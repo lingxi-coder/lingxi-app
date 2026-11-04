@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { HostNotifier, NOTIFICATION_COPY } from '../src/main/notifications';
+import { HostNotifier, NOTIFICATION_COPY, type DelegatedTask, type HostNotifierDeps } from '../src/main/notifications';
+import { nativeTr, setNativeLocale } from '../src/shared/nativeLocale';
 import {
   DEFAULT_IDLE_NOTIF_THRESHOLD_MS,
   PERMISSION_PROMPT_NOTIFY_DELAY_MS,
@@ -24,7 +25,7 @@ interface Harness {
   prefs(patch: Partial<NotificationPreferences>): void;
 }
 
-function harness(initial: Partial<NotificationPreferences> = {}): Harness {
+function harness(initial: Partial<NotificationPreferences> = {}, deps: Partial<HostNotifierDeps> = {}): Harness {
   const shown: { title: string; body: string; ref?: SessionRef }[] = [];
   let clock = 1_000_000;
   let focused = false;
@@ -41,6 +42,7 @@ function harness(initial: Partial<NotificationPreferences> = {}): Harness {
       return id as unknown as ReturnType<typeof setTimeout>;
     }) as never,
     unschedule: ((handle: unknown) => { timers.delete(handle as number); }) as never,
+    ...deps,
   });
   notifier.setPreferences({ ...defaultNotificationPreferences(), ...initial });
 
@@ -77,6 +79,28 @@ test('idle_prompt fires once the threshold elapses with no interaction', () => {
   assert.equal(h.shown.length, 1);
   assert.equal(h.shown[0]?.title, NOTIFICATION_COPY.idleTitle);
   assert.deepEqual(h.shown[0]?.ref, REF, 'the notification must carry the ref its click restores');
+});
+
+test('a turn the host ran on its own arms no idle_prompt, and the next turn of the owner still does', () => {
+  const h = harness();
+  h.notifier.turnStarted(SESSION, REF);
+  h.notifier.turnEnded(SESSION, REF, { idle: false });
+  h.advance(DEFAULT_IDLE_NOTIF_THRESHOLD_MS * 4);
+  assert.equal(h.shown.length, 0, 'nobody is waiting to come back to a task');
+  h.notifier.turnStarted(SESSION, REF);
+  h.notifier.turnEnded(SESSION, REF, { idle: true });
+  h.advance(DEFAULT_IDLE_NOTIF_THRESHOLD_MS + 1);
+  assert.equal(h.shown.length, 1);
+  assert.equal(h.shown[0]?.title, NOTIFICATION_COPY.idleTitle);
+});
+
+test('a host turn that follows an owner\'s turn leaves no countdown running', () => {
+  const h = harness();
+  h.notifier.turnEnded(SESSION, REF);
+  h.notifier.turnStarted(SESSION, REF);
+  h.notifier.turnEnded(SESSION, REF, { idle: false });
+  h.advance(DEFAULT_IDLE_NOTIF_THRESHOLD_MS * 4);
+  assert.equal(h.shown.length, 0, 'one timer per session, and the last turn did not arm it');
 });
 
 // ── upstream `class See`'s fire-time re-check, clause by clause ──────────────
@@ -159,6 +183,63 @@ test('two pending permissions each get their own timer', () => {
   h.advance(PERMISSION_PROMPT_NOTIFY_DELAY_MS + 1);
   assert.equal(h.shown.length, 1);
   assert.match(h.shown[0]?.body ?? '', /Write/);
+});
+
+// ── a Bot that needs its owner's answer for a task from another Bot ─────────
+
+function inTask(task: { current: DelegatedTask | undefined }): Partial<HostNotifierDeps> {
+  return { delegation: (sessionKey) => (sessionKey === SESSION ? task.current : undefined) };
+}
+
+test('a permission in a session that is doing a task says whose task it is, and still opens that session', () => {
+  setNativeLocale('en');
+  const h = harness({}, inTask({ current: { receiver: 'Bob', sender: 'Alice' } }));
+  h.notifier.permissionRequested(SESSION, 7, 'Bash', REF);
+  h.advance(PERMISSION_PROMPT_NOTIFY_DELAY_MS + 1);
+  assert.equal(h.shown.length, 1, 'the one notification there already was, not another');
+  assert.equal(h.shown[0]?.title, 'Bob needs your answer for a task from Alice');
+  assert.equal(h.shown[0]?.body, 'It is waiting for your permission to use Bash.');
+  assert.deepEqual(h.shown[0]?.ref, REF, 'a click shows the session that does the task');
+});
+
+test('a question in a session that is doing a task says whose task it is', () => {
+  setNativeLocale('en');
+  const h = harness({}, inTask({ current: { receiver: 'Bob', sender: 'Alice' } }));
+  h.notifier.askUserQuestion(SESSION, 3, REF);
+  h.notifier.askUserQuestion(SESSION, 3, REF);
+  assert.equal(h.shown.length, 1);
+  assert.equal(h.shown[0]?.title, 'Bob needs your answer for a task from Alice');
+  assert.equal(h.shown[0]?.body, 'It is waiting for your reply to a question.');
+  assert.deepEqual(h.shown[0]?.ref, REF);
+});
+
+test('whose task it is, is read when the notification goes out, and a session that is doing none says what it always said', () => {
+  setNativeLocale('en');
+  const task: { current: DelegatedTask | undefined } = { current: undefined };
+  const h = harness({}, inTask(task));
+  h.notifier.permissionRequested(SESSION, 1, 'Bash', REF);
+  task.current = { receiver: 'Bob', sender: 'Alice' };
+  h.advance(PERMISSION_PROMPT_NOTIFY_DELAY_MS + 1);
+  assert.equal(h.shown[0]?.title, nativeTr('native_task_input_title', 'Bob', 'Alice'));
+  task.current = undefined;
+  h.notifier.permissionRequested(SESSION, 2, 'Write', REF);
+  h.advance(PERMISSION_PROMPT_NOTIFY_DELAY_MS + 1);
+  h.notifier.askUserQuestion(SESSION, 4, REF);
+  assert.equal(h.shown[1]?.title, NOTIFICATION_COPY.permissionTitle);
+  assert.equal(h.shown[1]?.body, NOTIFICATION_COPY.permissionBody('Write'));
+  assert.equal(h.shown[2]?.title, NOTIFICATION_COPY.idleTitle);
+  assert.equal(h.shown[2]?.body, NOTIFICATION_COPY.idleBody);
+});
+
+test('the wording of a task is in every language, with the Bots in the places the language wants them', () => {
+  for (const locale of ['zh-Hans', 'zh-Hant', 'en', 'ja', 'ko'] as const) {
+    setNativeLocale(locale);
+    const title = nativeTr('native_task_input_title', 'RECEIVER', 'SENDER');
+    assert.ok(title.includes('RECEIVER') && title.includes('SENDER'), `${locale}: ${title}`);
+    assert.ok(nativeTr('native_task_input_permission', 'TOOL').includes('TOOL'), locale);
+    assert.ok(!nativeTr('native_task_input_question').startsWith('native_'), locale);
+  }
+  setNativeLocale('en');
 });
 
 // ── immediate kinds ──────────────────────────────────────────────────────────

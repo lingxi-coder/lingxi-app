@@ -1,6 +1,9 @@
+import { providerAccountSummary } from '../../shared/providerAccounts';
+import { providerAccountUnavailableReasons } from '../bridge/credentialRecovery';
 import { reasoningSelectionLabel } from '../model/reasoningLabel';
 import { tr } from '../i18n/locale';
 import { DesktopIcon } from './DesktopIcon';
+import { ImagePreview } from './ImagePreview';
 import { localAppAuthoringPrompt, localAppDraftDisposition, type LocalAppDraft } from '../bridge/localAppChat';
 import { NeedsInputBadge, sessionNeedsInput } from './NeedsInputBadge';
 import { audioFeatureGate, audioConversationGate, voiceStateAfterAudioFailure, audioSetupGuidance, type AudioSetupGuidance } from '../audio/audioFeatureGate';
@@ -75,6 +78,7 @@ import {
   modelDisplayLabel,
   modelReference,
   resolveModelSelection,
+  accountModelAvailability,
 } from '../bridge/modelCatalog';
 import { formatSessionMetadata } from '../bridge/sessionPresentation';
 import { ALL_DESKTOP_COMMANDS } from '../bridge/desktopCommands';
@@ -434,7 +438,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   );
 }
 
-export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, onOpenChat, children, topbar }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, bots = false, botsAvailable = false, onOpenBots, teams = false, onOpenTeams, onOpenChat, children, topbar }: {
   bridge: UseBridge;
   activityView?: boolean;
   onToggleActivityView?(): void;
@@ -444,6 +448,12 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   apps?: boolean;
   onOpenApps?(): void;
   changes?: boolean;
+  bots?: boolean;
+  /** Bots can be used on this computer. Where they cannot, the sidebar does not mention them. */
+  botsAvailable?: boolean;
+  onOpenBots?(): void;
+  teams?: boolean;
+  onOpenTeams?(): void;
   onOpenChat?(): void;
   children?: ReactNode;
   topbar?: ReactNode;
@@ -461,7 +471,10 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   );
   const generalCatalog = scheduledWorkspace ? bridge.bootstrap?.projectCatalogs?.[scheduledWorkspace] : undefined;
   const pinnedSessions = settings?.pinnedSessions ?? [];
-  const selectedProject = bridge.activeSession?.projectPath ?? settings?.activeProject ?? bridge.bootstrap?.workspace.path;
+  // A Bot's folder is not a project: new chats started from the sidebar go to the selected project instead.
+  const selectedProject = bridge.activeBotId !== undefined
+    ? settings?.activeProject ?? projects[0]
+    : bridge.activeSession?.projectPath ?? settings?.activeProject ?? bridge.bootstrap?.workspace.path;
   const visibleSession = bridge.activeSession ?? bridge.bootstrap?.activeSession ?? settings?.activeSession;
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
     () => new Set(selectedProject ? [selectedProject] : []),
@@ -810,8 +823,10 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       </div>
       <div className="desktop-body">
       <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
-        <button type="button" className="desktop-rail-button" data-active={!scheduled && !apps && !changes || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={onOpenChat}><DesktopIcon name="home" size={20} /></button>
+        <button type="button" className="desktop-rail-button" data-active={!scheduled && !apps && !changes && !bots && !teams || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={onOpenChat}><DesktopIcon name="home" size={20} /></button>
+        <button type="button" className="desktop-rail-button" data-active={teams || undefined} aria-label={tr('teams_title')} title={tr('teams_title')} onClick={onOpenTeams}><Icon name="users" size={21} stroke={1.7} /></button>
         <button type="button" className="desktop-rail-button" data-active={apps || undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={onOpenApps}><DesktopIcon name="apps" size={20}/></button>
+        {botsAvailable && <button type="button" className="desktop-rail-button" data-active={bots || undefined} aria-label={tr('bots_title')} title={tr('bots_title')} onClick={onOpenBots}><Icon name="bot" size={21} stroke={1.7} /></button>}
         <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label={tr('desktop_chat_scheduled_tasks')} title={tr('desktop_chat_scheduled_tasks')} onClick={onOpenScheduled}><DesktopIcon name="clock" size={20} /></button>
         <span className="desktop-rail-divider" aria-hidden="true" />
         <GitChangesButton active={changes} />
@@ -865,6 +880,14 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', borderRadius: 10, border: 0, background: apps ? t.surfaceActive : 'transparent', color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}>
           <DesktopIcon name="apps" size={18}/><span>{tr('apps_title')}</span>
         </button>
+        <button type="button" className="sidebar-primary-action" aria-current={teams ? 'page' : undefined} onClick={onOpenTeams}
+          style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', borderRadius: 10, border: 0, background: teams ? t.surfaceActive : 'transparent', color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}>
+          <Icon name="users" size={18} stroke={1.8} /><span>{tr('teams_title')}</span>
+        </button>
+        {botsAvailable && <button type="button" className="sidebar-primary-action" aria-current={bots ? 'page' : undefined} onClick={onOpenBots}
+          style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', borderRadius: 10, border: 0, background: bots ? t.surfaceActive : 'transparent', color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}>
+          <Icon name="bot" size={18} stroke={1.8} /><span>{tr('bots_title')}</span>
+        </button>}
       </div>
 
       {/* Electron drag regions discard pointer events. Keep every session control in
@@ -1379,7 +1402,7 @@ export function SummaryContextActions({ bridge }: { bridge: UseBridge }) {
   </section>;
 }
 
-export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, terminalOpen = false, terminalAvailable = false, onToggleTerminal, sideChatOpen = false, sideChatAvailable = false, onToggleSideChat }: {
+export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCenter, terminalOpen = false, terminalAvailable = false, onToggleTerminal, sideChatOpen = false, sideChatAvailable = false, onToggleSideChat }: {
   sideChatOpen?: boolean;
   sideChatAvailable?: boolean;
   onToggleSideChat?(): void;
@@ -1387,12 +1410,17 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
   terminalAvailable?: boolean;
   onToggleTerminal?(): void;
   bridge: UseBridge;
+  /** Set while a chat of a Bot is on screen: the chat belongs to the Bot, not to a project folder. */
+  bot?: { name: string; onOpen(): void };
   runtimeCenterOpen: boolean;
   onToggleRuntimeCenter(): void;
 }) {
   const t = useT();
   const inspectorOpen = bridge.runtimeCenter.inspectorOpen;
+  const panelOpen = sideChatOpen || inspectorOpen;
+  const panelLabel = sideChatOpen ? tr('desktop_navigation_hide_side') : sideChatAvailable && !inspectorOpen ? tr('desktop_chat_reopen_side_chat') : tr('desktop_toggle_right_panel');
   const projectPath = bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path;
+  const sessionTitle = bridge.bootstrap?.projectCatalogs?.[projectPath ?? '']?.sessions.find((session) => session.uuid === bridge.activeSession?.sessionId)?.title;
   const remoteState = useRemoteControl();
   const remote = remoteIndicator(remoteState.sessions, bridge.activeSession?.sessionId);
 
@@ -1406,12 +1434,9 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
   } as CSSProperties;
   return (
     <header className="drag-region desktop-topbar" style={{ '--toolbar-material': t.sidebarBg, '--topbar-project-color': t.text2, '--topbar-project-surface': t.surfaceHover } as CSSProperties}>
-      <div className="desktop-topbar-project" title={projectPath}>
-        <span className="desktop-topbar-project-icon" aria-hidden="true"><DesktopIcon name="folder" size={17} /></span>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(projectPath)}</div>
-          <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{projectPath ?? tr('desktop_chat_add_project_begin')}</div>
-        </div>
+      <div className="desktop-topbar-project" title={bot?.name ?? projectPath}>
+        {bot ? <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('bots_chat_open_bot')} title={tr('bots_chat_open_bot')} onClick={bot.onOpen} style={topbarActionTokens}><Icon name="bot" size={18} /></button> : <span className="desktop-topbar-project-icon" aria-hidden="true"><DesktopIcon name="folder" size={17} /></span>}
+        <span className="desktop-topbar-title" style={{ color: t.text }}>{bot?.name || sessionTitle || basename(projectPath)}</span>
       </div>
       {remote && (
         <span className="no-drag desktop-topbar-remote" role="status" data-remote-viewers={remote.viewers}
@@ -1434,19 +1459,20 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
         style={topbarActionTokens}
       ><DesktopIcon name="topbar-summary" size={19} /></button>
       <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('desktop_toggle_terminal')} title={`${tr('desktop_toggle_terminal')} (Ctrl+\`)`} aria-controls="desktop-terminal" aria-expanded={terminalOpen} aria-pressed={terminalOpen} disabled={!terminalAvailable} data-active={terminalOpen ? 'true' : undefined} onClick={onToggleTerminal} style={topbarActionTokens}><DesktopIcon name="topbar-terminal" size={19} /></button>
-      {sideChatAvailable ? <button className="no-drag desktop-topbar-action" type="button" title={tr('desktop_chat_reopen_side_chat')} aria-label={tr('desktop_chat_reopen_side_chat')} aria-expanded={sideChatOpen} aria-pressed={sideChatOpen} onClick={onToggleSideChat} style={topbarActionTokens}><DesktopIcon name="chat" size={19} /></button> : null}
       <div id="runtime-inspector-topbar-controls" className="no-drag runtime-inspector-topbar-controls" style={topbarActionTokens} />
       <button
         className="no-drag desktop-topbar-action desktop-inspector-trigger"
         type="button"
         data-runtime-inspector-trigger="true"
-        aria-label={tr('desktop_toggle_right_panel')}
-        title={tr('desktop_toggle_right_panel')}
-        aria-controls="runtime-inspector"
-        aria-expanded={inspectorOpen}
-        aria-pressed={inspectorOpen}
-        data-active={inspectorOpen ? 'true' : undefined}
-        onClick={() => {
+        aria-label={panelLabel}
+        title={panelLabel}
+        aria-controls={sideChatOpen ? 'side-chat-panel' : 'runtime-inspector'}
+        aria-expanded={panelOpen}
+        aria-pressed={panelOpen}
+        data-active={panelOpen ? 'true' : undefined}
+        onClick={(event) => {
+          event.currentTarget.focus({ preventScroll: true });
+          if (sideChatOpen || (sideChatAvailable && !inspectorOpen)) { onToggleSideChat?.(); return; }
           bridge.setRuntimeInspectorOpen(!inspectorOpen);
           // The inspector is still sliding in; focusing must not scroll its
           // clipped container and jump the panel straight to its resting position.
@@ -1457,7 +1483,7 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
           });
         }}
         style={topbarActionTokens}
-      ><DesktopIcon name={inspectorOpen ? 'topbar-inspector-open' : 'topbar-inspector-closed'} size={19} /></button>
+      ><DesktopIcon name={panelOpen ? 'topbar-inspector-open' : 'topbar-inspector-closed'} size={19} /></button>
     </header>
   );
 }
@@ -1760,6 +1786,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   /** The widget the next prompt follows up on; cleared on send or session switch. */
   const [visualizationChip, setVisualizationChip] = useState<VisualizationContextChip | null>(null);
   const input = useRef<HTMLDivElement>(null);
+  const promptHistory = useRef<{ entries: string[]; index: number; html: string } | null>(null);
   const commandMirror = useRef<HTMLDivElement>(null);
   const fileControl = useRef<HTMLDivElement>(null);
   const fileButton = useRef<HTMLButtonElement>(null);
@@ -1838,15 +1865,16 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   }), [filePicker?.query, filePicker?.view, fileResults, contextCatalog, bridge.running, bridge.desktop.permissionMode, bridge.desktop.slashCommands, selectedFiles.length, imageAttachments.length]);
   const visibleModelReferences = useMemo(
     () => filterVisibleModelReferences(
-      bridge.desktop.models,
+      [...new Set([...bridge.desktop.models, ...(bridge.bootstrap?.providerAccountSnapshot?.modelAvailability ?? []).filter(row => row.eligibleAccountIds.length > 0).map(row => `${row.executionBindingId}/${row.modelId}`)])],
       bridge.desktop.providerModelCatalog,
       modelPickerVisibility,
+      bridge.bootstrap?.providerAccountSnapshot?.modelAvailability,
     ),
-    [bridge.desktop.models, bridge.desktop.providerModelCatalog, modelPickerVisibility],
+    [bridge.desktop.models, bridge.desktop.providerModelCatalog, modelPickerVisibility, bridge.bootstrap?.providerAccountSnapshot],
   );
   const modelGroups = useMemo(
     () => groupModelReferences(visibleModelReferences),
-    [visibleModelReferences],
+    [visibleModelReferences, bridge.bootstrap?.providerAccountSnapshot],
   );
   const filteredModelGroups = useMemo(
     () => filterModelGroups(modelGroups, modelQuery, bridge.desktop.modelDetails),
@@ -1872,7 +1900,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     ({ selection }) => selection.type !== 'automatic' && selection.type !== 'disabled',
   );
   const selectedReasoning = reasoningControls?.effective ?? reasoningControls?.requested;
-  const providerCredentials = bridge.bootstrap?.providerCredentials;
+  const providerAccountSnapshot = bridge.bootstrap?.providerAccountSnapshot;
 
   const commandContext: DesktopCommandContext = useMemo(() => ({
     setModel: (model) => bridge.setModel(model),
@@ -1902,8 +1930,6 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       await bridge.copyText(item.text);
       return true;
     },
-    login: () => bridge.login(),
-    logout: () => bridge.logout(),
     reloadPlugins: () => bridge.restartBridge(),
     openTasks: async () => {
       bridge.setRuntimeCenterOverviewOpen(true);
@@ -2180,6 +2206,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const syncPromptState = () => {
     const editor = input.current;
     if (!editor) return { text: '', files: [] };
+    promptHistory.current = null;
     markDraftEdited();
     const snapshot = richPromptSnapshot(editor);
     setText(snapshot.text);
@@ -2236,6 +2263,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       }
     }
 
+    promptHistory.current = null;
     draftSessionId.current = activeSessionId;
     const draft = activeSessionId ? draftsBySession.current.get(activeSessionId) : undefined;
     // Adopting the live draft must preserve its nodes and browser selection.
@@ -2709,6 +2737,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     }
     imageDraftGeneration.current += 1;
     composerDraftRevision.current += 1;
+    promptHistory.current = null;
     input.current?.replaceChildren();
     savedEditorSelection.current = null;
     activeMentionRange.current = null;
@@ -3191,6 +3220,61 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       }
     }
   };
+  const recallPromptHistory = (event: KeyboardEvent<HTMLDivElement>): boolean => {
+    if ((event.key !== 'ArrowUp' && event.key !== 'ArrowDown')
+      || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return false;
+    const editor = input.current;
+    const selection = window.getSelection();
+    if (!editor || !selection?.isCollapsed || !selection.rangeCount
+      || !editor.contains(selection.getRangeAt(0).commonAncestorContainer)) return false;
+    let history = promptHistory.current;
+    if (history && history.html !== editor.innerHTML) {
+      promptHistory.current = null;
+      history = null;
+    }
+    if (!history) {
+      // Begin recall only from an empty editor; a browser placeholder <br> is empty too.
+      if (event.key !== 'ArrowUp' || (editor.textContent ?? '').split(ZERO_WIDTH_SPACE).join('').length
+        || editor.querySelector('[data-file-mention], [data-context-mention]') || imageAttachmentsRef.current.length) return false;
+      if (!activeSessionId || bridge.conversation.sessionKey !== activeSessionId) return false;
+      const entries = bridge.conversation.items.flatMap((item) => (
+        item.type === 'narration' && item.role === 'user' && item.text.trim() ? [item.text] : []
+      ));
+      if (!entries.length) return false;
+      history = { entries, index: entries.length, html: editor.innerHTML };
+    } else {
+      // Within recalled text, keep normal multiline cursor movement until its boundary.
+      const range = selection.getRangeAt(0);
+      const remaining = document.createRange();
+      remaining.selectNodeContents(editor);
+      remaining.setEnd(range.startContainer, range.startOffset);
+      const before = richPromptText(remaining.cloneContents());
+      remaining.selectNodeContents(editor);
+      remaining.setStart(range.endContainer, range.endOffset);
+      if (before.length && richPromptText(remaining.cloneContents()).length) return false;
+    }
+    event.preventDefault();
+    history.index = Math.max(0, Math.min(history.entries.length,
+      history.index + (event.key === 'ArrowUp' ? -1 : 1)));
+    editor.textContent = history.entries[history.index] ?? '';
+    const caret = document.createRange();
+    caret.selectNodeContents(editor);
+    caret.collapse(false);
+    applyEditorSelection(caret);
+    savedEditorSelection.current = caret.cloneRange();
+    syncPromptState();
+    if (history.index < history.entries.length) promptHistory.current = { ...history, html: editor.innerHTML };
+    // Recall is literal text, even when the historical message starts with / or @.
+    slashDismissed.current = true;
+    mentionDismissed.current = true;
+    setSlashQuery(null);
+    setFilePicker(null);
+    activeSlashRange.current = null;
+    activeSlashQuery.current = null;
+    activeMentionRange.current = null;
+    return true;
+  };
+
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (promptSuggestion && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
@@ -3213,6 +3297,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       if (event.defaultPrevented) return;
     }
     if (event.defaultPrevented) return;
+    if (recallPromptHistory(event)) return;
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
       void submit();
@@ -3275,14 +3360,15 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const permissionMode = permissionModes.find((mode) => mode.id === bridge.desktop.permissionMode) ?? permissionModes[0]!;
   const proactivity = bridge.desktop.conversationControls?.proactivity;
   const workspace = bridge.bootstrap?.workspace;
-  const providerConfigured = bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured) ?? false;
+  const providerConfigured = bridge.bootstrap?.providerAccountSnapshot?.modelAvailability?.some(model => model.eligibleAccountIds.length > 0) ?? false;
+  const accountUnavailableReason = !providerConfigured ? providerAccountUnavailableReasons(bridge.bootstrap?.providerAccountSnapshot).map(key => tr(key)).join(' · ') : '';
   const goal = composerGoalState(bridge.conversation?.items ?? []);
   const goalActive = goal.active;
   const promptPlaceholder = !ready
     ? !workspace?.path || workspace.recovery
       ? tr('desktop_prompt_project')
       : !providerConfigured
-        ? tr('desktop_prompt_provider')
+        ? accountUnavailableReason || tr('desktop_prompt_provider')
         : tr('desktop_prompt_engine')
     : goalActive
         ? tr('desktop_prompt_goal')
@@ -3413,6 +3499,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
         disabled={!ready || bridge.sessionLoading || bridge.running}
         onRetry={() => bridge.sendPrompt('继续之前因磁盘空间不足而暂停的任务，沿用此会话和已有历史。')} /> : null}
       {goalActive && <GoalStatus key={`${activeSessionId}:${goal.objective}`} objective={goal.objective} disabled={!ready || bridge.sessionLoading} running={bridge.running} cancelling={bridge.isCancelling} onClear={async () => { await bridge.runSlashCommand('/goal clear', []); }} onPause={() => bridge.cancel()} onResume={() => bridge.sendPrompt('Continue pursuing the current goal.')} />}
+      {!ready && accountUnavailableReason && <div className="provider-account-unavailable" role="status" aria-live="polite" style={{ color: t.warn, fontSize: 12, padding: '4px 2px 8px' }}>{accountUnavailableReason}</div>}
       <div
         className="beta-composer"
         onDragOver={(event) => {
@@ -3435,7 +3522,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           <div aria-label={tr('desktop_chat_image_attachments')} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 18px 2px' }}>
             {imageAttachments.map((attachment) => (
               <div key={attachment.id} title={attachment.name} style={{ position: 'relative', width: 74, height: 62, overflow: 'hidden', borderRadius: 10, background: t.surfaceHover, outline: `1px solid color-mix(in oklab, ${t.borderStrong} 55%, transparent)` }}>
-                <img src={attachment.previewUrl} alt={attachment.name} style={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover', outline: `1px solid color-mix(in oklab, ${t.text} 10%, transparent)`, outlineOffset: -1 }} />
+                <ImagePreview src={attachment.previewUrl} alt={attachment.name} style={{ height: '100%' }} imageStyle={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover', outline: `1px solid color-mix(in oklab, ${t.text} 10%, transparent)`, outlineOffset: -1 }} />
                 <button type="button" aria-label={tr('desktop_chat_remove_named', attachment.name)} title={tr('desktop_chat_remove_image')} onClick={() => removeImage(attachment.id)} style={{ position: 'absolute', top: 3, right: 3, width: 24, height: 24, display: 'grid', placeItems: 'center', padding: 0, border: 0, borderRadius: 99, background: 'rgba(0,0,0,.62)', color: '#fff', cursor: 'pointer' }}><Icon name="x" size={11} stroke={2} /></button>
               </div>
             ))}
@@ -3830,31 +3917,31 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                   <div style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '0 3px 3px', scrollbarGutter: 'stable' }}>
                     {filteredModelGroups.map((group, groupIndex) => {
                       const statusProviderId = group.providerId === 'builtin' ? 'anthropic' : group.providerId;
-                      const metadata = statusProviderId
-                        ? providerCredentials?.find((entry) => entry.providerId === statusProviderId)
-                        : undefined;
                       const knownProvider = Boolean(statusProviderId && providerById(statusProviderId));
+                      const configuration = providerAccountSnapshot && statusProviderId ? providerAccountSummary(providerAccountSnapshot, statusProviderId) : undefined;
+                      const connected = configuration?.status === 'configured';
                       const connectionLabel = knownProvider
-                        ? providerCredentials
-                          ? metadata?.configured ? tr('mcp_stat_connected') : tr('desktop_chat_not_connected')
-                          : tr('cron_reconciling_progress')
+                        ? configuration ? tr(`provider_accounts_configuration_${configuration.status}`) : tr('cron_reconciling_progress')
                         : undefined;
-                      const connected = metadata?.configured === true;
                       return (
                         <section key={group.providerId ?? 'unqualified'} aria-labelledby={`desktop-model-provider-${group.providerId ?? 'other'}`} style={groupIndex === 0 ? undefined : { marginTop: 5, paddingTop: 5, borderTop: `0.5px solid ${t.border}` }}>
                           <div id={`desktop-model-provider-${group.providerId ?? 'other'}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px 5px', color: t.text3, fontSize: 10.5, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>
                             <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{group.providerLabel}</span>
                             {connectionLabel && <span title={`${group.providerLabel}: ${connectionLabel}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, color: connected ? t.ok : connectionLabel === tr('cron_reconciling_progress') ? t.text4 : t.warn, fontSize: 9.5, fontWeight: 600, letterSpacing: 0, textTransform: 'none' }}><span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: 99, background: 'currentColor' }} />{connectionLabel}</span>}
                           </div>
-                          {modelBillingGroups(group, bridge.desktop.modelDetails).map((billingGroup, billingIndex) => (
+                          {modelBillingGroups(group, bridge.desktop.modelDetails, providerAccountSnapshot?.modelAvailability).map((billingGroup, billingIndex) => (
                             <div key={billingGroup.label ?? 'all'} style={billingIndex === 0 ? undefined : { marginTop: 4, paddingTop: 4, borderTop: `0.5px solid ${t.border}` }}>
-                              {billingGroup.label && <div style={{ padding: '5px 10px 3px', color: t.text4, fontSize: 9.5, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }}>{billingGroup.label}</div>}
+                              {billingGroup.label && <div style={{ padding: '5px 10px 3px', color: t.text4, fontSize: 9.5, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }}>{billingGroup.label === 'subscription' ? tr('provider_accounts_subscription') : billingGroup.label === 'api_key' ? tr('provider_accounts_key') : billingGroup.label}</div>}
                               {billingGroup.models.map((entry) => {
                                 const active = entry.reference === bridge.desktop.currentModel;
                                 const entryDetail = modelDetailsByReference.get(entry.reference);
                                 const entrySupportsFastMode = modelReference(entry.reference).providerId === 'anthropic'
                                   && modelSupportsFastMode(entryDetail);
-                                const selection = resolveModelSelection(entry.reference, providerCredentials);
+                                const availability = accountModelAvailability(entry.reference, bridge.bootstrap?.providerAccountSnapshot?.modelAvailability);
+                                const selection = resolveModelSelection(entry.reference, bridge.providerAccountsRefreshing && !availability ? undefined : bridge.bootstrap?.providerAccountSnapshot?.modelAvailability);
+                                const binding = modelReference(entry.reference).providerId;
+                                const hasAccount = providerAccountSnapshot?.accounts.some(account => account.enabled && account.executionBindingId === (binding === 'builtin' ? 'anthropic' : binding));
+                                const accessLabel = selection.kind === 'connect' && !hasAccount ? tr('provider_accounts_configuration_unconfigured') : availability?.confirmedAccountIds.length ? tr('provider_accounts_model_confirmed') : availability?.forbiddenAccountIds.length && !availability.unverifiedAccountIds.length ? tr('provider_accounts_model_forbidden') : tr('provider_accounts_model_unverified');
                                 const unavailable = selection.kind === 'loading';
                                 const requiresConnection = selection.kind === 'connect';
                                 return (
@@ -3867,7 +3954,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
                                   }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: unavailable ? t.text4 : requiresConnection ? t.text2 : t.text, textAlign: 'left', cursor: unavailable ? 'wait' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: unavailable ? .68 : 1 }} onMouseEnter={(event) => { if (!active && !unavailable) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !unavailable) event.currentTarget.style.background = 'transparent'; }}>
                                     {unavailable ? <span className="beta-spinner" aria-hidden="true" style={{ width: 11, height: 11, borderWidth: 1.5, color: t.text4 }} /> : requiresConnection ? <Icon name="lock" size={14} color={t.warn} /> : entrySupportsFastMode && <Icon name="bolt" size={14} color={active ? t.accent : t.text3} />}
                                     <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: active ? 650 : 500 }}>{modelDisplayLabel(entry, bridge.desktop.modelDetails)}</span>
-                                    {requiresConnection && <span style={{ flexShrink: 0, color: t.warn, fontSize: 10, fontWeight: 600 }}>{tr('desktop_chat_connect_settings')}</span>}
+                                    <span style={{ flexShrink: 0, color: requiresConnection ? t.warn : t.text3, fontSize: 10 }}>{accessLabel}</span>
                                     {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
                                   </button>
                                 );

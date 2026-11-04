@@ -1,0 +1,168 @@
+{
+  "scope": "local source, SDK data paths and simulator/AVD acceptance",
+  "project": "demo-lingxi-teams-t0",
+  "ordinaryHttpReads": 0,
+  "clients": {
+    "web": {
+      "pass": true,
+      "checks": [
+        "warm-server-snapshot",
+        "disk-cache-offline-browser-restart",
+        "old-edit-recall-reconnect",
+        "cross-device-read",
+        "membership-revocation",
+        "journal-has-no-history"
+      ]
+    },
+    "desktop": {
+      "pass": true,
+      "checks": [
+        "warm-server-snapshot",
+        "disk-cache-offline-reopen",
+        "old-edit-recall-reconnect",
+        "cross-device-read",
+        "membership-revocation",
+        "logout-removes-sdk-authentication",
+        "session-handlers-released"
+      ]
+    },
+    "ios": {
+      "pass": true,
+      "warmTests": 12,
+      "offlineTests": 1,
+      "skipped": 0,
+      "additionalDiagnosticListener": false
+    },
+    "android": {
+      "pass": true,
+      "warmInstrumentationTests": 1,
+      "offlineInstrumentationTests": 1,
+      "unit": {
+        "tests": 1275,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "unitSuites": 155
+    }
+  },
+  "regressions": {
+    "desktop": 132,
+    "web": 29,
+    "backend": 57,
+    "desktopSdk": 5,
+    "webSdk": 3,
+    "failures": 0,
+    "skipped": 0,
+    "buildProvenance": 1
+  },
+  "botRuntime": {
+    "pass": true,
+    "binaryMode": "debug",
+    "binarySha256": {
+      "host": "980975241a4414181e2e381d8c28e060cf93a84fe71fc60da43bcb544b8f6460",
+      "worker": "ecd47276365b373057363d4698d1d79ea19f60feae554e28c2a32f4f2f941753"
+    },
+    "checks": {
+      "actualAccountService": true,
+      "realAuthFirestoreHttp": true,
+      "ownerApprovals": 1,
+      "nonOriginAnswer": 403,
+      "exactAnswerRetries": 2,
+      "modelTurns": 4,
+      "finalDesktopReplies": 1,
+      "finishAckLostAfterCommit": true,
+      "stableRestart": true,
+      "offlineQueuedOnce": true,
+      "noProcessArguments": true
+    }
+  },
+  "lsp": {
+    "uniqueModifiedFiles": 30,
+    "errors": 0,
+    "warnings": 0
+  },
+  "syntax": {
+    "javascriptFiles": 8,
+    "shellFiles": 1,
+    "rustFiles": 2
+  },
+  "artifacts": {
+    "apps/electron/out/renderer/teams-data.html": {
+      "sha256": "f35886f6bf2ef702f0607924d64a71cd595e4298aed869a9354bbb0aa0f72d07",
+      "bytes": 424
+    },
+    "apps/electron/out/preload/teamsData.cjs": {
+      "sha256": "b97ddba2b76a81f8e91ef112f0b6d614c66a59d1425bcb56ad1b4512daa37e99",
+      "bytes": 217
+    },
+    "apps/electron/out/main/teams-cache-smoke.cjs": {
+      "sha256": "0a186b7417899982581682a19390818ac945a6049b38ecfeeef68af438feb241",
+      "bytes": 11164
+    },
+    "apps/electron/out/main/index.js": {
+      "sha256": "a98b857d76f31cbeb9a8906134a70efee0293a6dff15075a816fb3e9fad34780",
+      "bytes": 1651321
+    },
+    "apps/electron/out/main/chunks/firestore-3iSnS9Je.js": {
+      "sha256": "db8d28dda8442e4e8a69951e78c9c19b3110c31d4ff182fbc59d0f1e06b7cd71",
+      "bytes": 3018
+    },
+    "apps/electron/out/main/chunks/messageWindow-DiPEfMdG.js": {
+      "sha256": "180bbe28a3d5186d86934453066c6a35c1ba595f0964c1d5bdd1d9000de31361",
+      "bytes": 4622
+    },
+    "apps/electron/out/renderer/assets/teamsData-IapSMzio.js": {
+      "sha256": "78f575afb327660434312fb10341d36454292182e6c26c195bf481b5d73ca1d6",
+      "bytes": 1226587
+    },
+    "output/teams-sdk-cache-20261030/android/app-build/outputs/apk/direct/debug/app-direct-debug.apk": {
+      "sha256": "4575863e870551c5eb2a5482412ad1c9b9b5161c3c1f9b83c68dfd7f8e6f607c",
+      "bytes": 450399943
+    },
+    "output/teams-sdk-cache-20261030/android/app-build/outputs/apk/androidTest/direct/debug/app-direct-debug-androidTest.apk": {
+      "sha256": "7542291d0b0532456520d476e392a1806e78faef55562db846eb9be409e57bc7",
+      "bytes": 4777030
+    },
+    "output/teams-sdk-cache-20261030/ios/DerivedData/Build/Products/FullDebug-iphonesimulator/LingxiCode.app/LingxiCode.debug.dylib": {
+      "sha256": "febaea1c50dd2677e69f2355b78d3e0eccdeee574f9c12c44acf10fd8d09b90e",
+      "bytes": 385642848
+    }
+  },
+  "harnessRevision": "b09033fa446dfdee48e71ea18ca16095b068a353",
+  "runtimeWorktreeUnchanged": true,
+  "excludedMarkersUnchanged": true,
+  "emulatorReconciliations": [
+    {
+      "client": "ios",
+      "action": "revoke",
+      "code": "CANCELLED",
+      "confirmedAbsent": true
+    },
+    {
+      "client": "ios",
+      "action": "revoke",
+      "code": "CANCELLED",
+      "confirmedAbsent": true
+    },
+    {
+      "client": "ios",
+      "action": "revoke",
+      "code": "CANCELLED",
+      "confirmedAbsent": true
+    }
+  ],
+  "publication": {
+    "pushed": false,
+    "deployed": false,
+    "mergedMain": false,
+    "newSignedMacPackage": false
+  },
+  "dependencyLockSha256": {
+    "apps/web/package-lock.json": "c2a7e5ce2463565fd92b65022e1ec5d4d70b171004ee8e64af66d1e0e36060ba"
+  },
+  "excludedMarkerSha256": {
+    ".build/.buildSystem_debug": "cd1ba1c9604b794d71cd3cb482cc02e4c16bdea56c361333fabe801a74db2b90",
+    ".build/CACHEDIR.TAG": "61833598201b8d9bb6a18003b6be9fd00ae014cfbd583253c1f23b746bf035d1"
+  }
+}

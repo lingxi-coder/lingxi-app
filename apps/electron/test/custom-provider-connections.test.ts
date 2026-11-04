@@ -156,7 +156,7 @@ test('a provider whose every connection carries its own auth needs none at provi
   assert.equal(validateImportEntry(parseProviderImport(json).entries[0]), null);
 });
 
-test('a connection with no auth anywhere is still rejected', async () => {
+test('connection definitions can be saved before provider accounts are added', async () => {
   const { parseProviderImport, validateImportEntry } = await import('../src/renderer/components/settings/pages/customProviderImport');
   const json = JSON.stringify({ providers: { p: {
     type: 'openai', models: [{ id: 'm' }],
@@ -165,5 +165,5 @@ test('a connection with no auth anywhere is still rejected', async () => {
       { id: 'b', baseUrl: 'https://b.test/v1' },
     ],
   } } });
-  assert.match(String(validateImportEntry(parseProviderImport(json).entries[0])), /API Key/);
+  assert.equal(validateImportEntry(parseProviderImport(json).entries[0]), null);
 });

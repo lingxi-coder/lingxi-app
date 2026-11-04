@@ -279,7 +279,7 @@ suspend fun probeVoiceCapabilitySnapshot(
     AndroidAudioServiceProvider.get(context).rememberProviderCapability(preferences, "recognition", input)
     AndroidAudioServiceProvider.get(context).rememberProviderCapability(preferences, "speech", output)
     val repository = ProviderSettingsRepository(context)
-    val profiles = try { repository.loadProviderState().first } finally { repository.close() }
+    val profiles = repository.loadProviderState().first
     val recognitionProfiles = mutableListOf<ProviderAudioProfileOption>()
     val speechProfiles = mutableListOf<ProviderAudioProfileOption>()
     val realtimeProfiles = mutableListOf<ProviderAudioProfileOption>()

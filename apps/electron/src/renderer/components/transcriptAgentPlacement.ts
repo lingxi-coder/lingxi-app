@@ -1,5 +1,5 @@
 import type { SessionAgentSummaryDto } from '@lingxi/bridge-client';
-import type { RunItem } from '../model/runItem';
+import type { RunItem, ToolRunItem } from '../model/runItem';
 import type { TranscriptRow } from './transcriptRows';
 
 /**
@@ -85,7 +85,7 @@ export function anchorTranscriptAgents(previous: AgentAnchors, items: readonly R
   return anchors;
 }
 
-export type AgentTranscriptRow = TranscriptRow | { type: 'agents'; id: string; agents: SessionAgentSummaryDto[] };
+export type AgentTranscriptRow = TranscriptRow | { type: 'agents'; id: string; agents: SessionAgentSummaryDto[]; launches: ReadonlyMap<string, ToolRunItem>; sourceIds: string[] };
 
 export function placeTranscriptAgents(inputRows: readonly TranscriptRow[], items: readonly RunItem[], agents: readonly SessionAgentSummaryDto[], anchors: AgentAnchors): AgentTranscriptRow[] {
   // A successful launch receipt adds no information once its agent card exists.
@@ -114,19 +114,47 @@ export function placeTranscriptAgents(inputRows: readonly TranscriptRow[], items
     group.push(agent);
     groups.set(target, group);
   }
+  // A launch and its lifecycle are one object. Fold only within the same
+  // prose boundary; a later resume after an answer remains in the timeline.
+  const segments = new Map<string, number>();
+  let segment = 0;
+  for (const item of items) {
+    if (item.type === 'narration') segment++;
+    segments.set(item.id, segment);
+  }
+  const byKey = new Map(agents.filter(agent => agent.agent_id !== 'main').map(agent => [agentKey(agent.agent_id), agent]));
+  const merged = new Set<string>();
+  const mergedByAgent = new Map<string, string[]>();
+  const launches = new Map<string, ToolRunItem>();
+  for (const row of rows) {
+    if (row.type !== 'tool-group') continue;
+    for (const tool of row.tools) {
+      if (!tool.agentId || !SPAWNING_TOOL.test(tool.tool) || tool.status !== 'done') continue;
+      const agent = byKey.get(agentKey(tool.agentId));
+      const anchor = agent && anchors.get(agent.agent_id);
+      if (!agent || !anchor || segments.get(anchor) !== segments.get(tool.id)) continue;
+      merged.add(tool.id);
+      const sourceIds = mergedByAgent.get(agent.agent_id) ?? [];
+      sourceIds.push(tool.id);
+      mergedByAgent.set(agent.agent_id, sourceIds);
+      if (!launches.has(agent.agent_id)) launches.set(agent.agent_id, tool);
+    }
+  }
   const result: AgentTranscriptRow[] = [];
   const insert = (id: string | null) => {
     const group = groups.get(id);
-    if (group) result.push({ type: 'agents', id: `agents:${id ?? 'start'}`, agents: group });
+    if (group) result.push({ type: 'agents', id: `agents:${id ?? 'start'}`, agents: group, launches,
+      sourceIds: group.flatMap(agent => mergedByAgent.get(agent.agent_id) ?? []),
+    });
   };
   insert(null);
   for (const row of rows) {
     if (row.type === 'tool-group') {
       let tools: typeof row.tools = [];
       for (const tool of row.tools) {
-        tools.push(tool);
+        if (!merged.has(tool.id)) tools.push(tool);
         if (groups.has(tool.id)) {
-          result.push({ ...row, id: `tool-group:${tools[0]!.id}`, tools });
+          if (tools.length) result.push({ ...row, id: `tool-group:${tools[0]!.id}`, tools });
           tools = [];
           insert(tool.id);
         }

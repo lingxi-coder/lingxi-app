@@ -1,0 +1,22 @@
+{
+  "origin": "https://lingxios.net",
+  "restoredExistingOwnerAndMemberSessions": true,
+  "ownerUnbindControl": true,
+  "memberUnbindControl": false,
+  "privacyDisclosure": true,
+  "ownerWidth": 390,
+  "ownerScrollWidth": 390,
+  "horizontalOverflow": false,
+  "browserSentMessages": 1,
+  "serverMessageCopies": 1,
+  "ownerLivePageCopies": 1,
+  "botTriggerCountBefore": 1,
+  "botTriggerCountAfter": 1,
+  "realModelExecution": false,
+  "consoleObservation": "One expected 404 for botState on SDK mention metadata without a trusted trigger; no failed send or visible error banner claimed",
+  "console404CorrelationVerified": {
+    "command": "botState",
+    "code": "TRIGGER_REQUIRED",
+    "matchesSdkMentionWithoutTrustedTrigger": true
+  }
+}

@@ -47,38 +47,44 @@ internal interface ProviderRealtimeSession {
 
 /** Only a live conversation source attaches here; credentials and headless preview engines cannot replace it. */
 internal object AndroidAudioSessionContext {
+    private val bindings = ProviderAudioSessionBindings<AudioOwnerKey>()
     @Volatile private var engine: MobileEngineHandle? = null
-    @Synchronized fun attach(handle: MobileEngineHandle) { engine = handle }
-    @Synchronized fun clear() { engine = null }
+    @Synchronized fun attach(handle: MobileEngineHandle) { if (engine !== handle) bindings.clear(); engine = handle }
+    @Synchronized fun clear() { engine = null; bindings.clear() }
     fun currentEngine(): MobileEngineHandle? = engine
-    fun detach(handle: MobileEngineHandle) { synchronized(this) { if (engine === handle) engine = null } }
+    fun detach(handle: MobileEngineHandle) { synchronized(this) { if (engine === handle) { engine = null; bindings.clear() } } }
     suspend fun snapshot(owner: AudioOwnerKey, handle: MobileEngineHandle? = engine): JSONObject? {
         val current = handle ?: return null
         val json = JSONObject(current.audioSessionContext())
         if (json.isNull("profileId") || json.optString("profileId").isBlank()) return null
         if (owner.kind == AudioOwnerKey.Kind.Session && json.optString("sessionId") != owner.id) return null
-        return json
+        if (engine !== current) return null
+        return bindings.context(owner, json)
+    }
+    @Synchronized fun record(owner: AudioOwnerKey, handle: MobileEngineHandle, session: JSONObject, profileId: String?, accountScope: String?) {
+        if (engine === handle) bindings.record(owner, session, profileId, accountScope)
     }
 }
 
 internal class RustProviderAudioBridge(context: Context) : ProviderAudioBridge {
     private val appContext = context.applicationContext
-    private data class Host(val profiles: String, val region: String, val handle: com.lingxi.code.bindings.android.AndroidAudioProviderHost)
+    private data class Host(val profiles: String, val region: String, val accountHome: String, val handle: com.lingxi.code.bindings.android.AndroidAudioProviderHost)
     @Volatile private var cached: Host? = null
-    private data class Operation(val host: Host, val json: String, val engine: MobileEngineHandle?)
+    private data class Operation(val host: Host, val json: String, val engine: MobileEngineHandle?, val session: JSONObject?, val followsSession: Boolean)
     private val operations = java.util.concurrent.ConcurrentHashMap<String, Operation>()
 
     private fun host(sessionRegion: String?): Host {
         val repository = ProviderSettingsRepository(appContext)
-        val (profiles, configuredRegion) = try { repository.audioProviderProfilesJson() to repository.audioProviderRegion() } finally { repository.close() }
+        val (profiles, configuredRegion) = repository.audioProviderProfilesJson() to repository.audioProviderRegion()
+        val accountHome = com.lingxi.code.project.MobileUserStorage.directories(appContext).configHome
         val region = when (sessionRegion ?: configuredRegion) {
-            "china_mainland", "china" -> "china"
+            "china_mainland" -> "china_mainland"
             "international" -> "international"
             else -> throw AudioOperationException(DeviceAudioErrorKind.InvalidRequest, "Select a supported provider region in provider settings.")
         }
         return synchronized(this) {
-            cached?.takeIf { it.profiles == profiles && it.region == region } ?: Host(profiles, region,
-                buildAndroidAudioProviderHost(profiles, region, AndroidSecureStorageAdapter(appContext))).also { cached = it }
+            cached?.takeIf { it.profiles == profiles && it.region == region && it.accountHome == accountHome } ?: Host(profiles, region, accountHome,
+                buildAndroidAudioProviderHost(profiles, region, accountHome, AndroidSecureStorageAdapter(appContext))).also { cached = it }
         }
     }
 
@@ -92,10 +98,10 @@ internal class RustProviderAudioBridge(context: Context) : ProviderAudioBridge {
         }
         val selectedHost = if (session != null && engine != null && (cloud.binding == "follow_session" || kind == "realtime")) {
             // Clone the actual runtime SDK for every admission so profile edits cannot leave a stale host cache.
-            Host("session:${session.getString("sessionId")}", session.optionalString("region").orEmpty(),
+            Host("session:${session.getString("sessionId")}", session.optionalString("region").orEmpty(), "",
                 buildAndroidSessionAudioProviderHost(engine))
         } else host(session?.optionalString("region"))
-        val operation = Operation(selectedHost, providerAudioRequestJson(request, configuration, kind, session), engine)
+        val operation = Operation(selectedHost, providerAudioRequestJson(request, configuration, kind, session), engine, session, cloud.binding == "follow_session" || kind == "realtime")
         operations[request.identity.id] = operation
         val response = JSONObject(operation.host.handle.capabilities(operation.json))
         response.throwIfError()
@@ -120,6 +126,7 @@ internal class RustProviderAudioBridge(context: Context) : ProviderAudioBridge {
         return try {
             val reply = JSONObject(active.transcribe(operation.json, capture.bytes, capture.mimeType))
             reply.throwIfError()
+            recordAccountBinding(request.owner, operation, reply.optJSONObject("usageContext"))
             AndroidAudioUsageJournal.record(request.identity.id, "recognition", reply)
             SttResult.Ok(reply.getString("text"), reply.optionalString("language"), null)
         } catch (cancelled: CancellationException) {
@@ -134,6 +141,7 @@ internal class RustProviderAudioBridge(context: Context) : ProviderAudioBridge {
         return try {
             val reply = JSONObject(active.synthesize(operation.json, text))
             reply.throwIfError()
+            recordAccountBinding(request.owner, operation, reply.optJSONObject("usageContext"))
             AndroidAudioUsageJournal.record(request.identity.id, "speech", reply)
             val encoded = reply.getString("pcmBase64")
             if (encoded.length.toLong() > ((request.maxPayloadBytes + 2) / 3) * 4) {
@@ -146,6 +154,13 @@ internal class RustProviderAudioBridge(context: Context) : ProviderAudioBridge {
         }
     }
 
+    private fun recordAccountBinding(owner: AudioOwnerKey, operation: Operation, context: JSONObject?) {
+        if (!operation.followsSession || context == null) return
+        val engine = operation.engine ?: return
+        val session = operation.session ?: return
+        AndroidAudioSessionContext.record(owner, engine, session, context.optionalString("profileId"), context.optionalString("accountScope"))
+    }
+
     override suspend fun cancel(operationId: String) { operations.remove(operationId)?.host?.handle?.cancel(operationId) }
 
     override suspend fun openRealtime(request: DeviceAudioRequest, configuration: AudioConfigurationV4, onEvent: suspend (String) -> Unit): ProviderRealtimeSession {
@@ -153,7 +168,11 @@ internal class RustProviderAudioBridge(context: Context) : ProviderAudioBridge {
         val engine = operation.engine ?: throw AudioOperationException(DeviceAudioErrorKind.Unavailable, "Open a current Agent session before starting realtime conversation.")
         val session = com.lingxi.code.bindings.android.startAndroidRealtimeAudio(engine, operation.host.handle,
             operation.json, object : com.lingxi.code.bindings.android.AndroidRealtimeAudioListener {
-                override suspend fun onEvent(eventJson: String) { onEvent(eventJson) }
+                override suspend fun onEvent(eventJson: String) {
+                    val event = JSONObject(eventJson)
+                    if (event.optString("type") == "session_ready") recordAccountBinding(request.owner, operation, event)
+                    onEvent(eventJson)
+                }
             })
         val commands = Mutex()
         return object : ProviderRealtimeSession {

@@ -285,6 +285,33 @@ impl EventSink {
     }
 }
 
+struct AccountCredentialState {
+    data_root: PathBuf,
+    credentials: std::sync::Weak<secret::CredentialManager>,
+    catalog: harness_runtime::desktop::FusionCatalogRegistry,
+    snapshot: Option<lingxi_core::host::provider_accounts::AccountSnapshot>,
+}
+
+struct AccountTokenRequester {
+    sink: Arc<EventSink>,
+}
+#[async_trait]
+impl client::adapter::ClientEventSink for AccountTokenRequester {
+    async fn emit(&self, event: client::protocol::events::ClientEvent) {
+        if let client::protocol::events::ClientEvent::ProviderAccountRefreshRequested {
+            account_id,
+            identity_generation,
+            credential_revision,
+        } = event
+        {
+            self.sink
+                .emit(json!({"type":"credential_required","accountId":account_id,
+                "identityGeneration":identity_generation,"credentialRevision":credential_revision}))
+                .await;
+        }
+    }
+}
+
 struct InteractionState {
     next_id: AtomicU64,
     permissions: Mutex<HashMap<u64, oneshot::Sender<bool>>>,
@@ -293,7 +320,7 @@ struct InteractionState {
     skill_scope: Mutex<Option<harness_runtime::app_agent_skills::SkillScope>>,
     tool_cleanup_failed: Arc<AtomicBool>,
     cleanup_receipt: Mutex<Option<AppChatCleanupReceipt>>,
-    oauth: Mutex<Option<Arc<llm_runtime::auth::openai::HostSession>>>,
+    account_credentials: Mutex<Option<AccountCredentialState>>,
     reason: AtomicU8,
     cleanup: AtomicU8,
     cancel: CancellationToken,
@@ -309,7 +336,7 @@ impl InteractionState {
             skill_scope: Mutex::new(None),
             tool_cleanup_failed: Arc::new(AtomicBool::new(false)),
             cleanup_receipt: Mutex::new(None),
-            oauth: Mutex::new(None),
+            account_credentials: Mutex::new(None),
             reason: AtomicU8::new(0),
             cleanup: AtomicU8::new(CLEANUP_NOT_REQUIRED),
             cancel,
@@ -702,17 +729,97 @@ fn set_config_owner(
     Ok(())
 }
 
-struct TokenRequester {
-    sink: Arc<EventSink>,
-}
-impl llm_runtime::auth::openai::HostRefreshRequester for TokenRequester {
-    fn request_refresh(&self) {
-        let sink = self.sink.clone();
-        tokio::spawn(async move {
-            sink.emit(json!({"type":"credential_required","provider":"codex"}))
-                .await;
-        });
+async fn apply_account_credentials(
+    context: &mut AccountCredentialState,
+    snapshot: lingxi_core::host::provider_accounts::AccountSnapshot,
+    mut values: BTreeMap<String, secret::AccountCredential>,
+) -> Result<(), &'static str> {
+    crate::provider_accounts::validate_injection(Some(&snapshot), &values)
+        .map_err(|_| "invalid_credentials")?;
+    if let Some(current) = &context.snapshot {
+        if current.store_scope != snapshot.store_scope {
+            return Err("invalid_credentials");
+        }
+        if current.config_revision > snapshot.config_revision {
+            return Err("stale_credentials");
+        }
     }
+    let root = context.data_root.clone();
+    let expected = snapshot.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::provider_accounts::validate_current_snapshot(&root, &expected)
+    })
+    .await
+    .map_err(|_| "credential_storage_unavailable")?
+    .map_err(|error| {
+        if error == "account configuration changed" {
+            "stale_credentials"
+        } else {
+            "invalid_credentials"
+        }
+    })?;
+    let credentials = context
+        .credentials
+        .upgrade()
+        .ok_or("credential_storage_unavailable")?;
+    crate::provider_accounts::validate_credential_revisions(&credentials, &snapshot, &values)
+        .await
+        .map_err(|error| {
+            if error == "stale account credential revision" {
+                "stale_credentials"
+            } else {
+                "invalid_credentials"
+            }
+        })?;
+    // Validate the entire batch before touching the cache. Tombstones also
+    // suppress native fallback for removed or temporarily unavailable accounts.
+    if let Some(previous) = &context.snapshot {
+        for account in &previous.accounts {
+            if !snapshot
+                .accounts
+                .iter()
+                .any(|next| next.credential_ref == account.credential_ref)
+            {
+                credentials
+                    .set_account_credential_ephemeral(&account.credential_ref, None)
+                    .await
+                    .map_err(|_| "credential_storage_unavailable")?;
+            }
+        }
+    }
+    for account in &snapshot.accounts {
+        credentials
+            .set_account_credential_ephemeral(
+                &account.credential_ref,
+                values.remove(&account.account_id),
+            )
+            .await
+            .map_err(|_| "credential_storage_unavailable")?;
+    }
+    context
+        .catalog
+        .refresh_provider_accounts(snapshot.clone())
+        .map_err(|_| "invalid_credentials")?;
+    context.snapshot = Some(snapshot);
+    Ok(())
+}
+
+async fn update_credentials(
+    state: &InteractionState,
+    envelope: crate::boot::CredentialEnvelope,
+) -> Result<(), &'static str> {
+    if let Some(snapshot) = envelope.provider_accounts {
+        let mut context = state.account_credentials.lock().await;
+        apply_account_credentials(
+            context.as_mut().ok_or("credential_storage_unavailable")?,
+            snapshot,
+            envelope.provider_account_credentials,
+        )
+        .await?;
+    } else if !envelope.provider_account_credentials.is_empty() {
+        return Err("invalid_credentials");
+    }
+    Ok(())
 }
 
 async fn credential_stack(
@@ -720,6 +827,13 @@ async fn credential_stack(
     envelope: crate::boot::CredentialEnvelope,
     state: &Arc<InteractionState>,
 ) -> Result<SharedCredentialStack, &'static str> {
+    let account_home = envelope
+        .provider_account_home
+        .clone()
+        .unwrap_or_else(|| config.lingxi_home.clone());
+    if !account_home.is_absolute() {
+        return Err("invalid_directories");
+    }
     // MCP OAuth retains the trusted host vault. Provider credentials are a
     // separate in-memory manager seeded only with the bounded parent envelope.
     let mut shared = harness_runtime::desktop::build_shared_credential_stack_with_policy(
@@ -734,23 +848,35 @@ async fn credential_stack(
         shared.clock.clone(),
         shared.http.clone(),
     ));
-    let host = Arc::new(llm_runtime::auth::openai::HostSession::new(
-        shared.clock.clone(),
-    ));
-    host.request_refreshes_through(Arc::new(TokenRequester {
-        sink: state.sink.clone(),
-    }));
-    if let Some(session) = envelope.openai_oauth {
-        host.serve(crate::boot::openai_host_token(&session));
+    let mut context = AccountCredentialState {
+        data_root: account_home.clone(),
+        credentials: Arc::downgrade(&shared.credentials),
+        catalog: shared.catalog_registry.clone(),
+        snapshot: None,
+    };
+    shared.provider_account_home = Some(account_home.clone());
+    if let Some(snapshot) = envelope.provider_accounts {
+        apply_account_credentials(
+            &mut context,
+            snapshot.clone(),
+            envelope.provider_account_credentials,
+        )
+        .await?;
+        shared.provider_accounts = Some(snapshot);
     }
-    *state.oauth.lock().await = Some(host.clone());
-    shared.openai_host_session = Some(host);
-    crate::boot::seed_parent_supplied_provider_keys(
-        &shared.catalog_registry,
-        &shared.credentials,
-        &envelope.provider_keys,
-    )
-    .await;
+    shared
+        .credentials
+        .set_account_credential_refresher(Arc::new(
+            crate::provider_accounts::BrokerAccountRefresher {
+                data_root: account_home,
+                credentials: Arc::downgrade(&shared.credentials),
+                sink: Arc::new(AccountTokenRequester {
+                    sink: state.sink.clone(),
+                }),
+                locks: Default::default(),
+            },
+        ));
+    *state.account_credentials.lock().await = Some(context);
     Ok(shared)
 }
 
@@ -842,13 +968,11 @@ async fn pump_controls<R: AsyncBufRead + Unpin>(mut reader: R, state: Arc<Intera
                 state.questions.lock().await.remove(&request_id);
             }
             Control::CredentialUpdate { credentials: value } => {
-                if let Ok(envelope) = credentials(value) {
-                    if let (Some(host), Some(session)) =
-                        (state.oauth.lock().await.as_ref(), envelope.openai_oauth)
-                    {
-                        host.serve(crate::boot::openai_host_token(&session));
-                    }
-                } else {
+                let result = match credentials(value) {
+                    Ok(envelope) => update_credentials(&state, envelope).await,
+                    Err(error) => Err(error),
+                };
+                if result.is_err_and(|error| error != "stale_credentials") {
                     state.cancel(INVALID_CONTROL).await;
                     break;
                 }
@@ -976,8 +1100,6 @@ async fn execute_inner(
         request.routing.clone(),
         state.clone(),
     );
-    config.api_key = envelope.api_key.clone().unwrap_or_default();
-    config.api_key_source = llm_runtime::CredentialSource::Configured;
     config.cli_mcp_servers = request.mcp_configs.clone();
     config.json_schema = request
         .input
@@ -1182,8 +1304,6 @@ async fn execute_side_query(
         request.routing.clone(),
         state.clone(),
     );
-    config.api_key = envelope.api_key.clone().unwrap_or_default();
-    config.api_key_source = llm_runtime::CredentialSource::Configured;
     config.cli_mcp_servers = request.mcp_configs.clone();
     config.routing = None;
     let shared = credential_stack(&config, envelope, &state).await?;
@@ -1421,6 +1541,46 @@ async fn execute_runtime(
     Ok(terminal)
 }
 
+// The native registry owns protocol defaults and exact credential slots. Keep
+// this private catalog projection free of keys, owner settings and route guesses.
+fn project_team_model_routes(
+    models: Vec<lingxi_core::host::ModelListing>,
+    mut routes: BTreeMap<(String, String), harness_runtime::desktop::team_process::TeamModelRoute>,
+    snapshot: Option<&lingxi_core::host::provider_accounts::AccountSnapshot>,
+) -> Result<Value, &'static str> {
+    models
+        .into_iter()
+        .map(|model| {
+            // The trusted Host already computed this projection using Broker
+            // presence, account health, policy and model-specific entitlement.
+            // Catalog envelopes intentionally carry no grant material.
+            let can_select = snapshot.is_some_and(|snapshot| {
+                snapshot.model_availability.iter().any(|availability| {
+                    availability.execution_binding_id == model.provider_id
+                        && availability.model_id == model.request_model
+                        && availability.eligible_account_ids.iter().any(|id| {
+                            snapshot
+                                .accounts
+                                .iter()
+                                .any(|account| account.account_id == *id && account.enabled)
+                        })
+                })
+            });
+            let route = routes.remove(&(model.provider_id.clone(), model.request_model.clone()));
+            let mut value =
+                serde_json::to_value(model).map_err(|_| "catalog_serialization_failed")?;
+            value["canSelect"] = json!(can_select);
+            if let Some(route) = route {
+                route.validate_accounts().map_err(|_| "catalog_route_invalid")?;
+                value["team_route"] =
+                    serde_json::to_value(route).map_err(|_| "catalog_serialization_failed")?;
+            }
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Value::Array)
+}
+
 async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
     if request.protocol_version != PROTOCOL_VERSION {
         return Err("protocol_version");
@@ -1437,12 +1597,14 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
         packaged_credential_stdin_only: true,
         session_config_home: Some(request.config_home.clone()),
         ..Default::default()
-    });
+    })
+    .map_err(|_| "provider_settings_unavailable")?;
     let global = request.global_config_path.unwrap_or_else(|| {
         migrations::global_config::global_config_path()
             .unwrap_or_else(|| PathBuf::from("/dev/null"))
     });
-    let selected_mcp = mcp::load_mcp_servers(&request.cwd.join(".mcp.json"), &global, &request.cwd);
+    let mut selected_mcp = mcp::load_mcp_servers(&request.cwd.join(".mcp.json"), &global, &request.cwd);
+    mcp::local_apps::append(&mut selected_mcp, &request.config_home);
     let cancel = CancellationToken::new();
     let sink = Arc::new(EventSink::new(
         String::new(),
@@ -1469,8 +1631,6 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
         resolved.routing,
         state.clone(),
     );
-    config.api_key = envelope.api_key.clone().unwrap_or_default();
-    config.api_key_source = llm_runtime::CredentialSource::Configured;
     config.cli_mcp_servers = selected_mcp;
     config = prepare_app_config(
         config,
@@ -1487,6 +1647,9 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
     let provider_profiles = config.provider_profiles.clone();
     let routing = config.routing.clone();
     let shared = credential_stack(&config, envelope, &state).await?;
+    // credential_stack validated metadata, storage scope, current config
+    // revision and every account generation before this display projection.
+    let catalog_accounts = shared.provider_accounts.clone();
     let runtime = Box::pin(harness_runtime::desktop::build_with_credential_stack(
         config,
         output,
@@ -1495,60 +1658,71 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
     ))
     .await
     .map_err(|_| "catalog_initialization_failed")?;
-    let models = runtime.orchestrator.list_model_listings().await;
-    // Snapshot each descriptor and its exact source config under one lock.
-    // The host must not reconstruct identities from model-facing aliases.
-    let connections = runtime.mcp_registry.connections.read().await;
-    let mut names = connections.keys().collect::<Vec<_>>();
-    names.sort();
-    let mut mcp_configs = Vec::new();
-    let mut mcp_tools = Vec::new();
-    for name in names {
-        let Some(connection) = connections.get(name) else {
-            continue;
-        };
-        let (config, tools) = match connection {
-            mcp::McpConnectionState::Connected { config, tools, .. }
-            | mcp::McpConnectionState::Cached { config, tools, .. } => (config, tools),
-            _ => continue,
-        };
-        let config_index = mcp_configs.len();
-        for tool in tools {
-            let identity = tool_api::McpToolIdentity::from_config_tool(config, tool);
-            let mut row =
-                serde_json::to_value(identity).map_err(|_| "catalog_serialization_failed")?;
-            row["configIndex"] = json!(config_index);
-            row["label"] = json!(format!("{} / {}", config.name, tool.tool_name));
-            row["description"] = json!(tool
-                .description
-                .string_at("")
-                .unwrap_or_default()
-                .chars()
-                .take(1024)
-                .collect::<String>());
-            mcp_tools.push(row);
+    let candidate = async {
+        // One catalog response uses one model snapshot. Rebuilding the account-backed
+        // directory for each route is expensive and can mix publication generations.
+        let models = llm_runtime::catalog_task::scope(async {
+            project_team_model_routes(
+                runtime.orchestrator.list_model_listings().await,
+                runtime.team_model_routes(),
+                catalog_accounts.as_ref(),
+            )
+        }).await?;
+        // Snapshot each descriptor and its exact source config under one lock.
+        // The host must not reconstruct identities from model-facing aliases.
+        let connections = runtime.mcp_registry.connections.read().await;
+        let mut names = connections.keys().collect::<Vec<_>>();
+        names.sort();
+        let mut mcp_configs = Vec::new();
+        let mut mcp_tools = Vec::new();
+        for name in names {
+            let Some(connection) = connections.get(name) else {
+                continue;
+            };
+            let (config, tools) = match connection {
+                mcp::McpConnectionState::Connected { config, tools, .. }
+                | mcp::McpConnectionState::Cached { config, tools, .. } => (config, tools),
+                _ => continue,
+            };
+            let config_index = mcp_configs.len();
+            for tool in tools {
+                let identity = tool_api::McpToolIdentity::from_config_tool(config, tool);
+                let mut row =
+                    serde_json::to_value(identity).map_err(|_| "catalog_serialization_failed")?;
+                row["configIndex"] = json!(config_index);
+                row["label"] = json!(format!("{} / {}", config.name, tool.tool_name));
+                row["description"] = json!(tool
+                    .description
+                    .string_at("")
+                    .unwrap_or_default()
+                    .chars()
+                    .take(1024)
+                    .collect::<String>());
+                mcp_tools.push(row);
+            }
+            mcp_configs.push(config.clone());
         }
-        mcp_configs.push(config.clone());
-    }
-    drop(connections);
-    let registry = runtime.orchestrator.shared_tool_registry();
-    let mut builtins = Vec::new();
-    for name in harness_runtime::desktop::app_invocation::APP_AGENT_BUILTIN_TOOLS {
-        if let Some(tool) = registry.find_registered(name) {
-            let description = tool
-                .description(
-                    &Utf16JsonProjection::plain(json!({})),
-                    &tool_api::tool_trait::DescriptionOptions {
-                        is_non_interactive_session: false,
-                    },
-                )
-                .await;
-            builtins.push(json!({"name":name,"description":description.chars().take(1024).collect::<String>()}));
+        drop(connections);
+        let registry = runtime.orchestrator.shared_tool_registry();
+        let mut builtins = Vec::new();
+        for name in harness_runtime::desktop::app_invocation::APP_AGENT_BUILTIN_TOOLS {
+            if let Some(tool) = registry.find_registered(name) {
+                let description = tool
+                    .description(
+                        &Utf16JsonProjection::plain(json!({})),
+                        &tool_api::tool_trait::DescriptionOptions {
+                            is_non_interactive_session: false,
+                        },
+                    )
+                    .await;
+                builtins.push(json!({"name":name,"description":description.chars().take(1024).collect::<String>()}));
+            }
         }
-    }
-    let result = json!({"type":"catalog","protocolVersion":PROTOCOL_VERSION,"models":models,"builtins":builtins,"providerProfiles":provider_profiles,"routing":routing,"mcpTools":mcp_tools,"mcpConfigs":mcp_configs});
+        let result = json!({"type":"catalog","protocolVersion":PROTOCOL_VERSION,"models":models,"builtins":builtins,"providerProfiles":provider_profiles,"routing":routing,"mcpTools":mcp_tools,"mcpConfigs":mcp_configs});
+        Ok(result)
+    }.await;
     let result = complete_runtime_execution(
-        Ok(result),
+        candidate,
         &state,
         runtime.session_lifecycle.shutdown_and_drain(),
     )
@@ -2226,6 +2400,171 @@ mod tests {
             "committed answer"
         );
     }
+    fn account_record(revision: u64) -> secret::AccountCredential {
+        secret::AccountCredential {
+            credential_revision: revision,
+            identity_generation: 1,
+            kind: secret::AccountCredentialKind::OAuth {
+                access_token: lingxi_core::types::Secret::new(format!("fixture-access-{revision}")),
+                refresh_token: None,
+                expires_at: std::time::UNIX_EPOCH + Duration::from_secs(2_000_000_000),
+                scopes: vec![],
+                issuer: "https://auth.openai.com".into(),
+                subject: Some("fixture-subject".into()),
+                organization_id: None,
+                email: None,
+                fedramp: false,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn account_updates_fence_revisions_and_tombstone_removed_material() {
+        let root = tempfile::tempdir().unwrap();
+        let credentials = Arc::new(secret::CredentialManager::new(
+            Arc::new(lingxi_core::host::InMemorySecureStorage::new()),
+            Arc::new(platform_posix::PosixClock::new()),
+            Arc::new(platform_posix::PosixHttp::new()),
+        ));
+        let scope =
+            harness_runtime::provider_accounts::account_store_scope(root.path(), "desktop-broker");
+        let store = harness_runtime::provider_accounts::ProviderAccountStore::new(
+            root.path().into(),
+            scope,
+            credentials.clone(),
+        );
+        let snapshot = store.execute_metadata(serde_json::from_value(json!({
+            "action":"add","expectedRevision":0,"providerId":"openai","displayName":"Fixture",
+            "executionBindingId":"openai-chatgpt","authKind":"oauth"
+        })).unwrap()).await.unwrap();
+        let account = snapshot.accounts[0].clone();
+        let mut context = AccountCredentialState {
+            data_root: root.path().into(),
+            credentials: Arc::downgrade(&credentials),
+            catalog: Default::default(),
+            snapshot: None,
+        };
+        apply_account_credentials(
+            &mut context,
+            snapshot.clone(),
+            BTreeMap::from([(account.account_id.clone(), account_record(1))]),
+        )
+        .await
+        .unwrap();
+        apply_account_credentials(
+            &mut context,
+            snapshot.clone(),
+            BTreeMap::from([(account.account_id.clone(), account_record(2))]),
+        )
+        .await
+        .unwrap();
+        assert!(apply_account_credentials(
+            &mut context,
+            snapshot.clone(),
+            BTreeMap::from([(account.account_id.clone(), account_record(1))])
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            credentials
+                .get_account_credential(&account.credential_ref)
+                .await
+                .unwrap()
+                .unwrap()
+                .credential_revision,
+            2
+        );
+        let cancel = CancellationToken::new();
+        let sink = Arc::new(EventSink::new(
+            "fixture-run".into(),
+            tokio::io::sink(),
+            cancel.clone(),
+        ));
+        let state = Arc::new(InteractionState::new(sink, cancel));
+        *state.account_credentials.lock().await = Some(context);
+        let update = json!({"type":"credential_update","credentials":{
+            "provider_accounts":&snapshot,
+            "provider_account_credentials":{(account.account_id.clone()):account_record(1)}
+        }});
+        let frames = format!("{update}\n{{\"type\":\"cancel\"}}\n");
+        pump_controls(BufReader::new(frames.as_bytes()), state.clone()).await;
+        assert_eq!(
+            state.reason.load(Ordering::Acquire),
+            CANCELLED,
+            "a stale host update must not cancel an active task"
+        );
+        let mut context = state.account_credentials.lock().await.take().unwrap();
+        let mut forbidden = account_record(3);
+        if let secret::AccountCredentialKind::OAuth { refresh_token, .. } = &mut forbidden.kind {
+            *refresh_token = Some(lingxi_core::types::Secret::new(
+                "fixture-private-refresh".into(),
+            ));
+        }
+        assert!(apply_account_credentials(
+            &mut context,
+            snapshot.clone(),
+            BTreeMap::from([(account.account_id.clone(), forbidden)])
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            credentials
+                .get_account_credential(&account.credential_ref)
+                .await
+                .unwrap()
+                .unwrap()
+                .credential_revision,
+            2
+        );
+        let removed = store.execute_metadata(serde_json::from_value(json!({"action":"remove","expectedRevision":snapshot.config_revision,"accountId":account.account_id})).unwrap()).await.unwrap();
+        assert!(apply_account_credentials(
+            &mut context,
+            snapshot,
+            BTreeMap::from([(account.account_id.clone(), account_record(3))])
+        )
+        .await
+        .is_err());
+        apply_account_credentials(&mut context, removed, BTreeMap::new())
+            .await
+            .unwrap();
+        assert!(credentials
+            .get_account_credential(&account.credential_ref)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn named_account_refresh_uses_only_the_private_exact_account_message() {
+        let cancel = CancellationToken::new();
+        let (output, input) = tokio::io::duplex(4096);
+        let sink = Arc::new(EventSink::new("fixture-run".into(), output, cancel));
+        let adapter = AccountTokenRequester { sink };
+        client::adapter::ClientEventSink::emit(
+            &adapter,
+            client::protocol::events::ClientEvent::ProviderAccountRefreshRequested {
+                account_id: "fixture-account".into(),
+                identity_generation: 4,
+                credential_revision: 9,
+            },
+        )
+        .await;
+        let value: Value = serde_json::from_slice(
+            &read_frame(&mut BufReader::new(input), 4096)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["type"], "credential_required");
+        assert_eq!(value["accountId"], "fixture-account");
+        assert_eq!(value["identityGeneration"], 4);
+        assert_eq!(value["credentialRevision"], 9);
+        assert!(value.get("provider").is_none());
+        assert!(value.get("access_token").is_none());
+        assert!(value.get("refresh_token").is_none());
+    }
+
     #[test]
     fn credentials_fail_without_echoing_input() {
         let secret = "DO_NOT_PRINT_THE_TOKEN";
@@ -2430,5 +2769,98 @@ mod tests {
             PermissionDecision::Deny { .. }
         ));
         assert!(state.permissions.lock().await.is_empty());
+    }
+
+    #[test]
+    fn metadata_catalog_requires_exact_shared_binding_and_model_projection() {
+        let snapshot: lingxi_core::host::provider_accounts::AccountSnapshot = serde_json::from_value(json!({
+            "storeScope":"fixture","configRevision":2,
+            "accounts":[{"accountId":"fixture-a","providerId":"openai","displayName":"A","authKind":"api_key",
+            "executionBindingId":"openai","credentialRef":{"storeScope":"fixture","secretRef":"acct.fixture-a"},
+            "enabled":true,"userPriority":0,"configRevision":2,"identityGeneration":3}],
+            "modelAvailability":[
+                {"providerId":"openai","executionBindingId":"openai","modelId":"allowed","eligibleAccountIds":["fixture-a"],"confirmedAccountIds":[],"unverifiedAccountIds":["fixture-a"],"forbiddenAccountIds":[]},
+                {"providerId":"openai","executionBindingId":"openai","modelId":"blocked","eligibleAccountIds":[],"confirmedAccountIds":[],"unverifiedAccountIds":[],"forbiddenAccountIds":["fixture-a"]},
+                {"providerId":"openai","executionBindingId":"other-binding","modelId":"wrong-binding","eligibleAccountIds":["fixture-a"],"confirmedAccountIds":[],"unverifiedAccountIds":["fixture-a"],"forbiddenAccountIds":[]}
+            ]
+        })).unwrap();
+        let models = ["allowed", "blocked", "wrong-binding", "no-projection"]
+            .into_iter()
+            .map(|model| lingxi_core::host::ModelListing {
+                provider_id: "openai".into(),
+                request_model: model.into(),
+                ..Default::default()
+            })
+            .collect();
+        let rows = project_team_model_routes(models, BTreeMap::new(), Some(&snapshot)).unwrap();
+        assert_eq!(rows[0]["canSelect"], true);
+        for row in rows.as_array().unwrap().iter().skip(1) {
+            assert_eq!(row["canSelect"], false);
+        }
+        assert!(!rows.to_string().contains("credential_revision"));
+    }
+
+    #[test]
+    fn team_catalog_projection_keeps_effective_static_route_and_no_credential_material() {
+        use harness_runtime::desktop::team_process::TeamModelRoute;
+        let profile = json!({
+            "provider_id":"openai","profile_name":"openai-responses",
+            "base_url":"https://api.openai.com/v1","protocol":"open_ai_responses",
+            "auth":"api_key","credential":{"source":"host_managed","key":"team-selected-model"},
+            "models":[{"display_model":"GPT fixture","request_model":"gpt-fixture","billing_model":"gpt-fixture",
+                "capability_support":{"streaming":"supported","tools":"supported"}}],"extra":{}
+        });
+        let route = TeamModelRoute {
+            model_provider: "openai-responses".into(),
+            model_protocol: serde_json::from_value(json!("open_ai_responses")).unwrap(),
+            model_id: "gpt-fixture".into(),
+            model_endpoint: "https://api.openai.com/v1".into(),
+            credential_id: "openai".into(),
+            model_profile: serde_json::from_value(profile).unwrap(),
+        };
+        let models = vec![lingxi_core::host::ModelListing {
+            provider_id: "openai".into(),
+            request_model: "gpt-fixture".into(),
+            ..Default::default()
+        }];
+        let mut account_route = route.clone();
+        account_route.model_profile.auth = serde_json::from_value(json!("chat_gpt_o_auth")).unwrap();
+        account_route.model_endpoint = "https://chatgpt.com/backend-api/codex".into();
+        account_route.model_profile.base_url = account_route.model_endpoint.clone();
+        assert!(account_route.validate().is_err());
+        let account_rows = project_team_model_routes(
+            models.clone(),
+            BTreeMap::from([(("openai".into(), "gpt-fixture".into()), account_route)]),
+            None,
+        ).unwrap();
+        assert_eq!(account_rows[0]["canSelect"], false);
+        assert_eq!(account_rows[0]["team_route"]["model_profile"]["auth"], "chat_gpt_o_auth");
+        let rows = project_team_model_routes(
+            models,
+            BTreeMap::from([(("openai".into(), "gpt-fixture".into()), route)]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(rows[0]["provider_id"], "openai");
+        assert_eq!(rows[0]["canSelect"], false);
+        assert_eq!(rows[0]["team_route"]["model_provider"], "openai-responses");
+        assert_eq!(rows[0]["team_route"]["credential_id"], "openai");
+        assert_eq!(
+            rows[0]["team_route"]["model_profile"]["models"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            rows[0]["team_route"]["model_profile"]["credential"]["source"],
+            "host_managed"
+        );
+        assert!(rows[0]["team_route"]["model_profile"]["extra"]
+            .get("headers")
+            .is_none());
+        assert!(rows[0]["team_route"]["model_profile"]["connection"]
+            .get("protocol_profiles")
+            .is_none());
     }
 }

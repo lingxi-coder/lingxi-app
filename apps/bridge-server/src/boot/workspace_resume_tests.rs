@@ -698,8 +698,6 @@ async fn auto_cold_resume_classifier_unavailable_persists_denial_and_proof() {
     cfg.permission_mode = permission::PermissionMode::Auto;
     cfg.permission_mode_cli_explicit = true;
     cfg.api_base = "http://127.0.0.1:9".into();
-    cfg.api_key.clear();
-    cfg.api_key_helper = None;
     cfg.default_model = "claude-sonnet-4-6".into();
     cfg.session_id_override = Some(id.to_string());
     cfg.session_transcript_path = Some(selected.clone());
@@ -711,12 +709,16 @@ async fn auto_cold_resume_classifier_unavailable_persists_denial_and_proof() {
         runtime.orchestrator.permission_mode().as_deref(),
         Some("auto")
     );
-    assert!(runtime
-        .credentials
-        .get_anthropic_api_key()
-        .await
-        .unwrap()
-        .is_none());
+    let account_scope = harness_runtime::provider_accounts::account_store_scope(
+        &home,
+        &format!("{:?}", runtime.credentials.account_storage_backend()),
+    );
+    assert!(
+        harness_runtime::provider_accounts::load_account_snapshot(&home, &account_scope)
+            .unwrap()
+            .accounts
+            .is_empty()
+    );
     assert!(runtime
         .credentials
         .get_oauth_tokens()

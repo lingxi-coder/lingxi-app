@@ -468,6 +468,31 @@ async fn approved_reconnect_over_a_direct_link() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn every_connection_says_in_initialize_that_the_viewer_understands_bots() {
+    let rig = make_rig(true);
+    rig.pair_beforehand().await;
+    rig.conn.start();
+    rig.phase(ConnectionPhase::Ready).await;
+
+    // The reconnect says it again.
+    let conn_id = rig.host.conns()[0].conn_id.clone();
+    rig.host.drop_connection(&conn_id, "restart");
+    rig.phase(ConnectionPhase::Reconnecting).await;
+    rig.phase(ConnectionPhase::Ready).await;
+    let initializes: Vec<Value> = rig
+        .host
+        .requests()
+        .into_iter()
+        .filter(|(_, method, _)| method == methods::INITIALIZE)
+        .map(|(_, _, params)| params)
+        .collect();
+    assert_eq!(initializes.len(), 2);
+    for initialize in initializes {
+        assert_eq!(initialize["app"]["features"], json!(["bots"]));
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn direct_path_fails_and_the_tunnel_takes_over() {
     let rig = make_rig(true);
     rig.pair_beforehand().await;

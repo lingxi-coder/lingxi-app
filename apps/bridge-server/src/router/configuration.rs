@@ -17,7 +17,6 @@ use client::protocol::listings::ConfigurationEffectDto;
 use client::protocol::listings::ConfigurationOperationStatusDto;
 use client::protocol::text::ClientTextDto;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use std::collections::HashMap;
 
 fn source_string(value: impl Into<Utf16JsonProjection>) -> Utf16JsonProjection {
     value.into()
@@ -200,35 +199,11 @@ mod settings_reload_error_source_tests {
 mod skill_identity_source_tests {
     use super::*;
     use async_trait::async_trait;
-    use lingxi_core::host::auth::{AuthError, AuthHandle, LoginInfo};
     use lingxi_core::host::task_registry::{
         TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
         TaskRegistryHandle, TaskUpdatePatch,
     };
     use std::sync::{Arc, Mutex};
-
-    struct TestAuth;
-
-    #[async_trait]
-    impl AuthHandle for TestAuth {
-        fn register_account_change_observer(
-            &self,
-            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
-        ) {
-        }
-
-        async fn login(&self) -> Result<LoginInfo, AuthError> {
-            unreachable!("Skill Admin identity test does not log in")
-        }
-
-        async fn logout(&self) -> Result<(), AuthError> {
-            Ok(())
-        }
-
-        async fn current_user(&self) -> Option<LoginInfo> {
-            None
-        }
-    }
 
     struct TestTasks;
 
@@ -395,7 +370,6 @@ mod skill_identity_source_tests {
         };
         let router = EngineCommandRouter::new(
             Arc::new(orchestrator::test_support::MockOrchestratorHandle::new()),
-            Arc::new(TestAuth),
             Arc::new(TestTasks) as Arc<dyn TaskRegistryHandle>,
             None,
             Some(Arc::new(tokio::sync::RwLock::new(registry))),
@@ -1491,7 +1465,11 @@ impl EngineCommandRouter {
             .await;
             return;
         };
-        match plugin_admin::catalog_json(context, self.credentials.as_deref()).await {
+        let credentials = self
+            .provider_account_store
+            .as_ref()
+            .map(|store| store.credentials());
+        match plugin_admin::catalog_json(context, credentials.as_deref()).await {
             Ok(catalog_json) => sink.emit(ClientEvent::PluginCatalog { catalog_json }).await,
             Err(message) => {
                 sink.emit(ClientEvent::Error {
@@ -1623,7 +1601,9 @@ impl EngineCommandRouter {
                             context,
                             revision_sha256,
                             payload_json,
-                            self.credentials.clone(),
+                            self.provider_account_store
+                                .as_ref()
+                                .map(|store| store.credentials()),
                         )
                         .await
                     }
@@ -1993,86 +1973,5 @@ impl EngineCommandRouter {
                 .await
             }
         }
-    }
-    pub(super) async fn emit_provider_credential_status(
-        &self,
-        operation_id: u64,
-        provider_ids: &[String],
-        preview_provider_ids: &[String],
-        operation_error: Option<String>,
-        sink: &dyn ClientEventSink,
-    ) {
-        let Some(credentials) = self.credentials.as_ref() else {
-            sink.emit(ClientEvent::ProviderCredentialStatus {
-                operation_id,
-                configured_provider_ids: Vec::new(),
-                unavailable_provider_ids: provider_ids.to_vec(),
-                storage_encrypted: false,
-                credential_previews: HashMap::new(),
-                error: Some("provider credential storage is unavailable".to_string()),
-            })
-            .await;
-            return;
-        };
-
-        if let Some(error) = operation_error {
-            sink.emit(ClientEvent::ProviderCredentialStatus {
-                operation_id,
-                configured_provider_ids: Vec::new(),
-                unavailable_provider_ids: provider_ids.to_vec(),
-                storage_encrypted: credentials.provider_key_storage_is_encrypted(),
-                credential_previews: HashMap::new(),
-                error: Some(error),
-            })
-            .await;
-            return;
-        }
-
-        let mut configured_provider_ids = Vec::new();
-        let mut unavailable_provider_ids = Vec::new();
-        let mut credential_previews = HashMap::new();
-        let mut failures = Vec::new();
-        for provider_id in provider_ids {
-            match credentials.has_provider_key(provider_id).await {
-                Ok(true) => {
-                    configured_provider_ids.push(provider_id.clone());
-                    if preview_provider_ids.contains(provider_id) {
-                        match credentials.get_provider_key(provider_id).await {
-                            Ok(Some(secret)) => {
-                                credential_previews.insert(
-                                    provider_id.clone(),
-                                    secret::masked_credential_preview(secret.expose_secret()),
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(failure) => {
-                                failures.push(format!("{provider_id} preview: {failure}"))
-                            }
-                        }
-                    }
-                }
-                Ok(false) => {}
-                Err(failure) => {
-                    unavailable_provider_ids.push(provider_id.clone());
-                    failures.push(format!("{provider_id}: {failure}"));
-                }
-            }
-        }
-        let error = (!failures.is_empty()).then(|| {
-            format!(
-                "provider credential storage is unavailable ({})",
-                failures.join("; ")
-            )
-        });
-
-        sink.emit(ClientEvent::ProviderCredentialStatus {
-            operation_id,
-            configured_provider_ids,
-            unavailable_provider_ids,
-            storage_encrypted: credentials.provider_key_storage_is_encrypted(),
-            credential_previews,
-            error,
-        })
-        .await;
     }
 }

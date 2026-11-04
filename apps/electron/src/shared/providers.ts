@@ -7,6 +7,7 @@ export interface ProviderDefinition {
   description: string;
   popular: boolean;
   authMethod: ProviderAuthMethod;
+  authMethods: readonly ProviderAuthMethod[];
   keyLabel: string;
   keyPlaceholder: string;
   /** Built-in API base used by the engine's provider preset. */
@@ -40,7 +41,7 @@ export interface ProviderDefinition {
 export const PROVIDERS: readonly ProviderDefinition[] = [
   {
     id: 'anthropic', label: 'Anthropic', description: 'Claude models', popular: true,
-    authMethod: 'api_key', keyLabel: 'Anthropic API key', keyPlaceholder: 'sk-ant-…',
+    authMethod: 'api_key', authMethods: ['api_key'], keyLabel: 'Anthropic API key', keyPlaceholder: 'sk-ant-…',
     defaultApiBase: 'https://api.anthropic.com',
     credentialManagementUrl: 'https://console.anthropic.com/settings/keys',
     defaultModel: 'claude-sonnet-5', available: true,
@@ -50,7 +51,7 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
   },
   {
     id: 'openai', label: 'OpenAI', description: 'GPT models', popular: true,
-    authMethod: 'api_key', keyLabel: 'OpenAI API key', keyPlaceholder: 'sk-…',
+    authMethod: 'api_key', authMethods: ['api_key', 'oauth'], keyLabel: 'OpenAI API key', keyPlaceholder: 'sk-…',
     defaultApiBase: 'https://api.openai.com/v1',
     credentialManagementUrl: 'https://platform.openai.com/api-keys',
     defaultModel: 'openai/gpt-6.1-sol', available: true,
@@ -62,7 +63,7 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
   },
   {
     id: 'deepseek', label: 'DeepSeek', description: 'V4.1 Flash and V4 Pro', popular: true,
-    authMethod: 'api_key', keyLabel: 'DeepSeek API key', keyPlaceholder: 'sk-…',
+    authMethod: 'api_key', authMethods: ['api_key'], keyLabel: 'DeepSeek API key', keyPlaceholder: 'sk-…',
     defaultApiBase: 'https://api.deepseek.com',
     credentialManagementUrl: 'https://platform.deepseek.com/api_keys',
     defaultModel: 'deepseek/deepseek-flash', available: true,
@@ -73,7 +74,7 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
   },
   {
     id: 'kimi', label: 'Kimi', description: 'Moonshot AI models', popular: true,
-    authMethod: 'api_key', keyLabel: 'Kimi API key', keyPlaceholder: 'sk-…',
+    authMethod: 'api_key', authMethods: ['api_key'], keyLabel: 'Kimi API key', keyPlaceholder: 'sk-…',
     defaultApiBase: 'https://api.moonshot.cn/v1',
     credentialManagementUrl: 'https://platform.kimi.com/console/api-keys',
     defaultModel: 'kimi/kimi-k3', available: true,
@@ -86,7 +87,7 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
   },
   {
     id: 'kimi-code', label: 'Kimi Code', description: 'Coding membership models', popular: true,
-    authMethod: 'api_key', keyLabel: 'Kimi Code API key', keyPlaceholder: 'sk-…',
+    authMethod: 'api_key', authMethods: ['api_key'], keyLabel: 'Kimi Code API key', keyPlaceholder: 'sk-…',
     defaultApiBase: 'https://api.kimi.com/coding/v1',
     credentialManagementUrl: 'https://www.kimi.com/code/console',
     defaultModel: 'kimi-code/k3', available: true,
@@ -97,7 +98,7 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
   },
   {
     id: 'gemini', label: 'Google Gemini', description: 'Gemini models', popular: true,
-    authMethod: 'api_key', keyLabel: 'Gemini API key', keyPlaceholder: 'AIza…',
+    authMethod: 'api_key', authMethods: ['api_key'], keyLabel: 'Gemini API key', keyPlaceholder: 'AIza…',
     defaultApiBase: 'https://generativelanguage.googleapis.com/v1beta',
     credentialManagementUrl: 'https://aistudio.google.com/app/apikey',
     defaultModel: 'gemini/gemini-3.7-flash', available: true,
@@ -110,7 +111,7 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
   },
   {
     id: 'openrouter', label: 'OpenRouter', description: 'One key for many models', popular: false,
-    authMethod: 'api_key', keyLabel: 'OpenRouter API key', keyPlaceholder: 'sk-or-…',
+    authMethod: 'api_key', authMethods: ['api_key'], keyLabel: 'OpenRouter API key', keyPlaceholder: 'sk-or-…',
     defaultApiBase: 'https://openrouter.ai/api/v1',
     credentialManagementUrl: 'https://openrouter.ai/settings/keys',
     defaultModel: 'openrouter/openrouter/auto', available: true,
@@ -122,7 +123,7 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
   },
   {
     id: 'zai', label: 'Z.AI', description: 'GLM models', popular: false,
-    authMethod: 'api_key', keyLabel: 'Z.AI API key', keyPlaceholder: '…',
+    authMethod: 'api_key', authMethods: ['api_key'], keyLabel: 'Z.AI API key', keyPlaceholder: '…',
     defaultApiBase: 'https://api.z.ai/api/paas/v4',
     credentialManagementUrl: 'https://z.ai/manage-apikey/apikey-list',
     defaultModel: 'zai/glm-5.3', available: true,
@@ -133,7 +134,7 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
   },
   {
     id: 'glm-coding', label: 'GLM Coding Plan', description: 'Zhipu coding-plan subscription', popular: false,
-    authMethod: 'api_key', keyLabel: 'GLM Coding API key', keyPlaceholder: '…',
+    authMethod: 'api_key', authMethods: ['api_key'], keyLabel: 'GLM Coding API key', keyPlaceholder: '…',
     defaultApiBase: 'https://open.bigmodel.cn/api/anthropic',
     credentialManagementUrl: 'https://bigmodel.cn/usercenter/proj-mgmt/apikeys',
     defaultModel: 'glm-coding/glm-5.3', available: true,
@@ -146,7 +147,7 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
   },
   {
     id: 'github-copilot', label: 'GitHub Copilot', description: 'Copilot subscription', popular: true,
-    authMethod: 'token', keyLabel: 'GitHub token', keyPlaceholder: 'gho_…',
+    authMethod: 'token', authMethods: ['token'], keyLabel: 'GitHub token', keyPlaceholder: 'gho_…',
     defaultApiBase: 'https://api.githubcopilot.com',
     credentialManagementUrl: 'https://github.com/settings/tokens',
     defaultModel: 'github-copilot/claude-opus-5', available: true,
@@ -159,7 +160,7 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
   },
   {
     id: 'openai-chatgpt', label: 'Codex Auth', description: '使用 ChatGPT 账号登录', popular: true,
-    authMethod: 'oauth', keyLabel: 'ChatGPT 账号', keyPlaceholder: '',
+    authMethod: 'oauth', authMethods: ['api_key', 'oauth'], keyLabel: 'ChatGPT 账号', keyPlaceholder: '',
     defaultApiBase: 'https://chatgpt.com/backend-api/codex',
     credentialManagementUrl: 'https://chatgpt.com',
     defaultModel: 'openai-chatgpt/gpt-6.1-sol', available: true,
@@ -186,6 +187,7 @@ export function providersFromCatalog(entries: readonly ProviderModelCatalogEntry
       description: definition.description,
       popular: local?.popular ?? false,
       authMethod: local?.authMethod ?? (definition.auth === 'bearer' ? 'token' : 'api_key'),
+      authMethods: local?.authMethods ?? [definition.auth === 'bearer' ? 'token' : 'api_key'],
       keyLabel: local?.keyLabel ?? `${entry.provider_label} API key`,
       keyPlaceholder: local?.keyPlaceholder ?? '',
       defaultApiBase: definition.base_url,

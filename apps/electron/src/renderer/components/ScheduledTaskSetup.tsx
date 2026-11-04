@@ -1,11 +1,12 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import type { ModelDetailsDto, ReasoningSelectionDto } from '@lingxi/bridge-client';
+import { scopeName } from '../bridge/scheduledPresentation';
 import { localScheduledTimezone, localExpiryInput, scheduledTaskCron, scheduledTaskAdvice, scheduledTaskFromJob, type ScheduledCronJob, type ScheduledTaskDraft as Draft, type ScheduledTaskFrequency as Frequency, type ScheduledAutomation } from '../bridge/scheduledTaskDraft';
 import './ScheduledTaskSetup.css';
 import { currentLocale, tr } from '../i18n/locale';
 import { DateTimePicker } from './ui/DateTimePicker';
 
-export type ScheduledScope = { id: string; projectPath?: string; label: string };
+export type ScheduledScope = { id: string; projectPath?: string; label: string; botId?: string };
 export type ScheduledSession = { id: string; title: string; scopeId: string };
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 export function ScheduledTaskSetup({ initial, editingJob, scopeId, scopes, sessions, models, defaultModel, defaultReasoning, onBack, onSave, onDirtyChange, loadContext }: {
@@ -113,7 +114,7 @@ export function ScheduledTaskSetup({ initial, editingJob, scopeId, scopes, sessi
           const session = availableSessions.find((item) => item.id === event.target.value); if (!session) return;
           setDraft((previous) => ({ ...previous, scopeId: session.scopeId, automation: { ...previous.automation!, targetSessionId: session.id } }));
         }}><option value="">{tr('cron_select_chat')}</option>{availableSessions.filter((session) => !editingJob || session.scopeId === scopeId).map((session) => <option key={`${session.scopeId}:${session.id}`} value={session.id}>{session.title}</option>)}</select></label>}
-        <label className="scheduled-setup-field">{tr('cron_run_project_label')}<select value={draft.scopeId} disabled={Boolean(editingJob) || (automation.runMode === 'selected_session' && Boolean(automation.targetSessionId))} onChange={(event) => update('scopeId', event.target.value)}>{scopes.map((scope) => <option key={scope.id} value={scope.id}>{scope.label}</option>)}</select></label>
+        <label className="scheduled-setup-field">{tr('cron_run_project_label')}<select value={draft.scopeId} disabled={Boolean(editingJob) || (automation.runMode === 'selected_session' && Boolean(automation.targetSessionId))} onChange={(event) => update('scopeId', event.target.value)}>{scopes.map((scope) => <option key={scope.id} value={scope.id}>{scopeName(scope)}</option>)}</select></label>
         <label className="scheduled-setup-field">{tr('session_details_model')}<select required value={automation.model} onChange={(event) => {
           const model = availableModels.find((item) => item.reference === event.target.value);
           const compatible = model?.reasoning.options.some((option) => JSON.stringify(option.selection) === JSON.stringify(automation.reasoning));
@@ -128,6 +129,7 @@ export function ScheduledTaskSetup({ initial, editingJob, scopeId, scopes, sessi
       </div>
       {automation.statusReason && <p className="scheduled-setup-disclosure">{automation.statusReason}</p>}
       {draft.scopeId === 'global' && <p className="scheduled-setup-disclosure">{tr('desktop_scheduled_no_project')}</p>}
+      {scopes.find((scope) => scope.id === draft.scopeId)?.botId !== undefined && <p className="scheduled-setup-disclosure">{tr('bots_routine_scope_note')}</p>}
       {notice && <p role="status" className="scheduled-setup-disclosure">{tr(notice)}</p>}
       <h3>{tr('cron_frequency')}</h3><div className="scheduled-setup-group">{timingFields()}{repeatField()}{expiryFields()}
         <label className="scheduled-setup-field">{tr('settings_notifications')}<select value={automation.notificationPolicy} onChange={(event) => updateAutomation({ notificationPolicy: event.target.value as ScheduledAutomation['notificationPolicy'] })}><option value="all">{tr('cron_notify_all')}</option><option value="failed">{tr('cron_notify_failed')}</option><option value="none">{tr('composer_effort_off')}</option></select></label>

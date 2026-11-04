@@ -100,6 +100,7 @@ import com.lingxi.code.components.UiTags
 import com.lingxi.code.connectivity.OfflineBanner
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.ModelProviderStatus
+import com.lingxi.code.settings.ProviderAccountModelAvailability
 import com.lingxi.code.theme.LingXiTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -178,12 +179,14 @@ fun ChatScreen(
     onRetryOffline: (() -> Unit)? = null,
     /** True when the user has not selected an enabled Provider/model yet. */
     modelSetupRequired: Boolean = false,
+    modelAvailabilityNotice: String? = null,
     /** Opens settings directly at the LLM Provider page. */
     onOpenModelSettings: () -> Unit = {},
     effectivePermissionMode: String = "auto",
     onOpenPermissionSettings: () -> Unit = {},
     /** Settings/credential state displayed alongside each provider section. */
     modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
+    accountModelAvailability: List<ProviderAccountModelAvailability> = emptyList(),
     /** Remote choices are validated by the host, independently of local credentials. */
     remoteModelSelection: Boolean = false,
     /** Opens the matching provider editor, or the provider list for null. */
@@ -460,7 +463,7 @@ fun ChatScreen(
                 )
             }
             if (modelSetupRequired) {
-                ModelSetupBanner(onOpenModelSettings = onOpenModelSettings)
+                ModelSetupBanner(onOpenModelSettings = onOpenModelSettings, availabilityNotice = modelAvailabilityNotice)
             }
             // Match iOS: one runtime footer, with execution details in summary sheets.
             state.compaction?.let { CompactionProgressRow(it) }
@@ -482,6 +485,9 @@ fun ChatScreen(
             }
             Composer(
                 text = draft,
+                historySessionKey = state.session.id,
+                historyMessages = if (state.sessionTransitioning) emptyList() else state.messages
+                    .filter { it.role == com.lingxi.code.model.Role.User }.map { it.text },
                 slashCommands = state.slashCommands,
                 promptSuggestion = state.promptSuggestion,
                 promptSuggestionNotice = state.promptSuggestionNotice,
@@ -532,8 +538,10 @@ fun ChatScreen(
                 // Loading preserves the live editor's selection and IME composition.
                 inputEnabled = !state.durableRecoveryBlocked,
                 modelSetupRequired = modelSetupRequired,
+                modelAvailabilityNotice = modelAvailabilityNotice,
                 onOpenModelSettings = onOpenModelSettings,
                 modelProviderStatuses = modelProviderStatuses,
+                accountModelAvailability = accountModelAvailability,
                 remoteModelSelection = remoteModelSelection,
                 onOpenProviderSettings = onOpenProviderSettings,
                 onStop = onStop,
@@ -775,6 +783,11 @@ private fun MessageList(
                     is ChatRenderItem.Tools -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
                         ToolGroupView(TranscriptBlock.Tools(item.calls, item.anchor), state.expandedToolCalls, stableOnToggleToolCall)
                     }
+                    is ChatRenderItem.SkillInstructions -> SkillInstructionsView(
+                        name = item.name, text = item.message.text,
+                        expanded = "skill:${item.key}" in state.expandedToolCalls,
+                        onToggle = { stableOnToggleToolCall("skill:${item.key}") }, onOpenLink = stableOnOpenLink,
+                    )
                     is ChatRenderItem.Message, is ChatRenderItem.Streaming -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
                         MessageBubble(
                             message = when (item) {
@@ -791,7 +804,6 @@ private fun MessageList(
                     }
                     is ChatRenderItem.AgentRun -> AgentRunTimeline(
                         state = item.run,
-                        modifier = Modifier.padding(vertical = 4.dp),
                         expandedToolCalls = state.expandedToolCalls,
                         onToggleToolCall = stableOnToggleToolCall,
                     )
@@ -968,12 +980,12 @@ private fun CompactionProgressRow(progress: CompactionProgressUi) {
 
 /** An actionable configuration state, kept separate from runtime failures. */
 @Composable
-private fun ModelSetupBanner(onOpenModelSettings: () -> Unit) {
+private fun ModelSetupBanner(onOpenModelSettings: () -> Unit, availabilityNotice: String?) {
     SetupNotice(
-        title = stringResource(R.string.chat_model_not_configured_title),
-        detail = stringResource(R.string.chat_model_not_configured_detail),
+        title = stringResource(if (availabilityNotice == null) R.string.chat_model_not_configured_title else R.string.provider_account_unavailable_title),
+        detail = availabilityNotice ?: stringResource(R.string.chat_model_not_configured_detail),
         icon = LXIconName.Cog,
-        action = stringResource(R.string.chat_go_to_settings),
+        action = stringResource(if (availabilityNotice == null) R.string.chat_go_to_settings else R.string.provider_accounts_manage),
         onAction = onOpenModelSettings,
         tag = UiTags.MODEL_SETUP_BANNER,
         actionTag = UiTags.MODEL_SETUP_ACTION,

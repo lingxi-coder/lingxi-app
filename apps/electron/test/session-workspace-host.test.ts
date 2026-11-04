@@ -151,7 +151,7 @@ function hostFixture(t: TestContext) {
     trustDirectory: async (path) => { calls.trust.push(path); return true; },
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any,
-    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, undefined, dialogs);
+    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, dialogs);
   // The test uses the real orchestration and store; unrelated provider and OS
   // bootstrap services are replaced by their current persisted observations.
   (host as any).bootstrap = () => ({ settings: settings.getPublic(), activeSession: settings.getPublic().activeSession,
@@ -366,6 +366,44 @@ test('trust approval echoes the displayed canonical directory and re-prompts whe
     { path: alias, trust_accepted: true, trusted_directory: changedTarget },
   ]);
   assert.equal(f.settings.getPublic().activeSession?.projectPath, changedTarget);
+});
+
+test('/cd into the app\'s own data is refused and rolled back, and adds no project', async (t) => {
+  const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const inside = join(f.userData, 'bots', 'someone', 'workspace');
+  mkdirSync(inside, { recursive: true });
+  await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: inside }), /belongs to the app's own data/);
+  assert.equal(f.original.cwd, f.source, 'the engine is back where it was');
+  assert.deepEqual(f.original.changes, [{ path: inside }, { path: f.source, trust_accepted: true, trusted_directory: f.source }]);
+  assert.deepEqual(f.settings.getPublic().projects, [f.source]);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), bytes);
+  assert.equal(f.runtimes.get(sessionId), f.original);
+  assert.deepEqual(f.calls.close, []); assert.deepEqual(f.calls.open, []);
+  assert.equal(f.original.releases, 1);
+});
+
+test('an engine that asks to trust a folder of the app\'s own data is not asked of the owner', async (t) => {
+  const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const inside = join(f.userData, 'logs');
+  mkdirSync(inside, { recursive: true });
+  f.original.setWorkingDirectory = async (request) => {
+    f.original.changes.push({ ...request });
+    return request.path === f.source ? { status: 'ok', cwd: f.source, changed: false, transcript_relocated: false }
+      : { status: 'needs_trust', directory: realpathSync.native(inside) };
+  };
+  await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: inside }), /belongs to the app's own data/);
+  assert.deepEqual(f.calls.trust, [], 'the owner was not asked to trust it');
+  assert.deepEqual(f.settings.getPublic().projects, [f.source]);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), bytes);
+});
+
+test('a session whose folder lies in the app\'s own data is not added as a project by opening it', async (t) => {
+  const f = hostFixture(t), inside = join(f.userData, 'bots', 'someone', 'workspace'), id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
+  mkdirSync(inside, { recursive: true });
+  f.catalog.find = async () => ({ ...f.row(inside, id), workspace_path: inside });
+  await assert.rejects(f.host.openSessionAndActivate({ projectPath: f.source, sessionId: id }), /belongs to the app's own data/);
+  assert.deepEqual(f.calls.trust, []);
+  assert.deepEqual(f.settings.getPublic().projects, [f.source]);
 });
 
 test('canceling trust or a rejected native cd leaves the old session authoritative', async (t) => {
@@ -584,7 +622,7 @@ for (const coldStart of [false, true]) {
     f.calls.select.length = 0;
     const settings = coldStart ? new SettingsStore(f.userData) : f.settings;
     const host = coldStart ? new HostController(settings, f.bridge as any, new DiagnosticBuffer(), f.catalog as any,
-      { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, undefined, f.dialogs) : f.host;
+      { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, f.dialogs) : f.host;
     if (coldStart) {
       (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
       t.after(() => host.dispose());
@@ -657,7 +695,7 @@ test('cold restore revalidates the original picker scope after the selected sour
   f.settings.removeProject(f.source);
   const settings = new SettingsStore(f.userData);
   const host = new HostController(settings, f.bridge as any, new DiagnosticBuffer(), f.catalog as any,
-    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, undefined, f.dialogs);
+    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, f.dialogs);
   (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
   t.after(() => host.dispose());
   await host.restoreProjectSession(f.target, settings.getPublic().activeSession);

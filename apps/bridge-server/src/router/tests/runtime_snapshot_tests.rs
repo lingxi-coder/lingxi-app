@@ -4,28 +4,8 @@ use lingxi_core::host::task_registry::{
     TaskRegistryHandle, TaskUpdatePatch,
 };
 use lingxi_core::host::team_registry::{TeamRegistryHandle, WorkerInfo};
-use lingxi_core::host::{AuthError, AuthHandle, LoginInfo};
 use std::sync::{Arc, Mutex};
 
-struct SnapshotAuth;
-#[async_trait::async_trait]
-impl AuthHandle for SnapshotAuth {
-    fn register_account_change_observer(
-        &self,
-        _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
-    ) {
-    }
-
-    async fn login(&self) -> Result<LoginInfo, AuthError> {
-        unreachable!()
-    }
-    async fn logout(&self) -> Result<(), AuthError> {
-        Ok(())
-    }
-    async fn current_user(&self) -> Option<LoginInfo> {
-        None
-    }
-}
 
 #[derive(Default)]
 struct SnapshotTasks {
@@ -100,7 +80,6 @@ fn worker(id: &str, status: &str) -> WorkerInfo {
 fn snapshot_router(team: Arc<SnapshotTeam>) -> EngineCommandRouter {
     EngineCommandRouter::new(
         Arc::new(orchestrator::test_support::MockOrchestratorHandle::new()),
-        Arc::new(SnapshotAuth),
         Arc::new(SnapshotTasks::default()),
         None,
         None,
@@ -166,7 +145,6 @@ async fn runtime_snapshot_refuses_missing_authoritative_roster() {
     );
     let router = EngineCommandRouter::new(
         Arc::new(orchestrator::test_support::MockOrchestratorHandle::new()),
-        Arc::new(SnapshotAuth),
         Arc::new(SnapshotTasks::default()),
         None,
         None,
@@ -200,7 +178,6 @@ async fn runtime_snapshot_contains_all_live_task_kinds_and_terminal_rows() {
     .collect();
     let router = EngineCommandRouter::new(
         Arc::new(orchestrator::test_support::MockOrchestratorHandle::new()),
-        Arc::new(SnapshotAuth),
         tasks.clone(),
         None,
         None,

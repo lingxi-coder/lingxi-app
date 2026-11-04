@@ -1,0 +1,12 @@
+{
+  "status": "LIVE_VERIFIED",
+  "release": "sites/lingxi-5e4b2/releases/1793351712560000",
+  "version": "sites/lingxi-5e4b2/versions/71b4954f989e8405",
+  "baselineVersion": "sites/lingxi-5e4b2/versions/b628323e196483e0",
+  "preservedBaselineFiles": 19265,
+  "actualActiveFileCount": 19277,
+  "fileCountMetadata": "19277",
+  "unionHash": "a366991ed149d48fe569bd7a568f0f04001588aa483a5223db71902fa7805d1f",
+  "configHash": "00291004def62b35700e8d7c5b418c10bb413776053aff0031e50e2fbe003845",
+  "remoteWrites": true
+}

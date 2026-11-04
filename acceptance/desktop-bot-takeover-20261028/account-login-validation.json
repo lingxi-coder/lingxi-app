@@ -1,0 +1,24 @@
+{
+  "failure": "prompt-focus-interaction standalone BetaComposer fixture queries Chinese flow-mode label while its fixture explicitly selects English",
+  "changed_login_components_imported_by_fixture": false,
+  "unchanged_owning_files": [
+    {
+      "path": "apps/electron/test/fixtures/composer-draft-electron.mjs",
+      "identical_to_head": true,
+      "sha256": "a97aeb040fa59e5898221bce3692f7a86afc5f01afce90cdf6b3ab56973efc78"
+    },
+    {
+      "path": "apps/electron/test/fixtures/composer-draft-main.tsx",
+      "identical_to_head": true,
+      "sha256": "68cf688c969a6dca90515211bf2ee4561fe28e1182c07a9993db692a0fe339f6"
+    },
+    {
+      "path": "apps/electron/src/renderer/components/BetaDesktop.tsx",
+      "identical_to_head": true,
+      "sha256": "57d35572ab9900c801f1f43a6672c4b01acc0759641f3879df20c39e35b3fcc3"
+    }
+  ],
+  "failed_run_log": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/account-login-tests.log",
+  "focused_login_remote_suite": "67 pass; account-login-tests-final.log",
+  "electron_typecheck": "Node + renderer pass"
+}

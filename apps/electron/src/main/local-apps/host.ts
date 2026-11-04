@@ -29,7 +29,8 @@ import { LOCAL_APP_SDK, REMOTE_LOCAL_APP_SDK } from '../../preload/localAppSdk.j
 import { LocalAppRemoteGateway, type RemoteOwner, type RemoteRun } from './remoteGateway.js';
 import type { LocalAppRtc } from './remoteRtc.js';
 import { LOCAL_APP_RTC_BROWSER_SOURCE } from './remoteRtcBrowser.js';
-import { webmcpPolyfillSource } from '../../../vendor/local-app-webmcp/dist/webmcp-polyfill.source.js';
+import { LocalAppMcpManager } from './mcp.js';
+import { LocalAppMcpGateway } from './mcpGateway.js';
 
 const REMOTE_ORIGIN_ENV = productEnvironmentKey('LOCAL_APP_REMOTE_ORIGIN');
 const GATEWAY_PORT_ENV = productEnvironmentKey('LOCAL_APP_GATEWAY_PORT');
@@ -290,8 +291,7 @@ function isLocalAppHostScript(
   appId: string,
   documentBase: string,
 ): boolean {
-  return scriptTagHasLocalAppSource(attributes, appId, '/__lingxi_webmcp.js', documentBase)
-    || scriptTagHasLocalAppSource(attributes, appId, '/__lingxi_local_app_sdk.js', documentBase);
+  return scriptTagHasLocalAppSource(attributes, appId, '/__lingxi_local_app_sdk.js', documentBase);
 }
 
 function reliableHostScript(attributes: LocalAppScriptAttributes): boolean {
@@ -334,12 +334,8 @@ function htmlHasLocalAppScript(html: string, lower: string, appId: string, path:
 
 function injectLocalAppScripts(html: string, appId: string, documentPath: string): string {
   const lower = asciiLowercase(html);
-  const webmcpAlreadyLoaded = htmlHasLocalAppScript(html, lower, appId, '/__lingxi_webmcp.js', documentPath);
   const localAppAlreadyLoaded = htmlHasLocalAppScript(html, lower, appId, '/__lingxi_local_app_sdk.js', documentPath);
-  const scripts = [
-    ...(webmcpAlreadyLoaded ? [] : ['<script src="/__lingxi_webmcp.js" data-lingxi-webmcp></script>']),
-    ...(localAppAlreadyLoaded ? [] : ['<script src="/__lingxi_local_app_sdk.js"></script>']),
-  ].join('');
+  const scripts = localAppAlreadyLoaded ? '' : '<script src="/__lingxi_local_app_sdk.js"></script>';
   if (!scripts) return html;
   const doctype = findLeadingDoctypeEnd(html, lower);
   const insertionIndex = doctype ?? (html.charCodeAt(0) === 0xfeff ? 1 : 0);
@@ -426,6 +422,7 @@ export interface LocalAppHostOptions extends RuntimeOptions {
   mainWindow: () => BrowserWindow | undefined;
   edit: (request: LocalAppEditRequest) => Promise<void>;
   agentCatalog?: () => Promise<LocalAppAgentCatalog>;
+  onMcpChanged?: () => void;
 }
 interface PendingAuthoringEntry { authoring: DesktopAuthoringRef; registeredAtMs: number; state: 'pending' | 'consumed'; appId?: string }
 interface SourceSessionRef { projectPath: string; sessionId: string }
@@ -490,6 +487,8 @@ export class LocalAppHost {
   private readonly pendingAuthoring = new Map<string, PendingAuthoringEntry>();
   private pendingAuthoringTail: Promise<void> = Promise.resolve();
   private readonly pendingAuthoringPath: string;
+  private readonly mcp: LocalAppMcpManager;
+  private readonly mcpGateway: LocalAppMcpGateway;
   constructor(private readonly options: LocalAppHostOptions) {
     this.store = new CoreLocalAppStore(join(options.configHome, 'local-apps', 'v2'), options.core);
     this.pendingAuthoringPath = join(this.store.root, 'authoring-pending.v1.json');
@@ -508,10 +507,13 @@ export class LocalAppHost {
       install: id => this.market.install(id),
       installed: () => this.changed(),
     });
-    this.runtime = new LocalAppRuntime(this.store, () => this.changed(), { ...options,
+    this.mcp = new LocalAppMcpManager({ changed: () => { this.changed(); options.onMcpChanged?.(); } });
+    this.mcpGateway = new LocalAppMcpGateway(options.configHome, this.mcp);
+    this.runtime = new LocalAppRuntime(this.store, () => this.changed(), { ...options, mcp: this.mcp,
       onRunEnded: (appId, runId, reason) => this.runEnded(appId, runId, reason) });
     options.core.onDisconnected?.(error => {
       this.unavailable = error;
+      void Promise.allSettled([this.mcp.dispose(), this.mcpGateway.dispose()]);
       void this.agentBroker?.dispose().catch(() => undefined);
       this.remoteRevokeAll();
       this.launchGrants.clear();
@@ -792,6 +794,7 @@ export class LocalAppHost {
   async initialize(): Promise<void> {
     await this.loadPendingAuthoring();
     await fs.mkdir(this.store.importsRoot, { recursive: true, mode: 0o700 });
+    await this.mcpGateway.initialize();
     ipcMain.handle(CH_LOCAL_APPS, (event, input) => { this.assertMain(event); return this.request(input); });
     ipcMain.handle(CH_LOCAL_APP_NATIVE, (event, input) => this.native(event, input));
     // Model tools use this authenticated local-only endpoint. No account or
@@ -991,7 +994,6 @@ export class LocalAppHost {
     if (!await this.remoteCurrent(run)) return new Response('Session expired', { status: 410 });
     const { appId: id } = run, url = new URL(request.url), manifest = this.runtime.manifest(id), workspace = this.runtime.workspace(id);
     if (!manifest || !workspace) return new Response('Application unavailable', { status: 410 });
-    if (url.pathname === '/__lingxi_webmcp.js') return new Response(webmcpPolyfillSource, { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
     if (url.pathname === '/__lingxi_local_app_sdk.js') return new Response(REMOTE_LOCAL_APP_SDK + (this.remoteRtc ? `\n${LOCAL_APP_RTC_BROWSER_SOURCE}` : ''), { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
     if (url.pathname.startsWith('/__lingxi_remote_')) return new Response('Not found', { status: 404 });
     if (manifest.entry.type === 'server' && url.pathname === '/' && manifest.entry.path && manifest.entry.path !== '/') {
@@ -1372,12 +1374,7 @@ export class LocalAppHost {
     }
     if (action === 'open' || action === 'start') { await this.open(id, false, false, signal); return { action, id, phase: this.runtime.status(await this.store.get(id)).phase }; }
     if (action === 'stop') {
-      this.invalidateRemoteOpenings(id); this.remoteGateway?.revokeApp(id);
-      const opening = this.cancelOpening(id);
-      await this.cancelAgentApp(id, 'Application stopped');
-      await this.runtime.stop(id);
-      await opening;
-      this.windows.get(id)?.close();
+      await this.stopManagedApp(id, 'Application stopped');
     } else if (action === 'restart' || action === 'repair') {
       const epoch = await this.cancelOpeningBeforeNext(id, signal);
       this.assertOpeningEpoch(id, epoch, signal);
@@ -1387,29 +1384,42 @@ export class LocalAppHost {
       await this.runtime.exclusive(id, async () => { const row = await this.store.get(id); row.background = input.enabled as boolean; await this.store.save(row); });
       if (!input.enabled && !this.windows.has(id) && !this.opening.has(id) && !this.retainRemoteRun(id)) await this.runtime.stop(id);
     } else if (action === 'revoke') {
-      this.invalidateRemoteOpenings(id); this.remoteGateway?.revokeApp(id);
-      const opening = this.cancelOpening(id);
       this.launchGrants.delete(id);
-      await this.cancelAgentApp(id, 'Application permissions revoked');
-      await this.runtime.stop(id);
-      await opening;
-      this.windows.get(id)?.close();
-      await this.runtime.exclusive(id, async () => { await this.store.revoke(id); await fs.rm(join(this.store.directory(id), 'file-grants.json'), { force: true }); });
+      await this.stopManagedApp(id, 'Application permissions revoked', () => this.runtime.exclusive(id, async () => {
+        await this.store.revoke(id); await fs.rm(join(this.store.directory(id), 'file-grants.json'), { force: true });
+      }), true);
     } else if (action === 'remove') {
       const parent = this.options.mainWindow();
       const options = { type: 'question' as const, message: nativeTr('native_delete_app', (await this.store.get(id)).name), detail: nativeTr('native_delete_app_detail'), buttons: [nativeTr('common_cancel'), nativeTr('common_delete')], defaultId: 0, cancelId: 0 };
       const choice = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
       if (choice.response !== 1) return;
-      await this.setRemoteAccess(id, false);
-      const opening = this.cancelOpening(id);
-      await this.cancelAgentApp(id, 'Application deleted');
-      this.windows.get(id)?.destroy();
-      await this.runtime.remove(id);
-      await opening;
-      session.fromPartition(`persist:local-app-${id}`).flushStorageData();
+      await this.stopManagedApp(id, 'Application deleted', async () => {
+        await this.setRemoteAccess(id, false);
+        this.windows.get(id)?.destroy();
+        const partition = session.fromPartition(`persist:local-app-${id}`);
+        await partition.clearStorageData();
+        await partition.clearCache();
+        partition.flushStorageData();
+        await this.runtime.remove(id);
+      });
     } else if (action === 'edit') { const row = await this.store.get(id); if (row.marketOrigin && !row.authoring?.sourceDirectory) throw new Error('Create a permitted custom copy before developing a market application'); await this.editAuthoring(row); }
     else throw new Error('Unknown Local App action');
     this.changed(); return { action, id };
+  }
+  private async stopManagedApp(id: string, reason: string, finish?: () => Promise<void>, finishOnCleanupFailure = false): Promise<void> {
+    const release = this.runtime.suspendStarts(id);
+    this.invalidateRemoteOpenings(id); this.remoteGateway?.revokeApp(id);
+    const opening = this.cancelOpening(id);
+    try {
+      const results = await Promise.allSettled([this.mcp.revoke(id), this.cancelAgentApp(id, reason)]);
+      const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
+      try { await this.runtime.stop(id); } catch (error) { errors.push(error); }
+      await opening;
+      this.windows.get(id)?.close();
+      // Revocation must persist even when process cleanup needs retry. Deletion waits for cleanup.
+      if (finish && (!errors.length || finishOnCleanupFailure)) try { await finish(); } catch (error) { errors.push(error); }
+      if (errors.length) throw new AggregateError(errors, 'Application cleanup needs retry');
+    } finally { release(); }
   }
   private async authoringCopyPath(name: string): Promise<string> {
     const root = join(this.options.configHome, '.apps'); await fs.mkdir(root, { recursive: true, mode: 0o700 });
@@ -1442,6 +1452,7 @@ export class LocalAppHost {
     if (!missing.length) return;
     const labels: Record<LocalAppCapability, string> = {
       process: nativeTr('native_capability_process'),
+      mcp: 'Expose this application’s tools through standard MCP while it is running',
       files: nativeTr('native_capability_files'),
       clipboard: nativeTr('native_capability_clipboard'),
       notifications: nativeTr('native_capability_notifications'),
@@ -1639,9 +1650,6 @@ export class LocalAppHost {
         const window = this.windows.get(id);
         if (!window || window.isDestroyed() || this.windowRuns.get(window) !== this.runtime.invocationId(id) || !workspace || !revision || this.runtime.phase(id) !== 'running') return new Response('Application run is unavailable', { status: 410 });
         const manifest = this.runtime.manifest(id)!;
-        if (url.pathname === '/__lingxi_webmcp.js') {
-          return new Response(webmcpPolyfillSource, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
-        }
         if (url.pathname === '/__lingxi_local_app_sdk.js') {
           return new Response(LOCAL_APP_SDK, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
         }
@@ -1854,6 +1862,7 @@ export class LocalAppHost {
   }
   async dispose(): Promise<void> {
     this.shuttingDown = true;
+    const mcpCleanup = Promise.allSettled([this.mcp.dispose(), this.mcpGateway.dispose()]);
     this.unsubscribeAgentSettlement?.(); this.unsubscribeAgentSettlement = undefined;
     this.invalidateRemoteOpenings();
     await this.remoteGateway?.dispose();
@@ -1880,5 +1889,7 @@ export class LocalAppHost {
     this.configured.clear(); this.launchGrants.clear();
     const path = join(this.options.configHome, 'desktop-local-app-host.json');
     try { if (JSON.parse(await fs.readFile(path, 'utf8')).token === this.token) await fs.rm(path); } catch { /* Already removed. */ }
+    const mcpErrors = (await mcpCleanup).filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
+    if (mcpErrors.length) throw new AggregateError(mcpErrors, 'Local App MCP shutdown needs retry');
   }
 }

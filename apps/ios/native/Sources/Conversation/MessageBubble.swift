@@ -13,29 +13,14 @@ private struct MessageImages: View {
                     Button { selectedImage = image } label: { imageView(image) }
                         .buttonStyle(.plain)
                         .accessibilityLabel(String(localized: "chat_preview_attached_image"))
+                        .accessibilityIdentifier("image-preview.open")
                 }
             }
         }
         .scrollIndicators(.hidden)
         .frame(maxWidth: 320, alignment: .trailing)
         .fullScreenCover(item: $selectedImage) { image in
-            NavigationStack {
-                Group {
-                    if let decoded = decodedImage(image.url) {
-                        Image(uiImage: decoded).resizable().scaledToFit()
-                    } else if let url = URL(string: image.url) {
-                        AsyncImage(url: url) { content in content.resizable().scaledToFit() }
-                            placeholder: { ProgressView() }
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(t.windowBg)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("common_close") { selectedImage = nil }
-                    }
-                }
-            }
+            NativeImagePreview(source: image.url, mediaType: image.mediaType)
         }
     }
 

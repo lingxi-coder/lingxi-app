@@ -1,0 +1,213 @@
+{
+  "source_manifest": "metadata/runtime-tested-source.json",
+  "source_matches_verified": true,
+  "tests": {
+    "unit": {
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "log": "logs/provider-postcleanup-unit-r2.log.gz"
+    },
+    "profile": {
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "log": "logs/provider-postcleanup-profile-r2.log.gz"
+    },
+    "process": {
+      "passed": 15,
+      "failed": 0,
+      "ignored": 0,
+      "log": "logs/provider-postcleanup-process-r2.log.gz"
+    },
+    "connector": {
+      "passed": 16,
+      "failed": 0,
+      "ignored": 1,
+      "log": "logs/provider-postcleanup-connector-r2.log.gz"
+    },
+    "interactions": {
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "log": "logs/provider-postcleanup-interactions-r2.log.gz"
+    },
+    "sandbox": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "log": "logs/provider-postcleanup-sandbox-r2.log.gz"
+    }
+  },
+  "unique_passed": 67,
+  "ignored": 1,
+  "commands": {
+    "provider-compile-r2-cleanup": {
+      "exit": 0,
+      "elapsed_s": 91.3,
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "harness-runtime",
+        "--features",
+        "desktop",
+        "--offline",
+        "--locked",
+        "--lib",
+        "--test",
+        "team_invocation_profile",
+        "--test",
+        "team_invocation_process",
+        "--test",
+        "team_connector",
+        "--test",
+        "team_process_interactions",
+        "--test",
+        "team_sandbox_process_boundary",
+        "--no-run"
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+      "log": "logs/provider-compile-r2-cleanup.log.gz",
+      "freeAfter": 20357120000,
+      "stopped": null
+    },
+    "provider-standalone-r2-cleanup": {
+      "exit": 0,
+      "elapsed_s": 55.2,
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "harness-runtime",
+        "--features",
+        "desktop",
+        "--offline",
+        "--locked",
+        "--bin",
+        "harness-team-worker",
+        "--bin",
+        "harness-team-host"
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+      "log": "logs/provider-standalone-r2-cleanup.log.gz",
+      "freeAfter": 20275200000,
+      "stopped": null
+    },
+    "provider-postcleanup-unit-r2": {
+      "exit": 0,
+      "elapsed_s": 5.0,
+      "command": [
+        "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/harness_runtime-b0704cf4bc8a54de",
+        "desktop::team_process::",
+        "--test-threads=1"
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+      "log": "logs/provider-postcleanup-unit-r2.log.gz",
+      "freeAfter": 20007387136,
+      "stopped": null
+    },
+    "provider-postcleanup-profile-r2": {
+      "exit": 0,
+      "elapsed_s": 10.0,
+      "command": [
+        "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_invocation_profile-76a3761cdbe313f3",
+        "--test-threads=1"
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+      "log": "logs/provider-postcleanup-profile-r2.log.gz",
+      "freeAfter": 19969998848,
+      "stopped": null
+    },
+    "provider-postcleanup-process-r2": {
+      "exit": 0,
+      "elapsed_s": 46.2,
+      "command": [
+        "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_invocation_process-af61533248cade59",
+        "--test-threads=1"
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+      "log": "logs/provider-postcleanup-process-r2.log.gz",
+      "freeAfter": 19649609728,
+      "stopped": null
+    },
+    "provider-postcleanup-connector-r2": {
+      "exit": 0,
+      "elapsed_s": 29.1,
+      "command": [
+        "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_connector-1b1271548c791221",
+        "--test-threads=1"
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+      "log": "logs/provider-postcleanup-connector-r2.log.gz",
+      "freeAfter": 17812598784,
+      "stopped": null
+    },
+    "provider-postcleanup-interactions-r2": {
+      "exit": 0,
+      "elapsed_s": 53.2,
+      "command": [
+        "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_process_interactions-f4cb454f01b1f6c9",
+        "--test-threads=1"
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+      "log": "logs/provider-postcleanup-interactions-r2.log.gz",
+      "freeAfter": 19333324800,
+      "stopped": null
+    },
+    "provider-postcleanup-sandbox-r2": {
+      "exit": 0,
+      "elapsed_s": 2.0,
+      "command": [
+        "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_sandbox_process_boundary-80b35c764b66c2e4",
+        "--test-threads=1"
+      ],
+      "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime",
+      "log": "logs/provider-postcleanup-sandbox-r2.log.gz",
+      "freeAfter": 19332919296,
+      "stopped": null
+    }
+  },
+  "binaries": {
+    "harness-team-worker": {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/harness-team-worker",
+      "sha256": "ecd47276365b373057363d4698d1d79ea19f60feae554e28c2a32f4f2f941753",
+      "size_bytes": 327838904
+    },
+    "harness-team-host": {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/harness-team-host",
+      "sha256": "980975241a4414181e2e381d8c28e060cf93a84fe71fc60da43bcb544b8f6460",
+      "size_bytes": 32928368
+    }
+  },
+  "disk_watchdog_floor_bytes": 2147483648,
+  "disk_watchdog_interval_seconds": 1,
+  "cleanup": {
+    "scope": "R11 changed files plus P app_agent.rs",
+    "dead_code": "no justified removal",
+    "duplication": "reused PRIVATE_CREDENTIAL in three credential seeding/source/host descriptor sites",
+    "naming_error_handling": "no additional changes",
+    "tests": "existing behavior locks retained; full affected suites rerun"
+  },
+  "posix_56_prior_tests_repeated": false,
+  "runtimeCommit": "b09033fa446dfdee48e71ea18ca16095b068a353",
+  "binaryEvidenceKind": "local_debug_synthetic_fixture_not_signed_package_or_live_provider",
+  "remainingAtRuntimeCheckpoint": [
+    "P native bridge DTO test/current full catalog execution",
+    "configured real OpenAI provider request",
+    "fresh packaged product/pins/live acceptance"
+  ],
+  "subsequentEvidence": [
+    "native-full-catalog.json",
+    "signed-package.json",
+    "real-provider-journey.json",
+    "native-session-safety.json",
+    "ios-full-product.json"
+  ],
+  "sourceManifestHeadFields": "historical pre-commit base; preserve as recorded",
+  "finalRuntimeCommitContentHashVerification": {
+    "commit": "b09033fa446dfdee48e71ea18ca16095b068a353",
+    "contentHashes": 15,
+    "result": "PASS_independent_read_only_review"
+  }
+}

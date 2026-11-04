@@ -97,7 +97,7 @@ test('events the table withholds are not sent live either', () => {
   const { runtime, channel, clock, attachment } = setup();
   attachment.attach(undefined);
   channel.clear();
-  runtime.push({ type: 'provider_credential_status', secret: 'nope' } as any);
+  runtime.push({ type: 'provider_accounts_updated', secret: 'nope' } as any);
   runtime.push({ type: 'tool_heartbeat', id: 'x', tool: 'Bash', elapsed_ms: 5 } as any);
   clock.advance(LIVE_BATCH_MS);
   assert.equal(channel.sent.length, 0);

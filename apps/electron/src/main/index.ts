@@ -1,3 +1,6 @@
+import { providerById, providersFromCatalog } from '../shared/providers.js';
+import { DesktopProviderAccounts, providerAccountSessionStore, runtimeAccountCredential, withFileRefreshIntents, withProviderAccountLock } from './provider-accounts.js';
+import { loginCodex } from './codex-auth.js';
 import { promises as fs } from 'node:fs';
 import { LocalAppCoreClient } from './local-apps/coreClient.js';
 import { RemoteFileStore } from './remoteControl/fileStore.js';
@@ -12,16 +15,22 @@ import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
 import { installDeepLinks } from './deepLinks.js';
 import { installCrashReporting } from './crashReporting.js';
 import { AccountService } from './account.js';
+import { TeamsService } from './teams/service.js';
+import { installTeamsIpc } from './teams/ipc.js';
+import { TeamConnector } from './teams/connector.js';
+import { TeamPrivateStore } from './teams/privateStore.js';
+import { resolveTeamBinaries } from './teams/process.js';
 import { accountSessionStore } from './account-storage.js';
 import { brokerAccountSessionStore } from './account-broker-storage.js';
 import firebaseConfig from '../shared/firebaseConfig.json';
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
-import { app, BrowserWindow, dialog, Menu, net, powerMonitor, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
+import { app, BrowserWindow, dialog, Menu, net, powerMonitor, powerSaveBlocker, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
 import { applicationMenuTemplate } from './applicationMenu.js';
 import { CH_APPLICATION_MENU } from '../shared/applicationMenu.js';
 import { installDesktopUpdates } from './desktopUpdates.js';
 import { desktopUpdateManifestUrl } from '../shared/productConfig.js';
+import { CH_BOTS_PROMPT_SENT, CH_BOTS_TASKS_CHANGED, type BotPromptSentUi, type BotTasksChangedUi } from '../shared/bots.js';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -30,20 +39,28 @@ import type { SessionRef } from './bridgeTypes.js';
 import { SessionRuntimeManager } from './sessionRuntimeManager.js';
 import {
   createMacCredentialBrokerClient,
-  readProviderEnvironmentCredential,
-  resolveProviderCredential,
-  SessionLaunchCache,
+  resolveSessionLaunchPluginSecrets,
 } from './credential-broker.js';
-import { CodexTokenManager, codexAccessToken } from './codex-tokens.js';
-import { CODEX_PROVIDER_ID } from './codex-auth.js';
+import { CodexTokenManager } from './codex-tokens.js';
 import { createRemoteControl } from './remoteControl/electronBindings.js';
 import { RemotePolicy, managedSettingsDirectory } from './remoteControl/policy.js';
 import { RemoteCommands } from './remoteControl/remoteCommands.js';
 import { nativeImageCodec } from './remoteControl/nativeImageCodec.js';
 import { PushRequester, RemotePush } from './remoteControl/pushRequests.js';
 import { RemoteControlUi } from './remoteControl/rendererIpc.js';
+import { BotContent } from './bots/content.js';
+import { KeepAwake } from './bots/keepAwake.js';
+import { LoginItem } from './bots/loginItem.js';
+import { ownerPreferenceHooks } from './bots/ownerPreferences.js';
+import { BotsUi } from './bots/rendererIpc.js';
+import { BotRouter } from './bots/router.js';
+import { BotService } from './bots/service.js';
+import { BotStore } from './bots/store.js';
+import { TaskChangeAnnouncer } from './bots/taskChanges.js';
+import { BotTasks } from './bots/taskService.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
 import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
+import { TeamOwnerApprovalBroker, TeamApprovalsGateway } from './remoteControl/teamApprovals.js';
 import { createRemoteLocalAppsDelegate } from './remoteControl/localAppsBindings.js';
 import { LocalAppRtc } from './local-apps/remoteRtc.js';
 import { PeerHost } from './remoteControl/peerHost.js';
@@ -59,7 +76,7 @@ import { TerminalManager } from './terminal.js';
 import { HostController } from './host.js';
 import { HostNotifier } from './notifications.js';
 import { notificationPresentation } from './notificationPresentation.js';
-import { DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic, resolveModBunExecutable } from './host-utils.js';
+import { BOT_PERMISSION_TIMEOUT_SECS, DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic, resolveModBunExecutable } from './host-utils.js';
 import { SettingsStore } from './settings.js';
 import { ComputerSettingsStore } from './computerSettings.js';
 import { BrowserIntegration } from './browserIntegration.js';
@@ -114,6 +131,15 @@ let remotePolicy: RemotePolicy | null = null;
 let remoteGateway: SessionGateway | null = null;
 let remotePush: RemotePush | null = null;
 let remoteUi: RemoteControlUi | null = null;
+/** Desktop Bots; absent until the product paths are known. */
+let bots: BotService | null = null;
+let stopTeams: (() => void) | undefined;
+let teamConnector: TeamConnector | undefined;
+let teamApprovalBroker: TeamOwnerApprovalBroker | undefined;
+let teamApprovalGateway: TeamApprovalsGateway | undefined;
+/** The endpoint through which Bots hand tasks to each other; made with the Bots. */
+let botRouter: BotRouter | null = null;
+let botTasks: BotTasks | null = null;
 let remotePolicyTimer: NodeJS.Timeout | undefined;
 /** How often the administrator's `managed-settings.json` is read again. */
 const REMOTE_POLICY_RECHECK_MS = 30_000;
@@ -386,13 +412,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     const sessionId = owner?.type === 'session' ? owner.session_id : owner?.type === 'attached' && owner.logical_kind === 'session' ? owner.logical_owner_id : settings.getPublic().activeSession?.sessionId;
     return sessionId ? bridge?.get(sessionId)?.audioSessionContext : undefined;
   };
+  let providerAccounts: DesktopProviderAccounts | undefined;
   const providerAudio = new ProviderAudioHost({
+    resolveProviderAccounts: () => providerAccounts?.launch() ?? Promise.resolve(undefined),
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     cwd: () => settings.getPublic().activeSession?.projectPath ?? settings.getWorkspace() ?? app.getPath('home'),
     session: () => audioSessionContext(),
     realtimeSupported: () => { const sessionId = settings.getPublic().activeSession?.sessionId; return !!sessionId && bridge?.get(sessionId)?.realtimeAudioSupported === true; },
-    resolveCredential: (credentialId) => resolveProviderCredential(credentialId, { credentialBroker }),
   });
   nativeAudio = process.platform === 'darwin'
     ? new NativeAudioManager({
@@ -412,20 +439,63 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         isForeground: () => windowFocused,
       })
     : null;
-  const sessionCatalog = new ProjectSessionCatalog({
+  const catalogOptions = {
+    appVersion: app.getVersion(),
+    providerAccountChannel: credentialBroker?.credentialChannel ?? 'development',
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
-  });
-  const launchCache = new SessionLaunchCache();
+  };
+  const sessionCatalog = new ProjectSessionCatalog(catalogOptions);
+  // Off unless the owner (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns Remote Control on for this computer.
+  const remoteControlOn = (): boolean => settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1');
   // The one refresher of the Codex session. Engines get only access tokens.
   // The wall clock is checked every minute and on wake: a timer alone would
   // sleep with the laptop.
-  const codexTokens = new CodexTokenManager({
-    store: credentialBroker,
+  const accountBroker = credentialBroker;
+  const accountLockDirectory = () => sessionCatalog.productPaths().then(paths => join(paths.brandHome, 'provider-account-locks', accountBroker?.credentialChannel ?? 'development'));
+  const codexTokens = accountBroker ? new CodexTokenManager({
+    store: withFileRefreshIntents(providerAccountSessionStore(accountBroker, reference => providerAccounts?.latestSnapshot?.accounts.find(a => a.credentialRef.secretRef === reference)?.identityGeneration, version => sessionCatalog.publishProviderAccountCredentialVersion(version)), accountLockDirectory),
+    withAccountLock: (accountId, operation) => accountLockDirectory().then(directory => withProviderAccountLock(directory, accountId, operation)),
     onError: (message) => diagnostics.add('warn', 'host', message),
-  });
-  codexTokens.start();
+  }) : undefined;
+  providerAccounts = accountBroker && codexTokens ? new DesktopProviderAccounts({
+    accountHome: () => sessionCatalog.productPaths().then(paths => paths.brandHome),
+    configuredApiBinding: async (providerId, bindingId) => {
+      if (providerId !== bindingId) return false;
+      const providers = (await sessionCatalog.providerSettings()).effective.providers;
+      return !!providers && typeof providers === 'object' && !Array.isArray(providers) && Object.hasOwn(providers, bindingId);
+    },
+    providerDefinition: bindingId => {
+      const ref = settings.getPublic().activeSession;
+      const catalog = ref ? bridge?.get(ref.sessionId)?.officialProviderCatalog ?? [] : [];
+      return providersFromCatalog(catalog).find(provider => provider.id === bindingId) ?? providerById(bindingId);
+    },
+    withAccountMutationLock: (reference, operation) => accountLockDirectory().then(directory => withProviderAccountLock(directory, reference, operation)),
+    registry: (request, presence) => sessionCatalog.providerAccountCommand(request, undefined, presence),
+    broker: accountBroker,
+    publishVersions: async versions => { for (const version of versions) await sessionCatalog.publishProviderAccountCredentialVersion(version); },
+    tokens: codexTokens,
+    onCredentialDiagnostic: event => {
+      const accountId = /^[a-f0-9-]{36}$/.test(event.accountId) ? event.accountId : 'invalid';
+      diagnostics.add(event.outcome === 'failed' ? 'warn' : 'info', 'host', diagnosticEvent('provider_account_launch_credential', { ...event, accountId }));
+    },
+    login: signal => loginCodex({ openExternal: url => shell.openExternal(url), signal }),
+    changed: async () => {
+      if (bridge) await bridge.refreshProviderAccounts();
+    },
+    probe: async (account, credential) => {
+      const secret = JSON.stringify(runtimeAccountCredential(credential));
+      await sessionCatalog.providerAccountCommand({ action: 'test', expectedRevision: (await sessionCatalog.providerAccountCommand({ action: 'list', expectedRevision: 0 })).configRevision,
+        accountId: account.accountId }, secret);
+    },
+  }) : undefined;
+  const renewProviderAccount = async (accountId: string, identityGeneration: number, credentialRevision: number): Promise<void> => {
+    if (!providerAccounts) throw new Error('Provider account storage is unavailable.');
+    await providerAccounts.renewForRuntime(accountId, identityGeneration, credentialRevision);
+  };
+  codexTokens?.start();
+  codexTokens?.subscribe(() => { void bridge?.refreshProviderAccounts().catch(() => {}); });
   app.on('browser-window-focus', () => bridge?.refreshProviderCatalog('foreground'));
   app.on('browser-window-blur', () => {
     setImmediate(() => {
@@ -443,22 +513,34 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   catalogConnectivity.unref();
   app.once('before-quit', () => clearInterval(catalogConnectivity));
   powerMonitor.on('resume', () => {
-    codexTokens.check();
+    codexTokens?.check();
     bridge?.refreshProviderCatalog('foreground');
     remoteControl?.reconnect();
+    // Timers stand still while the Mac sleeps: the routines that came due and the
+    // tasks whose deadline has passed are looked for by the clock.
+    scheduled?.wake();
+    botTasks?.checkDeadlines();
   });
   /**
    * The one place an OS notification is raised. Shared by the scheduled-task
-   * service and `HostNotifier` so both get the same click behaviour: restore
+   * service and `HostNotifier` so both get the same click behaviour: show
    * the session the notification came from, then raise the window.
    */
   const showNotification = (title: string, body: string, ref?: SessionRef): void => {
     if (!Notification.isSupported()) return;
-    const notification = new Notification(notificationPresentation(title, body, ref));
+    // A Bot's workspace is a folder nobody named; the notification names the Bot.
+    const notification = new Notification(notificationPresentation(title, body, ref, process.platform, ref ? bots?.nameFor(ref.projectPath) : undefined));
     notification.on('click', () => {
-      if (ref) void host?.restoreProjectSession(ref.projectPath, ref).catch((error) => diagnostics.add('error', 'host', sanitizeDiagnostic(error)));
+      const shown = ref ? host?.showNotifiedSession(ref).catch((error) => diagnostics.add('error', 'host', sanitizeDiagnostic(error))) : undefined;
       const window = getMainWindow();
-      window?.show(); window?.focus();
+      if (window) { window.show(); window.focus(); return; }
+      // Opened at login, the app has no window: the click makes one, once the session is
+      // chosen, so that the window opens on it.
+      void Promise.resolve(shown).then(() => {
+        if (!host) return;
+        const created = getMainWindow() ?? createWindow();
+        created.show(); created.focus();
+      });
     });
     notification.show();
   };
@@ -468,16 +550,17 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // Remote Control is built after the notifier; both are looked up when used.
     remote: (kind, sessionId) => remotePush?.notify(kind, sessionId),
     systemIdleSeconds: () => powerMonitor.getSystemIdleTime(),
+    // The tasks between Bots are made after the notifier too.
+    delegation: (sessionKey) => botTasks?.doing(sessionKey),
   });
   notifier.setPreferences(settings.getPublic().notifications);
   bridge = new SessionRuntimeManager({
     getTelemetryConfig: () => settings.getTelemetryConfig(),
-    workspaceSettings: (projectPath) => sessionCatalog.workspaceSettings(projectPath),
+    // A Bot's working directory is not a project: it has its own configuration home and grants.
+    workspaceSettings: (projectPath, ref) => bots?.ownsWorkspace(projectPath)
+      ? bots.launchSettings(projectPath, ref.sessionId) : sessionCatalog.workspaceSettings(projectPath),
     appVersion: app.getVersion(),
-    getSavedPermissionMode: () => settings.getLastPermissionMode(),
-    onPermissionModeSelected: (mode) => settings.setLastPermissionMode(mode),
-    getSavedFastMode: () => settings.getLastFastMode(),
-    onFastModeSelected: (enabled) => settings.setLastFastMode(enabled),
+    ...ownerPreferenceHooks(settings, (ref) => bots?.ownsWorkspace(ref.projectPath) === true),
     notifier,
     onCronRunRequested: (runtime, event) => scheduled ? scheduled.run(runtime, event.run_id, event.task) : Promise.reject(new Error('Scheduled task service unavailable')),
     isPackaged: app.isPackaged,
@@ -499,17 +582,20 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         // Adding a Project is the Desktop trust decision. Repository edits must
         // not silently revoke a live session or reintroduce the removed setup
         // prompt; removal from the Project list revokes access instead.
-        return { workspace: ref.projectPath, trusted: settings.isTrustedWorkspace(ref.projectPath) };
+        return { workspace: ref.projectPath, trusted: settings.isTrustedWorkspace(ref.projectPath) || bots?.ownsWorkspace(ref.projectPath) === true };
       } catch {
         return { workspace: ref.projectPath, trusted: false };
       }
     },
-    onModelSelected: (ref, model) => settings.setSessionModel(ref, model),
-    getSavedModel: (ref) => settings.getSessionModel(ref),
-    resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
-    codexTokens,
-    invalidateLaunchConfigCache: () => launchCache.invalidate(),
+    // A Bot's model is its own; choosing one in a Bot's session must not become the default of the owner's sessions.
+    onModelSelected: (ref, model) => { if (!bots?.ownsWorkspace(ref.projectPath)) settings.setSessionModel(ref, model); },
+    getSavedModel: (ref) => bots?.ownsWorkspace(ref.projectPath) ? undefined : settings.getSessionModel(ref),
+    resolveProviderAccounts: () => providerAccounts?.launch() ?? Promise.resolve(undefined),
+    renewProviderAccount,
+    onProviderAccountRouting: event => { if (providerAccounts?.recordRouting(event)) host?.sendToWindows('lingxi:provider-accounts:routing', event); },
     onFirstPromptSent: (ref) => {
+      // A Bot's session is not one of the owner's: it is neither the one to restore at startup nor one to share.
+      if (bots?.ownsWorkspace(ref.projectPath)) return;
       settings.setActiveSession(ref);
       // `remoteControlAtStartup`: a new chat starts shared with the user's other devices.
       try { remotePolicy?.sessionCreated(ref); } catch (error) { diagnostics.add('warn', 'host', `remote control: ${sanitizeDiagnostic(error)}`); }
@@ -540,7 +626,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     launchConfig: async (ref: SessionRef, resumeModel?: string) => {
       const workspace = ref.projectPath;
       const configured = settings.getPublic();
-      const model = settings.getSessionModel(ref) ?? resumeModel ?? configured.model;
+      const botWorkspace = bots?.ownsWorkspace(workspace) === true;
+      const model = botWorkspace
+        ? resumeModel ?? bots?.modelFor(workspace) ?? configured.model
+        : settings.getSessionModel(ref) ?? resumeModel ?? configured.model;
       const startedAt = Date.now();
       // A chat opens even when its credentials cannot be read. The engine
       // starts without them, and the first prompt that needs one loads it
@@ -569,19 +658,20 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           return fallback;
         }
       };
-      const [credentials, pluginSecrets, openaiOAuth] = await Promise.all([
-        phase('provider_credentials', () => launchCache.credentials(model, credentialBroker), {}),
-        phase('plugin_secrets', () => launchCache.pluginSecrets(credentialBroker), {}),
-        phase('codex_session', () => codexTokens.current(), undefined),
+      const [pluginSecrets, accountLaunch] = await Promise.all([
+        phase('plugin_secrets', () => resolveSessionLaunchPluginSecrets(credentialBroker), {}),
+        providerAccounts ? providerAccounts.launch() : undefined,
       ]);
       diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_ready', {
         durationMs: Date.now() - startedAt,
         parallel: true,
-        hasApiKey: Boolean(credentials.apiKey),
         model,
         pluginSecretCount: Object.values(pluginSecrets).reduce((count, values) => count + Object.keys(values).length, 0),
         projectPath: workspace,
-        providerCredentialCount: Object.keys(credentials.providerCredentials ?? {}).length,
+        providerAccountCount: accountLaunch?.providerAccounts.accounts.length ?? 0,
+        providerCredentialVersions: Object.entries(accountLaunch?.providerAccountCredentials ?? {})
+          .filter(([id, record]) => /^[a-f0-9-]{36}$/.test(id) && Number.isSafeInteger(record.identity_generation) && Number.isSafeInteger(record.credential_revision))
+          .map(([id, record]) => ({ accountId: id, identityGeneration: record.identity_generation, credentialRevision: record.credential_revision })),
         sessionId: ref.sessionId,
       }));
       return {
@@ -591,15 +681,18 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           LINGXI_DESKTOP_BROWSER_DESCRIPTOR: browserDescriptor,
         },
         sessionId: ref.sessionId,
-        trusted: settings.isTrustedWorkspace(workspace),
+        // Making a Bot is the owner's decision to trust its folders; they are not in the project list.
+        trusted: settings.isTrustedWorkspace(workspace) || botWorkspace,
         telemetry: settings.getTelemetryConfig(),
         allowInsights: settings.getInsightsAllowed(),
         allowTeamOnboarding: settings.getTeamOnboardingAllowed(),
-        remoteControlEnabled: (settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1'))
-          && (remotePolicy?.allows() ?? true),
+        // A Bot's sessions are launched for remote devices when the Bot's own switch is on as well; its owner may be away for a day.
+        remoteControlEnabled: botWorkspace
+          ? remotePolicy?.botReachable(workspace) === true
+          : remoteControlOn() && (remotePolicy?.allows() ?? true),
+        ...(botWorkspace ? { permissionTimeoutSecs: BOT_PERMISSION_TIMEOUT_SECS } : {}),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
-        ...credentials,
-        ...(openaiOAuth ? { openaiOAuth } : {}),
+        ...accountLaunch,
         pluginSecrets,
         model,
         apiBaseUrl: configured.apiBaseUrl,
@@ -616,16 +709,30 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     credentialBroker,
     nativeAudio ?? undefined,
   );
+  if (providerAccounts) host.attachProviderAccounts(providerAccounts);
   host.attachComputerSettings(computerSettings);
+  // Whether the Mac may sleep while Bots work is the owner's to say; the switch is in the Bots page.
+  const keepAwake = new KeepAwake({
+    start: () => powerSaveBlocker.start('prevent-app-suspension'),
+    stop: (id) => powerSaveBlocker.stop(id),
+    enabled: settings.getPublic().botsKeepAwake === true,
+  });
+  host.attachKeepAwake(keepAwake);
+  // Opened at login, the app waits in the background: the Bots work without a window.
+  const loginItem = new LoginItem({ app, openExternal: (url) => shell.openExternal(url) });
   scheduled = new ScheduledTaskService(settings, bridge, sessionCatalog, (title, body, ref) => {
     // Propagate the refusal: `scheduledRun` returns false when the kind is off
     // or the notifier is disposed, and the caller keeps its dedupe key.
     return notifier?.scheduledRun(title, body, ref) ?? false;
-  }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
+  }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)), { keepAwake });
   const account = new AccountService(firebaseConfig, credentialBroker
     ? brokerAccountSessionStore(credentialBroker)
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
   host.attachAccount(account);
+  const teamsService = new TeamsService(account, firebaseConfig);
+  const teamRemoteEnabled = (botId: string): boolean => { try { return bots?.get(botId).remote === true; } catch { return false; } };
+  teamApprovalBroker = new TeamOwnerApprovalBroker({ botRemoteEnabled: teamRemoteEnabled });
+  stopTeams = installTeamsIpc(teamsService, () => [...mainWindows]);
   // Off unless the user (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns it on.
   const remoteDiagnostics = (level: 'info' | 'warn' | 'error', message: string): void => {
     diagnostics.add(level, 'host', `remote control: ${message}`);
@@ -633,6 +740,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const policy = new RemotePolicy({
     settings,
     managedDirectory: managedSettingsDirectory(process.env, process.platform),
+    computerEnabled: remoteControlOn,
+    bots: () => bots,
   });
   remotePolicy = policy;
   const runtimes = bridge;
@@ -640,7 +749,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     files: new RemoteFileStore(join(userData, 'remote-files')),
     runtimes,
     policy,
+    bots: () => bots,
     commands: new RemoteCommands({
+      providerAccounts,
+      authorizeProviderAccounts: viewer => remoteControlOn() && policy.allows() && account.snapshot().user?.uid === viewer.account_uid,
       allowAlwaysAllow: () => policy.allowAlwaysAllow(),
       echo: (echo) => remoteUi?.echo(echo),
       codec: nativeImageCodec,
@@ -673,10 +785,20 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     generation: viewer => `${remoteAccessGeneration}:${remoteOwnerGenerations.get(remoteOwnerKey({ accountUid: viewer.account_uid!, deviceId: viewer.device_id, hostId: viewer.host_id })) ?? 0}`,
     approvedDevice: deviceId => remoteControl?.listDevices().some(device => device.device_id === deviceId) ?? false,
   }));
+  teamApprovalGateway = new TeamApprovalsGateway(appsGateway, teamApprovalBroker, {
+    ownerContext: () => teamsService.hostContext(),
+    hostId: () => remoteControl?.status().host_id,
+    active: () => remoteControl?.status().state === 'online' && policy.allows(),
+    approvedViewer: viewer => remoteControl?.status().connections.some(connection => connection.conn_id === viewer.conn_id
+      && connection.device_id === viewer.device_id && connection.approved === true) === true
+      && remoteControl.listDevices().some(device => device.device_id === viewer.device_id),
+    generation: viewer => `${remoteAccessGeneration}:${remoteOwnerGenerations.get(remoteOwnerKey({ accountUid: viewer.account_uid!, deviceId: viewer.device_id, hostId: viewer.host_id })) ?? 0}`,
+    remoteEnabled: target => teamRemoteEnabled(target.botId),
+  });
   remoteControl = createRemoteControl({
     account,
     settings,
-    gateway: appsGateway,
+    gateway: teamApprovalGateway,
     deviceRevoked: owner => { const key = remoteOwnerKey(owner); remoteOwnerGenerations.set(key, (remoteOwnerGenerations.get(key) ?? 0) + 1); localApps?.remoteRevokeOwner(owner); },
     accessStopped: revokeRemoteAppAccess,
     policyAllows: () => policy.allows(),
@@ -707,7 +829,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     gateway,
     runtimeRef: (sessionId) => {
       const runtime = bridge?.get(sessionId);
-      return runtime ? { projectPath: runtime.projectPath, sessionId } : undefined;
+      // A Bot's chats stay on this computer: `/remote-control` in one finds no session to share.
+      return runtime && !bots?.ownsWorkspace(runtime.projectPath) ? { projectPath: runtime.projectPath, sessionId } : undefined;
     },
     signedIn: () => account.snapshot().user !== null,
     onAccountChanged: (callback) => account.onChanged(() => callback()),
@@ -749,31 +872,109 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     return undefined;
   });
   if (productPaths) {
+    let teamBotStore: BotStore | undefined;
+    // The Bots live beside the app's other data and keep clear of the default configuration home.
+    try {
+      const botStore = new BotStore({ userData, home: app.getPath('home'), defaultConfigHome: productPaths.brandHome });
+      teamBotStore = botStore;
+      const manager = bridge;
+      const botWarn = (message: string): void => { diagnostics.add('warn', 'host', `bots: ${message}`); };
+      // Tasks between Bots, and the endpoint they are handed through. The router listens
+      // before any session of a Bot is launched, which asks it for an address and a token.
+      const taskChanges = new TaskChangeAnnouncer((botIds) => host?.sendToWindows(CH_BOTS_TASKS_CHANGED, { botIds } satisfies BotTasksChangedUi));
+      const tasks = new BotTasks({
+        store: botStore,
+        runtimes: { withSession: (ref, empty, model, operation) => manager.withBackgroundSession(ref, empty, model, operation) },
+        available: () => bots?.availability().available === true,
+        isDeleting: (botId) => bots?.isDeleting(botId) === true,
+        warn: botWarn,
+        keepAwake,
+        changed: (botIds) => taskChanges.changed(botIds),
+        // The engine's events carry no user prompts: the window shows the one the task began with.
+        promptSent: (sessionId, text) => host?.sendToWindows(CH_BOTS_PROMPT_SENT, { sessionId, text } satisfies BotPromptSentUi),
+      });
+      botTasks = tasks;
+      tasks.load();
+      const router = new BotRouter({ backend: tasks, warn: botWarn });
+      botRouter = router;
+      router.start().catch((error: unknown) => botWarn(`the router cannot listen: ${sanitizeDiagnostic(error)}`));
+      router.watchRuntimes(manager);
+      bots = new BotService({
+        store: botStore,
+        runtimes: bridge,
+        router,
+        delegation: tasks,
+        // Remote devices reach a Bot's chats by session id, and its switch decides whether they may.
+        openProject: (sessionId) => manager.get(sessionId)?.projectPath,
+        changed: () => { remotePolicy?.notifySessionsChanged(); teamConnector?.localChanged(); },
+        teamRevoking: () => teamConnector?.localChanged(),
+        catalogFor: (configHome) => new ProjectSessionCatalog({ ...catalogOptions, configHome }),
+        // The scheduler was made first; it learns of the Bots below, and is asked for these only when used.
+        routines: {
+          isControllerSession: (workspace, sessionId) => scheduled?.isControllerSession(workspace, sessionId) === true,
+          releaseScope: (workspace) => scheduled?.releaseScope(workspace),
+        },
+        warn: botWarn,
+      });
+      scheduled?.attachBots(bots);
+      host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore), tasks, loginItem }));
+    } catch (error) {
+      diagnostics.add('warn', 'host', `bots unavailable: ${sanitizeDiagnostic(error)}`);
+    }
     const agentRoot = join(productPaths.brandHome, 'local-apps', 'v2');
     const agentExecutor = new LocalAppAgentExecutor({
       configHome: productPaths.brandHome,
       root: agentRoot,
       isPackaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
-      credentials: async (providerId, refresh) => {
-        if (providerId === CODEX_PROVIDER_ID) {
-          const session = await (refresh ? codexTokens.renew() : codexTokens.current());
-          if (!session) throw new LocalAppAgentError('model_unavailable', 'Sign in to the selected Agent model in LingXi settings.');
-          return { openaiOAuth: codexAccessToken(session) };
+      catalogCredentials: async () => providerAccounts ? { providerAccounts: await providerAccounts.snapshot(), providerAccountCredentials: {}, providerAccountHome: productPaths.brandHome } : {},
+      credentials: async (providerId, refresh, accountRequest) => {
+        if (accountRequest) await renewProviderAccount(accountRequest.accountId, accountRequest.identityGeneration, accountRequest.credentialRevision);
+        if (providerAccounts) {
+          const launch = await providerAccounts.launch();
+          if (launch.providerAccounts.accounts.some(a => a.enabled && a.executionBindingId === providerId)) {
+            if (refresh && !accountRequest) throw new LocalAppAgentError('model_unavailable', 'The Agent host must request refresh for a specific account.');
+            return launch;
+          }
         }
-        const key = await resolveProviderCredential(providerId, { credentialBroker });
-        if (!key) throw new LocalAppAgentError('model_unavailable', 'Configure the selected Agent model in LingXi settings.');
-        return { providerCredentials: { [providerId]: key } };
-      },
-      credentialStatus: async providerIds => {
-        const rows = await credentialBroker?.listStatus(providerIds) ?? [];
-        const configured = new Set(rows.filter(row => row.configured).map(row => row.providerId));
-        for (const id of providerIds) if (readProviderEnvironmentCredential(id)) configured.add(id);
-        return configured;
+        throw new LocalAppAgentError('model_unavailable', 'Configure an enabled account for the selected Agent model in settings.');
       },
       permission: (input, signal) => localApps!.promptAgentPermission(input, signal),
       question: (input, signal) => localApps!.promptAgentQuestion(input, signal),
     });
+    if (teamBotStore && process.platform === 'darwin') {
+      try {
+        teamConnector = new TeamConnector({
+          service: teamsService, store: teamBotStore, content: new BotContent(teamBotStore), privateStore: new TeamPrivateStore(userData),
+          binaries: () => resolveTeamBinaries({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }),
+          defaultModel: () => settings.getPublic().model,
+          modelRoute: selected => agentExecutor.teamModelRoute(selected),
+          modelAccounts: async (credentialId, bindingId, profiles) => {
+            const accounts = await providerAccounts?.launch();
+            if (!accounts) return undefined;
+            const managed = accounts.providerAccounts.accounts.filter(account => account.executionBindingId === (bindingId ?? credentialId));
+            if (!managed.length) return undefined;
+            const providerId = managed[0]!.providerId;
+            const bindings = new Set(profiles.map(profile => profile['profile_name']));
+            const candidates = accounts.providerAccounts.accounts.filter(account => account.providerId === providerId && bindings.has(account.executionBindingId));
+            const ids = new Set(candidates.map(account => account.accountId));
+            return { ...accounts, providerAccountCredentials: Object.fromEntries(Object.entries(accounts.providerAccountCredentials).filter(([id]) => ids.has(id))) };
+          },
+          renewModelAccount: renewProviderAccount,
+          permission: async (input, signal) => teamApprovalBroker!.request({ ...input, showLocal: async localSignal => {
+            localSignal.throwIfAborted();
+            const options = { type: 'question' as const, signal: localSignal, title: 'Team Bot permission',
+              message: 'Allow this Team Bot to run one sandboxed command?',
+              detail: `Team: ${input.target.teamId}\nBot: ${input.target.botId}\nConversation: ${input.target.conversationId}\n\n${JSON.stringify(input.input, null, 2).slice(0, 16000)}`,
+              buttons: ['Deny', 'Allow once'], defaultId: 0, cancelId: 0 };
+            const parent = [...mainWindows].find(window => !window.isDestroyed());
+            const result = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+            return !localSignal.aborted && result.response === 1;
+          } }, signal),
+        });
+        teamsService.attachHost(teamConnector);
+      } catch { diagnostics.add('warn', 'host', 'Team Bot host is unavailable'); }
+    }
     localApps = new LocalAppHost({
       configHome: productPaths.brandHome,
       onRemoteAccessEnded: quitIfNothingNeedsTheApp,
@@ -790,6 +991,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       bunExecutable: resolveModBunExecutable({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, configuredPath: process.env.LINGXI_MOD_BUN_EXECUTABLE }),
       mainWindow: () => getMainWindow() ?? createWindow(),
       agentCatalog: () => agentExecutor.catalog(),
+      onMcpChanged: () => agentExecutor.invalidateCatalog(),
       edit: async request => {
         const window = getMainWindow() ?? createWindow();
         window.show(); window.focus();
@@ -846,7 +1048,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     preferencePath: join(userData, 'desktop-update-reminder.json'),
     onError: error => diagnostics.add('warn', 'host', `Desktop update check failed: ${sanitizeDiagnostic(error)}`),
   });
-  createWindow();
+  // Read once, here: the system says "opened at login" only for the start that it did.
+  if (!loginItem.openedInBackground()) createWindow();
   if (app.isPackaged) {
     desktopUpdates.start();
     powerMonitor.on('resume', () => { void desktopUpdates?.check(); });
@@ -896,6 +1099,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
+  stopTeams?.(); stopTeams = undefined;
+  teamApprovalGateway?.close(); teamApprovalGateway = undefined;
+  teamApprovalBroker?.close(); teamApprovalBroker = undefined;
   desktopUpdates?.dispose();
   desktopUpdates = null;
   host?.dispose();
@@ -923,7 +1129,12 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   remotePush = null;
   remoteUi = null;
   remotePolicy = null;
+  bots = null;
+  botTasks = null;
+  const currentBotRouter = botRouter;
+  botRouter = null;
   const shutdownPhases: Array<[string, () => Promise<void>]> = [
+    ['bot_router', () => currentBotRouter?.dispose() ?? Promise.resolve()],
     ['browser', () => currentBrowser?.close() ?? Promise.resolve()],
     ['local_apps', () => currentLocalApps?.dispose() ?? Promise.resolve()],
     ['git', () => currentGit?.dispose() ?? Promise.resolve()],

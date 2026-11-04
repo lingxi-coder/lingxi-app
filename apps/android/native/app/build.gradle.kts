@@ -301,6 +301,7 @@ listOf("play", "direct").forEach { distribution ->
 dependencies {
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.auth)
+    implementation(libs.firebase.firestore)
     implementation(libs.firebase.messaging)
     implementation(libs.firebase.installations)
     // Includes JVM/ANR reporting and the native signal handler for Rust/JNI.

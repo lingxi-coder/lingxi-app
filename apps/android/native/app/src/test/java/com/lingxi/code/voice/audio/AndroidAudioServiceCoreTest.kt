@@ -23,6 +23,7 @@ import org.junit.Test
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
+/** Service-owned IO drain cases keep caller deadlines and child operations on real IO time. */
 class AndroidAudioServiceCoreTest {
     private val epoch = 17L
     private val owner = AudioOwnerKey.session("session-a")
@@ -92,54 +93,60 @@ class AndroidAudioServiceCoreTest {
 
     @Test
     fun failedPartialMediaOpenRetainsLeaseAndRetriesCleanupBeforeOpeningAgain() = runTest {
-        val driver = FakeDriver().apply {
-            failMediaCaptureStart = true
-            failNativeStops = 1
+        withContext(Dispatchers.IO) {
+            val driver = FakeDriver().apply {
+                failMediaCaptureStart = true
+                failNativeStops = 1
+            }
+            val service = AndroidAudioServiceCore(FakeRuntime(), driver, 64, epoch)
+
+            val firstFailure = runCatching {
+                service.openMediaAudioPort(owner, capture = true, playback = false)
+            }.exceptionOrNull()
+
+            assertTrue(firstFailure is AudioOperationException)
+            assertEquals(1, service.diagnostics().activeLeaseCount)
+            assertEquals(1, driver.nativeStopAttempts)
+
+            driver.failMediaCaptureStart = false
+            val retried = service.openMediaAudioPort(owner, capture = true, playback = false)
+
+            assertEquals(2, driver.nativeStopAttempts)
+            assertEquals(1, service.diagnostics().activeLeaseCount)
+            retried.stop()
+            assertEquals(0, service.diagnostics().activeLeaseCount)
         }
-        val service = AndroidAudioServiceCore(FakeRuntime(), driver, 64, epoch)
-
-        val firstFailure = runCatching {
-            service.openMediaAudioPort(owner, capture = true, playback = false)
-        }.exceptionOrNull()
-
-        assertTrue(firstFailure is AudioOperationException)
-        assertEquals(1, service.diagnostics().activeLeaseCount)
-        assertEquals(1, driver.nativeStopAttempts)
-
-        driver.failMediaCaptureStart = false
-        val retried = service.openMediaAudioPort(owner, capture = true, playback = false)
-
-        assertEquals(2, driver.nativeStopAttempts)
-        assertEquals(1, service.diagnostics().activeLeaseCount)
-        retried.stop()
-        assertEquals(0, service.diagnostics().activeLeaseCount)
     }
 
     @Test
     fun endOwnerDoesNotWaitForItsOwnRegisteredOperation() = runTest {
-        val service = AndroidAudioServiceCore(FakeRuntime(), FakeDriver(), 64, epoch)
+        withContext(Dispatchers.IO) {
+            val service = AndroidAudioServiceCore(FakeRuntime(), FakeDriver(), 64, epoch)
 
-        val result = withTimeout(5_000) {
-            service.execute(request("end-owner-self-join", DeviceAudioOperation.EndOwner))
+            val result = withTimeout(5_000) {
+                service.execute(request("end-owner-self-join", DeviceAudioOperation.EndOwner))
+            }
+
+            assertEquals(DeviceAudioResult.OwnerEnded, result)
         }
-
-        assertEquals(DeviceAudioResult.OwnerEnded, result)
     }
 
     @Test
     fun sameCoroutineCanOpenThenEndOwnerWithoutSelfCancellationOrSelfJoin() = runTest {
-        val service = AndroidAudioServiceCore(FakeRuntime(), FakeDriver(), 64, epoch)
-        val opened = service.openMediaAudioPort(owner, capture = true, playback = false)
-        assertEquals(1, service.diagnostics().activeLeaseCount)
+        withContext(Dispatchers.IO) {
+            val service = AndroidAudioServiceCore(FakeRuntime(), FakeDriver(), 64, epoch)
+            val opened = service.openMediaAudioPort(owner, capture = true, playback = false)
+            assertEquals(1, service.diagnostics().activeLeaseCount)
 
-        val ended = withTimeout(5_000) {
-            service.execute(request("same-coroutine-end-owner", DeviceAudioOperation.EndOwner))
+            val ended = withTimeout(5_000) {
+                service.execute(request("same-coroutine-end-owner", DeviceAudioOperation.EndOwner))
+            }
+
+            assertEquals(DeviceAudioResult.OwnerEnded, ended)
+            assertEquals(0, service.diagnostics().activeLeaseCount)
+            opened.stop()
+            assertEquals(0, service.diagnostics().activeLeaseCount)
         }
-
-        assertEquals(DeviceAudioResult.OwnerEnded, ended)
-        assertEquals(0, service.diagnostics().activeLeaseCount)
-        opened.stop()
-        assertEquals(0, service.diagnostics().activeLeaseCount)
     }
 
     @Test
@@ -154,84 +161,88 @@ class AndroidAudioServiceCoreTest {
 
     @Test
     fun endOwnerCancelsUnpublishedMediaOpenAndWaitsForStreamExit() = runTest {
-        val driver = FakeDriver().apply {
-            blockMediaCaptureReady = true
-            blockNativeStop = true
+        withContext(Dispatchers.IO) {
+            val driver = FakeDriver().apply {
+                blockMediaCaptureReady = true
+                blockNativeStop = true
+            }
+            val service = AndroidAudioServiceCore(FakeRuntime(), driver, 64, epoch)
+            val open = async { service.openMediaAudioPort(owner, capture = true, playback = false) }
+            driver.mediaCaptureStarted.await()
+
+            val end = async { service.execute(request("end-during-media-open", DeviceAudioOperation.EndOwner)) }
+            driver.nativeStopStarted.await()
+            assertFalse("EndOwner must wait for native close acknowledgement", end.isCompleted)
+            assertEquals(1, driver.mediaCaptureStarts.get())
+
+            val rejectedOpen = runCatching {
+                service.openMediaAudioPort(owner, capture = true, playback = false)
+            }.exceptionOrNull()
+            assertTrue("new admission is fenced while EndOwner drains", rejectedOpen is AudioOperationException)
+            assertEquals(1, driver.mediaCaptureStarts.get())
+
+            driver.nativeStopGate.complete(Unit)
+            runCurrent()
+            assertFalse("native stop alone does not prove the blocking stream has exited", end.isCompleted)
+            assertFalse(driver.mediaCaptureExited.isCompleted)
+
+            driver.mediaCaptureReadyGate.complete(Unit)
+            assertTrue(runCatching { open.await() }.exceptionOrNull() is kotlinx.coroutines.CancellationException)
+            assertEquals(DeviceAudioResult.OwnerEnded, end.await())
+            assertTrue(driver.mediaCaptureExited.isCompleted)
+            assertEquals(0, service.diagnostics().activeLeaseCount)
+
+            val reopened = service.openMediaAudioPort(owner, capture = true, playback = false)
+            assertEquals(1, service.diagnostics().activeLeaseCount)
+            reopened.stop()
+            assertEquals(0, service.diagnostics().activeLeaseCount)
         }
-        val service = AndroidAudioServiceCore(FakeRuntime(), driver, 64, epoch)
-        val open = async { service.openMediaAudioPort(owner, capture = true, playback = false) }
-        driver.mediaCaptureStarted.await()
-
-        val end = async { service.execute(request("end-during-media-open", DeviceAudioOperation.EndOwner)) }
-        driver.nativeStopStarted.await()
-        assertFalse("EndOwner must wait for native close acknowledgement", end.isCompleted)
-        assertEquals(1, driver.mediaCaptureStarts.get())
-
-        val rejectedOpen = runCatching {
-            service.openMediaAudioPort(owner, capture = true, playback = false)
-        }.exceptionOrNull()
-        assertTrue("new admission is fenced while EndOwner drains", rejectedOpen is AudioOperationException)
-        assertEquals(1, driver.mediaCaptureStarts.get())
-
-        driver.nativeStopGate.complete(Unit)
-        runCurrent()
-        assertFalse("native stop alone does not prove the blocking stream has exited", end.isCompleted)
-        assertFalse(driver.mediaCaptureExited.isCompleted)
-
-        driver.mediaCaptureReadyGate.complete(Unit)
-        assertTrue(runCatching { open.await() }.exceptionOrNull() is kotlinx.coroutines.CancellationException)
-        assertEquals(DeviceAudioResult.OwnerEnded, end.await())
-        assertTrue(driver.mediaCaptureExited.isCompleted)
-        assertEquals(0, service.diagnostics().activeLeaseCount)
-
-        val reopened = service.openMediaAudioPort(owner, capture = true, playback = false)
-        assertEquals(1, service.diagnostics().activeLeaseCount)
-        reopened.stop()
-        assertEquals(0, service.diagnostics().activeLeaseCount)
     }
 
     @Test
     fun endOwnerKeepsOwnerFencedAfterMediaCloseFailureAndRetriesSessionClose() = runTest {
-        val driver = FakeDriver().apply {
-            blockMediaCaptureExit = true
-            failNativeStops = 1
+        withContext(Dispatchers.IO) {
+            val driver = FakeDriver().apply {
+                blockMediaCaptureExit = true
+                failNativeStops = 1
+            }
+            val service = AndroidAudioServiceCore(FakeRuntime(), driver, 64, epoch)
+            val open = async { service.openMediaAudioPort(owner, capture = true, playback = false) }
+            open.await()
+            driver.mediaCaptureStarted.await()
+            assertFalse(driver.mediaCaptureExited.isCompleted)
+
+            val firstEnd = service.execute(request("end-media-close-fails", DeviceAudioOperation.EndOwner)) as DeviceAudioResult.Failed
+            assertEquals(DeviceAudioErrorKind.NativeFailure, firstEnd.error.kind)
+            assertEquals(1, service.diagnostics().activeLeaseCount)
+            assertFalse("failed native close leaves the stream owner unknown", driver.mediaCaptureExited.isCompleted)
+
+            val rejectedOpen = runCatching {
+                service.openMediaAudioPort(owner, capture = true, playback = false)
+            }.exceptionOrNull()
+            assertTrue("an owner with unconfirmed close cannot reopen", rejectedOpen is AudioOperationException)
+            val rejectedOperation = service.execute(request("status-while-owner-unknown", DeviceAudioOperation.Status(null))) as DeviceAudioResult.Failed
+            assertEquals(DeviceAudioErrorKind.Cancelled, rejectedOperation.error.kind)
+            assertEquals(1, driver.mediaCaptureStarts.get())
+
+            driver.blockNativeStop = true
+            val retry = async { service.execute(request("retry-media-owner-end", DeviceAudioOperation.EndOwner)) }
+            driver.nativeStopStarted.await()
+            assertFalse(retry.isCompleted)
+            driver.nativeStopGate.complete(Unit)
+            runCurrent()
+            assertFalse("native stop request is not proof that the stream job released its device", retry.isCompleted)
+            assertFalse(driver.mediaCaptureExited.isCompleted)
+
+            driver.mediaCaptureExitGate.complete(Unit)
+            assertEquals(DeviceAudioResult.OwnerEnded, retry.await())
+            assertTrue(driver.mediaCaptureExited.isCompleted)
+            assertEquals(0, service.diagnostics().activeLeaseCount)
+
+            val reopened = service.openMediaAudioPort(owner, capture = true, playback = false)
+            reopened.stop()
+            assertEquals(0, service.diagnostics().activeLeaseCount)
         }
-        val service = AndroidAudioServiceCore(FakeRuntime(), driver, 64, epoch)
-        val open = async { service.openMediaAudioPort(owner, capture = true, playback = false) }
-        open.await()
-        driver.mediaCaptureStarted.await()
-        assertFalse(driver.mediaCaptureExited.isCompleted)
-
-        val firstEnd = service.execute(request("end-media-close-fails", DeviceAudioOperation.EndOwner)) as DeviceAudioResult.Failed
-        assertEquals(DeviceAudioErrorKind.NativeFailure, firstEnd.error.kind)
-        assertEquals(1, service.diagnostics().activeLeaseCount)
-        assertFalse("failed native close leaves the stream owner unknown", driver.mediaCaptureExited.isCompleted)
-
-        val rejectedOpen = runCatching {
-            service.openMediaAudioPort(owner, capture = true, playback = false)
-        }.exceptionOrNull()
-        assertTrue("an owner with unconfirmed close cannot reopen", rejectedOpen is AudioOperationException)
-        val rejectedOperation = service.execute(request("status-while-owner-unknown", DeviceAudioOperation.Status(null))) as DeviceAudioResult.Failed
-        assertEquals(DeviceAudioErrorKind.Cancelled, rejectedOperation.error.kind)
-        assertEquals(1, driver.mediaCaptureStarts.get())
-
-        driver.blockNativeStop = true
-        val retry = async { service.execute(request("retry-media-owner-end", DeviceAudioOperation.EndOwner)) }
-        driver.nativeStopStarted.await()
-        assertFalse(retry.isCompleted)
-        driver.nativeStopGate.complete(Unit)
-        runCurrent()
-        assertFalse("native stop request is not proof that the stream job released its device", retry.isCompleted)
-        assertFalse(driver.mediaCaptureExited.isCompleted)
-
-        driver.mediaCaptureExitGate.complete(Unit)
-        assertEquals(DeviceAudioResult.OwnerEnded, retry.await())
-        assertTrue(driver.mediaCaptureExited.isCompleted)
-        assertEquals(0, service.diagnostics().activeLeaseCount)
-
-        val reopened = service.openMediaAudioPort(owner, capture = true, playback = false)
-        reopened.stop()
-        assertEquals(0, service.diagnostics().activeLeaseCount)
     }
 
     @Test
@@ -441,36 +452,38 @@ class AndroidAudioServiceCoreTest {
 
     @Test
     fun cancellationTombstonesDoNotMatchSameStringIdWithNewGenerationOrEpoch() = runTest {
-        val driver = FakeDriver()
-        val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
-        val stale = AudioOperationIdentity("reused-logical-id", generation = 41L, serviceEpoch = epoch)
-        fun offloadRequest(identity: AudioOperationIdentity) = DeviceAudioRequest(
-            identity = identity,
-            owner = owner,
-            timeoutBudgetMs = null,
-            maxPayloadBytes = 64,
-            operation = DeviceAudioOperation.OffloadMediaPlay("music", "/music/a.mp3"),
-        )
+        withContext(Dispatchers.IO) {
+            val driver = FakeDriver()
+            val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
+            val stale = AudioOperationIdentity("reused-logical-id", generation = 41L, serviceEpoch = epoch)
+            fun offloadRequest(identity: AudioOperationIdentity) = DeviceAudioRequest(
+                identity = identity,
+                owner = owner,
+                timeoutBudgetMs = null,
+                maxPayloadBytes = 64,
+                operation = DeviceAudioOperation.OffloadMediaPlay("music", "/music/a.mp3"),
+            )
 
-        service.cancel(stale)
-        val nextGeneration = stale.copy(generation = stale.generation + 1L)
-        assertTrue(service.execute(offloadRequest(nextGeneration)) is DeviceAudioResult.OffloadMedia)
-        service.cancel(stale)
-        assertEquals("old-generation cancel must not stop the new lease", 1, service.diagnostics().activeLeaseCount)
-        assertEquals(0, driver.nativeStopAttempts)
-        service.cancel(nextGeneration)
-        assertEquals(0, service.diagnostics().activeLeaseCount)
-        assertEquals(1, driver.nativeStopAttempts)
+            service.cancel(stale)
+            val nextGeneration = stale.copy(generation = stale.generation + 1L)
+            assertTrue(service.execute(offloadRequest(nextGeneration)) is DeviceAudioResult.OffloadMedia)
+            service.cancel(stale)
+            assertEquals("old-generation cancel must not stop the new lease", 1, service.diagnostics().activeLeaseCount)
+            assertEquals(0, driver.nativeStopAttempts)
+            service.cancel(nextGeneration)
+            assertEquals(0, service.diagnostics().activeLeaseCount)
+            assertEquals(1, driver.nativeStopAttempts)
 
-        assertEquals(epoch + 1L, service.invalidate())
-        val nextEpoch = stale.copy(serviceEpoch = epoch + 1L)
-        assertTrue(service.execute(offloadRequest(nextEpoch)) is DeviceAudioResult.OffloadMedia)
-        service.cancel(stale)
-        assertEquals("old-epoch cancel must not stop the new lease", 1, service.diagnostics().activeLeaseCount)
-        assertEquals(1, driver.nativeStopAttempts)
-        service.cancel(nextEpoch)
-        assertEquals(0, service.diagnostics().activeLeaseCount)
-        assertEquals(2, driver.nativeStopAttempts)
+            assertEquals(epoch + 1L, service.invalidate())
+            val nextEpoch = stale.copy(serviceEpoch = epoch + 1L)
+            assertTrue(service.execute(offloadRequest(nextEpoch)) is DeviceAudioResult.OffloadMedia)
+            service.cancel(stale)
+            assertEquals("old-epoch cancel must not stop the new lease", 1, service.diagnostics().activeLeaseCount)
+            assertEquals(1, driver.nativeStopAttempts)
+            service.cancel(nextEpoch)
+            assertEquals(0, service.diagnostics().activeLeaseCount)
+            assertEquals(2, driver.nativeStopAttempts)
+        }
     }
 
     @Test
@@ -564,16 +577,18 @@ class AndroidAudioServiceCoreTest {
 
     @Test
     fun replayedEndOwnerCannotStopANewRecording() = runTest {
-        val driver = FakeDriver()
-        val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
-        val end = request("end-once", DeviceAudioOperation.EndOwner)
-        assertEquals(DeviceAudioResult.OwnerEnded, service.execute(end))
-        val started = service.execute(request("new-recording", DeviceAudioOperation.StartRecording(16_000, "audio/m4a"))) as DeviceAudioResult.RecordingStarted
+        withContext(Dispatchers.IO) {
+            val driver = FakeDriver()
+            val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
+            val end = request("end-once", DeviceAudioOperation.EndOwner)
+            assertEquals(DeviceAudioResult.OwnerEnded, service.execute(end))
+            val started = service.execute(request("new-recording", DeviceAudioOperation.StartRecording(16_000, "audio/m4a"))) as DeviceAudioResult.RecordingStarted
 
-        val replay = service.execute(end) as DeviceAudioResult.Failed
-        assertEquals(DeviceAudioErrorKind.InvalidRequest, replay.error.kind)
-        assertEquals(0, driver.recordingStops)
-        service.execute(request("stop-new-recording", DeviceAudioOperation.StopRecording(started.handle)))
+            val replay = service.execute(end) as DeviceAudioResult.Failed
+            assertEquals(DeviceAudioErrorKind.InvalidRequest, replay.error.kind)
+            assertEquals(0, driver.recordingStops)
+            service.execute(request("stop-new-recording", DeviceAudioOperation.StopRecording(started.handle)))
+        }
     }
 
     @Test
@@ -620,33 +635,35 @@ class AndroidAudioServiceCoreTest {
 
     @Test
     fun invalidationWaitsForCancelledSpeechRuntimeCleanupBeforeReturning() = runTest {
-        val trace = mutableListOf<String>()
-        val runtime = FakeRuntime(trace).apply { blockRender = true }
-        val driver = FakeDriver(trace)
-        val service = AndroidAudioServiceCore(runtime, driver, maxPayloadBytes = 64, initialEpoch = epoch)
-        val speak = launch { service.execute(request("speak-blocked", DeviceAudioOperation.Speak("hello", null, null, null))) }
-        runCurrent()
-        runtime.renderStarted.await()
+        withContext(Dispatchers.IO) {
+            val trace = mutableListOf<String>()
+            val runtime = FakeRuntime(trace).apply { blockRender = true }
+            val driver = FakeDriver(trace)
+            val service = AndroidAudioServiceCore(runtime, driver, maxPayloadBytes = 64, initialEpoch = epoch)
+            val speak = launch { service.execute(request("speak-blocked", DeviceAudioOperation.Speak("hello", null, null, null))) }
+            runCurrent()
+            runtime.renderStarted.await()
 
-        val invalidation = launch {
-            service.invalidate()
-            trace += "invalidated"
-        }
-        runCurrent()
-        runtime.renderCleanupStarted.await()
-        val newAdmission = launch {
-            service.execute(request("after-invalidate", DeviceAudioOperation.Status(null)))
-        }
-        runCurrent()
-        assertFalse("invalidation waits for runtime cleanup", invalidation.isCompleted)
-        assertFalse("new operations cannot cross the invalidation boundary", newAdmission.isCompleted)
-        runtime.renderCleanupGate.complete(Unit)
-        invalidation.join()
-        newAdmission.join()
-        speak.join()
+            val invalidation = launch {
+                service.invalidate()
+                trace += "invalidated"
+            }
+            runCurrent()
+            runtime.renderCleanupStarted.await()
+            val newAdmission = launch {
+                service.execute(request("after-invalidate", DeviceAudioOperation.Status(null)))
+            }
+            runCurrent()
+            assertFalse("invalidation waits for runtime cleanup", invalidation.isCompleted)
+            assertFalse("new operations cannot cross the invalidation boundary", newAdmission.isCompleted)
+            runtime.renderCleanupGate.complete(Unit)
+            invalidation.join()
+            newAdmission.join()
+            speak.join()
 
-        assertTrue(runtime.renderCleaned.isCompleted)
-        assertTrue(trace.indexOf("render-cleanup") < trace.indexOf("invalidated"))
+            assertTrue(runtime.renderCleaned.isCompleted)
+            assertTrue(trace.indexOf("render-cleanup") < trace.indexOf("invalidated"))
+        }
     }
 
     @Test
@@ -714,57 +731,63 @@ class AndroidAudioServiceCoreTest {
 
     @Test
     fun endedSessionOwnerCanStartANewOperationAfterEndOwnerBoundary() = runTest {
-        val service = AndroidAudioServiceCore(FakeRuntime(), FakeDriver(), maxPayloadBytes = 64, initialEpoch = epoch)
-        assertEquals(DeviceAudioResult.OwnerEnded, service.execute(request("end", DeviceAudioOperation.EndOwner)))
+        withContext(Dispatchers.IO) {
+            val service = AndroidAudioServiceCore(FakeRuntime(), FakeDriver(), maxPayloadBytes = 64, initialEpoch = epoch)
+            assertEquals(DeviceAudioResult.OwnerEnded, service.execute(request("end", DeviceAudioOperation.EndOwner)))
 
-        val status = service.execute(request("reopened", DeviceAudioOperation.Status(null)))
-        assertEquals(DeviceAudioResult.Status(recording = false, playing = false), status)
+            val status = service.execute(request("reopened", DeviceAudioOperation.Status(null)))
+            assertEquals(DeviceAudioResult.Status(recording = false, playing = false), status)
+        }
     }
 
     @Test
     fun endOwnerWaitsUntilActivePlaybackHasStopped() = runTest {
-        val trace = mutableListOf<String>()
-        val driver = FakeDriver(trace).apply { blockNativeStop = true }
-        val service = AndroidAudioServiceCore(FakeRuntime(trace), driver, maxPayloadBytes = 64, initialEpoch = epoch)
-        val speak = launch {
-            service.execute(request("speak-before-stop", DeviceAudioOperation.Speak("hello", null, null, null)))
+        withContext(Dispatchers.IO) {
+            val trace = mutableListOf<String>()
+            val driver = FakeDriver(trace).apply { blockNativeStop = true }
+            val service = AndroidAudioServiceCore(FakeRuntime(trace), driver, maxPayloadBytes = 64, initialEpoch = epoch)
+            val speak = launch {
+                service.execute(request("speak-before-stop", DeviceAudioOperation.Speak("hello", null, null, null)))
+            }
+            runCurrent()
+            driver.playStarted.await()
+
+            val stopAudio = async {
+                service.execute(request("stop-audio", DeviceAudioOperation.EndOwner))
+            }
+            runCurrent()
+            driver.nativeStopStarted.await()
+            assertFalse("EndOwner must wait for the native stop to settle", stopAudio.isCompleted)
+
+            driver.nativeStopGate.complete(Unit)
+            assertEquals(DeviceAudioResult.OwnerEnded, stopAudio.await())
+            speak.join()
+
+            assertTrue(trace.contains("play-settled"))
+            assertEquals(0, service.diagnostics().activeLeaseCount)
+            assertEquals(0, retainedLeaseEntries(service, "leaseOperations"))
+            assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
         }
-        runCurrent()
-        driver.playStarted.await()
-
-        val stopAudio = async {
-            service.execute(request("stop-audio", DeviceAudioOperation.EndOwner))
-        }
-        runCurrent()
-        driver.nativeStopStarted.await()
-        assertFalse("EndOwner must wait for the native stop to settle", stopAudio.isCompleted)
-
-        driver.nativeStopGate.complete(Unit)
-        assertEquals(DeviceAudioResult.OwnerEnded, stopAudio.await())
-        speak.join()
-
-        assertTrue(trace.contains("play-settled"))
-        assertEquals(0, service.diagnostics().activeLeaseCount)
-        assertEquals(0, retainedLeaseEntries(service, "leaseOperations"))
-        assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
     }
 
     @Test
     fun failedNativeStopCanBeRetriedByEndOwner() = runTest {
-        val driver = FakeDriver().apply { failNativeStops = 1 }
-        val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
-        service.execute(request("start-for-retry", DeviceAudioOperation.StartRecording(16_000, "audio/m4a")))
+        withContext(Dispatchers.IO) {
+            val driver = FakeDriver().apply { failNativeStops = 1 }
+            val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
+            service.execute(request("start-for-retry", DeviceAudioOperation.StartRecording(16_000, "audio/m4a")))
 
-        val failed = service.execute(request("end-fails-once", DeviceAudioOperation.EndOwner)) as DeviceAudioResult.Failed
-        assertEquals(DeviceAudioErrorKind.NativeFailure, failed.error.kind)
-        assertEquals(1, service.diagnostics().activeLeaseCount)
-        assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
+            val failed = service.execute(request("end-fails-once", DeviceAudioOperation.EndOwner)) as DeviceAudioResult.Failed
+            assertEquals(DeviceAudioErrorKind.NativeFailure, failed.error.kind)
+            assertEquals(1, service.diagnostics().activeLeaseCount)
+            assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
 
-        assertEquals(DeviceAudioResult.OwnerEnded, service.execute(request("end-retries", DeviceAudioOperation.EndOwner)))
-        assertEquals(2, driver.nativeStopAttempts)
-        assertEquals(0, service.diagnostics().activeLeaseCount)
-        assertEquals(0, retainedLeaseEntries(service, "leaseOperations"))
-        assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
+            assertEquals(DeviceAudioResult.OwnerEnded, service.execute(request("end-retries", DeviceAudioOperation.EndOwner)))
+            assertEquals(2, driver.nativeStopAttempts)
+            assertEquals(0, service.diagnostics().activeLeaseCount)
+            assertEquals(0, retainedLeaseEntries(service, "leaseOperations"))
+            assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
+        }
     }
 
     @Test
@@ -810,24 +833,26 @@ class AndroidAudioServiceCoreTest {
 
     @Test
     fun failedInvalidationRestoresAdmissionAndCanRetryNativeStop() = runTest {
-        val driver = FakeDriver().apply { failNativeStops = 1 }
-        val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
-        service.execute(request("start-before-failed-invalidate", DeviceAudioOperation.StartRecording(16_000, "audio/m4a")))
+        withContext(Dispatchers.IO) {
+            val driver = FakeDriver().apply { failNativeStops = 1 }
+            val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
+            service.execute(request("start-before-failed-invalidate", DeviceAudioOperation.StartRecording(16_000, "audio/m4a")))
 
-        val error = runCatching { service.invalidate() }.exceptionOrNull()
-        assertTrue(error is AudioOperationException)
-        assertEquals(1, service.diagnostics().activeLeaseCount)
-        assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
-        assertEquals(
-            DeviceAudioResult.Status(recording = true, playing = false),
-            service.execute(request("status-after-failed-invalidate", DeviceAudioOperation.Status(null))),
-        )
+            val error = runCatching { service.invalidate() }.exceptionOrNull()
+            assertTrue(error is AudioOperationException)
+            assertEquals(1, service.diagnostics().activeLeaseCount)
+            assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
+            assertEquals(
+                DeviceAudioResult.Status(recording = true, playing = false),
+                service.execute(request("status-after-failed-invalidate", DeviceAudioOperation.Status(null))),
+            )
 
-        assertEquals(epoch + 1L, service.invalidate())
-        assertEquals(2, driver.nativeStopAttempts)
-        assertEquals(0, service.diagnostics().activeLeaseCount)
-        assertEquals(0, retainedLeaseEntries(service, "leaseOperations"))
-        assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
+            assertEquals(epoch + 1L, service.invalidate())
+            assertEquals(2, driver.nativeStopAttempts)
+            assertEquals(0, service.diagnostics().activeLeaseCount)
+            assertEquals(0, retainedLeaseEntries(service, "leaseOperations"))
+            assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
+        }
     }
 
     @Test
@@ -1037,60 +1062,64 @@ class AndroidAudioServiceCoreTest {
 
     @Test
     fun offloadMediaLabelsAreScopedToSessionOwnerAndEndOwnerReleasesNativePlayer() = runTest {
-        val driver = FakeDriver()
-        val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
-        val otherOwner = AudioOwnerKey.session("session-b")
-        service.execute(request("owner-a-play", DeviceAudioOperation.OffloadMediaPlay("shared-label", "/music/a.mp3")))
-        val activeLease = service.diagnostics().activeLeaseCount
+        withContext(Dispatchers.IO) {
+            val driver = FakeDriver()
+            val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
+            val otherOwner = AudioOwnerKey.session("session-b")
+            service.execute(request("owner-a-play", DeviceAudioOperation.OffloadMediaPlay("shared-label", "/music/a.mp3")))
+            val activeLease = service.diagnostics().activeLeaseCount
 
-        val wrongOwnerStop = service.execute(
-            request(
-                "owner-b-stop",
-                DeviceAudioOperation.OffloadMediaControl("shared-label", OffloadMediaCommand.STOP),
-                owner = otherOwner,
-            ),
-        ) as DeviceAudioResult.OffloadMedia
-        assertFalse(wrongOwnerStop.state.playing)
-        assertEquals("a different session cannot stop or release this owner’s player", activeLease, service.diagnostics().activeLeaseCount)
-        assertTrue(driver.events.none { it.startsWith("media-stop:") })
+            val wrongOwnerStop = service.execute(
+                request(
+                    "owner-b-stop",
+                    DeviceAudioOperation.OffloadMediaControl("shared-label", OffloadMediaCommand.STOP),
+                    owner = otherOwner,
+                ),
+            ) as DeviceAudioResult.OffloadMedia
+            assertFalse(wrongOwnerStop.state.playing)
+            assertEquals("a different session cannot stop or release this owner’s player", activeLease, service.diagnostics().activeLeaseCount)
+            assertTrue(driver.events.none { it.startsWith("media-stop:") })
 
-        assertEquals(DeviceAudioResult.OwnerEnded, service.execute(request("owner-b-end", DeviceAudioOperation.EndOwner, owner = otherOwner)))
-        assertEquals(1, service.diagnostics().activeLeaseCount)
-        service.execute(request("owner-a-end", DeviceAudioOperation.EndOwner))
-        assertEquals(0, service.diagnostics().activeLeaseCount)
-        assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
-        assertTrue(driver.events.any { it.startsWith("media-stop:") })
+            assertEquals(DeviceAudioResult.OwnerEnded, service.execute(request("owner-b-end", DeviceAudioOperation.EndOwner, owner = otherOwner)))
+            assertEquals(1, service.diagnostics().activeLeaseCount)
+            service.execute(request("owner-a-end", DeviceAudioOperation.EndOwner))
+            assertEquals(0, service.diagnostics().activeLeaseCount)
+            assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
+            assertTrue(driver.events.any { it.startsWith("media-stop:") })
 
-        val reopened = service.execute(
-            request("owner-a-reopen", DeviceAudioOperation.OffloadMediaPlay("shared-label", "/music/b.mp3")),
-        )
-        assertTrue("EndOwner allows the stable session owner to reopen", reopened is DeviceAudioResult.OffloadMedia)
+            val reopened = service.execute(
+                request("owner-a-reopen", DeviceAudioOperation.OffloadMediaPlay("shared-label", "/music/b.mp3")),
+            )
+            assertTrue("EndOwner allows the stable session owner to reopen", reopened is DeviceAudioResult.OffloadMedia)
+        }
     }
 
     @Test
     fun foregroundSpeechPreemptionDoesNotRetainStoppedPlaybackLedger() = runTest {
-        val driver = FakeDriver()
-        val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
-        service.execute(request("media-before-preemption", DeviceAudioOperation.OffloadMediaPlay("music", "/music/a.mp3")))
+        withContext(Dispatchers.IO) {
+            val driver = FakeDriver()
+            val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
+            service.execute(request("media-before-preemption", DeviceAudioOperation.OffloadMediaPlay("music", "/music/a.mp3")))
 
-        val speech = launch {
-            service.execute(
-                request(
-                    "foreground-speech",
-                    DeviceAudioOperation.Speak("hello", null, null, null, foregroundUserInitiated = true),
-                ),
-            )
+            val speech = launch {
+                service.execute(
+                    request(
+                        "foreground-speech",
+                        DeviceAudioOperation.Speak("hello", null, null, null, foregroundUserInitiated = true),
+                    ),
+                )
+            }
+            runCurrent()
+            driver.playStarted.await()
+
+            assertEquals(1, service.diagnostics().activeLeaseCount)
+            assertEquals("preempted lease completion must be forgotten", 0, retainedLeaseEntries(service, "nativeStopCompletion"))
+            assertEquals("preempted media session must be forgotten", 0, retainedLeaseEntries(service, "offloadMedia"))
+            service.invalidate()
+            speech.join()
+            assertEquals(0, retainedLeaseEntries(service, "leaseOperations"))
+            assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
         }
-        runCurrent()
-        driver.playStarted.await()
-
-        assertEquals(1, service.diagnostics().activeLeaseCount)
-        assertEquals("preempted lease completion must be forgotten", 0, retainedLeaseEntries(service, "nativeStopCompletion"))
-        assertEquals("preempted media session must be forgotten", 0, retainedLeaseEntries(service, "offloadMedia"))
-        service.invalidate()
-        speech.join()
-        assertEquals(0, retainedLeaseEntries(service, "leaseOperations"))
-        assertEquals(0, retainedLeaseEntries(service, "nativeStopCompletion"))
     }
 
     @Test

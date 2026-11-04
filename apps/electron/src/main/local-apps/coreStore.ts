@@ -40,7 +40,7 @@ export class CoreLocalAppStore implements LocalAppStore {
     this.layouts.set(`${record.appId}:${release.revision}`, layout);
     const prefs = await this.preferences(record.appId);
     const manifest = { ...release.manifest, capabilities: [...(release.manifest.capabilities ?? [])] };
-    if (manifest.install?.length || manifest.build?.length || manifest.processes?.length || manifest.entry.type === 'server') {
+    if (manifest.install?.length || manifest.build?.length || manifest.processes?.length || Object.keys(manifest.mcpServers ?? {}).length || manifest.entry.type === 'server') {
       if (!manifest.capabilities.includes('process')) manifest.capabilities.push('process');
     }
     const caps = manifest.capabilities;
@@ -100,7 +100,7 @@ export class CoreLocalAppStore implements LocalAppStore {
   async assertTarget(row: DesktopLocalApp): Promise<void> {
     const platform = process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';
     const architecture = process.arch === 'arm64' ? 'aarch64' : process.arch === 'ia32' ? 'x86' : process.arch;
-    const capabilities = ['process', 'files', 'clipboard', 'notifications', 'camera', 'microphone', 'network', 'background', 'agent'];
+    const capabilities = ['process', 'files', 'clipboard', 'notifications', 'camera', 'microphone', 'network', 'background', 'agent', 'mcp'];
     for (const environment of ['native', 'web']) {
       const result = await this.core.request<{ compatible: boolean }>({ op: 'checkTarget', appId: row.id, revision: row.revision,
         target: { platform, environment, architecture: architecture === 'x64' ? 'x86_64' : architecture, runtimeVersion: '0.1.0', channels: ['desktop'], capabilities } });

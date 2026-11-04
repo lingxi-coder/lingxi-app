@@ -46,6 +46,7 @@ pub(super) async fn read_session_agent_summary(
     let mut agent_type = None;
     let mut model = None;
     let mut model_profile = None;
+    let mut report_delivery = None;
     for line in raw
         .split(|byte| *byte == b'\n')
         .rev()
@@ -112,6 +113,10 @@ pub(super) async fn read_session_agent_summary(
             None
         };
         if let Some(row) = row {
+            report_delivery = row
+                .handback_state
+                .as_ref()
+                .and_then(|state| state.delivery_status().map(str::to_owned));
             name = name
                 .or_else(|| row.request.name.map(ClientTextDto::from))
                 .or_else(|| {
@@ -152,6 +157,7 @@ pub(super) async fn read_session_agent_summary(
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|duration| u64::try_from(duration.as_millis()).ok());
     Some(SessionAgentSummaryDto {
+        report_delivery,
         agent_id,
         name,
         agent_type,
@@ -281,6 +287,7 @@ impl EngineCommandRouter {
         };
         let model_snapshot = self.handle.get_status_snapshot().await;
         let mut agents = vec![SessionAgentSummaryDto {
+            report_delivery: None,
             agent_id: "main".to_string(),
             name: "Main agent".into(),
             agent_type: "main".to_string(),

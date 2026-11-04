@@ -11,7 +11,7 @@
 //! non-turn/non-permission command to — exactly the way
 //! [`crate::server::TurnDriver`] abstracts the turn entry. The production server
 //! binds an [`EngineCommandRouter`] wrapping the real engine handles
-//! ([`lingxi_core::host::OrchestratorHandle`], [`lingxi_core::host::AuthHandle`],
+//! ([`lingxi_core::host::OrchestratorHandle`],
 //! [`lingxi_core::host::task_registry::TaskRegistryHandle`], and the slash dispatcher); a
 //! test binds the SAME router over the engine's `MockOrchestratorHandle` / mock
 //! task + auth handles, so the routing-and-lowering path under test is the
@@ -32,7 +32,6 @@
 //! | `RefreshListings{Agents}` | `list_agents` | `Agents` |
 //! | `RefreshListings{Status}` | `get_status_snapshot` | `StatusSnapshot` |
 //! | `RefreshListings{Doctor}` | `run_doctor_checks` | `DoctorReport` |
-//! | `RefreshListings{Auth}` / `Login` / `Logout` | `AuthHandle::*` | `AuthState` |
 //! | `RefreshListings{Tasks}` / `TaskList` | `TaskRegistryHandle::list` | `TaskRow`× |
 //! | `RunSlashCommand` | `SlashCommandDispatcher::dispatch` | `SlashCommandResult` or normal turn stream |
 //! | `TaskOutput` | `TaskRegistryHandle::output` | `TaskOutputChunk` |
@@ -79,12 +78,11 @@ use client::adapter::lowering::{
 use client::adapter::ClientEventSink;
 use client::protocol::commands::{ClientCommand, ListingKindDto};
 use client::protocol::events::{ClientEvent, ErrorKindDto};
-use client::protocol::listings::{AuthStateDto, SessionModeDto};
+use client::protocol::listings::SessionModeDto;
 use client::protocol::text::ClientTextDto;
 use command_api::model::CommandSource;
 use command_api::parser::parse_slash_command;
 use command_api::registry::CommandRegistry;
-use lingxi_core::host::auth::{AuthHandle, LoginInfo};
 use lingxi_core::host::orchestrator::HandleError;
 use lingxi_core::host::orchestrator::OrchestratorHandle;
 use lingxi_core::host::task_registry::{TaskListFilter, TaskRegistryHandle};
@@ -130,9 +128,8 @@ fn split_model_selection_source(
 
 /// Inputs needed to enumerate and replay the persisted JSONL session store.
 ///
-/// Kept optional on [`EngineCommandRouter`] so existing embedded/test callers
-/// that only need model/auth/task routing remain source-compatible. Production
-/// bridge boot always supplies this context.
+/// Optional for routers without session operations. Production bridge boot
+/// supplies the authoritative session roots.
 pub struct SessionStoreContext {
     lingxi_home: PathBuf,
     session_cwd: String,
@@ -547,17 +544,6 @@ pub struct SlashDispatchOutcome {
     pub authority_events: Vec<ClientEvent>,
 }
 
-/// Lower an `Option<LoginInfo>` to the auth-state DTO (`current_user` → wire).
-fn lower_auth_state(info: Option<LoginInfo>) -> AuthStateDto {
-    match info {
-        Some(li) => AuthStateDto::SignedIn {
-            email: li.email,
-            org_id: li.org_id,
-        },
-        None => AuthStateDto::SignedOut,
-    }
-}
-
 fn provider_model_catalog_from_listings(
     listings: &[lingxi_core::host::ModelListing],
 ) -> Vec<client::protocol::listings::ProviderModelCatalogEntryDto> {
@@ -574,7 +560,6 @@ pub struct EngineCommandRouter {
     session_cron: Option<Arc<cron::CronScheduler>>,
     cron_firer: Option<Arc<crate::cron_host::HostCronFirer>>,
     handle: Arc<dyn OrchestratorHandle>,
-    auth: Arc<dyn AuthHandle>,
     tasks: Arc<dyn TaskRegistryHandle>,
     /// Optional slash dispatcher. The desktop runtime always supplies one; it is
     /// `Option` so a transport that has not yet built the command registry can
@@ -601,10 +586,11 @@ pub struct EngineCommandRouter {
     /// Current coordinator ownership supplements persisted agent transcripts
     /// when a host reconnects after missing background completion events.
     team_registry: Option<Arc<dyn lingxi_core::host::team_registry::TeamRegistryHandle>>,
-    /// Shared provider credential manager. Production bridge boot wires the
-    /// exact manager used by the runtime; tests/embedded clients may omit it.
+    /// Shared runtime catalog used by account-aware model routes.
     catalog_registry: harness_runtime::desktop::FusionCatalogRegistry,
-    credentials: Option<Arc<secret::CredentialManager>>,
+    provider_account_store: Option<Arc<harness_runtime::provider_accounts::ProviderAccountStore>>,
+    provider_account_update_lock:
+        tokio::sync::Mutex<Option<lingxi_core::host::provider_accounts::AccountSnapshot>>,
     realtime_audio: Option<Arc<crate::realtime_audio::RealtimeAudioController>>,
     media_cloud_audio: Option<Arc<AudioProviderCloudRegistry>>,
     media_cloud_attachment_slot: Option<Arc<std::sync::RwLock<Option<MediaAttachmentHandle>>>>,
@@ -621,13 +607,6 @@ pub struct EngineCommandRouter {
     /// Packaged Desktop owns persistence in its signed credential broker; in
     /// that mode bridge credential mutations update only this process cache.
     provider_credentials_ephemeral: bool,
-    /// The Codex session packaged Desktop keeps fresh. Credential commands
-    /// for the Codex provider serve and clear its access token instead of
-    /// touching storage.
-    openai_host_session: Option<Arc<llm_runtime::auth::openai::HostSession>>,
-    /// HTTP transport used by provider connection probes. Production boot
-    /// supplies the same guarded transport as the runtime's LLM clients.
-    http: Option<Arc<dyn lingxi_core::host::HttpTransport>>,
     /// Optional layered-settings context backing the `Settings` listing.
     /// Production boot wires it from the desktop composition root; lightweight
     /// users of the routing seam may omit it, in which case the listing
@@ -944,7 +923,6 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn new(
         handle: Arc<dyn OrchestratorHandle>,
-        auth: Arc<dyn AuthHandle>,
         tasks: Arc<dyn TaskRegistryHandle>,
         dispatcher: Option<Arc<dyn SlashCommandDispatcher>>,
         slash_registry: Option<Arc<RwLock<CommandRegistry>>>,
@@ -954,7 +932,6 @@ impl EngineCommandRouter {
             cron_firer: None,
             session_cron: None,
             handle,
-            auth,
             tasks,
             dispatcher,
             slash_registry,
@@ -964,7 +941,8 @@ impl EngineCommandRouter {
             session_agent_observer: None,
             team_registry: None,
             catalog_registry: harness_runtime::desktop::FusionCatalogRegistry::default(),
-            credentials: None,
+            provider_account_store: None,
+            provider_account_update_lock: tokio::sync::Mutex::new(None),
             realtime_audio: None,
             media_cloud_audio: None,
             media_cloud_attachment_slot: None,
@@ -976,8 +954,6 @@ impl EngineCommandRouter {
             catalog_refresh: None,
             catalog_observers: Default::default(),
             provider_credentials_ephemeral: false,
-            openai_host_session: None,
-            http: None,
             settings: None,
             mcp: None,
             mcp_registry: None,
@@ -1190,19 +1166,13 @@ impl EngineCommandRouter {
         }
     }
 
-    pub fn with_credentials(mut self, credentials: Arc<secret::CredentialManager>) -> Self {
-        self.credentials = Some(credentials);
-        self
-    }
-
-    /// Route the Codex provider's credential commands to the session the
-    /// desktop keeps fresh.
-    #[must_use]
-    pub fn with_openai_host_session(
+    pub fn with_provider_account_store(
         mut self,
-        session: Option<Arc<llm_runtime::auth::openai::HostSession>>,
+        store: Arc<harness_runtime::provider_accounts::ProviderAccountStore>,
+        snapshot: Option<lingxi_core::host::provider_accounts::AccountSnapshot>,
     ) -> Self {
-        self.openai_host_session = session;
+        self.provider_account_update_lock = tokio::sync::Mutex::new(snapshot);
+        self.provider_account_store = Some(store);
         self
     }
 
@@ -1286,19 +1256,10 @@ impl EngineCommandRouter {
         );
     }
 
-    /// Keep provider credential writes process-local because the parent owns
-    /// the persistent Data Protection Keychain entry.
+    /// Let the parent own account secrets and accept access-only cache updates.
     #[must_use]
     pub fn with_ephemeral_provider_credentials(mut self, enabled: bool) -> Self {
         self.provider_credentials_ephemeral = enabled;
-        self
-    }
-
-    /// Attach the runtime's provider HTTP transport for low-cost connection
-    /// probes from Desktop settings.
-    #[must_use]
-    pub fn with_http(mut self, http: Arc<dyn lingxi_core::host::HttpTransport>) -> Self {
-        self.http = Some(http);
         self
     }
 
@@ -2094,291 +2055,113 @@ impl CommandRouter for EngineCommandRouter {
                 .await;
             }
             // ── Provider credentials ────────────────────────────────────────
-            ClientCommand::ListProviderCredentials {
+            ClientCommand::ProviderAccounts {
                 operation_id,
-                provider_ids,
-                preview_provider_ids,
-            } => {
-                let validation_error = if provider_ids.len() > 32
-                    || provider_ids.iter().any(|id| !provider_id_is_valid(id))
-                    || preview_provider_ids
-                        .iter()
-                        .any(|id| !provider_ids.contains(id))
-                {
-                    Some("invalid provider credential query".to_string())
-                } else {
-                    None
-                };
-                self.emit_provider_credential_status(
-                    operation_id,
-                    &provider_ids,
-                    &preview_provider_ids,
-                    validation_error,
-                    &*sink,
-                )
-                .await;
-            }
-            // The desktop refreshes its one Codex session itself and serves
-            // every engine the current access token, so nothing is stored here.
-            ClientCommand::SetProviderCredential {
-                operation_id,
-                provider_id,
-                credential,
-            } if provider_id == crate::boot::CODEX_PROVIDER_ID
-                && self.openai_host_session.is_some() =>
-            {
-                let error = match &self.openai_host_session {
-                    Some(session) => serve_openai_host_token(session, credential.expose_secret()),
-                    None => Some("Codex session is unavailable".to_string()),
-                };
-                // The session is the ChatGPT delegate for this engine's whole
-                // life, so Fusion adopts the token in place.
-                if error.is_none()
-                    && !crate::boot::refresh_fusion_catalog_bounded(
-                        &self.catalog_registry,
-                        vec![provider_id.clone()],
-                    )
-                    .await
-                {
-                    tracing::warn!("Fusion did not adopt the Codex session without a restart");
-                }
-                let applied = error.is_none();
-                sink.emit(ClientEvent::ProviderCredentialStatus {
-                    operation_id,
-                    configured_provider_ids: applied
-                        .then_some(provider_id.clone())
-                        .into_iter()
-                        .collect(),
-                    unavailable_provider_ids: (!applied)
-                        .then_some(provider_id)
-                        .into_iter()
-                        .collect(),
-                    storage_encrypted: self
-                        .credentials
-                        .as_ref()
-                        .is_some_and(|credentials| credentials.provider_key_storage_is_encrypted()),
-                    // Every part of a session is secret; it has no preview.
-                    credential_previews: HashMap::new(),
-                    error,
-                })
-                .await;
-            }
-            ClientCommand::SetProviderCredential {
-                operation_id,
-                provider_id,
+                action,
+                request_json,
                 credential,
             } => {
-                let credential_preview =
-                    secret::masked_credential_preview(credential.expose_secret());
-                let mut error = if !provider_id_is_valid(&provider_id)
-                    || credential.expose_secret().is_empty()
-                    || credential.expose_secret().len() > 16_384
-                    || credential.expose_secret().contains('\0')
-                {
-                    Some("invalid provider credential".to_string())
-                } else if let Some(credentials) = self.credentials.as_ref() {
-                    if self.provider_credentials_ephemeral {
-                        credentials
-                            .set_provider_key_ephemeral(&provider_id, credential.expose_secret())
-                            .await;
-                        None
-                    } else {
-                        credentials
-                            .set_provider_key(&provider_id, credential.expose_secret())
-                            .await
-                            .err()
-                            .map(|failure| {
-                                format!("failed to store provider credential: {failure}")
-                            })
-                    }
-                } else {
-                    Some("provider credential storage is unavailable".to_string())
-                };
-                // Publish before emitting readiness. The helper starts its
-                // full-source reconciliation detached; `false` means storage
-                // succeeded but this process's fixed auth route needs restart.
-                if error.is_none()
-                    && !crate::boot::refresh_fusion_catalog_bounded(
-                        &self.catalog_registry,
-                        vec![provider_id.clone()],
-                    )
-                    .await
-                {
-                    error = Some(
-                        harness_runtime::desktop::fusion_credential_restart_required_message(
-                            &provider_id,
-                        ),
-                    );
-                }
-                let applied = error.is_none();
-                let credential_previews = if applied {
-                    HashMap::from([(provider_id.clone(), credential_preview)])
-                } else {
-                    HashMap::new()
-                };
-                sink.emit(ClientEvent::ProviderCredentialStatus {
-                    operation_id,
-                    configured_provider_ids: applied
-                        .then_some(provider_id.clone())
-                        .into_iter()
-                        .collect(),
-                    unavailable_provider_ids: (!applied)
-                        .then_some(provider_id)
-                        .into_iter()
-                        .collect(),
-                    storage_encrypted: self
-                        .credentials
+                let result = async {
+                    let store = self
+                        .provider_account_store
                         .as_ref()
-                        .is_some_and(|credentials| credentials.provider_key_storage_is_encrypted()),
-                    credential_previews,
-                    error,
-                })
-                .await;
-            }
-            // The desktop signed out of Codex.
-            ClientCommand::DeleteProviderCredential {
-                operation_id,
-                provider_id,
-            } if provider_id == crate::boot::CODEX_PROVIDER_ID
-                && self.openai_host_session.is_some() =>
-            {
-                if let Some(session) = &self.openai_host_session {
-                    session.clear();
-                }
-                harness_runtime::desktop::refresh_fusion_catalog_after_credential_delete(
-                    &self.catalog_registry,
-                    &provider_id,
-                )
-                .await;
-                sink.emit(ClientEvent::ProviderCredentialStatus {
-                    operation_id,
-                    configured_provider_ids: Vec::new(),
-                    unavailable_provider_ids: Vec::new(),
-                    storage_encrypted: self
-                        .credentials
-                        .as_ref()
-                        .is_some_and(|credentials| credentials.provider_key_storage_is_encrypted()),
-                    credential_previews: HashMap::new(),
-                    error: None,
-                })
-                .await;
-            }
-            // Round-12 finding [2]: a credential DELETE must tell Fusion's
-            // catalog filter, and it must NOT do so through the sibling `Set`
-            // arm's `crate::boot::refresh_fusion_catalog_bounded` one screen
-            // up — that routes to
-            // `FusionCatalogRefresher::refresh_after_credential_write`, whose
-            // `forced` loop publishes `true` for the named profile, i.e. the
-            // exact opposite of what a delete means. The refresher's merge
-            // rule is additive by design and can never lower a `true`
-            // (`refresh_inner`: `if row.available { insert(true) } else {
-            // entry(..).or_insert(false) }`), so a re-probe cannot close this
-            // either. Hence the dedicated removal fan-out
-            // `harness_runtime::desktop::refresh_fusion_catalog_after_credential_delete`
-            // below. Without it a provider whose key was deleted mid-session
-            // survived `filter_fusion_catalog`, could be auto-selected as a
-            // `/fusion` panel, had budget reserved for it, and died on
-            // `LlmError::Authentication` at request time instead of being
-            // excluded by the §4 preflight. BOTH branches need it — the
-            // persistent keychain delete and the packaged/brokered ephemeral
-            // one, whose key never touched the keychain at all and so could
-            // never be re-probed away even in principle. Unlike the write
-            // path this needs no budget wrapper: `mark_credential_removed` is
-            // a lock-and-set with no credential-backend I/O.
-            ClientCommand::DeleteProviderCredential {
-                operation_id,
-                provider_id,
-            } => {
-                let error = if !provider_id_is_valid(&provider_id) {
-                    Some("invalid provider id".to_string())
-                } else if let Some(credentials) = self.credentials.as_ref() {
-                    if self.provider_credentials_ephemeral {
-                        credentials
-                            .suppress_provider_key_ephemeral(&provider_id)
-                            .await;
-                        None
-                    } else {
-                        credentials
-                            .delete_provider_key(&provider_id)
-                            .await
-                            .err()
-                            .map(|failure| {
-                                format!("failed to delete provider credential: {failure}")
-                            })
-                    }
-                } else {
-                    Some("provider credential storage is unavailable".to_string())
-                };
-                let applied = error.is_none();
-                if applied {
-                    harness_runtime::desktop::refresh_fusion_catalog_after_credential_delete(
-                        &self.catalog_registry,
-                        &provider_id,
-                    )
-                    .await;
-                }
-                sink.emit(ClientEvent::ProviderCredentialStatus {
-                    operation_id,
-                    configured_provider_ids: Vec::new(),
-                    unavailable_provider_ids: (!applied)
-                        .then_some(provider_id)
-                        .into_iter()
-                        .collect(),
-                    storage_encrypted: self
-                        .credentials
-                        .as_ref()
-                        .is_some_and(|credentials| credentials.provider_key_storage_is_encrypted()),
-                    credential_previews: HashMap::new(),
-                    error,
-                })
-                .await;
-            }
-            ClientCommand::TestProviderConnection {
-                operation_id,
-                provider_id,
-                api_base,
-                model,
-                credential_override,
-            } => {
-                let event = if provider_id_is_valid(&provider_id) {
-                    crate::provider_connection::test(
-                        self.credentials.as_ref(),
-                        self.http.as_ref(),
-                        crate::provider_connection::ProviderConnectionProbe {
-                            protocol: self.official_catalog.as_ref().and_then(|source| {
-                                source
-                                    .snapshot()
-                                    .providers
+                        .ok_or("account store unavailable")?;
+                    if action == "inject_credentials" {
+                        let mut current = self.provider_account_update_lock.lock().await;
+                        if !self.provider_credentials_ephemeral {
+                            return Err("private account injection is unavailable".to_string());
+                        }
+                        let snapshot: lingxi_core::host::provider_accounts::AccountSnapshot =
+                            serde_json::from_str(&request_json)
+                                .map_err(|_| "invalid account snapshot")?;
+                        let mut values: std::collections::BTreeMap<
+                            String,
+                            secret::AccountCredential,
+                        > = serde_json::from_str(
+                            credential
+                                .as_ref()
+                                .ok_or("account credentials required")?
+                                .expose_secret(),
+                        )
+                        .map_err(|_| "invalid account credential envelope")?;
+                        crate::provider_accounts::validate_injection(Some(&snapshot), &values)?;
+                        if snapshot.store_scope != store.store_scope() {
+                            return Err("account store scope mismatch".to_string());
+                        }
+                        crate::provider_accounts::validate_current_snapshot(
+                            store.data_dir(),
+                            &snapshot,
+                        )?;
+                        crate::provider_accounts::validate_credential_revisions(
+                            &store.credentials(),
+                            &snapshot,
+                            &values,
+                        )
+                        .await?;
+                        if let Some(previous) = current.as_ref() {
+                            for account in &previous.accounts {
+                                if !snapshot
+                                    .accounts
                                     .iter()
-                                    .find(|p| p.profile_name == provider_id)
-                                    .and_then(|p| serde_json::to_value(p.protocol).ok())
-                                    .and_then(|v| v.as_str().map(str::to_owned))
-                            }),
-                            operation_id,
-                            provider_id,
-                            api_base,
-                            model,
-                            credential_override,
-                        },
-                    )
-                    .await
-                } else {
-                    ClientEvent::ProviderConnectionTested {
-                        operation_id,
-                        provider_id,
-                        connected: false,
-                        reachable: false,
-                        authenticated: false,
-                        model_available: false,
-                        http_status: None,
-                        latency_ms: 0,
-                        message: "Provider 标识无效".to_string(),
-                        used_stored_credential: credential_override.is_none(),
+                                    .any(|next| next.credential_ref == account.credential_ref)
+                                {
+                                    store
+                                        .credentials()
+                                        .set_account_credential_ephemeral(
+                                            &account.credential_ref,
+                                            None,
+                                        )
+                                        .await
+                                        .map_err(|_| "private account credential unavailable")?;
+                                }
+                            }
+                        }
+                        for account in &snapshot.accounts {
+                            store
+                                .credentials()
+                                .set_account_credential_ephemeral(
+                                    &account.credential_ref,
+                                    values.remove(&account.account_id),
+                                )
+                                .await
+                                .map_err(|_| "private account credential unavailable")?;
+                        }
+                        self.catalog_registry
+                            .refresh_provider_accounts(snapshot.clone())?;
+                        *current = Some(snapshot.clone());
+                        return serde_json::to_string(&snapshot)
+                            .map_err(|_| "account snapshot encoding failed".to_string());
                     }
+                    let request: lingxi_core::host::provider_accounts::ProviderAccountCommand =
+                        serde_json::from_str(&request_json)
+                            .map_err(|_| "invalid account command")?;
+                    let snapshot = if self.provider_credentials_ephemeral {
+                        if credential.is_some() {
+                            return Err("Broker owns account credentials".to_string());
+                        }
+                        store.execute_metadata(request).await?
+                    } else {
+                        store
+                            .execute(request, credential.map(|s| s.expose_secret().to_string()))
+                            .await?
+                    };
+                    self.catalog_registry
+                        .refresh_provider_accounts(snapshot.clone())?;
+                    serde_json::to_string(&snapshot)
+                        .map_err(|_| "account snapshot encoding failed".to_string())
+                }
+                .await;
+                let (snapshot_json, error) = match result {
+                    Ok(snapshot) => (snapshot, None),
+                    Err(error) => (String::new(), Some(error)),
                 };
-                sink.emit(event).await;
+                sink.emit(ClientEvent::ProviderAccountsUpdated {
+                    operation_id,
+                    snapshot_json,
+                    error,
+                })
+                .await;
             }
-
             // ── Permission mode ────────────────────────────────────────────
             ClientCommand::SetPermissionMode { mode } => {
                 match self.handle.set_permission_mode(&mode).await {
@@ -2736,52 +2519,6 @@ impl CommandRouter for EngineCommandRouter {
             }
             ClientCommand::HookAdmin { command } => {
                 self.apply_hook_admin(command, &*sink).await;
-            }
-
-            // ── Auth ───────────────────────────────────────────────────────
-            // This is a credential write: the Anthropic OAuth handle persists
-            // tokens on success. The shared AuthHandle is wrapped by
-            // `FusionCatalogClearingAuth`, which cheaply publishes the canonical
-            // `anthropic-oauth` route before returning. Do not repeat the global
-            // refresh here; that would create a second reconciliation owner.
-            ClientCommand::Login => {
-                let state = match self.auth.login().await {
-                    Ok(li) => lower_auth_state(Some(li)),
-                    Err(e) => {
-                        sink.emit(ClientEvent::Error {
-                            kind: ErrorKindDto::Internal,
-                            message: format!("login failed: {e}").into(),
-                        })
-                        .await;
-                        lower_auth_state(self.auth.current_user().await)
-                    }
-                };
-                sink.emit(ClientEvent::AuthState { state }).await;
-            }
-            // Round-12 finding [2], class member the finding itself did not
-            // name: signing OUT is a credential removal too, and
-            // `refresh_inner`'s closing `guard.entry("anthropic")
-            // .or_insert(..)` is an `or_insert`, so an `anthropic: true` that
-            // a sign-in published survives a sign-out for the life of the
-            // process. Deliberately NOT fixed with a call here: `self.auth`
-            // is the SAME `Arc<dyn AuthHandle>` the TUI's `/logout`
-            // (`command_api::builtins::LogoutHandler`) drives, so the clearing lives
-            // in `harness_runtime::desktop::FusionCatalogClearingAuth`, which wraps
-            // that one handle for every sign-out surface in the process at
-            // once. Adding a second call here would double-fire the same
-            // fan-out and let the two mechanisms drift.
-            ClientCommand::Logout => {
-                if let Err(e) = self.auth.logout().await {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Internal,
-                        message: format!("logout failed: {e}").into(),
-                    })
-                    .await;
-                }
-                sink.emit(ClientEvent::AuthState {
-                    state: lower_auth_state(self.auth.current_user().await),
-                })
-                .await;
             }
 
             // ── Compaction ───────────────────────────────────────────────────
@@ -3186,35 +2923,6 @@ pub(crate) fn requires_idle_turn_for_slash(
             || source_text_eq_ascii(&command.name, "cd"))
 }
 
-/// Serve the access token of the Codex session the desktop sent. Returns the
-/// failure to report, if any; the session never appears in it.
-fn serve_openai_host_token(
-    session: &llm_runtime::auth::openai::HostSession,
-    credential: &str,
-) -> Option<String> {
-    let delivered = (credential.len() <= crate::boot::MAX_STDIN_CREDENTIAL_BYTES)
-        .then(|| {
-            serde_json::from_str::<client::protocol::events::OpenAiOAuthSessionDto>(credential).ok()
-        })
-        .flatten()
-        .filter(|delivered| crate::boot::validate_openai_oauth_session(delivered).is_ok());
-    let Some(delivered) = delivered else {
-        return Some("invalid Codex OAuth session".to_string());
-    };
-    session.serve(crate::boot::openai_host_token(&delivered));
-    None
-}
-
-fn provider_id_is_valid(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value.chars().enumerate().all(|(index, ch)| {
-            ch.is_ascii_lowercase()
-                || ch.is_ascii_digit()
-                || (index > 0 && matches!(ch, '-' | '_' | '.'))
-        })
-}
-
 fn command_source_string(source: CommandSource) -> &'static str {
     match source {
         CommandSource::Builtin => "builtin",
@@ -3235,17 +2943,6 @@ mod settings_patch_parsing_tests;
 #[cfg(test)]
 #[path = "router/tests/mcp_config_json_parsing_tests.rs"]
 mod mcp_config_json_parsing_tests;
-
-/// Round-9 review finding [2]: the Electron desktop's ONLY credential-add path
-/// is [`ClientCommand::SetProviderCredential`] (Settings -> Provider
-/// Credentials). It must tell Fusion's scoped catalog refresher about the
-/// write, exactly the way the TUI key view does
-/// (`apps/cli/src/mode.rs`'s `run_connect_action`); without it a key added in
-/// Settings routes on the next ordinary turn but stays invisible to `/fusion`
-/// for the rest of the engine process.
-#[cfg(test)]
-#[path = "router/tests/fusion_catalog_refresh_tests.rs"]
-mod fusion_catalog_refresh_tests;
 
 #[cfg(test)]
 #[path = "router/tests/scheduled_chat_anchor_tests.rs"]

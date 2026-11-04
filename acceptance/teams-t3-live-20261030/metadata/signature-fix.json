@@ -1,0 +1,14 @@
+{
+  "status": "PASSED",
+  "initialVerifier": "Stopped at overstrict full buildConfig identity after successful patch; generated build ID/source generation changed",
+  "serviceConfigurationChanges": [
+    "environmentVariables.FUNCTION_SIGNATURE_TYPE:cloudevent",
+    "revision:onteammessage-00002-siw"
+  ],
+  "serverRebuilt": true,
+  "sourceArchiveFilesByteIdentical": true,
+  "trackedSourceFiles": 25,
+  "eventTriggerUnchanged": true,
+  "unrelatedServiceConfigurationUnchanged": true,
+  "finalCloudVerifier": "PASSED"
+}

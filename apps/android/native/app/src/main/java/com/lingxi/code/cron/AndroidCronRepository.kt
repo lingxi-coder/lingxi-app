@@ -200,9 +200,7 @@ class AndroidCronRepository private constructor(
     }
 
     private fun defaultAutomation(): CronAutomation =
-        com.lingxi.code.settings.ProviderSettingsRepository(appContext).use {
-            CronAutomation.defaults(it.engineLaunchConfig().defaultModel)
-        }
+        CronAutomation.defaults(com.lingxi.code.settings.ProviderSettingsRepository(appContext).engineLaunchConfig().defaultModel)
 
     suspend fun create(
         scopeId: String,

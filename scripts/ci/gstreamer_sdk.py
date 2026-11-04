@@ -153,7 +153,14 @@ def _inside(root: pathlib.Path, candidate: pathlib.Path) -> bool:
         return False
 
 
-def safe_extract_tar(archive: pathlib.Path, destination: pathlib.Path) -> None:
+def safe_extract_tar(
+    archive: pathlib.Path,
+    destination: pathlib.Path,
+    *,
+    ios_platform_only: bool = False,
+    android_platform_only: bool = False,
+    resume_existing: bool = False,
+) -> None:
     """Extract a verified SDK archive without allowing paths outside destination."""
     destination.mkdir(parents=True, exist_ok=True)
     resolved_root = destination.resolve()
@@ -181,10 +188,42 @@ def safe_extract_tar(archive: pathlib.Path, destination: pathlib.Path) -> None:
             output = (destination / pathlib.Path(*member_path.parts)).resolve(strict=False)
             if not _inside(resolved_root, output):
                 raise SetupError(f"unsafe SDK archive output: {member.name}")
-        try:
-            source.extractall(destination, members=members, filter="data")
-        except TypeError:  # Python 3.11 before the data filter backport.
-            source.extractall(destination, members=members)
+        # Validate every member above, including skipped platforms. Filtering
+        # never turns an unsafe archive path or link into an accepted archive.
+        if not ios_platform_only and not android_platform_only and not resume_existing:
+            try:
+                source.extractall(destination, members=members, filter="data")
+            except TypeError:  # Python 3.11 before the data filter backport.
+                source.extractall(destination, members=members)
+            return
+        for member in members:
+            parts = pathlib.PurePosixPath(member.name).parts
+            if ios_platform_only and len(parts) > 1 and parts[0] == "GStreamer.xcframework":
+                if parts[1] not in (*IOS_SLICES, "Info.plist"):
+                    continue
+            if android_platform_only and parts and parts[0] not in ("arm64", "x86_64"):
+                continue
+            output = destination / pathlib.Path(*parts)
+            if resume_existing and member.isfile() and output.exists():
+                if output.is_symlink() or not output.is_file() or output.stat().st_size > member.size:
+                    raise SetupError(f"invalid staged SDK file: {member.name}")
+                # Existing bytes must match the verified archive before reuse.
+                # Append only the missing suffix, avoiding a second multi-GB
+                # copy when resuming a disk-constrained interrupted extraction.
+                incoming = source.extractfile(member)
+                if incoming is None:
+                    raise SetupError(f"cannot read SDK archive member: {member.name}")
+                with incoming, output.open("rb") as existing:
+                    while block := existing.read(1024 * 1024):
+                        if incoming.read(len(block)) != block:
+                            raise SetupError(f"staged SDK file differs from verified archive: {member.name}")
+                    with output.open("ab") as target:
+                        shutil.copyfileobj(incoming, target, length=1024 * 1024)
+                continue
+            try:
+                source.extract(member, destination, filter="data")
+            except TypeError:  # Python 3.11 before the data filter backport.
+                source.extract(member, destination)
 
 
 def _module_pc_files(sdk: pathlib.Path) -> bool:
@@ -238,7 +277,17 @@ def select_ios_xcframework(extracted: pathlib.Path) -> pathlib.Path:
     return framework.resolve()
 
 
-def prepare_archive_sdk(kind: str, root: pathlib.Path, artifact: dict) -> pathlib.Path:
+def prepare_archive_sdk(
+    kind: str,
+    root: pathlib.Path,
+    artifact: dict,
+    *,
+    ios_platform_only: bool = False,
+    android_platform_only: bool = False,
+    resume_staging: pathlib.Path | None = None,
+) -> pathlib.Path:
+    if (ios_platform_only and kind != "ios") or (android_platform_only and kind != "android"):
+        raise SetupError("SDK platform filter does not match the selected platform")
     root = root.expanduser().resolve()
     downloads = root.parent / "downloads"
     archive = download_artifact(artifact, downloads)
@@ -249,11 +298,21 @@ def prepare_archive_sdk(kind: str, root: pathlib.Path, artifact: dict) -> pathli
             return selected
         raise SetupError(f"SDK output directory exists without a matching lock marker: {root}")
     root.parent.mkdir(parents=True, exist_ok=True)
-    staging_root = pathlib.Path(tempfile.mkdtemp(prefix=f".{root.name}-", dir=root.parent))
+    if resume_staging is not None:
+        if not (ios_platform_only or android_platform_only) or resume_staging.is_symlink():
+            raise SetupError("staging reuse requires platform-only extraction")
+        staging_root = resume_staging.resolve(strict=True)
+        if staging_root.parent != root.parent or not staging_root.name.startswith(f".{root.name}-"):
+            raise SetupError("staging reuse must name this SDK's temporary sibling directory")
+    else:
+        staging_root = pathlib.Path(tempfile.mkdtemp(prefix=f".{root.name}-", dir=root.parent))
     try:
         staging = staging_root / "archive"
-        staging.mkdir()
-        safe_extract_tar(archive, staging)
+        staging.mkdir(exist_ok=resume_staging is not None)
+        if staging.is_symlink() or staging.resolve().parent != staging_root:
+            raise SetupError("SDK staging archive directory must stay inside its staging root")
+        safe_extract_tar(archive, staging, ios_platform_only=ios_platform_only,
+            android_platform_only=android_platform_only, resume_existing=resume_staging is not None)
         if kind == "android":
             select_android_root(staging)
         else:
@@ -261,7 +320,7 @@ def prepare_archive_sdk(kind: str, root: pathlib.Path, artifact: dict) -> pathli
         (staging_root / ".lingxi-gstreamer-sdk-sha256").write_text(artifact["sha256"] + "\n", encoding="ascii")
         staging_root.replace(root)
     finally:
-        if staging_root.exists():
+        if staging_root.exists() and resume_staging is None:
             shutil.rmtree(staging_root)
     return select_android_root(root / "archive") if kind == "android" else select_ios_xcframework(root / "archive")
 
@@ -588,11 +647,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("platform", choices=("android", "ios", "macos", "windows", "linux"))
     parser.add_argument("--root", type=pathlib.Path)
+    parser.add_argument("--ios-platform-only", action="store_true", help="extract required iOS device/simulator slices without unused tvOS slices")
+    parser.add_argument("--android-platform-only", action="store_true", help="extract required Android arm64/x86_64 slices without unused 32-bit ABIs")
+    parser.add_argument("--resume-staging", type=pathlib.Path, help="verify and finish an interrupted platform-only SDK staging directory")
     args = parser.parse_args()
     lock = load_lock()
     root = _require_runner_temp_root(args.root or _default_root(args.platform))
+    if args.ios_platform_only and args.platform != "ios":
+        parser.error("iOS extraction options require the ios platform")
+    if args.android_platform_only and args.platform != "android":
+        parser.error("Android extraction options require the android platform")
+    if args.resume_staging and not (args.ios_platform_only or args.android_platform_only):
+        parser.error("--resume-staging requires a platform-only extraction option")
+    resume_staging = _require_runner_temp_root(args.resume_staging) if args.resume_staging else None
     if args.platform in ("android", "ios"):
-        sdk_root = prepare_archive_sdk(args.platform, root, lock["artifacts"][args.platform])
+        sdk_root = prepare_archive_sdk(args.platform, root, lock["artifacts"][args.platform],
+            ios_platform_only=args.ios_platform_only, android_platform_only=args.android_platform_only,
+            resume_staging=resume_staging)
         variable = "LINGXI_GSTREAMER_SDK_ANDROID" if args.platform == "android" else "LINGXI_GSTREAMER_SDK_IOS"
         export_environment({variable: str(sdk_root)})
     elif args.platform == "macos":

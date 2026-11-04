@@ -1,3 +1,4 @@
+import { fixtureAccountSnapshot } from './provider-accounts-mock';
 import { createRoot } from 'react-dom/client';
 import { App } from '../../src/renderer/App';
 import type { GitApi, GitScope, GitStatus } from '../../src/shared/git';
@@ -39,7 +40,7 @@ const git: GitApi = {
     settings: { version: 1, projects: scenario === 'empty' ? [] : [projectPath], activeProject: scenario === 'empty' ? undefined : projectPath, activeSession, pinnedSessions: [], archivedSessions: [], theme: params.get('theme') ?? 'light' },
     activeSession, workspace: { path: scenario === 'empty' ? undefined : projectPath, trusted: scenario !== 'empty' }, connection: { status: 'connected' },
     runtimes: activeSession ? [{ ...activeSession, connection: { status: 'connected' }, turnActive: false, pendingInteractions: 0, pendingAskUserQuestions: 0 }] : [],
-    projectCatalogs: { [projectPath]: { sessions: [] } }, diagnostics: [], providerCredentials: [{ providerId: 'openai', configured: true }],
+    projectCatalogs: { [projectPath]: { sessions: [] } }, diagnostics: [], providerAccountSnapshot: fixtureAccountSnapshot(['openai']),
   }),
   scheduled: { scopes: async () => [], context: async () => ({ models: [], currentModel: '', sessions: [] }), manage: async () => [] },
 };

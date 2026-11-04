@@ -132,7 +132,7 @@ final class IOSRealtimeAudioService {
                 do {
                     for try await event in callback.events {
                         guard let self, self.generation == operation, !Task.isCancelled else { return }
-                        await self.receive(event, generation: operation)
+                        await self.receive(event, generation: operation, owner: pinned.owner, requestJSON: pinned.requestJSON)
                     }
                 } catch is CancellationError {
                 } catch {
@@ -296,7 +296,7 @@ final class IOSRealtimeAudioService {
         await withCheckedContinuation { commandDrainWaiters.append($0) }
     }
 
-    private func receive(_ json: String, generation expectedGeneration: UInt64) async {
+    private func receive(_ json: String, generation expectedGeneration: UInt64, owner: IOSAudioOwner?, requestJSON: String) async {
         guard generation == expectedGeneration else { return }
         guard let data = json.data(using: .utf8),
               let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -306,6 +306,7 @@ final class IOSRealtimeAudioService {
         }
         switch type {
         case "session_ready":
+            IOSAudioProviderService.shared.bindSelectedAccount(event, owner: owner, requestJSON: requestJSON)
             guard let input = event["inputFormat"] as? [String: Any], let output = event["outputFormat"] as? [String: Any],
                   input["encoding"] as? String == "pcm16", output["encoding"] as? String == "pcm16",
                   (input["channels"] as? NSNumber)?.intValue == 1, (output["channels"] as? NSNumber)?.intValue == 1,

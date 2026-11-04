@@ -4,7 +4,7 @@ import com.lingxi.code.R
 
 /** Stable routes retain old deep links while new entries mirror desktop settings. */
 object SettingsRoutes {
-    const val CREDENTIALS = "settings/provider-credentials"
+    const val PROVIDER_ACCOUNTS = "settings/provider-accounts"
     const val GENERAL = "settings/general"
     const val CUSTOM_PROVIDERS = "settings/custom-providers"
     const val FUSION = "settings/fusion"

@@ -106,6 +106,14 @@
       "params": {
         "message": "123e4567-e89b-12d3-a456-426614174000"
       }
+    },
+    {
+      "url": "lingxi://team/inbox",
+      "route": "team/inbox"
+    },
+    {
+      "url": "https://lingxios.net/open/team/inbox",
+      "route": "team/inbox"
     }
   ],
   "invalid": [
@@ -140,6 +148,9 @@
     "https://lingxios.net/open/session/%2e%2e/new",
     "lingxi://remote/host-only",
     "lingxi://remote/host/session/extra",
-    "lingxi://remote/host/session#payload=%7B%22prompt%22%3A%22x%22%7D"
+    "lingxi://remote/host/session#payload=%7B%22prompt%22%3A%22x%22%7D",
+    "lingxi://team/inbox?code=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "lingxi://team/inbox?workspace=x",
+    "lingxi://team/inbox#payload=%7B%7D"
   ]
 }

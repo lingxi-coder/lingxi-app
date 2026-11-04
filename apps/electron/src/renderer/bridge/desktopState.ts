@@ -1,6 +1,5 @@
 import type {
   AgentDto,
-  AuthStateDto,
   ClientEvent,
   CostDto,
   DoctorReportDto,
@@ -38,7 +37,6 @@ export interface DesktopState {
   readonly taskOutput: Readonly<Record<string, TaskOutputState>>;
   readonly status: StatusSnapshotDto | null;
   readonly doctor: DoctorReportDto | null;
-  readonly auth: AuthStateDto | null;
   readonly hooks: HookDto[];
   readonly agents: AgentDto[];
   readonly lastCost: CostDto | null;
@@ -75,7 +73,6 @@ export function emptyDesktopState(): DesktopState {
     taskOutput: {},
     status: null,
     doctor: null,
-    auth: null,
     hooks: [],
     agents: [],
     lastCost: null,
@@ -197,8 +194,6 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
       return { ...state, status: event.snapshot };
     case 'doctor_report':
       return { ...state, doctor: event.report };
-    case 'auth_state':
-      return { ...state, auth: event.state };
     case 'hooks':
       return { ...state, hooks: [...event.hooks] };
     case 'agents':

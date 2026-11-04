@@ -4,21 +4,11 @@ import OSLog
 import SwiftUI
 
 #if canImport(harness_runtimeFFI)
-import AuthenticationServices
 import UIKit
 import harness_runtimeFFI
 #endif
 
-#if canImport(harness_runtimeFFI)
-final class OAuthPresentationContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        let windows = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows)
-        return windows.first(where: \.isKeyWindow) ?? windows.first ?? UIWindow()
-    }
-}
-#endif
+
 
 #if canImport(harness_runtimeFFI)
 /// Swift implementation of the `IosPermissionSink` UniFFI callback interface
@@ -122,13 +112,6 @@ final class EngineListener: IosEventListener {
         ))
     }
 
-    /// Compatibility with an older generated callback. It intentionally
-    /// drops unscoped progress rather than reintroducing cross-session rows.
-    func onWorkflowProgress(
-        taskId _: String,
-        runId _: String,
-        progress _: WorkflowProgressDto
-    ) async {}
 
     /// Wait for all callbacks enqueued before this call to be applied. This
     /// is also used by durable reattach so terminal recovery state is seen

@@ -21,6 +21,8 @@ export {
   CLIENT_PROTOCOL_MAJOR,
   /** Label of the DataChannel that carries RPC fragments, `'lingxi-agent'`. */
   DATA_CHANNEL_LABEL,
+  /** `initialize.app.features` value of a viewer that understands Bots, `'bots'`. */
+  REMOTE_FEATURE_BOTS,
   /** Largest fragment, kind byte included (16384). */
   FRAGMENT_MAX_BYTES,
   /** Fragment size that packs three to a tunnel frame (16374). */

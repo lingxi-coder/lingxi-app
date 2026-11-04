@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, readdir, readFile, stat, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import type { CronAutomationDto, CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
-import { ScheduledTaskService } from '../src/main/scheduled';
+import { DUE_SOON_MS, ScheduledTaskService, type RoutineBot, type RoutineBots, type RoutineCatalog, type ScheduledTaskServiceOptions } from '../src/main/scheduled';
 import type { SessionRuntime } from '../src/main/bridge.js';
 import type { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
 import type { SettingsStore } from '../src/main/settings';
 import type { ProjectSessionCatalog } from '../src/main/session-catalog';
 import type { SessionRef } from '../src/shared/settings';
+import { awakeFixture } from './bot-helpers.js';
 
 const targetId = '11111111-2222-4333-8444-555555555555';
 function claimWireId(occurrenceId: string, generation = 1): string {
@@ -61,9 +62,10 @@ async function harness(t: TestContext) {
   const errors: unknown[] = [];
   let execute = async (_runId: string, _task: CronJobDto) => 'A completed summary';
   let ensureFailure: Error | undefined;
+  let managed: CronJobDto[] = [];
   const runtime = (ref: SessionRef) => ({ projectPath: ref.projectPath,
     markCronRunStarted: async (runId: string, sessionId: string) => { bindings.push({ runId, sessionId }); },
-    manageCron: async (request: CronRequestDto) => { requests.push(request); return []; },
+    manageCron: async (request: CronRequestDto) => { requests.push(request); return managed; },
     scheduledModelCatalog: async () => ({ details: [], current: 'openai/project-model' }),
     runScheduledTurn: async (runId: string, saved: CronJobDto, beforeStart?: () => Promise<void>) => { await beforeStart?.(); turns.push({ runId, task: saved, ref }); return execute(runId, saved); },
   }) as unknown as SessionRuntime;
@@ -93,12 +95,14 @@ async function harness(t: TestContext) {
     list: async (path: string) => ({ sessions: (catalogRows.get(path) ?? []).slice(0, 200) }),
     find: async (path: string, sessionId: string) => catalogRows.get(path)?.find((row) => row.uuid === sessionId),
   } as unknown as ProjectSessionCatalog;
-  const createService = () => new ScheduledTaskService(settings, manager, catalog, (title, body, ref) => notifications.push({ title, body, ref }), (error) => errors.push(error));
+  const createService = (options: ScheduledTaskServiceOptions = {}) => new ScheduledTaskService(settings, manager, catalog, (title, body, ref) => notifications.push({ title, body, ref }), (error) => errors.push(error), options);
   const service = createService();
   t.after(async () => { service.dispose(); await rm(directory, { recursive: true, force: true }); });
   return { directory, catalog, project, global, managedSessions, grants, projects, archived, catalogRows, ensured, background, turns, requests, leases, notifications, errors, bindings, service, createService,
     source: runtime({ projectPath: project, sessionId: targetId }),
     globalSource: runtime({ projectPath: global, sessionId: targetId }),
+    runtime,
+    setManaged: (jobs: CronJobDto[]) => { managed = jobs; },
     setExecute: (callback: typeof execute) => { execute = callback; },
     failEnsure: (error: Error) => { ensureFailure = error; },
   };
@@ -360,4 +364,468 @@ test('brand discovery failures never fall back to an unrelated workspace', async
   assert.equal(h.background.length, 0);
   assert.equal(h.managedSessions.size, 0);
   assert.deepEqual(await readdir(h.directory), ['scheduled-notifications.json']);
+});
+
+// ---- The workspaces of Bots ----
+
+const botTarget = '66666666-7777-4888-8999-000000000000';
+
+/** The Bots the scheduler is told of: one that exists, as `BotService` answers for its folder. */
+function botsOf(h: Awaited<ReturnType<typeof harness>>, options: { model?: string } = {}) {
+  const root = join(h.directory, 'bots');
+  const workspace = join(root, 'Bot0000000000000000001', 'workspace');
+  const rows: { uuid: string; title: string }[] = [{ uuid: botTarget, title: 'Bot chat' }];
+  const catalogCalls: string[] = [];
+  const catalog: RoutineCatalog = {
+    list: async (path) => { catalogCalls.push(`list ${path}`); return { sessions: rows } as never; },
+    find: async (path, sessionId) => { catalogCalls.push(`find ${path} ${sessionId}`); return rows.find((row) => row.uuid === sessionId) as never; },
+  };
+  const bot: RoutineBot = { botId: 'Bot0000000000000000001', name: 'Research', workspace, ...(options.model ? { model: options.model } : {}), catalog: () => catalog };
+  const present = new Set([workspace]);
+  const deleting = new Set<string>();
+  const api: RoutineBots = {
+    routineBots: () => present.has(workspace) && !deleting.has(workspace) ? [bot] : [],
+    routineBotFor: (path) => path === workspace && present.has(workspace) && !deleting.has(workspace) ? bot : undefined,
+    isBotWorkspace: (path) => basename(path) === 'workspace' && dirname(dirname(path)) === root,
+  };
+  h.service.attachBots(api);
+  return { bot, workspace, rows, catalogCalls, deleting, remove: () => { present.delete(workspace); }, api };
+}
+
+async function until(condition: () => Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (await condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail('the condition did not come true');
+}
+
+test('the workspace of a Bot is a scope named for the Bot, and is not a project', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  assert.deepEqual(h.service.scopes(), [
+    { id: 'global', label: 'No project' },
+    { id: h.project, projectPath: h.project, label: 'project' },
+    { id: b.workspace, label: 'Research', botId: b.bot.botId },
+  ]);
+  assert.ok(!('projectPath' in h.service.scopes()[2]!), 'the Bot\'s folder is not offered as a project');
+  assert.equal(h.service.resolveScope(b.workspace), b.workspace);
+  assert.equal(h.projects.has(b.workspace), false);
+  await assert.rejects(async () => h.service.resolveScope(join(dirname(b.workspace), 'home')), /Project is unavailable/);
+  await assert.rejects(async () => h.service.resolveScope(join(h.directory, 'bots', 'Bot0000000000000000002', 'workspace')), /This Bot is unavailable/, 'the folder of a Bot that is not there');
+});
+
+test('a Bot that is being deleted, or is gone, is not a scope and starts no controller', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  await writeCatalog(b.workspace, [task()]);
+  b.deleting.add(b.workspace);
+  assert.deepEqual(h.service.scopes().map((scope) => scope.id), ['global', h.project]);
+  assert.throws(() => h.service.resolveScope(b.workspace), /This Bot is unavailable/);
+  await assert.rejects(h.service.manage(b.workspace, { action: 'list' }), /This Bot is unavailable/);
+  await assert.rejects(h.service.manage(b.workspace, { action: 'create', automation: task().automation }), /This Bot is unavailable/);
+  await assert.rejects(h.service.context(b.workspace), /This Bot is unavailable/);
+  assert.equal(h.ensured.length, 0, 'no engine was started for it');
+  assert.equal(h.leases.length, 0, 'and no lease taken');
+  b.deleting.delete(b.workspace);
+  b.remove();
+  assert.deepEqual(h.service.scopes().map((scope) => scope.id), ['global', h.project]);
+  await assert.rejects(h.service.manage(b.workspace, { action: 'list' }), /This Bot is unavailable/);
+});
+
+test('a Bot that begins to be deleted while the scheduler is reading its catalog gets no controller and no lease', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  // The scope was listed and its catalog read; only then did the deletion start. The scheduler gets to the controller last.
+  b.deleting.add(b.workspace);
+  await assert.rejects((h.service as any).controller(b.workspace), /This Bot is unavailable/);
+  assert.equal(h.leases.length, 0);
+  assert.equal(h.ensured.length, 0);
+});
+
+test('a Bot\'s routines are managed in its workspace, by a controller that starts on the Bot\'s model and not the owner\'s', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h, { model: 'bot/model' });
+  await writeCatalog(b.workspace, [task()]);
+  await writeCatalog(h.project, [task()]);
+  await h.service.manage(b.workspace, { action: 'list' });
+  await h.service.manage(h.project, { action: 'list' });
+  assert.equal(h.ensured[0]!.ref.projectPath, b.workspace);
+  assert.equal(h.ensured[0]!.empty, true);
+  assert.equal(h.ensured[0]!.model, 'bot/model');
+  assert.equal(h.ensured[1]!.ref.projectPath, h.project);
+  assert.equal(h.ensured[1]!.model, 'openai/default', 'a project still starts on the owner\'s model');
+  assert.ok(h.service.isControllerSession(b.workspace, h.ensured[0]!.ref.sessionId));
+  assert.deepEqual(h.errors, []);
+});
+
+test('reading the routines of a Bot that has none starts no engine, so opening a Bot\'s page costs nothing', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  assert.deepEqual(await h.service.manage(b.workspace, { action: 'list' }), []);
+  assert.deepEqual(await h.service.manage(b.workspace, { action: 'history', id: 'task-1' }), []);
+  assert.equal(h.ensured.length, 0);
+  assert.equal(h.leases.length, 0);
+  assert.deepEqual(h.errors, []);
+});
+
+test('a Bot without a model of its own starts its controller on no model, which the Bot\'s launch then settles', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  await writeCatalog(b.workspace, [task()]);
+  await h.service.manage(b.workspace, { action: 'list' });
+  assert.equal(h.ensured[0]!.model, undefined, 'the owner\'s model must not be passed on: it would win over what the Bot is set to');
+});
+
+test('discovery finds the routines a chat of the Bot scheduled, and lets go of the Bot\'s controller when the Bot goes', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  await writeCatalog(b.workspace, [{ automation: { status: 'active' } }]);
+  await h.service.sync();
+  assert.equal(h.leases.length, 1);
+  assert.equal(h.leases[0]!.ref.projectPath, b.workspace);
+  assert.equal(h.leases[0]!.released, false);
+  b.deleting.add(b.workspace);
+  await h.service.sync();
+  assert.equal(h.leases[0]!.released, true);
+  assert.deepEqual(h.errors, []);
+});
+
+test('a routine of a Bot runs in the Bot\'s workspace although it is not a project', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  const source = h.runtime({ projectPath: b.workspace, sessionId: targetId });
+  const result = await runClaim(h.service, source, 'bot-run', task({ model: 'bot/model' }));
+  assert.deepEqual(h.background.map((item) => [item.ref.projectPath, item.empty, item.model]), [[b.workspace, true, 'bot/model']]);
+  assert.deepEqual(h.notifications.map((item) => item.ref), [{ projectPath: b.workspace, sessionId: result.sessionId }], 'the notification names the Bot\'s workspace, which the host opens as the Bot\'s chat');
+  assert.deepEqual(h.bindings.map((binding) => binding.sessionId), [result.sessionId]);
+});
+
+test('a routine of a Bot that is being deleted, or is gone, does not run', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  const source = h.runtime({ projectPath: b.workspace, sessionId: targetId });
+  b.deleting.add(b.workspace);
+  await assert.rejects(runClaim(h.service, source, 'deleting', task()), /paused: The Bot is unavailable\./);
+  b.deleting.delete(b.workspace);
+  b.remove();
+  await assert.rejects(runClaim(h.service, source, 'gone', task()), /paused: The Bot is unavailable\./);
+  assert.equal(h.background.length, 0);
+  assert.equal(h.notifications.at(-1)?.body, 'The Bot is unavailable.');
+  // Another folder that is neither a project nor a Bot's is still the project that is unavailable.
+  await assert.rejects(runClaim(h.service, h.runtime({ projectPath: join(h.directory, 'elsewhere'), sessionId: targetId }), 'stranger', task()), /paused: The project is unavailable\./);
+});
+
+test('a routine queued behind another one is checked again once it is its turn, and the Bot may be gone by then', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  const source = h.runtime({ projectPath: b.workspace, sessionId: targetId });
+  const entered = deferred(); const finish = deferred<string>();
+  h.setExecute(async () => { entered.resolve(); return finish.promise; });
+  const saved = task({ runMode: 'selected_session', targetSessionId: botTarget });
+  const first = runClaim(h.service, source, 'first', saved);
+  await entered.promise;
+  const second = runClaim(h.service, source, 'second', saved);
+  const rejected = assert.rejects(second, /The Bot is unavailable/);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  b.deleting.add(b.workspace);
+  finish.resolve('Finished first run');
+  await first; await rejected;
+  assert.equal(h.turns.length, 1, 'the second run never started');
+});
+
+test('the chats a routine can target are the Bot\'s own, not the owner\'s', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  const context = await h.service.context(b.workspace);
+  assert.deepEqual(context.sessions, [{ uuid: botTarget, title: 'Bot chat' }]);
+  assert.deepEqual(b.catalogCalls, [`list ${b.workspace}`]);
+  assert.equal(h.ensured[0]!.ref.projectPath, b.workspace);
+  await h.service.manage(b.workspace, { action: 'create', automation: task({ runMode: 'selected_session', targetSessionId: botTarget }).automation });
+  assert.ok(b.catalogCalls.includes(`find ${b.workspace} ${botTarget}`), 'a target is looked up in the Bot\'s catalog');
+  await assert.rejects(h.service.manage(b.workspace, { action: 'create', automation: task({ runMode: 'selected_session', targetSessionId: targetId }).automation }), /target chat is unavailable/, 'a chat of the owner\'s is not the Bot\'s');
+  // And a project\'s routine still looks in the owner\'s catalog.
+  await h.service.manage(h.project, { action: 'create', automation: task({ runMode: 'selected_session', targetSessionId: targetId }).automation });
+  assert.ok(!b.catalogCalls.some((call) => call.includes(h.project)));
+});
+
+test('the tasks of a Bot are never kept for an unavailable project, whether the Bot is there or not', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  h.setManaged([task()]);
+  await h.service.manage(b.workspace, { action: 'create', automation: task().automation });
+  await h.service.manage(h.project, { action: 'create', automation: task().automation });
+  const cacheFile = join(h.directory, 'scheduled-scopes.json');
+  const cached = JSON.parse(await readFile(cacheFile, 'utf8')) as { path: string }[];
+  assert.deepEqual(cached.map((row) => row.path), [h.project], 'only the project is remembered');
+  h.projects.delete(h.project);
+  b.deleting.add(b.workspace);
+  assert.deepEqual(h.service.scopes().filter((scope) => scope.unavailable).map((scope) => scope.id), [h.project], 'the Bot is not listed as an unavailable project');
+  b.remove();
+  assert.deepEqual(h.service.scopes().filter((scope) => scope.unavailable).map((scope) => scope.id), [h.project]);
+});
+
+test('an entry kept for the folder of a Bot is never offered as an unavailable project, and is dropped when the Bot is released', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  const cacheFile = join(h.directory, 'scheduled-scopes.json');
+  await writeFile(cacheFile, JSON.stringify([{ path: b.workspace, label: 'workspace', jobs: [task()] }, { path: h.project, label: 'project', jobs: [task()] }]));
+  const service = h.createService();
+  t.after(() => service.dispose());
+  service.attachBots(b.api);
+  h.projects.delete(h.project);
+  b.remove();
+  assert.deepEqual(service.scopes().filter((scope) => scope.unavailable).map((scope) => scope.id), [h.project]);
+  service.releaseScope(b.workspace);
+  await until(async () => !(await readFile(cacheFile, 'utf8')).includes(b.workspace));
+  assert.deepEqual((JSON.parse(await readFile(cacheFile, 'utf8')) as { path: string }[]).map((row) => row.path), [h.project], 'what was kept for the project is kept');
+});
+
+test('releasing a scope lets go of its controller at once, and the scheduler may start another when the scope is listed again', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  h.setManaged([task()]);
+  await writeCatalog(b.workspace, [task()]);
+  await h.service.manage(b.workspace, { action: 'list' });
+  assert.equal(h.leases.length, 1);
+  assert.equal(h.leases[0]!.released, false, 'an active routine keeps the controller');
+  h.service.releaseScope(b.workspace);
+  assert.equal(h.leases[0]!.released, true);
+  h.service.releaseScope(b.workspace);
+  h.service.releaseScope(join(h.directory, 'never-seen'));
+  assert.equal(h.leases.length, 1, 'releasing what is not held is harmless');
+  await h.service.manage(b.workspace, { action: 'list' });
+  assert.equal(h.leases.length, 2);
+  assert.equal(h.leases[1]!.released, false);
+});
+
+test('without Bots attached the scheduler is what it was: projects only, and a Bot\'s folder is just an unknown path', async (t) => {
+  const h = await harness(t);
+  assert.deepEqual(h.service.scopes().map((scope) => scope.id), ['global', h.project]);
+  assert.throws(() => h.service.resolveScope(join(h.directory, 'bots', 'Bot0000000000000000001', 'workspace')), /Project is unavailable/);
+});
+
+// ---- Waking up ----
+
+test('the computer waking up before the scheduler has started does nothing', async (t) => {
+  const h = await harness(t);
+  await writeCatalog(h.project, [{ automation: { status: 'active' } }]);
+  h.service.wake();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(h.leases.length, 0, 'nothing was looked at');
+  assert.equal(h.ensured.length, 0);
+  assert.deepEqual(h.errors, []);
+});
+
+test('the computer waking up makes the scheduler look at the routines at once, not at its next tick', async (t) => {
+  const h = await harness(t);
+  h.service.start();
+  await h.service.sync();
+  assert.equal(h.leases.length, 0);
+  // What happened during the sleep: a routine of the project was found in its catalog.
+  await writeCatalog(h.project, [{ automation: { status: 'active' } }]);
+  h.service.wake();
+  await h.service.sync();
+  assert.equal(h.leases.length, 1, 'the sync that waking began has run');
+  assert.equal(h.leases[0]!.ref.projectPath, h.project);
+  assert.deepEqual(h.errors, []);
+});
+
+test('a sync that waking began and that fails goes to the reporter the tick uses', async (t) => {
+  const h = await harness(t);
+  h.service.start();
+  await h.service.sync();
+  (h.service as unknown as { sync(): Promise<void> }).sync = () => Promise.reject(new Error('the catalog cannot be read'));
+  h.service.wake();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(h.errors.map(String), ['Error: the catalog cannot be read']);
+});
+
+test('the computer waking up after the scheduler was closed does nothing', async (t) => {
+  const h = await harness(t);
+  h.service.start();
+  await h.service.sync();
+  h.service.dispose();
+  await writeCatalog(h.project, [{ automation: { status: 'active' } }]);
+  h.service.wake();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(h.leases.length, 0);
+  assert.deepEqual(h.errors, []);
+});
+
+// ---- Keeping the computer awake for the routines of Bots ----
+
+/** A scheduler that keeps the computer awake as the owner has asked, a Bot, and a clock the test moves. */
+function awakeScheduler(h: Awaited<ReturnType<typeof harness>>, t: TestContext, options: { enabled?: boolean } = {}) {
+  const awake = awakeFixture(options.enabled ?? true);
+  const clock = { time: 1_800_000_000_000 };
+  const service = h.createService({ keepAwake: awake.keepAwake, now: () => clock.time });
+  t.after(() => service.dispose());
+  const b = botsOf(h);
+  service.attachBots(b.api);
+  return { ...awake, clock, service, b };
+}
+
+/** The Bot has a routine that runs next at `next`, and the scheduler looks. */
+async function lookWhenNext(s: ReturnType<typeof awakeScheduler>, h: Awaited<ReturnType<typeof harness>>, next: number | undefined, patch: Partial<CronAutomationDto> = {}): Promise<void> {
+  await writeCatalog(s.b.workspace, [{ automation: { status: 'active' } }]);
+  h.setManaged([{ ...task(patch), ...(next !== undefined ? { next_run_at: next } : {}) }]);
+  await s.service.sync();
+}
+
+test('a routine of a Bot keeps the computer awake while it runs, and one of the owner\'s does not', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  const entered = deferred(); const finish = deferred<string>();
+  h.setExecute(async () => { entered.resolve(); return finish.promise; });
+  const running = runClaim(s.service, h.runtime({ projectPath: s.b.workspace, sessionId: targetId }), 'bot-run', task());
+  await entered.promise;
+  assert.deepEqual(s.log, ['start 41']);
+  finish.resolve('Done');
+  await running;
+  assert.deepEqual(s.log, ['start 41', 'stop 41']);
+
+  await runClaim(s.service, h.source, 'owner-run', task());
+  assert.deepEqual(s.log, ['start 41', 'stop 41'], 'the owner\'s own routine asked nothing');
+});
+
+test('a routine of a Bot that fails lets the computer sleep again', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  h.setExecute(async () => { throw new Error('interrupted: The session was lost.'); });
+  await assert.rejects(runClaim(s.service, h.runtime({ projectPath: s.b.workspace, sessionId: targetId }), 'bot-run', task()), /session was lost/);
+  assert.deepEqual(s.log, ['start 41', 'stop 41']);
+});
+
+test('a routine of a Bot that is being deleted, or is gone, does not run and keeps nothing awake', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  s.b.deleting.add(s.b.workspace);
+  await assert.rejects(runClaim(s.service, h.runtime({ projectPath: s.b.workspace, sessionId: targetId }), 'deleting', task()), /The Bot is unavailable/);
+  assert.deepEqual(s.log, []);
+});
+
+test('the computer is kept awake from ten minutes before a routine of a Bot is due, to the moment it is run', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  const due = s.clock.time + 3 * 60 * 60_000;
+  assert.equal(DUE_SOON_MS, 10 * 60_000);
+
+  s.clock.time = due - DUE_SOON_MS - 1;
+  await lookWhenNext(s, h, due);
+  assert.deepEqual(s.log, [], 'not yet: a millisecond more than ten minutes');
+
+  s.clock.time = due - DUE_SOON_MS;
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41'], 'ten minutes exactly is soon enough');
+
+  s.clock.time = due - 1_000;
+  await s.service.sync();
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41'], 'looking again changes nothing');
+
+  // It runs: the run holds the computer from here on, and the next one is tomorrow.
+  s.clock.time = due + 5_000;
+  h.setManaged([{ ...task(), next_run_at: due + 24 * 60 * 60_000 }]);
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41', 'stop 41']);
+});
+
+test('a routine that is overdue, waiting to be claimed, counts as due', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  await lookWhenNext(s, h, s.clock.time - 45 * 60_000);
+  assert.deepEqual(s.log, ['start 41']);
+});
+
+test('routines that will not run, and routines of the owner\'s, keep nothing awake', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  const soon = s.clock.time + 60_000;
+  await lookWhenNext(s, h, soon, { status: 'paused' });
+  assert.deepEqual(s.log, [], 'a paused routine');
+  await lookWhenNext(s, h, undefined);
+  assert.deepEqual(s.log, [], 'a routine with no next time, such as one that has run for the last time');
+  // The same due time, in a project.
+  h.setManaged([{ ...task(), next_run_at: soon }]);
+  await writeCatalog(s.b.workspace, []);
+  await writeCatalog(h.project, [{ automation: { status: 'active' } }]);
+  await s.service.sync();
+  assert.deepEqual(s.log, [], 'a routine of the owner\'s');
+});
+
+test('one routine soon due is enough, and the computer sleeps again when none is', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  const now = s.clock.time;
+  await writeCatalog(s.b.workspace, [{ automation: { status: 'active' } }]);
+  h.setManaged([{ ...task(), id: 'later', next_run_at: now + 5 * 60 * 60_000 }, { ...task(), id: 'soon', next_run_at: now + 4 * 60_000 }]);
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41']);
+  h.setManaged([{ ...task(), id: 'later', next_run_at: now + 5 * 60 * 60_000 }]);
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41', 'stop 41']);
+});
+
+test('a catalog that cannot be read, or a Bot that is gone, ends the wait rather than extending it', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  await lookWhenNext(s, h, s.clock.time + 60_000);
+  assert.deepEqual(s.log, ['start 41']);
+  await writeFile(join(s.b.workspace, '.lingxi', 'scheduled_tasks.json'), '{ this is not json');
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41', 'stop 41']);
+  assert.equal(h.errors.length, 1, 'and the reason was reported');
+
+  await lookWhenNext(s, h, s.clock.time + 60_000);
+  assert.deepEqual(s.log, ['start 41', 'stop 41', 'start 42']);
+  s.b.deleting.add(s.b.workspace);
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41', 'stop 41', 'start 42', 'stop 42']);
+});
+
+test('waking is when the clock shows a routine of a Bot has become due, and the computer is held for it', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  await writeCatalog(s.b.workspace, [{ automation: { status: 'active' } }]);
+  const due = s.clock.time + 2 * 60 * 60_000;
+  h.setManaged([{ ...task(), next_run_at: due }]);
+  s.service.start();
+  await s.service.sync();
+  assert.deepEqual(s.log, []);
+  // The computer slept through two hours; its first words on waking are the clock.
+  s.clock.time = due + 60_000;
+  s.service.wake();
+  await s.service.sync();
+  assert.deepEqual(s.log, ['start 41']);
+});
+
+test('closing the scheduler lets the computer sleep, and a look that was under way takes no hold afterwards', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t);
+  await lookWhenNext(s, h, s.clock.time + 60_000);
+  assert.deepEqual(s.log, ['start 41']);
+  s.service.dispose();
+  assert.deepEqual(s.log, ['start 41', 'stop 41']);
+  s.service.dispose();
+  assert.deepEqual(s.log, ['start 41', 'stop 41'], 'closing twice lets go once');
+
+  // A look that is in the middle of listing the routines when the scheduler is closed.
+  const other = h.createService({ keepAwake: s.keepAwake, now: () => s.clock.time });
+  t.after(() => other.dispose());
+  other.attachBots(s.b.api);
+  h.setManaged([{ ...task(), next_run_at: s.clock.time + 60_000 }]);
+  const request = h.requests.push.bind(h.requests);
+  h.requests.push = (...items) => { other.dispose(); return request(...items); };
+  await other.sync();
+  assert.deepEqual(s.log, ['start 41', 'stop 41'], 'it held nothing');
+});
+
+test('nothing is asked of the computer when the owner has not asked for it', async (t) => {
+  const h = await harness(t);
+  const s = awakeScheduler(h, t, { enabled: false });
+  await lookWhenNext(s, h, s.clock.time + 60_000);
+  h.setExecute(async () => 'Done');
+  await runClaim(s.service, h.runtime({ projectPath: s.b.workspace, sessionId: targetId }), 'bot-run', task());
+  assert.deepEqual(s.log, []);
 });

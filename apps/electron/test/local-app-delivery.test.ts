@@ -42,8 +42,8 @@ test('a later running start cannot hide the published application card', () => {
 test('non-publish and failed LocalApp results stay ordinary grouped tools', () => {
   for (const item of [{ ...published, status: 'error' as const }, { ...published, nativeOutput: { action: 'list', apps: [] } }]) {
     const rows = transcriptRows([shell, item], false);
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0]?.type === 'tool-group' && rows[0].tools.length, 2);
+    assert.equal(rows.length, 2);
+    assert.deepEqual(rows.flatMap(row => row.type === 'tool-group' ? row.tools.map(tool => tool.id) : []), ['install', 'publish']);
     assert.doesNotMatch(render([shell, item]), /local-app-chat-card/);
   }
 });
@@ -54,9 +54,8 @@ test('activity view preserves the app card outside collapsed tool details', () =
     liveItems: [shell, published, { ...published, id: 'start', status: 'running', nativeOutput: undefined }],
     running: true,
   })));
-  const collapsedGroups = [...html.matchAll(/<details class="activity-tool-group"[\s\S]*?<\/details>/g)];
-  assert.equal(collapsedGroups.length, 2, 'installation and start remain collapsed');
-  for (const [details] of collapsedGroups) assert.doesNotMatch(details, /local-app-chat-card/);
+  assert.doesNotMatch(html, /activity-tool-group/);
+  assert.match(html, /data-status="running"/, 'the current start remains visible beside the published app');
   assert.equal((html.match(/>Open app<\/button>/g) ?? []).length, 1);
 });
 

@@ -30,8 +30,29 @@ use bridge::McpEndpoint;
 use bridge_server::boot::{self, BridgeArgs};
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--provider-settings-command") {
+        let home = boot::brand_home()
+            .ok_or_else(|| anyhow::anyhow!("provider settings home unavailable"))?;
+        let mut cfg = harness_runtime::desktop::DesktopConfig::default();
+        cfg.lingxi_home = home.clone();
+        let managed = harness_runtime::desktop::managed_settings_overlay(&cfg)
+            .await
+            .map_err(|_| anyhow::anyhow!("managed settings unavailable"))?;
+        let result =
+            bridge_server::provider_settings::run(&home, managed.as_ref(), std::io::stdin().lock())
+                .map_err(|error| anyhow::anyhow!(error))?;
+        println!("{result}");
+        return Ok(());
+    }
     if std::env::args().nth(1).as_deref() == Some("--local-app-service-json") {
         return bridge_server::local_app_service::run().await;
     }
@@ -100,6 +121,21 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if args.provider_account_command {
+        let home = args
+            .session_config_home
+            .clone()
+            .or_else(boot::brand_home)
+            .ok_or_else(|| anyhow::anyhow!("account configuration directory unavailable"))?;
+        let input = bridge_server::provider_accounts::read_command(std::io::stdin().lock())
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let result = bridge_server::provider_accounts::execute(&home, input)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+        println!("{result}");
+        return Ok(());
+    }
+
     if args.workspace_environment_json {
         let cwd = std::env::current_dir()
             .map_err(|_| anyhow::anyhow!("failed to resolve workspace environment directory"))?;
@@ -156,25 +192,17 @@ async fn main() -> anyhow::Result<()> {
 
     // (2) Resolve config, then receive credentials over the dedicated stdin
     //     channel before assembly. They are never placed in argv/env or logged.
-    let mut cfg = boot::resolve_desktop_config(&args);
-    let mut provider_keys = BTreeMap::new();
-    let mut openai_oauth = None;
+    let mut cfg = boot::resolve_desktop_config(&args).map_err(|error| anyhow::anyhow!(error))?;
+    let mut provider_accounts = None;
+    let mut provider_account_home = None;
+    let mut provider_account_credentials = BTreeMap::new();
     if args.credential_stdin {
         let envelope = boot::read_credential_envelope(&mut std::io::stdin().lock())
             .map_err(|e| anyhow::anyhow!(e))?;
-        if let Some(api_key) = envelope.api_key {
-            cfg.api_key = api_key;
-        }
-        provider_keys = envelope.provider_keys;
-        openai_oauth = envelope.openai_oauth;
+        provider_accounts = envelope.provider_accounts;
+        provider_account_home = envelope.provider_account_home;
+        provider_account_credentials = envelope.provider_account_credentials;
         cfg.injected_plugin_secrets = envelope.plugin_secrets;
-    }
-    if args.api_key_stdin {
-        cfg.api_key = boot::read_api_key_line(&mut std::io::stdin().lock())
-            .map_err(|e| anyhow::anyhow!(e))?;
-    }
-    if boot::has_no_credential_source(&cfg) && provider_keys.is_empty() {
-        tracing::info!("no parent credential supplied for this bridge session");
     }
     tracing::info!(
         cwd = %cfg.cwd.display(),
@@ -183,9 +211,14 @@ async fn main() -> anyhow::Result<()> {
         "bridge-server: resolved desktop config"
     );
 
-    let bound = boot::assemble_with_credentials(cfg, provider_keys, openai_oauth)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to assemble bridge runtime: {e}"))?;
+    let bound = boot::assemble_with_account_credentials(
+        cfg,
+        provider_accounts,
+        provider_account_credentials,
+        provider_account_home,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to assemble bridge runtime: {e}"))?;
 
     // Capture the ordered runtime lifecycle before moving the connection into
     // the endpoint. It outlives the pump and drains all accepted work before

@@ -89,7 +89,6 @@ pub mod daemon_lock;
 pub mod daemon_roster;
 pub mod exit_codes;
 mod headless_host;
-mod headless_oauth;
 #[cfg(unix)]
 mod headless_process_io;
 pub mod idle_notify;

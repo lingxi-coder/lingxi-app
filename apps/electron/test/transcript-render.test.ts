@@ -52,6 +52,7 @@ import { Stage } from '../src/renderer/components/Stage';
 import { emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
 import { parseSlashCommandMessage } from '../src/renderer/components/slashCommandMessage';
 import { ToolCall, toolIconName } from '../src/renderer/components/ToolCall';
+import { agentAvatarIndex } from '../src/renderer/components/AgentAvatar';
 import { ToolGroup } from '../src/renderer/components/ToolGroup';
 import {
   ASSISTANT_NARRATION_COLLAPSE_MAX_CHARS,
@@ -93,7 +94,7 @@ test('finished shell cards and groups do not announce that commands are still ru
       render(React.createElement(ToolCall, { item, onSetOpen: () => {} })),
       render(React.createElement(ToolGroup, { group: { type: 'tool-group', id: 'group', tools: [item] }, open: true, toolOpen: () => false, onSetOpen: () => {} })),
     ]) {
-      assert.ok(html.includes(status === 'running' ? '>Running<' : '>Ran<'));
+      assert.ok(html.includes(status === 'running' ? '>Running<' : status === 'done' ? '>Ran<' : '>Run<'));
       assert.ok(html.includes('echo done'));
       assert.doesNotMatch(html, /Running 1 shell command|Shell command/);
     }
@@ -523,6 +524,15 @@ test('tool icon mapping covers the built-in tool families and has a fallback', (
   assert.equal(toolIconName('GitCommit'), 'git');
   assert.equal(toolIconName('TodoWrite'), 'tasks');
   assert.equal(toolIconName('mcp__unknown__call'), 'mcp-fallback');
+});
+
+test('a spawned agent uses the same avatar in its tool and agent rows', () => {
+  const id = 'c0ffee00-1234-5678-9abc-def012345678';
+  assert.equal(agentAvatarIndex(id), agentAvatarIndex(`agent:${id}`));
+  const item: ToolRunItem = { ...READ, tool: 'Agent', agentId: id,
+    view: { ...READ.view, verb: 'task', label: 'Agent', title: 'Agent(research)' } };
+  const html = render(React.createElement(ToolCall, { item, onSetOpen: () => {} }));
+  assert.match(html, new RegExp(`data-agent-avatar="${agentAvatarIndex(`agent:${id}`)}"`));
 });
 
 test('short tool bodies and diffs stay unmounted until explicitly opened', () => {

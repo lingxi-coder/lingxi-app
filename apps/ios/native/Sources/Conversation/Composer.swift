@@ -62,6 +62,8 @@ struct Composer: View {
     var promptSuggestionSourceCodeUnits: [UInt16]? = nil
     var promptSuggestionNotice: String? = nil
     var suggestionTurnKey: String = ""
+    var historySessionKey: String = ""
+    var historyMessages: [String] = []
     var onSuggestionFeedback: (String) -> Void = { _ in }
     @State private var shownSuggestionKey: String?
     @State private var rejectedSuggestionKey: String?
@@ -159,6 +161,8 @@ struct Composer: View {
         promptSuggestionSourceCodeUnits: [UInt16]? = nil,
         promptSuggestionNotice: String? = nil,
         suggestionTurnKey: String = "",
+        historySessionKey: String = "",
+        historyMessages: [String] = [],
         onSuggestionFeedback: @escaping (String) -> Void = { _ in },
         slashCommands: [ConversationSlashCommand] = [],
         slashCommandsLoaded: Bool = false,
@@ -222,6 +226,8 @@ struct Composer: View {
         self.promptSuggestionSourceCodeUnits = promptSuggestionSourceCodeUnits
         self.promptSuggestionNotice = promptSuggestionNotice
         self.suggestionTurnKey = suggestionTurnKey
+        self.historySessionKey = historySessionKey
+        self.historyMessages = historyMessages
         self.onSuggestionFeedback = onSuggestionFeedback
         self.slashCommands = slashCommands
         self.slashCommandsLoaded = slashCommandsLoaded
@@ -287,7 +293,9 @@ struct Composer: View {
                         return SlashCommandMatcher.argumentHint(for: text, catalog: slashCommands, cursor: cursor)
                     },
                     onSubmit: send,
-                    onAcceptSuggestion: visibleSuggestion == nil ? nil : acceptSuggestion
+                    onAcceptSuggestion: visibleSuggestion == nil ? nil : acceptSuggestion,
+                    historySessionKey: historySessionKey,
+                    historyMessages: historyMessages
                 )
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .onChange(of: Array(draft.utf16)) { _, newDisplayCodeUnits in
@@ -908,6 +916,7 @@ private struct ComposerTurnActionIcon: View {
 /// Android `AttachmentThumb`.
 private struct AttachmentThumb: View {
     @Environment(\.theme) private var t
+    @State private var preview = false
     let attachment: ComposerAttachment
     let onRemove: () -> Void
 
@@ -915,7 +924,7 @@ private struct AttachmentThumb: View {
         HStack(spacing: 8) {
             #if canImport(UIKit)
                 ZStack(alignment: .topTrailing) {
-                    Image(uiImage: attachment.image)
+                    Button { preview = true } label: { Image(uiImage: attachment.image)
                         .resizable()
                         .scaledToFill()
                         .frame(width: 74, height: 62)
@@ -924,6 +933,12 @@ private struct AttachmentThumb: View {
                             RoundedRectangle(cornerRadius: 10)
                                 .stroke(t.borderStrong.opacity(0.55), lineWidth: 0.5)
                         }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(String(localized: "chat_preview_attached_image"))
+                    .fullScreenCover(isPresented: $preview) {
+                        NativeImagePreview(source: "data:\(attachment.mediaType);base64,\(attachment.base64)", mediaType: attachment.mediaType, fallbackImage: attachment.image)
+                    }
                     Button(action: onRemove) {
                         LXIcon(name: .x, size: 11, color: .white, stroke: 2)
                             .frame(width: 24, height: 24)

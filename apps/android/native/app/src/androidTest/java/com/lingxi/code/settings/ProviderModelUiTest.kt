@@ -26,6 +26,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -56,6 +58,25 @@ class ProviderModelUiTest {
         id = "preview", preset = "custom", name = "Preview", url = "https://example.com", key = "",
         model = "model-0", status = ConnStatus.Configured, enabled = true,
     )
+
+    @Test fun catalogRefreshWaitsForConnectionAndShowsDispatchFailure() {
+        val store = SettingsStore()
+        val connected = mutableStateOf(false)
+        val notice = mutableStateOf<String?>(null)
+        var requests = 0
+        rule.setContent {
+            LingXiTheme(darkTheme = false) {
+                ProviderListPage(com.lingxi.code.model.ProviderKind.Llm, store.state.value, store,
+                    onEdit = {}, onAdd = {}, onRefreshCatalog = { requests++ },
+                    catalogRefreshEnabled = connected.value, catalogRefreshNotice = notice.value)
+            }
+        }
+        rule.onNodeWithText(text(R.string.settings_parity_refresh_catalog)).assertIsNotEnabled()
+        rule.runOnIdle { assertEquals(0, requests); connected.value = true }
+        rule.onNodeWithText(text(R.string.settings_parity_refresh_catalog)).assertIsEnabled().performClick()
+        rule.runOnIdle { assertEquals(1, requests); notice.value = "Synthetic catalog dispatch failure" }
+        rule.onNodeWithText("Synthetic catalog dispatch failure").assertIsDisplayed()
+    }
 
     @Test fun defaultSelectionSearchesLongCatalogWithoutChangingVisibility() {
         var provider = initial
@@ -133,7 +154,7 @@ class ProviderModelUiTest {
         capture(name)
     }
 
-    @Test fun connectionEditorKeepsCredentialDraftWhenInspectingModels() {
+    @Test fun connectionEditorKeepsEndpointDraftWhenInspectingModels() {
         val store = SettingsStore()
         val id = store.addProvider(com.lingxi.code.model.ProviderKind.Llm, "custom")
         rule.setContent {
@@ -149,24 +170,43 @@ class ProviderModelUiTest {
         android.util.Log.i("ModelUiProgress", "capture connection")
         capture("connection-light")
         android.util.Log.i("ModelUiProgress", "enter draft")
-        rule.onNodeWithTag("provider.api-key").performScrollTo().performTextInput("sk-ui-placeholder")
+        rule.onNodeWithTag("provider.api-base").performScrollTo().performTextReplacement("https://draft.example.test/v1")
         android.util.Log.i("ModelUiProgress", "open models")
         rule.onNodeWithTag("provider.models.open").performScrollTo().performClick()
         android.util.Log.i("ModelUiProgress", "verify models")
         rule.onNodeWithTag("provider.models.search").assertIsDisplayed()
         android.util.Log.i("ModelUiProgress", "close sheet")
         rule.onNodeWithText(text(R.string.common_close)).performClick()
-        rule.onNodeWithTag("provider.api-key").performScrollTo()
-        android.util.Log.i("ModelUiProgress", "show draft")
-        rule.onNodeWithText(text(R.string.settings_provider_show_key)).performClick()
-        rule.onNodeWithTag("provider.api-key").assertTextContains("sk-ui-placeholder")
+        rule.onNodeWithTag("provider.api-base").performScrollTo()
+        rule.onNodeWithTag("provider.api-base").assertTextContains("https://draft.example.test/v1")
         android.util.Log.i("ModelUiProgress", "open advanced")
         rule.onNodeWithTag("provider.advanced").performScrollTo().performClick()
         android.util.Log.i("ModelUiProgress", "verify advanced")
         rule.onNodeWithText(text(R.string.settings_provider_connection_add)).assertIsDisplayed()
         android.util.Log.i("ModelUiProgress", "close sheet")
         rule.onNodeWithText(text(R.string.common_close)).performClick()
-        rule.onNodeWithTag("provider.api-key").performScrollTo().assertTextContains("sk-ui-placeholder")
+        rule.onNodeWithTag("provider.api-base").performScrollTo().assertTextContains("https://draft.example.test/v1")
+    }
+
+    @Test fun hostAccountModelPermissionsAndProjectedModelsAppearWithoutCatalogPermissionAssumptions() {
+        var selected = ""
+        val rows = listOf(
+            ProviderAccountModelAvailability("custom", "custom", "model-0", listOf("A"), listOf("A"), emptyList(), emptyList()),
+            ProviderAccountModelAvailability("custom", "custom", "only-B", listOf("B"), emptyList(), listOf("B"), emptyList()),
+            ProviderAccountModelAvailability("custom", "custom", "denied", emptyList(), emptyList(), emptyList(), listOf("B")),
+        )
+        rule.setContent { LingXiTheme(darkTheme = false) {
+            ProviderModelSheet(initial, listOf(details("model-0")), true, false,
+                onUpdate = {}, onSelect = { selected = it }, onDismiss = {}, accountAvailability = rows)
+        } }
+        rule.onNodeWithText(text(R.string.provider_account_model_confirmed)).assertIsDisplayed()
+        rule.onNodeWithTag("provider.models.search").performTextInput("only-B")
+        rule.onNodeWithText(text(R.string.provider_account_model_unverified)).assertIsDisplayed()
+        rule.onNodeWithTag("provider.models.row.only-B").performClick()
+        rule.runOnIdle { assertEquals("only-B", selected) }
+        rule.onNodeWithTag("provider.models.search").performTextReplacement("denied")
+        rule.onNodeWithText(text(R.string.provider_account_model_forbidden)).assertIsDisplayed()
+        rule.onNodeWithText(text(R.string.provider_account_model_no_eligible)).assertIsDisplayed()
     }
 
     @Test fun missingCatalogStillOffersCustomModelEntry() {

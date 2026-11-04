@@ -256,6 +256,7 @@ fun RootScreen(
     onOpenTerminal: (sessionId: String, initCommand: String?) -> Unit = { _, _ -> },
     /** Open the Remote Control screens, which the host draws above this one. */
     onOpenRemoteControl: () -> Unit = {},
+    onOpenTeams: () -> Unit = {},
     modelSetupRequired: Boolean = false,
     // FlowMode (心流) profile bits, read from the persisted AppearancePrefs and
     // passed down so the voice-orb overlay can label itself + gate its text input.
@@ -656,6 +657,7 @@ fun RootScreen(
     val resolvedSettingsStore: SettingsStore =
         settingsStore ?: viewModel(factory = SettingsStore.factory(context))
     val settingsState by resolvedSettingsStore.state.collectAsState()
+    val providerAccountState by resolvedSettingsStore.providerAccounts.state.collectAsState()
     LaunchedEffect(settingsState.voice, settingsState.llmProviders) {
         audioGuidance = null
     }
@@ -667,8 +669,16 @@ fun RootScreen(
     }
     val currentEngineSource by chatViewModel.engineSource.collectAsStateWithLifecycle()
     DisposableEffect(resolvedSettingsStore, currentEngineSource) {
-        resolvedSettingsStore.bindProviderCredentialSource(currentEngineSource)
-        onDispose { resolvedSettingsStore.bindProviderCredentialSource(null) }
+        resolvedSettingsStore.bindProviderAccountSource(currentEngineSource)
+        onDispose { resolvedSettingsStore.bindProviderAccountSource(null) }
+    }
+    LaunchedEffect(resolvedSettingsStore, currentEngineSource, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                resolvedSettingsStore.providerAccounts.refresh()
+                delay(15_000)
+            }
+        }
     }
     LaunchedEffect(currentEngineSource, settingsState.voice, settingsState.llmProviders, state.session.id, state.model.id, appInForeground) {
         val audioSource = currentEngineSource as? com.lingxi.code.conversation.EngineConversationSource
@@ -2173,6 +2183,7 @@ fun RootScreen(
                             closeDrawer()
                             onOpenRemoteControl()
                         },
+                        onOpenTeams = { closeDrawer(); onOpenTeams() },
                     )
                 }
             },
@@ -2361,8 +2372,12 @@ fun RootScreen(
                         runConversationAction { chatViewModel.resendLast() }
                     },
                     modelSetupRequired = modelSetupRequired,
+                    modelAvailabilityNotice = providerAccountState.availabilityProblem?.let {
+                        com.lingxi.code.settings.accountAvailabilityProblemLabel(it)
+                    },
                     onOpenModelSettings = onOpenModelSettings,
                     modelProviderStatuses = modelProviderStatuses,
+                    accountModelAvailability = providerAccountState.modelAvailability,
                     onOpenProviderSettings = onOpenProviderSettings,
                     computerUseSetup = computerUseSetup,
                     onOpenComputerUseSettings = onOpenComputerUseSettings,
@@ -2389,7 +2404,11 @@ fun RootScreen(
         // Immersive voice overlay (full-screen, above everything else).
         VoiceFlowOverlay(visible = voiceActive)
 
-        com.lingxi.code.conversation.SideChatSheet(chatViewModel.sideChats, isDark, onCreate = chatViewModel::createSideChat)
+        com.lingxi.code.conversation.SideChatSheet(
+            chatViewModel.sideChats, isDark, onCreate = chatViewModel::createSideChat,
+            modelProviderStatuses = modelProviderStatuses,
+            accountModelAvailability = providerAccountState.modelAvailability,
+        )
 
         // Permission prompt (above everything): renders the head parked request
         // and resolves it by submitting Approve/DenyPermission through the source,

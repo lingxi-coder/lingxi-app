@@ -69,7 +69,7 @@ class LingxiMarketplaceSeeder(private val context: Context) {
             if (store.data.first()[SEEN] == true) return@withContext
             PluginAdminSession(source).open { session ->
                 var catalog = session.catalog()
-                val region = ProviderSettingsRepository(context).use { it.audioProviderRegion() }
+                val region = ProviderSettingsRepository(context).audioProviderRegion()
                 LingxiMarketplace.sourceToAdd(catalog, seen = false, providerRegion = region)?.let { marketplace ->
                     val revision = catalog.revisions["user"] ?: error("The plugin catalog has no user revision")
                     session.apply(JSONObject().put("action", "marketplace_add").put("source", marketplace), revision)

@@ -2,7 +2,7 @@
 // Do not edit. Run scripts/checks/generate-client-protocol.py after updating the pin.
 // Nested DTOs and semantic validation remain in protocol.ts and validation.ts.
 
-// Custom Serde fingerprints (review changes): command=af88521a395dcbc9 event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=687222993966002c event_source=2f84ac6515662ada
+// Custom Serde fingerprints (review changes): command=af4073569e8ac93f event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=97999b148e4a9b02 event_source=736675594350ceb1
 
 import type {
   AgentDto,
@@ -12,7 +12,6 @@ import type {
   AudioOperationIdDto,
   AudioOperationRequestDto,
   AudioOperationResultDto,
-  AuthStateDto,
   ComputerAccessResponseDto,
   ConfigurationDomainDto,
   ConfigurationEffectDto,
@@ -93,16 +92,6 @@ export interface TaskRowDto {
   agent_id?: string;
 }
 
-/** Rust Serde rejects unknown fields when decoding this DTO. */
-export interface OpenAiOAuthSessionDto {
-  access_token: string;
-  refresh_token?: string;
-  expires_at: number;
-  account_id?: string;
-  fedramp: boolean;
-  email?: string;
-}
-
 export interface CoordinatorWorkerDto {
   agent_id: string;
   name: string;
@@ -124,9 +113,7 @@ export type ClientCommand =
   | { type: 'answer_ask_user_question'; request_id: number; answers: Record<string, string> }
   | { type: 'cancel_ask_user_question'; request_id: number }
   | { type: 'set_permission_mode'; mode: string }
-  | { type: 'list_provider_credentials'; operation_id: number; provider_ids: Array<string>; preview_provider_ids?: Array<string> }
-  | { type: 'set_provider_credential'; operation_id: number; provider_id: string; credential: string }
-  | { type: 'delete_provider_credential'; operation_id: number; provider_id: string }
+  | { type: 'provider_accounts'; operation_id: number; action: string; request_json: string; credential?: string | null }
   | { type: 'set_model'; model: string }
   | { type: 'list_models' }
   | { type: 'run_slash_command'; raw: string; images: Array<ImageRefDto>; turn_id?: number | null }
@@ -136,8 +123,6 @@ export type ClientCommand =
   | { type: 'new_session'; cwd?: string | null; model?: string | null }
   | { type: 'resume_session'; session_id: string; cwd?: string | null }
   | { type: 'list_sessions'; limit?: number | null }
-  | { type: 'login' }
-  | { type: 'logout' }
   | { type: 'force_compact' }
   | { type: 'clear_session' }
   | { type: 'task_list'; status_filter?: TaskStatusDto | null; request_id?: string | null }
@@ -164,7 +149,6 @@ export type ClientCommand =
   | { type: 'pause_turn'; turn_id: number; reason: string }
   | { type: 'set_typescript_lsp_mode'; mode: string }
   | { type: 'fork_session'; session_id: string; target_mode: SessionModeDto }
-  | { type: 'test_provider_connection'; operation_id: number; provider_id: string; api_base: string; model: string; credential_override?: string | null }
   | { type: 'cron_manage'; request_id: string; request: CronRequestDto }
   | { type: 'task_message'; task_id: string; message: string }
   | { type: 'cron_run_started'; run_id: string; session_id: string }
@@ -230,7 +214,9 @@ export type ClientEvent =
   | { type: 'model_list'; models: Array<string>; current: string; current_model_source?: string; details?: Array<ModelDetailsDto> }
   | { type: 'model_changed'; model: string; model_source?: string }
   | { type: 'permission_mode_changed'; mode: string }
-  | { type: 'provider_credential_status'; operation_id: number; configured_provider_ids: Array<string>; unavailable_provider_ids?: Array<string>; storage_encrypted: boolean; credential_previews?: Record<string, string>; error?: string }
+  | { type: 'provider_accounts_updated'; operation_id: number; snapshot_json: string; error?: string }
+  | { type: 'provider_account_routing'; event_json: string }
+  | { type: 'provider_account_refresh_requested'; account_id: string; identity_generation: number; credential_revision: number }
   | { type: 'mcp_servers'; servers: Array<McpServerDto> }
   | { type: 'hooks'; hooks: Array<HookDto> }
   | { type: 'agents'; agents: Array<AgentDto> }
@@ -239,7 +225,6 @@ export type ClientEvent =
   | { type: 'memory_entries'; entries: Array<MemoryEntryDto> }
   | { type: 'status_snapshot'; snapshot: StatusSnapshotDto }
   | { type: 'settings_snapshot'; effective_json: string; provenance_json: string; files_json?: string; active_json?: string; locked?: Array<string>; layers_json?: string; merged_keys?: Array<string> }
-  | { type: 'auth_state'; state: AuthStateDto }
   | { type: 'doctor_report'; report: DoctorReportDto }
   | { type: 'task_row'; task: TaskRowDto }
   | { type: 'task_output_chunk'; task_id: string; content: string; total_lines: number; truncated: boolean }
@@ -261,7 +246,6 @@ export type ClientEvent =
   | { type: 'skills'; skills: Array<SkillDto> }
   | { type: 'typescript_lsp_mode_changed'; requested: string; effective: string; available: boolean }
   | { type: 'session_forked'; source_session_id: string; session_id: string; mode: SessionModeDto }
-  | { type: 'provider_connection_tested'; operation_id: number; provider_id: string; connected: boolean; reachable: boolean; authenticated: boolean; model_available: boolean; http_status?: number; latency_ms: number; message: string; used_stored_credential: boolean }
   | { type: 'configuration_operation'; domain: ConfigurationDomainDto; operation_id: number; status: ConfigurationOperationStatusDto; effect: ConfigurationEffectDto; message?: string; details_json?: string }
   | { type: 'skill_catalog'; catalog_json: string }
   | { type: 'skill_document'; document_json: string }
@@ -274,7 +258,6 @@ export type ClientEvent =
   | { type: 'message_identity'; message_id: string }
   | { type: 'loop_wakeup'; message: string; companion?: string; streak: number; since_ms: number }
   | { type: 'task_lifecycle'; event_json: string }
-  | { type: 'openai_oauth_updated'; session: OpenAiOAuthSessionDto }
   | { type: 'cron_run_bound'; run_id: string; error: string | null }
   | { type: 'scheduled_run_finished'; run_id: string; summary: string | null; error: string | null }
   | { type: 'cron_run_requested'; run_id: string; task: CronJobDto }
@@ -449,13 +432,18 @@ const CLIENT_EVENT_FIELDS: Record<ClientEvent['type'], readonly BasicField[]> = 
   permission_mode_changed: [
     ['mode', 'string', false, false, false],
   ],
-  provider_credential_status: [
+  provider_accounts_updated: [
     ['operation_id', 'unsigned', false, false, false],
-    ['configured_provider_ids', 'array', false, false, false],
-    ['unavailable_provider_ids', 'array', true, false, false],
-    ['storage_encrypted', 'boolean', false, false, false],
-    ['credential_previews', 'map', true, false, false],
+    ['snapshot_json', 'string', false, false, false],
     ['error', 'string', true, false, true],
+  ],
+  provider_account_routing: [
+    ['event_json', 'string', false, false, false],
+  ],
+  provider_account_refresh_requested: [
+    ['account_id', 'string', false, false, false],
+    ['identity_generation', 'unsigned', false, false, false],
+    ['credential_revision', 'unsigned', false, false, false],
   ],
   mcp_servers: [
     ['servers', 'array', false, false, false],
@@ -488,9 +476,6 @@ const CLIENT_EVENT_FIELDS: Record<ClientEvent['type'], readonly BasicField[]> = 
     ['locked', 'array', true, false, true],
     ['layers_json', 'string', true, false, true],
     ['merged_keys', 'array', true, false, true],
-  ],
-  auth_state: [
-    ['state', 'opaque', false, false, false],
   ],
   doctor_report: [
     ['report', 'opaque', false, false, false],
@@ -580,18 +565,6 @@ const CLIENT_EVENT_FIELDS: Record<ClientEvent['type'], readonly BasicField[]> = 
     ['session_id', 'string', false, false, false],
     ['mode', 'opaque', false, false, false],
   ],
-  provider_connection_tested: [
-    ['operation_id', 'unsigned', false, false, false],
-    ['provider_id', 'string', false, false, false],
-    ['connected', 'boolean', false, false, false],
-    ['reachable', 'boolean', false, false, false],
-    ['authenticated', 'boolean', false, false, false],
-    ['model_available', 'boolean', false, false, false],
-    ['http_status', 'unsigned', true, false, true],
-    ['latency_ms', 'unsigned', false, false, false],
-    ['message', 'string', false, false, false],
-    ['used_stored_credential', 'boolean', false, false, false],
-  ],
   configuration_operation: [
     ['domain', 'opaque', false, false, false],
     ['operation_id', 'unsigned', false, false, false],
@@ -638,9 +611,6 @@ const CLIENT_EVENT_FIELDS: Record<ClientEvent['type'], readonly BasicField[]> = 
   ],
   task_lifecycle: [
     ['event_json', 'string', false, false, false],
-  ],
-  openai_oauth_updated: [
-    ['session', 'opaque', false, false, false],
   ],
   cron_run_bound: [
     ['run_id', 'string', false, false, false],
@@ -852,9 +822,7 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   answer_ask_user_question: true,
   cancel_ask_user_question: true,
   set_permission_mode: true,
-  list_provider_credentials: true,
-  set_provider_credential: true,
-  delete_provider_credential: true,
+  provider_accounts: true,
   set_model: true,
   list_models: true,
   run_slash_command: true,
@@ -864,8 +832,6 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   new_session: true,
   resume_session: true,
   list_sessions: true,
-  login: true,
-  logout: true,
   force_compact: true,
   clear_session: true,
   task_list: true,
@@ -892,7 +858,6 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   pause_turn: true,
   set_typescript_lsp_mode: true,
   fork_session: true,
-  test_provider_connection: true,
   cron_manage: true,
   task_message: true,
   cron_run_started: true,
@@ -958,7 +923,9 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   model_list: true,
   model_changed: true,
   permission_mode_changed: true,
-  provider_credential_status: true,
+  provider_accounts_updated: true,
+  provider_account_routing: true,
+  provider_account_refresh_requested: true,
   mcp_servers: true,
   hooks: true,
   agents: true,
@@ -967,7 +934,6 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   memory_entries: true,
   status_snapshot: true,
   settings_snapshot: true,
-  auth_state: true,
   doctor_report: true,
   task_row: true,
   task_output_chunk: true,
@@ -989,7 +955,6 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   skills: true,
   typescript_lsp_mode_changed: true,
   session_forked: true,
-  provider_connection_tested: true,
   configuration_operation: true,
   skill_catalog: true,
   skill_document: true,
@@ -1002,7 +967,6 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   message_identity: true,
   loop_wakeup: true,
   task_lifecycle: true,
-  openai_oauth_updated: true,
   cron_run_bound: true,
   scheduled_run_finished: true,
   cron_run_requested: true,

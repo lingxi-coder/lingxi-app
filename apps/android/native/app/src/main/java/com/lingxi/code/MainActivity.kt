@@ -270,6 +270,9 @@ class MainActivity : ComponentActivity() {
             // Remote Control is a full-surface overlay like settings; a link or a
             // notification names the destination, which the overlay consumes once.
             var remoteOpen by rememberSaveable { mutableStateOf(false) }
+            var teamsOpen by rememberSaveable { mutableStateOf(false) }
+            var teamInvite by rememberSaveable { mutableStateOf<String?>(null) }
+            val openTeams: () -> Unit = { teamsOpen = true; settingsOpen = false; terminalOpen = false; remoteOpen = false }
             var requestedRemoteRoute by remember { mutableStateOf<com.lingxi.code.remote.RemoteRoute?>(null) }
             val openRemote: (com.lingxi.code.remote.RemoteRoute) -> Unit = { route ->
                 requestedRemoteRoute = route
@@ -308,13 +311,15 @@ class MainActivity : ComponentActivity() {
                     var awaitingFeature = false
                     // Any destination but a Remote Control session leaves the overlay behind.
                     if (parts.first() != "remote") remoteOpen = false
+                    if (parts.first() != "team") teamsOpen = false
                     when {
+                        link.route in setOf("team/join", "team/inbox") -> { teamInvite = link.params["code"]; openTeams() }
                         parts.first() == "remote" -> com.lingxi.code.remote.RemoteRoute.fromLink(link)?.let(openRemote) ?: run { handled = false }
                         link.params["workspace"] != null && parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal") && preparedNativeLink != link -> { requestedFeatureLink = link; awaitingFeature = true }
                         parts.first() in setOf("session", "new", "project", "apps", "market", "runtime", "import") -> { requestedFeatureLink = link; awaitingFeature = true }
                         parts.first() == "terminal" -> openTerminal(id, link.payload["command"] as? String)
                         parts.first() == "settings" -> {
-                            val pages = mapOf("general" to SettingsRoutes.GENERAL, "account" to SettingsRoutes.ACCOUNT, "appearance" to SettingsRoutes.APPEARANCE, "notifications" to SettingsRoutes.NOTIFICATIONS, "voice" to SettingsRoutes.VOICE, "custom-providers" to SettingsRoutes.CUSTOM_PROVIDERS, "fusion" to SettingsRoutes.FUSION, "permissions" to SettingsRoutes.ENGINE_PERMISSIONS, "tools-agent" to SettingsRoutes.TOOLS_AGENT, "skills" to SettingsRoutes.ENGINE_SKILLS, "mcp" to SettingsRoutes.ENGINE_MCP, "hooks" to SettingsRoutes.HOOKS, "plugins" to SettingsRoutes.PLUGINS, "diagnostics" to SettingsRoutes.DIAGNOSTICS, "about" to SettingsRoutes.ABOUT, "projects" to SettingsRoutes.PROJECTS, "archived-chats" to SettingsRoutes.ARCHIVED, "language" to SettingsRoutes.LANGUAGE, "input" to SettingsRoutes.INPUT, "privacy" to SettingsRoutes.PRIVACY, "permission-mode" to SettingsRoutes.PERMISSION_MODE, "open-source" to SettingsRoutes.OPEN_SOURCE, "linux-runtime" to SettingsRoutes.LINUX_RUNTIME, "typescript-lsp" to SettingsRoutes.TYPESCRIPT_LSP, "computer-use" to SettingsRoutes.COMPUTER_USE, "dream" to SettingsRoutes.DREAM, "cron" to SettingsRoutes.CRON, "provider-credentials" to SettingsRoutes.CREDENTIALS)
+                            val pages = mapOf("general" to SettingsRoutes.GENERAL, "account" to SettingsRoutes.ACCOUNT, "appearance" to SettingsRoutes.APPEARANCE, "notifications" to SettingsRoutes.NOTIFICATIONS, "voice" to SettingsRoutes.VOICE, "custom-providers" to SettingsRoutes.CUSTOM_PROVIDERS, "fusion" to SettingsRoutes.FUSION, "permissions" to SettingsRoutes.ENGINE_PERMISSIONS, "tools-agent" to SettingsRoutes.TOOLS_AGENT, "skills" to SettingsRoutes.ENGINE_SKILLS, "mcp" to SettingsRoutes.ENGINE_MCP, "hooks" to SettingsRoutes.HOOKS, "plugins" to SettingsRoutes.PLUGINS, "diagnostics" to SettingsRoutes.DIAGNOSTICS, "about" to SettingsRoutes.ABOUT, "projects" to SettingsRoutes.PROJECTS, "archived-chats" to SettingsRoutes.ARCHIVED, "language" to SettingsRoutes.LANGUAGE, "input" to SettingsRoutes.INPUT, "privacy" to SettingsRoutes.PRIVACY, "permission-mode" to SettingsRoutes.PERMISSION_MODE, "open-source" to SettingsRoutes.OPEN_SOURCE, "linux-runtime" to SettingsRoutes.LINUX_RUNTIME, "typescript-lsp" to SettingsRoutes.TYPESCRIPT_LSP, "computer-use" to SettingsRoutes.COMPUTER_USE, "dream" to SettingsRoutes.DREAM, "cron" to SettingsRoutes.CRON, "provider-credentials" to SettingsRoutes.PROVIDER_ACCOUNTS)
                             pages[id]?.let { settingsInitialRoute = it; settingsOpen = true } ?: run { handled = false }
                         }
                         parts.first() == "provider" -> { settingsInitialRoute = SettingsRoutes.providerEdit(ProviderKind.Llm.name, android.net.Uri.encode(id)); settingsOpen = true }
@@ -407,6 +412,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onOpenTerminal = openTerminal,
                         onOpenRemoteControl = { openRemote(com.lingxi.code.remote.RemoteRoute.Hosts) },
+                        onOpenTeams = openTeams,
                         modelSetupRequired = settingsState.needsLlmSetup,
                         assistantName = prefs.assistantName,
                         inputDialog = prefs.inputDialog,
@@ -525,6 +531,12 @@ class MainActivity : ComponentActivity() {
                             },
                             onClose = { remoteOpen = false },
                         )
+                    }
+
+                    if (teamsOpen) {
+                        com.lingxi.code.teams.TeamsScreen(initialInvite = teamInvite, onInviteHandled = { teamInvite = null },
+                            onOpenAccount = { teamsOpen = false; settingsInitialRoute = SettingsRoutes.ACCOUNT; settingsOpen = true },
+                            onClose = { teamsOpen = false; teamInvite = null })
                     }
 
                     // First-run setup wizard — shown until onboarding completes;

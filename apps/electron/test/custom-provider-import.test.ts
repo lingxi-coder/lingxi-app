@@ -112,12 +112,10 @@ test('missing OpenCode fields remain editable in preview', () => {
   entry.apiKey = 'key';
   assert.equal(validateImportEntry(entry), null);
 });
-test('existing stored credentials permit import without overwriting device secrets', () => {
+test('provider definitions import without credentials and leave account secrets untouched', () => {
   const entry = parseProviderImport(JSON.stringify({providers:{custom:{...native,apiKeyEnv:undefined}}})).entries[0];
-  assert.ok(validateImportEntry(entry));
-  assert.equal(validateImportEntry(entry, {credentialConfigured:true}), null);
-  assert.throws(() => mergeProviderImport({}, [entry]));
-  const merged = mergeProviderImport({}, [entry], {credentialConfigured: name => name === 'custom'});
+  assert.equal(validateImportEntry(entry), null);
+  const merged = mergeProviderImport({}, [entry]);
   assert.deepEqual(merged.credentials, {});
   assert.equal(merged.providers.custom.apiKeyEnv, undefined);
 });

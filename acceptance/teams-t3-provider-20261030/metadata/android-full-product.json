@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "scope": "Current full Android product Direct Full debug APK on owned arm64 16 KiB AVD; normal member sign-in and read-only real-provider history; not a probe, Store release, physical-device or new Android model-dispatch acceptance.",
+  "source": {
+    "product_revision": "ea59210a827015d0ac316aee393bcb08f22f40f1",
+    "runtime_revision": "b09033fa446dfdee48e71ea18ca16095b068a353",
+    "mobile_linux_sdk_revision": "bfd17e346f7ebbb2bcd5206f3c05f56b83a1858b",
+    "source_clean_at_build_and_ui_checkpoint": true,
+    "source_checkpoint_utc": "2026-10-30T16:03:22.389195+00:00",
+    "tracked_files_unchanged": 4146,
+    "tracked_manifest_sha256": "66e04d97f0ecd2822865b0be9fb2144870f81da08443d259ca44c7bc99d368f6",
+    "index_clean_at_checkpoint": true,
+    "later_docs_only_edits_are_outside_binary_under_test": true
+  },
+  "build": {
+    "distribution": "direct",
+    "build_type": "debug",
+    "full_product_ffi_crate": "android-aar",
+    "ffi_features": [
+      "uniffi",
+      "android-computer-use"
+    ],
+    "ffi_profile": "dev optimized; debug info 0",
+    "cargo_incremental": false,
+    "cargo_jobs": 1,
+    "isolated_target": "output/teams-t3-product-android/target",
+    "gradle_offline": true,
+    "gradle_max_workers": 1,
+    "watchdog_poll_seconds": 1,
+    "disk_floor_bytes": 2147483648,
+    "product_native_and_maven_verified": true,
+    "rootfs_evidence_and_apk_native_checks_passed": true,
+    "attempts": {
+      "full-direct-native-ffi-r1": {
+        "exit": 0,
+        "elapsed_seconds": 529.1,
+        "stopped": null
+      },
+      "full-direct-gradle-offline-r1": {
+        "exit": 1,
+        "elapsed_seconds": 203.1,
+        "stopped": null
+      },
+      "full-direct-unit-r1": {
+        "exit": 0,
+        "elapsed_seconds": 33.2,
+        "stopped": null
+      },
+      "full-direct-gradle-offline-r2": {
+        "exit": 0,
+        "elapsed_seconds": 18.1,
+        "stopped": null
+      },
+      "full-direct-install-r1": {
+        "exit": 0,
+        "elapsed_seconds": 2.0,
+        "stopped": null
+      }
+    },
+    "first_gradle_attempt_note": "Missing task-local ignored project debug keystore at signing validation, after Kotlin/dex compilation. Existing exact canonical debug input verified and copied with directory0700/file0600; source unchanged. Retry passed. This was a build-input issue, not a code compilation failure.",
+    "unit_tests": {
+      "tests": 1276,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1276,
+      "suites": 155
+    },
+    "unit_count_scope": "Fresh testDirectDebugUnitTest results only; counted once. The successful combined retry reused these results. Play/probe/earlier JVM runs excluded."
+  },
+  "dependencies": {
+    "ndk_version": "27.2.12479018",
+    "ndk_archive_sha256": "8c5685457c58a88527367d46d3f14e8c727d962c39f85344cff0c0768a73c3b7",
+    "gstreamer_version": "1.28.8",
+    "gstreamer_archive_sha256": "f19c6f971a956675402452fce0fe772d66dbd0d28d70999618355813ea593a99",
+    "gstreamer_arm64_content_identity": "b4d60487514aa2d94d96fc0222821244d7e5866294f396e510ddb0aed06870f4",
+    "sherpa_version": "1.13.2",
+    "sherpa_aar_sha256": "9b2a290b8c7f31bd0aba35abb4628e87fe8d0eb71796a98aa12f3acd089ceaed",
+    "native_support_manifest_sha256": "cdfb1e6e2d9cbb5d3ed8dd0fb62d89b361c7473dc23f209aea672429cb063571",
+    "native_support_kind": "native-support-only",
+    "native_support_source_dirty": false,
+    "native_support_contains_rust_core": false,
+    "native_support_built_abis": [
+      "arm64-v8a",
+      "x86_64"
+    ],
+    "native_support_artifacts_per_abi": {
+      "arm64-v8a": 3,
+      "x86_64": 3
+    },
+    "proot_revision": "8cf13e997cdc9472997aae19df8050c073c9a86c",
+    "rootfs_version": "3.24.2-user1",
+    "rootfs_arm64_archive_sha256": "043363aa7a21ff3b3095652de2849d9d6a3a2546fc8012c082383dfed32a37a8",
+    "native_support_artifacts_total": 6
+  },
+  "artifact": {
+    "package": "com.lingxi.code.direct.debug",
+    "apk_bytes": 449791589,
+    "apk_sha256": "750a0b74080b4fa3301a726b0deceafebdb73a56500a9adf91f3052808ba17c8",
+    "signature_verified": true,
+    "certificate_sha256": "5cf27eb0fd1a36cc47027fb0b81ced5b234036104d6fb0e2c3e0a740e8c2cc42",
+    "jni_bytes": 166452712,
+    "jni_sha256": "8f0f927aa607b93f31d80417a8a61ce72f1f574b46a4c8a6d3531e67a1c5f5fa",
+    "kotlin_aggregate_sha256": "a1773003db060090336b17b8cae424336e36669d3ef28c0bfb90f20f98cd968c",
+    "direct_full": true,
+    "android_computer_use_compiled": true,
+    "apk_abis": [
+      "arm64-v8a"
+    ],
+    "kotlin_generated_files": 3,
+    "signing_scope": "Existing project Android debug certificate; no release/Store signature claim."
+  },
+  "device": {
+    "type": "owned Android emulator",
+    "avd": "LingXi_Teams_T3",
+    "serial": "emulator-5556",
+    "avd_task_local": true,
+    "android_version": "17",
+    "abi": "arm64-v8a",
+    "page_size_bytes": 16384,
+    "installed_current_apk": true,
+    "extra_runtime_permissions_enabled": false,
+    "notifications_permission_granted": false,
+    "physical_device": false,
+    "data_and_session_preserved": true
+  },
+  "ui": {
+    "normal_member_login": true,
+    "created_reset_or_verification_email_sent": false,
+    "team": "T3 Live ef6e2add",
+    "connected": true,
+    "owner_role_visible": true,
+    "bot_owner_privacy_disclosure_visible": true,
+    "tool_execution_remains_owner_desktop_disclosure_visible": true,
+    "offline_group": "T3 offline luna-ef6e2add-offline",
+    "offline_group_exact_final": "LUNA_OK_luna-ef6e2add-offline_Blue",
+    "offline_group_exact_final_visible_count": 1,
+    "old_dm_exact_final": "LUNA_OK_luna-ef6e2add_Blue",
+    "old_dm_exact_final_visible_count": 1,
+    "question_closed_or_expired_visible": true,
+    "bot_revoked_visible": true,
+    "auth_restart": {
+      "exact_package_terminated_and_relaunched": true,
+      "no_data_clear_or_signout": true,
+      "same_member_automatically_restored": true,
+      "no_second_login": true,
+      "same_team_and_both_histories_readable": true,
+      "offline_group_final_closed_question_and_revoked_state_rechecked": true
+    },
+    "new_trigger_messages_sent": 0,
+    "question_answers_sent": 0,
+    "bot_rebinds": 0,
+    "history_count_scope": "Exact final text elements observed once in each normal UI conversation view; no claim of a second Android model invocation or independent backend final-ID audit."
+  },
+  "public_evidence": {
+    "screenshot": "screenshots/android-real-provider-history.png",
+    "ffi_log": "logs/android-full-direct-ffi.log.gz",
+    "build_log": "logs/android-full-product-build.log.gz",
+    "build_log_sources": [
+      "full-direct-gradle-offline-r1.log",
+      "full-direct-unit-r1.log",
+      "full-direct-gradle-offline-r2.log"
+    ],
+    "ffi_log_source": "full-direct-native-ffi-r1.log",
+    "screenshot_sha256": "196acf7519d921573cdc887256b5ec5467f6d66cfd3067cc053c220113a80a04",
+    "account_screen_or_adb_log_exported": false,
+    "secret_scan": "Known private fixture email/password/uid/idToken/refreshToken values and high-signal key/token patterns checked; no matches. Screenshot visually checked for no email/UID/token."
+  }
+}

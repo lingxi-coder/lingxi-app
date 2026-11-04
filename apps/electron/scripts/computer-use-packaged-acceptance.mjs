@@ -76,7 +76,7 @@ class Cdp {
   }
   close() { this.ws.close(); }
 }
-let page, appChild, fixtureChild, shadowChild, provider, providerId;
+let page, appChild, fixtureChild, shadowChild, provider, providerId, providerAccountId;
 let appProcessIdentity, launchedUserDataDirectory, appLaunchConfiguration;
 let syntheticCredentialStored=false;
 let appGeneration=0, attributionStarted;
@@ -580,8 +580,13 @@ print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sor
   await invoke('command', sessionId, { type: 'update_settings', destination: 'user', patch_json: JSON.stringify(patch) });
   await invoke('command', sessionId, { type: 'refresh_listings', which: [{ type: 'settings' }] });
   await waitFor(() => evaluate(`window.__computerAcceptance.events.some(e=>e.type==='settings_snapshot'&&JSON.parse(e.effective_json).providers?.[${JSON.stringify(providerId)}])`), 'synthetic provider registration');
-  const stored=await invoke('setProviderCredential', providerId, key);syntheticCredentialStored=true;assert.equal(stored.credential.configured,true);assert.equal(stored.credential.encryptionAvailable,true);
-  const credentialStatus=await invoke('providerCredentials',providerId);assert.ok(credentialStatus.some(entry=>entry.providerId===providerId && entry.configured),'The synthetic provider credential must be confirmed');
+  const beforeAccount = await invoke('providerAccounts.snapshot');
+  const stored = await invoke('providerAccounts.command', { action: 'add', expectedRevision: beforeAccount.configRevision,
+    providerId, executionBindingId: providerId, displayName: 'Computer acceptance fixture', authKind: 'api_key' }, key);
+  providerAccountId = stored.accounts.find(entry => entry.providerId === providerId)?.accountId;
+  syntheticCredentialStored = Boolean(providerAccountId);
+  assert.ok(providerAccountId, 'The synthetic provider account must be registered');
+  assert.equal(stored.health.find(entry => entry.accountId === providerAccountId)?.status, 'ready');
   if (options.explicitComputerRule) {
     await invoke('command', sessionId, {
       type: 'update_permission_rules', destination: 'user', behavior: 'allow', add: ['computer'], remove: [],
@@ -722,7 +727,7 @@ print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sor
   receipt.status = 'failed'; receipt.error = String(error.stack ?? error); phase('failed', { error: String(error.message ?? error) }); process.exitCode = 1;
 } finally {
   if(syntheticCredentialStored && !page){receipt.syntheticCredentialRemoved=false;receipt.credentialCleanupError='Application disconnected before synthetic credential cleanup; the run is not fully cleaned.'}
-  if (page && providerId) { try { await invoke('clearProviderCredential', providerId); receipt.syntheticCredentialRemoved = true; } catch (error) { receipt.syntheticCredentialRemoved = false; receipt.credentialCleanupError = String(error.message ?? error); } }
+  if (page && providerAccountId) { try { const snapshot = await invoke('providerAccounts.snapshot'); await invoke('providerAccounts.command', { action: 'remove', expectedRevision: snapshot.configRevision, accountId: providerAccountId }); receipt.syntheticCredentialRemoved = true; } catch (error) { receipt.syntheticCredentialRemoved = false; receipt.credentialCleanupError = String(error.message ?? error); } }
   if (page) { try { await page.send('Browser.close', {}, 3000); } catch {} page.close(); }
   try { await terminateOwnedApp(); } catch(error) { receipt.realAppProcessExited=false;receipt.applicationCleanupError=String(error.message ?? error); }
   if (fixtureChild && fixtureChild.exitCode === null) fixtureChild.kill('SIGTERM');

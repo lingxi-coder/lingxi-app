@@ -72,7 +72,7 @@ class EngineRoundtripTest {
      * instrumentation TARGET context's private `filesDir` (the app under test, on
      * the device sandbox) — no shared global state, cleaned with the app data.
      *
-     * KEYLESS: we read `ANTHROPIC_API_KEY` from the env (empty in CI) and never
+     * KEYLESS: authentication is managed only through account operations; we never
      * hardcode a secret. `NativeEngineFactory.build` builds regardless of key, mirroring
      * the iOS test's keyless `buildIosEngine`.
      */
@@ -85,7 +85,6 @@ class EngineRoundtripTest {
         return NativeEngineFactory.build(
             context = targetContext,
             apiBase = System.getenv("ANTHROPIC_BASE_URL") ?: "https://api.anthropic.com",
-            apiKey = System.getenv("ANTHROPIC_API_KEY") ?: "",
             model = model,
             routingJson = routingJson,
             scenario = NativeEngineScenario.Interactive(NativeEngineCallbacks(onEvent = onEvent)),

@@ -492,16 +492,8 @@ private struct AttachmentPreview: View {
 
     var body: some View {
         Group {
-            if let image = decodedImage(resource.url) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-            } else if resource.icon == "photo", let url = URL(string: resource.url) {
-                AsyncImage(url: url) { content in
-                    content.resizable().scaledToFit()
-                } placeholder: {
-                    ProgressView()
-                }
+            if resource.icon == "photo" {
+                NativeImagePreview(source: resource.url)
             } else {
                 ScrollView {
                     Text(resource.url)
@@ -518,12 +510,6 @@ private struct AttachmentPreview: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private func decodedImage(_ url: String) -> UIImage? {
-        guard url.hasPrefix("data:"), let comma = url.firstIndex(of: ",") else { return nil }
-        let encoded = String(url[url.index(after: comma)...])
-        guard let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters) else { return nil }
-        return UIImage(data: data)
-    }
 }
 
 private extension String {

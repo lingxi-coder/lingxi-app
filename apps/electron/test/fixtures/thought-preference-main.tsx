@@ -42,6 +42,7 @@ function Fixture() {
       ]} running={running} sessionKey={sessionKey} collapseThoughtsByDefault={preference} liveItems={[
         { id: 'before', type: 'narration', role: 'assistant', text: 'Checking the project.' },
         { id: 'read', type: 'tool', tool: 'Read', status: 'done', view: { verb: 'read', label: 'Read', primary: 'Stage.tsx', title: 'Read Stage.tsx' } },
+        { id: 'read-theme', type: 'tool', tool: 'Read', status: 'done', view: { verb: 'read', label: 'Read', primary: 'ThemeContext.tsx', title: 'Read ThemeContext.tsx' } },
         { id: 'thought', type: 'thinking', streamed: true, done, text: done ? 'Finished reasoning' : reasoningText },
         { id: 'shell', type: 'tool', tool: 'Bash', status: toolsDone ? 'done' : 'running', view: { verb: 'shell', label: 'Shell', primary: 'npm run typecheck', title: 'Check TypeScript' } },
         { id: 'after', type: 'narration', role: 'assistant', text: 'Following message.' },

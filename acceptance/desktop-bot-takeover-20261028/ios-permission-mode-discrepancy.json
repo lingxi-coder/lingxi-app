@@ -1,0 +1,28 @@
+{
+  "status": "confirmed_display_discrepancy_unresolved",
+  "session": "7855bf54-2a84-470d-9de2-4e615d2c6a6e",
+  "bot_model": "openai-chatgpt/gpt-6-luna",
+  "bot_config_permission": "default",
+  "desktop_same_thread_effective_label": "Ask",
+  "ios_remote_composer_ax_value": "Auto",
+  "mode_changed_during_test": false,
+  "tools_called_by_ios_echo": false,
+  "observation_boundary": "iOS unique remote composer.controls exposes effectivePermissionMode; not the underlying local composer. Current source applies authoritative controls when present, but captured runtime controls/event sequence is unavailable.",
+  "owning_paths": [
+    "apps/ios/native/Sources/Remote/RemoteConversationSource.swift",
+    "apps/ios/native/Sources/Conversation/EngineConversationSource.swift",
+    "apps/ios/native/Sources/Conversation/ConversationModels.swift",
+    "apps/ios/native/Sources/Conversation/ChatView.swift",
+    "packages/remote-control-client/src/session.rs",
+    "apps/electron/src/main/remoteControl/snapshot.ts"
+  ],
+  "source_findings": [
+    "ConversationModel initial requested/effective permission values are auto.",
+    "Remote reconcile overwrites requested/effective when update.controls is non-nil. Nil preserves existing values.",
+    "Replay occurs before reconciliation; separate controls events have active model guard. Reconcile sets the active model before applying its controls snapshot.",
+    "Asynchronous model listing does not itself change permission values.",
+    "Shared Rust reducer stores controls from snapshot or ConversationControlsChanged events; Desktop snapshot includes controls only when its runtime has that event."
+  ],
+  "hypothesis_not_established": "Initial/missing controls or event ordering could leave iOS default Auto; actual failing update sequence must be captured before assigning root cause.",
+  "required_follow_up": "Reproduce on stable device, inspect authoritative controls/event ordering, fix owning path and verify a newly signed iOS app. Do not change engine permissions merely to match the label."
+}

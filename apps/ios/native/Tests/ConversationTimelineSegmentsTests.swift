@@ -8,6 +8,15 @@ import SwiftUI
 /// `ForEach` id, SwiftUI tears the row down and rebuilds it, which moves the
 /// scroll position under the reader.
 final class ConversationTimelineSegmentsTests: XCTestCase {
+    func testSkillPromptRequiresMatchingCompletedToolBody() {
+        let body = "# LingXi API guide\n\nFull instructions."
+        let trace = ConversationToolTrace(id: "skill", tool: "Skill", status: .completed, skillBody: body)
+        XCTAssertTrue(ConversationSkillInstructions.matches(Message(role: .user, text: body), tool: trace))
+        XCTAssertFalse(ConversationSkillInstructions.matches(Message(role: .user, text: "Another request"), tool: trace))
+        var failed = trace
+        failed.status = .failed
+        XCTAssertFalse(ConversationSkillInstructions.matches(Message(role: .user, text: body), tool: failed))
+    }
     func testCompactSpacingAndThinkingVisibilityDoesNotChangeLayout() {
         let user = Message(role: .user, text: "Question")
         let assistant = Message(role: .ai, text: "Reply")
@@ -20,6 +29,26 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         let withTools = groups + [toolGroup([trace("t1")])]
         XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: withTools), [0, 16, 12, 8, 8])
         XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: [groups[0]]), [0, 16])
+    }
+
+    func testAgentRowsUseActivitySpacingAndPreserveUserTurnBoundaries() {
+        let groups = [
+            ConversationTimelineGroup(id: "before", runID: nil, rows: [.message(Message(role: .ai, text: "Checking"))]),
+            ConversationTimelineGroup(id: "after", runID: nil, rows: [.message(Message(role: .ai, text: "Result"))]),
+            ConversationTimelineGroup(id: "user", runID: nil, rows: [.message(Message(role: .user, text: "Continue"))]),
+        ]
+        for status in ["running", "completed"] {
+            let agent = ConversationAgentSummary(id: "child", name: "Child", agentType: "worker", status: status)
+            XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(
+                groups: groups, transcriptAgents: [agent], transcriptAgentAnchors: [agent.id: "before"]
+            ), [0, 8, 8, 16, 16])
+            XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(
+                groups: groups, transcriptAgents: [agent], transcriptAgentAnchors: [agent.id: "user"]
+            ), [0, 12, 16, 16, 8])
+            XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(
+                groups: groups, transcriptAgents: [agent]
+            ), [0, 8, 12, 16, 16])
+        }
     }
 
     @MainActor
@@ -138,10 +167,20 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         ), ["thought:bottom-slot"])
     }
 
+    func testConsecutiveActivityGroupsKeepInvocationOrder() {
+        let calls = [trace("read-1"), trace("read-2"), ConversationToolTrace(id: "edit", tool: "Edit", status: .completed), trace("read-3")]
+        let projected = ConversationDesktopTimeline.groups([toolGroup(calls)])
+        let ids = projected.map { group in group.rows.compactMap { row -> String? in
+            if case let .tool(_, trace) = row { return trace.id }; return nil
+        } }
+        XCTAssertEqual(ids, [["read-1", "read-2"], ["edit"], ["read-3"]])
+        XCTAssertEqual(Set(projected.map(\.id)).count, projected.count)
+    }
+
     func testDesktopToolSummaryUsesLastToolAndShowsOnlyActiveWork() {
-        let tools = [trace("done"), ConversationToolTrace(id: "live", tool: "Read", status: .running)]
+        let tools = [ConversationToolTrace(id: "done", tool: "Read", status: .completed), ConversationToolTrace(id: "live", tool: "Read", status: .running)]
         XCTAssertEqual(ConversationDesktopTimeline.activeTools(tools).map(\.id), ["live"])
-        XCTAssertEqual(ConversationDesktopTimeline.summary(tools), "Read")
+        XCTAssertTrue(ConversationDesktopTimeline.summary(tools).hasPrefix("Read · "))
     }
 
     #if canImport(harness_runtimeFFI)
@@ -150,7 +189,7 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         struct Offline: Error {}
         func source() -> EngineConversationSource {
             EngineConversationSource(config: EngineConfig(
-                apiBase: "https://invalid.example", apiKey: "", model: "",
+                apiBase: "https://invalid.example", model: "",
                 appSandboxRoot: NSTemporaryDirectory(), projectCwd: nil,
                 sessionMode: .code, visionDelegationEnabled: false),
                 handleBuilder: { _, _, _, _ in throw Offline() })
@@ -231,9 +270,12 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
                 transcriptAgents: model.orderedAgentSummaries,
                 transcriptAgentAnchors: model.transcriptAgentAnchors
             ),
-            ["timeline-tools:spawn-tool", "agents:after:spawn-tool", "timeline-tools:later-tool", "thought:bottom-slot"]
+            ["agents:after:spawn-tool", "timeline-tools:later-tool", "thought:bottom-slot"]
         )
         XCTAssertEqual(model.transcriptAgentAnchors["child"], "spawn-tool")
+        XCTAssertEqual(ConversationTimelineView.toolDestinationID(toolID: "spawn-tool",
+            groups: model.visibleTimelineGroups, transcriptAgents: model.orderedAgentSummaries,
+            transcriptAgentAnchors: model.transcriptAgentAnchors), "agents:after:spawn-tool")
     }
 
     @MainActor

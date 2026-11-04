@@ -722,8 +722,8 @@ mod tests {
             "--permission-prompt-tool",
             "mcp__perm__prompt",
             "--file",
-            "file_abc:doc.txt",
-            "file_def:img.png",
+            r#"{"resource":{},"relativePath":"doc.txt"}"#,
+            r#"{"resource":{},"relativePath":"img.png"}"#,
         ])
         .unwrap();
         assert_eq!(a.prompt.as_deref(), Some("hi"));
@@ -820,10 +820,12 @@ mod tests {
         assert!(r.command.is_none() && r.resume.as_deref() == Some("mcp"));
         // A subcommand-name token as the FIRST argument still routes to the
         // subcommand (no optional-value flag precedes it to eat it).
-        assert!(Argv::from_iter(["lingxi-cli", "auth", "status"])
-            .unwrap()
-            .command
-            .is_some());
+        assert!(
+            Argv::from_iter(["lingxi-cli", "provider", "accounts", "list", "openai"])
+                .unwrap()
+                .command
+                .is_some()
+        );
         // Controls: a normal prompt stays command=None; the `=` filter works.
         assert!(Argv::from_iter(["lingxi-cli", "fix the bug"])
             .unwrap()

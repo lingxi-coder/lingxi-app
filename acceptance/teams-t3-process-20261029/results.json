@@ -1,0 +1,372 @@
+{
+  "schema_version": 1,
+  "sealed_at_utc": "2026-10-30T02:16:05.113705+00:00",
+  "status": "validated_disabled_prerequisite",
+  "t3_enabled": false,
+  "backend_worker_integration": false,
+  "harness_commit": "43031991ba7246b2f1b0f38e05632009334d3aaa",
+  "harness_parent": "dfab0eb36bb20196534509298d88654fce008554",
+  "harness_tree": "dd5ad0b15a1d84b913342abcffd72ba1463eedb9",
+  "harness_branch": "codex/teams-runtime",
+  "harness_clean_at_seal": true,
+  "product_base_commit": "12b5336d24efddddc32f988d7305360e2e5a6d80",
+  "product_branch": "claude/teams",
+  "product_harness_pin": "eed08ca06c35371c1eb7ea5b02ebc10bcae63a12",
+  "sdk_pin": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8",
+  "cargo_lock_changed": false,
+  "tests": [
+    {
+      "name": "worker_process",
+      "passed": 15,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0
+    },
+    {
+      "name": "private_profile",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0
+    },
+    {
+      "name": "visible_text",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 2146
+    },
+    {
+      "name": "turn_recovery",
+      "passed": 39,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 2114
+    }
+  ],
+  "distinct_selected_tests_passed": 74,
+  "not_entire_repository_suite": true,
+  "additional_repeated_test_run": {
+    "kind": "Cargo test integration, prior to normal standalone build",
+    "passed": 15,
+    "counted_twice": false,
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked",
+      "-p",
+      "harness-runtime",
+      "--features",
+      "desktop",
+      "--test",
+      "team_invocation_process",
+      "--",
+      "--test-threads=1"
+    ]
+  },
+  "test_commands": {
+    "visible_text": [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked",
+      "-p",
+      "orchestrator",
+      "--lib",
+      "pumped_visible_text",
+      "--",
+      "--test-threads=1"
+    ],
+    "worker_final": [
+      "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_invocation_process-1dfd968c83f4de4f",
+      "--test-threads=1"
+    ]
+  },
+  "final_build_and_regression_checks": [
+    {
+      "name": "recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "orchestrator",
+        "--lib",
+        "turn_recovery",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 4.99,
+      "free_bytes_before": 45918334976
+    },
+    {
+      "name": "profile",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "harness-runtime",
+        "--features",
+        "desktop",
+        "--test",
+        "team_invocation_profile",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 18.8,
+      "free_bytes_before": 45840830464
+    },
+    {
+      "name": "desktop",
+      "command": [
+        "cargo",
+        "check",
+        "--offline",
+        "--locked",
+        "-p",
+        "harness-runtime",
+        "--lib",
+        "--features",
+        "desktop"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 12.41,
+      "free_bytes_before": 45465010176
+    },
+    {
+      "name": "mobile",
+      "command": [
+        "cargo",
+        "check",
+        "--offline",
+        "--locked",
+        "-p",
+        "harness-runtime",
+        "--lib",
+        "--features",
+        "mobile"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 10.52,
+      "free_bytes_before": 45382287360
+    },
+    {
+      "name": "worker-build",
+      "command": [
+        "cargo",
+        "build",
+        "--offline",
+        "--locked",
+        "-p",
+        "harness-runtime",
+        "--features",
+        "desktop",
+        "--bin",
+        "harness-team-worker"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 23.63,
+      "free_bytes_before": 44746440704
+    }
+  ],
+  "formatting": {
+    "rust_files": [
+      "crates/orchestrator/src/conversation/drivers/mod.rs",
+      "crates/orchestrator/src/conversation/tests/pumped_visible_text_tests.rs",
+      "crates/runtime/src/desktop/mod.rs",
+      "crates/runtime/src/bin/team_worker.rs",
+      "crates/runtime/src/desktop/team_process/mod.rs",
+      "crates/runtime/src/desktop/team_process/protocol.rs",
+      "crates/runtime/src/desktop/team_process/worker.rs",
+      "crates/runtime/tests/desktop/team_invocation_process.rs"
+    ],
+    "rustfmt_exit": 0,
+    "diff_check_exit": 0
+  },
+  "worker_artifact": {
+    "worker_sha256_before": "7e959bdc930a9396ae1df696ef51bf4ed530bac6e02a4b81226001b46d162807",
+    "worker_binary": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/harness-team-worker",
+    "test_binary": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/debug/deps/team_invocation_process-1dfd968c83f4de4f",
+    "test_binary_sha256": "4ce51050847886e3f5742ad12739fedcbddf425633b8aac23a990f9ce0090614",
+    "free_bytes_before": 43188637696,
+    "exit_code": 0,
+    "elapsed_seconds": 45.27,
+    "worker_sha256_after": "7e959bdc930a9396ae1df696ef51bf4ed530bac6e02a4b81226001b46d162807",
+    "mode": "unsigned local debug standalone, normal Desktop dependency features",
+    "built_before_checkpoint_commit": true,
+    "source_files_verified_against_checkpoint": true
+  },
+  "runtime_boundary": {
+    "platform": "macOS only",
+    "credential": "explicit selected static Anthropic API key only",
+    "tools": "all denied",
+    "question_sender": false,
+    "worker_pool": false,
+    "bootstrap_bytes_max": 262144,
+    "reply_utf8_bytes_max": 8192,
+    "cumulative_received_text_utf8_bytes_max": 8192,
+    "deadline_ms_max": 300000,
+    "live_deadline_test_ms": 10000,
+    "reap_timeout_ms": 2000,
+    "private_environment_keys": [
+      "HOME",
+      "LINGXI_CONFIG_DIR",
+      "TMPDIR",
+      "PATH",
+      "LANG",
+      "LC_ALL",
+      "CFFIXED_USER_HOME",
+      "__CF_USER_TEXT_ENCODING"
+    ]
+  },
+  "review": {
+    "verdict": "APPROVE only disabled prerequisite",
+    "changed_files_reviewed": 10,
+    "unresolved_critical": 0,
+    "unresolved_high": 0,
+    "unresolved_medium": 0,
+    "reviewer_executed_tests": false,
+    "fixed_findings": [
+      "exclude retracted attempts and tool preambles from terminal text",
+      "typed terminal API errors and empty text cannot report Completed",
+      "use visible_text for accepted variants and shared recovery guard"
+    ]
+  },
+  "source_files": [
+    {
+      "path": "crates/orchestrator/src/conversation/drivers/mod.rs",
+      "sha256": "0a1caf247ff088251f22332530a1be24954cac7fc1bf0558f4c99c8a7ffdbbef"
+    },
+    {
+      "path": "crates/orchestrator/src/conversation/tests/pumped_visible_text_tests.rs",
+      "sha256": "539a89d202b2b835e2405386ab21330c67e37b33c263d6804733534dc381cd75"
+    },
+    {
+      "path": "crates/runtime/Cargo.toml",
+      "sha256": "407f60fb4b561b43fc2d16ea8b6f13943f9db78063f2f52b069866c603b0150c"
+    },
+    {
+      "path": "crates/runtime/src/bin/team_worker.rs",
+      "sha256": "4227740672c3cadc71e54ce5da0beb623621044c106517438cdfa0bba025fb36"
+    },
+    {
+      "path": "crates/runtime/src/desktop/mod.rs",
+      "sha256": "9584da6b32640910b2e31bfecb0126ef3ddc36336055801de2beeb866430126e"
+    },
+    {
+      "path": "crates/runtime/src/desktop/team_process/mod.rs",
+      "sha256": "421e37168b05ab9974bb1d9609b571f03cd347fb5fec5c02ece241a798d4e277"
+    },
+    {
+      "path": "crates/runtime/src/desktop/team_process/protocol.rs",
+      "sha256": "210435d8ed3a538ac88aaeb10cfa4f442e8fda991c2bb17c9e05684f3fdc532f"
+    },
+    {
+      "path": "crates/runtime/src/desktop/team_process/worker.rs",
+      "sha256": "82c66e9f2c0aa3390707c2f18ab5c60dad934638cb433dcd3253ce0a1c44a557"
+    },
+    {
+      "path": "crates/runtime/tests/desktop/team_invocation_process.rs",
+      "sha256": "6ef9f778894b6b3278c2eef9db9c962b087c4f1bb707649704a9b56cbbab6cf8"
+    },
+    {
+      "path": "docs/TEAM_INVOCATION_PROCESS.md",
+      "sha256": "c24ecaf3642d5450c80efbe91c3a366ed0239ea6873f4c9bfd8e2d550f083011"
+    }
+  ],
+  "compressed_logs": [
+    {
+      "path": "logs/worker-acceptance.log.gz",
+      "raw_source": "process-final-acceptance.log",
+      "raw_sha256": "3a6c4e289ca2e823e3c9156d52ea3d8cb18623f36eb240983a42aef448d07c09",
+      "compressed_sha256": "728ffd3b86469c214d52b7170265b719d80f0724350f42d703e2b85eaf3f8d09",
+      "historical_failure_only": false
+    },
+    {
+      "path": "logs/visible-text.log.gz",
+      "raw_source": "process-visible-text.log",
+      "raw_sha256": "22d4cb710091aa46b0c19009970d780a0bc089a1fcc8d88f735531f72fb841f3",
+      "compressed_sha256": "d95222b6cfdc4b214cd98d90d3675d831789c3f45497e2b9f2915bdae4c16e69",
+      "historical_failure_only": false
+    },
+    {
+      "path": "logs/recovery.log.gz",
+      "raw_source": "process-final-recovery.log",
+      "raw_sha256": "9238df0f7b7a3706b83ac4fd64d54302bcdcd0d7d84ba06d183c831fbeb07009",
+      "compressed_sha256": "d5a02781a6f23f0bffec4e997a2d7dca2fc295dcbbf2a253dddde2b8ef607372",
+      "historical_failure_only": false
+    },
+    {
+      "path": "logs/private-profile.log.gz",
+      "raw_source": "process-final-profile.log",
+      "raw_sha256": "22e18db39a1d2c8b31970c38d221ae3e550789733ba759d2c471c7105309af1d",
+      "compressed_sha256": "96a35587ef586bbaae2a329b2af44b3c0d5cb91623e20f3cfebac7a8452fa9cc",
+      "historical_failure_only": false
+    },
+    {
+      "path": "logs/desktop-check.log.gz",
+      "raw_source": "process-final-desktop.log",
+      "raw_sha256": "927912d39df260d0e0b69aa276128a88cc6113096e89c68b9d8ee2c2f15b2adc",
+      "compressed_sha256": "290756b68b7fde4736b00ec79baf971347e326297bf8a1179c0fb607503eb346",
+      "historical_failure_only": false
+    },
+    {
+      "path": "logs/mobile-check.log.gz",
+      "raw_source": "process-final-mobile.log",
+      "raw_sha256": "605523538867a0df8a114ca728e573b3668aed9cfe97a052231d049e3bef1c08",
+      "compressed_sha256": "8e83cd946c34b9c233e5ead2f27c55843791e5d5ec9028c5dd7203a1a140add6",
+      "historical_failure_only": false
+    },
+    {
+      "path": "logs/worker-build.log.gz",
+      "raw_source": "process-final-worker-build.log",
+      "raw_sha256": "ae9c371546b0196d5051b6183e3ebaf6e6d456b7173cd8985ee5b19bda520706",
+      "compressed_sha256": "7b06d75e363abeab5e91a0cf8a6139ebad36ebfe437616d07435481e3abb54de",
+      "historical_failure_only": false
+    },
+    {
+      "path": "logs/format.log.gz",
+      "raw_source": "process-final-format.log",
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "compressed_sha256": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64",
+      "historical_failure_only": false
+    },
+    {
+      "path": "logs/outer-sandbox-denied-history.log.gz",
+      "raw_source": "process-initial-test.log",
+      "raw_sha256": "8261a590137fd43dcbdfcd181fdee15f687b37cfae34d09875482a424706b37b",
+      "compressed_sha256": "8dcfe59be1cfd7de0861c9b8b838948db14177a7bb6ec4740b874b14ec6f9440",
+      "historical_failure_only": true
+    }
+  ],
+  "free_bytes_at_seal": 41369600000,
+  "minimum_build_floor_bytes": 2147483648,
+  "weekly_usage_observed_percent": 52,
+  "real_provider_used": false,
+  "firebase_used": false,
+  "saved_accounts_or_sessions_used": false,
+  "signed_product_or_device_acceptance": false,
+  "publication": {
+    "push": false,
+    "merge": false,
+    "deploy": false,
+    "iam_change": false
+  },
+  "existing_build_caches_deleted": false,
+  "other_worktree_source_changed": false,
+  "remaining_gates": [
+    "authenticated backend one-shot start consumer and fencing",
+    "owner-only approvals and original-human question broker",
+    "durable final results and idempotent finishBot retry with revocation/recovery",
+    "detached tool containment and independently reliable total deadline before tools",
+    "other model/auth protocols and live provider acceptance",
+    "all four T3 clients plus signed/native/device/offline/crash acceptance",
+    "explicit publication authority before any push/deploy"
+  ]
+}

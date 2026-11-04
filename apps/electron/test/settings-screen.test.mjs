@@ -193,9 +193,7 @@ test('custom providers import, save credentials, preserve edits and isolate laye
   assert.equal(result.overflow, false);
   assert.match(result.retryError, /正整数/);
   assert.equal(result.malformedRowSurvives, true);
-  assert.deepEqual(result.dualAuth, { mode: 'key', keyPresent: true });
-  assert.equal(result.legacy.apiKeyEnv, 'LEGACY_KEY');
-  assert.deepEqual(result.legacy.models, [{ id: 'legacy-model' }]);
+  assert.deepEqual(result.dualAuth, { keyPresent: true });
   assert.deepEqual(result.toggledPricing, { 'final-model': { inputPerMtok: 1, outputPerMtok: 2 }, other: { inputPerMtok: 3, outputPerMtok: 4 } });
   assert.equal(result.pricingTargetProtected, true);
 });

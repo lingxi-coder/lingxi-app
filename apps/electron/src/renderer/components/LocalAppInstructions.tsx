@@ -4,9 +4,10 @@ import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { MarkdownContent } from './MarkdownContent';
 
-export function LocalAppInstructions({ id, text, open, onSetOpen }: {
+export function LocalAppInstructions({ id, text, name = 'local-app', open, onSetOpen }: {
   id: string;
   text: string;
+  name?: string;
   open: boolean;
   onSetOpen(id: string, next: boolean): void;
 }) {
@@ -22,9 +23,9 @@ export function LocalAppInstructions({ id, text, open, onSetOpen }: {
     <button type="button" className="local-app-instructions-toggle"
       aria-expanded={open} aria-controls={contentId} onClick={() => onSetOpen(id, !open)}>
       <Icon name="spark" size={15} stroke={1.6} />
-      <span className="local-app-instructions-title">{tr('desktop_local_apps')}</span>
+      <span className="local-app-instructions-title">{name === 'local-app' ? tr('desktop_local_apps') : name}</span>
       <span className="local-app-instructions-label">{tr('desktop_instructions')}</span>
-      <Icon name={open ? 'chevron' : 'chevronR'} size={12} stroke={1.8} />
+      <span className="local-app-instructions-chevron" aria-hidden="true"><Icon name={open ? 'chevron' : 'chevronR'} size={12} stroke={1.8} /></span>
     </button>
     <div id={contentId} hidden={!open} className="local-app-instructions-body">
       {open && <MarkdownContent text={text} variant="compact" />}

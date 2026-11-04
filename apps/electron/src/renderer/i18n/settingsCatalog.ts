@@ -1016,11 +1016,11 @@ export const settingsCatalog: Record<string, Record<string, string>> = {
     "ko": "기본 요청 형식"
   },
   "desktop_settings_5334aa2c77": {
-    "zh-Hans": "请求格式保存在所选配置层；账号凭据保存在此设备。搜索与语音使用各自支持的连接方式。",
-    "zh-Hant": "請求格式儲存在所選設定層；帳號憑證儲存在此裝置。搜尋與語音使用各自支援的連線方式。",
-    "en": "The request format is saved in the selected configuration layer; account credentials stay on this device. Search and audio use their supported connections.",
-    "ja": "リクエスト形式は選択した設定レイヤーに、アカウント認証情報はこのデバイスに保存されます。検索と音声は対応する接続方法を使用します。",
-    "ko": "요청 형식은 선택한 구성 계층에, 계정 자격 증명은 이 기기에 저장됩니다. 검색과 음성은 각각 지원하는 연결을 사용합니다."
+    "zh-Hans": "所有项目共用此请求格式，账号凭据保存在此设备。",
+    "zh-Hant": "所有專案共用此請求格式，帳號憑證儲存在此裝置。",
+    "en": "All projects share this request format. Account credentials stay on this device.",
+    "ja": "リクエスト形式はすべてのプロジェクトで共通です。認証情報はこのデバイスに保存されます。",
+    "ko": "모든 프로젝트에서 이 요청 형식을 공유합니다. 계정 자격 증명은 이 기기에 저장됩니다."
   },
   "desktop_settings_2746420a13": {
     "zh-Hans": "默认格式",

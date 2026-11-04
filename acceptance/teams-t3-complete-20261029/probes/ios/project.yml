@@ -1,0 +1,103 @@
+name: TeamsT3Probe
+options:
+  deploymentTarget:
+    iOS: "26.0"
+  developmentLanguage: en
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGN_IDENTITY[sdk=iphonesimulator*]: "-"
+    DEVELOPMENT_TEAM: AZ4AX7J833
+    TARGETED_DEVICE_FAMILY: "1,2"
+    TEAM_TEST_BACKEND: ""
+    TEAM_TEST_UID: ""
+    TEAM_TEST_AUTH_PORT: "9098"
+    TEAM_TEST_FIRESTORE_PORT: "8085"
+    TEAM_TEST_BOT_NAME: "Acceptance Bot"
+    TEAM_TEST_CONVERSATION_TITLE: ""
+    TEAM_TEST_QUESTION_ID: ""
+    TEAM_TEST_QUESTION_TEXT: ""
+    TEAM_TEST_EXPECT_QUESTION: "visible"
+packages:
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk.git
+    exactVersion: 12.19.2
+targets:
+  TeamsT3Probe:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - path: ../../../../apps/ios/native/Sources/Teams
+      - path: ../../../../apps/ios/native/Sources/App/CanonicalDeepLink.swift
+      - path: ../../../../apps/ios/native/Resources/Localizable.xcstrings
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.teams.t3.probe
+        PRODUCT_MODULE_NAME: LingxiCode
+        INFOPLIST_FILE: ../../acceptance/teams-t3-complete-20261029/probes/ios/Info.plist
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        ENABLE_TESTABILITY: YES
+        CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]: ../../acceptance/teams-t3-complete-20261029/probes/ios/Simulator.entitlements
+    dependencies:
+      - package: Firebase
+        product: FirebaseAuth
+      - package: Firebase
+        product: FirebaseFirestore
+  TeamsT3ProbeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+      - path: ../../../../apps/ios/native/Tests/TeamBotTests.swift
+      - path: ../../../../apps/ios/native/Tests/TeamsTests.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.teams.t3.probe.tests
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: TeamsT3Probe
+  TeamsT3ProbeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.teams.t3.probe.uitests
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: TeamsT3Probe
+schemes:
+  TeamsT3Probe:
+    build:
+      targets:
+        TeamsT3Probe: all
+        TeamsT3ProbeTests: [test]
+        TeamsT3ProbeUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - TeamsT3ProbeTests
+        - TeamsT3ProbeUITests
+      commandLineArguments:
+        "-AppleLanguages (en)": true
+        "-AppleLocale en_US": true
+      environmentVariables:
+        TEAM_TEST_BACKEND: $(TEAM_TEST_BACKEND)
+        TEAM_TEST_UID: $(TEAM_TEST_UID)
+        TEAM_TEST_AUTH_PORT: $(TEAM_TEST_AUTH_PORT)
+        TEAM_TEST_FIRESTORE_PORT: $(TEAM_TEST_FIRESTORE_PORT)
+        TEAM_TEST_BOT_NAME: $(TEAM_TEST_BOT_NAME)
+        TEAM_TEST_CONVERSATION_TITLE: $(TEAM_TEST_CONVERSATION_TITLE)
+        TEAM_TEST_QUESTION_ID: $(TEAM_TEST_QUESTION_ID)
+        TEAM_TEST_QUESTION_TEXT: $(TEAM_TEST_QUESTION_TEXT)
+        TEAM_TEST_EXPECT_QUESTION: $(TEAM_TEST_EXPECT_QUESTION)

@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-30T15:21:00.803397+00:00",
+  "scope": "Actual complete iOS product FullDebug on owned arm64 simulator; prior read-only smoke and subsequent real-provider answer journey are separate",
+  "source": {
+    "productRevision": "ea59210a827015d0ac316aee393bcb08f22f40f1",
+    "harnessRevision": "b09033fa446dfdee48e71ea18ca16095b068a353",
+    "mobileLinuxRevision": "bfd17e346f7ebbb2bcd5206f3c05f56b83a1858b",
+    "sourceChangesForBuildOrUIAcceptance": false
+  },
+  "build": {
+    "configuration": "FullDebug",
+    "scheme": "LingxiCodeFull",
+    "appBundleIdentifier": "com.lingxi.code.full",
+    "architecture": "arm64 iOS Simulator",
+    "ffiPassed": true,
+    "ffiElapsedSeconds": 3706.1,
+    "productPassed": true,
+    "productElapsedSeconds": 287.5,
+    "appSourcePhaseCount": 217,
+    "appSourcePhaseSwiftCount": 216,
+    "actualAppSwiftCompilePathsIncludingGeneratedAssets": 217,
+    "widgetSwiftSources": 3,
+    "teamsSourcesActuallyCompiled": [
+      "TeamBotViews.swift",
+      "TeamBots.swift",
+      "TeamInvitation.swift",
+      "TeamMessageProjection.swift",
+      "TeamMessagesPage.swift",
+      "TeamMessagingModel.swift",
+      "TeamsModel.swift",
+      "TeamsPage.swift"
+    ],
+    "freshGeneratedSwiftBindings": [
+      "LingxiCodeBindings.swift",
+      "client.swift",
+      "harness_runtime.swift"
+    ],
+    "formalResolvedSwiftPackages": 17,
+    "fixedDirectVersions": {
+      "Firebase": "12.19.2",
+      "GoogleSignIn": "9.2.0",
+      "ZIPFoundation": "0.9.20"
+    },
+    "ffiStaticArchiveBytes": 415596024,
+    "ffiStaticArchiveSHA256": "907baa1a970f62fe404d571eb8c14993426053a7aeba3aad09e93372cba9d0b0",
+    "nativeSupportSourceIsCurrentPin": true,
+    "nativeSupportContainsRustCore": false,
+    "publishedOldSdkArtifactReused": false,
+    "diskGuard": "1 second / 2 GiB floor"
+  },
+  "signature": {
+    "mode": "ad-hoc simulator only",
+    "deepStrictVerificationPassed": true,
+    "mainArchitecture": [
+      "arm64"
+    ],
+    "actualMachOEntitlementsMatchSimulatedBuildRecord": true,
+    "appExecutableSHA256": "c549ad12d869ae8ff84f3aba4370da6cb4af2b8991f85e7f6a28d65df1d0b972",
+    "embeddedBinaryFrameworkCount": 5,
+    "widgetBundleIdentifier": "com.lingxi.code.full.widget"
+  },
+  "priorReadOnlyProductSmoke": {
+    "manualCheckpointCount": 8,
+    "passed": [
+      "cold launch",
+      "first-run entry and native root/sidebar",
+      "authorized existing test-member Firebase SDK native email/password login",
+      "process restart restores account",
+      "production Teams joined-team list",
+      "native conversation sheet Connected through production API",
+      "Bot card owner/offline/permitted/member privacy",
+      "existing live group history and explicit Bot target disclosure"
+    ],
+    "newTriggersSent": 0,
+    "modelExecutionClaimed": false,
+    "xctestCasesExecutedThisLane": 0,
+    "note": "Earlier API-only fixture smoke; kept separate from the subsequent real-provider interaction."
+  },
+  "subsequentNativeRealProviderQuestion": {
+    "provider": "openai/gpt-6-luna",
+    "team": "T3 Live ef6e2add",
+    "group": "T3 offline luna-ef6e2add-offline",
+    "nonce": "luna-ef6e2add-offline",
+    "question": "你选择 Blue 还是 Green？",
+    "originalRequesterDisclosureObserved": true,
+    "nativeAnswer": "Blue",
+    "nativeSendAnswersClickCount": 1,
+    "newTriggersSentByIOS": 0,
+    "oldDmOpenedOrAnsweredByIOS": false,
+    "pendingAnswerObservedThenGone": true,
+    "answerControlsGone": true,
+    "exactFinalBody": "LUNA_OK_luna-ef6e2add-offline_Blue",
+    "finalRowCountObservedByIOS": 1,
+    "finalStatus": "Completed",
+    "iosHttpCapturePerformed": false,
+    "crossEvidence": {
+      "source": "output/teams-t3-provider-private/native-live-final.json",
+      "sourceSHA256": "28ff5665df6e862c4bc16812fd21c9c7435b9f5f7e82bb98e4b416c6ebfb867b",
+      "observer": "Root; independent Desktop normal UI, browser production synchronization UI, sandbox file verification and restored original app normal UI",
+      "scope": "Cross-client/server-derived UI and file evidence; not an iOS HTTP capture",
+      "observations": {
+        "actualRealProvider": "openai/gpt-6-luna",
+        "samePrivateProfile": true,
+        "oldMarkerUnchanged": true,
+        "group": {
+          "finalReplyCount": 1,
+          "questionCount": 1,
+          "answerReceived": true,
+          "originalTaskCount": 1
+        },
+        "oldDm": {
+          "finalReplyCount": 1,
+          "sameFinalMessage": true
+        },
+        "ownerNativeApprovalCountObserved": 1,
+        "ownerOriginalRequesterQuestionDisclosure": true,
+        "ownerAnswerControlsAbsent": true,
+        "nativeIosOriginalMemberAnswerSubmittedOnce": true,
+        "browserSecondJourneyAnswerSubmitted": false,
+        "originalEnvironmentRestored": true,
+        "restorationErrors": [],
+        "originalCloudIdentitySameNormalUi": true,
+        "originalCloudAuthenticatedNormalUi": true,
+        "originalOpenAiConfiguredNormalUi": true,
+        "isolatedTestBotUnboundAndDisabled": true,
+        "conversationHistoryRetained": true
+      },
+      "markerLineCounts": [
+        1,
+        1
+      ]
+    }
+  },
+  "publicScreenshot": {
+    "path": "screenshots/ios-real-provider-completed.png",
+    "sha256": "c0811109c7a619904e7e10ffd132db10bd22bace316309cfbfb4e00905e03209",
+    "review": "Unedited original screenshot visually reviewed: question, exact final reply and Completed are visible; no email, raw UID, token, password or private filesystem path is visible.",
+    "pngChunkTypes": [
+      "IDAT",
+      "IEND",
+      "IHDR",
+      "eXIf",
+      "iTXt",
+      "sRGB"
+    ],
+    "metadataSensitiveScanPassed": true
+  },
+  "limits": [
+    "Simulator only; no physical-device or release-signing acceptance.",
+    "No new XCTest execution; prior feature-harness test results are separate.",
+    "Root/onboarding/pushed Teams accessibility snapshots in MobileMCP expose only status bar despite normal screenshots and operation; drawer and presented sheets expose full trees. No source workaround applied.",
+    "Root independently verified provider completion, server-derived counts, markers and restoration; iOS did not capture HTTP traffic."
+  ]
+}

@@ -238,7 +238,7 @@ struct RootView: View {
         let projects = ProjectStore.forRuntime(managedRoot: LXISHDefaultWorkspace.managedRootPath())
         let settings = SettingsStore()
         let providers = ProviderRepository.shared
-        settings.llmProviders = providers.legacyProviders()
+        settings.llmProviders = providers.settingsProviders()
         settings.searchProviders = []
         settings.fetchProviders = []
 
@@ -597,7 +597,7 @@ struct RootView: View {
                 scopedPreferences.setDraft(value, scope: activeScope, mode: activeMode)
             }
             .onChange(of: providerRepository.syncRevision) { _, _ in
-                settingsStore.llmProviders = providerRepository.legacyProviders()
+                settingsStore.llmProviders = providerRepository.settingsProviders()
             }
         let presentationLifecycle = stateLifecycle
             .onChange(of: externalEngineReady) { _, ready in if ready { retryDeferredAppActions() } }
@@ -700,7 +700,7 @@ struct RootView: View {
                     }
                     externalEngineReady = true
                     retryDeferredAppActions()
-                    await providerRepository.refreshCredentialStatus()
+                    await providerRepository.refreshAccounts()
                     #if canImport(harness_runtimeFFI)
                         // 只登记灵犀的插件市场，不安装任何插件；用户在设置 → 插件里自己装。
                         // 记过一次就不再加回来，用户删掉的市场保持删掉。
@@ -883,6 +883,7 @@ struct RootView: View {
             appLibrary: LocalApps.library,
             appInfo: LocalApps.info,
             openApps: { navigation.openApps() },
+            openTeams: { navigation.openTeams() },
             openApp: { navigation.runApp($0) }
         )
         .id(sourceGeneration)
@@ -1161,6 +1162,8 @@ struct RootView: View {
                 markCronResultsSeen()
             }
             .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
+        case .teams(let invite):
+            TeamsPage(initialInvite: invite, onOpenAccount: { navigation.showSettings(.account) })
         case .apps:
             AppsPage(library: LocalApps.library, market: LocalApps.market,
                 onOpenApp: { navigation.runApp($0) }, onShowDetails: { navigation.openLocalApp($0) },
@@ -1323,36 +1326,27 @@ struct RootView: View {
         let generation = sourceGeneration
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: current)
-            DesktopSettingsRepository.shared.credentialCommitHandler = { [weak current] ids, configured, encrypted in
-                guard let current, source === current, generation == sourceGeneration else { return }
-                providerRepository.recordExternalCredentialCommit(
-                    providerIDs: ids, configuredProviderIDs: configured, storageEncrypted: encrypted)
-            }
+            ProviderAccountRepository.shared.configure(load: {
+                guard source === current, generation == sourceGeneration else { throw CancellationError() }
+                return try await current.providerAccountsSnapshot()
+            }, command: { request, credential in
+                // Teardown cancels only the captured Host's exact grant even
+                // after navigation has installed a replacement source.
+                let action = (try? JSONSerialization.jsonObject(with: Data(request.utf8))) as? [String: Any]
+                if action?["action"] as? String == "cancel_oauth" {
+                    return try await current.providerAccountCommand(requestJSON: request, credential: nil)
+                }
+                guard source === current, generation == sourceGeneration else { throw CancellationError() }
+                return try await current.providerAccountCommand(requestJSON: request, credential: credential)
+            }, oauthSupported: !(current is RemoteConversationSource))
+            ProviderAccountRepository.shared.setForeground(scenePhase == .active)
             providerRepository.configure(
                 submitCommand: { command in
                     guard source === current, generation == sourceGeneration else { throw CancellationError() }
                     try await current.submitEngineCommand(command)
                 },
-                testConnection: { profile, secret in
-                    guard source === current, generation == sourceGeneration else { throw CancellationError() }
-                    let result = try await current.testProviderConnection(profile: profile, credentialOverride: secret)
-                    guard source === current, generation == sourceGeneration else { throw CancellationError() }
-                    return result
-                },
                 applyReconnect: { snapshot in
                     try await rebuildSource(snapshot: snapshot)
-                },
-                oauthLogin: { provider in
-                    try await current.loginOAuth(provider: provider)
-                },
-                oauthState: { provider in
-                    try await current.authState(provider: provider)
-                },
-                oauthLogout: { provider in
-                    try await current.logoutOAuth(provider: provider)
-                },
-                testOAuthConnection: { provider, profile in
-                    try await current.testOAuthConnection(provider: provider, profile: profile)
                 },
                 providerCatalog: {
                     try await current.providerCatalog()
@@ -1360,6 +1354,7 @@ struct RootView: View {
                 resetCatalog: !preserveCatalog
             )
         #else
+            ProviderAccountRepository.shared.configure(load: nil, command: nil)
             providerRepository.configure(submitCommand: nil)
         #endif
     }
@@ -2022,6 +2017,7 @@ struct RootView: View {
 
     private func handleScenePhase(_ oldPhase: ScenePhase, _ phase: ScenePhase) {
         conversationBackgroundAlerts.setScenePhase(phase)
+        ProviderAccountRepository.shared.setForeground(phase == .active)
         switch phase {
         case .background:
             #if canImport(harness_runtimeFFI)
@@ -2096,7 +2092,7 @@ struct RootView: View {
     private func applyAppAction(_ action: LingxiAppAction, approvedDraftChange: Bool = false) -> Bool {
         // A remote overlay preserves the local source and draft. It also works
         // when the local engine has not booted or is waiting for an answer.
-        if case let .canonical(target) = action, target.parts.first == "remote" {
+        if case let .canonical(target) = action, ["remote", "team"].contains(target.parts.first ?? "") {
             guard app.setupDone else { return false }
             return applyCanonicalLink(target)
         }
@@ -2236,6 +2232,8 @@ struct RootView: View {
             else { navigation.openCron(scopeID: target.params["scope"] ?? activeScope.projectID ?? globalCronScopeID, taskID: id) }
         case "terminal":
             navigation.openTerminal(sessionID: id, initialCommand: target.payload["command"] as? String, projectID: activeScope.projectID)
+        case "team":
+            navigation.openTeams(invite: target.params["code"])
         case "apps":
             let requestID = externalAsyncRouteID
             Task { @MainActor in
@@ -2290,10 +2288,10 @@ struct RootView: View {
             source.model.deepLinkScrollRevision &+= 1
             pendingMessageLink = nil
         } else if let toolID = source.model.transcriptUUIDToolIDs[pending.uuid],
-                  let group = ConversationRenderLayout.timelineGroups(source.model.items).first(where: { group in
-                      group.rows.contains { if case let .tool(_, tool) = $0 { return tool.id == toolID }; return false }
-                  }), let firstToolID = group.rows.compactMap({ row -> String? in if case let .tool(_, tool) = row { return tool.id }; return nil }).first {
-            source.model.deepLinkScrollRowID = ConversationTimelineView.toolSegmentID(firstToolID: firstToolID)
+                  let destination = ConversationTimelineView.toolDestinationID(toolID: toolID,
+                      groups: source.model.visibleTimelineGroups, transcriptAgents: source.model.orderedAgentSummaries,
+                      transcriptAgentAnchors: source.model.transcriptAgentAnchors) {
+            source.model.deepLinkScrollRowID = destination
             source.model.deepLinkScrollRevision &+= 1
             pendingMessageLink = nil
         } else if !projectSwitching && pendingSessionRestoreID == nil {
@@ -2303,14 +2301,6 @@ struct RootView: View {
     }
 
     private func handleIncomingURL(_ url: URL) {
-        #if canImport(harness_runtimeFFI)
-            if url.scheme?.lowercased() == "lingxi",
-               url.host?.lowercased() == "oauth",
-               url.path == "/callback" {
-                source.handleOAuthCallback(url)
-                return
-            }
-        #endif
         guard let action = LingxiDeepLink.action(from: url) else {
             // Account sign-in callbacks belong to the app delegate's SDK handlers.
             if url.scheme?.lowercased() == "lingxi" || (url.scheme == "https" && url.host == "lingxios.net") {

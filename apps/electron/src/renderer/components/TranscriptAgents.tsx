@@ -6,9 +6,11 @@ import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { AgentAvatar } from './AgentAvatar';
 import { statusLabel } from '../bridge/agentStatus';
+import type { ToolRunItem } from '../model/runItem';
 
 export interface TranscriptAgentsProps {
   agents?: readonly SessionAgentSummaryDto[];
+  launches?: ReadonlyMap<string, ToolRunItem>;
   activeAgentId?: string;
   onOpenAgent?: (agentId: string) => void;
 }
@@ -39,7 +41,7 @@ function agentStatusText(status: string): string {
 
 const EMPTY_AGENTS: readonly SessionAgentSummaryDto[] = [];
 
-export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent, activeAgentId }: TranscriptAgentsProps) {
+export function TranscriptAgents({ agents = EMPTY_AGENTS, launches, onOpenAgent, activeAgentId }: TranscriptAgentsProps) {
   const t = useT();
   useI18n();
   const [snapshot, setSnapshot] = useState(() => ({ source: agents, rows: orderedTranscriptAgents([], agents) }));
@@ -52,17 +54,24 @@ export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent, activeAge
 
   return <div className="transcript-agents" role="group" aria-label={tr("desktop_ui_session_agents")} style={{
     color: t.text2,
-    '--agent-hover': t.surfaceHover,
+    '--agent-ink-focus': t.text,
     '--agent-focus': t.accent,
   } as CSSProperties}>
     {rows.map((agent) => {
       const name = agent.name.trim() || agent.agent_type || 'Agent';
+      const launch = launches?.get(agent.agent_id);
+      const task = launch?.view.primary && launch.view.primary !== name ? launch.view.primary : launch?.view.qualifier;
+      const title = task ? `${name} (${task})` : name;
       const running = agent.status === 'running' || agent.status === 'working';
-      const failed = agent.status === 'failed' || agent.status === 'error';
-      // claude-code's word, then sentence case for this chip: a finished
-      // background agent reads `Done`, never `Completed` and never the port's
-      // old invented `Idle`.
-      const status = running ? tr('remote_status_running') : agentStatusText(agent.status);
+      const activity = agent.latest_activity === 'SubagentHandback' ? undefined : agent.latest_activity;
+      const failed = agent.status === 'failed' || agent.status === 'error' || agent.report_delivery === 'withheld';
+      const delivery = agent.report_delivery;
+      const status = running ? tr('remote_status_running')
+        : delivery === 'withheld' ? tr('chat_agent_report_withheld')
+        : delivery === 'flagged' ? tr('chat_agent_report_flagged')
+        : delivery === 'pending' ? tr('chat_agent_report_pending')
+        : agent.status === 'completed' && !delivery ? tr('chat_agent_execution_ended')
+        : agentStatusText(agent.status);
       return <button
         key={agent.agent_id}
         type="button"
@@ -71,13 +80,13 @@ export function TranscriptAgents({ agents = EMPTY_AGENTS, onOpenAgent, activeAge
         data-agent-id={agent.agent_id}
         data-agent-running={running ? 'true' : undefined}
         disabled={!onOpenAgent}
-        aria-label={`${name} · ${status}${onOpenAgent ? ` · ${tr('desktop_ui_agent_open_details')}` : ''}`}
+        aria-label={`${title} · ${status}${onOpenAgent ? ` · ${tr('desktop_ui_agent_open_details')}` : ''}`}
         onClick={() => onOpenAgent?.(agent.agent_id)}
       >
         <span className="transcript-agent-icon"><AgentAvatar agentId={agent.agent_id} size={18} /></span>
-        <span className="transcript-agent-name" title={name}>{name}</span>
+        <span className="transcript-agent-name" title={title}>{name}{task && <span className="transcript-agent-task"> ({task})</span>}</span>
         <span className="transcript-agent-status" style={{ color: failed ? t.danger : t.text3 }}>{status}</span>
-        {agent.latest_activity && <span className="transcript-agent-activity" title={agent.latest_activity} style={{ color: t.text3 }}>{agent.latest_activity}</span>}
+        {activity && <span className="transcript-agent-activity" title={activity} style={{ color: t.text3 }}>{activity}</span>}
         {onOpenAgent && <span className="transcript-disclosure-chevron" aria-hidden="true"><Icon name="chevronR" size={12} color={t.text3} /></span>}
       </button>;
     })}

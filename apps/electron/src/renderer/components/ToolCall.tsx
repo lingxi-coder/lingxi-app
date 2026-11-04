@@ -45,6 +45,7 @@ import { Icon } from './Icon';
 import { MarkdownContent } from './MarkdownContent';
 import { ToolActivityIcon } from './ToolActivityIcon';
 import { ComputerApplicationIcon } from './ComputerApplicationIcon';
+import { AgentAvatar } from './AgentAvatar';
 import { ModUiParentSite } from './modUiAbovePrompt';
 
 const TITLE_STYLE: CSSProperties = Object.freeze({
@@ -133,6 +134,7 @@ function ToolGlyph({ item, permissionRequest }: { item: ToolRunItem; permissionR
     >
       {permissionRequest
         ? <Icon name="hand" size={18} stroke={1.7} />
+        : item.agentId ? <AgentAvatar agentId={item.agentId} size={18} />
         : <ComputerApplicationIcon item={item} fallback={<ToolActivityIcon name={toolIconName(item.view.verb, item.tool, item.view.icon)} />} />}
     </span>
   );
@@ -191,7 +193,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
   const permissionStatusInBody = permissionRequest && expandable && Boolean(permissionStatusText);
   const compactError = item.status === 'error' && expandable && !permissionRequest;
   const summaryResponse = compactError
-    ? tr("voice_model_state_failed")
+    ? tr('desktop_ui_tool_attempt_unsuccessful')
     : item.tool === 'WebSearch' && item.status === 'done' && expandable
     ? `${tr('desktop_ui_search_completed')}${truncationNotice ? ` ${tr('desktop_ui_truncated_suffix')}` : ''}`
     : permissionStatusInBody

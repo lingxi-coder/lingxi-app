@@ -425,6 +425,8 @@ export interface InitializeOptions {
   push?: unknown;
   appPlatform?: string;
   mediaCapabilities?: unknown;
+  /** `app.features`, as the viewer declares it. */
+  features?: unknown;
   /** Replace the whole params object. */
   params?: unknown;
 }
@@ -550,6 +552,7 @@ export class SimViewer {
         version: '1.0.0',
         platform: options.appPlatform ?? this.platform,
         ...(options.mediaCapabilities === undefined ? {} : { media_capabilities: options.mediaCapabilities }),
+        ...(options.features === undefined ? {} : { features: options.features }),
       },
       ...(options.push === undefined ? {} : { push_installation_id: options.push }),
     };

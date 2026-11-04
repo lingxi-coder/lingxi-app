@@ -1,3 +1,4 @@
+import { fixtureAccountSnapshot } from './provider-accounts-mock';
 import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -20,6 +21,7 @@ import {
 setLanguagePreference('en');
 
 const projectPath = '/tmp/composer-draft-project';
+const openaiOAuthFixture = new URLSearchParams(location.search).has('openai-oauth');
 const mentionsFixture = new URLSearchParams(location.search).has('mentions');
 const slashHintsFixture = new URLSearchParams(location.search).has('slash-hints');
 const suggestionFeedback: Array<{ sessionId: string; uuid: string; action: string }> = [];
@@ -169,10 +171,7 @@ function bridgeFixture(sessionId: string | null, running: boolean, backgroundSta
       activeSession,
       runtimes: [],
       projectCatalogs: { [projectPath]: { sessions: [] } },
-      providerCredentials: [
-        { providerId: 'anthropic', configured: true, encryptionAvailable: true },
-        { providerId: 'openrouter', configured: true, encryptionAvailable: true },
-      ],
+      providerAccountSnapshot: openaiOAuthFixture ? fixtureAccountSnapshot(['openai-chatgpt'], models.map(reference => reference.replace('openai/', 'openai-chatgpt/'))) : fixtureAccountSnapshot(['anthropic', 'openrouter'], models),
       connection: { status: 'connected' },
       diagnostics: [],
     },
@@ -220,7 +219,7 @@ function bridgeFixture(sessionId: string | null, running: boolean, backgroundSta
     previewWorkspaceFile: async (path: string) => ({ kind: 'text', path, size: 20, content: 'export const value = 42;', truncated: false }),
     refreshModelPicker: async () => { modelRefreshCount += 1; },
     refreshSlashCommands: async () => undefined,
-    setModel: async () => undefined,
+    setModel: async (reference: string) => { (window as any).__selectedModel = reference; },
     setReasoningSelection: async () => undefined,
     setFastMode: async () => undefined,
     setPermissionMode: async (mode: string) => { permissionChanges.push(mode); },
@@ -244,12 +243,13 @@ function Fixture() {
   const [sessionId, setSessionId] = useState<string | null>('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
   const [sessionLoading, setSessionLoading] = useState(false);
   const [running, setRunning] = useState(false);
+  const [historyItems, setHistoryItems] = useState<import('../../src/renderer/model/runItem').RunItem[]>([]);
   const [suggestionState, setSuggestionState] = useState({ enabled: true, notice: null as string | null });
   const [suggestion, setSuggestion] = useState<{ text: string; turn: number; sessionId: string }>();
   const [backgroundStatuses, setBackgroundStatuses] = useState<Record<string, string | undefined>>({});
   const [cancellingSessions, setCancellingSessions] = useState<Record<string, boolean>>({});
   const [sidebarWidth, setSidebarWidth] = useState(0);
-  const [models, setModels] = useState<string[]>(ALL_MODELS);
+  const [models, setModels] = useState<string[]>(openaiOAuthFixture ? ['openai/gpt-6.1-sol', 'openai/gpt-6-astra'] : ALL_MODELS);
   const [ready, setReady] = useState(true);
   const [connected, setConnected] = useState(true);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
@@ -258,6 +258,7 @@ function Fixture() {
 
   useEffect(() => {
     window.__composerDraftTest = {
+      setHistoryItems,
       switchSession: setSessionId,
       setSessionLoading,
       setFusionDefault,
@@ -313,7 +314,7 @@ function Fixture() {
               fusionAdmin: async () => undefined,
               updatePromptSuggestionContext: async (context: Record<string, unknown>) => { suggestionContexts.push(context); },
               promptSuggestionFeedback: async (sessionId: string, uuid: string, action: string) => { suggestionFeedback.push({ sessionId, uuid, action }); },
-              conversation: { ...emptyConversation(), sessionKey: sessionId, suggestionTurn: suggestion?.turn ?? 0,
+              conversation: { ...emptyConversation(), items: historyItems, sessionKey: sessionId, suggestionTurn: suggestion?.turn ?? 0,
                 promptSuggestionEnabled: suggestionState.enabled, promptSuggestionNotice: suggestionState.notice,
                 promptSuggestion: suggestion?.text && suggestion?.sessionId === sessionId ? { type: 'prompt_suggestion', suggestion: suggestion.text, session_id: sessionId, uuid: `suggestion-${suggestion.turn}` } : undefined },
             } as never}
@@ -332,6 +333,7 @@ function Fixture() {
 declare global {
   interface Window {
     __composerDraftTest?: {
+      setHistoryItems(items: import('../../src/renderer/model/runItem').RunItem[]): void;
       setSuggestion(text: string, turn: number, sessionId: string): void;
       setSuggestionState(enabled: boolean, notice: string | null): void;
       suggestionFeedback(): Array<{ sessionId: string; uuid: string; action: string }>;

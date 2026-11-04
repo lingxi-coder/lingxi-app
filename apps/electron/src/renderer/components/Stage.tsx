@@ -1,6 +1,5 @@
 import { tr } from '../i18n/locale';
 import { crossSessionMessage } from './messageOrigin';
-import { ActivityToolGroup } from './ActivityToolGroup';
 import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
 import { PlanPreview, PlanDocument } from './PlanDocument';
@@ -8,7 +7,6 @@ import type { SubmittedPlan } from '../bridge/submittedPlan';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useT } from '../theme/ThemeContext';
 import type { CommandRunItem, RunItem, TurnFileChange, VisualizationFollowup } from '../model/runItem';
-import { localAppReference } from '../model/localAppReference';
 import { VisualizationCard, VisualizationContextBadge, VisualizationPlaceholder, VisualizationUnavailable } from './VisualizationCard';
 import {
   transcriptRowUuids,
@@ -20,6 +18,7 @@ import { collapseFor, collapseInitial, collapseOpen, collapseSet } from './colla
 import { CommandOutput } from './CommandOutput';
 import { CompactionStatus } from './CompactionStatus';
 import { Icon } from './Icon';
+import { ImagePreview } from './ImagePreview';
 import type { SessionAgentSummaryDto, UiJsonValue } from '@lingxi/bridge-client';
 import { TranscriptAgents } from './TranscriptAgents';
 import { anchorTranscriptAgents, placeTranscriptAgents, type AgentAnchors } from './transcriptAgentPlacement';
@@ -29,7 +28,7 @@ import { ToolGroup } from './ToolGroup';
 import { TurnFileSummary } from './TurnFileSummary';
 import { MarkdownContent } from './MarkdownContent';
 import { LocalAppInstructions } from './LocalAppInstructions';
-import { localAppInstructionIds } from './localAppInstructionPresentation';
+import { skillInstructionNames } from './localAppInstructionPresentation';
 import { CommandIdentity } from './CommandIdentity';
 import { parseSlashCommandMessage } from './slashCommandMessage';
 import { formatClockTime } from '../bridge/sessionPresentation';
@@ -95,10 +94,10 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
         <div role="group" aria-label={tr('desktop_stage_images')} style={{ display: 'grid', gridTemplateColumns: images.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 7, marginBottom: item.text ? 8 : 0 }}>
           {images.map((image, index) => (
             <div key={`${image.media_type}-${index}`} style={{ overflow: 'hidden', minWidth: 0, borderRadius: 11, background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 12%, transparent)` }}>
-              <img
+              <ImagePreview
                 src={image.url}
                 alt={tr('desktop_stage_image', index + 1)}
-                style={{ display: 'block', width: '100%', maxHeight: 260, aspectRatio: images.length > 1 ? '4 / 3' : 'auto', objectFit: 'contain', background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 8%, transparent)`, outlineOffset: -1 }}
+                imageStyle={{ display: 'block', width: '100%', maxHeight: 260, aspectRatio: images.length > 1 ? '4 / 3' : 'auto', objectFit: 'contain', background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 8%, transparent)`, outlineOffset: -1 }}
               />
             </div>
           ))}
@@ -364,7 +363,7 @@ const BOTTOM_SLACK = 24;
 export function Stage({ messageTarget, onMessageLocated, activityView = false, onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
-  const instructionIds = useMemo(() => localAppInstructionIds(liveItems), [liveItems]);
+  const instructionIds = useMemo(() => skillInstructionNames(liveItems), [liveItems]);
   useEffect(() => setLocalPlan(null), [sessionKey]);
   const stageRef = useRef<HTMLDivElement>(null);
   const feedRef = useRef<HTMLDivElement>(null);
@@ -703,10 +702,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
               } as CSSProperties}
             >
               {welcomeProject !== undefined ? <>
-                <svg className="desktop-welcome-mark" width="96" height="96" viewBox="0 0 96 96" fill="none" aria-hidden="true">
-                  <path d="M24 22C28 3 48 1 61 13C80 7 95 23 88 41C102 58 89 76 74 76C65 94 46 96 34 84C15 90 3 73 11 57C-1 42 7 25 24 22Z" transform="translate(4 3) scale(.9)" stroke="currentColor" strokeWidth="5.5" strokeLinejoin="round" />
-                  <path d="m29 35 8 13-8 13M53 61h18" stroke="currentColor" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+                <img className="desktop-welcome-mark" src={new URL('../assets/app-icon.png', import.meta.url).href} width="96" height="96" alt="" aria-hidden="true" />
                 <h1>{welcomeProject ? tr('desktop_stage_welcome_project', welcomeProject) : tr('desktop_stage_welcome')}</h1>
               </> : <>
               <div className="desktop-empty-mark" aria-hidden="true">
@@ -734,14 +730,11 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           // break the sibling spacing when that status appears or disappears.
           if (item === tailThinking) return null;
           const content = (() => {
-          if (activityView && item.type === 'tool-group' && !item.tools.some(tool => localAppReference(tool) || submittedPlans.some(plan => plan.id === tool.id))) {
-            return <div className="transcript-run-item" data-run-type="tool" key={item.id}><ActivityToolGroup group={item}><ToolGroup group={item} modUiSessionId={modUiSessionId} open={true} ungrouped toolOpen={id => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} /></ActivityToolGroup></div>;
-          }
           if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} files={item.files} onReview={onReviewFiles ? path => onReviewFiles(item.id, item.files!, path) : undefined} />;
-          if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
+          if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} launches={item.launches} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
           if (item.type === 'narration') {
             if (instructionIds.has(item.id)) return <div className="transcript-run-item" data-run-type="skill-instructions" key={item.id}>
-              <LocalAppInstructions id={item.id} text={item.text}
+              <LocalAppInstructions id={item.id} text={item.text} name={instructionIds.get(item.id)}
                 open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} />
             </div>;
             const document = submittedPlans.find(plan => plan.id === item.id);
@@ -872,7 +865,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           return null;
           })();
           if (!content) return null;
-          const sourceIds = item.type === 'tool-group' ? item.tools.map(tool => tool.id) : [item.id];
+          const sourceIds = item.type === 'tool-group' ? item.tools.map(tool => tool.id) : item.type === 'agents' ? item.sourceIds : [item.id];
           const uuids = [...new Set(sourceIds.flatMap(id => {
             const source = liveItemById.get(id);
             return source ? transcriptRowUuids(source) : [];

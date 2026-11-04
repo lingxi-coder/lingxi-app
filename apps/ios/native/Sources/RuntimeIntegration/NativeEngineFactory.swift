@@ -51,7 +51,6 @@ enum NativeEngineFactory {
     private struct LaunchSettings {
         let appAgentHost: Bool
         let apiBase: String
-        let apiKey: String
         let model: String
         let sessionMode: SessionModeDto
         let visionDelegationEnabled: Bool
@@ -68,8 +67,7 @@ enum NativeEngineFactory {
     /// device state. Building the engine itself always happens off-main.
     @MainActor
     static func prepare(
-        _ scenario: Scenario,
-        credentialReader: (Keychain.Item) throws -> String? = Keychain.getOrThrow
+        _ scenario: Scenario
     ) throws -> Prepared {
         let directories = MobileUserStorage.directories()
         let settings: LaunchSettings
@@ -79,7 +77,6 @@ enum NativeEngineFactory {
             settings = LaunchSettings(
                 appAgentHost: false,
                 apiBase: config.apiBase,
-                apiKey: config.apiKey,
                 model: config.model,
                 sessionMode: config.sessionMode.dto,
                 visionDelegationEnabled: config.visionDelegationEnabled,
@@ -100,11 +97,10 @@ enum NativeEngineFactory {
         case let .scheduled(appSandboxRoot, scope, task, snapshot, runtime):
             settings = LaunchSettings(
                 appAgentHost: false,
-                apiBase: Keychain.get(.apiBase) ?? "https://api.anthropic.com",
+                apiBase: "https://api.anthropic.com",
                 // Scheduled execution resolves persisted credentials through
                 // native secure storage, never a scalar Keychain override.
-                apiKey: "",
-                model: task?.configuration.model ?? snapshot.defaultModelID ?? Keychain.get(.model) ?? "",
+                model: task?.configuration.model ?? snapshot.defaultModelID ?? "",
                 sessionMode: .code,
                 visionDelegationEnabled: snapshot.visionDelegationEnabled,
                 appSandboxRoot: appSandboxRoot,
@@ -120,17 +116,6 @@ enum NativeEngineFactory {
             policy = .scheduled
 
         case let .appAgent(appSandboxRoot, snapshot):
-            let apiBase: String?
-            let apiKey: String?
-            do {
-                apiBase = try credentialReader(.apiBase)
-                apiKey = try credentialReader(.apiKey)
-            } catch {
-                throw LocalAppServiceFailure(
-                    "CREDENTIAL_STORAGE_UNAVAILABLE",
-                    "The model's secure settings are temporarily unavailable. Try again when the device is unlocked."
-                )
-            }
             let mobileLinux: IosMobileLinuxConfigFfi?
             #if LINGXI_FULL
             let metadata = LXISHRuntimeBundleMetadata.current()
@@ -156,8 +141,7 @@ enum NativeEngineFactory {
             #endif
             settings = LaunchSettings(
                 appAgentHost: true,
-                apiBase: apiBase ?? "https://api.anthropic.com",
-                apiKey: apiKey ?? "",
+                apiBase: "https://api.anthropic.com",
                 model: snapshot.defaultModelID ?? "",
                 sessionMode: .code,
                 visionDelegationEnabled: false,
@@ -183,7 +167,6 @@ enum NativeEngineFactory {
                 configDirName: directories.configDirName,
                 nativeConfigHome: directories.configHome,
                 apiBase: settings.apiBase,
-                apiKey: settings.apiKey,
                 model: settings.model,
                 sessionMode: settings.sessionMode,
                 visionDelegationEnabled: settings.visionDelegationEnabled,
@@ -212,7 +195,6 @@ enum NativeEngineFactory {
         let permissions: IosPermissionSink
         let headlessPermissions: NativeHeadlessPermissionSink?
         let provideLocation: Bool
-        let migrateCredential: Bool
         let threadName: String
         switch prepared.policy {
         case let .interactive(interactiveListener, interactivePermissions):
@@ -220,7 +202,6 @@ enum NativeEngineFactory {
             permissions = interactivePermissions
             headlessPermissions = nil
             provideLocation = true
-            migrateCredential = true
             threadName = "LingXi engine bootstrap"
         case .scheduled:
             let sink = NativeHeadlessPermissionSink()
@@ -228,7 +209,6 @@ enum NativeEngineFactory {
             permissions = sink
             headlessPermissions = sink
             provideLocation = false
-            migrateCredential = true
             threadName = "LingXi scheduled engine bootstrap"
         case .appAgent:
             let sink = NativeHeadlessPermissionSink()
@@ -236,7 +216,6 @@ enum NativeEngineFactory {
             permissions = sink
             headlessPermissions = sink
             provideLocation = false
-            migrateCredential = false
             threadName = "Local App model host"
         }
 
@@ -271,9 +250,6 @@ enum NativeEngineFactory {
             thread.start()
         }
         try Task.checkCancellation()
-        if migrateCredential {
-            try await migrateLegacyAnthropicCredential(on: handle)
-        }
         headlessPermissions?.attach(handle)
         return handle
     }

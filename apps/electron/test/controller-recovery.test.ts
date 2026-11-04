@@ -176,6 +176,25 @@ test('concurrent controller ensure reconnects the same live sidecar once and res
   assert.deepEqual(await h.runtime.manageCron({ action: 'list' }), []);
 });
 
+test('a live controller is no active work, so the folder it watches can be closed around it', async (t) => {
+  const h = await fixture(t);
+  assert.equal(h.runtime.connectionState.status, 'connected');
+  assert.equal(h.runtime.hasActiveWork, false);
+  assert.equal(h.manager.hasActiveWork(ref.projectPath), false, 'the folder is not busy because its controller is up');
+  // The scheduler asks the controller to manage tasks; a request in flight is not work either.
+  h.holdCron = true;
+  const pending = h.runtime.manageCron({ action: 'list' });
+  const settled = assert.rejects(pending);
+  assert.equal(h.manager.hasActiveWork(ref.projectPath), false);
+  // The fixture has no process to end: let go of it as its teardown does.
+  h.internal.child = null;
+  await h.manager.closeProject(ref.projectPath);
+  await settled;
+  assert.equal(h.manager.get(ref.sessionId), undefined, 'the controller went with the folder');
+  assert.equal(h.manager.isProjectClosing(ref.projectPath), false);
+  assert.equal(h.kills, 0);
+});
+
 test('failed reconnect preserves an external sidecar and retries its original endpoint', async (t) => {
   const h = await fixture(t, true);
   await h.disconnect();

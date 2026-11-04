@@ -97,7 +97,7 @@ function fixture(t: TestContext, options: { running?: boolean; savedSource?: boo
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any,
     { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler: (name: string) => handlers.delete(name) } as any,
-    undefined, undefined, undefined, undefined, dialogs);
+    undefined, undefined, undefined, dialogs);
   (host as any).bootstrap = () => ({ settings: settings.getPublic(), projectCatalogs: Object.fromEntries((host as any).catalogs) });
   const frame = { url: 'http://127.0.0.1:4242' };
   const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };

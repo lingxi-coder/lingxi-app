@@ -48,6 +48,12 @@ export interface RemoteAppInfo {
   platform: DevicePlatform;
   /** Explicitly declared handler support, absent on older/general viewers. */
   media_capabilities?: RemoteMediaCapabilities;
+  /**
+   * Protocol extensions the viewer understands, such as `REMOTE_FEATURE_BOTS`.
+   * The host sends nothing an extension adds to a viewer that did not declare it,
+   * and ignores strings it does not know.
+   */
+  features?: string[];
 }
 
 /** The desktop, as described to an approved viewer. */
@@ -121,6 +127,8 @@ export interface RemoteSessionSummary {
   model?: string;
   /** Number of viewers attached to the session right now. */
   viewers: number;
+  /** The Bot this chat belongs to; set only in `bot.threads.list`, never in `sessions.list`. */
+  bot_id?: string;
 }
 
 /** `sessions.list` (request). */
@@ -155,8 +163,11 @@ export interface RemoteImageRef {
   media_type: string;
 }
 
-/** Who started a prompt. */
-export type RemotePromptOrigin = 'desktop' | 'device' | 'scheduled';
+/**
+ * Who started a prompt. `bot`: another Bot handed it over as a task; only a
+ * viewer that declared `REMOTE_FEATURE_BOTS` is sent it, any other sees `scheduled`.
+ */
+export type RemotePromptOrigin = 'desktop' | 'device' | 'scheduled' | 'bot';
 
 /**
  * One entry of a session's record stream. Prompts are records of their own
@@ -174,6 +185,8 @@ export type RemoteRecord =
       origin: RemotePromptOrigin;
       /** TBD: name of the sending device when `origin` is `device` ("from iPhone"). */
       device_name?: string;
+      /** Name of the sending Bot when `origin` is `bot`. */
+      from_bot_name?: string;
     }
   | { type: 'permission_request'; request: PermissionRequest }
   /** Shown only; computer access can be granted on the desktop alone. */
@@ -384,6 +397,67 @@ export interface ModelsListResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Bots
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Only a viewer whose `initialize.app.features` includes `REMOTE_FEATURE_BOTS`
+// may call these; any other gets the unknown-method error. A Bot's chats are
+// ordinary sessions: a viewer reaches them through `bot.threads.list` and then
+// uses the `session.*` and command methods with their `session_id`, unchanged.
+// They never appear in `sessions.list`. Principal: v1 has no field for it, the
+// principal is always the approved owner device of the connection; a member
+// principal would go beside `bot_id` in these params.
+
+/** Where a Bot stands, derived from its chats: any waiting chat is `requires_action`, else any running chat is `running`. */
+export type RemoteBotStatus = 'idle' | 'running' | 'requires_action';
+
+/** One Bot whose Remote Control switch is on, in `bots.list` / `bots.changed`. */
+export interface RemoteBotSummary {
+  bot_id: string;
+  name: string;
+  description: string;
+  status: RemoteBotStatus;
+  /** Chats of the Bot that are waiting for an answer right now. */
+  waiting_threads: number;
+  /** Epoch milliseconds of the Bot's latest chat activity, absent before it has any. */
+  last_activity_at?: number;
+}
+
+/** `bots.list` (request). */
+export type BotsListParams = Record<string, never>;
+export interface BotsListResult {
+  bots: RemoteBotSummary[];
+}
+
+/** `bots.watch` (request): the answer is the current list; later changes arrive as `bots.changed`. */
+export type BotsWatchParams = Record<string, never>;
+export type BotsWatchResult = BotsListResult;
+
+/** `bots.changed` (host to viewer): always the full list. */
+export interface BotsChangedParams {
+  bots: RemoteBotSummary[];
+}
+
+/** `bot.threads.list` (request): the Bot's chats, newest first, at most 50. */
+export interface BotThreadsListParams {
+  bot_id: string;
+}
+export interface BotThreadsListResult {
+  /** `project_label` is the Bot's name and `bot_id` is set on every entry. */
+  sessions: RemoteSessionSummary[];
+}
+
+/** `bot.thread.create` (request): start a new chat of the Bot; a retry with the same `client_request_id` returns the same chat. */
+export interface BotThreadCreateParams {
+  bot_id: string;
+  /** Chosen by the viewer; makes a retry after a reconnect recognizable. */
+  client_request_id: string;
+}
+export interface BotThreadCreateResult {
+  session_id: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Method tables
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -412,6 +486,10 @@ export interface ViewerRequests {
   'controls.set_reasoning': { params: ControlsSetReasoningParams; result: EmptyResult };
   'controls.set_permission_mode': { params: ControlsSetPermissionModeParams; result: EmptyResult };
   'models.list': { params: ModelsListParams; result: ModelsListResult };
+  'bots.list': { params: BotsListParams; result: BotsListResult };
+  'bots.watch': { params: BotsWatchParams; result: BotsWatchResult };
+  'bot.threads.list': { params: BotThreadsListParams; result: BotThreadsListResult };
+  'bot.thread.create': { params: BotThreadCreateParams; result: BotThreadCreateResult };
 }
 
 /** Notifications a viewer sends to the host: method name to params. */
@@ -429,6 +507,7 @@ export interface HostNotifications {
   ping: PingParams;
   pong: PongParams;
   'sessions.changed': SessionsChangedParams;
+  'bots.changed': BotsChangedParams;
   'session.snapshot': SessionSnapshotParams;
   'session.event': SessionEventParams;
   'session.pending': SessionPendingParams;

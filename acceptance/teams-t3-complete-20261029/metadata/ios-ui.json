@@ -1,0 +1,47 @@
+{
+  "passed": true,
+  "scope": "actual native Teams feature harness; not full product",
+  "sameActiveQuestionOwnerDeniedThenHumanAnswered": true,
+  "records": [
+    {
+      "uid": "fixture-owner",
+      "originUid": "ios-human",
+      "expectedQuestion": "hidden",
+      "teamId": "t3runtime-mvuogrbj-13942",
+      "generation": 1,
+      "conversationId": "ios-human-live-thread",
+      "triggerId": "d2a0d69964397f41efd7f584e80baa4efcbdf5a420edcb11ac843911455c986c",
+      "questionId": "3761ccc6149966ef7579e1985ac10275825d0d31289fc9524f6a169c3463fb2f",
+      "testSummary": {
+        "result": "Passed",
+        "totalTestCount": 1,
+        "passedTests": 1,
+        "failedTests": 0,
+        "skippedTests": 0
+      },
+      "xcodeExit": 0,
+      "answered": false,
+      "state": "running"
+    },
+    {
+      "uid": "ios-human",
+      "originUid": "ios-human",
+      "expectedQuestion": "visible",
+      "teamId": "t3runtime-mvuogrbj-13942",
+      "generation": 1,
+      "conversationId": "ios-human-live-thread",
+      "triggerId": "d2a0d69964397f41efd7f584e80baa4efcbdf5a420edcb11ac843911455c986c",
+      "questionId": "3761ccc6149966ef7579e1985ac10275825d0d31289fc9524f6a169c3463fb2f",
+      "testSummary": {
+        "result": "Passed",
+        "totalTestCount": 3,
+        "passedTests": 3,
+        "failedTests": 0,
+        "skippedTests": 0
+      },
+      "xcodeExit": 0,
+      "answered": true,
+      "state": "completed"
+    }
+  ]
+}

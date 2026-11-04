@@ -3,6 +3,11 @@ package com.lingxi.code.secure
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermission
+import java.util.Base64
+import com.lingxi.code.bindings.android.SecureStorageFfiException
+import org.junit.Assume.assumeFalse
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -26,6 +31,37 @@ class AndroidSecureStorageAtomicityTest {
 
     private fun store(writer: AtomicCredentialWriter = AtomicCredentialWriter()) =
         AndroidSecureStorageAdapter(temp.root, { fakeKey }, writer)
+
+    private fun encoded(value: String): String = Base64.getUrlEncoder().withoutPadding().encodeToString(value.toByteArray())
+
+    @Test fun missingServiceIsEmptyButExistingNonDirectoryIsStorageFailure() = runBlocking {
+        val subject = store()
+        assertTrue(subject.list("missing").isEmpty())
+        File(temp.root, encoded("broken")).writeText("not a directory")
+        val failure = runCatching { subject.list("broken") }.exceptionOrNull()
+        assertTrue("An existing unusable service must not look like missing credentials", failure is SecureStorageFfiException.Io)
+    }
+
+    @Test fun existingUnreadableDirectoryPreservesStorageFailure() = runBlocking {
+        val directory = File(temp.root, encoded("denied")).apply { mkdirs() }.toPath()
+        val previous = Files.getPosixFilePermissions(directory)
+        try {
+            Files.setPosixFilePermissions(directory, emptySet<PosixFilePermission>())
+            assumeFalse("Root can bypass filesystem permission denial", Files.isReadable(directory))
+            assertTrue(runCatching { store().list("denied") }.exceptionOrNull() is SecureStorageFfiException.Io)
+        } finally { Files.setPosixFilePermissions(directory, previous) }
+    }
+
+    @Test fun presenceListingUsesCiphertextNamesWithoutOpeningPayloadOrKeystore() = runBlocking {
+        val directory = File(temp.root, encoded("presence")).apply { mkdirs() }
+        val entry = File(directory, "${encoded("account-A")}.bin").apply { writeText("invalid ciphertext must not be parsed") }.toPath()
+        val previous = Files.getPosixFilePermissions(entry)
+        val subject = AndroidSecureStorageAdapter(temp.root, { error("Listing must not open AndroidKeyStore") }, AtomicCredentialWriter())
+        try {
+            Files.setPosixFilePermissions(entry, emptySet<PosixFilePermission>())
+            assertEquals(listOf("account-A"), subject.list("presence"))
+        } finally { Files.setPosixFilePermissions(entry, previous) }
+    }
 
     @Test fun partialWriteFailurePreservesPriorAuthenticatedCredential() = runBlocking {
         val initial = store()

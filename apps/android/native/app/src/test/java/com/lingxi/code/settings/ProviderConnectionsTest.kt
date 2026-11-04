@@ -131,19 +131,6 @@ class ProviderConnectionsTest {
     // ── Persistence ──────────────────────────────────────────────────────────
 
     @Test
-    fun providerSavedBeforeConnectionsExisted_decodesAsReachableOneWay() {
-        val legacy = """
-            [{"id":"l_deepseek","preset":"deepseek","name":"DeepSeek",
-              "url":"https://api.deepseek.com","model":"deepseek-flash","enabled":true}]
-        """.trimIndent()
-
-        val decoded = ProviderSettingsRepository.decodeProvidersJson(legacy)
-
-        assertEquals(1, decoded.size)
-        assertTrue(decoded[0].connections.isEmpty())
-    }
-
-    @Test
     fun connectionsSurviveAnEncodeDecodeRoundTrip() {
         val subject = withSecondConnection(
             id = "cn",
@@ -229,6 +216,7 @@ class ProviderConnectionsTest {
         status = ConnStatus.Idle,
         enabled = true,
         credentialConfigured = true,
+        catalogBaseUrl = "https://api.deepseek.com",
     )
 
     private fun withSecondConnection(

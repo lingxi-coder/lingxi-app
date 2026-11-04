@@ -1,9 +1,13 @@
+import type { ProviderAccountSnapshot } from '../../shared/providerAccounts.js';
+import type { ProviderAccountsApi } from '../../shared/providerAccounts.js';
 import type { LocalAppsApi, LocalAppEditRequest } from '../../shared/localApps';
 import type { ProjectCreationPurpose, ProjectFolderSelection } from '../../shared/projectCreation';
 import type { AccountApi } from '../../shared/account.js';
+import type { DesktopTeamsApi } from '../../../../../packages/teams';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type { ScheduledApi } from '../../shared/scheduled';
 import type { RemoteControlApi } from '../../shared/remoteControl';
+import type { BotsApi } from '../../shared/bots';
 import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../../shared/visualization';
 import type { GitApi } from '../../shared/git.js';
 import type { TerminalApi } from '../../shared/terminal.js';
@@ -70,6 +74,8 @@ export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEvent
 export interface SessionRuntimeSummary {
   projectPath: string;
   sessionId: string;
+  /** Set when the session is a Bot's. It is not a project's session and is listed with its Bot, not with the projects. */
+  botId?: string;
   connection: ConnectionState;
   turnActive: boolean;
   pendingInteractions: number;
@@ -88,12 +94,23 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true; environmentOverride?: true; storageError?: string; codexAccountEmail?: string }
-export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
-export interface PluginSecretMetadata { pluginId: string; key: string; configured: boolean; maskedValue?: string; storageError?: string; restartRequired?: boolean }
-export interface PluginSecretCleanupResult { pluginId: string; status: 'cleared' | 'retained' | 'deferred' | 'partial'; deletedCount: number; failedCount: number; restartRequired?: boolean }
-export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
-export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
+export interface PluginSecretMetadata {
+  pluginId: string;
+  key: string;
+  configured: boolean;
+  maskedValue?: string;
+  storageError?: string;
+  restartRequired?: boolean;
+}
+
+export interface PluginSecretCleanupResult {
+  pluginId: string;
+  status: 'cleared' | 'retained' | 'deferred' | 'partial';
+  deletedCount: number;
+  failedCount: number;
+  restartRequired?: boolean;
+}
+
 export interface DiagnosticEntry {
   timestamp: string;
   level: 'info' | 'warn' | 'error';
@@ -108,10 +125,10 @@ export interface BootstrapState {
   activeSession?: SessionRef;
   runtimes: SessionRuntimeSummary[];
   projectCatalogs: Record<string, ProjectSessionCatalogState>;
-  providerCredentials?: ProviderCredentialMetadata[];
   /** Whether credentials can be queried without a connected engine. */
   credentialBrokerAvailable?: boolean;
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
+  providerAccountSnapshot?: ProviderAccountSnapshot;
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
   /** The three numbers the About page shows. `engine` is absent until a bridge runtime has connected at least once. */
@@ -154,18 +171,21 @@ export interface VisualizationApi {
 
 export interface LingxiApi {
   computerSettings: import('../../shared/computerSettings').ComputerSettingsApi;
+  saveImage(request: import('../../shared/imageSave').ImageSaveRequest): Promise<boolean>;
   applicationIcon: import('../../shared/applicationIcon').ApplicationIconApi;
   desktopUpdates?: import('../../shared/desktopUpdates').DesktopUpdatesApi;
   localApps?: LocalAppsApi;
   onLocalAppEdit?(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled?: ScheduledApi;
   remoteControl?: RemoteControlApi;
+  bots?: BotsApi;
   git?: GitApi;
   terminal: TerminalApi;
   getPathForFile(file: File): string;
   platform: NodeJS.Platform;
   isElectron: true;
   account: AccountApi;
+  teams: DesktopTeamsApi;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
   openSettingsFile(path: string): Promise<void>;
@@ -173,6 +193,7 @@ export interface LingxiApi {
     telemetryEnabled?: boolean;
     theme?: 'dark' | 'light' | 'system';
     collapseThoughtsByDefault?: boolean;
+    botsKeepAwake?: boolean;
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
@@ -191,12 +212,8 @@ export interface LingxiApi {
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   previewWorkspaceFile(sessionId: string, path: string): Promise<WorkspaceFilePreview>;
-  providerCredentials(providerId?: string): Promise<ProviderCredentialMetadata[]>;
-  setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
-  clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
-  loginCodex(): Promise<ProviderCredentialUpdate>;
-  cancelCodexLogin(): Promise<void>;
-  testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
+  providerAccounts: ProviderAccountsApi;
+  providerSettings(patch?: Record<string, unknown>, expected?: Record<string, unknown>): Promise<import('../../shared/providerAccounts.js').HostProviderSettings>;
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
   clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;

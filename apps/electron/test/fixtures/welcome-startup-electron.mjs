@@ -1,3 +1,4 @@
+import { configureFixtureWindow } from './electron-test-environment.mjs';
 import { app, BrowserWindow } from 'electron';
 import { writeFileSync } from 'node:fs';
 
@@ -10,11 +11,13 @@ async function main() {
   const window = new BrowserWindow({ show: false, width: 1362, height: 900, webPreferences: { sandbox: true } });
   try {
     await window.loadURL(url);
+    window.showInactive();
+    await configureFixtureWindow(window);
     const run = script => window.webContents.executeJavaScript(script);
     const wait = async expression => {
       const deadline = Date.now() + 6000;
       while (Date.now() < deadline) { if (await run(expression)) return; await delay(20); }
-      throw new Error(`Timed out: ${expression}\n${await run('document.body.innerText')}`);
+      throw new Error(`Timed out: ${expression}\n${await run('document.body.innerText')}\n${await run('JSON.stringify({ ...window.welcomeStartupFixture.recoveryState(), visibility: document.visibilityState, now: Date.now() })')}`);
     };
     const prompt = `document.querySelector('[aria-label="Prompt"]')`;
     const send = `document.querySelector('[aria-label="Send prompt"]')`;
@@ -32,7 +35,11 @@ async function main() {
     await enter('Draft before secure bootstrap');
     result.bootstrapBlocked = await run(`${send}.disabled && window.welcomeStartupFixture.sent.length === 0 && ${prompt}.textContent === 'Draft before secure bootstrap'`);
     await run('window.welcomeStartupFixture.finishBootstrap()');
+    await wait(`${prompt}.getAttribute('data-placeholder').includes('Rate limited')`);
+    result.temporaryReason = await run(`!${prompt}.getAttribute('data-placeholder').includes('Connect a provider') && document.querySelector('.provider-account-unavailable')?.textContent.includes('Rate limited') && ${send}.disabled`);
     await wait(`${send} && !${send}.disabled`);
+    result.automaticRecovery = await run(`window.welcomeStartupFixture.recoveryState().recoveryReads > 0 && window.welcomeStartupFixture.sent.length === 0 && !window.welcomeStartupFixture.newSessionPending`);
+    result.recoveryPreservesDraft = await run(`${prompt}.textContent === 'Draft before secure bootstrap' && window.welcomeStartupFixture.recoveryState().currentSessionId === 'initial-session'`);
     await enter('Previous session message');
     await wait('window.welcomeStartupFixture.sent.length === 1');
     await wait(`document.querySelector('.beta-stage')?.innerText.includes('Previous session message') || document.body.innerText.includes('Previous session message')`);

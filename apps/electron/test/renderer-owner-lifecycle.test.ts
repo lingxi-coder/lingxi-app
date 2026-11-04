@@ -65,6 +65,28 @@ test('connected layered settings wait for a valid snapshot and offer retry after
   assert.match(ready, /aria-label="outputStyle"[^>]*value="Explanatory"/);
 });
 
+test('provider accounts remain reachable without a project or settings snapshot', () => {
+  const bridge = {
+    connected: false, sessionLoading: false, running: false,
+    bootstrap: { settings: { projects: [] } }, desktop: { providerModelCatalog: [] },
+    settingsSnapshotEvent: null, refreshSettingsSnapshot: async () => {},
+    refreshModelPicker: async () => {}, providerAccounts: { snapshot: async () => ({}) },
+  };
+  const markup = renderToStaticMarkup(createElement(Theme.Provider, { value: tokens('light') },
+    createElement(SettingsScreen, { bridge: bridge as never, initialPageId: 'provider-credentials', theme: 'light',
+      onTheme: () => {}, onClose: () => {} })));
+  assert.doesNotMatch(markup, /settings-snapshot-loading/);
+  assert.match(markup, /provider-list-item-openai/);
+  assert.match(markup, /Provider presets are shown/);
+  assert.doesNotMatch(markup, /data-layer="(?:user|project|local)"/);
+  const detail = renderToStaticMarkup(createElement(Theme.Provider, { value: tokens('light') },
+    createElement(SettingsScreen, { bridge: bridge as never, initialProviderId: 'openai', theme: 'light',
+      onTheme: () => {}, onClose: () => {} })));
+  assert.match(detail, /Provider presets are shown/);
+  assert.doesNotMatch(detail, /type="checkbox"/);
+  assert.doesNotMatch(detail, /data-layer="(?:user|project|local)"/);
+});
+
 /** Persistent hook cells exercise the actual ToolsAgent, including its effect dependencies. */
 function toolsHarness() {
   const cells: any[] = [], deps: unknown[][] = [];

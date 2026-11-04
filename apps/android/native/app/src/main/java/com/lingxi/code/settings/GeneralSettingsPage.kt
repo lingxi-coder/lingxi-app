@@ -38,10 +38,10 @@ internal fun GeneralSettingsPage(onNavigate: (String) -> Unit, onReplayOnboardin
 internal fun NativeAccountPage(state: SettingsUiState, onCredentials: () -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         com.lingxi.code.account.LingxiAccountSection()
-        Text(settingsLabel("Provider accounts"))
-        Text(settingsLabel("This installation connects using your configured provider credentials. Manage credentials to connect or change an account."))
+        Text(stringResource(R.string.provider_accounts_title))
+        Text(stringResource(R.string.provider_accounts_host_hint))
         state.llmProviders.forEach { provider -> Text(settingsLabel("${provider.name} · ${provider.status}")) }
-        TextButton(onClick = onCredentials) { Text(settingsLabel("Manage provider credentials")) }
+        TextButton(onClick = onCredentials) { Text(stringResource(R.string.provider_accounts_manage)) }
     }
 }
 

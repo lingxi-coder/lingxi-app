@@ -94,11 +94,8 @@ fun SettingsHost(
     val context = LocalContext.current
     val resolvedStore: SettingsStore =
         store ?: viewModel(factory = SettingsStore.factory(context))
-    LaunchedEffect(resolvedStore, engineSettingsState.generation, engineSettingsState.credentialRevision) {
-        if (engineSettingsState.credentialRevision > 0) resolvedStore.refreshAfterProviderCredentialMutation()
-    }
     val reconnectSafely: () -> Unit = {
-        if (draftRegistry.hasUnsavedDrafts || engineSettingsState.savingSettings || engineSettingsState.credentialSaving || engineSettingsState.pending != null) {
+        if (draftRegistry.hasUnsavedDrafts || engineSettingsState.savingSettings || engineSettingsState.pending != null) {
             draftRegistry.reconnectBlocked = true
         } else {
             resolvedStore.applyLlmConfiguration(onReconnectEngine)
@@ -220,8 +217,8 @@ fun SettingsHost(
                 }
                 page(SettingsRoutes.FUSION) { Text(stringResource(R.string.settings_parity_fusion_unavailable)) }
                 page(SettingsRoutes.GENERAL) { GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding) }
-                page(SettingsRoutes.ACCOUNT) { NativeAccountPage(state, onCredentials = { navController.navigate(SettingsRoutes.CREDENTIALS) }) }
-                page(SettingsRoutes.CREDENTIALS) { EngineCredentialsPage(engineBridge, onMobileProfiles = { navController.navigate(SettingsRoutes.providerList(ProviderKind.Llm.name)) }) }
+                page(SettingsRoutes.ACCOUNT) { NativeAccountPage(state, onCredentials = { navController.navigate(SettingsRoutes.PROVIDER_ACCOUNTS) }) }
+                page(SettingsRoutes.PROVIDER_ACCOUNTS) { ProviderAccountsPage(engineBridge, resolvedStore.providerAccounts, state.llmCatalogEntries, onChanged = { resolvedStore.refreshAfterProviderAccountMutation() }, onMobileProfiles = { navController.navigate(SettingsRoutes.providerList(ProviderKind.Llm.name)) }) }
                 page(SettingsRoutes.ABOUT) { NativeAboutPage(onLicenses = { navController.navigate(SettingsRoutes.OPEN_SOURCE) }) }
                 composable(SettingsRoutes.ARCHIVED) {
                     if (projectStore != null) {
@@ -345,14 +342,32 @@ fun SettingsHost(
                 }
                 page(SettingsRoutes.PROVIDER_LIST) {
                     val kind = providerKindArg(it)
-                    LaunchedEffect(kind, engineSource) { if (kind == ProviderKind.Llm) engineBridge.refresh() }
+                    LaunchedEffect(kind, engineSource, engineSettingsState.connected) {
+                        // Binding owns the initial refresh; a fresh app may open this page first.
+                        if (kind == ProviderKind.Llm && engineSettingsState.connected) {
+                            try { engineBridge.refresh() }
+                            catch (error: Exception) {
+                                if (error is kotlinx.coroutines.CancellationException) throw error
+                                // Dispatch records the failure shown by ProviderListPage.
+                            }
+                        }
+                    }
                     ProviderListPage(
                         kind = kind,
                         state = state,
                         store = resolvedStore,
                         onEdit = { id -> navController.navigate(SettingsRoutes.providerEdit(kind.name, id)) },
                         onAdd = { navController.navigate(SettingsRoutes.providerPicker(kind.name)) },
-                        onRefreshCatalog = { catalogScope.launch { engineBridge.refreshOfficialCatalog() } },
+                        onRefreshCatalog = {
+                            if (engineSettingsState.connected) catalogScope.launch {
+                                try { engineBridge.refreshOfficialCatalog() }
+                                catch (error: Exception) {
+                                    if (error is kotlinx.coroutines.CancellationException) throw error
+                                }
+                            }
+                        },
+                        catalogRefreshEnabled = engineSettingsState.connected,
+                        catalogRefreshNotice = engineSettingsState.notice,
                         onReconnectEngine = reconnectSafely,
                         onNavigate = { navController.navigate(it) },
                     )

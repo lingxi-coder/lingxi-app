@@ -1,7 +1,7 @@
 window.LINGXI_BRAND = {
-  "version": "1.0.0",
-  "status": "design-proposal",
-  "name": "灵犀结 / Resonance Link",
+  "version": "1.1.0",
+  "status": "integrated",
+  "name": "星芒 / Sparkles",
   "brand": {
     "en": "LingXi",
     "zh-Hans": "灵犀",
@@ -21,9 +21,9 @@ window.LINGXI_BRAND = {
       128,
       128
     ],
-    "path": "M24 64C24 38 43 31 64 64C85 97 104 90 104 64C104 38 85 31 64 64C43 97 24 90 24 64Z",
-    "rotation": -35,
-    "stroke": 14
+    "path": "M52 32L62 54L84 64L62 74L52 96L42 74L20 64L42 54ZM92 20L97 31L108 36L97 41L92 52L87 41L76 36L87 31ZM92 76L97 87L108 92L97 97L92 108L87 97L76 92L87 87Z",
+    "rotation": 0,
+    "fill": "solid"
   },
   "products": [
     {
@@ -135,7 +135,8 @@ window.LINGXI_BRAND = {
     "wordmark_min_width": 96,
     "mark_min_size": 16,
     "clear_space_mark_units": 20,
-    "product_glyph_min_size": 48,
+    "product_variation": "color-only",
+    "same_mark_at_all_sizes": true,
     "small_icon_requires_visible_product_label": true,
     "application_identifiers_changed": false
   }

@@ -81,6 +81,7 @@ fn session_route_key_from_permit(
     session_route_key(permit.owner())
 }
 
+#[derive(Clone)]
 struct ScheduledRouteGuard {
     sessions: Arc<RwLock<HashMap<SessionRouteKey, SessionHost>>>,
     key: SessionRouteKey,
@@ -121,10 +122,124 @@ struct PinnedCredentialSource {
     profile_name: String,
     account_scope: String,
     scheduled_guard: Option<ScheduledRouteGuard>,
+    owner_binding: Option<(
+        Arc<RwLock<HashMap<SessionRouteKey, SessionHost>>>,
+        SessionRouteKey,
+        u64,
+    )>,
+}
+
+struct SelectedCredentialSource {
+    authority: llm_runtime::services::ProviderServices,
+    selected: tokio::sync::Mutex<llm_runtime::services::SelectedServiceAccount>,
+    scheduled_guard: Option<ScheduledRouteGuard>,
+}
+#[async_trait]
+impl CloudAudioCredentialSource for SelectedCredentialSource {
+    async fn request_options(
+        &self,
+        context: &AudioOperationContext,
+    ) -> Result<sdk::RequestOptions, AudioError> {
+        if let Some(guard) = &self.scheduled_guard {
+            guard.ensure_current(context)?;
+        }
+        let selected = self.selected.lock().await;
+        if !selected
+            .services
+            .profile_matches_current_of(&self.authority, &selected.actual_profile)
+        {
+            return Err(AudioError::new(
+                AudioErrorKind::Unavailable,
+                "selected audio account changed before dispatch",
+            ));
+        }
+        Ok(sdk::RequestOptions {
+            credential: Some(selected.credential.clone()),
+            account_scope: Some(selected.account_scope.clone()),
+            total_timeout: context
+                .timeout_budget_ms
+                .map(std::time::Duration::from_millis),
+            ..Default::default()
+        })
+    }
+    async fn provider_outcome(&self, error: Option<&sdk::audio::AudioError>) {
+        let mut selected = self.selected.lock().await;
+        match error {
+            Some(error) => {
+                selected.failed_audio(error).await;
+            }
+            None => selected.succeeded().await,
+        }
+    }
 }
 
 #[async_trait]
 impl CloudAudioCredentialSource for PinnedCredentialSource {
+    async fn resolve_account(
+        &self,
+        _route: &HostedCloudRoute,
+        context: &AudioOperationContext,
+        operation: sdk::audio::AudioOperation,
+        model: Option<&str>,
+    ) -> Result<HostedCloudRoute, AudioError> {
+        if let Some(guard) = &self.scheduled_guard {
+            guard.ensure_current(context)?;
+        }
+        let selected = self
+            .provider
+            .bound_services
+            .resolve_audio_account(
+                &self.profile_name,
+                operation,
+                model,
+                (self.account_scope != lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE)
+                    .then_some(self.account_scope.as_str()),
+            )
+            .await
+            .map_err(|error| AudioProviderCloudRegistry::error(super::service_failure(error)))?;
+        if !selected
+            .services
+            .profile_matches_current_of(&self.provider.bound_services, &selected.actual_profile)
+        {
+            return Err(AudioError::new(
+                AudioErrorKind::Unavailable,
+                "audio provider configuration changed while resolving credentials",
+            ));
+        }
+        if let Some((sessions, key, generation)) = &self.owner_binding {
+            let mut sessions = sessions.write().unwrap_or_else(|error| error.into_inner());
+            let binding = sessions
+                .get_mut(key)
+                .filter(|entry| entry.binding_generation == *generation)
+                .ok_or_else(|| {
+                    AudioError::new(
+                        AudioErrorKind::Unavailable,
+                        "audio owner changed before account admission",
+                    )
+                })?;
+            if binding.account_scope != lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
+                && binding.account_scope != selected.account_scope
+            {
+                return Err(AudioError::new(
+                    AudioErrorKind::InvalidRequest,
+                    "audio owner is bound to another account",
+                ));
+            }
+            binding.account_scope = selected.account_scope.clone();
+        }
+        let route = HostedCloudRoute::new(
+            selected.services.snapshot(),
+            selected.actual_profile.clone(),
+            selected.account_scope.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            Arc::new(SelectedCredentialSource {
+                authority: self.provider.bound_services.clone(),
+                selected: tokio::sync::Mutex::new(selected),
+                scheduled_guard: self.scheduled_guard.clone(),
+            }),
+        );
+        Ok(route)
+    }
     async fn request_options(
         &self,
         context: &AudioOperationContext,
@@ -133,29 +248,10 @@ impl CloudAudioCredentialSource for PinnedCredentialSource {
         if let Some(guard) = &self.scheduled_guard {
             guard.ensure_current(context)?;
         }
-        let credential = self
-            .provider
-            .credential_for_profile(&self.profile_name)
-            .await
-            .map_err(AudioProviderCloudRegistry::error)?;
-        ensure_current_profile(&self.provider, &self.profile_name)?;
-        if let Some(guard) = &self.scheduled_guard {
-            guard.ensure_current(context)?;
-        }
-        if context.timeout_budget_ms == Some(0) {
-            return Err(AudioError::new(
-                AudioErrorKind::Timeout,
-                "media operation deadline has elapsed",
-            ));
-        }
-        Ok(sdk::RequestOptions {
-            credential: Some(credential),
-            account_scope: Some(self.account_scope.clone()),
-            total_timeout: context
-                .timeout_budget_ms
-                .map(std::time::Duration::from_millis),
-            ..Default::default()
-        })
+        Err(AudioError::new(
+            AudioErrorKind::InvalidRequest,
+            "resolve the concrete audio account before requesting credentials",
+        ))
     }
 }
 
@@ -254,20 +350,32 @@ impl AudioProviderCloudRegistry {
                 "media session provider identity is incomplete",
             ));
         }
-        let binding_generation = self.next_session_generation()?;
-        self.sessions
+        let mut sessions = self
+            .sessions
             .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                key,
-                SessionHost {
-                    profile_name,
-                    account_scope,
-                    provider,
-                    binding_generation,
-                    parent: None,
-                },
-            );
+            .unwrap_or_else(|error| error.into_inner());
+        let account_scope = sessions
+            .get(&key)
+            .filter(|current| {
+                current.profile_name == profile_name
+                    && account_scope == lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
+                    && current.account_scope
+                        != lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
+            })
+            .map_or(account_scope.clone(), |current| {
+                current.account_scope.clone()
+            });
+        let binding_generation = self.next_session_generation()?;
+        sessions.insert(
+            key,
+            SessionHost {
+                profile_name,
+                account_scope,
+                provider,
+                binding_generation,
+                parent: None,
+            },
+        );
         Ok(binding_generation)
     }
 
@@ -738,7 +846,8 @@ impl AudioProviderCloudRegistry {
                             "the conversation has no trusted audio provider context",
                         )
                     })?;
-                    let explicit_scope = format!("profile:{profile_name}");
+                    let explicit_scope =
+                        lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.to_owned();
                     if route.parent.is_some()
                         && (route.profile_name != *profile_name
                             || route.account_scope != explicit_scope)
@@ -765,7 +874,7 @@ impl AudioProviderCloudRegistry {
                 Ok((
                     provider,
                     profile_name.clone(),
-                    format!("profile:{profile_name}"),
+                    lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.to_owned(),
                 ))
             }
         }
@@ -845,7 +954,19 @@ impl CloudAudioHost for AudioProviderCloudRegistry {
         ensure_current_profile(&provider, &profile_name)?;
         let scheduled_guard =
             self.scheduled_route_guard(owner, &provider, &profile_name, &account_scope)?;
+        let owner_binding = if matches!(binding, CloudBinding::FollowSession) {
+            let key = session_route_key(owner)?;
+            let sessions = self
+                .sessions
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            Self::current_session(&sessions, &key)
+                .map(|entry| (self.sessions.clone(), key.clone(), entry.binding_generation))
+        } else {
+            None
+        };
         let source = Arc::new(PinnedCredentialSource {
+            owner_binding,
             provider: provider.clone(),
             profile_name: profile_name.clone(),
             account_scope: account_scope.clone(),
@@ -882,7 +1003,7 @@ impl CloudAudioHost for AudioProviderCloudRegistry {
                 (
                     provider.clone(),
                     profile.clone(),
-                    format!("profile:{profile}"),
+                    lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.to_owned(),
                 )
             }));
         }
@@ -963,10 +1084,53 @@ mod attachment_route_tests {
     }
 
     fn provider() -> Arc<AudioProviderHost> {
-        Arc::new(
-            AudioProviderHost::new("{}", "international", None, BTreeMap::new())
-                .expect("empty provider host is valid"),
-        )
+        Arc::new(AudioProviderHost::test_empty())
+    }
+
+    #[test]
+    fn unbound_refresh_preserves_the_owner_concrete_account_scope() {
+        let registry = AudioProviderCloudRegistry::new("wav");
+        let initial = provider();
+        let selected_scope = serde_json::to_string(&llm_runtime::accounts::AccountResourceScope {
+            store_scope: "fixture".into(),
+            account_id: "b".into(),
+            identity_generation: 2,
+        })
+        .unwrap();
+        let generation = registry
+            .register_session("session", "openai", &selected_scope, initial)
+            .unwrap();
+        let refreshed = provider();
+        let refreshed_generation = registry
+            .register_session(
+                "session",
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+                refreshed.clone(),
+            )
+            .unwrap();
+        assert_ne!(generation, refreshed_generation);
+        let (actual_host, profile, scope) = registry
+            .route_host(&session_owner("session"), &CloudBinding::FollowSession)
+            .unwrap();
+        assert!(Arc::ptr_eq(&actual_host, &refreshed));
+        assert_eq!(profile, "openai");
+        assert_eq!(scope, selected_scope);
+        registry
+            .register_session(
+                "session",
+                "other-profile",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+                refreshed,
+            )
+            .unwrap();
+        let (_, _, scope) = registry
+            .route_host(&session_owner("session"), &CloudBinding::FollowSession)
+            .unwrap();
+        assert_eq!(
+            scope,
+            lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE
+        );
     }
 
     fn session_owner(session_id: &str) -> AudioOwner {
@@ -1063,14 +1227,19 @@ mod attachment_route_tests {
         let parent_permit = parent.authorize_owner(&session_owner("parent")).unwrap();
         let child_permit = child.authorize_owner(&session_owner("child")).unwrap();
         registry
-            .register_attached_session(&parent_permit, "openai", "profile:openai", provider)
+            .register_attached_session(
+                &parent_permit,
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+                provider,
+            )
             .unwrap();
         registry
             .register_scheduled_child_session(
                 &parent_permit,
                 &child_permit,
                 "openai",
-                "profile:openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
                 Arc::new(|| true),
             )
             .unwrap();
@@ -1092,6 +1261,14 @@ mod attachment_route_tests {
             let _ = template.current();
             let route = registry
                 .resolve(&child_owner, &CloudBinding::FollowSession)
+                .unwrap();
+            let route = route
+                .resolve_account(
+                    &child_context,
+                    sdk::audio::AudioOperation::FileTranscription,
+                    None,
+                )
+                .await
                 .unwrap();
             assert!(route.request_options(&child_context).await.is_ok());
             *source.0.write().unwrap() = next;
@@ -1142,7 +1319,12 @@ mod attachment_route_tests {
         let fresh = host.attach(Arc::new(EmptyMediaService)).unwrap();
         let fresh_permit = fresh.authorize_owner(&session_owner("fresh")).unwrap();
         registry
-            .register_attached_session(&fresh_permit, "openai", "profile:openai", fresh_provider)
+            .register_attached_session(
+                &fresh_permit,
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+                fresh_provider,
+            )
             .unwrap();
         let fresh_route = registry
             .resolve(fresh_permit.owner(), &CloudBinding::FollowSession)
@@ -1203,18 +1385,37 @@ mod attachment_route_tests {
             services,
             BTreeMap::from([("openai".into(), "openai".into())]),
         ));
-        let pinned = PinnedCredentialSource {
+        let snapshot = provider.client_snapshot();
+        let pinned = Arc::new(PinnedCredentialSource {
+            owner_binding: None,
             provider,
             profile_name: "openai".into(),
-            account_scope: "profile:openai".into(),
+            account_scope: lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.into(),
             scheduled_guard: None,
-        };
+        });
+        let route = HostedCloudRoute::new(
+            snapshot,
+            "openai".into(),
+            lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE.into(),
+            "test".into(),
+            pinned.clone(),
+        );
         let context = AudioOperationContext::new(
             media_api::MediaOperationId::new(2, 1),
             session_owner("parent"),
         );
         assert_eq!(
-            pinned.request_options(&context).await.err().unwrap().kind,
+            pinned
+                .resolve_account(
+                    &route,
+                    &context,
+                    sdk::audio::AudioOperation::FileTranscription,
+                    None
+                )
+                .await
+                .err()
+                .unwrap()
+                .kind,
             AudioErrorKind::Unavailable,
         );
     }
@@ -1230,7 +1431,12 @@ mod attachment_route_tests {
         let parent_permit = parent.authorize_owner(&parent_owner).unwrap();
         let child_permit = child.authorize_owner(&child_owner).unwrap();
         registry
-            .register_attached_session(&parent_permit, "openai", "profile:openai", provider())
+            .register_attached_session(
+                &parent_permit,
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+                provider(),
+            )
             .unwrap();
         let weak_registry = Arc::downgrade(&registry);
         let check: orchestrator::ScheduledMediaParentCheck = Arc::new(move || {
@@ -1245,12 +1451,17 @@ mod attachment_route_tests {
                 &parent_permit,
                 &child_permit,
                 "openai",
-                "profile:openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
                 check,
             )
             .unwrap();
         assert!(registry
-            .provider_for_attached_session(child.id(), "child", "openai", "profile:openai",)
+            .provider_for_attached_session(
+                child.id(),
+                "child",
+                "openai",
+                lingxi_core::host::provider_accounts::UNBOUND_ACCOUNT_SCOPE,
+            )
             .is_ok());
     }
 

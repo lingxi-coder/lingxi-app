@@ -1,3 +1,4 @@
+import { fixtureAccountSnapshot } from './provider-accounts-mock';
 import { createRoot } from 'react-dom/client';
 import { App } from '../../src/renderer/App';
 import '../../src/renderer/global.css';
@@ -17,7 +18,7 @@ const snapshot = {
   settings: { version: 1, projects: [projectPath], activeProject: projectPath, activeSession, pinnedSessions: [], archivedSessions: [], theme: new URLSearchParams(location.search).get('theme') ?? 'light' },
   activeSession, workspace: { path: projectPath, trusted: true }, connection: { status: 'connected' },
   runtimes: [{ ...activeSession, connection: { status: 'connected' }, turnActive: true, pendingInteractions: 0, pendingAskUserQuestions: 0 }],
-  projectCatalogs: { [projectPath]: { sessions: [] } }, providerCredentials: [{ providerId: 'openai', configured: true }], diagnostics: [], versions: { app: '0.1.0', electron: '43.1.1' },
+  projectCatalogs: { [projectPath]: { sessions: [] } }, providerAccountSnapshot: fixtureAccountSnapshot(['openai']), diagnostics: [], versions: { app: '0.1.0', electron: '43.1.1' },
 };
 (window as any).lingxi = {
   platform: 'darwin', isElectron: true,

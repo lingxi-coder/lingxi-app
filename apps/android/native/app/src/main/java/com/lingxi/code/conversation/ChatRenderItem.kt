@@ -31,6 +31,12 @@ sealed interface ChatRenderItem {
         override val contentType: String get() = "message"
     }
 
+    @Immutable
+    data class SkillInstructions(val message: com.lingxi.code.model.Message, val name: String) : ChatRenderItem {
+        override val key get() = message.id
+        override val contentType get() = "skill_instructions"
+    }
+
     /**
      * The assistant message currently receiving deltas. Same contentType as
      * [Message] — it becomes one when the turn settles, keeping its id/key.
@@ -112,7 +118,7 @@ fun buildChatRenderItems(state: ChatState, anchoredMessageUuid: String? = null):
     var canMergeTools = true
     fun appendTools(calls: List<ToolCallUi>, anchor: String) {
         val previous = if (canMergeTools) lastOrNull() as? ChatRenderItem.Tools else null
-        if (previous == null) add(ChatRenderItem.Tools(calls, anchor))
+        if (previous == null || !sameToolGroup(previous.calls.last(), calls.first())) add(ChatRenderItem.Tools(calls, anchor))
         else { removeAt(lastIndex); add(previous.copy(calls = previous.calls + calls)) }
         canMergeTools = true
     }
@@ -130,7 +136,7 @@ fun buildChatRenderItems(state: ChatState, anchoredMessageUuid: String? = null):
                     MessageContent.Tool(when {
                         live != null -> call.copy(status = live.status, header = live.header ?: call.header,
                             display = live.display ?: call.display, questionAnswers = live.questionAnswers ?: call.questionAnswers,
-                            localApp = live.localApp ?: call.localApp)
+                            localApp = live.localApp ?: call.localApp, skillBody = live.skillBody ?: call.skillBody)
                         call.status == AgentToolStatus.Running -> call.copy(status = AgentToolStatus.Unknown)
                         else -> call
                     })
@@ -158,7 +164,10 @@ fun buildChatRenderItems(state: ChatState, anchoredMessageUuid: String? = null):
                 }
             }
         } else if (message.text.isNotBlank() || message.images.isNotEmpty() || message.blocks.isNotEmpty()) {
-            add(ChatRenderItem.Message(message))
+            val previousTool = (lastOrNull() as? ChatRenderItem.Tools)?.calls?.lastOrNull()
+            if (message.role == com.lingxi.code.model.Role.User && message.images.isEmpty() && previousTool != null && matchesSkillInstructions(previousTool, message.text)) {
+                add(ChatRenderItem.SkillInstructions(message, previousTool.header?.primary ?: previousTool.tool))
+            } else add(ChatRenderItem.Message(message))
         }
         val run = state.agentRunsByMessageId[message.id]
         // Resumed JSONL has no turn IDs; Finished traces are reconstructed per
@@ -220,7 +229,8 @@ internal fun transcriptSpacingBefore(previous: ChatRenderItem?, current: ChatRen
         is ChatRenderItem.Streaming -> message.role == com.lingxi.code.model.Role.User
         else -> false
     }
-    fun ChatRenderItem.isActivity(): Boolean = this is ChatRenderItem.Tools || this == ChatRenderItem.StreamingIndicator
+    fun ChatRenderItem.isActivity(): Boolean = this is ChatRenderItem.Tools ||
+        this is ChatRenderItem.AgentRun || this == ChatRenderItem.StreamingIndicator
     if (previous.isUser() || current.isUser()) return 16
     if (previous.isActivity() || current.isActivity()) return 8
     return 12

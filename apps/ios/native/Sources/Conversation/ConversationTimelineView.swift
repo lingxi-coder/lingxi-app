@@ -45,11 +45,13 @@ struct ConversationTimelineView: View {
 
     static func projectedSegmentSpacings(
         groups: [ConversationTimelineGroup],
+        transcriptAgents: [ConversationAgentSummary] = [],
+        transcriptAgentAnchors: [String: String] = [:],
         streaming: Bool = false,
         showThinking: Bool = true
     ) -> [CGFloat] {
         let segments = projectedSegments(
-            groups: groups, transcriptAgents: [], transcriptAgentAnchors: [:],
+            groups: groups, transcriptAgents: transcriptAgents, transcriptAgentAnchors: transcriptAgentAnchors,
             liveToolIDs: nil, hasLiveOwner: true, streaming: streaming, showThinking: showThinking
         )
         return segments.enumerated().map { index, segment in
@@ -72,6 +74,11 @@ struct ConversationTimelineView: View {
     @ViewBuilder
     private func segmentView(_ segment: Segment) -> some View {
         switch segment {
+        case let .skillInstructions(rowID, message, name):
+            ConversationSkillInstructionsRow(name: name, text: message.text,
+                isExpanded: expandedToolCalls.contains("skill:\(rowID)"),
+                onToggle: { onToggleToolCall("skill:\(rowID)") })
+                .id(rowID)
         case let .message(rowID, message) where message.visualization != nil:
             VisualizationCardView(
                 sessionId: visualizationSessionId,
@@ -237,7 +244,14 @@ struct ConversationTimelineView: View {
                     rows: rows,
                     status: group.status
                 )
-                result.append(contentsOf: Self.segments(in: chunk))
+                let represented = rows.filter { row in
+                    guard case let .tool(_, trace) = row, trace.status == .completed,
+                          let spawned = trace.spawnedAgentID else { return true }
+                    let key = spawned.replacingOccurrences(of: "agent:", with: "")
+                    return !children.contains { $0.id.replacingOccurrences(of: "agent:", with: "") == key && transcriptAgentAnchors[$0.id] == trace.id }
+                }
+                result.append(contentsOf: Self.segments(in: ConversationTimelineGroup(
+                    id: chunk.id, runID: chunk.runID, rows: represented, status: chunk.status)))
                 let attached = children.filter { agent in
                     guard let anchor = transcriptAgentAnchors[agent.id], !anchor.isEmpty else { return false }
                     if rows.contains(where: { anchorID(for: $0) == anchor }) { return true }
@@ -254,6 +268,22 @@ struct ConversationTimelineView: View {
                     let stableID = "agents:after:\(anchorIDs.joined(separator: ","))"
                     result.append(.agents(id: stableID, agents: attached))
                 }
+            }
+        }
+        var previousTool: ConversationToolTrace?
+        for index in result.indices {
+            switch result[index] {
+            case let .toolBatch(_, tools):
+                previousTool = tools.last
+            case .reasoning:
+                continue
+            case let .message(id, message):
+                if let tool = previousTool, ConversationSkillInstructions.matches(message, tool: tool) {
+                    result[index] = .skillInstructions(id: id, message: message, name: tool.header?.primary ?? tool.tool)
+                }
+                previousTool = nil
+            default:
+                previousTool = nil
             }
         }
         if !groups.isEmpty || !result.isEmpty || (streaming && hasLiveOwner) {
@@ -279,6 +309,7 @@ struct ConversationTimelineView: View {
 
     private enum Segment: Identifiable {
         case message(id: String, message: Message)
+        case skillInstructions(id: String, message: Message, name: String)
         case commandOutput(id: String, output: ConversationCommandOutput)
         case reasoning(id: String, text: String, isRunning: Bool)
         case thinkingSlot(isVisible: Bool)
@@ -293,7 +324,7 @@ struct ConversationTimelineView: View {
 
         var isActivity: Bool {
             switch self {
-            case .toolBatch, .reasoning, .thinkingSlot: return true
+            case .toolBatch, .reasoning, .thinkingSlot, .agents: return true
             default: return false
             }
         }
@@ -302,11 +333,26 @@ struct ConversationTimelineView: View {
             switch self {
             case .thinkingSlot:
                 return "thought:bottom-slot"
-            case let .message(id, _), let .commandOutput(id, _), let .reasoning(id, _, _),
+            case let .message(id, _), let .skillInstructions(id, _, _), let .commandOutput(id, _), let .reasoning(id, _, _),
                  let .toolBatch(id, _), let .notice(id, _), let .agents(id, _):
                 return id
             }
         }
+    }
+
+    /// Resolve links through the same projection that renders tools and merged agents.
+    static func toolDestinationID(toolID: String, groups: [ConversationTimelineGroup],
+                                  transcriptAgents: [ConversationAgentSummary], transcriptAgentAnchors: [String: String]) -> String? {
+        let segments = projectedSegments(groups: groups, transcriptAgents: transcriptAgents,
+            transcriptAgentAnchors: transcriptAgentAnchors, liveToolIDs: nil, hasLiveOwner: true,
+            streaming: false, showThinking: true)
+        return segments.first { segment in
+            switch segment {
+            case let .toolBatch(_, tools): return tools.contains { $0.id == toolID }
+            case let .agents(_, agents): return agents.contains { transcriptAgentAnchors[$0.id] == toolID }
+            default: return false
+            }
+        }?.id
     }
 
     private static func segments(in group: ConversationTimelineGroup) -> [Segment] {
@@ -329,6 +375,8 @@ struct ConversationTimelineView: View {
         for row in group.rows {
             switch row {
             case let .tool(_, trace):
+                if let last = pendingTools.last,
+                   last.groupingKey == nil || last.groupingKey != trace.groupingKey { flushTools() }
                 pendingTools.append(trace)
             case let .message(message):
                 flushTools()
@@ -355,6 +403,28 @@ struct ConversationTimelineView: View {
 
 }
 
+private struct ConversationSkillInstructionsRow: View {
+    @Environment(\.theme) private var t
+    let name: String
+    let text: String
+    let isExpanded: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button(action: onToggle) {
+                HStack(spacing: 8) {
+                    LXIcon(name: .sparkles, size: 16, color: t.text3, stroke: 1.6)
+                    Text(name).font(.footnote).foregroundStyle(t.text3)
+                }.frame(minHeight: 40).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(isExpanded ? String(localized: "chat_agent_details_collapse") : String(localized: "chat_agent_details_expand"))
+            if isExpanded { AIText(markdown: text).padding(.leading, 24) }
+        }
+    }
+}
+
 private struct ConversationThoughtRow: View {
     @Environment(\.theme) private var t
     let isRunning: Bool
@@ -374,6 +444,7 @@ private struct ConversationToolBatchRow: View {
     @Environment(\.theme) private var t
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var isFocused: Bool
+    @State private var isHovering = false
 
     let id: String
     let tools: [ConversationToolTrace]
@@ -389,11 +460,9 @@ private struct ConversationToolBatchRow: View {
                     ToolCallView(trace: trace, isExpanded: expandedToolCalls.contains(trace.id), compact: true,
                                  onToggle: { onToggleTool(trace.id) })
                 }
-            } else if !activeTools.isEmpty {
-                ForEach(activeTools) { trace in
-                    ToolCallView(trace: trace, isExpanded: expandedToolCalls.contains(trace.id), compact: true,
-                                 onToggle: { onToggleTool(trace.id) })
-                }
+            } else if ordinaryTools.count == 1, let trace = ordinaryTools.first {
+                ToolCallView(trace: trace, isExpanded: expandedToolCalls.contains(trace.id), compact: true,
+                             onToggle: { onToggleTool(trace.id) })
             } else if !ordinaryTools.isEmpty {
             Button(action: onToggleBatch) {
                 HStack(spacing: 8) {
@@ -405,39 +474,38 @@ private struct ConversationToolBatchRow: View {
                             .lineLimit(1)
                     }
                     .runtimeTextSweep(isActive: containsRunningTool, highlightColor: t.text)
-                    if failedToolCount > 0 {
-                        Text("· \(failedToolCount) failed")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(t.danger)
+                    if containsRunningTool {
+                        Text(String(localized: "chat_tool_running_count \(activeTools.count)"))
+                            .font(.caption).foregroundStyle(t.text3)
+                    } else if ordinaryTools.allSatisfy({ $0.status == .failed }) {
+                        Text(String(localized: "chat_tool_calls_unsuccessful"))
+                            .font(.caption).foregroundStyle(t.text3)
                     }
                     Spacer(minLength: 0)
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(t.text4)
                         .timelineChevron(
-                            isHighlighted: isFocused,
+                            isHighlighted: isFocused || isHovering,
                             isExpanded: isExpanded,
                             reduceMotion: reduceMotion
                         )
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
-                .background {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(t.accent.opacity(isFocused || isExpanded ? 0.10 : 0))
-                }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .focused($isFocused)
+            .onHover { isHovering = $0 }
             .accessibilityLabel(String(localized: "chat_tool_batch_count \(tools.count)"))
             .accessibilityValue(isExpanded
                 ? String(localized: "chat_agent_details_collapse")
                 : String(localized: "chat_agent_details_expand"))
             .accessibilityIdentifier("conversation.timeline.tool-batch.\(id)")
 
-            if isExpanded {
-                ForEach(ordinaryTools) { trace in
+            if isExpanded || containsRunningTool {
+                ForEach(isExpanded ? ordinaryTools : activeTools) { trace in
                     ToolCallView(
                         trace: trace,
                         isExpanded: expandedToolCalls.contains(trace.id),
@@ -462,19 +530,13 @@ private struct ConversationToolBatchRow: View {
         ConversationDesktopTimeline.summary(ordinaryTools)
     }
 
-    private var failedToolCount: Int {
-        tools.reduce(into: 0) { count, tool in
-            if tool.status == .failed { count += 1 }
-        }
-    }
-
     private var containsRunningTool: Bool {
         tools.contains(where: { $0.status == .running })
     }
 
     private var batchIcon: LXIconName {
-        guard let last = tools.last else { return .workflow }
-        return ToolDisplayText.icon(header: last.header, tool: last.tool)
+        guard let first = tools.first else { return .workflow }
+        return ToolDisplayText.icon(header: first.header, tool: first.tool)
     }
 }
 
@@ -553,17 +615,38 @@ enum ConversationDesktopTimeline {
                 return false
             }
         }
-        for (index, group) in groups.enumerated() {
+        var typedGroups: [ConversationTimelineGroup] = []
+        for group in groups {
+            var chunk: [ConversationTimelineRow] = []
+            var chunkIndex = 0
+            func flushChunk() {
+                guard !chunk.isEmpty else { return }
+                let suffix = chunkIndex == 0 ? "" : ":\(chunk[0].id)"
+                typedGroups.append(ConversationTimelineGroup(id: group.id + suffix, runID: group.runID, rows: chunk, status: group.status))
+                chunkIndex += 1
+                chunk.removeAll(keepingCapacity: true)
+            }
+            for row in group.rows {
+                if case let .tool(_, trace) = row, let last = chunk.last, case let .tool(_, previous) = last,
+                   previous.groupingKey == nil || previous.groupingKey != trace.groupingKey { flushChunk() }
+                chunk.append(row)
+            }
+            flushChunk()
+        }
+        for (index, group) in typedGroups.enumerated() {
             let rows = group.rows.filter { row in
                 if case .reasoning = row {
-                    return index == groups.count - 1 && group.status == .running && hasLiveOwner && !hasActiveTools
+                    return index == typedGroups.count - 1 && group.status == .running && hasLiveOwner && !hasActiveTools
                 }
                 return true
             }
             guard !rows.isEmpty else { continue }
             let visible = ConversationTimelineGroup(id: group.id, runID: group.runID, rows: rows, status: group.status)
             if visible.isToolGroup, let previous = result.last, previous.isToolGroup,
-               previous.runID == visible.runID {
+               previous.runID == visible.runID,
+               case let .tool(_, previousTool)? = previous.rows.last,
+               case let .tool(_, nextTool)? = visible.rows.first,
+               let key = previousTool.groupingKey, key == nextTool.groupingKey {
                 result[result.count - 1] = ConversationTimelineGroup(
                     id: previous.id, runID: previous.runID,
                     rows: previous.rows + visible.rows, status: visible.status)
@@ -579,9 +662,11 @@ enum ConversationDesktopTimeline {
     }
 
     static func summary(_ tools: [ConversationToolTrace]) -> String {
-        guard let last = tools.last else { return "" }
-        let title = last.header.map(ToolDisplayText.title) ?? last.tool
-        guard let detail = last.header?.subLine, !detail.text.isEmpty else { return title }
-        return "\(title) · \(detail.prefix)\(detail.text)"
+        guard let first = tools.first else { return "" }
+        if tools.count == 1 { return first.header.map(ToolDisplayText.title) ?? first.tool }
+        let label = first.header.map { header in
+            header.verb == .shell ? String(localized: "chat_tool_group_shell") : ToolDisplayText.verbLabel(header)
+        } ?? first.tool
+        return "\(label) · \(String(localized: "chat_tool_calls_count \(tools.count)"))"
     }
 }

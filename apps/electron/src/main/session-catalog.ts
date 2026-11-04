@@ -1,3 +1,5 @@
+import type { ProviderAccountCredentialVersion } from './provider-accounts.js';
+import type { HostProviderSettings, ProviderAccountCommand, ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -14,13 +16,26 @@ const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SESSIONS = 200;
 const DEFAULT_CACHE_TTL_MS = 15_000;
 
+export interface ProviderAccountConfiguration {
+  profilesJson: string;
+  providerRegion: 'international' | 'china_mainland';
+}
+
 export interface ProjectSessionCatalogOptions {
+  appVersion?: string;
+  providerAccountChannel?: 'development' | 'production';
   serverBin?: string;
   isPackaged?: boolean;
   resourcesPath?: string;
   timeoutMs?: number;
   /** Keep project metadata warm while session/runtime work is in flight. */
   cacheTtlMs?: number;
+  /**
+   * Read this configuration home instead of the default one. The catalog modes
+   * of the bridge server take the home from `LINGXI_CONFIG_DIR` only (they
+   * ignore `--session-config-home`), so this sets that variable for the child.
+   */
+  configHome?: string;
   spawnProcess?: typeof spawn;
 }
 
@@ -117,12 +132,69 @@ export class ProjectSessionCatalog {
   private readonly cache = new Map<string, CatalogCacheEntry>();
   private readonly pending = new Map<string, Promise<ProjectSessionCatalogResult>>();
   private readonly pendingSessions = new Map<string, Promise<ProjectSessionCatalogResult>>();
+  private nativeProductPaths?: Promise<ProductPaths>;
   private generation = 0;
 
   constructor(private readonly options: ProjectSessionCatalogOptions = {}) {}
 
+  async providerSettings(patch?: Record<string, unknown>, expected?: Record<string, unknown>): Promise<HostProviderSettings> {
+    const output = await this.runOutput(realpathSync.native(homedir()), ['--provider-settings-command'], JSON.stringify({ patch, expected }));
+    const result: unknown = JSON.parse(boundedOutput(output));
+    if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('Invalid provider settings response.');
+    const value = result as Partial<HostProviderSettings>;
+    if (!value.raw || typeof value.raw !== 'object' || Array.isArray(value.raw) || !value.effective || typeof value.effective !== 'object' || Array.isArray(value.effective) || !Array.isArray(value.locked) || value.locked.some(key => !['providers', 'routing', 'providerRegion'].includes(key))) throw new Error('Invalid provider settings response.');
+    return value as HostProviderSettings;
+  }
+
+  /** Headless host account management uses the same canonical Rust registry. */
+  async providerAccountCommand(request: ProviderAccountCommand, credential?: string, credentialPresence?: string[]): Promise<ProviderAccountSnapshot> {
+    const { action, expectedRevision, accountId, displayName, providerId, accountIds, enabled, authKind, executionBindingId, allowSubscriptionToMetered } = request;
+    if (credential !== undefined && action !== 'test') throw new Error('Account metadata commands do not accept credentials.');
+    if (credentialPresence !== undefined && action !== 'list') throw new Error('Credential presence is only available for account listing.');
+    // Rust's tagged action enum rejects irrelevant fields; retain the exact
+    // narrow command shape at this boundary.
+    const command = action === 'list' ? { action, expectedRevision }
+      : action === 'add' ? { action, expectedRevision, accountId, providerId, displayName, authKind, executionBindingId }
+      : action === 'set_policy' ? { action, expectedRevision, providerId, allowSubscriptionToMetered }
+      : action === 'update' ? { action, expectedRevision, accountId, displayName }
+      : action === 'reorder' ? { action, expectedRevision, providerId, accountIds }
+      : action === 'enable' ? { action: 'set_enabled', expectedRevision, accountId, enabled }
+      : { action, expectedRevision, accountId };
+    const output = await this.runOutput(realpathSync.native(homedir()), ['--provider-account-command'],
+      JSON.stringify({ ...(credentialPresence ? { credential_presence: credentialPresence } : {}), ...(this.options.appVersion !== undefined ? { app_version: this.options.appVersion } : {}), request_json: JSON.stringify(command), metadata_only: true, backend: 'desktop-broker', credential_channel: this.options.providerAccountChannel ?? 'development', ...(credential ? { credential } : {}) }));
+    const result = JSON.parse(boundedOutput(output));
+    if (result.error) throw new Error('Provider account operation failed.');
+    const snapshot = typeof result.snapshot_json === 'string' ? JSON.parse(result.snapshot_json) : result;
+    if (!snapshot || typeof snapshot.storeScope !== 'string' || !Number.isSafeInteger(snapshot.configRevision)
+      || !Array.isArray(snapshot.accounts) || !Array.isArray(snapshot.health)) throw new Error('Invalid provider account snapshot.');
+    return snapshot as ProviderAccountSnapshot;
+  }
+
+  /** Private authority commit: never exposed as an account-management command. */
+  async publishProviderAccountCredentialVersion(version: ProviderAccountCredentialVersion): Promise<void> {
+    if (!/^[a-f0-9-]{36}$/.test(version.accountId) || !Number.isSafeInteger(version.identityGeneration) || version.identityGeneration < 1
+      || !Number.isSafeInteger(version.credentialRevision) || version.credentialRevision < 1) throw new Error('Invalid credential version.');
+    const output = await this.runOutput(realpathSync.native(homedir()), ['--provider-account-command'], JSON.stringify({
+      metadata_only: true, backend: 'desktop-broker', credential_channel: this.options.providerAccountChannel ?? 'development',
+      request_json: '', publish_credential_version: { accountId: version.accountId, identityGeneration: version.identityGeneration, credentialRevision: version.credentialRevision },
+    }));
+    const result = JSON.parse(boundedOutput(output));
+    if (!result || result.published !== true) throw new Error('Credential version could not be committed.');
+  }
+
   /** Product directory discovery must work even if workspace settings are broken. */
   async productPaths(): Promise<ProductPaths> {
+    if (!this.nativeProductPaths) {
+      const operation = this.discoverProductPaths().catch(error => {
+        if (this.nativeProductPaths === operation) this.nativeProductPaths = undefined;
+        throw error;
+      });
+      this.nativeProductPaths = operation;
+    }
+    return { ...await this.nativeProductPaths };
+  }
+
+  private async discoverProductPaths(): Promise<ProductPaths> {
     const output = await this.runOutput(realpathSync.native(homedir()), ['--product-paths-json']);
     let value: unknown;
     try { value = JSON.parse(boundedOutput(output)); }
@@ -255,13 +327,12 @@ export class ProjectSessionCatalog {
       listSessionsJson: true,
       sessionScope: scope,
       ...(sessionId ? { sessionId } : {}),
-      hasApiKey: false,
       trusted: false,
     });
     return this.runOutput(canonical, args).then((output) => parseCatalog(output));
   }
 
-  private runOutput(canonical: string, args: string[]): Promise<string> {
+  private runOutput(canonical: string, args: string[], input?: string): Promise<string> {
     const bin = resolveServerBin({
       serverBin: this.options.serverBin,
       isPackaged: this.options.isPackaged,
@@ -270,10 +341,14 @@ export class ProjectSessionCatalog {
     return new Promise<string>((resolve, reject) => {
       const child = (this.options.spawnProcess ?? spawn)(bin, args, {
         cwd: canonical,
-        env: buildBridgeEnvironment(process.env),
-        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) },
+        stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         windowsHide: true,
       });
+      if (input !== undefined) {
+        child.stdin?.on('error', () => { /* Process close carries the bounded failure. */ });
+        child.stdin?.end(input);
+      }
       const stdout: Buffer[] = [];
       let stdoutBytes = 0;
       const stderr: Buffer[] = [];
@@ -286,7 +361,7 @@ export class ProjectSessionCatalog {
         reject(new Error('session catalog timed out'));
       }, this.options.timeoutMs ?? 15_000);
       timeout.unref();
-      child.stdout.on('data', (chunk: Buffer | string) => {
+      child.stdout!.on('data', (chunk: Buffer | string) => {
         if (settled) return;
         const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
         stdoutBytes += bytes.length;
@@ -299,7 +374,7 @@ export class ProjectSessionCatalog {
         }
         stdout.push(bytes);
       });
-      child.stderr.on('data', (chunk: Buffer | string) => {
+      child.stderr!.on('data', (chunk: Buffer | string) => {
         if (settled) return;
         const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
         // Keep the same diagnostic tail as before, bounded in raw bytes.

@@ -130,7 +130,7 @@ test('unmount closes an in-flight popup synchronously before passive effects', a
     if (specifier === './appsController') return { LocalAppsController };
     if (specifier === './strings') return { t };
     if (specifier === './text') return { displayText };
-    if (specifier === './useRemote') return { useStore: (store: LocalAppsController) => useSyncExternalStore(store.subscribe, store.getState) };
+    if (specifier === './useStore') return { useStore: (store: LocalAppsController) => useSyncExternalStore(store.subscribe, store.getState) };
     return require(specifier);
   };
   new Function('require', 'module', 'exports', compiled)(substitute, module, module.exports);

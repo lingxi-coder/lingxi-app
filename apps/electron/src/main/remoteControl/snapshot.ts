@@ -193,7 +193,12 @@ export function recordForEvent(envelope: SequencedRuntimeEventEnvelope<ClientEve
   return { seq: envelope.sequence, record: size > EVENT_MAX_BYTES ? omitted(event, size) : record };
 }
 
-export function recordForPrompt(sessionId: string, entry: PromptJournalEntry): RemoteSeqRecord {
+/**
+ * A prompt as a viewer sees it. A task another Bot handed over has the origin
+ * `bot` and the sender's name, but only for a viewer that understands them: to
+ * any other it is a `scheduled` prompt, as it was before Bots could hand over tasks.
+ */
+export function recordForPrompt(sessionId: string, entry: PromptJournalEntry, botAware = false): RemoteSeqRecord {
   const images: RemoteImageRef[] = entry.images.flatMap((image, index) => (
     image.base64 === undefined ? [] : [{ ref: promptImageRef(sessionId, entry.sequence, index), media_type: image.media_type }]
   ));
@@ -204,8 +209,9 @@ export function recordForPrompt(sessionId: string, entry: PromptJournalEntry): R
       turn_id: entry.turnId,
       text: entry.text,
       ...(images.length > 0 ? { images } : {}),
-      origin: entry.origin,
+      origin: entry.origin === 'bot' && !botAware ? 'scheduled' : entry.origin,
       ...(entry.deviceName !== undefined ? { device_name: entry.deviceName } : {}),
+      ...(botAware && entry.fromBotName !== undefined ? { from_bot_name: entry.fromBotName } : {}),
     },
   };
 }
@@ -251,7 +257,7 @@ export function coalesceRecords(records: readonly RemoteSeqRecord[]): RemoteSeqR
  * latest state is sent whatever its sequence (`allState`): a model chosen
  * before the base is still the model.
  */
-export function recordsAfter(view: RemoteRuntimeView, afterSeq: number, allState = false): RemoteSeqRecord[] {
+export function recordsAfter(view: RemoteRuntimeView, afterSeq: number, allState = false, botAware = false): RemoteSeqRecord[] {
   const items: RemoteSeqRecord[] = [];
   const seen = new Set<number>();
   const add = (item: RemoteSeqRecord | undefined, any = false): void => {
@@ -259,7 +265,7 @@ export function recordsAfter(view: RemoteRuntimeView, afterSeq: number, allState
   };
   for (const envelope of view.events) add(envelope.sequence > afterSeq ? recordForEvent(envelope) : undefined);
   for (const envelope of view.state) add(allState || envelope.sequence > afterSeq ? recordForEvent(envelope) : undefined, allState);
-  for (const entry of view.prompts) add(entry.sequence > afterSeq ? recordForPrompt(view.sessionId, entry) : undefined);
+  for (const entry of view.prompts) add(entry.sequence > afterSeq ? recordForPrompt(view.sessionId, entry, botAware) : undefined);
   for (const interaction of view.interactions) add(interaction.sequence > afterSeq ? recordForInteraction(interaction) : undefined);
   items.sort((a, b) => a.seq - b.seq);
   return coalesceRecords(items);
@@ -285,7 +291,7 @@ export function pageBySize<T>(items: readonly T[], limit = PAGE_MAX_BYTES): T[][
 }
 
 /** A snapshot as the frames it is sent in, in order: `begin`, the `messages` pages, the `records` pages, `end`. */
-export function buildSnapshot(view: RemoteRuntimeView): SessionSnapshotParams[] {
+export function buildSnapshot(view: RemoteRuntimeView, botAware = false): SessionSnapshotParams[] {
   const sessionId = view.sessionId;
   const all = baseMessages(view);
   let first = 0;
@@ -301,7 +307,7 @@ export function buildSnapshot(view: RemoteRuntimeView): SessionSnapshotParams[] 
     first_message_index: first,
   }];
   for (const messages of pageBySize(all.slice(first))) frames.push({ phase: 'messages', session_id: sessionId, messages });
-  for (const records of pageBySize(recordsAfter(view, view.baseSequence, true))) frames.push({ phase: 'records', session_id: sessionId, records });
+  for (const records of pageBySize(recordsAfter(view, view.baseSequence, true, botAware))) frames.push({ phase: 'records', session_id: sessionId, records });
   frames.push({
     phase: 'end',
     session_id: sessionId,

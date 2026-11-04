@@ -59,7 +59,7 @@ internal object PushNotifications {
             .setContentIntent(intent).setAutoCancel(true)
             .setTimeoutAfter((message.data.getValue("expiresAt").toLong() - System.currentTimeMillis()).coerceAtLeast(1))
             .build()
-        try { manager.notify(CHANNEL, (message.messageId ?: message.sentTime.toString()).hashCode(), notification) }
+        try { manager.notify(CHANNEL, (message.data["notificationId"] ?: message.messageId ?: message.sentTime.toString()).hashCode(), notification) }
         catch (_: SecurityException) { /* Permission can be revoked between the check and notify. */ }
     }
 }

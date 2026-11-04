@@ -1,0 +1,62 @@
+{
+  "time_utc": "2026-10-29T04:03:52.839644+00:00",
+  "authorization": "User requested task-owned Rust and Android/iOS scratch cleanup, preserving sources, real bindings, library inputs, SDK, SwiftPM and acceptance",
+  "removed": [
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-linux-android/debug/deps",
+      "allocated_bytes": 2560499712
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-linux-android/debug/build",
+      "allocated_bytes": 58728448
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-linux-android/debug/.fingerprint",
+      "allocated_bytes": 10092544
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-linux-android/debug/incremental",
+      "allocated_bytes": 0
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/deps",
+      "allocated_bytes": 484003840
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/build",
+      "allocated_bytes": 197296128
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/.fingerprint",
+      "allocated_bytes": 5062656
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/incremental",
+      "allocated_bytes": 0
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/intermediates",
+      "allocated_bytes": 1964539904
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/tmp",
+      "allocated_bytes": 55001088
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/kotlin",
+      "allocated_bytes": 20611072
+    }
+  ],
+  "preserved_sha256": {
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/libios_framework.a": "25d10c37d36d9fe86e38fe61a7fbbbd3791a6869076fbe49ad136e552bc11ccf",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/libandroid_aar.dylib": "62d0f499744c6c3529aeeaa897c201492a9ca2a526eb5af89252e2b11c28a552",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/debug/uniffi-bindgen": "389b98c8e9289180ca2a15897b428969cbad94fe727ce3959e0ab50526cdfb7e",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-linux-android/debug/libandroid_aar.so": "569fb636d76dde5823d06c1c55839a7d7ca1e9515bb1e5952f28306c999e99fd",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/src/play/jniLibs/arm64-v8a/libandroid_aar.so": "7a634a4e6fc295a4ee473b5d0fbfc18e794b6d2eabffba1f0581c6880cc772f2",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/nativeSymbols/play/arm64-v8a/libandroid_aar.so": "569fb636d76dde5823d06c1c55839a7d7ca1e9515bb1e5952f28306c999e99fd",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/outputs/apk/play/debug/app-play-debug.apk": "bb57b6588ebfb2b524267383985f6cc29ce2cea12d1370a1b97c1daf8b427b21",
+    "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/build/outputs/apk/androidTest/play/debug/app-play-debug-androidTest.apk": "b9f980b9081a37fec8f4b49273c792396037b2b751abb62621bcaab9c7b7bd1d"
+  },
+  "free_gib_before": 8.044,
+  "free_gib_after": 12.131
+}

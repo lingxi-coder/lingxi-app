@@ -120,9 +120,7 @@ internal class MobileCronEngineGateway(context: Context) : CronEngineGateway {
             projectCwd = scope.projectId?.let { scope.workspacePath },
         )
         return try {
-            val defaults = com.lingxi.code.settings.ProviderSettingsRepository(appContext).use {
-                it.engineLaunchConfig().defaultModel
-            }
+            val defaults = com.lingxi.code.settings.ProviderSettingsRepository(appContext).engineLaunchConfig().defaultModel
             store.setMigrationDefaults(defaults, "{\"type\":\"automatic\"}")
             block(store)
         } finally {

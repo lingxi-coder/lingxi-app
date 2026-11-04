@@ -4,7 +4,6 @@ use bridge_server::router::{CommandRouter, EngineCommandRouter};
 use client::adapter::ClientEventSink;
 use client::protocol::commands::ClientCommand;
 use client::protocol::events::{ClientEvent, ErrorKindDto};
-use lingxi_core::host::auth::{AuthError, AuthHandle, LoginInfo};
 use lingxi_core::host::orchestrator::StatusSnapshot;
 use lingxi_core::host::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
@@ -31,32 +30,7 @@ impl ClientEventSink for CapturingSink {
         self.events.lock().await.push(event);
     }
 }
-struct MockAuth;
 
-#[async_trait]
-impl AuthHandle for MockAuth {
-    fn register_account_change_observer(
-        &self,
-        _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
-    ) {
-    }
-
-    async fn login(&self) -> Result<LoginInfo, AuthError> {
-        Ok(LoginInfo {
-            email: "u@x.com".into(),
-            org_id: "org_1".into(),
-        })
-    }
-    async fn logout(&self) -> Result<(), AuthError> {
-        Ok(())
-    }
-    async fn current_user(&self) -> Option<LoginInfo> {
-        Some(LoginInfo {
-            email: "u@x.com".into(),
-            org_id: "org_1".into(),
-        })
-    }
-}
 
 struct MockTaskRegistry {
     rows: Vec<TaskRecord>,
@@ -113,7 +87,6 @@ fn router_with(
 ) -> EngineCommandRouter {
     EngineCommandRouter::new(
         handle as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
-        Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         tasks as Arc<dyn TaskRegistryHandle>,
         None,
         None,

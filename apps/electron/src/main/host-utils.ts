@@ -1,3 +1,5 @@
+import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
+import type { RuntimeProviderAccountCredential } from './provider-accounts.js';
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
@@ -101,6 +103,8 @@ export interface PersistedSettings {
   /** Local host policy for the local `/team-onboarding` prompt. */
   allowTeamOnboarding?: boolean;
   collapseThoughtsByDefault?: boolean;
+  /** Keep the computer awake while Bots work; see `PublicSettings`. */
+  botsKeepAwake?: boolean;
   model?: string;
   /** Explicit model selections are scoped to their owning session. */
   sessionModels?: Array<SessionRef & { model: string }>;
@@ -209,6 +213,9 @@ export function parseSettings(value: unknown): PersistedSettings {
   }
   if (typeof value['collapseThoughtsByDefault'] === 'boolean') {
     settings.collapseThoughtsByDefault = value['collapseThoughtsByDefault'];
+  }
+  if (typeof value['botsKeepAwake'] === 'boolean') {
+    settings.botsKeepAwake = value['botsKeepAwake'];
   }
   settings.model = boundedString(value['model'], 256);
   if (Array.isArray(value['sessionModels'])) {
@@ -348,7 +355,7 @@ export function parseSettings(value: unknown): PersistedSettings {
 export function publicSettings(settings: PersistedSettings): PublicSettings {
   const {
     version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions, telemetryEnabled,
-    bypassPermissionsModeAccepted, voice, notifications, modelPickerVisibility, sidebar, collapseThoughtsByDefault,
+    bypassPermissionsModeAccepted, voice, notifications, modelPickerVisibility, sidebar, collapseThoughtsByDefault, botsKeepAwake,
   } = settings;
   return {
     version,
@@ -362,6 +369,7 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     pinnedSessions: pinnedSessions.map((session) => ({ ...session })),
     ...(typeof telemetryEnabled === 'boolean' ? { telemetryEnabled } : {}),
     ...(typeof collapseThoughtsByDefault === 'boolean' ? { collapseThoughtsByDefault } : {}),
+    ...(typeof botsKeepAwake === 'boolean' ? { botsKeepAwake } : {}),
     ...(bypassPermissionsModeAccepted ? { bypassPermissionsModeAccepted: true } : {}),
     ...(voice ? { voice: parseVoicePreferences(voice) } : {}),
     ...(notifications ? { notifications: { ...notifications } } : {}),
@@ -698,6 +706,11 @@ export function resolveModBunExecutable(options: {
   return configured && configured.length > 0 && !configured.includes('\0') ? configured : undefined;
 }
 
+/** How long the engine waits for a remote device to answer a permission prompt, in seconds. */
+export const REMOTE_PERMISSION_TIMEOUT_SECS = 1800;
+/** The same for a Bot, whose owner may be away for a day; the most bridge-server accepts. */
+export const BOT_PERMISSION_TIMEOUT_SECS = 86_400;
+
 export function buildBridgeArguments(config: {
   appVersion?: string;
   workspace: string;
@@ -712,7 +725,6 @@ export function buildBridgeArguments(config: {
   configHome?: string;
   globalConfigPath?: string;
   model?: string;
-  hasApiKey: boolean;
   hasCredentialStdin?: boolean;
   trusted: boolean;
   /** Private parent-to-bridge verdict for the local Insights command gate. */
@@ -722,6 +734,8 @@ export function buildBridgeArguments(config: {
   packagedCredentialBoundary?: boolean;
   scheduledController?: boolean;
   remoteControlEnabled?: boolean;
+  /** How long a remote device has to answer a permission prompt; {@link REMOTE_PERMISSION_TIMEOUT_SECS} when absent. */
+  permissionTimeoutSecs?: number;
 }): string[] {
   if (config.listSessionsJson) {
     return ['--cwd', config.workspace, '--list-sessions-json',
@@ -739,7 +753,6 @@ export function buildBridgeArguments(config: {
   for (const directory of config.promptDirectories ?? []) args.push('--session-prompt-directory', directory);
   if (config.model) args.push('--model', config.model);
   if (config.hasCredentialStdin) args.push('--credential-stdin');
-  else if (config.hasApiKey) args.push('--api-key-stdin');
   if (config.trusted) args.push('--trusted-workspace');
   if (typeof config.allowInsights === 'boolean') {
     args.push('--host-insights-policy-gate', String(config.allowInsights));
@@ -747,7 +760,9 @@ export function buildBridgeArguments(config: {
   if (typeof config.allowTeamOnboarding === 'boolean') {
     args.push('--host-team-onboarding-policy-gate', String(config.allowTeamOnboarding));
   }
-  if (config.remoteControlEnabled) args.push('--permission-timeout-secs', '1800', '--ask-user-question-timeout', 'never');
+  if (config.remoteControlEnabled) {
+    args.push('--permission-timeout-secs', String(config.permissionTimeoutSecs ?? REMOTE_PERMISSION_TIMEOUT_SECS), '--ask-user-question-timeout', 'never');
+  }
   if (config.scheduledController) args.push('--scheduled-controller');
   if (config.packagedCredentialBoundary) args.push('--packaged-credential-stdin-only');
   return args;
@@ -758,26 +773,15 @@ export function buildBridgeArguments(config: {
  * Keep this boundary explicitly snake_case: it is a Rust serde contract, not
  * an Electron/JavaScript object passed over IPC.
  */
-export interface OpenAiOAuthSession {
-  access_token: string;
-  refresh_token?: string;
-  expires_at: number;
-  account_id?: string;
-  fedramp: boolean;
-  email?: string;
-}
-
 export function buildCredentialEnvelope(config: {
-  openaiOAuth?: OpenAiOAuthSession;
-  apiKey?: string;
-  providerCredentials?: Record<string, string>;
+  providerAccountHome?: string;
+  providerAccounts?: ProviderAccountSnapshot;
+  providerAccountCredentials?: Record<string, RuntimeProviderAccountCredential>;
   pluginSecrets?: Record<string, Record<string, string>>;
 }): string {
   return `${JSON.stringify({
-    api_key: config.apiKey ?? null,
-    provider_keys: config.providerCredentials ?? {},
+    ...(config.providerAccounts ? { provider_accounts: config.providerAccounts, ...(config.providerAccountHome ? { provider_account_home: config.providerAccountHome } : {}), provider_account_credentials: config.providerAccountCredentials ?? {} } : {}),
     plugin_secrets: config.pluginSecrets ?? {},
-    ...(config.openaiOAuth ? { openai_oauth: config.openaiOAuth } : {}),
   })}\n`;
 }
 

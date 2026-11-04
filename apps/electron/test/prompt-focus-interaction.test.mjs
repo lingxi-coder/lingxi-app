@@ -85,11 +85,11 @@ async function checkComposerDraft(loadingCaret = false) {
       },
       initialPicker: {
         sections: ['Paid', 'Free'],
-        models: ['OpenRouter Auto', 'Anthropic: Claude Opus Latest', 'OpenRouter Free', 'InclusionAI: Ling 3.0 Flash Fin (free)'],
+        models: ['OpenRouter AutoAccess unverified', 'Anthropic: Claude Opus LatestAccess unverified', 'OpenRouter FreeAccess unverified', 'InclusionAI: Ling 3.0 Flash Fin (free)Access unverified'],
       },
       filteredPicker: {
         focused: 'Search models',
-        models: ['InclusionAI: Ling 3.0 Flash Fin (free)'],
+        models: ['InclusionAI: Ling 3.0 Flash Fin (free)Access unverified'],
         clearVisible: true,
       },
       restoredA: 'draft for A',

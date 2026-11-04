@@ -1,15 +1,48 @@
+import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
+import type { ProviderAccountsApi } from '../shared/providerAccounts.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
 import { DESKTOP_BRIDGE_GLOBAL } from '../shared/desktopBridge.js';
+import { CH_IMAGE_SAVE, type ImageSaveRequest } from '../shared/imageSave.js';
 import { CH_APPLICATION_ICON, type ApplicationIconApi } from '../shared/applicationIcon.js';
 import { CH_DESKTOP_UPDATES, CH_DESKTOP_UPDATES_CHANGED, type DesktopUpdatesApi } from '../shared/desktopUpdates.js';
 import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
 import { CH_COMPUTER_SETTINGS, CH_COMPUTER_SETTINGS_CHANGED, type ComputerSettingsApi } from '../shared/computerSettings.js';
 import { ModUiIpcQueue } from '../shared/modUiIpcQueue';
 import type { AccountApi, AccountState } from '../shared/account.js';
+import type { DesktopTeamsApi } from '../../../../packages/teams';
 import { CH_APPLICATION_MENU, type ApplicationMenuAction } from '../shared/applicationMenu.js';
 import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectCreationPurpose, type ProjectFolderSelection } from '../shared/projectCreation.js';
 import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE, type NativeRealtimeAudioCommand, type NativeRealtimeAudioState } from '../shared/realtimeAudio.js';
 import { CH_SCHEDULED, type ScheduledApi } from '../shared/scheduled.js';
+import {
+  CH_BOTS_AVAILABILITY,
+  CH_BOTS_CREATE,
+  CH_BOTS_DELETE,
+  CH_BOTS_GET,
+  CH_BOTS_LIST,
+  CH_BOTS_LOGIN_ITEM_GET,
+  CH_BOTS_LOGIN_ITEM_SET,
+  CH_BOTS_LOGIN_ITEMS_OPEN,
+  CH_BOTS_MEMORY_DELETE,
+  CH_BOTS_MEMORY_LIST,
+  CH_BOTS_MEMORY_READ,
+  CH_BOTS_MEMORY_WRITE,
+  CH_BOTS_PERSONA_GET,
+  CH_BOTS_PERSONA_SET,
+  CH_BOTS_PROMPT_SENT,
+  CH_BOTS_SESSION_OPEN,
+  CH_BOTS_SESSION_SHOWN,
+  CH_BOTS_SESSIONS_LIST,
+  CH_BOTS_SKILL_DELETE,
+  CH_BOTS_SKILL_IMPORT,
+  CH_BOTS_SKILLS_IMPORTABLE,
+  CH_BOTS_SKILLS_LIST,
+  CH_BOTS_TASK_CANCEL,
+  CH_BOTS_TASKS_CHANGED,
+  CH_BOTS_TASKS_LIST,
+  CH_BOTS_UPDATE,
+  type BotsApi,
+} from '../shared/bots.js';
 import {
   CH_REMOTE_AT_STARTUP_GET,
   CH_REMOTE_AT_STARTUP_SET,
@@ -108,10 +141,6 @@ const CH_WORKSPACE_SET = 'lingxi:workspace:set';
 const CH_PROJECT_REMOVE = 'lingxi:project:remove';
 const CH_SESSION_PIN_SET = 'lingxi:session-pin:set';
 const CH_WORKSPACE_FILES_SEARCH = 'lingxi:workspace-files:search';
-const CH_PROVIDER_CREDENTIALS_GET = 'lingxi:provider-credentials:get';
-const CH_PROVIDER_CREDENTIAL_SET = 'lingxi:provider-credential:set';
-const CH_PROVIDER_CREDENTIAL_CLEAR = 'lingxi:provider-credential:clear';
-const CH_PROVIDER_CONNECTION_TEST = 'lingxi:provider-connection:test';
 const CH_PLUGIN_SECRET_GET = 'lingxi:plugin-secret:get';
 const CH_PLUGIN_SECRET_SET = 'lingxi:plugin-secret:set';
 const CH_PLUGIN_SECRET_CLEAR = 'lingxi:plugin-secret:clear';
@@ -149,6 +178,8 @@ export interface RuntimeEventEnvelope<T = unknown> {
 export interface SessionRuntimeSummary {
   projectPath: string;
   sessionId: string;
+  /** Set when the session is a Bot's. It is not a project's session and is listed with its Bot, not with the projects. */
+  botId?: string;
   connection: ConnectionState;
   turnActive: boolean;
   pendingInteractions: number;
@@ -169,10 +200,6 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true; environmentOverride?: true }
-export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
-export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
-export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
 export interface DiagnosticEntry {
   timestamp: string;
   level: 'info' | 'warn' | 'error';
@@ -186,8 +213,9 @@ export interface BootstrapState {
   activeSession?: SessionRef;
   runtimes: SessionRuntimeSummary[];
   projectCatalogs: Record<string, ProjectSessionCatalogState>;
-  providerCredentials?: ProviderCredentialMetadata[];
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
+  providerAccountSnapshot?: ProviderAccountSnapshot;
+  credentialBrokerAvailable?: boolean;
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
 }
@@ -229,18 +257,21 @@ export interface VisualizationApi {
 
 export interface LingxiApi {
   computerSettings: ComputerSettingsApi;
+  saveImage(request: ImageSaveRequest): Promise<boolean>;
   applicationIcon: ApplicationIconApi;
   desktopUpdates: DesktopUpdatesApi;
   localApps: LocalAppsApi;
   onLocalAppEdit(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled: ScheduledApi;
   remoteControl: RemoteControlApi;
+  bots: BotsApi;
   git?: GitApi;
   terminal: TerminalApi;
   getPathForFile(file: File): string;
   platform: NodeJS.Platform;
   isElectron: true;
   account: AccountApi;
+  teams: DesktopTeamsApi;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
   openSettingsFile(path: string): Promise<void>;
@@ -248,6 +279,7 @@ export interface LingxiApi {
     telemetryEnabled?: boolean;
     theme?: 'dark' | 'light' | 'system';
     collapseThoughtsByDefault?: boolean;
+    botsKeepAwake?: boolean;
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
@@ -265,12 +297,8 @@ export interface LingxiApi {
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   previewWorkspaceFile(sessionId: string, path: string): Promise<WorkspaceFilePreview>;
-  providerCredentials(providerId?: string): Promise<ProviderCredentialMetadata[]>;
-  setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
-  clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
-  loginCodex(): Promise<ProviderCredentialUpdate>;
-  cancelCodexLogin(): Promise<void>;
-  testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
+  providerAccounts: ProviderAccountsApi;
+  providerSettings(patch?: Record<string, unknown>, expected?: Record<string, unknown>): Promise<import('../shared/providerAccounts.js').HostProviderSettings>;
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
   clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
@@ -326,6 +354,11 @@ export interface LingxiApi {
   modUi: ModUiApi;
 }
 
+async function teamsRequest<T>(command: unknown): Promise<T> {
+  const result = await ipcRenderer.invoke('lingxi:teams', command) as { value: T; error?: string };
+  if (result.error) throw new Error(result.error);
+  return result.value;
+}
 function subscribe<T>(channel: string, callback: (payload: T) => void): Unsubscribe {
   const listener = (_event: IpcRendererEvent, payload: T): void => callback(payload);
   ipcRenderer.on(channel, listener);
@@ -356,6 +389,7 @@ const api: LingxiApi = {
       return () => ipcRenderer.removeListener(CH_COMPUTER_SETTINGS_CHANGED, callback);
     },
   },
+  saveImage: request => ipcRenderer.invoke(CH_IMAGE_SAVE, request),
   applicationIcon: { get: bundleId => ipcRenderer.invoke(CH_APPLICATION_ICON, bundleId) },
   desktopUpdates: {
     getState: () => ipcRenderer.invoke(CH_DESKTOP_UPDATES, 'get'),
@@ -420,6 +454,23 @@ const api: LingxiApi = {
       return () => { ipcRenderer.removeListener('lingxi:account:changed', listener); };
     },
   },
+  teams: {
+    localBots: uid => teamsRequest({ type: 'localBots', uid }),
+    bindLocalBot: (uid, input) => teamsRequest({ type: 'bindLocalBot', uid, input }),
+    list: uid => teamsRequest({ type: 'list', uid }),
+    detail: (uid, teamId) => teamsRequest({ type: 'detail', uid, teamId }),
+    messages: (uid, command) => teamsRequest({ type: 'messages', uid, command }),
+    onMessagesChanged: callback => subscribe('lingxi:teams:messages', callback),
+    watchMessages: (uid, scope, conversationId, next) => {
+      const leaseId = crypto.randomUUID();
+      let closed = false;
+      const stop = subscribe('lingxi:teams:snapshot', (event: { leaseId: string; snapshot: import('../../../../packages/teams/messages').MessageSnapshot }) => { if (event.leaseId === leaseId && event.snapshot.uid === uid) next(event.snapshot); });
+      void teamsRequest({ type: 'watchMessages', uid, scope, conversationId, leaseId }).catch(error => { if (!closed) next({ uid, ...scope, kind: 'error', fromCache: true, error: error instanceof Error ? error.message : 'MESSAGE_LISTENER_FAILED' }); });
+      return () => { closed = true; stop(); void teamsRequest({ type: 'unwatchMessages', uid, leaseId }).catch(() => undefined); };
+    },
+    execute: (uid, command) => teamsRequest({ type: 'execute', uid, command }),
+    onChanged: callback => subscribe('lingxi:teams:changed', callback),
+  },
   scheduled: {
     context: (scopeId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'context', scopeId }),
     scopes: () => ipcRenderer.invoke(CH_SCHEDULED, { action: 'scopes' }),
@@ -439,6 +490,46 @@ const api: LingxiApi = {
     onSessions: callback => subscribe(CH_REMOTE_SESSIONS_EVENT, callback),
     onPromptEcho: callback => subscribe(CH_REMOTE_PROMPT_ECHO, callback),
   } satisfies RemoteControlApi,
+  bots: {
+    availability: () => ipcRenderer.invoke(CH_BOTS_AVAILABILITY),
+    list: () => ipcRenderer.invoke(CH_BOTS_LIST),
+    get: botId => ipcRenderer.invoke(CH_BOTS_GET, botId),
+    create: request => ipcRenderer.invoke(CH_BOTS_CREATE, request),
+    update: (botId, expectedRevision, patch) => ipcRenderer.invoke(CH_BOTS_UPDATE, botId, expectedRevision, patch),
+    delete: botId => ipcRenderer.invoke(CH_BOTS_DELETE, botId),
+    openSession: (botId, sessionId) => (sessionId === undefined
+      ? ipcRenderer.invoke(CH_BOTS_SESSION_OPEN, botId)
+      : ipcRenderer.invoke(CH_BOTS_SESSION_OPEN, botId, sessionId)),
+    onSessionShown: callback => subscribe(CH_BOTS_SESSION_SHOWN, callback),
+    listSessions: botId => ipcRenderer.invoke(CH_BOTS_SESSIONS_LIST, botId),
+    persona: {
+      get: botId => ipcRenderer.invoke(CH_BOTS_PERSONA_GET, botId),
+      set: (botId, text) => ipcRenderer.invoke(CH_BOTS_PERSONA_SET, botId, text),
+    },
+    memory: {
+      list: botId => ipcRenderer.invoke(CH_BOTS_MEMORY_LIST, botId),
+      read: (botId, name) => ipcRenderer.invoke(CH_BOTS_MEMORY_READ, botId, name),
+      write: (botId, name, content) => ipcRenderer.invoke(CH_BOTS_MEMORY_WRITE, botId, name, content),
+      delete: (botId, name) => ipcRenderer.invoke(CH_BOTS_MEMORY_DELETE, botId, name),
+    },
+    skills: {
+      list: botId => ipcRenderer.invoke(CH_BOTS_SKILLS_LIST, botId),
+      delete: (botId, name) => ipcRenderer.invoke(CH_BOTS_SKILL_DELETE, botId, name),
+      importFromUser: (botId, name) => ipcRenderer.invoke(CH_BOTS_SKILL_IMPORT, botId, name),
+      listImportable: () => ipcRenderer.invoke(CH_BOTS_SKILLS_IMPORTABLE),
+    },
+    tasks: {
+      list: botId => ipcRenderer.invoke(CH_BOTS_TASKS_LIST, botId),
+      cancel: (botId, taskId) => ipcRenderer.invoke(CH_BOTS_TASK_CANCEL, botId, taskId),
+      onChanged: callback => subscribe(CH_BOTS_TASKS_CHANGED, callback),
+    },
+    onPromptSent: callback => subscribe(CH_BOTS_PROMPT_SENT, callback),
+    loginItem: {
+      status: () => ipcRenderer.invoke(CH_BOTS_LOGIN_ITEM_GET),
+      set: enabled => ipcRenderer.invoke(CH_BOTS_LOGIN_ITEM_SET, enabled),
+      openSettings: () => ipcRenderer.invoke(CH_BOTS_LOGIN_ITEMS_OPEN),
+    },
+  } satisfies BotsApi,
   bootstrap: () => ipcRenderer.invoke(CH_BOOTSTRAP) as Promise<BootstrapState>,
   settings: () => ipcRenderer.invoke(CH_SETTINGS_GET) as Promise<PublicSettings>,
   openSettingsFile: (path) => ipcRenderer.invoke(CH_SETTINGS_FILE_OPEN, path) as Promise<void>,
@@ -452,12 +543,14 @@ const api: LingxiApi = {
   setSessionPinned: (session, pinned) => ipcRenderer.invoke(CH_SESSION_PIN_SET, session, pinned) as Promise<PublicSettings>,
   searchWorkspaceFiles: (query) => ipcRenderer.invoke(CH_WORKSPACE_FILES_SEARCH, query) as Promise<WorkspaceFileSearchResult>,
   previewWorkspaceFile: (sessionId, path) => ipcRenderer.invoke(CH_WORKSPACE_FILE_PREVIEW, sessionId, path) as Promise<WorkspaceFilePreview>,
-  loginCodex: () => ipcRenderer.invoke('lingxi:codex:login') as Promise<ProviderCredentialUpdate>,
-  cancelCodexLogin: () => ipcRenderer.invoke('lingxi:codex:cancel') as Promise<void>,
-  providerCredentials: (providerId) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIALS_GET, providerId) as Promise<ProviderCredentialMetadata[]>,
-  setProviderCredential: (providerId, credential) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_SET, providerId, credential) as Promise<ProviderCredentialUpdate>,
-  clearProviderCredential: (providerId) => ipcRenderer.invoke(CH_PROVIDER_CREDENTIAL_CLEAR, providerId) as Promise<ProviderCredentialMetadata>,
-  testProviderConnection: (providerId, credentialOverride) => ipcRenderer.invoke(CH_PROVIDER_CONNECTION_TEST, providerId, credentialOverride) as Promise<ProviderConnectionTestResult>,
+  providerAccounts: {
+    routing: () => ipcRenderer.invoke('lingxi:provider-accounts:routing:get'),
+    onRouting: callback => subscribe('lingxi:provider-accounts:routing', callback),
+    snapshot: () => ipcRenderer.invoke('lingxi:provider-accounts'),
+    command: (request, credential) => ipcRenderer.invoke('lingxi:provider-accounts', request, credential),
+    cancel: operationId => ipcRenderer.invoke('lingxi:provider-accounts:cancel', operationId),
+  },
+  providerSettings: (patch, expected) => ipcRenderer.invoke('lingxi:provider-settings', patch, expected),
   pluginSecret: (pluginId, key) => ipcRenderer.invoke(CH_PLUGIN_SECRET_GET, pluginId, key) as Promise<PluginSecretMetadata>,
   setPluginSecret: (pluginId, key, secret) => ipcRenderer.invoke(CH_PLUGIN_SECRET_SET, pluginId, key, secret) as Promise<PluginSecretMetadata>,
   clearPluginSecret: (pluginId, key) => ipcRenderer.invoke(CH_PLUGIN_SECRET_CLEAR, pluginId, key) as Promise<PluginSecretMetadata>,

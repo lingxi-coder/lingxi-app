@@ -16,6 +16,7 @@ final class RemoteControlManager {
     private(set) var hostsLoaded = false
     private(set) var connection: RemoteConnectionStateFfi?
     private(set) var sessions: [RemoteSessionSummaryFfi] = []
+    private(set) var botDirectory = RemoteBotDirectory()
     private(set) var error: String?
     @ObservationIgnored private var client: IosRemoteControlClient?
     @ObservationIgnored private var generation: UInt64 = 0
@@ -25,6 +26,8 @@ final class RemoteControlManager {
         init(_ value: RemoteConversationSource) { self.value = value }
     }
     @ObservationIgnored private var sources: [String: SourceReference] = [:]
+    /// The Bots whose chats a screen has had listed on this connection (see `showBot`).
+    @ObservationIgnored private var shownBots: Set<RemoteBotKey> = []
 
     init(
         mediaHostComposition: IOSNativeMediaHostComposition? = nil,
@@ -46,9 +49,12 @@ final class RemoteControlManager {
         hostsLoaded = false
         connection = nil
         sessions = []
+        botDirectory.removeAll()
+        shownBots.removeAll()
         error = nil
         for source in sources.values { source.value?.invalidate() }
         sources.removeAll()
+        previous?.setBotsListener(listener: nil)
         await previous?.stopWatchingHosts()
         await previous?.disconnect()
         guard let uid, mine == generation, !Task.isCancelled else { return }
@@ -71,6 +77,7 @@ final class RemoteControlManager {
                 await created.disconnect()
                 return
             }
+            created.setBotsListener(listener: RemoteBotsListener(manager: self, generation: mine))
             created.setPushInstallationId(id: PushRegistration.shared.remoteInstallationId)
             client = created
             await created.watchHosts()
@@ -90,6 +97,8 @@ final class RemoteControlManager {
         if connection?.hostId != hostID {
             connectionEpoch.advance()
             sessions = []
+            botDirectory.removeAll()
+            shownBots.removeAll()
             for source in sources.values { source.value?.invalidate() }
             sources.removeAll()
         }
@@ -166,6 +175,53 @@ final class RemoteControlManager {
         try? await client?.detachSession(sessionId: source.sessionID)
     }
 
+    /// A Bot's screen is up: list the Bot's chats and keep them current until `hideBot`. The computer is
+    /// dialled first when another one is current, as `follow` does for a session; screens are counted per
+    /// connection, so what a replaced connection held is gone, and this is what activates them again.
+    func showBot(_ key: RemoteBotKey) async throws {
+        let mine = generation
+        try await connect(key.hostID)
+        guard mine == generation, !Task.isCancelled else { throw CancellationError() }
+        let client = try activeClient()
+        guard shownBots.insert(key).inserted else { return }
+        do { try await client.activateBotThreads(botId: key.botID) } catch {
+            shownBots.remove(key)
+            throw error
+        }
+        // The screen left while the call was on its way, and its `hideBot` found nothing to undo.
+        if !shownBots.contains(key) { client.deactivateBotThreads(botId: key.botID) }
+    }
+
+    /// The Bot's screen is gone.
+    func hideBot(_ key: RemoteBotKey) {
+        guard shownBots.remove(key) != nil else { return }
+        client?.deactivateBotThreads(botId: key.botID)
+    }
+
+    /// List the Bot's chats again: the client has no call for it, so the screen is taken off and put on.
+    func reloadBot(_ key: RemoteBotKey) async throws {
+        guard shownBots.contains(key) else { return try await showBot(key) }
+        let client = try activeClient()
+        client.deactivateBotThreads(botId: key.botID)
+        do { try await client.activateBotThreads(botId: key.botID) } catch {
+            shownBots.remove(key)
+            throw error
+        }
+        if !shownBots.contains(key) { client.deactivateBotThreads(botId: key.botID) }
+    }
+
+    /// Start a chat with the Bot and return its session id, for the session screen to follow.
+    func createBotChat(_ key: RemoteBotKey) async throws -> String {
+        let client = try activeClient()
+        guard connection?.hostId == key.hostID else { throw RemoteFfiError.NotConnected }
+        return try await client.createBotThread(botId: key.botID)
+    }
+
+    /// The Bot a chat belongs to, when this connection has been told.
+    func botOfThread(_ sessionID: String) -> String? {
+        client?.botOfThread(sessionId: sessionID)
+    }
+
     func close() async {
         generation &+= 1
         connectionEpoch.reset()
@@ -176,7 +232,10 @@ final class RemoteControlManager {
         sources.removeAll()
         hosts = []
         sessions = []
+        botDirectory.removeAll()
+        shownBots.removeAll()
         connection = nil
+        previous?.setBotsListener(listener: nil)
         await previous?.stopWatchingHosts()
         await previous?.disconnect()
     }
@@ -207,6 +266,14 @@ final class RemoteControlManager {
         guard generation == self.generation else { return }
         sources[update.sessionId]?.value?.receive(update)
     }
+    func receive(bots state: RemoteBotsStateFfi, hostID: String, generation: UInt64) {
+        guard generation == self.generation else { return }
+        botDirectory.set(state, host: hostID)
+    }
+    func receive(botThreads state: RemoteBotThreadsStateFfi, hostID: String, botID: String, generation: UInt64) {
+        guard generation == self.generation else { return }
+        botDirectory.set(state, host: hostID, bot: botID)
+    }
 }
 
 /// Each Rust client receives its own generation-tagged callback object. Awaiting
@@ -226,6 +293,23 @@ private final class RemoteListener: IosRemoteListener {
         manager?.receive(sessions, hostID: hostId, generation: generation)
     }
     func onSessionUpdate(update: RemoteSessionUpdateFfi) async { manager?.receive(update, generation: generation) }
+}
+
+/// The same for the Bots, which come through a listener of their own (`setBotsListener`).
+@MainActor
+private final class RemoteBotsListener: IosRemoteBotsListener {
+    private weak var manager: RemoteControlManager?
+    private let generation: UInt64
+    init(manager: RemoteControlManager, generation: UInt64) {
+        self.manager = manager
+        self.generation = generation
+    }
+    func onBots(hostId: String, state: RemoteBotsStateFfi) async {
+        manager?.receive(bots: state, hostID: hostId, generation: generation)
+    }
+    func onBotThreads(hostId: String, botId: String, state: RemoteBotThreadsStateFfi) async {
+        manager?.receive(botThreads: state, hostID: hostId, botID: botId, generation: generation)
+    }
 }
 
 @MainActor

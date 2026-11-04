@@ -8,23 +8,24 @@ import { CancellationTombstones, createInvocationRef, type InvocationRef } from 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { join, dirname, delimiter } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { DesktopLocalApp, DesktopAppManifest, LocalAppLog, LocalAppPhase, LocalAppStep, LocalAppProcess } from '../../shared/localApps.js';
 import { CoreLocalAppStore } from './coreStore.js';
 import { guardedProcessArguments } from './processGuardian.js';
 import { LocalAppStore, PREPARATION_DATA_DIRECTORY, PREPARATION_MARKER, atomicJson, containedFile } from './store.js';
+import type { LocalAppMcpLifecycle } from './mcp.js';
 
 interface Invocation {
-  id: string; operationId: string; revision: number; releaseDigest?: string; controller: AbortController; phase: LocalAppPhase;
+  appId: string; id: string; operationId: string; revision: number; releaseDigest?: string; controller: AbortController; phase: LocalAppPhase; mcpToken: string;
   children: Set<ChildProcess>; services: Map<string, { port: number; url: string }>;
   manifest: DesktopAppManifest;
   readiness: Map<string, { needle: string; matched: boolean; stdout: string; stderr: string }>;
   workspace: string; preparationDataPath?: string; error?: string; retired?: Invocation[];
 }
 interface SharedStart { controller: AbortController; operation: Promise<void>; waiters: number; intent: string }
-export interface RuntimeOptions { onRunEnded?: (appId: string, runId: string, reason: string) => Promise<void> | void; nodeExecutable?: string; bunExecutable?: string; shell?: string; environment?: NodeJS.ProcessEnv }
+export interface RuntimeOptions { onRunEnded?: (appId: string, runId: string, reason: string) => Promise<void> | void; mcp?: LocalAppMcpLifecycle; nodeExecutable?: string; bunExecutable?: string; shell?: string; environment?: NodeJS.ProcessEnv }
 
 export function orderedProcesses(processes: LocalAppProcess[]): LocalAppProcess[] {
   const remaining = [...processes], sorted: LocalAppProcess[] = [];
@@ -90,6 +91,7 @@ async function terminateTree(child: ChildProcess): Promise<void> {
 }
 
 export class LocalAppRuntime {
+  private readonly blockedStarts = new Map<string, number>();
   private readonly preparing = new Map<string, Invocation>();
   private readonly invocations = new Map<string, Invocation>();
   private readonly queues = new Map<string, Promise<unknown>>();
@@ -105,7 +107,8 @@ export class LocalAppRuntime {
   constructor(readonly store: LocalAppStore, private readonly changed: () => void, private readonly options: RuntimeOptions = {}) {}
   status(row: DesktopLocalApp): DesktopLocalApp {
     const run = this.preparing.get(row.id) ?? this.invocations.get(row.id);
-    return { ...row, phase: run?.phase ?? 'stopped', runningRevision: run?.revision, runId: run?.id, error: run?.error };
+    return { ...row, phase: run?.phase ?? 'stopped', runningRevision: run?.revision, runId: run?.id, error: run?.error,
+      ...(this.options.mcp ? { mcp: this.options.mcp.status(row.id, run?.id) } : {}) };
   }
   hasRunning(): boolean { return [...this.invocations.values()].some(run => ['running', 'installing', 'building', 'starting'].includes(run.phase)); }
   logs(id: string): LocalAppLog[] { return [...(this.output.get(id) ?? [])]; }
@@ -216,6 +219,7 @@ export class LocalAppRuntime {
     finally { signal?.removeEventListener('abort', abort); leave(); }
   }
   async start(id: string, repair = false, signal?: AbortSignal, replace = false, revision?: number, expectedCurrentRevision?: number): Promise<void> {
+    if (this.blockedStarts.has(id)) throw new Error('Application is stopping or its permissions are being revoked');
     if (repair) return this.startOnce(id, repair, signal, replace, revision, expectedCurrentRevision);
     const intent = JSON.stringify(['start', replace, revision ?? null, expectedCurrentRevision ?? null]);
     return this.sharedStart(id, intent, signal, ownedSignal => this.startOnce(id, repair, ownedSignal, replace, revision, expectedCurrentRevision));
@@ -251,6 +255,7 @@ export class LocalAppRuntime {
     };
     signal?.addEventListener('abort', cancel, { once: true });
     const operation = this.exclusive(id, async () => {
+      if (this.blockedStarts.has(id)) throw new Error('Application is stopping or its permissions are being revoked');
       if (this.preparing.has(id)) throw new Error('An application update is still stopping; retry Stop before starting it');
       if (this.invocations.get(id)?.phase === 'stopping') throw new Error('The previous application is still stopping; retry Stop');
       if (this.cancellations.has(ref)) throw new Error("Application operation cancelled");
@@ -262,7 +267,7 @@ export class LocalAppRuntime {
       if (this.store instanceof CoreLocalAppStore) await this.store.assertTarget(row);
       const missing = (row.manifest.capabilities ?? []).filter(c => c !== 'agent' && !row.grants.includes(c));
       if (missing.length) throw new Error(`Application permission required: ${missing.join(', ')}`);
-      const run: Invocation = { id: ref.operationId, operationId: ref.operationId, revision: row.revision, releaseDigest: row.releaseDigest, controller: new AbortController(), phase: 'starting', children: new Set(), services: new Map(), workspace: '', manifest: row.manifest, readiness: new Map() };
+      const run: Invocation = { appId: id, id: ref.operationId, operationId: ref.operationId, revision: row.revision, releaseDigest: row.releaseDigest, controller: new AbortController(), mcpToken: randomBytes(32).toString('hex'), phase: 'starting', children: new Set(), services: new Map(), workspace: '', manifest: row.manifest, readiness: new Map() };
       if (previous?.phase === 'running') this.preparing.set(id, run); else this.invocations.set(id, run);
       this.changed();
       try {
@@ -306,6 +311,7 @@ export class LocalAppRuntime {
           await this.waitReady(id, run, spec, child, port);
         }
         if (row.manifest.entry.type === 'static' && !(await fs.stat(await containedFile(run.workspace, row.manifest.entry.path))).isFile()) throw new Error('The application entry is not a file');
+        await this.prepareMcp(id, run);
         run.controller.signal.throwIfAborted();
         run.phase = 'running';
         await this.syncRun(id, run);
@@ -315,6 +321,7 @@ export class LocalAppRuntime {
         run.controller.signal.throwIfAborted();
         if (this.store instanceof CoreLocalAppStore) await this.store.activate(id, run.revision);
         this.preparing.delete(id); this.invocations.set(id, run);
+        this.options.mcp?.activate(id, run.id);
         if (previous && previous !== run && previous.phase === 'running') {
           run.retired = [previous];
           try { await this.stopInvocation(id, previous); run.retired = []; }
@@ -349,6 +356,7 @@ export class LocalAppRuntime {
   }
   /** Resume services for an expressly retained background Agent invocation. */
   async resume(id: string, revision: number, invocationId: string, signal?: AbortSignal): Promise<void> {
+    if (this.blockedStarts.has(id)) throw new Error('Application is stopping or its permissions are being revoked');
     const intent = JSON.stringify(['resume', revision, invocationId]);
     await this.sharedStart(id, intent, signal, ownedSignal => this.resumeOnce(id, revision, invocationId, ownedSignal));
     if (this.revision(id) !== revision || this.invocationId(id) !== invocationId) throw new Error('Application invocation changed before resume');
@@ -371,7 +379,7 @@ export class LocalAppRuntime {
       if (this.invocations.get(id) !== run || row.revision !== revision || run.phase !== 'stopped') throw new Error('Application invocation changed before resume');
       const missing = (run.manifest.capabilities ?? []).filter(capability => !row.grants.includes(capability));
       if (missing.length) throw new Error(`Application permission required: ${missing.join(', ')}`);
-      run.controller = new AbortController(); run.error = undefined; run.readiness.clear();
+      run.controller = new AbortController(); run.mcpToken = randomBytes(32).toString('hex'); run.error = undefined; run.readiness.clear();
       try {
         await this.startServices(id, run, () => signal?.removeEventListener('abort', cancel));
         await this.syncRun(id, run);
@@ -412,18 +420,30 @@ export class LocalAppRuntime {
       await this.waitReady(id, run, spec, child, port);
     }
     if (run.manifest.entry.type === 'static' && !(await fs.stat(await containedFile(run.workspace, run.manifest.entry.path))).isFile()) throw new Error('The application entry is not a file');
+    await this.prepareMcp(id, run);
     controller.signal.throwIfAborted();
     // Once the retained invocation is running, caller cancellation must not
     // abort its controller; the host reconciles any abandoned opening instead.
     commit();
-    run.phase = 'running'; this.log(id, run, 'host', 'Application is ready'); this.changed();
+    run.phase = 'running'; this.options.mcp?.activate(id, run.id); this.log(id, run, 'host', 'Application is ready'); this.changed();
   }
-  private async launch(id: string, run: Invocation, step: LocalAppStep, name: string, extra: NodeJS.ProcessEnv, createEnvironment: boolean): Promise<ChildProcess> {
+  private async prepareMcp(id: string, run: Invocation): Promise<void> {
+    if (!Object.keys(run.manifest.mcpServers ?? {}).length) return;
+    if (!this.options.mcp) throw new Error('This host does not support app-owned MCP servers');
+    await this.options.mcp.prepare({ appId: id, runId: run.id, revision: run.revision, releaseDigest: run.releaseDigest ?? String(run.revision),
+      manifest: run.manifest, signal: run.controller.signal, token: run.mcpToken,
+      service: name => run.services.get(name)?.url,
+      spawn: (name, spec) => this.launch(id, run, spec, `mcp:${name}`, {}, false, true),
+      stop: child => stopTree(child), log: message => { this.log(id, run, 'mcp', message); this.changed(); },
+    });
+  }
+  private async launch(id: string, run: Invocation, step: LocalAppStep, name: string, extra: NodeJS.ProcessEnv, createEnvironment: boolean, mcp = false): Promise<ChildProcess> {
     const cwd = await containedFile(run.workspace, step.cwd ?? '.');
     const preparing = name === 'installing' || name === 'building';
     const dataDirectory = preparing ? run.preparationDataPath ?? join(run.workspace, PREPARATION_DATA_DIRECTORY) : this.store.dataPath(id);
     if (preparing) await fs.mkdir(dataDirectory, { recursive: true, mode: 0o700 });
     const env: NodeJS.ProcessEnv = { ...appEnvironment(this.options.environment), ...step.env, ...extra, LOCAL_APP_DATA_DIR: dataDirectory, LOCAL_APP_ID: id, LOCAL_APP_RUN_ID: run.id, LOCAL_APP_BASE_PATH: '/' };
+    if (!preparing && Object.keys(run.manifest.mcpServers ?? {}).length) env.LOCAL_APP_MCP_TOKEN = run.mcpToken;
     // Build scripts get a disposable preparation location, never the live data alias.
     // Finder/Dock launches have a minimal PATH. Reuse the same installed tools
     // Bash provisions, and fall back to the already packaged Node/Bun runtimes.
@@ -456,20 +476,20 @@ export class LocalAppRuntime {
       env.PATH = `${dirname(executable)}${process.platform === 'win32' ? ';' : ':'}${env.PATH ?? ''}`;
       Object.assign(env, { VIRTUAL_ENV: venv, PYTHONNOUSERSITE: '1' });
     }
-    return this.spawn(id, run, name, command, cwd, env);
+    return this.spawn(id, run, name, command, cwd, env, mcp);
   }
-  private spawn(id: string, run: Invocation, name: string, command: string, cwd: string, env: NodeJS.ProcessEnv): ChildProcess {
+  private spawn(id: string, run: Invocation, name: string, command: string, cwd: string, env: NodeJS.ProcessEnv, mcp = false): ChildProcess {
     run.controller.signal.throwIfAborted();
     const shell = this.options.shell ?? (process.platform === 'win32' ? 'bash.exe' : '/bin/bash');
     const guarded = process.platform !== 'win32';
-    const child = spawn(shell, guarded ? guardedProcessArguments(command) : ['-c', command], { cwd, env, stdio: guarded ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'], detached: guarded, windowsHide: true });
+    const child = spawn(shell, guarded ? guardedProcessArguments(command) : ['-c', command], { cwd, env, stdio: guarded ? [mcp ? 'pipe' : 'ignore', 'pipe', 'pipe', 'pipe'] : [mcp ? 'pipe' : 'ignore', 'pipe', 'pipe'], detached: guarded, windowsHide: true });
     run.children.add(child);
     // Drain descendants as soon as the root closes, then discard its pid.
     // Keeping exited roots until a later restart risks signaling a recycled pid.
     child.once('close', () => {
       void stopTree(child).then(() => run.children.delete(child)).catch(error => this.log(id, run, name, String(error), 'stderr'));
     });
-    child.stdout?.setEncoding('utf8').on('data', data => this.log(id, run, name, data, 'stdout'));
+    if (!mcp) child.stdout?.setEncoding('utf8').on('data', data => this.log(id, run, name, data, 'stdout'));
     child.stderr?.setEncoding('utf8').on('data', data => this.log(id, run, name, data, 'stderr'));
     child.on('error', error => this.log(id, run, name, error.message, 'stderr'));
     return child;
@@ -505,7 +525,12 @@ export class LocalAppRuntime {
   private async syncRun(id: string, run: Invocation): Promise<void> {
     if (this.store instanceof CoreLocalAppStore) await this.store.updateRun(id, run.id, run.phase, [...run.services].map(([name, value]) => ({ name, port: value.port })), run.error);
   }
-  private async killChildren(run: Invocation): Promise<void> { await Promise.all([...run.children].map(stopTree)); run.children.clear(); run.services.clear(); }
+  private async killChildren(run: Invocation): Promise<void> {
+    const results = await Promise.allSettled([this.options.mcp?.stop(run.appId, run.id), ...[...run.children].map(stopTree)]);
+    const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
+    if (errors.length) throw new AggregateError(errors, 'Application process/MCP cleanup needs retry');
+    run.children.clear(); run.services.clear();
+  }
   private async stopInvocation(id: string, run: Invocation): Promise<void> {
     run.controller.abort();
     const errors: unknown[] = [], pending: Invocation[] = [];
@@ -533,13 +558,27 @@ export class LocalAppRuntime {
     if (run && run !== preparing) { try { await this.stopInvocation(id, run); } catch (error) { errors.push(error); } }
     if (errors.length) throw new AggregateError(errors, 'Application cleanup needs retry');
   }
-  async stop(id: string): Promise<void> {
+  /** Synchronously close startup admission while a native stop/revoke/remove transaction drains. */
+  suspendStarts(id: string): () => void {
+    this.blockedStarts.set(id, (this.blockedStarts.get(id) ?? 0) + 1);
+    this.interrupt(id);
+    let released = false;
+    return () => {
+      if (released) return; released = true;
+      const remaining = (this.blockedStarts.get(id) ?? 1) - 1;
+      if (remaining) this.blockedStarts.set(id, remaining); else this.blockedStarts.delete(id);
+    };
+  }
+  private interrupt(id: string): void {
     // Abort before waiting for the queue: Stop must interrupt an in-progress install/readiness wait.
     this.sharedStarts.get(id)?.controller.abort();
     for (const waiter of this.waitingStarts.get(id) ?? []) waiter.abort(new Error('Application operation cancelled'));
     for (const ref of this.requests.get(id) ?? []) this.cancellations.add(ref);
     this.preparing.get(id)?.controller.abort();
     this.invocations.get(id)?.controller.abort();
+  }
+  async stop(id: string): Promise<void> {
+    this.interrupt(id);
     await this.exclusive(id, () => this.stopCurrent(id));
   }
   async execute(id: string, command: string): Promise<{ output: string }> {

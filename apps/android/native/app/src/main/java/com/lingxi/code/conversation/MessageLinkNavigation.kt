@@ -9,6 +9,7 @@ internal fun messageLinkRenderIndex(items: List<ChatRenderItem>, messages: List<
     return items.indexOfFirst { item ->
         when (item) {
             is ChatRenderItem.Message -> item.message.matchesTranscriptUuid(uuid)
+            is ChatRenderItem.SkillInstructions -> item.message.matchesTranscriptUuid(uuid)
             is ChatRenderItem.Tools -> item.calls.any { it.id in tools }
             is ChatRenderItem.Visualization -> item.messageId == message.id
             else -> false

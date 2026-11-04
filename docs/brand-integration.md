@@ -2,6 +2,29 @@
 
 品牌源为 `assets/brand/identity-v1/`。本轮将设计源接入应用资源与官网，保持 bundle ID、URL scheme、包名、账号和签名配置。
 
+## 2026-11-01 星芒图标统一
+
+母品牌与 Code、Chat、Control、Apps、Remote、Harness、SDK 全部使用同一 ✨ 四角星芒，产品之间只保留既有配色差异。所有尺寸使用同一几何，移除双环及各产品叠加的功能符号；字标中的品牌图形一并更新。
+
+已重新生成主应用 Desktop / iOS / Android / Web 的 35 个平台资源，更新 Chat 默认、深浅备用与 Icon Composer 的 178 个资源、Control 的 SVG / PNG / ICNS，以及应用市场字标、favicon、touch icon。各仓来源摘要已同步；品牌预览截图与 ZIP 已刷新。执行 `python3 assets/brand/identity-v1/build.py --png --archive` 可重新生成设计资源与下载包。
+
+资源校验通过：7 产品的 21 个图标 SVG 共享同一星芒路径；56 个产品 PNG 尺寸正确，8 个 1024 px 母版不透明；各仓资源摘要、Chat 深浅备用图标、Android adaptive 安全区与 Control ICNS 均通过独立复核。浏览器验证预览页 28 种产品 / 主题 / 语言组合无图片加载错误，390 px 手机页面无横向溢出。历史双环路径在本轮品牌源及接入副本中无遗留。
+
+本轮只更新源码资源与本地预览，未部署网站、生成签名发行包或安装真机客户端。以下记录保留原验收日期与范围。
+
+## 2026-11-01 星芒前端发布
+
+用户随后授权提交、推送与上线。四个品牌提交均已推送到对应仓库的 `main`：主应用 `25feabc80900c513e1ec2c093c0edc9aacf7f8df`、Chat `9dfa3d2e24f04cdb5b5fdc05fd7c1f285bfd0093`、Control `f18f271e6bac1d31e4c7e6eb64fceead0eaab1df`、应用市场 `57fc633c0f9fc2743831729f9b232716a5f86a78`。主应用与市场从隔离的已提交工作区构建；原工作区其他改动保留。
+
+| 入口 | Hosting site | 发布版本 |
+|---|---|---|
+| [官网](https://lingxios.net) | `lingxi-5e4b2` | `a0df56c549ba5794` |
+| [应用市场](https://lingxi-5e4b2-market.web.app) | `lingxi-5e4b2-market` | `c8ef79bff9257b01` |
+
+发布范围为两个 Hosting 站点的静态内容及既有 Hosting 配置。官网类型检查、生产构建、263 项测试通过，3 项模拟器测试按原条件跳过；市场类型检查、生产构建、64 项测试通过，4 项 Firebase 环境测试按原条件跳过。
+
+发布后，两个生产域名的首页与品牌资源共 11 项均返回 HTTP 200，SHA-256 与对应提交的构建文件逐项一致。浏览器验证官网深浅主题、两个站点的桌面与 390 px 手机页面，新星芒字标正常加载且无横向溢出，控制台无错误。客户端签名发行包与真机安装仍属于独立验收范围。
+
 ## 产品仓库
 
 - Desktop：ICNS、ICO、PNG、通知示意图、窗口图标及打包资源；Windows 打包写入 EXE 图标和产品 label，Linux 注册文件引用随包 PNG。

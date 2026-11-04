@@ -47,7 +47,7 @@ import harness_runtimeFFI
 @MainActor
 final class SideChatConversationSourceTests: XCTestCase {
     private func makeSource(root: URL) -> EngineConversationSource {
-        EngineConversationSource(config: EngineConfig(apiBase: "https://api.anthropic.com", apiKey: "", model: "",
+        EngineConversationSource(config: EngineConfig(apiBase: "https://api.anthropic.com", model: "",
             appSandboxRoot: root.path, projectCwd: nil, sessionMode: .code, visionDelegationEnabled: true), memoryOnly: true)
     }
 

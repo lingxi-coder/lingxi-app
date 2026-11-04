@@ -19,8 +19,8 @@
 # Idempotent: regenerated dirs are cleaned first; safe to re-run. Prints the
 # output paths on success.
 #
-# NO secrets here: the LLM API key (ANTHROPIC_API_KEY) is read by the engine
-# from the runtime environment / app-config — never baked into the framework.
+# No credentials are baked into the framework. Account commands persist
+# independent credentials through the native secure-storage interface.
 
 set -euo pipefail
 
@@ -72,6 +72,11 @@ BUILD_DIR="${LINGXI_XCFRAMEWORK_BUILD_DIR:-${IOS_DIR}/build/xcframework}"
 
 DEVICE_TARGET="aarch64-apple-ios"
 SIM_TARGETS=("aarch64-apple-ios-sim" "x86_64-apple-ios")
+# Bounded local validation can rebuild both current ARM64 execution targets
+# without compiling the Intel simulator graph. The default retains all slices.
+if [[ "${LINGXI_ARM64_DEVICE_SIM_ONLY:-0}" == "1" ]]; then
+  SIM_TARGETS=("aarch64-apple-ios-sim")
+fi
 BUILD_TARGETS=("${DEVICE_TARGET}" "${SIM_TARGETS[@]}")
 if [[ "${LINGXI_DEVICE_ONLY:-0}" == "1" ]]; then
   BUILD_TARGETS=("${DEVICE_TARGET}")
@@ -115,7 +120,31 @@ fi
 # remains the only Rust/UniFFI implementation in the application.
 LINUX_RUNTIME_BUILD="${SCRIPT_DIR}/build-linux-runtime.sh"
 if [[ "${LINGXI_FFI_BINDINGS_ONLY:-0}" != "1" ]]; then
-if [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" && "${LINGXI_REUSE_STAGED_LINUX_RUNTIME:-0}" == "1" ]]; then
+if [[ "${LINGXI_FFI_REUSE_NATIVE_SUPPORT_ONLY:-0}" == "1" ]]; then
+  # Library-only verification can reuse the SDK's verified native support
+  # without staging a guest rootfs. Device app packaging still checks rootfs
+  # in project.yml and verify-linux-runtime.sh; this does not bypass either.
+  SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
+  SDK_OUTPUT="${IOS_DIR}/build/mobile-linux-sdk"
+  python3 "${SDK_ROOT}/scripts/checks/verify-ios-native.py" --artifact-dir "${SDK_OUTPUT}"
+  diff -qr "${SDK_OUTPUT}/MobileLinuxNativeSupport.xcframework" "${FRAMEWORKS_DIR}/MobileLinuxNativeSupport.xcframework"
+  python3 - "${REPO_ROOT}" "${SDK_OUTPUT}" "${BUILD_TARGETS[@]}" <<'CHECK_NATIVE_SUPPORT'
+import json, pathlib, subprocess, sys
+repo, output = map(pathlib.Path, sys.argv[1:3])
+resolved = json.loads(subprocess.check_output([sys.executable, str(repo / "scripts/lib/mobile_linux_source.py"), "--json"], text=True))
+recorded = json.loads((output / "sdk-source.json").read_text())
+if any(recorded[key] != resolved[key] for key in ("source", "revision")):
+    raise SystemExit("native support SDK revision differs from Cargo.lock; rebuild it")
+manifest = json.loads((output / "native-support-manifest.json").read_text())
+required = {
+    "aarch64-apple-ios": "iphoneos-arm64",
+    "aarch64-apple-ios-sim": "iphonesimulator-arm64",
+    "x86_64-apple-ios": "iphonesimulator-x86_64",
+}
+if any(required[target] not in manifest.get("slices", []) for target in sys.argv[3:]):
+    raise SystemExit("staged native support is missing a required execution slice")
+CHECK_NATIVE_SUPPORT
+elif [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" && "${LINGXI_REUSE_STAGED_LINUX_RUNTIME:-0}" == "1" ]]; then
   SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
   SDK_OUTPUT="${IOS_DIR}/build/mobile-linux-sdk"
   python3 "${SDK_ROOT}/scripts/checks/verify-ios-native.py" --artifact-dir "${SDK_OUTPUT}"
@@ -447,13 +476,13 @@ inject_uniffi_init \
   "public convenience init(audio: IosAudioService, camera: IosCamera, mediaDevices: IosMediaDevicePorts," \
   "M10-P4:IosNativeMediaHost" \
   "IosNativeMediaHost.init"
-for constructor in buildIosEngine buildIosEngineWithConfig; do
+for constructor in buildIosEngineWithConfig buildIosAudioProviderHost; do
   inject_uniffi_init \
     "public func ${constructor}(" \
     "M10-P4:${constructor}" \
     "${constructor}"
 done
-for marker in M10-P4:IosNativeMediaHost M10-P4:buildIosEngine M10-P4:buildIosEngineWithConfig; do
+for marker in M10-P4:IosNativeMediaHost M10-P4:buildIosEngineWithConfig M10-P4:buildIosAudioProviderHost; do
   count="$(grep -Fc "uniffiEnsureIosFrameworkInitialized() // ${marker} " "${IOSF}")"
   [[ "${count}" == "1" ]] || {
     echo "ERROR: expected exactly one UniFFI initialization marker ${marker}; found ${count}" >&2

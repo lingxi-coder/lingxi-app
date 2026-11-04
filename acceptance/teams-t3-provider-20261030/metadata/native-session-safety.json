@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "recordType": "teams-t3.native-session-safety",
+  "result": "PASS",
+  "scope": "Normal signed Desktop sessions, same-profile reopen, and restoration of the original application environment.",
+  "normalLaunch": {
+    "signedApplication": true,
+    "productionAccountBrokerFlow": true,
+    "sameCloudIdentityObservedInNormalUi": true,
+    "cloudAuthenticatedObservedInNormalUi": true,
+    "openAiConfiguredObservedInNormalUi": true,
+    "ownerBusinessProfileCopied": false,
+    "credentialMaterialExportedByHelper": false,
+    "modelProxyOrCredentialFixtureUsed": false
+  },
+  "sameProfile": {
+    "reusedExistingOwnedProfile": true,
+    "boundDirectoryCount": 5,
+    "ownedPrivateDirectoryModesVerified": true,
+    "profileInitializedOrOverwrittenByReopenHelper": false,
+    "profileFileContentsReadByReopenHelper": false,
+    "taskDeadlinesQueuesOrQuotasResetByHelper": false,
+    "conversationHistoryRetained": true
+  },
+  "sessions": {
+    "officialPackageSmoke": {
+      "verificationExit": 0,
+      "originalEnvironmentRestored": true,
+      "recordedRestorationErrorCount": 0,
+      "evidenceRef": "officialSmoke"
+    },
+    "initialLiveSession": {
+      "realProviderDirectMessageCompleted": true,
+      "restartExecutedCount": 0,
+      "originalEnvironmentRestored": true,
+      "restorationErrorCount": 0,
+      "restartAcceptanceResult": "NOT_A_RESTART_PASS",
+      "timeoutAndRefusalBasis": "Parent-observed supervisor timeout and refused command publication; no standalone refusal artifact. State supports zero executed restarts and successful restoration.",
+      "evidenceRef": "initialSupervisor"
+    },
+    "separateSameProfileReopen": {
+      "supervisorLimitSeconds": 1800,
+      "exitReason": "normal restore command",
+      "originalEnvironmentRestored": true,
+      "restorationErrorCount": 0,
+      "evidenceRef": "reopenSupervisor"
+    }
+  },
+  "finalRestoration": {
+    "originalApplicationBrokerServicePlistAndUrlHandlerRestored": true,
+    "restorationErrorCount": 0,
+    "sameCloudIdentityObservedInNormalUi": true,
+    "cloudAuthenticatedObservedInNormalUi": true,
+    "openAiConfiguredObservedInNormalUi": true,
+    "isolatedTestBotUnboundAndDisabled": true,
+    "conversationHistoryRetained": true,
+    "evidenceRefs": [
+      "reopenSupervisor",
+      "nativeFinal"
+    ]
+  },
+  "observationOrdering": {
+    "reopenObservationStillHadRestorationPending": true,
+    "nativeFinalHasRestorationPending": false,
+    "note": "The earlier journey observation was not final restoration proof. The final record and completed supervisor state establish restoration."
+  },
+  "evidenceSources": {
+    "officialSmoke": {
+      "record": "full-smoke-r2/state.json",
+      "sha256": "d1af533e40c74fc98c5164920bd809bd3f6f6fe4c016a25f3bddcfe87414add9"
+    },
+    "initialSupervisor": {
+      "record": "normal-live-r1/state.json",
+      "sha256": "4e278e298ff338c38d49363de884cce67a354f37ab4dc4f8ab688730921dd6cc"
+    },
+    "reopenSupervisor": {
+      "record": "normal-reopen-r1/state.json",
+      "sha256": "37ac331689859b28a305894829954db2d34977441a861e471f7b0f59148fad75"
+    },
+    "reopenObservation": {
+      "record": "live-reopen-verification.json",
+      "sha256": "bae579ee6fe2420b84834ab1c2c38378c108d5f01e2cdc2b892b5f16763c9abf"
+    },
+    "nativeFinal": {
+      "record": "native-live-final.json",
+      "sha256": "28ff5665df6e862c4bc16812fd21c9c7435b9f5f7e82bb98e4b416c6ebfb867b"
+    }
+  },
+  "redaction": "Only outcomes, counts and raw evidence file SHA256 are published. Private profiles, identities, credential storage and full supervisor state remain private."
+}

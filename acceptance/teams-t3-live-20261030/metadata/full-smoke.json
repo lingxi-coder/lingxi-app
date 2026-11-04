@@ -1,0 +1,15 @@
+{
+  "exit": 0,
+  "elapsed_s": 57.2,
+  "command": [
+    "npm",
+    "run",
+    "verify:package"
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/teams/lingxi-app/apps/electron",
+  "log": "/Users/luolingfeng/lingxi/.worktrees/teams/harness-runtime/target/teams-t3-completion-evidence/macos-full-smoke-r1.log",
+  "freeAfter": 4519735296,
+  "stopped": null,
+  "rawLogSha256": "ddf0c32042e604a0b9c849e71f2650096245312de5c924790058b327c9c4f1a6",
+  "gzipLogSha256": "a55dfdcfa7c0f522305cbc7a4c562da0c37589a9b144c3e5c1108344b43d2a11"
+}

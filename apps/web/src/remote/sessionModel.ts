@@ -29,6 +29,8 @@ export function imageRefOf(url: string): string | undefined {
 export interface PromptMeta {
   origin: RemotePromptOrigin;
   deviceName?: string;
+  /** The Bot that handed the prompt over, when `origin` is `bot`. */
+  fromBotName?: string;
   turnId: number;
 }
 
@@ -151,6 +153,8 @@ export class TranscriptBuilder {
     const meta: PromptMeta = { origin: record.origin, turnId: record.turn_id };
     const deviceName = displayText(record.device_name, 64);
     if (deviceName) meta.deviceName = deviceName;
+    const fromBotName = record.origin === 'bot' ? displayText(record.from_bot_name, 60) : '';
+    if (fromBotName) meta.fromBotName = fromBotName;
     this.promptMeta = new Map(this.promptMeta).set(last.id, meta);
   }
 

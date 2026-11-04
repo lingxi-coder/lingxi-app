@@ -6,6 +6,14 @@ import XCTest
 /// Pure model-picker and composer presentation policies that can be tested
 /// without driving the SwiftUI hierarchy.
 final class ModelPickerTests: XCTestCase {
+    func testPickerBillingChannelsStayAdjacentAndPreserveExecutionReferences() {
+        let sections = ModelDisplay.pickerSections(for: ["openai/shared-model", "anthropic/other", "openai-chatgpt/shared-model"],
+            eligibleReferences: ["openai-chatgpt/shared-model"])
+        XCTAssertEqual(sections.map(\.providerId), ["openai-chatgpt", "openai", "anthropic"])
+        XCTAssertEqual(sections[0].models.map(\.reference), ["openai-chatgpt/shared-model"])
+        XCTAssertEqual(sections[1].models.map(\.reference), ["openai/shared-model"])
+    }
+
     private let catalog = [
         "anthropic/claude-sonnet-5",
         "anthropic/claude-opus-4-8",

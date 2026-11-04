@@ -241,10 +241,3 @@ export function useConnectionState(connection: ViewerConnection | null): Connect
     () => (connection === null ? null : connection.state),
   );
 }
-
-export function useStore<T>(store: { subscribe(listener: () => void): () => void; getState(): T } | null): T | null {
-  return useSyncExternalStore(
-    (listener) => (store === null ? () => undefined : store.subscribe(listener)),
-    () => (store === null ? null : store.getState()),
-  );
-}

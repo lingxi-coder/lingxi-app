@@ -93,7 +93,7 @@ test('the model list stays inside the workspace that clips it', async () => {
     );
     // The names are the reason the panel exists; a clipped panel keeps its
     // width and loses them, so the rectangle alone is not enough.
-    assert.equal(narrow.firstRowLabel, 'OpenRouter Auto');
+    assert.equal(narrow.firstRowLabel, 'OpenRouter AutoAccess unverified');
     assert.ok(narrow.firstRowReachable, 'the first model row was not reachable at its own label');
     assert.equal(narrow.submenu.width, 390);
 

@@ -1,0 +1,372 @@
+{
+  "checkpoint_date": "2026-10-29",
+  "timezone": "America/Los_Angeles",
+  "status": "validated-local-prerequisite-t3-disabled",
+  "harness": {
+    "branch": "codex/teams-runtime",
+    "commit": "dfab0eb36bb20196534509298d88654fce008554",
+    "parent": "6ac2f6f4e617a21a71b57e479bf2b7e195adcaea",
+    "published": false,
+    "source_files": [
+      {
+        "path": "crates/core/src/host/sandbox.rs",
+        "sha256": "31aa88dbe9f94ec9c7929521fb141ffabd8573ee1ff72c83c461499953488e0d"
+      },
+      {
+        "path": "crates/core/src/host/shell_supervisor.rs",
+        "sha256": "49e46a7684f630c62568963135eecd82b3d6f984c6c2914138ebcdd921b305ad"
+      },
+      {
+        "path": "crates/orchestrator/src/conversation/drivers/prepare.rs",
+        "sha256": "39c2402593c871d8c0db94653bd106c9afd94f6411224886e1426a310d06fc1c"
+      },
+      {
+        "path": "crates/orchestrator/src/conversation/model.rs",
+        "sha256": "8a757ea12f74c697abbe4fb53fc09c287da9fb7365ee4a7b18dcb09b53245dc4"
+      },
+      {
+        "path": "crates/orchestrator/src/conversation/prompt.rs",
+        "sha256": "141f8e6483284392c219b3d0c2e7b92ce7fee89f2b471db9f54aa8a06f830819"
+      },
+      {
+        "path": "crates/orchestrator/src/conversation/prompt_ingress_environment.rs",
+        "sha256": "c7eb5f016cc177dd19cc8134a4dd6bd6bd1075ad4cb0658771d5358a7ee90a55"
+      },
+      {
+        "path": "crates/orchestrator/src/conversation/runtime.rs",
+        "sha256": "8b8fa272cad01123ec406a04bd009d4690f56534d01c43fa8215fa383fac6546"
+      },
+      {
+        "path": "crates/orchestrator/src/conversation/transcript.rs",
+        "sha256": "7485f63818adf78b69b19adc5e53fcd6419834baa0cce4939abcd0fbae770891"
+      },
+      {
+        "path": "crates/orchestrator/src/conversation/wiring.rs",
+        "sha256": "284d3fc6f7b4d53a4f4c78e88e7e6bade04e19094531f74f0541e707312c7fb2"
+      },
+      {
+        "path": "crates/orchestrator/src/prompt/memory_block.rs",
+        "sha256": "7ee8ce4faf14c64ef153570a875c531ea02135f073ebac78f27c3f856c0590d0"
+      },
+      {
+        "path": "crates/platforms/posix/src/process/runner.rs",
+        "sha256": "310af4ae4e090f4938d3454204b521045c23b620a228acee233f76179494cae0"
+      },
+      {
+        "path": "crates/provider-config/src/credentials.rs",
+        "sha256": "160834d91b495015f07736a825c91b19938721ce7fdd70b80f396dc6bf289442"
+      },
+      {
+        "path": "crates/runtime/Cargo.toml",
+        "sha256": "adfbe8bd94dae0d7b7da52d0646d4edec1297d2c16072abd95828958820eb1a4"
+      },
+      {
+        "path": "crates/runtime/src/desktop/assembly.rs",
+        "sha256": "46e4f704727da9ddd4b8f05e021791357e6fa91e07ec3176d6b7a25c5481e253"
+      },
+      {
+        "path": "crates/runtime/src/desktop/configuration.rs",
+        "sha256": "723309474a06f1a69f39f00c78f317e86400dd565ae7b0dde4998b5f8fc418f6"
+      },
+      {
+        "path": "crates/runtime/src/desktop/credentials.rs",
+        "sha256": "7c40a926003f64f47faf3e27863e5e24915df8bf3fb7c9af1e327388e0030b7f"
+      },
+      {
+        "path": "crates/runtime/src/desktop/mod.rs",
+        "sha256": "4da93685e651e09431ce888268c1d13405890e0524358708e8ff8d44ec896d9e"
+      },
+      {
+        "path": "crates/runtime/src/desktop/team_invocation.rs",
+        "sha256": "dd49b4b0e0316925958bfbac140f6c8b095efae0279ca16ee2aeb4bfa0cf74b7"
+      },
+      {
+        "path": "crates/runtime/src/desktop/team_sandbox.rs",
+        "sha256": "ffaf702c782782e5e56fa546fa30e1d18ecf4d092fc816b933acb69fd841e832"
+      },
+      {
+        "path": "crates/runtime/src/mobile/host/assembly.rs",
+        "sha256": "80c51676e13b0c2f1f97dd58fbd102db2e3115a3d82cf8944e0883dc210e10f9"
+      },
+      {
+        "path": "crates/runtime/tests/desktop/team_invocation_profile.rs",
+        "sha256": "3baee114be1d3e64298102f8bb9ba0e4c97156b04940826276e5556e8a55ad94"
+      },
+      {
+        "path": "crates/tool-api/src/builtin_context.rs",
+        "sha256": "0a50dadb0eac09f19f221b219fbb751e01772444380306c9dd1433d8b3210012"
+      },
+      {
+        "path": "crates/tool-api/src/isolated_shell.rs",
+        "sha256": "a275574614638b9fa204edf1680b8f3e76ce004cb6bceda66534d2b95a1ce3e7"
+      },
+      {
+        "path": "crates/tool-api/src/lib.rs",
+        "sha256": "c839d70cb6f065917a6de404a3f43a811221340d6495ce35dd74fa82b601ff73"
+      },
+      {
+        "path": "crates/tool-api/src/test_support.rs",
+        "sha256": "a3d41d0aba98d4eeb38a6d9968743c629ae8fc87c88a4f06a22c7706b0ba13e4"
+      },
+      {
+        "path": "crates/tools/shell/src/bash.rs",
+        "sha256": "6fd281eaceb515e6f3289a07bfe0ac88d360a9b8da6e0392bc9c87b36508abb1"
+      },
+      {
+        "path": "docs/TEAM_INVOCATION_PROFILE.md",
+        "sha256": "4f7a027e945649c55f0f5895f04943f73f0868f6af8104fc16c57aa6dfe19519"
+      }
+    ]
+  },
+  "product": {
+    "baseline": "68f93de3b",
+    "branch": "claude/teams",
+    "harness_pin": "eed08ca06c35371c1eb7ea5b02ebc10bcae63a12",
+    "entry_enabled": false
+  },
+  "sdk_revision": "ff71b2ec1139bc67cc8719d78b1735aca967bbe8",
+  "tests_passed": 721,
+  "checks": [
+    {
+      "name": "acceptance",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "harness-runtime",
+        "--features",
+        "desktop",
+        "--test",
+        "team_invocation_profile",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "passing_groups": [
+        13
+      ],
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "posix-runner",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "platform-posix",
+        "--lib",
+        "process::runner::",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "passing_groups": [
+        31
+      ],
+      "passed": 31,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "shared-regression",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "tool-api",
+        "-p",
+        "tool-shell",
+        "-p",
+        "provider-config",
+        "--lib",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "passing_groups": [
+        97,
+        303,
+        258
+      ],
+      "passed": 658,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "orchestrator-git",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "orchestrator",
+        "--lib",
+        "git",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "passing_groups": [
+        11
+      ],
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "orchestrator-environment",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "orchestrator",
+        "--lib",
+        "prompt_ingress_environment",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "passing_groups": [
+        8
+      ],
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "desktop-check",
+      "command": [
+        "cargo",
+        "check",
+        "--offline",
+        "--locked",
+        "-p",
+        "harness-runtime",
+        "--lib",
+        "--features",
+        "desktop"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "mobile-check",
+      "command": [
+        "cargo",
+        "check",
+        "--offline",
+        "--locked",
+        "-p",
+        "harness-runtime",
+        "--lib",
+        "--features",
+        "mobile"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "format-and-diff",
+      "rust_files": 25,
+      "exit_code": 0,
+      "details": "PASS: 25 changed Rust files; skip_children=true\nPASS: git diff --check"
+    }
+  ],
+  "logs": [
+    {
+      "path": "logs/acceptance.log.gz",
+      "raw_sha256": "1d5324c204f48423e1ce4fb7174befa493e874e7ce4893e4040a08f56c7be741",
+      "compressed_sha256": "3094e9ee2583da17bb4b35bf9fb050eb52d4568bf5627e617744c43b998e8798",
+      "raw_bytes": 88012
+    },
+    {
+      "path": "logs/posix-runner.log.gz",
+      "raw_sha256": "165e6cc1bd4bc12f20bb462e5f7f3c84514cac89805168f3cd4d92e56e892f6e",
+      "compressed_sha256": "589611ae3434ce747842f8b8afb4c8d94043c39607c6a525282aa1da3105d368",
+      "raw_bytes": 3475
+    },
+    {
+      "path": "logs/shared-regression.log.gz",
+      "raw_sha256": "0e742cf1dc7c7723d3c97da78aebfe43d10731be40ae467bf283e650abbd6e1a",
+      "compressed_sha256": "deb1626be1c531daa145cbf7dbf7ae7a1490e2e0b6e7b6d5612ceb9897d462d1",
+      "raw_bytes": 58410
+    },
+    {
+      "path": "logs/orchestrator-git.log.gz",
+      "raw_sha256": "265e9bc9fc5e68c2d7789f43e185863902f8e3cf3bd0c15e5a6b75ced94a42cb",
+      "compressed_sha256": "cab9a03beefde48288f2822cd822cd1ad18806fcdba80306119054eabccf7869",
+      "raw_bytes": 7920
+    },
+    {
+      "path": "logs/orchestrator-environment.log.gz",
+      "raw_sha256": "214e1f3235299a665648c31e3b3bb1c257d30865f80a01645ee9a8c5de5daa51",
+      "compressed_sha256": "53891352055f0ba446c455ffc02b8a4c1063b4eef617a8ba4cc3804f11a27e3c",
+      "raw_bytes": 5100
+    },
+    {
+      "path": "logs/desktop-check.log.gz",
+      "raw_sha256": "882d030a6c042e0e4d883180ab9e0e2ed8af611a40181a43beead3026ee15251",
+      "compressed_sha256": "fd5e0a16f792f176512b2dea69029cf862a327722691bc320631d3d124456475",
+      "raw_bytes": 92445
+    },
+    {
+      "path": "logs/mobile-check.log.gz",
+      "raw_sha256": "abf0e5e919e263270926695e422831e0af9a4b35d71eb1dc7d13d4c39528e065",
+      "compressed_sha256": "e880d4f8c15bd5f31c07d6945abb854779a9726725a3c2eb1be5c679353a2054",
+      "raw_bytes": 95635
+    },
+    {
+      "path": "logs/format.log.gz",
+      "raw_sha256": "92ee682e53eb5658d0de670d08e2d1e232b2106608624a04f26a3fcc421865ad",
+      "compressed_sha256": "0b09f63f7849e6c22fc6793877a574a67f867c6e080cfa20186db0aa766dd5c2",
+      "raw_bytes": 71
+    },
+    {
+      "path": "logs/acceptance-outer-sandbox-denied.log.gz",
+      "raw_sha256": "46b6692e914e5d19b061c36dc1c48b72ae1df4d23eeca7323ed49994b8e4842e",
+      "compressed_sha256": "bdd03ff091f42007e6cc38e837d28122e3ef4911c9c11fb7e54d4476d0bae23f",
+      "raw_bytes": 88253
+    }
+  ],
+  "review": {
+    "verdict": "APPROVE for disabled prerequisite only",
+    "files": 27,
+    "critical": 0,
+    "high": 0,
+    "tests_run_by_reviewer": false
+  },
+  "limits": {
+    "turns_default": 12,
+    "turns_ceiling": 20,
+    "human_input_utf8_bytes": 32768,
+    "snapshot_utf8_bytes": 65536,
+    "output_tokens_per_request": 4096,
+    "dispatches_default": 24,
+    "dispatches_ceiling": 32
+  },
+  "limitations": [
+    "macOS-only profile; Linux/Windows reject preparation",
+    "No fresh clean-environment invocation process or actual provider request verification",
+    "No authenticated owner approval or original-human answer broker",
+    "No reliable five-minute termination or escaped-setsid descendant supervision",
+    "No total-input/token/monetary or CPU/memory/disk ceiling",
+    "No durable executor integration, four-client T3 UI, signed/native/device or live-model acceptance"
+  ],
+  "disk": {
+    "last_available_kib": 58800000,
+    "observation": "Filesystem   1024-blocks      Used Available Capacity  iused     ifree %iused  Mounted on\n/dev/disk3s1   971350180 884000000  58800000    94% 10741594 590559760    2%   /System/Volumes/Data",
+    "floor_kib": 2097152,
+    "caches_deleted": false
+  },
+  "real_accounts_or_sessions_used": false,
+  "push_merge_deploy_iam": false
+}

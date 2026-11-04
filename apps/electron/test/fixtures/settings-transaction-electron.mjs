@@ -19,7 +19,7 @@ async function waitFor(webContents, expression, timeout = 8000) {
 }
 
 async function runCloseScenario(webContents) {
-  await waitFor(webContents, `Boolean(document.querySelector('[data-testid="provider-connection-test"]'))`);
+  await waitFor(webContents, `Boolean(document.querySelector('[data-testid^="provider-account-test-"]'))`);
   const connectionTestButtonState = await webContents.executeJavaScript('window.__settingsTransactionTest.connectionTestButtonState()');
   if (!connectionTestButtonState.exists || connectionTestButtonState.disabled || !connectionTestButtonState.providerCredentialField) {
     throw new Error(`Anthropic connection-test prerequisites are not ready: ${JSON.stringify(connectionTestButtonState)}`);

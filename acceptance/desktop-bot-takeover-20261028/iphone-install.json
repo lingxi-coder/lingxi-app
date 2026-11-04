@@ -1,0 +1,39 @@
+{
+  "info" : {
+    "arguments" : [
+      "devicectl",
+      "--json-output",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/iphone-install.json",
+      "--log-output",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/iphone-install.log",
+      "device",
+      "install",
+      "app",
+      "--device",
+      "00008030-001549902184802E",
+      "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-derived/Build/Products/FullDebug-iphoneos/LingxiCode.app"
+    ],
+    "commandType" : "devicectl.device.install.app",
+    "environment" : {
+      "TERM" : "dumb"
+    },
+    "jsonVersion" : 5,
+    "outcome" : "success",
+    "version" : "651.13.5"
+  },
+  "result" : {
+    "deviceIdentifier" : "B12BBA62-E6E6-5C78-A50A-58D900D56C9A",
+    "installedApplications" : [
+      {
+        "bundleID" : "com.lingxi.code.full",
+        "databaseSequenceNumber" : 2608,
+        "databaseUUID" : "67F37AB6-FB3D-4FBB-915D-C2384348E981",
+        "installationURL" : "file:///private/var/containers/Bundle/Application/F11CF755-BE71-4B83-92FD-45F6E5D0B498/LingxiCode.app/",
+        "launchServicesIdentifier" : "unknown",
+        "options" : {
+
+        }
+      }
+    ]
+  }
+}

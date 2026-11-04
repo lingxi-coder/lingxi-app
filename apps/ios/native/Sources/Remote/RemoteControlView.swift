@@ -7,11 +7,6 @@ struct RemoteControlDestination: Identifiable {
 }
 
 #if canImport(harness_runtimeFFI)
-private enum RemoteRoute: Hashable {
-    case host(String)
-    case session(host: String, session: String, title: String)
-}
-
 @MainActor
 struct RemoteControlView: View {
     let destination: RemoteControlDestination
@@ -81,6 +76,12 @@ struct RemoteControlView: View {
                 case let .host(id):
                     RemoteHostView(manager: manager, hostID: id) { session in
                         path.append(.session(host: id, session: session.sessionId, title: session.title))
+                    } openBot: { bot in
+                        path.append(.bot(host: id, bot: bot.botId))
+                    }
+                case let .bot(host, bot):
+                    RemoteBotView(manager: manager, hostID: host, botID: bot) { session, title in
+                        path.append(.session(host: host, session: session, title: title))
                     }
                 case let .session(host, session, title):
                     if let uid = configuredUID {
@@ -102,10 +103,11 @@ struct RemoteControlView: View {
             guard !Task.isCancelled, uid == FirebaseAccount.shared.user?.uid else { return }
             configuredUID = uid
             if uid != nil, let host = destination.hostID {
-                path = [.host(host)]
-                if let session = destination.sessionID {
-                    path.append(.session(host: host, session: session, title: String(localized: "remote_untitled")))
-                }
+                // A session id is unique across computers, so a push for a Bot's chat is routed like any other;
+                // its Bot is only known if this connection has already been told.
+                path = RemoteRoute.stack(host: host, session: destination.sessionID,
+                    title: String(localized: "remote_untitled"),
+                    bot: destination.sessionID.flatMap { manager.botOfThread($0) })
             }
         }
     }
@@ -116,6 +118,7 @@ private struct RemoteHostView: View {
     let manager: RemoteControlManager
     let hostID: String
     let select: (RemoteSessionSummaryFfi) -> Void
+    let openBot: (RemoteBotSummaryFfi) -> Void
     @Environment(\.scenePhase) private var scenePhase
     @State private var error: String?
     @State private var appBrowser = RemoteAppBrowserLifetime()
@@ -131,17 +134,16 @@ private struct RemoteHostView: View {
                     browserGeneration: { appBrowser.generation },
                     presentBrowser: { url, generation in appBrowser.present(url, generation: generation) },
                     invalidateBrowserLaunch: { appBrowser.invalidatePending() })
+                // Nothing at all while the computer has none to show or does not know Bots.
+                if case let .bots(bots) = manager.botDirectory.bots(host: hostID), !bots.isEmpty {
+                    RemoteBotsSection(bots: bots, open: openBot)
+                }
                 if manager.sessions.isEmpty {
                     Section { Text("remote_no_sessions_help").foregroundStyle(.secondary) } header: { Text("remote_no_sessions") }
                 }
                 ForEach(manager.sessions, id: \.sessionId) { session in
-                    Button { select(session) } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(session.title.isEmpty ? String(localized: "remote_untitled") : session.title)
-                            Text(session.projectLabel).font(.caption).foregroundStyle(.secondary)
-                            Text(status(session.status)).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }.accessibilityIdentifier("remote.session.\(session.sessionId)")
+                    Button { select(session) } label: { RemoteSessionRow(session: session) }
+                        .accessibilityIdentifier("remote.session.\(session.sessionId)")
                 }
             } else if host?.online == false {
                 Text("remote_offline_help").foregroundStyle(.secondary)
@@ -158,15 +160,6 @@ private struct RemoteHostView: View {
         }
         .task { do { try await manager.connect(hostID) } catch { self.error = String(localized: "remote_err_generic") } }
         .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await manager.nudge() } } }
-    }
-
-    private func status(_ value: RemoteSessionStatusFfi) -> LocalizedStringKey {
-        switch value {
-        case .running: "remote_status_running"
-        case .requiresAction: "remote_status_requires_action"
-        case .idle: "remote_status_idle"
-        case .dormant: "remote_status_dormant"
-        }
     }
 }
 

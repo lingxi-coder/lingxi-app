@@ -4,6 +4,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TranscriptToolGroupTest {
+    @Test fun activityTypesNeverReorderOrMergeAcrossOtherCalls() {
+        val calls = listOf("Read", "Read", "Edit", "Read", "mcp__a__search", "mcp__b__search")
+            .mapIndexed { index, name -> ToolCallUi(index.toString(), name) }
+        assertEquals(listOf(listOf("0", "1"), listOf("2"), listOf("3"), listOf("4"), listOf("5")),
+            consecutiveToolGroups(calls).map { group -> group.map { it.id } })
+        assertEquals(calls, consecutiveToolGroups(calls).flatten())
+    }
+
+    @Test fun questionsAndAgentsRemainIndividuallyReachable() {
+        for (name in listOf("Agent", "Skill", "AskUserQuestion", "PermissionRequest")) {
+            assertEquals(2, consecutiveToolGroups(listOf(ToolCallUi("a", name), ToolCallUi("b", name))).size)
+        }
+    }
     private fun tool(id: String, status: AgentToolStatus = AgentToolStatus.Completed) =
         MessageContent.Tool(ToolCallUi(id, "Read", status = status))
 
@@ -51,6 +64,16 @@ class TranscriptToolGroupTest {
     )
     private fun message(id: String, vararg blocks: MessageContent) = com.lingxi.code.model.Message(
         role = com.lingxi.code.model.Role.Ai, text = "", id = id, blocks = blocks.toList())
+
+    @Test fun skillPromptIsCollapsedWithoutReclassifyingAnUnrelatedUserMessage() {
+        val text = "# LingXi API guide\n\nFull instructions."
+        val call = ToolCallUi("skill", "Skill", status = AgentToolStatus.Completed, skillBody = text)
+        val user = com.lingxi.code.model.Message(com.lingxi.code.model.Role.User, text, id = "injected")
+        val rows = buildChatRenderItems(state(message("assistant", MessageContent.Tool(call)), user))
+        assertEquals("injected", rows.filterIsInstance<ChatRenderItem.SkillInstructions>().single().key)
+        val ordinary = buildChatRenderItems(state(message("assistant", MessageContent.Tool(call)), user.copy(text = "Another request")))
+        assertTrue(ordinary.last() is ChatRenderItem.Message)
+    }
 
     @Test fun groupsSpanAssistantEnvelopesButStopAtProseAndUserMessages() {
         val rows = buildChatRenderItems(state(

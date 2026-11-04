@@ -1,4 +1,12 @@
 export const runtimeCatalog: Record<string, Record<string, string>> = {
+  "desktop_scheduled_next_run": {
+    "en": "Next run %1$s",
+    "zh-Hans": "下次运行 %1$s",
+    "zh-Hant": "下次執行 %1$s",
+    "ja": "次回実行 %1$s",
+    "ko": "다음 실행 %1$s"
+  },
+
   "desktop_scheduled_advice_ongoing": {
     "en": "No expiry works well for ongoing summaries and routine checks. Set an end date for temporary work.",
     "zh-Hans": "长期摘要与例行检查适合不设置到期日。临时工作请设置结束日期。",

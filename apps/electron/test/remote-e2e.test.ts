@@ -961,12 +961,12 @@ test('6. events the disposition table withholds never reach a browser, live or i
     const controller = await attachSession(backend, browser);
     const client = desktop.client();
     client.emitEvent({ type: 'settings_snapshot', effective_json: '{"apiKey":"sk-secret-settings"}', provenance_json: '{}' });
-    client.emitEvent({ type: 'provider_credential_status', operation_id: 1, configured_provider_ids: ['anthropic'], storage_encrypted: true, credential_previews: { anthropic: 'sk-secret-preview' } });
+    client.emitEvent({ type: 'provider_accounts_updated', operation_id: 1, configured_provider_ids: ['anthropic'], storage_encrypted: true, credential_previews: { anthropic: 'sk-secret-preview' } });
     client.emitEvent({ type: 'mcp_configuration_snapshot', snapshot_json: '{"env":{"TOKEN":"sk-secret-mcp"}}' });
     client.emitEvent({ type: 'text_delta', text: 'visible after the secrets' });
     await backend.until(() => transcriptText(browser).some((text) => text.includes('visible after the secrets')), 'the next event to arrive');
     const everything = (b: Browser): string => JSON.stringify(b.received);
-    for (const needle of ['sk-secret', 'settings_snapshot', 'provider_credential_status', 'mcp_configuration_snapshot']) {
+    for (const needle of ['sk-secret', 'settings_snapshot', 'provider_accounts_updated', 'mcp_configuration_snapshot']) {
       assert.ok(!everything(browser).includes(needle), `${needle} reached the live viewer`);
     }
     assert.equal(controller.getState().status, 'live');
@@ -978,7 +978,7 @@ test('6. events the disposition table withholds never reach a browser, live or i
     await attachSession(backend, late);
     assert.ok(late.received.some((item) => item.method === 'session.snapshot' && item.params.phase === 'end'));
     assert.ok(transcriptText(late).some((text) => text.includes('visible after the secrets')));
-    for (const needle of ['sk-secret', 'settings_snapshot', 'provider_credential_status', 'mcp_configuration_snapshot']) {
+    for (const needle of ['sk-secret', 'settings_snapshot', 'provider_accounts_updated', 'mcp_configuration_snapshot']) {
       assert.ok(!everything(late).includes(needle), `${needle} reached a snapshot`);
     }
   } finally {

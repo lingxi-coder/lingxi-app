@@ -1,0 +1,32 @@
+{
+  "productSourceCommit": "ea59210a827015d0ac316aee393bcb08f22f40f1",
+  "runtimePin": "b09033fa446dfdee48e71ea18ca16095b068a353",
+  "zipSha256": "4f60b49f8145215401b133ace2b94286b4da37780b8c5f235cf5c3cfef588c9a",
+  "zipBytes": 367910155,
+  "officialFlareWrapper": true,
+  "staticVerification": "PASS",
+  "fullOfficialVerification": "PASS",
+  "fullVerificationSeconds": 59.2,
+  "originalAppRestored": true,
+  "originalBrokerRestored": true,
+  "originalUrlHandlerRestored": true,
+  "restorationErrors": [],
+  "realProvider": "PASS_actual_configured_OpenAI_GPT6Luna_two_journeys",
+  "realProviderEvidence": "metadata/real-provider-journey.json",
+  "verificationPhases": [
+    {
+      "phase": "official_build_sign_zip_static",
+      "result": "PASS",
+      "fullSmokeInThisInvocation": "REFUSED_active_original_Broker",
+      "log": "logs/native-package-provider-r2.log.gz"
+    },
+    {
+      "phase": "separate_official_reuse_existing_full_smoke",
+      "result": "PASS",
+      "seconds": 59.2,
+      "guardedOriginalInterruption": true,
+      "restorationErrors": [],
+      "log": "logs/native-package-full-smoke-r1.log.gz"
+    }
+  ]
+}

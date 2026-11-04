@@ -11,7 +11,7 @@ async function main() {
   try {
     await window.loadURL(url);
     await configureFixtureWindow(window);
-    const run = script => window.webContents.executeJavaScript(script);
+    const run = async script => { try { return await window.webContents.executeJavaScript(script); } catch (cause) { throw new Error(`Fixture script failed: ${script}`, { cause }); } };
     const wait = async expression => { for (let i = 0; i < 300; i++) { if (await run(expression)) return; await delay(20); } throw new Error(`Timeout: ${expression}\n${await run('document.body.innerText')}`); };
     const exists = selector => wait(`Boolean(document.querySelector(${JSON.stringify(selector)}))`);
     const button = text => run(`Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === ${JSON.stringify(text)})?.click()`);
@@ -81,6 +81,8 @@ async function main() {
     await exists('[id="scheduled-run-run-1"][aria-current="true"]');
     assert.ok(await run('document.body.innerText.includes("Linked run result")'));
     assert.equal((await state()).calls.filter(call => call.domain === 'cron').every(call => call.command.action === 'list'), true);
+    await run(`document.querySelector('.scheduled-create-button').click()`);
+    await exists('input.scheduled-setup-title');
     await run(`(() => { const input = document.querySelector('.scheduled-setup-title'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'Keep my task draft'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
     await delay(30);
     await run('window.linkPreviewFixture.cron("job", "job-1")');

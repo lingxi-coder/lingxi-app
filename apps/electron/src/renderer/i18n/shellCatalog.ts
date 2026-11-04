@@ -216,40 +216,12 @@ export const shellCatalog: Record<string, Record<string, string>> = {
     "ja": "プライバシーのお問い合わせ",
     "ko": "개인정보 문의"
   },
-  "desktop_shell_auth_unknown": {
-    "zh-Hans": "状态未知",
-    "zh-Hant": "狀態未知",
-    "en": "Unknown status",
-    "ja": "状態不明",
-    "ko": "상태 알 수 없음"
-  },
-  "desktop_shell_auth_pending": {
-    "zh-Hans": "尚未收到 auth_state。",
-    "zh-Hant": "尚未收到 auth_state。",
-    "en": "Authentication status has not arrived yet.",
-    "ja": "認証状態をまだ受信していません。",
-    "ko": "인증 상태를 아직 받지 못했습니다."
-  },
   "desktop_shell_signed_out": {
     "zh-Hans": "未登录",
     "zh-Hant": "未登入",
     "en": "Signed out",
     "ja": "未ログイン",
     "ko": "로그아웃됨"
-  },
-  "desktop_shell_engine_signed_out": {
-    "zh-Hans": "当前引擎没有持久登录态。",
-    "zh-Hant": "目前引擎沒有持續登入狀態。",
-    "en": "The current engine has no persistent sign-in.",
-    "ja": "現在のエンジンに永続的なログイン状態はありません。",
-    "ko": "현재 엔진에 영구 로그인 상태가 없습니다."
-  },
-  "desktop_shell_runtime_credential": {
-    "zh-Hans": "运行时提供",
-    "zh-Hant": "執行階段提供",
-    "en": "Provided at runtime",
-    "ja": "実行時に提供",
-    "ko": "실행 시 제공됨"
   },
   "desktop_shell_secure_storage": {
     "zh-Hans": "安全存储",
@@ -258,40 +230,12 @@ export const shellCatalog: Record<string, Record<string, string>> = {
     "ja": "安全なストレージ",
     "ko": "보안 저장소"
   },
-  "desktop_shell_fallback_configured": {
-    "zh-Hans": "已配置，回退存储",
-    "zh-Hant": "已設定，備用儲存",
-    "en": "Configured in fallback storage",
-    "ja": "代替ストレージに設定済み",
-    "ko": "대체 저장소에 구성됨"
-  },
-  "desktop_shell_fallback_unconfigured": {
-    "zh-Hans": "未配置，需回退",
-    "zh-Hant": "未設定，需使用備用方式",
-    "en": "Not configured; fallback required",
-    "ja": "未設定、代替手段が必要",
-    "ko": "구성되지 않음, 대체 수단 필요"
-  },
   "desktop_shell_account_state": {
     "zh-Hans": "账户状态",
     "zh-Hant": "帳戶狀態",
     "en": "Account status",
     "ja": "アカウントの状態",
     "ko": "계정 상태"
-  },
-  "desktop_shell_engine_login": {
-    "zh-Hans": "引擎登录",
-    "zh-Hant": "引擎登入",
-    "en": "Engine sign-in",
-    "ja": "エンジンのログイン",
-    "ko": "엔진 로그인"
-  },
-  "desktop_shell_engine_login_desc": {
-    "zh-Hans": "登录和登出通过引擎命令执行；这里展示当前 auth_state。",
-    "zh-Hant": "登入及登出透過引擎命令執行；這裡顯示目前的認證狀態。",
-    "en": "Sign in and out through engine commands. This shows the current authentication status.",
-    "ja": "ログインとログアウトはエンジンのコマンドで実行します。現在の認証状態を表示します。",
-    "ko": "엔진 명령으로 로그인 및 로그아웃합니다. 현재 인증 상태를 표시합니다."
   },
   "desktop_shell_open_credentials": {
     "zh-Hans": "打开凭据页",
@@ -306,13 +250,6 @@ export const shellCatalog: Record<string, Record<string, string>> = {
     "en": "Availability",
     "ja": "利用について",
     "ko": "사용 안내"
-  },
-  "desktop_shell_auth_info": {
-    "zh-Hans": "auth_state 只显示是否登录；密钥、API base URL 和提供商状态在 Provider 凭据页中编辑。",
-    "zh-Hant": "auth_state 僅顯示是否登入；金鑰、API base URL 和提供商狀態在 Provider 憑證頁中編輯。",
-    "en": "Authentication status shows sign-in only. Edit keys, API base URLs and provider status in Provider credentials.",
-    "ja": "認証状態はログインの有無のみを示します。キー、API URL、プロバイダー状態は認証情報のページで編集します。",
-    "ko": "인증 상태는 로그인 여부만 표시합니다. 키, API 기본 URL 및 제공자 상태는 제공자 인증 정보에서 편집하세요."
   },
   "desktop_shell_credentials_overview": {
     "zh-Hans": "Provider 凭据概览",

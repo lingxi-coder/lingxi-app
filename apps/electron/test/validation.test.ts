@@ -39,8 +39,6 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
   assert.deepEqual(validateClientCommand({ type: 'task_output', task_id: 'task-1', offset: 0 }), { type: 'task_output', task_id: 'task-1', offset: 0 });
   assert.deepEqual(validateClientCommand({ type: 'task_message', task_id: 'task-1', message: 'continue the task' }), { type: 'task_message', task_id: 'task-1', message: 'continue the task' });
   assert.deepEqual(validateClientCommand({ type: 'list_session_agents' }), { type: 'list_session_agents' });
-  assert.deepEqual(validateClientCommand({ type: 'login' }), { type: 'login' });
-  assert.deepEqual(validateClientCommand({ type: 'logout' }), { type: 'logout' });
   assert.deepEqual(validateClientCommand({ type: 'force_compact' }), { type: 'force_compact' });
   assert.deepEqual(
     validateClientCommand({ type: 'load_session_agent_transcript', agent_id: 'agent:11111111-2222-4333-8444-555555555555' }),
@@ -60,8 +58,8 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
     { type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] },
   );
   assert.deepEqual(
-    validateClientCommand({ type: 'refresh_listings', which: [{ type: 'auth' }, { type: 'hooks' }, { type: 'agents' }] }),
-    { type: 'refresh_listings', which: [{ type: 'auth' }, { type: 'hooks' }, { type: 'agents' }] },
+    validateClientCommand({ type: 'refresh_listings', which: [{ type: 'hooks' }, { type: 'agents' }] }),
+    { type: 'refresh_listings', which: [{ type: 'hooks' }, { type: 'agents' }] },
   );
   assert.throws(() => validateClientCommand({ type: 'send_prompt', text: 'bypass' }), /not allowed/);
   assert.throws(() => validateClientCommand({ type: 'request_exit' }), /not allowed/);
@@ -83,7 +81,6 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
     () => validateClientCommand({
       type: 'refresh_listings',
       which: [
-        { type: 'auth' },
         { type: 'status' },
         { type: 'doctor' },
         { type: 'slash_commands' },
@@ -92,6 +89,7 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
         { type: 'skills' },
         { type: 'hooks' },
         { type: 'agents' },
+        { type: 'status' },
       ],
     }),
     /invalid listing selection/,
@@ -358,8 +356,6 @@ test('UI surface lifecycle commands enforce the native client id and surface con
 test('active turns allow live model and permission controls but reject session lifecycle mutations', () => {
   for (const command of [
     { type: 'set_fast_mode', enabled: true },
-    { type: 'login' },
-    { type: 'logout' },
     { type: 'force_compact' },
     { type: 'run_slash_command', raw: '/clear', images: [] },
   ] as const) {

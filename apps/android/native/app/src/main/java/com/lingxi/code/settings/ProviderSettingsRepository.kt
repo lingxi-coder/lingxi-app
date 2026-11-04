@@ -2,11 +2,6 @@ package com.lingxi.code.settings
 
 import android.content.Context
 import android.content.SharedPreferences
-import com.lingxi.code.R
-import com.lingxi.code.bindings.client.ClientCommand
-import com.lingxi.code.bindings.client.ClientEvent
-import com.lingxi.code.bindings.client.ProviderCredentialSecretDto
-import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.GenericProvider
@@ -14,44 +9,9 @@ import com.lingxi.code.model.LlmProviderCatalogEntry
 import com.lingxi.code.model.ProviderConnection
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.model.ProviderPreset
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.flow.filterIsInstance
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-
-data class ProviderCredentialSnapshot(
-    val configuredProviderIds: Set<String>,
-    val unavailableProviderIds: Set<String>,
-    val storageEncrypted: Boolean,
-    val error: String? = null,
-)
-
-data class ProviderStatusRefreshResult(
-    val providers: List<GenericProvider>,
-    val error: String? = null,
-)
-
-data class ProviderConnectionTestResult(
-    val connected: Boolean,
-    val reachable: Boolean,
-    val authenticated: Boolean,
-    val modelAvailable: Boolean,
-    val httpStatus: Int?,
-    val latencyMs: Long,
-    val message: String,
-    val usedStoredCredential: Boolean,
-)
 
 data class ProviderEngineLaunchConfig(
     val providerProfilesJson: String,
@@ -60,223 +20,10 @@ data class ProviderEngineLaunchConfig(
     val visionDelegationEnabled: Boolean,
 )
 
-interface ProviderCredentialClient : AutoCloseable {
-    fun bindSource(source: ConversationSource?) {}
-    suspend fun list(providerIds: List<String>): ProviderCredentialSnapshot
-    suspend fun set(providerId: String, secret: String): ProviderCredentialSnapshot
-    suspend fun delete(providerId: String): ProviderCredentialSnapshot
-    suspend fun test(
-        providerId: String,
-        providerPreset: String,
-        apiBase: String,
-        model: String,
-        credentialOverride: String?,
-    ): ProviderConnectionTestResult
-    override fun close() = Unit
-}
-
-class EngineProviderCredentialClient(
-    context: Context,
-) : ProviderCredentialClient {
-    private val appContext = context.applicationContext
-    private val closed = AtomicBoolean(false)
-    private val credentialMutations = Mutex()
-    private class ActiveBinding(val source: ConversationSource)
-    @Volatile private var activeBinding: ActiveBinding? = null
-
-    override fun bindSource(source: ConversationSource?) {
-        if (!closed.get() && activeBinding?.source !== source) {
-            activeBinding = source?.let(::ActiveBinding)
-        }
-    }
-
-    override suspend fun list(providerIds: List<String>): ProviderCredentialSnapshot =
-        runOperation { operationId ->
-            ClientCommand.ListProviderCredentials(
-                operationId = operationId,
-                providerIds = providerIds,
-                previewProviderIds = emptyList(),
-            )
-        }
-
-    override suspend fun set(providerId: String, secret: String): ProviderCredentialSnapshot =
-        runOperation { operationId ->
-            ClientCommand.SetProviderCredential(
-                operationId = operationId,
-                providerId = providerId,
-                credential = ProviderCredentialSecretDto(value = secret),
-            )
-        }
-
-    override suspend fun delete(providerId: String): ProviderCredentialSnapshot =
-        runOperation { operationId ->
-            ClientCommand.DeleteProviderCredential(
-                operationId = operationId,
-                providerId = providerId,
-            )
-        }
-
-    override suspend fun test(
-        providerId: String,
-        providerPreset: String,
-        apiBase: String,
-        model: String,
-        credentialOverride: String?,
-    ): ProviderConnectionTestResult {
-        if (closed.get()) {
-            return unavailableConnectionResult("provider credential client is closed")
-        }
-        val binding = activeBinding
-        val source = binding?.source ?: return unavailableConnectionResult("engine unavailable")
-        return try {
-            val result = withTimeout(20_000) {
-                val draft = credentialOverride?.takeIf { it.isNotBlank() }?.let { ProviderCredentialSecretDto(value = it) }
-                source.testProviderConnection(providerId, providerPreset, apiBase, model, draft)
-            }
-            if (activeBinding !== binding || closed.get()) return unavailableConnectionResult("engine changed; retry the connection test")
-            ProviderConnectionTestResult(
-                connected = result.connected,
-                reachable = result.reachable,
-                authenticated = result.authenticated,
-                modelAvailable = result.modelAvailable,
-                httpStatus = result.httpStatus?.toInt(),
-                latencyMs = result.latencyMs.toLong(),
-                message = result.message,
-                usedStoredCredential = result.usedStoredCredential,
-            )
-        } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
-            unavailableConnectionResult(com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.settings_provider_test_timeout))
-        } catch (t: kotlinx.coroutines.CancellationException) {
-            throw t
-        } catch (_: Throwable) {
-            unavailableConnectionResult(
-                com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.settings_provider_test_unavailable),
-            )
-        }
-    }
-
-    private suspend fun runOperation(
-        command: (ULong) -> ClientCommand,
-    ): ProviderCredentialSnapshot {
-        if (closed.get()) {
-            return unavailableSnapshot("provider credential client is closed")
-        }
-        val operationId = NEXT_OPERATION_ID.getAndIncrement().toULong()
-        val binding = activeBinding
-        val source = binding?.source ?: return unavailableSnapshot("engine unavailable")
-        return try {
-            val request = command(operationId)
-            val current = { activeBinding === binding && !closed.get() }
-            val snapshot = if (request is ClientCommand.SetProviderCredential || request is ClientCommand.DeleteProviderCredential) {
-                credentialMutations.withLock {
-                    runLiveProviderCredentialOperation(source, operationId, request, current)
-                }
-            } else {
-                runLiveProviderCredentialOperation(source, operationId, request, current)
-            }
-            if (activeBinding !== binding) unavailableSnapshot("engine changed; retry the credential operation") else snapshot
-        } catch (t: TimeoutCancellationException) {
-            unavailableSnapshot("provider credential operation timed out")
-        } catch (t: CancellationException) {
-            throw t
-        } catch (t: Throwable) {
-            ProviderCredentialSnapshot(
-                configuredProviderIds = emptySet(),
-                unavailableProviderIds = emptySet(),
-                storageEncrypted = false,
-                error = t.message ?: "provider credential operation failed",
-            )
-        }
-    }
-
-    override fun close() {
-        if (!closed.compareAndSet(false, true)) return
-        activeBinding = null
-    }
-
-    private companion object {
-        private val NEXT_OPERATION_ID = AtomicLong(1L)
-        fun unavailableSnapshot(error: String) = ProviderCredentialSnapshot(
-            configuredProviderIds = emptySet(),
-            unavailableProviderIds = emptySet(),
-            storageEncrypted = false,
-            error = error,
-        )
-
-        fun unavailableConnectionResult(message: String) = ProviderConnectionTestResult(
-            connected = false,
-            reachable = false,
-            authenticated = false,
-            modelAvailable = false,
-            httpStatus = null,
-            latencyMs = 0,
-            message = message,
-            usedStoredCredential = false,
-        )
-    }
-}
-
-/** Subscribe before dispatch: native acknowledgements may arrive during submit. */
-internal suspend fun runLiveProviderCredentialOperation(
-    source: ConversationSource,
-    operationId: ULong,
-    command: ClientCommand,
-    isCurrentBinding: () -> Boolean,
-): ProviderCredentialSnapshot = withTimeout(5_000) {
-    coroutineScope {
-        val reply = async(start = CoroutineStart.UNDISPATCHED) {
-            source.clientEvents.filterIsInstance<ClientEvent.ProviderCredentialStatus>()
-                .first { it.operationId == operationId }
-        }
-        try {
-            check(isCurrentBinding()) { "engine changed; retry the credential operation" }
-            source.submitClientCommand(command)
-            val event = reply.await()
-            check(isCurrentBinding()) { "engine changed; retry the credential operation" }
-            val snapshot = ProviderCredentialSnapshot(
-                configuredProviderIds = event.configuredProviderIds.toSet(),
-                unavailableProviderIds = event.unavailableProviderIds.toSet(),
-                storageEncrypted = event.storageEncrypted,
-                error = event.error,
-            )
-            val mutationProvider = when (command) {
-                is ClientCommand.SetProviderCredential -> command.providerId
-                is ClientCommand.DeleteProviderCredential -> command.providerId
-                else -> null
-            }
-            if (mutationProvider != null && snapshot.error == null) {
-                val configured = mutationProvider in snapshot.configuredProviderIds
-                check(configured == (command is ClientCommand.SetProviderCredential) &&
-                    mutationProvider !in snapshot.unavailableProviderIds
-                ) { "credential write was not confirmed" }
-                // Availability changes after hot writes. Refresh the picker
-                // through the same engine without rebuilding its session.
-                try {
-                    source.submitClientCommand(ClientCommand.ListModels)
-                } catch (canceled: CancellationException) {
-                    throw canceled
-                } catch (_: Exception) {
-                    // The credential is already committed. A transport failure
-                    // refreshing the picker must not report that write failed.
-                }
-                check(isCurrentBinding()) { "engine changed; retry the credential operation" }
-            }
-            snapshot
-        } finally {
-            reply.cancel()
-        }
-    }
-}
-
-class ProviderSettingsRepository(
-    context: Context,
-    private val credentialClient: ProviderCredentialClient = EngineProviderCredentialClient(context),
-) : AutoCloseable {
+class ProviderSettingsRepository(context: Context) {
     private val appContext = context.applicationContext
     private val prefs: SharedPreferences =
         appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-    fun bindSource(source: ConversationSource?) = credentialClient.bindSource(source)
 
     fun loadProviderState(): Triple<List<GenericProvider>, List<GenericProvider>, List<GenericProvider>> {
         val llm = decodeProviders(PREF_LLM)
@@ -299,6 +46,7 @@ class ProviderSettingsRepository(
 
     fun recordAudioProviderRegion(settingsJson: String) {
         val value = JSONObject(settingsJson).optString("providerRegion", "international")
+        require(value in setOf("china_mainland", "international")) { "Unsupported provider region" }
         prefs.edit().putString("audio_provider_region", value).apply()
     }
 
@@ -306,75 +54,10 @@ class ProviderSettingsRepository(
         prefs.edit().putBoolean(PREF_VISION_DELEGATION_ENABLED, enabled).apply()
     }
 
-    suspend fun refreshLlmStatuses(providers: List<GenericProvider>): ProviderStatusRefreshResult {
-        val supportedIds = providers.mapNotNull { engineCredentialIdFor(it) }.distinct()
-        if (supportedIds.isEmpty()) {
-            return ProviderStatusRefreshResult(
-                providers = providers.map { provider ->
-                    provider.copy(
-                        credentialConfigured = false,
-                        status = statusFor(provider, false, encrypted = false, unavailable = false),
-                    )
-                },
-            )
-        }
-        val snapshot = credentialClient.list(supportedIds)
-        return ProviderStatusRefreshResult(
-            providers = applyCredentialSnapshot(providers, snapshot),
-            error = snapshot.error,
-        )
-    }
-
     fun persistProviders(kind: ProviderKind, providers: List<GenericProvider>) {
         val key = prefKeyFor(kind)
         val encoded = encodeProvidersJson(providers)
         prefs.edit().putString(key, encoded).apply()
-    }
-
-    suspend fun setCredential(provider: GenericProvider, secret: String): ProviderCredentialSnapshot {
-        val credentialId = engineCredentialIdFor(provider)
-            ?: return ProviderCredentialSnapshot(
-                configuredProviderIds = emptySet(),
-                unavailableProviderIds = emptySet(),
-                storageEncrypted = false,
-                error = "provider ${provider.preset} is not supported by the built-in mobile catalog",
-            )
-        return credentialClient.set(credentialId, secret)
-    }
-
-    suspend fun deleteCredential(provider: GenericProvider): ProviderCredentialSnapshot {
-        val credentialId = engineCredentialIdFor(provider)
-            ?: return ProviderCredentialSnapshot(
-                configuredProviderIds = emptySet(),
-                unavailableProviderIds = emptySet(),
-                storageEncrypted = false,
-                error = "provider ${provider.preset} is not supported by the built-in mobile catalog",
-            )
-        return credentialClient.delete(credentialId)
-    }
-
-    suspend fun testConnection(
-        provider: GenericProvider,
-        credentialOverride: String?,
-    ): ProviderConnectionTestResult {
-        val credentialId = engineCredentialIdFor(provider)
-            ?: return ProviderConnectionTestResult(
-                connected = false,
-                reachable = false,
-                authenticated = false,
-                modelAvailable = false,
-                httpStatus = null,
-                latencyMs = 0,
-                message = com.lingxi.code.theme.LocaleWrapper.getString(appContext, R.string.settings_provider_test_not_supported),
-                usedStoredCredential = credentialOverride.isNullOrBlank(),
-            )
-        return credentialClient.test(
-            providerId = credentialId,
-            providerPreset = provider.preset,
-            apiBase = provider.url,
-            model = provider.model,
-            credentialOverride = credentialOverride?.trim()?.takeIf { it.isNotEmpty() },
-        )
     }
 
     /**
@@ -391,29 +74,12 @@ class ProviderSettingsRepository(
         )
     }
 
-    override fun close() {
-        credentialClient.close()
-    }
-
     companion object {
         private const val PREFS_NAME = "provider_settings"
         private const val PREF_LLM = "providers_llm"
         private const val PREF_SEARCH = "providers_search"
         private const val PREF_FETCH = "providers_fetch"
         private const val PREF_VISION_DELEGATION_ENABLED = "vision_delegation_enabled"
-
-        internal fun migrateLegacyDeepSeek(provider: GenericProvider): GenericProvider {
-            if (provider.preset != "deepseek") return provider
-            val migratedUrl = when (provider.url.trimEnd('/')) {
-                "https://api.deepseek.com/v1" -> "https://api.deepseek.com"
-                else -> provider.url
-            }
-            val migratedModel = when (provider.model) {
-                "deepseek-chat", "deepseek-reasoner" -> "deepseek-flash"
-                else -> provider.model
-            }
-            return provider.copy(url = migratedUrl, model = migratedModel)
-        }
 
         internal fun buildEngineLaunchConfig(
             savedProviders: List<GenericProvider>,
@@ -470,9 +136,6 @@ class ProviderSettingsRepository(
             )
         }
 
-        internal fun engineCredentialIdFor(provider: GenericProvider): String? =
-            providerType(provider)?.let { profileNameFor(provider) }
-
         internal fun profileNameFor(provider: GenericProvider): String =
             if (usesBuiltInProfile(provider)) {
                 when (provider.preset) {
@@ -494,41 +157,6 @@ class ProviderSettingsRepository(
                     .take(64)
                     .ifBlank { "mobile_provider" }
             }
-
-        internal fun statusFor(
-            provider: GenericProvider,
-            credentialConfigured: Boolean,
-            encrypted: Boolean,
-            unavailable: Boolean,
-        ): ConnStatus = when {
-            unavailable -> ConnStatus.Error
-            engineCredentialIdFor(provider) == null -> ConnStatus.Error
-            credentialConfigured && encrypted -> ConnStatus.Configured
-            credentialConfigured -> ConnStatus.Error
-            else -> ConnStatus.Idle
-        }
-
-        internal fun applyCredentialSnapshot(
-            providers: List<GenericProvider>,
-            snapshot: ProviderCredentialSnapshot,
-        ): List<GenericProvider> = providers.map { provider ->
-            val credentialId = engineCredentialIdFor(provider)
-            val unavailable = credentialId != null && (
-                snapshot.unavailableProviderIds.contains(credentialId) ||
-                    (snapshot.error != null && snapshot.unavailableProviderIds.isEmpty())
-                )
-            val configured = if (unavailable) provider.credentialConfigured else
-                credentialId != null && snapshot.configuredProviderIds.contains(credentialId)
-            provider.copy(
-                credentialConfigured = configured,
-                status = statusFor(
-                    provider = provider,
-                    credentialConfigured = configured,
-                    encrypted = snapshot.storageEncrypted,
-                    unavailable = unavailable,
-                ),
-            )
-        }
 
         internal fun newProvider(
             kind: ProviderKind,
@@ -599,7 +227,6 @@ class ProviderSettingsRepository(
             return JSONObject().apply {
                 put("type", type)
                 put("baseUrl", baseUrl)
-                put("apiKeyEnv", "LINGXI_MOBILE_${profileNameFor(provider).uppercase()}_API_KEY")
                 put(
                     "models",
                     JSONArray().apply {
@@ -609,7 +236,7 @@ class ProviderSettingsRepository(
                 // A single connection would rename the engine profile to
                 // `group:id` while describing the same one endpoint, so only a
                 // real branch is emitted. Each entry restates its own baseUrl;
-                // the protocol and credential are inherited from the keys above.
+                // the protocol is inherited from the profile above.
                 if (provider.connections.size > 1) {
                     put(
                         "connections",
@@ -643,7 +270,7 @@ class ProviderSettingsRepository(
                 val array = JSONArray(raw)
                 buildList {
                     for (i in 0 until array.length()) {
-                        add(migrateLegacyDeepSeek(providerFromJson(array.getJSONObject(i))))
+                        add(providerFromJson(array.getJSONObject(i)))
                     }
                 }
             }.getOrDefault(emptyList())
@@ -668,10 +295,9 @@ class ProviderSettingsRepository(
                 status = ConnStatus.Idle,
                 isDefault = obj.optBoolean("isDefault"),
                 enabled = obj.optBoolean("enabled", true),
-                credentialConfigured = obj.optBoolean("credentialConfigured", false),
+                credentialConfigured = false,
                 showInModelPicker = obj.optBoolean("showInModelPicker", true),
                 visibleModelIds = distinctModelIds(obj.optJSONArray("visibleModelIds")),
-                // Absent from every provider saved before connections existed.
                 connections = readConnections(obj.optJSONArray("connections")),
             )
 
@@ -714,7 +340,6 @@ class ProviderSettingsRepository(
                 put("cx", provider.cx)
                 put("isDefault", provider.isDefault)
                 put("enabled", provider.enabled)
-                put("credentialConfigured", provider.credentialConfigured)
                 put("showInModelPicker", provider.showInModelPicker)
                 if (provider.visibleModelIds != null) {
                     put(

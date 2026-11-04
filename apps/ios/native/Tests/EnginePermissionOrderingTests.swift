@@ -92,7 +92,6 @@ import XCTest
         private func makeSource() -> EngineConversationSource {
             EngineConversationSource(config: EngineConfig(
                 apiBase: "https://api.anthropic.com",
-                apiKey: "",
                 model: "",
                 appSandboxRoot: NSTemporaryDirectory(),
                 projectCwd: nil,

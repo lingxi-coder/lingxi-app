@@ -1,0 +1,66 @@
+{
+  "purpose": "Remove only this task's completed iOS SDK precompile/stat caches under prior explicit cache-cleanup authorization",
+  "started_at": 1793261989.475221,
+  "free_gib_before": 4.044,
+  "removed": [
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-derived/SDKExplicitPrecompiledModules",
+      "allocated_bytes": 259137536
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-derived/SDKStatCaches.noindex",
+      "allocated_bytes": 1585152
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-derived/CompilationCache.noindex",
+      "allocated_bytes": 28672
+    }
+  ],
+  "preserved_before": [
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Generated/LingxiCodeBindings.swift",
+      "bytes": 527163,
+      "sha256": "e610b6fd32bc722c5ae40c529b846e2dd404105f885930cc280f5bb54cc4ca3c"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/src/main/java/com/lingxi/code/bindings/android/android_aar.kt",
+      "bytes": 672076,
+      "sha256": "b3952cccd2dbcf63b15609f82faaf9630984fe18d848f6bc787a939b1556b969"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-apple-ios/debug/libios_framework.a",
+      "bytes": 415370352,
+      "sha256": "af23478dc1c3f005b2c0dde965044064e42be2c2b67cace201254fe84005c1bd"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/src/play/jniLibs/arm64-v8a/libandroid_aar.so",
+      "bytes": 166197696,
+      "sha256": "7a634a4e6fc295a4ee473b5d0fbfc18e794b6d2eabffba1f0581c6880cc772f2"
+    }
+  ],
+  "free_gib_after": 4.311,
+  "preserved_after": [
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Generated/LingxiCodeBindings.swift",
+      "bytes": 527163,
+      "sha256": "e610b6fd32bc722c5ae40c529b846e2dd404105f885930cc280f5bb54cc4ca3c"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/src/main/java/com/lingxi/code/bindings/android/android_aar.kt",
+      "bytes": 672076,
+      "sha256": "b3952cccd2dbcf63b15609f82faaf9630984fe18d848f6bc787a939b1556b969"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-apple-ios/debug/libios_framework.a",
+      "bytes": 415370352,
+      "sha256": "af23478dc1c3f005b2c0dde965044064e42be2c2b67cace201254fe84005c1bd"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/android/native/app/src/play/jniLibs/arm64-v8a/libandroid_aar.so",
+      "bytes": 166197696,
+      "sha256": "7a634a4e6fc295a4ee473b5d0fbfc18e794b6d2eabffba1f0581c6880cc772f2"
+    }
+  ],
+  "preserved_inputs_unchanged": true,
+  "finished_at": 1793261990.062929
+}

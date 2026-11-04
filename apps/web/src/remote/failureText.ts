@@ -34,3 +34,15 @@ export function failureStringKey(failure: ConnectionFailure): StringKey {
   if (failure.kind === 'revoked' || failure.kind === 'disabled') return KIND_STRINGS[failure.kind];
   return KIND_STRINGS[failure.kind];
 }
+
+const REQUEST_ERRORS: ReadonlyMap<string, StringKey> = new Map<string, StringKey>([
+  ['unknown_session', 'errUnknownSession'],
+  ['not_remote_enabled', 'errNotRemoteEnabled'],
+  ['capacity', 'errCapacity'],
+  ['forbidden', 'errForbidden'],
+]);
+
+/** The string that explains why the desktop refused a request (its error `code`) to the user. */
+export function requestErrorStringKey(code: string): StringKey {
+  return REQUEST_ERRORS.get(code) ?? 'errGeneric';
+}

@@ -26,7 +26,6 @@ import SwiftUI
         ) -> EngineConversationSource {
             let config = EngineConfig(
                 apiBase: "https://api.anthropic.com",
-                apiKey: "",
                 model: "",
                 appSandboxRoot: appSandboxRoot,
                 projectCwd: nil,
@@ -326,25 +325,6 @@ import SwiftUI
             XCTAssertFalse(source.model.controlsPending)
         }
 
-        func testReportedModelsDoNotOverwriteLegacyLaunchFallback() {
-            let previous = Keychain.get(.model)
-            defer {
-                if let previous { Keychain.set(.model, previous) }
-                else { Keychain.clear(.model) }
-            }
-            XCTAssertTrue(Keychain.set(.model, "anthropic/legacy-model"))
-            let source = makeSource()
-
-            source.applyForTesting(.modelList(
-                models: ["openai/current-model"], current: "openai/current-model",
-                currentModelSource: nil, details: []))
-            XCTAssertEqual(source.model.activeModelId, "openai/current-model")
-            XCTAssertEqual(Keychain.get(.model), "anthropic/legacy-model")
-
-            source.applyForTesting(.modelChanged(model: "other-profile/confirmed-model", modelSource: nil))
-            XCTAssertEqual(source.model.activeModelId, "other-profile/confirmed-model")
-            XCTAssertEqual(Keychain.get(.model), "anthropic/legacy-model")
-        }
 
         func testModelSwitchWaitsForConfirmationWhileStreaming() async {
             let source = makeSource()

@@ -33,7 +33,6 @@ async fn resume_usage_snapshot_crosses_idle_websocket_and_late_usage_stays_filte
         let handle = Arc::new(ResumingHandle::new());
         let router = EngineCommandRouter::new(
             handle.clone(),
-            Arc::new(MockAuth),
             Arc::new(MockTaskRegistry { rows: vec![] }),
             None,
             None,

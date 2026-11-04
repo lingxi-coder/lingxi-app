@@ -21,19 +21,23 @@
 .transcript-tool-row .tool-disclosure-trigger:is(:hover, :focus, :focus-visible, :active) {
   background: transparent !important; scale: 1; outline: none; transition: color 120ms ease, opacity 120ms ease;
 }
-.transcript-tool-row .tool-disclosure-trigger .transcript-disclosure-chevron { color: var(--tool-label-color); opacity: .65; }
+.transcript-tool-row .tool-disclosure-trigger .transcript-disclosure-chevron { color: var(--tool-label-color); opacity: 0; }
 .transcript-tool-row .tool-disclosure-trigger:is(:hover, :focus-visible) .transcript-disclosure-chevron { color: var(--tool-focus-color); opacity: 1; }
 .transcript-tool-group > .tool-group-trigger {
   width: fit-content !important; background: transparent !important; opacity: .82; transition: color 120ms ease, opacity 120ms ease;
 }
+.tool-group-icon { width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.tool-group-state { flex-shrink: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+.tool-group-calls { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 4px 9px; padding-left: 19px; border-left: 1px solid var(--tool-group-border); min-width: 0; }
 .transcript-tool-group > .tool-group-trigger:is(:hover, :focus, :focus-visible, :active) {
   background: transparent !important; color: var(--tool-focus-color) !important; opacity: 1; outline: none; scale: 1;
 }
-.transcript-tool-group > .tool-group-trigger[aria-expanded] .transcript-disclosure-chevron { opacity: .8; }
+.transcript-tool-group > .tool-group-trigger[aria-expanded] .transcript-disclosure-chevron { opacity: 0; }
+.transcript-tool-group > .tool-group-trigger:is(:hover, :focus-visible) .transcript-disclosure-chevron { opacity: 1; }
 .transcript-tool-group .tool-group-summary-text { line-height: 1.5; }
 @media (prefers-reduced-motion: reduce) {
   .transcript-tool-row :is(.tool-row-title, .tool-row-icon, .tool-row-diff-stats, .tool-disclosure-trigger),
-  .transcript-tool-group > .tool-group-trigger { transition: none; }
+  .transcript-tool-group > .tool-group-trigger, .transcript-disclosure-chevron { transition: none; }
 }
 @media (prefers-contrast: more) {
   .transcript-tool-row :is(.tool-row-title, .tool-row-icon),

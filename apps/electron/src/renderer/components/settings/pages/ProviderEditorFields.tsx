@@ -1,21 +1,20 @@
 import { useI18n } from '../../../i18n/useI18n';
 import { tr } from '../../../i18n/locale';
-import { useRef, useState } from 'react';
+import { useRef } from 'react';
 import { useT } from '../../../theme/ThemeContext';
 import { SUPPORTED_PROVIDER_TYPES, type CustomProviderDraft, type CustomProviderModelDraft } from './customProviderImport';
 import { renameProviderModel, removeProviderModel, canRemoveProviderModel, addProviderConnection, removeProviderConnection, updateProviderConnection, providerConnections } from './customProviderDraft';
 import { ghostButtonStyle } from './ghostButton';
 
 /** Shared editor keeps unknown provider/model properties while changing the visible fields. */
-export function ProviderEditorFields({ name, onName, nameLocked, draft, onDraft, apiKey, onApiKey, credentialConfigured, envOnly = false, hostManagedCredentials = false }: {
+export function ProviderEditorFields({ name, onName, nameLocked, draft, onDraft, apiKey, onApiKey, credentialConfigured }: {
   name: string; onName(value: string): void; nameLocked?: boolean;
   draft: CustomProviderDraft; onDraft(value: CustomProviderDraft): void;
-  apiKey: string; onApiKey(value: string): void; credentialConfigured?: boolean; envOnly?: boolean; hostManagedCredentials?: boolean;
+  apiKey: string; onApiKey(value: string): void; credentialConfigured?: boolean;
 }) {
   useI18n();
   const t = useT();
   const pricingIds = useRef(draft.models.map((model) => typeof model.id === 'string' ? model.id.trim() : ''));
-  const [authMode, setAuthMode] = useState(envOnly ? 'env' : apiKey.trim() ? 'key' : draft.apiKeyEnv ? 'env' : 'key');
   const connections = providerConnections(draft);
   const input = { width: '100%', minWidth: 0, boxSizing: 'border-box' as const, padding: '9px 11px', borderRadius: 7, border: `1px solid ${t.border}`, background: t.surface, color: t.text, fontFamily: 'inherit', fontSize: 13 };
   const field = { display: 'grid', gap: 7, minWidth: 0, fontSize: 12.5, color: t.text3 };
@@ -35,24 +34,13 @@ export function ProviderEditorFields({ name, onName, nameLocked, draft, onDraft,
     </div>
     <div style={{ display: 'grid', gap: 12 }}>
       <strong style={{ fontSize: 13 }}>{tr('desktop_settings_d2d648bd1c')}</strong>
-      <label style={field}>{tr('desktop_settings_d1ff8f98bc')}<select aria-label={tr('desktop_settings_d1ff8f98bc')} value={authMode} onChange={(event) => {
-        setAuthMode(event.target.value);
-        if (event.target.value === 'key') onDraft({ ...draft, apiKeyEnv: undefined }); else onApiKey('');
-      }} style={input}>{!envOnly && <option value="key">{tr('desktop_settings_af92b1c90b')}</option>}<option value="env" disabled={hostManagedCredentials}>{tr('desktop_settings_ae27b474ea')}</option></select></label>
-      {envOnly && <span style={{ color: t.text3, fontSize: 12 }}>{hostManagedCredentials
-        ? tr('desktop_settings_6c4934e558')
-        : tr('desktop_settings_63ab6c6735')}</span>}
-      {authMode === 'key' ? <label style={field}>{tr('settings_provider_api_key')}<input aria-label={tr('settings_provider_api_key')} type="password" autoComplete="new-password" value={apiKey} onChange={(event) => onApiKey(event.target.value)} placeholder={credentialConfigured ? tr('desktop_settings_9aca67d120') : tr('settings_provider_api_key_placeholder')} style={input} /></label>
-        : <label style={field}>{tr('desktop_settings_856fddd137')}<input aria-label="apiKeyEnv" disabled={hostManagedCredentials} value={typeof draft.apiKeyEnv === 'string' ? draft.apiKeyEnv : ''} onChange={(event) => onDraft({ ...draft, apiKeyEnv: event.target.value || undefined })} placeholder="MY_PROVIDER_API_KEY" spellCheck={false} style={input} /></label>}
-      {!hostManagedCredentials && authMode === 'key' && draft.apiKeyEnv && <span style={{ color: t.text3, fontSize: 12 }}>{tr('desktop_settings_environment_fallback', typeof draft.apiKeyEnv === 'string' ? draft.apiKeyEnv : '')}</span>}
-      <span style={{ color: t.text4, fontSize: 12 }}>{hostManagedCredentials
-        ? tr('desktop_settings_f65e758fce')
-        : tr('desktop_settings_938cc1197f')}</span>
+      <label style={field}>{tr('settings_provider_api_key')}<input aria-label={tr('settings_provider_api_key')} type="password" autoComplete="new-password" value={apiKey} onChange={(event) => onApiKey(event.target.value)} placeholder={credentialConfigured ? tr('desktop_settings_9aca67d120') : tr('settings_provider_api_key_placeholder')} style={input} /></label>
+      <span style={{ color: t.text4, fontSize: 12 }}>{tr('provider_accounts_storage')}</span>
     </div>
     <div style={{ display: 'grid', gap: 12 }}>
       <strong style={{ fontSize: 13 }}>{tr('settings_provider_connections')}</strong>
       <span style={{ color: t.text4, fontSize: 12 }}>
-        {tr('desktop_settings_9e7c47bc4c')}</span>
+        {tr('provider_accounts_connections_desc')}</span>
       {connections.length === 0
         ? <span style={{ color: t.text3, fontSize: 12 }}>{tr('settings_provider_connections_single')}</span>
         : connections.map((connection, index) => <div key={index} style={{ display: 'grid', gap: 10, padding: 12, borderRadius: 8, border: `1px solid ${t.border}` }}>
@@ -66,9 +54,7 @@ export function ProviderEditorFields({ name, onName, nameLocked, draft, onDraft,
               <option value="">{tr('desktop_settings_ab95d61e3b')}{draft.type}</option>
               {SUPPORTED_PROVIDER_TYPES.map((type) => <option value={type} key={type}>{type}</option>)}
             </select></label>
-            <label style={field}>{tr('desktop_settings_856fddd137')}<input aria-label={tr('desktop_settings_6b988b728f', index + 1)} disabled={hostManagedCredentials} value={typeof connection.apiKeyEnv === 'string' ? connection.apiKeyEnv : ''} onChange={(event) => onDraft(updateProviderConnection(draft, index, { apiKeyEnv: event.target.value || undefined }))} placeholder="MY_PROVIDER_CN_API_KEY" spellCheck={false} style={input} /></label>
           </div>
-          <span style={{ color: t.text4, fontSize: 11.5 }}>{tr('desktop_settings_connection_credential_default', name || 'provider')}</span>
         </div>)}
       <button type="button" style={{ ...ghostButtonStyle(t), justifySelf: 'start' }} onClick={() => onDraft(addProviderConnection(draft))}>{tr('settings_provider_connection_add')}</button>
     </div>

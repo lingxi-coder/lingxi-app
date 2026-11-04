@@ -33,10 +33,12 @@ export class AccountService {
   private expiresAt = 0;
   private busy = false;
   private error: string | null = null;
+  private sessionExpired = false;
   private abort?: AbortController;
   private readonly events = new EventEmitter();
   private readonly ready: Promise<void>;
   private tokenRequest?: Promise<string>;
+  private authenticationEpoch = 0;
 
   constructor(
     private readonly config: { apiKey: string; authDomain: string; projectId: string; appId: string },
@@ -49,16 +51,24 @@ export class AccountService {
     try {
       const saved = await this.store.read();
       if (!saved) return;
-      const value = JSON.parse(saved) as Session;
+      const value = JSON.parse(saved) as Session & { sessionExpired?: boolean };
+      if (value.projectId === this.config.projectId && value.sessionExpired === true) {
+        this.sessionExpired = true;
+        this.error = accountError(new Error('TOKEN_EXPIRED'));
+        return;
+      }
       if (value.projectId !== this.config.projectId || typeof value.refreshToken !== 'string' || !value.refreshToken || typeof value.user?.uid !== 'string') throw new Error('Invalid session');
       this.session = { projectId: value.projectId, refreshToken: value.refreshToken, user: {
         uid: value.user.uid, email: typeof value.user.email === 'string' ? value.user.email : null,
         displayName: typeof value.user.displayName === 'string' ? value.user.displayName : null, emailVerified: value.user.emailVerified === true,
       } };
-    } catch { this.error = '无法恢复已保存的登录状态，请重新登录。'; }
+      this.authenticationEpoch++;
+    } catch { this.sessionExpired = true; this.error = '无法恢复已保存的登录状态，请重新登录。'; }
   }
 
-  snapshot(): AccountState { return { user: this.session?.user ?? null, busy: this.busy, persistence: this.store.persistent ? 'secure' : 'session', error: this.error }; }
+  snapshot(): AccountState { return { user: this.session?.user ?? null, busy: this.busy, persistence: this.store.persistent ? 'secure' : 'session', error: this.error, ...(this.sessionExpired ? { sessionExpired: true } : {}) }; }
+  /** Main-only authentication identity; normal ID/refresh-token rotation retains it. */
+  sessionEpoch(): number { return this.authenticationEpoch; }
   onChanged(callback: (state: AccountState) => void): () => void {
     this.events.on('change', callback);
     return () => { this.events.off('change', callback); };
@@ -74,15 +84,22 @@ export class AccountService {
     return value as T;
   }
   private async save(): Promise<void> {
-    if (this.session) await this.store.write(JSON.stringify(this.session)); else await this.store.remove();
+    if (this.session) await this.store.write(JSON.stringify(this.session));
+    else if (this.sessionExpired) await this.store.write(JSON.stringify({ projectId: this.config.projectId, sessionExpired: true }));
+    else await this.store.remove();
   }
   private async invalidateSession(error: unknown, session: Session | null): Promise<void> {
     if (!session || this.session !== session || !(error instanceof Error)
       || !['INVALID_REFRESH_TOKEN', 'INVALID_ID_TOKEN', 'TOKEN_EXPIRED', 'USER_DISABLED', 'USER_NOT_FOUND'].includes(error.message.split(' : ')[0])) return;
     this.session = null;
+    this.authenticationEpoch++;
+    this.tokenRequest = undefined;
     this.idToken = null;
     this.expiresAt = 0;
-    try { await this.save(); } finally { this.publish(); }
+    this.sessionExpired = true;
+    this.error = accountError(error);
+    this.publish();
+    await this.save();
   }
   private async authenticatedRequest<T>(method: string, body: Record<string, unknown> = {}): Promise<T> {
     const session = this.session;
@@ -97,12 +114,20 @@ export class AccountService {
     if (value.needConfirmation) throw new Error('NEED_CONFIRMATION');
     if (!value.localId || !value.refreshToken || !value.idToken) throw new Error('INVALID_IDP_RESPONSE');
     const previous = this.session;
+    const previousToken = this.idToken, previousExpiry = this.expiresAt, previousExpired = this.sessionExpired;
     this.session = { projectId: this.config.projectId, refreshToken: value.refreshToken, user: {
       uid: value.localId, email: value.email ?? null, displayName: value.displayName ?? null, emailVerified: value.emailVerified === true,
     } };
-    try { await this.save(); } catch (error) { this.session = previous; throw error; }
+    this.authenticationEpoch++;
+    this.tokenRequest = undefined;
+    this.sessionExpired = false;
     this.idToken = value.idToken;
     this.expiresAt = Date.now() + Number(value.expiresIn) * 1000;
+    this.publish();
+    try { await this.save(); } catch (error) {
+      this.session = previous; this.idToken = previousToken; this.expiresAt = previousExpiry; this.sessionExpired = previousExpired;
+      this.authenticationEpoch++; this.tokenRequest = undefined; this.publish(); throw error;
+    }
   }
 
   /**
@@ -114,8 +139,9 @@ export class AccountService {
     if (!this.session) throw new Error('请先登录。');
     if (!forceRefresh && this.idToken && this.expiresAt > Date.now() + 60_000) return this.idToken;
     if (this.tokenRequest) return this.tokenRequest;
-    this.tokenRequest = this.refreshToken().finally(() => { this.tokenRequest = undefined; });
-    return this.tokenRequest;
+    const request = this.refreshToken().finally(() => { if (this.tokenRequest === request) this.tokenRequest = undefined; });
+    this.tokenRequest = request;
+    return request;
   }
   private async refreshToken(): Promise<string> {
     const session = this.session!;
@@ -176,6 +202,7 @@ export class AccountService {
         }
         case 'signOut':
           await this.store.remove(); this.session = null; this.idToken = null; this.expiresAt = 0;
+          this.authenticationEpoch++; this.tokenRequest = undefined;
           break;
         case 'resetPassword':
           await this.request('sendOobCode', { requestType: 'PASSWORD_RESET', email: command.email });

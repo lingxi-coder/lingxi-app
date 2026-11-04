@@ -52,8 +52,8 @@ use crate::tunnel::{TunnelLink, TunnelLinkOptions};
 use crate::tunnel_crypto::derive_tunnel_keys;
 use crate::version::{
     client_protocol_major, DATA_CHANNEL_LABEL, DATA_CHANNEL_OPEN_TIMEOUT, DEFAULT_STUN_URLS,
-    ICE_GATHER_TIMEOUT, OFFER_ANSWER_TIMEOUT, REMOTE_PROTOCOL_MAJOR, SDP_MAX_CHARS,
-    SSE_BACKOFF_MAX, SSE_BACKOFF_MIN, SSE_BACKOFF_RESET,
+    ICE_GATHER_TIMEOUT, OFFER_ANSWER_TIMEOUT, REMOTE_FEATURE_BOTS, REMOTE_PROTOCOL_MAJOR,
+    SDP_MAX_CHARS, SSE_BACKOFF_MAX, SSE_BACKOFF_MIN, SSE_BACKOFF_RESET,
 };
 
 // ---------------------------------------------------------------------------
@@ -1645,6 +1645,9 @@ impl Inner {
                     .as_ref()
                     .and_then(|handler| handler.capabilities())
                     .filter(|capabilities| capabilities.validate().is_ok()),
+                // `RemoteClient` handles Bots, and a host answers the Bot methods and
+                // sends the `bot` prompt origin only to a viewer that says it does.
+                features: Some(vec![REMOTE_FEATURE_BOTS.to_owned()]),
             },
             push_installation_id: deps.push_installation_id.clone(),
         })

@@ -1,0 +1,12 @@
+{
+  "kind": "ad-hoc simulator MachO TEXT entitlements",
+  "values": {
+    "application-identifier": "AZ4AX7J833.com.lingxi.teams.t3.probe",
+    "com.apple.developer.team-identifier": "AZ4AX7J833",
+    "keychain-access-groups": [
+      "AZ4AX7J833.com.lingxi.teams.t3.probe"
+    ]
+  },
+  "strictSignatureVerified": true,
+  "realSDKLoginObserved": true
+}

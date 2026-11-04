@@ -6,9 +6,9 @@
 // keyed by `(service, account)`; we persist it as a Keychain GenericPassword
 // item with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` — encrypted at
 // rest by the data-protection/Secure Enclave and EXCLUDED from iCloud/iTunes
-// backups (`...ThisDeviceOnly`). Injecting this store (via `buildIosEngine`'s
-// `secureStorage:` param) flips the engine's `oauth_supported` true so OAuth
-// `/login` can persist its tokens instead of failing at the persist step.
+// backups (`...ThisDeviceOnly`). Injecting this store (via `buildIosEngineWithConfig`'s
+// `secureStorage:` param) enables per-account OAuth grant persistence through
+// the Host's account authority.
 //
 // DEVICE-VERIFY: this is native code; build + exercise on a device/simulator
 // (the Rust host build cannot compile Swift). The Keychain calls are synchronous

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { navigateTo, parseRemoteRoute, remoteSessionRoute, type AppRoute } from '../app/router';
+import { navigateTo, parseRemoteBotRoute, parseRemoteRoute, remoteBotRoute, remoteSessionRoute, type AppRoute } from '../app/router';
 import type { Theme } from '../app/useTheme';
 import type { Locale } from '../utils/locale';
+import { BotList, BotPage } from '../remote/Bots';
 import { ConnectionScreen } from '../remote/ConnectionScreen';
 import { HostList } from '../remote/HostList';
 import { LocalApps } from '../remote/LocalApps';
@@ -97,9 +98,10 @@ function SignedIn({ uid, locale, route }: { uid: string; locale: Locale; route: 
   const rtdb = useRtdb(uid);
   const hosts = useHosts(uid, rtdb);
   const target = parseRemoteRoute(route);
+  const botTarget = parseRemoteBotRoute(route);
   const [chosen, setChosen] = useState<string | null>(null);
   const [view, setView] = useState<'sessions' | 'apps'>('sessions');
-  const hostId = target?.hostId ?? chosen;
+  const hostId = target?.hostId ?? botTarget?.hostId ?? chosen;
   const remote = useRemoteHost(uid, rtdb, hostId);
   const state = useConnectionState(remote?.connection ?? null);
   const [pinVersion, setPinVersion] = useState(0);
@@ -136,6 +138,10 @@ function SignedIn({ uid, locale, route }: { uid: string; locale: Locale; route: 
       />
     );
   }
+  const toComputer = (): void => {
+    setChosen(hostId);
+    navigateTo('/remote');
+  };
   if (target !== null) {
     return (
       <SessionView
@@ -146,9 +152,25 @@ function SignedIn({ uid, locale, route }: { uid: string; locale: Locale; route: 
         connection={state}
         deviceName={deviceName}
         onBack={() => {
-          setChosen(hostId);
-          navigateTo('/remote');
+          // A Bot's chat goes back to its Bot, when this browser knows which; one opened by its address goes to the computer.
+          const botId = remote.client.botOfThread(target.sessionId);
+          if (botId === undefined) toComputer();
+          else navigateTo(remoteBotRoute(hostId, botId));
         }}
+      />
+    );
+  }
+  if (botTarget !== null) {
+    return (
+      <BotPage
+        key={`${uid}:${hostId}:bots:${botTarget.botId}`}
+        locale={locale}
+        client={remote.client}
+        hostName={hostName}
+        botId={botTarget.botId}
+        connection={state}
+        onBack={toComputer}
+        onOpenSession={(sessionId) => navigateTo(remoteSessionRoute(hostId, sessionId))}
       />
     );
   }
@@ -162,7 +184,7 @@ function SignedIn({ uid, locale, route }: { uid: string; locale: Locale; route: 
         <button type="button" className="control-chip" aria-current={view === 'sessions' ? 'page' : undefined} onClick={() => setView('sessions')}>{t(locale, 'sessions')}</button>
         <button type="button" className="control-chip" aria-current={view === 'apps' ? 'page' : undefined} onClick={() => setView('apps')}>{t(locale, 'apps')}</button>
       </nav>
-      {view === 'sessions' ? <SessionList locale={locale} client={remote.client} onOpen={(sessionId) => navigateTo(remoteSessionRoute(hostId, sessionId))} /> : <LocalApps key={`${uid}:${hostId}`} locale={locale} connection={remote.connection} ready={state.phase === 'ready'} />}
+      {view === 'sessions' ? <><BotList locale={locale} client={remote.client} onOpen={(botId) => navigateTo(remoteBotRoute(hostId, botId))} /><SessionList locale={locale} client={remote.client} onOpen={(sessionId) => navigateTo(remoteSessionRoute(hostId, sessionId))} /></> : <LocalApps key={`${uid}:${hostId}`} locale={locale} connection={remote.connection} ready={state.phase === 'ready'} />}
     </>
   );
 }

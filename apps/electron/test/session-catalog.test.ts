@@ -1,3 +1,4 @@
+import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -319,4 +320,143 @@ test('catalog retains a bounded UTF-8 stderr tail with the final diagnostic', as
       return true;
     });
   } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('a catalog of another configuration home reads that home in every mode, and the default one reads the environment\'s', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-config-home-'));
+  const environments: Array<NodeJS.ProcessEnv | undefined> = [];
+  const spawnProcess = ((_bin: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
+    environments.push(options.env);
+    const configHome = options.env?.['LINGXI_CONFIG_DIR'] ?? '/owner/.lingxi';
+    return fakeChild(args.includes('--product-paths-json')
+      ? JSON.stringify({ version: 1, brand_home: configHome, app_projects_root: join(configHome, '.apps') })
+      : args.includes('--workspace-environment-json')
+        ? JSON.stringify({ version: 1, environment: {}, config_home: configHome, global_config_path: join(configHome, '.lingxi.json') })
+        : JSON.stringify({ version: 1, sessions: [] }));
+  }) as any;
+  const previous = process.env['LINGXI_CONFIG_DIR'];
+  process.env['LINGXI_CONFIG_DIR'] = '/owner/.lingxi';
+  try {
+    const botHome = join(project, 'bot-home');
+    const bot = new ProjectSessionCatalog({ serverBin: '/bridge-server', configHome: botHome, spawnProcess });
+    const owner = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess });
+    assert.equal((await bot.productPaths()).brandHome, botHome);
+    assert.equal((await bot.workspaceSettings(project)).configHome, botHome);
+    await bot.list(project);
+    assert.deepEqual(environments.map((env) => env?.['LINGXI_CONFIG_DIR']), [botHome, botHome, botHome]);
+    environments.length = 0;
+    assert.equal((await owner.productPaths()).brandHome, '/owner/.lingxi');
+    await owner.list(project);
+    assert.deepEqual(environments.map((env) => env?.['LINGXI_CONFIG_DIR']), ['/owner/.lingxi', '/owner/.lingxi']);
+  } finally {
+    if (previous === undefined) delete process.env['LINGXI_CONFIG_DIR']; else process.env['LINGXI_CONFIG_DIR'] = previous;
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+
+test('account helper uses Host settings and sends secret input only on stdin', async () => {
+  let flags: readonly string[] | undefined, envelope: any;
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', providerAccountChannel: 'production', appVersion: '1.2.3',
+    spawnProcess: ((_bin: string, args: readonly string[], options: any) => {
+      flags = args;
+      assert.deepEqual(options.stdio, ['pipe', 'pipe', 'pipe']);
+      const child = fakeChild(JSON.stringify({ storeScope: 'host-production', configRevision: 2, accounts: [], health: [] })) as any;
+      child.stdin = new PassThrough(); child.stdin.on('data', bytes => { envelope = JSON.parse(bytes.toString()); });
+      return child;
+    }) as any });
+  await catalog.providerAccountCommand({ action: 'enable', expectedRevision: 1, accountId: 'account-a', enabled: false, displayName: 'irrelevant' });
+  assert.deepEqual(flags, ['--provider-account-command']);
+  assert.equal(envelope.credential_channel, 'production');
+  assert.equal(envelope.backend, 'desktop-broker');
+  assert.equal(envelope.metadata_only, true);
+  assert.equal(Object.hasOwn(envelope, 'profiles_json'), false);
+  assert.equal(Object.hasOwn(envelope, 'provider_region'), false);
+  assert.equal(envelope.app_version, '1.2.3');
+  assert.equal(envelope.credential, undefined);
+  assert.deepEqual(JSON.parse(envelope.request_json), { action: 'set_enabled', expectedRevision: 1, accountId: 'account-a', enabled: false });
+  const credential = JSON.stringify({ credential_revision: 1, identity_generation: 1, kind: { kind: 'api_key', key: 'private-test-credential' } });
+  await catalog.providerAccountCommand({ action: 'test', expectedRevision: 2, accountId: 'account-a' }, credential);
+  assert.equal(envelope.credential, credential);
+  assert.deepEqual(JSON.parse(envelope.request_json), { action: 'test', expectedRevision: 2, accountId: 'account-a' });
+  assert.equal(JSON.stringify(flags).includes('private-test-credential'), false);
+  await catalog.providerAccountCommand({ action: 'list', expectedRevision: 2 }, undefined, ['account-a']);
+  assert.deepEqual(envelope.credential_presence, ['account-a']);
+  assert.equal(Object.hasOwn(envelope, 'profiles_json'), false);
+  assert.equal(Object.hasOwn(envelope, 'provider_region'), false);
+  assert.equal(envelope.app_version, '1.2.3');
+  assert.equal(envelope.credential, undefined);
+  await assert.rejects(catalog.providerAccountCommand({ action: 'add', expectedRevision: 2 }, credential), /do not accept credentials/);
+  await assert.rejects(catalog.providerAccountCommand({ action: 'enable', expectedRevision: 2 }, undefined, []), /only available for account listing/);
+});
+
+test('account helper ignores an unavailable runtime and uses the persisted Host home', async () => {
+  let envelope: any;
+  const options = { serverBin: '/bridge-server',
+    spawnProcess: (() => {
+      const child = fakeChild(JSON.stringify({ storeScope: 'home', configRevision: 1, accounts: [], health: [] })) as any;
+      child.stdin = new PassThrough(); child.stdin.on('data', bytes => { envelope = JSON.parse(bytes.toString()); }); return child;
+    }) as any };
+  Object.defineProperty(options, 'providerAccountConfiguration', { get: () => { throw new Error('untrusted session must not be read'); } });
+  const catalog = new ProjectSessionCatalog(options);
+  await catalog.providerAccountCommand({ action: 'list', expectedRevision: 1 });
+  assert.equal(Object.hasOwn(envelope, 'profiles_json'), false);
+  assert.equal(Object.hasOwn(envelope, 'provider_region'), false);
+  assert.equal(Object.hasOwn(envelope, 'app_version'), false);
+});
+
+test('credential version publication uses a private metadata-only helper envelope without profiles or secrets', async () => {
+  let envelope: any;
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', providerAccountChannel: 'production', appVersion: '1.2.3',
+    spawnProcess: ((_bin: string, args: readonly string[]) => {
+      assert.deepEqual(args, ['--provider-account-command']);
+      const child = fakeChild(JSON.stringify({ published: true })) as any;
+      child.stdin = new PassThrough(); child.stdin.on('data', bytes => { envelope = JSON.parse(bytes.toString()); }); return child;
+    }) as any });
+  const version = { accountId: '11111111-1111-4111-8111-111111111111', identityGeneration: 2, credentialRevision: 3 };
+  await catalog.publishProviderAccountCredentialVersion({ ...version, accessToken: 'must-not-cross-private-version-channel' } as any);
+  assert.deepEqual(envelope, { metadata_only: true, backend: 'desktop-broker', credential_channel: 'production', request_json: '', publish_credential_version: version });
+  await assert.rejects(catalog.publishProviderAccountCredentialVersion({ ...version, credentialRevision: 0 }), /Invalid credential version/);
+});
+
+test('global provider settings use a headless Host command with expected snapshot on stdin', async () => {
+  let flags: readonly string[] = [], envelope: any;
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: ((_bin: string, args: readonly string[]) => {
+    flags = args;
+    const child = fakeChild(JSON.stringify({ raw: {}, effective: { providers: { custom: { type: 'openai' } }, providerRegion: 'international' }, locked: [] })) as any;
+    child.stdin = new PassThrough(); child.stdin.on('data', bytes => { envelope = JSON.parse(bytes.toString()); });
+    return child;
+  }) as any });
+  const expected = { providers: {} };
+  const patch = { providerRegion: 'international' };
+  const result = await catalog.providerSettings(patch, expected);
+  assert.deepEqual(flags, ['--provider-settings-command']);
+  assert.deepEqual(envelope, { patch, expected });
+  assert.equal(result.effective.providerRegion, 'international');
+});
+
+test('native brand paths share discovery across concurrent Host services and survive caller mutation', async () => {
+  let calls = 0;
+  const brandHome = join(tmpdir(), '.configured-brand');
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: (() => {
+    calls++;
+    return fakeChild(JSON.stringify({ version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps') }));
+  }) as any });
+  const rows = await Promise.all(Array.from({ length: 12 }, () => catalog.productPaths()));
+  assert.equal(calls, 1, 'concurrent consumers must not launch competing native discovery processes');
+  rows[0].brandHome = '/caller-mutated';
+  assert.equal((await catalog.productPaths()).brandHome, brandHome);
+  assert.equal(calls, 1);
+});
+
+test('a failed native brand discovery is not retained by later Host operations', async () => {
+  let calls = 0;
+  const brandHome = join(tmpdir(), '.configured-brand');
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: (() => {
+    calls++;
+    return fakeChild(calls === 1 ? '{' : JSON.stringify({ version: 1, brand_home: brandHome, app_projects_root: join(brandHome, '.apps') }));
+  }) as any });
+  await assert.rejects(catalog.productPaths(), /invalid product paths response/);
+  assert.equal((await catalog.productPaths()).brandHome, brandHome);
+  assert.equal(calls, 2);
 });

@@ -90,7 +90,7 @@ enum ProviderBulkImport {
     /// the provider entry itself only supplies defaults, so it need not satisfy
     /// `models` / `baseUrl` on its own, and no endpoint can pass a rule another
     /// one fails.
-    private static func validateConnections(_ entry: ProviderImportEntry, credentialConfigured: Bool) -> String? {
+    private static func validateConnections(_ entry: ProviderImportEntry) -> String? {
         let draft = entry.draft
         guard let connections = draft["connections"] as? [[String: Any]], !connections.isEmpty else {
             return localized("settings_parity_provider_validation_invalid")
@@ -109,7 +109,7 @@ enum ProviderBulkImport {
             if let error = validateCredentialIds(connection["credentialIds"]) { return error }
             var merged = entry
             merged.draft = mergedConnection(draft, connection)
-            if let error = validate(merged, credentialConfigured: credentialConfigured) { return error }
+            if let error = validate(merged) { return error }
         }
         if let fallback = draft["fallback"] {
             guard let map = fallback as? [String: Any] else { return localized("settings_parity_provider_validation_invalid") }
@@ -125,12 +125,12 @@ enum ProviderBulkImport {
         return nil
     }
 
-    static func validate(_ entry: ProviderImportEntry, credentialConfigured: Bool) -> String? {
+    static func validate(_ entry: ProviderImportEntry) -> String? {
         guard entry.name.range(of: "^[a-z0-9][a-z0-9._-]{0,63}$", options: .regularExpression) != nil,
               !forbidden.contains(entry.name), !["builtin", "claude"].contains(entry.name) else { return localized("settings_parity_provider_validation_invalid") }
         if let error = entry.errors.first { return error }
         let draft = entry.draft
-        if draft["connections"] != nil { return validateConnections(entry, credentialConfigured: credentialConfigured) }
+        if draft["connections"] != nil { return validateConnections(entry) }
         if let error = validateCredentialIds(draft["credentialIds"]) { return error }
         guard let type = draft["type"] as? String, supportedTypes.contains(type) else { return localized("settings_parity_provider_validation_protocol") }
         guard let models = draft["models"] as? [[String: Any]], !models.isEmpty else { return localized("settings_parity_provider_validation_models") }
@@ -169,19 +169,16 @@ enum ProviderBulkImport {
                       values.allSatisfy({ allowed.contains($0.key) && nonnegativeNumber($0.value) }) else { return localized("settings_parity_provider_validation_pricing") }
             }
         }
-        if type != "bedrock-claude", !nonempty(entry.credential), !nonempty(draft["apiKeyEnv"]), !credentialConfigured {
-            return localized("settings_parity_import_credentials_required")
-        }
         return nil
     }
 
-    static func merge(_ entries: [ProviderImportEntry], into existing: [String: Any], configured: Set<String>) throws -> [String: Any] {
+    static func merge(_ entries: [ProviderImportEntry], into existing: [String: Any]) throws -> [String: Any] {
         let selected = entries.filter(\.selected)
         guard !selected.isEmpty else { throw ImportError(localized("settings_parity_import_select_required")) }
         guard Set(selected.map(\.name)).count == selected.count else { throw ImportError(localized("settings_parity_provider_validation_invalid")) }
         var merged = existing
         for entry in selected {
-            if let error = validate(entry, credentialConfigured: configured.contains(entry.name)) { throw ImportError(error) }
+            if let error = validate(entry) { throw ImportError(error) }
             var sanitized = ProviderImportEntry(name: entry.name, draft: [:], selected: true, conflict: false)
             convertNative(entry.draft, entry: &sanitized)
             guard sanitized.errors.isEmpty, sanitized.credential == nil else { throw ImportError(localized("settings_parity_provider_validation_secret")) }

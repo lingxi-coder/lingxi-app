@@ -7,6 +7,9 @@
 //! in order: it attaches (resuming from the last `(epoch, seq)` when it can),
 //! assembles the snapshot the desktop sends in pieces, holds live records back
 //! while that is going on, applies them in order, and offers the commands.
+//!
+//! The computer's Bots ([`BotsState`]) and the chats of a Bot ([`BotThreads`])
+//! are kept by the same [`RemoteClient`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,12 +31,15 @@ use crate::connection::{ConnectionListener, ConnectionPhase, ConnectionState, Vi
 use crate::encoding::random_id;
 use crate::messages::{
     methods, ImageGetResult, ModelsListResult, PermissionModeId, PromptSendResult, RemoteCursor,
-    RemotePending, RemoteRecord, RemoteSeqRecord, RemoteSessionSummary, RemoteTurnState,
-    SessionAttachResult, SessionHistoryResult, SessionSnapshotParams, SessionsChangedParams,
-    SessionsListResult,
+    RemotePending, RemotePromptOrigin, RemoteRecord, RemoteSeqRecord, RemoteSessionSummary,
+    RemoteTurnState, SessionAttachResult, SessionHistoryResult, SessionSnapshotParams,
+    SessionsChangedParams, SessionsListResult,
 };
 use crate::rpc::{RemoteErrorCode, RpcError};
 use crate::text::display_text;
+
+mod bots;
+pub use bots::{BotThreads, BotThreadsState, BotsState};
 
 /// Longest wait for `session.attach` to answer.
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -43,6 +49,8 @@ const RESET_SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
 const HISTORY_PAGE: u32 = 100;
 /// Live records kept while a snapshot is still being assembled.
 const MAX_BUFFERED_EVENTS: usize = 5000;
+/// Longest name shown of a Bot, in characters.
+const BOT_NAME_CHARS: usize = 60;
 /// Images a prompt may carry.
 pub const MAX_IMAGE_ATTACHMENTS: usize = 4;
 /// Media types the desktop accepts for prompt images.
@@ -312,6 +320,27 @@ impl SessionController {
     /// The current state.
     pub fn state(&self) -> SessionState {
         self.inner.core.lock().expect("core").state.clone()
+    }
+
+    /// The name of the Bot that handed over the prompt of turn `turn_id`, cleaned
+    /// for display, when the prompt came from a Bot and the Bot gave a name.
+    /// Prompts older than the held records have no origin to look up.
+    pub fn prompt_bot_name(&self, turn_id: u64) -> Option<String> {
+        let core = self.inner.core.lock().expect("core");
+        core.state
+            .records
+            .iter()
+            .rev()
+            .find_map(|item| match &item.record {
+                RemoteRecord::Prompt {
+                    turn_id: id,
+                    origin: RemotePromptOrigin::Bot,
+                    from_bot_name: Some(name),
+                    ..
+                } if *id == turn_id => Some(display_text(name, BOT_NAME_CHARS)),
+                _ => None,
+            })
+            .filter(|name| !name.is_empty())
     }
 
     /// Register a listener; returns an id for [`remove_listener`](Self::remove_listener).
@@ -1127,10 +1156,15 @@ impl SessionInner {
 // RemoteClient
 // ---------------------------------------------------------------------------
 
-/// Hears about the list of shared sessions. Must not block.
+/// Hears about the list of shared sessions, the Bots and the chats of the Bots
+/// a screen shows. Must not block.
 pub trait RemoteClientListener: Send + Sync {
     /// The list changed (`None` until the first list arrives).
     fn on_sessions(&self, sessions: &[RemoteSessionSummary]);
+    /// The computer's Bots changed, or it turned out not to know Bots.
+    fn on_bots(&self, _state: &BotsState) {}
+    /// The chats of a Bot that a screen shows changed.
+    fn on_bot_threads(&self, _bot_id: &str, _state: &BotThreadsState) {}
 }
 
 fn clean_summary(mut summary: RemoteSessionSummary) -> RemoteSessionSummary {
@@ -1147,12 +1181,25 @@ struct ClientInner {
     listeners: Mutex<Vec<(u64, Arc<dyn RemoteClientListener>)>>,
     next_listener: AtomicU64,
     models: tokio::sync::Mutex<Option<ModelsListResult>>,
+    bots: bots::BotsHub,
+}
+
+impl ClientInner {
+    /// The listeners now, to be called without a lock held.
+    fn hearers(&self) -> Vec<Arc<dyn RemoteClientListener>> {
+        self.listeners
+            .lock()
+            .expect("listeners")
+            .iter()
+            .map(|(_, l)| Arc::clone(l))
+            .collect()
+    }
 }
 
 /// Everything above one connection that the screens share: the list of shared
-/// sessions, the per-session controllers (kept so a session's `(epoch, seq)`
-/// survives going back to the list and a reconnect), and the routing of host
-/// notifications to them. Cheap to clone.
+/// sessions, the Bots and their chats, the per-session controllers (kept so a
+/// session's `(epoch, seq)` survives going back to the list and a reconnect), and
+/// the routing of host notifications to them. Cheap to clone.
 #[derive(Clone)]
 pub struct RemoteClient {
     inner: Arc<ClientInner>,
@@ -1211,6 +1258,7 @@ impl RemoteClient {
                 listeners: Mutex::new(Vec::new()),
                 next_listener: AtomicU64::new(1),
                 models: tokio::sync::Mutex::new(None),
+                bots: bots::BotsHub::default(),
             }),
         }
     }
@@ -1264,6 +1312,20 @@ impl RemoteClient {
             .clone()
     }
 
+    /// The name of the Bot that handed over the prompt of turn `turn_id` in a
+    /// session this client holds, when the prompt came from a Bot and the Bot gave
+    /// a name; see [`SessionController::prompt_bot_name`].
+    pub fn prompt_bot_name(&self, session_id: &str, turn_id: u64) -> Option<String> {
+        let controller = self
+            .inner
+            .controllers
+            .lock()
+            .expect("controllers")
+            .get(session_id)
+            .cloned()?;
+        controller.prompt_bot_name(turn_id)
+    }
+
     /// The models the desktop offers; asked once per connection.
     pub async fn models(&self) -> Result<ModelsListResult, RpcError> {
         let mut cache = self.inner.models.lock().await;
@@ -1283,15 +1345,7 @@ impl RemoteClient {
     fn publish(&self, sessions: Vec<RemoteSessionSummary>) {
         let sessions: Vec<RemoteSessionSummary> = sessions.into_iter().map(clean_summary).collect();
         *self.inner.sessions.lock().expect("sessions") = Some(sessions.clone());
-        let listeners: Vec<Arc<dyn RemoteClientListener>> = self
-            .inner
-            .listeners
-            .lock()
-            .expect("listeners")
-            .iter()
-            .map(|(_, l)| Arc::clone(l))
-            .collect();
-        for listener in listeners {
+        for listener in self.inner.hearers() {
             listener.on_sessions(&sessions);
         }
     }
@@ -1311,6 +1365,7 @@ impl RemoteClient {
                 }
             }
         });
+        self.bots_ready();
         let controllers: Vec<SessionController> = self
             .inner
             .controllers
@@ -1329,6 +1384,10 @@ impl RemoteClient {
             if let Ok(changed) = serde_json::from_value::<SessionsChangedParams>(params.clone()) {
                 self.publish(changed.sessions);
             }
+            return;
+        }
+        if method == methods::BOTS_CHANGED {
+            self.bots_changed(params);
             return;
         }
         let Some(session_id) = params.get("session_id").and_then(Value::as_str) else {
@@ -1371,7 +1430,8 @@ impl RemoteClient {
         }
     }
 
-    /// Detach every session (the screens are gone).
+    /// Detach every session and stop keeping the chats of Bots current (the
+    /// screens are gone).
     pub fn dispose(&self) {
         let controllers: Vec<SessionController> = self
             .inner
@@ -1384,5 +1444,6 @@ impl RemoteClient {
         for controller in controllers {
             controller.deactivate();
         }
+        self.bots_dispose();
     }
 }

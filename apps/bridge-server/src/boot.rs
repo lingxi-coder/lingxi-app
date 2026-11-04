@@ -121,12 +121,10 @@ mod workspace_resume_tests;
 pub const API_BASE_ENV: &str = "LINGXI_API_BASE_URL";
 /// The canonical Anthropic endpoint used when [`API_BASE_ENV`] is unset.
 pub const DEFAULT_API_BASE: &str = "https://api.anthropic.com";
-/// Maximum accepted credential length from `--api-key-stdin`.
-pub const MAX_STDIN_API_KEY_BYTES: usize = 16 * 1024;
+/// Maximum size of an injected plugin secret.
+pub const MAX_PLUGIN_SECRET_BYTES: usize = 16 * 1024;
 /// Maximum accepted JSON credential envelope size from `--credential-stdin`.
-pub const MAX_STDIN_CREDENTIAL_BYTES: usize = 64 * 1024;
-/// Provider id under which the desktop delivers and releases its Codex session.
-pub(crate) const CODEX_PROVIDER_ID: &str = "openai-chatgpt";
+pub const MAX_STDIN_CREDENTIAL_BYTES: usize = 2 * 1024 * 1024;
 
 /// Parsed command-line flags the binary accepts (a tiny hand-rolled parser;
 /// `apps/bridge-server` deliberately avoids a clap dependency).
@@ -150,6 +148,8 @@ pub struct BridgeArgs {
     pub workspace_environment_json: bool,
     /// Resolve product-owned directories without loading workspace settings.
     pub product_paths_json: bool,
+    /// Execute one private Host account metadata command without a project engine.
+    pub provider_account_command: bool,
     /// Private catalog scope; accepted only beside `--list-sessions-json`.
     pub session_scope: Option<session::jsonl::SessionDiscoveryScope>,
     /// Explicit session grants replayed by the Desktop during a workspace remount.
@@ -167,9 +167,7 @@ pub struct BridgeArgs {
     pub permission_timeout_secs: Option<u64>,
     /// Host policy for questions: never, 60s, 5m, or 10m.
     pub ask_user_question_timeout: Option<tool_ui::ask_user_question::AskUserQuestionTimeout>,
-    /// Read one bounded credential line from stdin before assembling the engine.
-    pub api_key_stdin: bool,
-    /// Read a bounded JSON envelope containing the API key and provider keys.
+    /// Read the bounded account credential envelope from stdin.
     pub credential_stdin: bool,
     /// Allow workspace-controlled configuration and customization sources.
     pub trusted_workspace: bool,
@@ -221,6 +219,7 @@ impl BridgeArgs {
                 "--list-sessions-json" => out.list_sessions_json = true,
                 "--workspace-environment-json" => out.workspace_environment_json = true,
                 "--product-paths-json" => out.product_paths_json = true,
+                "--provider-account-command" => out.provider_account_command = true,
                 "--session-scope" => {
                     let value = it
                         .next()
@@ -336,7 +335,6 @@ impl BridgeArgs {
                         .ok_or("--ask-user-question-timeout requires never, 60s, 5m, or 10m")?,
                     );
                 }
-                "--api-key-stdin" => out.api_key_stdin = true,
                 "--credential-stdin" => out.credential_stdin = true,
                 "--trusted-workspace" => out.trusted_workspace = true,
                 "--host-insights-policy-gate" => {
@@ -433,7 +431,6 @@ pub fn usage() -> String {
              --permission-timeout-secs <SECONDS>  Permission wait (1..86400)\n    \
              --ask-user-question-timeout <never|60s|5m|10m>\n    \
              --model <ID>     Default model id (default: the desktop build default)\n    \
-             --api-key-stdin  Read the API key from one line on stdin\n    \
              --credential-stdin\n    \
                               Read a provider credential envelope from stdin\n    \
              --trusted-workspace\n    \
@@ -452,156 +449,24 @@ pub fn usage() -> String {
     )
 }
 
-/// Read exactly one credential line with a hard allocation bound.
-///
-/// Only the trailing line ending is removed; credential whitespace is otherwise
-/// preserved. Error text never contains input bytes.
-pub fn read_api_key_line<R: BufRead>(reader: &mut R) -> Result<String, String> {
-    let mut bytes = Vec::with_capacity(256);
-    let mut limited = (&mut *reader).take((MAX_STDIN_API_KEY_BYTES + 2) as u64);
-    limited
-        .read_until(b'\n', &mut bytes)
-        .map_err(|_| "failed to read API key from stdin".to_string())?;
-
-    let without_lf = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
-    let content_len = without_lf.strip_suffix(b"\r").unwrap_or(without_lf).len();
-    if content_len > MAX_STDIN_API_KEY_BYTES
-        || (bytes.len() > MAX_STDIN_API_KEY_BYTES && !bytes.ends_with(b"\n"))
-    {
-        return Err(format!(
-            "API key from stdin exceeds the {MAX_STDIN_API_KEY_BYTES}-byte limit"
-        ));
-    }
-    if !bytes.ends_with(b"\n") && bytes.len() == MAX_STDIN_API_KEY_BYTES + 2 {
-        return Err(format!(
-            "API key from stdin exceeds the {MAX_STDIN_API_KEY_BYTES}-byte limit"
-        ));
-    }
-    if bytes.ends_with(b"\n") {
-        bytes.pop();
-        if bytes.ends_with(b"\r") {
-            bytes.pop();
-        }
-    }
-    String::from_utf8(bytes).map_err(|_| "API key from stdin must be valid UTF-8".to_string())
-}
-
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 /// One bounded credential payload accepted from the Electron parent.
 pub struct CredentialEnvelope {
-    /// Optional legacy Anthropic API key.
+    /// Secret-free Host account directory for this credential domain.
     #[serde(default)]
-    pub api_key: Option<String>,
-    /// Provider id to API key/bearer token mappings.
+    pub provider_accounts: Option<lingxi_core::host::provider_accounts::AccountSnapshot>,
+    /// Canonical Host account root, independent of the session settings root.
     #[serde(default)]
-    pub provider_keys: BTreeMap<String, String>,
-    /// Host-owned Codex session; the engine uses only its access token.
+    pub provider_account_home: Option<PathBuf>,
+    /// Private access-only account material. Never forwarded to clients.
     #[serde(default)]
-    pub openai_oauth: Option<client::protocol::events::OpenAiOAuthSessionDto>,
+    pub provider_account_credentials: BTreeMap<String, secret::AccountCredential>,
     /// Sensitive plugin configuration, keyed by plugin identity then manifest
     /// field name. Values are injected into the runtime's process-local
     /// credential cache before plugin discovery.
     #[serde(default)]
     pub plugin_secrets: BTreeMap<String, BTreeMap<String, String>>,
-}
-
-struct OpenAiOAuthHostObserver {
-    sink: Arc<dyn client::adapter::ClientEventSink>,
-}
-
-#[async_trait::async_trait]
-impl secret::credential::OpenAiOAuthObserver for OpenAiOAuthHostObserver {
-    async fn updated(&self, tokens: secret::credential::OpenAiOAuthTokens) {
-        self.sink
-            .emit(client::protocol::events::ClientEvent::OpenAiOAuthUpdated {
-                session: client::protocol::events::OpenAiOAuthSessionDto {
-                    access_token: tokens.access_token.expose_secret().clone(),
-                    refresh_token: tokens
-                        .refresh_token
-                        .map(|value| value.expose_secret().clone()),
-                    expires_at: tokens
-                        .expires_at
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                    account_id: tokens.account_id,
-                    fedramp: tokens.fedramp,
-                    email: tokens.email,
-                },
-            })
-            .await;
-    }
-}
-
-pub(crate) fn validate_openai_oauth_session(
-    session: &client::protocol::events::OpenAiOAuthSessionDto,
-) -> Result<(), String> {
-    let valid_token = |token: &str| {
-        !token.is_empty() && token.len() <= 16 * 1024 && !token.chars().any(char::is_control)
-    };
-    if !valid_token(&session.access_token)
-        || session
-            .refresh_token
-            .as_deref()
-            .is_some_and(|token| !valid_token(token))
-        || session
-            .account_id
-            .as_deref()
-            .is_some_and(|id| id.is_empty() || id.len() > 1024 || id.chars().any(char::is_control))
-        || session.email.as_deref().is_some_and(|email| {
-            email.is_empty() || email.len() > 320 || email.chars().any(char::is_control)
-        })
-        || session.expires_at == 0
-        || std::time::UNIX_EPOCH
-            .checked_add(std::time::Duration::from_secs(session.expires_at))
-            .is_none()
-    {
-        return Err("invalid Codex OAuth session in credential envelope".into());
-    }
-    Ok(())
-}
-
-/// The access token of a Codex session the desktop serves. A refresh token
-/// in it is ignored: the desktop is the session's one refresher.
-pub(crate) fn openai_host_token(
-    session: &client::protocol::events::OpenAiOAuthSessionDto,
-) -> llm_runtime::auth::openai::HostToken {
-    llm_runtime::auth::openai::HostToken {
-        access_token: lingxi_core::types::Secret::new(session.access_token.clone()),
-        expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.expires_at),
-        account_id: session.account_id.clone(),
-        fedramp: session.fedramp,
-    }
-}
-
-/// `operation_id` of a credential status no command asked for: this engine's
-/// Codex access token expired and it needs the desktop to serve the next one.
-/// Desktop credential operations are numbered from 1.
-pub(crate) const CODEX_TOKEN_REQUEST_OPERATION_ID: u64 = 0;
-
-/// Asks the desktop for the next Codex access token.
-struct CodexTokenRequester {
-    sink: Arc<dyn client::adapter::ClientEventSink>,
-}
-
-impl llm_runtime::auth::openai::HostRefreshRequester for CodexTokenRequester {
-    fn request_refresh(&self) {
-        let sink = self.sink.clone();
-        tokio::spawn(async move {
-            sink.emit(
-                client::protocol::events::ClientEvent::ProviderCredentialStatus {
-                    operation_id: CODEX_TOKEN_REQUEST_OPERATION_ID,
-                    configured_provider_ids: Vec::new(),
-                    unavailable_provider_ids: vec![CODEX_PROVIDER_ID.to_string()],
-                    storage_encrypted: false,
-                    credential_previews: std::collections::HashMap::new(),
-                    error: Some("Codex access token expired".to_string()),
-                },
-            )
-            .await;
-        });
-    }
 }
 
 /// Read and validate the one-line JSON envelope used by the packaged desktop.
@@ -621,32 +486,10 @@ pub fn read_credential_envelope<R: BufRead>(reader: &mut R) -> Result<Credential
     }
     let envelope: CredentialEnvelope =
         serde_json::from_slice(line).map_err(|_| "invalid credential envelope".to_string())?;
-    if let Some(session) = &envelope.openai_oauth {
-        validate_openai_oauth_session(session)?;
-    }
-    if let Some(key) = envelope.api_key.as_ref() {
-        if key.is_empty() || key.len() > MAX_STDIN_API_KEY_BYTES || key.contains('\0') {
-            return Err("invalid API key in credential envelope".to_string());
-        }
-    }
-    if envelope.provider_keys.len() > 32 {
-        return Err("credential envelope contains too many providers".to_string());
-    }
-    for (provider, key) in &envelope.provider_keys {
-        if provider.is_empty()
-            || provider.len() > 64
-            || !provider.chars().enumerate().all(|(index, ch)| {
-                ch.is_ascii_lowercase()
-                    || ch.is_ascii_digit()
-                    || (index > 0 && matches!(ch, '-' | '_' | '.'))
-            })
-        {
-            return Err("invalid provider id in credential envelope".to_string());
-        }
-        if key.is_empty() || key.len() > MAX_STDIN_API_KEY_BYTES || key.contains('\0') {
-            return Err("invalid provider credential in credential envelope".to_string());
-        }
-    }
+    crate::provider_accounts::validate_injection(
+        envelope.provider_accounts.as_ref(),
+        &envelope.provider_account_credentials,
+    )?;
     let plugin_secret_count: usize = envelope.plugin_secrets.values().map(BTreeMap::len).sum();
     if plugin_secret_count > 256 {
         return Err("credential envelope contains too many plugin secrets".to_string());
@@ -671,7 +514,7 @@ pub fn read_credential_envelope<R: BufRead>(reader: &mut R) -> Result<Credential
             {
                 return Err("invalid plugin secret key in credential envelope".to_string());
             }
-            if secret.is_empty() || secret.len() > MAX_STDIN_API_KEY_BYTES || secret.contains('\0')
+            if secret.is_empty() || secret.len() > MAX_PLUGIN_SECRET_BYTES || secret.contains('\0')
             {
                 return Err("invalid plugin secret in credential envelope".to_string());
             }
@@ -786,34 +629,22 @@ fn desktop_provider_catalog_anthropic_models(
         .collect()
 }
 
-/// Load the merged settings `providers` / `routing` / `apiKeyHelper` blocks from the layered
-/// settings (project + user + env), rooted at the *current* working directory
-/// (the process has already `chdir`'d into any `--cwd`). Returns `(None, None)`
-/// on any load failure — callers then fall back to built-in profiles + the
-/// default routing. Mirrors `apps/cli/src/init.rs`'s `load_provider_profiles`
-/// + `load_routing`.
+/// Read provider profiles and routing from the Host settings file. Project and
+/// local settings cannot replace these fields; invalid Host settings fail boot.
 #[must_use]
-fn load_settings_blocks() -> (
-    Option<BTreeMap<String, serde_json::Value>>,
-    Option<serde_json::Value>,
-    Option<String>,
-) {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let env: BTreeMap<String, String> = std::env::vars().collect();
-    let inputs = lingxi_core::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: lingxi_core::settings::schema::SettingsJson::default(),
-    };
-    match lingxi_core::settings::Settings::load(inputs) {
-        Ok(eff) => (
-            eff.settings.providers,
-            eff.settings.routing,
-            eff.settings
-                .api_key_helper
-                .filter(|helper| !helper.trim().is_empty()),
-        ),
-        Err(_) => (None, None, None),
+fn load_settings_blocks(
+    home: &std::path::Path,
+) -> Result<
+    (
+        Option<BTreeMap<String, serde_json::Value>>,
+        Option<serde_json::Value>,
+    ),
+    String,
+> {
+    match lingxi_core::settings::loader::read_settings_file(&home.join("settings.json")) {
+        Ok(Some(settings)) => Ok((settings.providers, settings.routing)),
+        Ok(None) => Ok((None, None)),
+        Err(_) => Err("Host provider settings are unavailable".into()),
     }
 }
 
@@ -832,11 +663,11 @@ fn without_settings_credentials(
 }
 
 /// Brand data home: the branding crate's configuration-directory override when
-/// set (including an empty value), otherwise the branded hidden home directory.
+/// set to a non-empty value, otherwise the branded hidden home directory.
 /// Shared by configuration, sessions, apps, and scheduled workspaces.
 #[must_use]
 pub fn brand_home() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
+    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV).filter(|dir| !dir.is_empty()) {
         return Some(PathBuf::from(dir));
     }
     dirs::home_dir().map(|h| h.join(branding::DOT_DIR))
@@ -853,11 +684,10 @@ pub fn brand_home() -> Option<PathBuf> {
 /// `chdir`'d into any `--cwd` (so the settings / hook / `.mcp.json` loaders read
 /// the same dir).
 ///
-/// The API key is deliberately left empty here; `main` may assign the bounded
-/// stdin value immediately before assembly. An empty key is valid for transport
-/// testing and only fails when a live turn needs credentials.
+/// Provider authentication is supplied through the account directory and exact
+/// account credential records during assembly.
 #[must_use]
-pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
+pub fn resolve_desktop_config(args: &BridgeArgs) -> Result<DesktopConfig, String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let lingxi_home = args
         .session_config_home
@@ -877,22 +707,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         default_model.clone_from(m);
     }
 
-    let (provider_profiles, routing, api_key_helper) = if args.trusted_workspace {
-        let (provider_profiles, routing, api_key_helper) = load_settings_blocks();
-        if !args.packaged_credential_stdin_only {
-            (provider_profiles, routing, api_key_helper)
-        } else {
-            // Keep routes available for credentials supplied by the parent,
-            // without permitting settings to introduce credential sources.
-            (
-                without_settings_credentials(provider_profiles),
-                routing,
-                None,
-            )
-        }
-    } else {
-        (None, None, None)
-    };
+    let (profiles, routing) = load_settings_blocks(&lingxi_home)?;
+    let provider_profiles = without_settings_credentials(profiles);
     let trusted = args.trusted_workspace;
 
     let build_info = harness_runtime::desktop::BuildInfo::new(
@@ -929,7 +745,6 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         __desktop_config.request_identity = None;
         __desktop_config.anthropic_compatible_version = None;
         __desktop_config.native_thinking_display = None;
-        __desktop_config.oauth_environment_lookup = None;
         __desktop_config.verified_computer_profiles = Vec::new();
         __desktop_config.host_workspace_trusted = Some(trusted);
         __desktop_config.insights_policy_gate = args.insights_policy_gate;
@@ -942,14 +757,10 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         __desktop_config.initial_teammate_team_name = None;
         __desktop_config.api_base = api_base;
         __desktop_config.anthropic_client_metadata = anthropic_client_metadata;
-        // Credentials are supplied explicitly by the parent over stdin and
-        // assigned by `main` immediately before assembly. Never inherit them
-        // from environment or argv.
-        __desktop_config.api_key = String::new();
-        __desktop_config.api_key_source = llm_runtime::CredentialSource::Configured;
+        // Authentication belongs to the account directory; config carries no key.
         // The packaged bridge gets an explicit process-local store. Desktop,
-        // CLI, and TUI own persistent broker access; this sidecar receives only
-        // its current session credential over stdin.
+        // CLI, and TUI own persistent broker access; this sidecar receives
+        // access-only account records over stdin.
         __desktop_config.isolated_credential_storage = false;
         __desktop_config.credential_storage_policy = if args.packaged_credential_stdin_only {
             CredentialStoragePolicy::NativeOrMemory
@@ -957,13 +768,6 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
             CredentialStoragePolicy::NativePreferred
         };
         __desktop_config.injected_plugin_secrets = BTreeMap::new();
-        __desktop_config.api_key_helper = api_key_helper;
-        // (M13) The bridge host does not resolve managed login-method forcing
-        // (the Electron parent owns credential policy) and passes no
-        // FD-inherited key — both auth-resolver inputs stay at their inert
-        // defaults.
-        __desktop_config.managed_oauth_only = false;
-        __desktop_config.anthropic_key_fd_present = false;
         __desktop_config.initial_project_root = args.session_project_root.clone();
         __desktop_config.initial_prompt_directories = args.session_prompt_directory.clone();
         __desktop_config.cwd = cwd;
@@ -1014,16 +818,16 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The headless bridge has no interactive /fork or /resume-as-background
         // surface, so it wires no background-session forker seam.
         __desktop_config.bg_session_forker = None;
-        // Placeholder — `assemble_with_provider_keys` installs the
+        // Placeholder — `assemble_with_account_credentials` installs the
         // connection-scoped AskUserQuestion broker once the event sink exists.
         __desktop_config.ask_user_question_tx = None;
         // Placeholder — `resolve_desktop_config` has no live connection to
-        // build a sink from yet. `assemble_with_provider_keys` overwrites this
+        // build a sink from yet. `assemble_with_account_credentials` overwrites this
         // to `Some(sender)` once the `BridgeConnection` (and therefore its
         // `computer_access_sink()`) exists, wiring the Electron-facing
         // `ComputerAccessBroker`.
         __desktop_config.computer_access_tx = None;
-        // Filled by `assemble_with_provider_keys` after the connection-scoped
+        // Filled by `assemble_with_account_credentials` after the connection-scoped
         // event sink exists; this keeps subagent lifecycle events on the same
         // authenticated session stream as ordinary turn events.
         __desktop_config.session_agent_observer = None;
@@ -1046,8 +850,6 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         __desktop_config.permission_mode_cli = None;
         __desktop_config.permission_mode_preference = None;
         __desktop_config.permission_mode_cli_explicit = false;
-        // Plan 3c: bridge has no interactive secure prompt; headless no-op.
-        __desktop_config.connect_prompt = None;
         // The Electron bridge exposes no --max-turns / --max-budget flags;
         // both stay unset (unbounded), matching the CLI defaults.
         __desktop_config.max_turns = None;
@@ -1129,26 +931,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         __desktop_config.inline_visualization = true;
         // Electron owns the desktop project library, application windows and process lifecycle.
         __desktop_config.local_apps = true;
-        __desktop_config
+        Ok(__desktop_config)
     }
-}
-
-/// True iff the config has neither an API key/apiKeyHelper NOR any
-/// settings-configured provider profile — i.e. no way to authenticate a live
-/// turn. The server still boots (transport testing and read-only listings remain
-/// valuable), but [`assemble`] binds a fail-fast turn driver so no provider call
-/// or retry is attempted.
-#[must_use]
-pub fn has_no_credential_source(cfg: &DesktopConfig) -> bool {
-    cfg.api_key.is_empty()
-        && cfg
-            .api_key_helper
-            .as_deref()
-            .is_none_or(|helper| helper.trim().is_empty())
-        && cfg
-            .provider_profiles
-            .as_ref()
-            .is_none_or(BTreeMap::is_empty)
 }
 
 /// The assembled, ready-to-serve connection plus its auth-relevant facts.
@@ -1170,7 +954,7 @@ pub struct BoundServer {
     /// here keeps that pairing visible at the composition root.
     audio: Arc<AudioBridge>,
     /// The single shared media facade used by Desktop tools, UI/Remote RPC,
-    /// and the legacy audio-only service projection.
+    /// and the audio service projection.
     media_host: Arc<AppMediaHost>,
     /// Host-control transport handles retained by the product Remote media
     /// connector for this authenticated Bridge connection.
@@ -1881,109 +1665,6 @@ async fn list_sessions_json_from_with_scope(
     .map_err(|_| "failed to encode session catalog".to_string())
 }
 
-/// Regression ceiling used by the credential-publication tests. Production no
-/// longer waits for the broker-backed reconciliation probe at all: the known
-/// mutation is published synchronously and the probe is detached.
-///
-/// Round-10 finding N3. The detached engine refresh re-runs
-/// `provider_config::compute_availability_with_isolation` over every
-/// `CredentialSource` of each registered refresher, which bottoms out in the
-/// (on macOS, possibly brokered) keychain — the exact call the boot probe
-/// deliberately wraps in a 5s `tokio::time::timeout`
-/// (`harness-runtime/src/desktop/mod.rs`, `resolve_llm_stack`) because a contended
-/// broker can stall it. The historical five-second budget remains a generous
-/// assertion ceiling for tests of the now-immediate publication path.
-#[cfg(test)]
-pub(crate) const FUSION_CATALOG_REFRESH_BUDGET: std::time::Duration =
-    std::time::Duration::from_secs(5);
-
-/// Publish each known credential mutation, then start one detached reconciliation
-/// probe. The historical name is retained for the two bridge call sites.
-///
-/// Two properties this seam exists for, both of which the inline
-/// `for … { refresh(id).await }` it replaced got wrong:
-///
-/// * **Non-blocking.** `harness_runtime::desktop::refresh_fusion_catalog_after_credential_write`
-///   is a keychain re-probe with no internal timeout. Awaiting it inline put an
-///   unbounded stall on two paths that must not have one: connection assembly
-///   (nothing serves the Electron client until `assemble_with_provider_keys`
-///   returns) and `EngineCommandRouter::route` (awaited straight from the
-///   connection's read loop in `server.rs`'s `on_frame`, whose contract is
-///   "return promptly" — a stall there stops the client's interrupts and
-///   permission replies from even being READ).
-/// * **One detached probe for N ids.** The packaged Electron host supplies one
-///   key per configured provider. Publishing all known ids first and spawning
-///   once avoids N identical full-source scans.
-///
-/// The spawned task keeps running, so the availability map still converges once
-/// the broker answers. The caller never waits for it: readiness depends only on
-/// the cheap publication above, not on task scheduling or keychain latency.
-pub(crate) async fn refresh_fusion_catalog_bounded(
-    catalog_registry: &harness_runtime::desktop::FusionCatalogRegistry,
-    provider_ids: Vec<String>,
-) -> bool {
-    if provider_ids.is_empty() {
-        return true;
-    }
-    // Publish the known mutation before returning readiness to the caller.
-    // The full broker scan has one detached owner for the whole runtime and is
-    // epoch-guarded, so it cannot block this connection or resurrect a newer
-    // delete.  Anthropic's bridge provider id is a UI id; normalize it before
-    // the engine records the mutation so OAuth is never mistaken for a key.
-    let mut routable = true;
-    for provider_id in provider_ids {
-        let mutation_id = if provider_id == "anthropic" {
-            "anthropic-api-key"
-        } else {
-            provider_id.as_str()
-        };
-        routable &= harness_runtime::desktop::publish_fusion_catalog_credential(
-            catalog_registry,
-            mutation_id,
-        )
-        .await;
-    }
-    if routable {
-        harness_runtime::desktop::spawn_fusion_catalog_refresh(catalog_registry);
-    }
-    routable
-}
-
-/// Seed the provider keys the parent process handed over the dedicated stdin
-/// boundary into the runtime's process-local credential cache, then tell
-/// Fusion's catalog filter about them.
-///
-/// Round 9, item 2's class sweep: these keys are seeded AFTER `build` already
-/// computed the boot `provider_availability` map and registered the
-/// scoped `FusionCatalogRefresher`, so without the refresh Fusion's
-/// `FusionCatalogModelSource::list()` keeps filtering against a map in which the
-/// parent-supplied profile is absent/false — its rows are dropped for the whole
-/// engine process even though `/model` and the turn loop route it. An ephemeral
-/// key is never persisted and so can never be re-probed;
-/// `refresh_after_credential_write` force-marks the named profile available,
-/// which is the only correct answer here.
-///
-/// Round-10 finding N3: the refresh is bounded (see
-/// [`refresh_fusion_catalog_bounded`]) — it used to be one unbounded keychain
-/// re-probe PER key, inline on the assembly path.
-///
-/// Split out of `assemble_with_provider_keys` so it is reachable from a test
-/// without a full engine build.
-pub(crate) async fn seed_parent_supplied_provider_keys(
-    catalog_registry: &harness_runtime::desktop::FusionCatalogRegistry,
-    credentials: &Arc<secret::CredentialManager>,
-    provider_keys: &BTreeMap<String, String>,
-) {
-    for (provider_id, secret) in provider_keys {
-        credentials
-            .set_provider_key_ephemeral(provider_id, secret)
-            .await;
-    }
-    let _ =
-        refresh_fusion_catalog_bounded(catalog_registry, provider_keys.keys().cloned().collect())
-            .await;
-}
-
 /// Assemble a fully-bound [`BridgeConnection`] from a resolved [`DesktopConfig`].
 ///
 /// Wires the connection-scoped sinks into a real [`DesktopRuntime`]
@@ -1995,27 +1676,36 @@ pub(crate) async fn seed_parent_supplied_provider_keys(
 /// Returns the [`harness_runtime::desktop::BuildError`] string if the engine cannot be
 /// assembled (effectively infallible today).
 pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
-    Box::pin(assemble_with_provider_keys(cfg, BTreeMap::new())).await
+    Box::pin(assemble_with_account_credentials(
+        cfg,
+        None,
+        BTreeMap::new(),
+        None,
+    ))
+    .await
 }
 
-/// Assemble a runtime after injecting provider credentials received over the
-/// dedicated stdin boundary. Provider secrets never enter `DesktopConfig` or
-/// the process environment; they are held only in the engine process. The
-/// Electron host owns persistent Keychain storage, so packaged startup does
-/// not write the same key into the Rust Keychain on every launch.
-pub async fn assemble_with_provider_keys(
-    cfg: DesktopConfig,
-    provider_keys: BTreeMap<String, String>,
-) -> Result<BoundServer, String> {
-    Box::pin(assemble_with_credentials(cfg, provider_keys, None)).await
-}
-
-/// Assemble a host-owned OAuth session without storing secrets in configuration.
-pub async fn assemble_with_credentials(
+/// Assemble all account routes with private, process-local Host credentials.
+pub async fn assemble_with_account_credentials(
     mut cfg: DesktopConfig,
-    provider_keys: BTreeMap<String, String>,
-    openai_oauth: Option<client::protocol::events::OpenAiOAuthSessionDto>,
+    provider_accounts: Option<lingxi_core::host::provider_accounts::AccountSnapshot>,
+    mut provider_account_credentials: BTreeMap<String, secret::AccountCredential>,
+    provider_account_home: Option<PathBuf>,
 ) -> Result<BoundServer, String> {
+    if cfg.team_invocation.is_none() {
+        crate::provider_settings::apply_managed(&mut cfg).await?;
+    }
+    let account_home = provider_account_home.unwrap_or_else(|| cfg.lingxi_home.clone());
+    if !account_home.is_absolute() {
+        return Err("account home must be an absolute Host path".into());
+    }
+    crate::provider_accounts::validate_injection(
+        provider_accounts.as_ref(),
+        &provider_account_credentials,
+    )?;
+    if let Some(snapshot) = provider_accounts.as_ref() {
+        crate::provider_accounts::validate_current_snapshot(&account_home, snapshot)?;
+    }
     let media_handoffs =
         Arc::new(harness_runtime::desktop::DesktopMediaAgentHandoffQueue::default());
     cfg.media_agent_handoffs = Some(media_handoffs.clone());
@@ -2045,12 +1735,6 @@ pub async fn assemble_with_credentials(
         Arc::new(HostFileSystem::new(cfg.cwd.clone())),
         &cfg.lingxi_home,
     );
-
-    // Preserve only the non-secret parent-source fact before `cfg` moves. The
-    // authoritative decision is completed after `build`, when the runtime has
-    // checked the same Rust secure store used by CLI and TUI.
-    let _parent_credential_supplied =
-        !has_no_credential_source(&cfg) || !provider_keys.is_empty() || openai_oauth.is_some();
 
     // Capture the persisted-session inputs before `cfg` moves into the desktop
     // composition root. The router uses the same cwd/config-home pair as the
@@ -2258,56 +1942,67 @@ pub async fn assemble_with_credentials(
     .map_err(|error| error.to_string())?;
     if provider_credentials_ephemeral {
         // The parent is the only provider-key authority. Keep the shared native
-        // store for MCP/OAuth, but never revive a legacy provider key from it.
+        // store for MCP, while provider authentication belongs to the account store.
         shared.credentials.use_host_managed_provider_keys();
     }
-    // A desktop that owns credential persistence refreshes its one Codex
-    // session itself and serves every engine only access tokens, so any
-    // number of them use the account at once. This engine never refreshes
-    // the session; once its token expires it asks the desktop for the next.
-    // A session signed in from inside this engine still reaches the desktop.
-    let openai_host_session = provider_credentials_ephemeral.then(|| {
-        let session = Arc::new(llm_runtime::auth::openai::HostSession::new(Arc::new(
-            platform_posix::PosixClock::new(),
-        )));
-        session.request_refreshes_through(Arc::new(CodexTokenRequester {
-            sink: event_sink.clone(),
-        }));
-        session
-    });
-    shared.openai_host_session = openai_host_session.clone();
-    if openai_host_session.is_some() {
-        shared
-            .credentials
-            .set_openai_oauth_observer(Arc::new(OpenAiOAuthHostObserver {
-                sink: event_sink.clone(),
-            }));
-    }
-    if let Some(session) = openai_oauth {
-        validate_openai_oauth_session(&session)?;
-        if let Some(host) = &openai_host_session {
-            host.serve(openai_host_token(&session));
-        } else {
+    if let Some(snapshot) = provider_accounts {
+        crate::provider_accounts::validate_current_snapshot(&account_home, &snapshot)?;
+        for account in &snapshot.accounts {
             shared
                 .credentials
-                .store_openai_oauth_tokens(
-                    &session.access_token,
-                    session.refresh_token.as_deref(),
-                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.expires_at),
-                    vec![],
-                    session.account_id.as_deref(),
-                    session.fedramp,
-                    session.email.as_deref(),
+                .set_account_credential_ephemeral(
+                    &account.credential_ref,
+                    provider_account_credentials.remove(&account.account_id),
                 )
                 .await
-                .map_err(|_| "failed to seed Codex OAuth session".to_string())?;
-            shared
-                .credentials
-                .set_openai_oauth_observer(Arc::new(OpenAiOAuthHostObserver {
-                    sink: event_sink.clone(),
-                }));
+                .map_err(|_| "failed to install private account credential".to_string())?;
         }
+        shared.provider_accounts = Some(snapshot);
     }
+    shared.provider_account_home = Some(account_home.clone());
+    let account_scope = shared
+        .provider_accounts
+        .as_ref()
+        .map(|s| s.store_scope.clone())
+        .unwrap_or_else(|| {
+            harness_runtime::provider_accounts::account_store_scope(
+                &account_home,
+                &format!("{:?}", shared.credentials.account_storage_backend()),
+            )
+        });
+    let account_catalog_source = cfg.startup_catalog.clone();
+    let account_catalog_inputs = provider_config::AssembleInputs {
+        official_catalog: None,
+        anthropic_api_base: cfg.api_base.clone(),
+        anthropic_models: llm_runtime::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "anthropic")
+            .map(|profile| profile.models)
+            .unwrap_or_default(),
+        anthropic_has_api_key: false,
+        anthropic_has_oauth: false,
+        user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
+        routing: cfg.routing.clone(),
+    };
+    let provider_account_store = harness_runtime::provider_accounts::ProviderAccountStore::new(
+        account_home.clone(),
+        account_scope,
+        shared.credentials.clone(),
+    );
+    if provider_credentials_ephemeral {
+        shared
+            .credentials
+            .set_account_credential_refresher(Arc::new(
+                crate::provider_accounts::BrokerAccountRefresher {
+                    data_root: account_home,
+                    credentials: Arc::downgrade(&shared.credentials),
+                    sink: event_sink.clone(),
+                    locks: Default::default(),
+                },
+            ));
+    }
+    let initial_account_snapshot = shared.provider_accounts.clone();
     let runtime = Arc::new(
         // Do not nest the SDK's large assembly future in every transport wrapper.
         // This also keeps cold resume within ordinary worker-thread stack limits.
@@ -2338,6 +2033,16 @@ pub async fn assemble_with_credentials(
     // coordinator. Do not let the bridge's process-registration guard pin the
     // old session through later hot clear/resume operations.
     live_session.release_writer_claim();
+    let provider_account_store = Arc::new({
+        provider_account_store.with_catalog(
+            harness_runtime::provider_accounts::ProviderAccountCatalog::new(
+                account_catalog_inputs,
+                runtime.provider_region,
+                account_catalog_source,
+                None,
+            ),
+        )
+    });
     let provider_region = match runtime.provider_region {
         llm_runtime::Region::ChinaMainland => "china_mainland",
         llm_runtime::Region::International => "international",
@@ -2351,16 +2056,6 @@ pub async fn assemble_with_credentials(
             lingxi_core::types::utf16_json::Utf16JsonProjection::from(provider_region),
         )
         .map_err(|error| format!("failed to update active providerRegion: {error}"))?;
-
-    // Seeds the parent-supplied keys and refreshes Fusion's catalog filter for
-    // them under ONE bounded budget -- see `seed_parent_supplied_provider_keys`
-    // for why both halves live there (round 9 item 2; round-10 finding N3).
-    seed_parent_supplied_provider_keys(
-        &runtime.catalog_registry,
-        &runtime.credentials,
-        &provider_keys,
-    )
-    .await;
 
     // `use_noop_permission_gate: false` ⇒ build MUST surface the adapter gate.
     let gate = runtime.permission_gate.clone().ok_or_else(|| {
@@ -2579,7 +2274,6 @@ pub async fn assemble_with_credentials(
     );
     let mut router = EngineCommandRouter::new(
         handle,
-        runtime.auth.clone(),
         runtime.task_registry.clone()
             as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
         Some(dispatcher),
@@ -2592,13 +2286,11 @@ pub async fn assemble_with_credentials(
     )
     .with_cron_firer(cron_firer)
     .with_session_cron(runtime.session_lifecycle.cron_scheduler.clone())
-    .with_credentials(runtime.credentials.clone())
+    .with_provider_account_store(provider_account_store, initial_account_snapshot)
     .with_catalog_registry(runtime.catalog_registry.clone())
     .with_provider_model_catalog_listings(provider_model_catalog_listings)
     .with_official_catalog(official_catalog)
     .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
-    .with_openai_host_session(openai_host_session)
-    .with_http(runtime.http.clone())
     .with_session_store(
         session_store
             .with_runtime_cwd(runtime.session_cwd.clone())
@@ -2849,7 +2541,7 @@ mod tests {
             "never",
         ])
         .unwrap();
-        let config = resolve_desktop_config(&args);
+        let config = resolve_desktop_config(&args).unwrap();
         assert_eq!(
             config.resolved_permission_timeout().unwrap(),
             std::time::Duration::from_secs(1800)
@@ -2859,6 +2551,7 @@ mod tests {
             Some(tool_ui::ask_user_question::AskUserQuestionTimeout::Never)
         );
         assert!(resolve_desktop_config(&BridgeArgs::default())
+            .unwrap()
             .permission_timeout
             .is_none());
         for value in ["0", "86401", "-1", "1.5", "18446744073709551616"] {
@@ -2887,7 +2580,7 @@ mod tests {
             vec!["--product-paths-json", "--workspace-environment-json"],
             vec!["--product-paths-json", "--list-sessions-json"],
             vec!["--product-paths-json", "--model", "unused"],
-            vec!["--product-paths-json", "--api-key-stdin"],
+            vec!["--product-paths-json", "--credential-stdin"],
             vec!["--product-paths-json", "--trusted-workspace"],
         ] {
             assert!(BridgeArgs::parse(flags).is_err());
@@ -3589,7 +3282,7 @@ mod tests {
         std::fs::create_dir_all(transcript.parent().expect("transcript parent")).unwrap();
         std::fs::write(&transcript, "{}\n").unwrap();
 
-        let mut cfg = resolve_desktop_config(&BridgeArgs::default());
+        let mut cfg = resolve_desktop_config(&BridgeArgs::default()).unwrap();
         cfg.cwd = cwd.path().to_path_buf();
         cfg.lingxi_home = home.path().to_path_buf();
         cfg.session_id_override = Some(session_id.to_string());
@@ -3633,13 +3326,13 @@ mod tests {
         let session_a = "aaaaaaaa-2222-4333-8444-555555555555";
         let session_c = "cccccccc-2222-4333-8444-555555555555";
 
-        let mut cfg_a = resolve_desktop_config(&BridgeArgs::default());
+        let mut cfg_a = resolve_desktop_config(&BridgeArgs::default()).unwrap();
         cfg_a.cwd = cwd.path().to_path_buf();
         cfg_a.lingxi_home = home.path().to_path_buf();
         cfg_a.session_id_override = Some(session_a.to_string());
         let guard_a = initialize_live_session(&mut cfg_a, None).expect("start generation A");
 
-        let mut cfg_c = resolve_desktop_config(&BridgeArgs::default());
+        let mut cfg_c = resolve_desktop_config(&BridgeArgs::default()).unwrap();
         cfg_c.cwd = cwd.path().to_path_buf();
         cfg_c.lingxi_home = home.path().to_path_buf();
         cfg_c.session_id_override = Some(session_c.to_string());
@@ -3773,18 +3466,25 @@ mod tests {
     fn only_explicit_scope_controller_enables_automation_dispatch() {
         let ordinary = BridgeArgs::parse(["--trusted-workspace"]).unwrap();
         assert!(!ordinary.scheduled_controller);
-        assert!(!resolve_desktop_config(&ordinary).enable_automation_scheduler);
+        assert!(
+            !resolve_desktop_config(&ordinary)
+                .unwrap()
+                .enable_automation_scheduler
+        );
         let controller =
             BridgeArgs::parse(["--trusted-workspace", "--scheduled-controller"]).unwrap();
         assert!(controller.scheduled_controller);
-        assert!(resolve_desktop_config(&controller).enable_automation_scheduler);
+        assert!(
+            resolve_desktop_config(&controller)
+                .unwrap()
+                .enable_automation_scheduler
+        );
         assert!(usage().contains("--scheduled-controller"));
     }
 
     #[test]
     fn parse_security_flags_and_absolute_bridge_dir() {
         let args = BridgeArgs::parse([
-            "--api-key-stdin",
             "--credential-stdin",
             "--trusted-workspace",
             "--packaged-credential-stdin-only",
@@ -3792,7 +3492,6 @@ mod tests {
             "/tmp/lingxi-bridge",
         ])
         .expect("security flags parse");
-        assert!(args.api_key_stdin);
         assert!(args.credential_stdin);
         assert!(args.trusted_workspace);
         assert!(args.packaged_credential_stdin_only);
@@ -3818,7 +3517,7 @@ mod tests {
     #[test]
     fn usage_mentions_stdin_but_never_a_value_or_key_env() {
         let u = usage();
-        assert!(u.contains("--api-key-stdin"));
+        assert!(u.contains("--credential-stdin"));
         assert!(!u.contains("ANTHROPIC_API_KEY"));
         // Match a key-shaped token, not the substring in --ask-user-question-timeout.
         assert!(
@@ -3829,76 +3528,12 @@ mod tests {
     }
 
     #[test]
-    fn stdin_key_is_one_line_bounded_and_errors_never_echo_it() {
-        let mut input = std::io::Cursor::new(b"secret value\r\nignored\n".to_vec());
-        assert_eq!(read_api_key_line(&mut input).unwrap(), "secret value");
-
-        let secret = "z".repeat(MAX_STDIN_API_KEY_BYTES + 1);
-        let mut oversized = std::io::Cursor::new(format!("{secret}\n").into_bytes());
-        let error = read_api_key_line(&mut oversized).unwrap_err();
-        assert!(error.contains("limit"));
-        assert!(!error.contains(&secret));
-    }
-
-    #[test]
-    fn credential_envelope_accepts_provider_keys_without_echoing_secrets() {
-        let mut input = std::io::Cursor::new(
-            br#"{"api_key":null,"provider_keys":{"openai":"sk-secret","deepseek":"ds-secret"},"plugin_secrets":{"weather@official":{"API_KEY":"plugin-secret"}}}"#
-                .to_vec(),
-        );
-        let envelope = read_credential_envelope(&mut input).expect("envelope parses");
-        assert_eq!(
-            envelope.provider_keys.get("openai").map(String::as_str),
-            Some("sk-secret")
-        );
-        assert_eq!(envelope.provider_keys.len(), 2);
-        assert_eq!(
-            envelope
-                .plugin_secrets
-                .get("weather@official")
-                .and_then(|values| values.get("API_KEY"))
-                .map(String::as_str),
-            Some("plugin-secret")
-        );
-
-        let secret = "x".repeat(MAX_STDIN_CREDENTIAL_BYTES + 1);
-        let mut oversized = std::io::Cursor::new(
-            format!(r#"{{"provider_keys":{{"openai":"{secret}"}}}}"#).into_bytes(),
-        );
-        let error =
-            read_credential_envelope(&mut oversized).expect_err("oversized envelope must fail");
-        assert!(error.contains("limit"));
-        assert!(!error.contains(&secret));
-    }
-
-    #[test]
-    fn codex_oauth_envelope_is_validated_and_debug_redacted() {
-        let mut input = std::io::Cursor::new(br#"{"openai_oauth":{"access_token":"access-private","refresh_token":"refresh-private","expires_at":2000000000,"account_id":"acct","fedramp":false,"email":"user@example.com"}}"#);
-        let envelope = read_credential_envelope(&mut input).unwrap();
-        let session = envelope.openai_oauth.as_ref().unwrap();
-        assert_eq!(session.account_id.as_deref(), Some("acct"));
-        assert_eq!(session.email.as_deref(), Some("user@example.com"));
-        assert!(!format!("{envelope:?}").contains("private"));
-        for invalid in ["", "bad\nheader"] {
-            let mut session = session.clone();
-            session.access_token = invalid.into();
-            assert!(validate_openai_oauth_session(&session).is_err());
+    fn credential_envelope_rejects_removed_provider_slots() {
+        for field in ["api_key", "provider_keys", "openai_oauth"] {
+            let bytes = serde_json::to_vec(&serde_json::json!({field: null})).unwrap();
+            let error = read_credential_envelope(&mut std::io::Cursor::new(bytes)).unwrap_err();
+            assert_eq!(error, "invalid credential envelope");
         }
-        // Email is display-only, but it is still attacker-controlled input
-        // crossing the parent/child boundary, so it carries the same shape
-        // bounds as the account id. `None` stays valid (older sessions).
-        for invalid in [
-            String::new(),
-            "bad\nheader".to_string(),
-            format!("{}@example.com", "a".repeat(320)),
-        ] {
-            let mut session = session.clone();
-            session.email = Some(invalid);
-            assert!(validate_openai_oauth_session(&session).is_err());
-        }
-        let mut session = session.clone();
-        session.email = None;
-        assert!(validate_openai_oauth_session(&session).is_ok());
     }
 
     #[test]
@@ -3916,7 +3551,7 @@ mod tests {
             model: Some("custom-model".to_string()),
             ..BridgeArgs::default()
         };
-        let cfg = resolve_desktop_config(&args);
+        let cfg = resolve_desktop_config(&args).unwrap();
         assert_eq!(cfg.default_model, "custom-model");
         // A transport always binds the adapter gate.
         assert!(!cfg.use_noop_permission_gate);
@@ -3924,16 +3559,20 @@ mod tests {
 
     #[test]
     fn workspace_is_untrusted_by_default() {
-        let cfg = resolve_desktop_config(&BridgeArgs::default());
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("settings.json"), r#"{"providers":{"test":{"type":"openai"}},"routing":{"aliases":{"alias":"test/model"}}}"#).unwrap();
+        let cfg = resolve_desktop_config(&BridgeArgs {
+            session_config_home: Some(home.path().to_path_buf()),
+            ..BridgeArgs::default()
+        })
+        .unwrap();
         assert_eq!(cfg.host_workspace_trusted, Some(false));
         assert_eq!(
             cfg.mod_render_surface,
             Some(harness_runtime::desktop::ModRenderSurface::Desktop)
         );
-        assert!(cfg.api_key.is_empty(), "credentials must not come from env");
-        assert!(cfg.api_key_helper.is_none());
-        assert!(cfg.provider_profiles.is_none());
-        assert!(cfg.routing.is_none());
+        assert!(cfg.provider_profiles.as_ref().unwrap().contains_key("test"));
+        assert!(cfg.routing.is_some());
         assert!(cfg.mcp_paths.is_empty());
         assert_eq!(cfg.setting_source_scope, (false, false));
         assert!(cfg.customization_gates.safe_mode);
@@ -3947,7 +3586,8 @@ mod tests {
         let cfg = resolve_desktop_config(&BridgeArgs {
             trusted_workspace: true,
             ..BridgeArgs::default()
-        });
+        })
+        .unwrap();
         assert_eq!(cfg.host_workspace_trusted, Some(true));
         assert_eq!(cfg.permission_mode, permission::PermissionMode::Auto);
         assert!(!cfg.permission_mode_cli_explicit);
@@ -3994,7 +3634,8 @@ mod tests {
             trusted_workspace: true,
             packaged_credential_stdin_only: true,
             ..BridgeArgs::default()
-        });
+        })
+        .unwrap();
         assert_eq!(cfg.permission_mode, permission::PermissionMode::Auto);
         assert!(!cfg.permission_mode_cli_explicit);
         assert_eq!(cfg.setting_source_scope, (true, true));
@@ -4004,7 +3645,6 @@ mod tests {
         );
         assert_eq!(cfg.mcp_paths.len(), 2);
         assert!(cfg.memory_provider.is_some());
-        assert!(cfg.api_key_helper.is_none());
         assert!(cfg.provider_profiles.as_ref().is_none_or(|profiles| {
             profiles
                 .values()
@@ -4015,40 +3655,6 @@ mod tests {
             CredentialStoragePolicy::NativeOrMemory,
             "packaged bridge credentials must remain process-local"
         );
-    }
-
-    #[test]
-    fn has_no_credential_source_detects_empty() {
-        let mut cfg = {
-            let mut __desktop_config = DesktopConfig::default();
-            __desktop_config.build_info = harness_runtime::desktop::BuildInfo::new(
-                env!("CARGO_PKG_VERSION"),
-                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
-            );
-            __desktop_config.api_key = String::new();
-            __desktop_config.provider_profiles = None;
-            __desktop_config
-        };
-        assert!(has_no_credential_source(&cfg));
-
-        cfg.api_key = "x".to_string();
-        assert!(!has_no_credential_source(&cfg));
-
-        cfg.api_key = String::new();
-        cfg.api_key_helper = Some("printf sk-test".to_string());
-        assert!(!has_no_credential_source(&cfg));
-
-        cfg.api_key_helper = None;
-        cfg.provider_profiles = Some(BTreeMap::new());
-        assert!(
-            has_no_credential_source(&cfg),
-            "empty profiles map is still no source"
-        );
-
-        let mut profiles = BTreeMap::new();
-        profiles.insert("p".to_string(), serde_json::json!({}));
-        cfg.provider_profiles = Some(profiles);
-        assert!(!has_no_credential_source(&cfg));
     }
 
     // `block_on` polls the root future on its calling thread; size both that
@@ -4123,7 +3729,6 @@ mod tests {
             cfg.host_workspace_trusted = Some(true);
             cfg.restricted = true;
             cfg.isolated_credential_storage = true;
-            cfg.api_key = String::new();
             cfg.default_model_explicit = true;
             cfg.use_noop_permission_gate = false;
             cfg.permission_mode = permission::PermissionMode::Default;
@@ -4285,9 +3890,7 @@ mod tests {
             __desktop_config.anthropic_compatible_version = None;
             __desktop_config.anthropic_client_metadata = None;
             __desktop_config.native_thinking_display = None;
-            __desktop_config.oauth_environment_lookup = None;
             __desktop_config.verified_computer_profiles = Vec::new();
-            __desktop_config.api_key_source = llm_runtime::CredentialSource::Configured;
             __desktop_config.build_info = harness_runtime::desktop::BuildInfo::new(
                 env!("CARGO_PKG_VERSION"),
                 option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
@@ -4305,12 +3908,8 @@ mod tests {
             __desktop_config.isolated_credential_storage = true;
             __desktop_config.credential_storage_policy = CredentialStoragePolicy::NativePreferred;
             __desktop_config.api_base = DEFAULT_API_BASE.to_string();
-            __desktop_config.api_key = String::new();
-            __desktop_config.api_key_helper = None;
             // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no
             // FD-inherited key.
-            __desktop_config.managed_oauth_only = false;
-            __desktop_config.anthropic_key_fd_present = false;
             __desktop_config.cwd = cwd.clone();
             __desktop_config.lingxi_home = settings_dir;
             __desktop_config.default_model = "claude-sonnet-4-20250514".to_string();
@@ -4340,7 +3939,6 @@ mod tests {
             __desktop_config.permission_mode_preference = None;
             __desktop_config.permission_mode_cli_explicit = false;
             __desktop_config.allow_dangerously_skip_permissions = false;
-            __desktop_config.connect_prompt = None;
             __desktop_config.max_turns = None;
             __desktop_config.plan_mode_instructions = None;
             __desktop_config.plans_directory = None;
@@ -4469,278 +4067,5 @@ mod tests {
         close_unserved_for_test(&bound).await;
         let report = bound.session_lifecycle().shutdown_and_drain().await;
         assert!(report.complete, "shutdown errors: {:?}", report.errors);
-    }
-}
-
-/// Shared stalling-storage fixtures; each test owns its credential scope.
-#[cfg(test)]
-pub(crate) mod fusion_refresh_test_support {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    /// A credential backend whose READS never answer — the contended macOS
-    /// keychain broker whose 5s stall the boot availability probe already wraps
-    /// in `tokio::time::timeout` (`harness-runtime/src/desktop/mod.rs`,
-    /// `resolve_llm_stack`).
-    ///
-    /// Writes succeed, so seeding an ephemeral key never blocks; only the
-    /// availability RE-PROBE a credential write triggers does, which is exactly
-    /// the shape of the production hazard.
-    pub(crate) struct StallingSecureStorage {
-        reads_started: Arc<AtomicUsize>,
-    }
-
-    impl StallingSecureStorage {
-        /// Returns the storage plus the counter of reads it has swallowed, so a
-        /// test can prove the stall was actually REACHED rather than passing
-        /// because the probe never ran.
-        pub(crate) fn new() -> (Arc<Self>, Arc<AtomicUsize>) {
-            let reads_started = Arc::new(AtomicUsize::new(0));
-            (
-                Arc::new(Self {
-                    reads_started: reads_started.clone(),
-                }),
-                reads_started,
-            )
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl lingxi_core::host::SecureStorage for StallingSecureStorage {
-        async fn store(
-            &self,
-            _service: &str,
-            _account: &str,
-            _data: lingxi_core::types::SecureStorageData,
-        ) -> Result<(), lingxi_core::host::SecureStorageError> {
-            Ok(())
-        }
-
-        async fn retrieve(
-            &self,
-            _service: &str,
-            _account: &str,
-        ) -> Result<
-            Option<lingxi_core::types::SecureStorageData>,
-            lingxi_core::host::SecureStorageError,
-        > {
-            self.reads_started.fetch_add(1, Ordering::SeqCst);
-            std::future::pending().await
-        }
-
-        async fn delete(
-            &self,
-            _service: &str,
-            _account: &str,
-        ) -> Result<(), lingxi_core::host::SecureStorageError> {
-            Ok(())
-        }
-
-        async fn list(
-            &self,
-            _service: &str,
-        ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
-            Ok(Vec::new())
-        }
-
-        fn is_encrypted(&self) -> bool {
-            true
-        }
-
-        fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
-            lingxi_core::host::SecureStorageBackend::MacOsKeychain
-        }
-    }
-
-    /// Build a `CredentialManager` over [`StallingSecureStorage`] and publish a
-    /// `FusionCatalogRefresher` for `profiles` into an explicit registry —
-    /// the registered refresher a credential write then fans out to.
-    pub(crate) fn register_stalling_refresher(
-        profiles: &[&str],
-    ) -> (
-        Arc<secret::CredentialManager>,
-        Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>>,
-        Arc<AtomicUsize>,
-        harness_runtime::desktop::FusionCatalogRegistry,
-    ) {
-        let (storage, reads) = StallingSecureStorage::new();
-        let credentials = Arc::new(secret::CredentialManager::new(
-            storage,
-            Arc::new(platform_posix::PosixClock::new()),
-            Arc::new(platform_posix::PosixHttp::new()),
-        ));
-        let availability = Arc::new(std::sync::RwLock::new(
-            profiles
-                .iter()
-                .map(|profile| ((*profile).to_string(), false))
-                .collect::<std::collections::BTreeMap<String, bool>>(),
-        ));
-        let catalog_registry = harness_runtime::desktop::FusionCatalogRegistry::default();
-        harness_runtime::desktop::register_fusion_catalog_refresher(
-            &catalog_registry,
-            harness_runtime::desktop::FusionCatalogRefresher::for_keychain_profiles(
-                availability.clone(),
-                credentials.clone(),
-                profiles,
-            ),
-        );
-        (credentials, availability, reads, catalog_registry)
-    }
-
-    /// Give a detached refresh a bounded number of scheduler turns to reach
-    /// the injected backend. The production seam intentionally does not yield
-    /// on behalf of this observation.
-    pub(crate) async fn wait_for_refresh_start(reads: &AtomicUsize) {
-        for _ in 0..128 {
-            if reads.load(Ordering::SeqCst) > 0 {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    }
-}
-
-/// Round-10 finding N3: the Fusion catalog refresh that follows a credential
-/// write must never put an UNBOUNDED keychain stall on connection assembly.
-#[cfg(test)]
-mod fusion_catalog_refresh_budget_tests {
-    use super::fusion_refresh_test_support::{register_stalling_refresher, wait_for_refresh_start};
-    use super::{seed_parent_supplied_provider_keys, FUSION_CATALOG_REFRESH_BUDGET};
-    use std::collections::BTreeMap;
-    use std::sync::atomic::Ordering;
-
-    #[tokio::test]
-    async fn fresh_host_managed_boot_uses_only_parent_provider_keys() {
-        #[cfg(unix)]
-        use platform_posix::{
-            PlainTextSecureStorage, PosixClock as NativeClock, PosixHttp as NativeHttp,
-        };
-        #[cfg(windows)]
-        use platform_windows::{
-            PlainTextSecureStorage, WindowsClock as NativeClock, WindowsHttp as NativeHttp,
-        };
-        use std::sync::Arc;
-
-        let temp = tempfile::tempdir().unwrap();
-        let storage = Arc::new(
-            PlainTextSecureStorage::new(temp.path().join("credentials"))
-                .await
-                .unwrap(),
-        );
-        let credentials = Arc::new(secret::CredentialManager::new(
-            storage.clone(),
-            Arc::new(NativeClock::new()),
-            Arc::new(NativeHttp::new()),
-        ));
-        credentials
-            .set_provider_key("anthropic", "old-native-key")
-            .await
-            .unwrap();
-        credentials
-            .set_provider_key("deepseek", "old-native-key")
-            .await
-            .unwrap();
-        credentials.use_host_managed_provider_keys();
-        assert!(credentials
-            .get_provider_key("anthropic")
-            .await
-            .unwrap()
-            .is_none());
-        assert!(credentials
-            .get_provider_key("deepseek")
-            .await
-            .unwrap()
-            .is_none());
-
-        let keys = BTreeMap::from([("anthropic".to_string(), "host-current-key".to_string())]);
-        seed_parent_supplied_provider_keys(
-            &harness_runtime::desktop::FusionCatalogRegistry::default(),
-            &credentials,
-            &keys,
-        )
-        .await;
-        assert_eq!(
-            credentials
-                .get_provider_key("anthropic")
-                .await
-                .unwrap()
-                .unwrap()
-                .expose_secret(),
-            "host-current-key"
-        );
-        assert!(!credentials.has_provider_key("deepseek").await.unwrap());
-        let independent = secret::CredentialManager::new(
-            storage,
-            Arc::new(NativeClock::new()),
-            Arc::new(NativeHttp::new()),
-        );
-        assert!(
-            independent.has_provider_key("deepseek").await.unwrap(),
-            "other hosts retain their native credentials"
-        );
-    }
-
-    /// The packaged Electron host hands N provider keys over the credential
-    /// stdin boundary; each one triggers a re-probe of EVERY credential source
-    /// through the (possibly brokered) keychain. Awaiting those inline made
-    /// `assemble_with_provider_keys` — and therefore the whole engine startup —
-    /// hang for as long as the broker did, N times over, with no timeout
-    /// anywhere on the path.
-    ///
-    /// Virtual time (`start_paused`): the assertion is on the DEADLINE, so the
-    /// clock only has to advance to it.
-    #[tokio::test(start_paused = true)]
-    async fn parent_supplied_keys_never_block_assembly_on_a_stalled_keychain() {
-        // The refresher covers four profiles; the parent supplies keys for
-        // three. The fourth has no ephemeral key, so its probe reaches the
-        // never-answering backend — exactly like a real install where the
-        // parent-supplied providers are a subset of the configured ones.
-        let (credentials, _availability, reads, catalog_registry) =
-            register_stalling_refresher(&["openrouter", "deepseek", "groq", "never-answers"]);
-
-        let provider_keys: BTreeMap<String, String> = [
-            ("openrouter", "sk-or-n3"),
-            ("deepseek", "sk-ds-n3"),
-            ("groq", "sk-gq-n3"),
-        ]
-        .into_iter()
-        .map(|(id, key)| (id.to_string(), key.to_string()))
-        .collect();
-
-        let began = tokio::time::Instant::now();
-        let seeded = tokio::time::timeout(
-            FUSION_CATALOG_REFRESH_BUDGET * 3,
-            seed_parent_supplied_provider_keys(&catalog_registry, &credentials, &provider_keys),
-        )
-        .await;
-        assert!(
-            seeded.is_ok(),
-            "seeding the parent-supplied provider keys must return even when the \
-credential backend never answers: a stalled keychain here blocks \
-`assemble_with_provider_keys`, so no client is served at all"
-        );
-        let waited = began.elapsed();
-        assert!(
-            waited < FUSION_CATALOG_REFRESH_BUDGET * 2,
-            "the {} parent-supplied keys must share ONE {FUSION_CATALOG_REFRESH_BUDGET:?} \
-budget, not one each; waited {waited:?}",
-            provider_keys.len()
-        );
-        wait_for_refresh_start(&reads).await;
-        assert!(
-            reads.load(Ordering::SeqCst) >= 1,
-            "the refresh must actually have reached the credential backend — with \
-zero reads this test would pass without exercising the stall at all"
-        );
-        for provider_id in provider_keys.keys() {
-            assert!(
-                credentials
-                    .get_provider_key_ephemeral(provider_id)
-                    .await
-                    .is_some(),
-                "bounding the refresh must not skip the SEEDING it follows: \
-{provider_id} is missing from the process-local credential cache"
-            );
-        }
     }
 }

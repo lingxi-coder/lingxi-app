@@ -1,0 +1,51 @@
+{
+  "metadata_source": "fresh aarch64-apple-ios device static archive; native target reuse required byte equality",
+  "files": [
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-apple-ios/debug/libios_framework.a",
+      "bytes": 415370352,
+      "sha256": "af23478dc1c3f005b2c0dde965044064e42be2c2b67cace201254fe84005c1bd"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/libios_framework.a",
+      "bytes": 416689440,
+      "sha256": "4d8fd10863884123e8cbf2ecccf65b90459d05224734492d343e76bae688bd93"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Generated/LingxiCodeBindings.swift",
+      "bytes": 527163,
+      "sha256": "e610b6fd32bc722c5ae40c529b846e2dd404105f885930cc280f5bb54cc4ca3c"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Generated/client.swift",
+      "bytes": 773985,
+      "sha256": "b50382287c37bfadf62d3e5b3b4d45869b2880324724ad7c79b2e18122bcb8ae"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Generated/harness_runtime.swift",
+      "bytes": 177543,
+      "sha256": "f2def31e476711810e90030f5b8d570c84b824e793bb6c490fa158c0f1787e81"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Generated/clientFFI.h",
+      "bytes": 21554,
+      "sha256": "3464fec33ce10eaf27fc2771a507f262eb6fd6e1017c447298ce4dc51e775bc4"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Generated/harness_runtimeFFI.h",
+      "bytes": 60731,
+      "sha256": "0a73a2a9011f318fb9c180df413bfeb0a285fb1e5840894d2a5026572454afd6"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Generated/lingxi_code_bindings_FFI.h",
+      "bytes": 121878,
+      "sha256": "f969e13314ed07d00616bb538ab5b6e1f4645b618d4fcfb629dff2cc7e65dbdc"
+    },
+    {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Generated/module.modulemap",
+      "bytes": 435,
+      "sha256": "4468c15f676b54a5bd2d78ce0fe5bb6657469e947ade735236676bddde00e5dc"
+    }
+  ],
+  "architecture": "Non-fat file: /Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/cargo/aarch64-apple-ios/debug/libios_framework.a is architecture: arm64"
+}

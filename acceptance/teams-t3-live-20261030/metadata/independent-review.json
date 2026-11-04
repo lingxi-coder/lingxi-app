@@ -1,0 +1,44 @@
+{
+  "verdict": "APPROVE_REVIEWED_API_SDK_AND_EVENT_DELIVERY_SCOPE",
+  "sourceEditsByReviewer": false,
+  "apiAndRealSdk": {
+    "status": "PASSED_API_ONLY_AND_REAL_SDK",
+    "checkpoints": 18,
+    "aclDenials": 14,
+    "oneIsolatedTeam": true,
+    "apiOnlyCancelled": true,
+    "modelExecutionClaimed": false
+  },
+  "productionEventDelivery": {
+    "status": "PASSED",
+    "freshReceipts": 3,
+    "allExactCandidateReceiptsFinished": true,
+    "historicalBeforeFix": "FAILED_0_OF_4_RETAINED",
+    "oldEventsRequeued": false,
+    "physicalFcmDeliveryClaimed": false
+  },
+  "signatureFix": {
+    "rootCause": "Legacy event function signature discarded CloudEvent envelope expected by Firebase onDocumentCreated wrapper; initial guard returned before any database read.",
+    "localActualWrapperReproduction": true,
+    "buildMetadataConfirmsLegacyEvent": true,
+    "afterRevision": "onteammessage-00002-siw",
+    "afterSignature": "cloudevent",
+    "onlyExpectedRuntimeEnvironmentDelta": true,
+    "eventTriggerUnchanged": true,
+    "sourceFilesCompared": 25,
+    "bothSourceArchivesEqualFrozenManifest": true
+  },
+  "savedCloudChecks": {
+    "projectIamEqualsAfterPrerequisites": true,
+    "serviceAccountIamEqualsAfterPrerequisites": true,
+    "defaultRulesExactBytes": true,
+    "triggerIndexState": "READY"
+  },
+  "remainingAcceptance": [
+    "Real provider and tool execution through the production host is not established by this lane.",
+    "Full product mobile UI acceptance is separate from native feature harnesses.",
+    "Production sign-in UI and document isolation require the parent browser lane; no result inferred here.",
+    "Full packaged Desktop smoke remains separate from the signed Teams companion acceptance."
+  ],
+  "fullT3CompleteClaim": false
+}

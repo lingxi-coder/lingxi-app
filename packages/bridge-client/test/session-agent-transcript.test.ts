@@ -3,7 +3,12 @@ import { test } from 'node:test';
 
 import { validateClientEvent } from '../src/validation.js';
 
-const message = { sent_at_ms: 1_791_417_600_000, role: 'assistant', blocks: [{ type: 'text', text: 'answer' }] };
+const message = {
+  transcript_uuid: '11111111-1111-4111-8111-111111111111',
+  sent_at_ms: 1_791_417_600_000,
+  role: 'assistant',
+  blocks: [{ type: 'text', text: 'answer' }],
+};
 const apiErrorJson = '{ "type": "api_error", "error": { "message": "rate limited" } }';
 
 test('session-agent transcript snapshots retain UUID-addressed rows and raw API error envelopes', () => {
@@ -28,6 +33,7 @@ test('session-agent transcript snapshots retain UUID-addressed rows and raw API 
   assert.equal(event.messages[1]?.message_index, 3);
   assert.equal(event.messages[1]?.message_uuid, '33333333-3333-4333-8333-333333333333');
   assert.equal(event.messages[1]?.api_error_json, apiErrorJson);
+  assert.equal(event.messages[0]?.message.transcript_uuid, message.transcript_uuid);
 });
 
 test('session-agent live rows and UUID tombstones use the strict current wire shape', () => {
@@ -87,4 +93,17 @@ test('session-agent messages reject malformed persisted timestamps', () => {
       message: { ...message, sent_at_ms },
     }), /message time/);
   }
+});
+
+test('session-agent messages validate native transcript UUIDs without accepting unknown fields', () => {
+  const row = {
+    type: 'session_agent_message', session_id: 'session-a', agent_id: 'main',
+    message_index: 0, message_uuid: message.transcript_uuid,
+  };
+  for (const transcript_uuid of ['', 1, {}, []]) {
+    assert.throws(() => validateClientEvent({ ...row, message: { ...message, transcript_uuid } }), /transcript UUID/);
+  }
+  assert.throws(() => validateClientEvent({
+    ...row, message: { ...message, unsupported_field: true },
+  }), /unsupported fields/);
 });

@@ -577,7 +577,7 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     func cancelCloudOperation(
         _ cloud: IOSAudioProviderService.PinnedOperation
     ) async -> IOSAudioError? {
-        let task = Task { @MainActor in
+        let task = Task<IOSAudioError?, Never> { @MainActor in
             do {
                 try await cloud.host.cancel(operationId: cloud.id)
                 return nil

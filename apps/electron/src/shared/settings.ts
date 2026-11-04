@@ -75,6 +75,8 @@ export interface PublicSettings {
   version: typeof SETTINGS_VERSION;
   theme?: 'dark' | 'light' | 'system';
   collapseThoughtsByDefault?: boolean;
+  /** Keep this computer awake while Bots work or a Bot's routine is about to run. Off, and omitted, until the owner turns it on. */
+  botsKeepAwake?: boolean;
   model?: string;
   apiBaseUrl?: string;
   activeProject?: string;

@@ -53,6 +53,7 @@ import {
 import { prepareModBun, sealModBun, stageModBun } from './mod-bun.mjs';
 import { stageCrashlytics, signCrashlytics } from './desktop-crashlytics.mjs';
 import { prepareMacGStreamerRuntime, verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
+import { resolvePackagedTeamBinaries, TEAM_BINARIES } from './team-runtime.mjs';
 
 function log(message) {
   process.stdout.write(`[package:mac] ${message}\n`);
@@ -166,12 +167,14 @@ function signApplication(appPath, contents, appContainer, packagedSidecar, broke
   signBinary(modCompilerPath, identity, `${identifiers.desktopBundleId}.mod-compiler`, helperEntitlementsPath);
   sealModBun(join(contents, 'Resources'));
   signBinary(packagedSidecar, identity, identifiers.bridgeServerIdentifier);
+  for (const name of TEAM_BINARIES) signBinary(join(contents, 'Resources', 'bin', name), identity, `${identifiers.desktopBundleId}.${name}`);
   signBinary(join(brokerResourceRoot, 'bin', 'lingxi-credential-client'), identity, identifiers.clientIdentifier);
   signAppBundle(audioHelperAppPath, identity, audioEntitlementsPath);
   signAppBundle(join(brokerResourceRoot, 'LingXiCredentialBroker.app'), identity, brokerEntitlementsPath);
   signCrashlytics(join(contents, 'Resources'), identity);
   signAppBundle(appPath, identity, appEntitlementsPath);
   verifyIdentifier(packagedSidecar, identifiers.bridgeServerIdentifier, teamId);
+  for (const name of TEAM_BINARIES) verifyIdentifier(join(contents, 'Resources', 'bin', name), `${identifiers.desktopBundleId}.${name}`, teamId);
   verifyIdentifier(modCompilerPath, `${identifiers.desktopBundleId}.mod-compiler`, teamId);
   verifyIdentifier(join(brokerResourceRoot, 'bin', 'lingxi-credential-client'), identifiers.clientIdentifier, teamId);
   verifyIdentifier(audioHelperAppPath, audioIdentifiers.bundleId, teamId);
@@ -212,6 +215,8 @@ async function main() {
   // Reject the most expensive and most common packaging mistakes before building.
   assertArm64Executable(electronExecutable, 'Electron runtime');
   assertArm64Executable(sidecar, 'release bridge-server sidecar');
+  const teamBinaries = resolvePackagedTeamBinaries();
+  for (const path of teamBinaries) { assertArm64Executable(path, 'Team runtime sidecar'); scanTreeForForbiddenContent(path); }
   const modCompiler = await prepareModBun({ platform: 'darwin', arch: TARGET_ARCH });
   assertArm64Executable(modCompiler.executable, 'Mod Bun compiler');
   try {
@@ -264,6 +269,10 @@ async function main() {
   cpSync(join(packageRoot, 'browser-extension'), join(resources, 'browser-extension'), { recursive: true });
   copyFileSync(sidecar, packagedSidecar);
   chmodSync(packagedSidecar, 0o755);
+  for (const [index, path] of teamBinaries.entries()) {
+    const target = join(binDir, TEAM_BINARIES[index]);
+    copyFileSync(path, target); chmodSync(target, 0o755);
+  }
   prepareMacGStreamerRuntime(packagedSidecar, join(contents, 'Frameworks'), 'arm64');
   stageModBun(resources, modCompiler);
   const brokerResourceRoot = join(resources, BROKER_RESOURCE_DIRNAME);

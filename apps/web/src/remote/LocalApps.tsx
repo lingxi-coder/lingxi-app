@@ -3,7 +3,7 @@ import type { Locale } from '../utils/locale';
 import { LocalAppsController, type AppWindow } from './appsController';
 import { t } from './strings';
 import { displayText } from './text';
-import { useStore } from './useRemote';
+import { useStore } from './useStore';
 import type { ViewerConnection } from './viewerConnection';
 
 export function LocalApps({ locale, connection, ready }: { locale: Locale; connection: ViewerConnection; ready: boolean }) {

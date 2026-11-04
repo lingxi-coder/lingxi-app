@@ -32,7 +32,7 @@ use harness_runtime::mobile::MobileConfig;
 use harness_runtime::mobile::{
     ClientEventListener, MediaAttachmentHandle, MediaAttachmentHost, MediaAttachmentPhase,
     MediaAttachmentRevocation, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
-    PermissionRequestSink, SessionModeDto,
+    PermissionRequestSink,
 };
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use lingxi_core::host::Platform;
@@ -772,8 +772,6 @@ pub fn build_mobile_engine(
 /// drives turns via [`MobileEngineHandle::submit`].
 ///
 /// - `api_base`  — Anthropic-compatible base URL (e.g. `https://api.anthropic.com`).
-/// - `api_key`   — read by Swift from `ANTHROPIC_API_KEY` / an app setting at
-///   runtime. Empty is valid (turns 401 at `run_turn`); never hardcoded here.
 /// - `model`     — default model id for new turns.
 /// - `app_sandbox_root` — the app container path the engine roots its filesystem
 ///   + `~/.claude`-equivalent under.
@@ -1010,89 +1008,6 @@ pub fn build_ios_engine_with_config(
     })
 }
 
-#[cfg(feature = "uniffi")]
-#[cfg_attr(feature = "uniffi", uniffi::export)]
-#[allow(clippy::too_many_arguments)] // FFI constructor: one flat arg per Swift callback.
-pub fn build_ios_engine(
-    api_base: String,
-    api_key: String,
-    model: String,
-    app_sandbox_root: String,
-    listener: Box<dyn IosEventListener>,
-    media_host: Arc<IosNativeMediaHost>,
-    share: Box<dyn IosShare>,
-    notifications: Box<dyn IosNotification>,
-    clipboard: Box<dyn IosClipboard>,
-    permissions: Box<dyn IosPermissionSink>,
-    mobile_linux: Option<IosMobileLinuxConfigFfi>,
-    secure_storage: Option<Box<dyn IosSecureStorage>>,
-    device_control: Option<Box<dyn IosDeviceControl>>,
-) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
-    let (brand_id, linux_user, config_dir_name, native_config_home) =
-        if let Some(linux) = mobile_linux.as_ref() {
-            let profile = mobile_linux_api::BrandRuntimeProfile::new(
-                linux.brand_id.clone(),
-                linux.linux_user.clone(),
-                linux.config_dir_name.clone(),
-            );
-            profile
-                .validate()
-                .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
-            let home = profile
-                .persistent_home_host_path(std::path::Path::new(&linux.managed_root))
-                .join(&profile.config_dir_name);
-            (
-                profile.brand_id.clone(),
-                profile.linux_user.clone(),
-                profile.config_dir_name.clone(),
-                home.to_string_lossy().into_owned(),
-            )
-        } else {
-            let profile = mobile_linux_api::BrandRuntimeProfile::default();
-            let home = profile
-                .persistent_home_host_path(std::path::Path::new(&app_sandbox_root))
-                .join(&profile.config_dir_name);
-            (
-                profile.brand_id,
-                profile.linux_user,
-                profile.config_dir_name,
-                home.to_string_lossy().into_owned(),
-            )
-        };
-    build_ios_engine_with_config(
-        IosEngineLaunchConfigFfi {
-            app_agent_host: false,
-            app_version: None,
-            brand_id,
-            linux_user,
-            config_dir_name,
-            native_config_home,
-            api_base,
-            api_key,
-            model,
-            session_mode: SessionModeDto::Code,
-            app_sandbox_root,
-            project_cwd: None,
-            project_additional_directories: Vec::new(),
-            project_mount_grants: Vec::new(),
-            provider_config: None,
-            mobile_linux,
-            vision_delegation_enabled: true,
-            physical_memory_bytes: 0,
-            host_environment: None,
-        },
-        listener,
-        Some(media_host),
-        share,
-        notifications,
-        clipboard,
-        permissions,
-        secure_storage,
-        device_control,
-        None,
-    )
-}
-
 #[cfg(all(test, feature = "uniffi"))]
 mod media_host_policy_tests {
     use super::{retain_media_route_guard, with_engine_media_host, MediaAudioSessionBindingGuard};
@@ -1221,18 +1136,33 @@ mod media_host_policy_tests {
 }
 
 #[cfg(all(test, feature = "uniffi"))]
+fn account_audio_test_provider() -> (tempfile::TempDir, Arc<AudioProviderHost>) {
+    let home = tempfile::tempdir().unwrap();
+    let (services, credential_ids) = harness_runtime::account_audio::build_account_audio_services(
+        home.path().to_path_buf(),
+        "{}",
+        "international",
+        Arc::new(lingxi_core::host::InMemorySecureStorage::new()),
+    )
+    .unwrap();
+    let provider = Arc::new(AudioProviderHost::from_provider_services(
+        services,
+        credential_ids,
+    ));
+    (home, provider)
+}
+
+#[cfg(all(test, feature = "uniffi"))]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     #[test]
     fn clearing_an_audio_binding_preserves_a_newer_engine_owner() {
         let registry = Arc::new(AudioProviderCloudRegistry::new("audio/wav"));
-        let provider =
-            Arc::new(AudioProviderHost::new("{}", "international", None, BTreeMap::new()).unwrap());
+        let (_account_home, provider) = account_audio_test_provider();
         let current = std::sync::Mutex::new(None);
         let first = registry
-            .register_session("session", "first", "profile:first", provider.clone())
+            .register_session("session", "first", "account:first", provider.clone())
             .unwrap();
         replace_audio_session_binding(
             &registry,
@@ -1248,7 +1178,7 @@ mod tests {
         assert_eq!(registry.session_identity("session"), None);
 
         let old = registry
-            .register_session("session", "old", "profile:old", provider.clone())
+            .register_session("session", "old", "account:old", provider.clone())
             .unwrap();
         replace_audio_session_binding(
             &registry,
@@ -1261,12 +1191,12 @@ mod tests {
             },
         );
         registry
-            .register_session("session", "new", "profile:new", provider)
+            .register_session("session", "new", "account:new", provider)
             .unwrap();
         clear_audio_session_binding(&registry, &current);
         assert_eq!(
             registry.session_identity("session"),
-            Some(("new".into(), "profile:new".into()))
+            Some(("new".into(), "account:new".into()))
         );
     }
 
@@ -1274,8 +1204,7 @@ mod tests {
     fn same_session_routes_are_isolated_by_engine_attachment_registry() {
         let first_registry = AudioProviderCloudRegistry::new("audio/wav");
         let second_registry = AudioProviderCloudRegistry::new("audio/wav");
-        let provider =
-            Arc::new(AudioProviderHost::new("{}", "international", None, BTreeMap::new()).unwrap());
+        let (_account_home, provider) = account_audio_test_provider();
         let first_generation = first_registry
             .register_session("session", "first", "account:first", provider.clone())
             .unwrap();
@@ -1303,7 +1232,6 @@ mod mobile_media_scope_tests {
         MediaOperation, MediaOperationContext, MediaOperationId, MediaOperationKind, MediaOwner,
         MediaResult,
     };
-    use std::collections::BTreeMap;
     use std::time::Duration;
 
     struct Audio;
@@ -1433,11 +1361,8 @@ mod mobile_media_scope_tests {
                 Ok(MediaResult::Sources { .. })
             ));
         }
-        let provider = || {
-            Arc::new(AudioProviderHost::new("{}", "international", None, BTreeMap::new()).unwrap())
-        };
-        let first_provider = provider();
-        let second_provider = provider();
+        let (_first_account_home, first_provider) = account_audio_test_provider();
+        let (_second_account_home, second_provider) = account_audio_test_provider();
         let registry = first_binding.registry.clone();
         for (attachment, provider) in [(first, &first_provider), (second, &second_provider)] {
             let permit = attachment.authorize_owner(&owner).unwrap();
@@ -1445,13 +1370,13 @@ mod mobile_media_scope_tests {
                 .register_attached_profile(&permit, "openai", provider.clone())
                 .unwrap();
             registry
-                .bind_attached_session_to_profile(&permit, "openai", "profile:openai")
+                .bind_attached_session_to_profile(&permit, "openai", "account:openai")
                 .unwrap();
         }
         let callback = host.attachment_confirmed_callback(&first_binding);
         callback();
         assert!(registry
-            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .provider_for_attached_session(first.id(), "same-session", "openai", "account:openai")
             .is_ok());
         let (idle, _) = host.create_engine_media_scope().unwrap();
         let _idle_audio = idle.attachment.audio_service(host.audio_service()).unwrap();
@@ -1470,7 +1395,7 @@ mod mobile_media_scope_tests {
         first.begin_revoke();
         callback();
         assert!(registry
-            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .provider_for_attached_session(first.id(), "same-session", "openai", "account:openai")
             .is_ok());
         assert_eq!(
             first.revoke(Duration::from_secs(2)).await,
@@ -1478,7 +1403,7 @@ mod mobile_media_scope_tests {
         );
         callback();
         assert!(registry
-            .provider_for_attached_session(first.id(), "same-session", "openai", "profile:openai")
+            .provider_for_attached_session(first.id(), "same-session", "openai", "account:openai")
             .is_err());
         assert!(Arc::ptr_eq(
             &registry
@@ -1486,7 +1411,7 @@ mod mobile_media_scope_tests {
                     second.id(),
                     "same-session",
                     "openai",
-                    "profile:openai"
+                    "account:openai"
                 )
                 .unwrap(),
             &second_provider

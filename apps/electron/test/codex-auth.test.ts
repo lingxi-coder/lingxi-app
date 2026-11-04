@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import test from 'node:test';
 import { loginCodex, parseCodexSession, sessionFromTokenResponse } from '../src/main/codex-auth.ts';
-import { resolveCodexOAuthSession, resolveProviderCredential, resolveSessionLaunchCredentials } from '../src/main/credential-broker.ts';
 
 const jwt = (value: unknown) => `header.${Buffer.from(JSON.stringify(value)).toString('base64url')}.signature`;
 
@@ -32,16 +31,6 @@ test('a malformed display email is rejected rather than stored', () => {
   for (const email of ['', 'a\nb@example.com', 'x'.repeat(321)]) {
     assert.throws(() => parseCodexSession({ ...base, email }), /Codex 登录凭据无效/);
   }
-});
-
-test('OAuth secrets never enter the ordinary API-key credential path', async () => {
-  const session = { access_token: 'access', refresh_token: 'refresh', expires_at: 1234, fedramp: false };
-  let calls = 0;
-  const broker = { resolve: async () => { calls++; return JSON.stringify(session); } };
-  assert.equal(await resolveProviderCredential('openai-chatgpt', { credentialBroker: broker }), undefined);
-  assert.deepEqual(await resolveSessionLaunchCredentials('openai-chatgpt/gpt-5.6-sol', { credentialBroker: broker }), {});
-  assert.equal(calls, 0);
-  assert.deepEqual(await resolveCodexOAuthSession(broker), session);
 });
 
 test('PKCE validates state, exchanges only the matching callback, and releases the listener', async () => {

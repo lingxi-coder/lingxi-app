@@ -43,6 +43,7 @@ import {
 import { verifyModBun } from './mod-bun.mjs';
 import { verifyMacGStreamerRuntime } from './gstreamer-macos.mjs';
 import { packagedProductNamespace } from './product-namespace.mjs';
+import { TEAM_BINARIES } from './team-runtime.mjs';
 
 function requirePath(path, kind = 'path') {
   if (!existsSync(path)) throw new Error(`required ${kind} is missing: ${path}`);
@@ -106,6 +107,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     join(contents, 'Info.plist'),
     join(contents, 'MacOS', APP_NAME),
     join(resources, 'bin', 'bridge-server'),
+    ...TEAM_BINARIES.map(name => join(resources, 'bin', name)),
     join(resources, 'bin', 'bun'),
     join(resources, 'mod-bun.json'),
     join(resources, 'Bun-LICENSE.md'),
@@ -129,8 +131,6 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     join(extractedApp, 'out', 'renderer', 'index.html'),
     join(extractedApp, 'out', 'renderer', 'remote-rtc.html'),
     join(extractedApp, 'node_modules', '@lingxi', 'bridge-client', 'dist', 'index.js'),
-    join(extractedApp, 'node_modules', 'ws', 'package.json'),
-    join(extractedApp, 'node_modules', 'ws', 'lib', 'stream.js'),
   ];
   try {
   for (const path of expected) requirePath(path);
@@ -145,6 +145,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
 
   assertArm64Executable(join(contents, 'MacOS', APP_NAME), `${APP_NAME} executable`);
   assertArm64Executable(join(resources, 'bin', 'bridge-server'), 'packaged bridge-server sidecar');
+  for (const name of TEAM_BINARIES) assertArm64Executable(join(resources, 'bin', name), `packaged ${name} sidecar`);
   assertArm64Executable(join(resources, 'bin', 'bun'), 'packaged Mod compiler');
   verifyModBun(resources, 'darwin', 'arm64');
   verifyMacGStreamerRuntime(join(contents, 'Frameworks'), join(resources, 'bin', 'bridge-server'));
@@ -210,7 +211,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   if (Object.keys(runtimeMetadata.dependencies ?? {}).sort().join(',') !== expectedDependencies.join(',')) {
     throw new Error('runtime package contains unexpected production dependencies');
   }
-  for (const dependency of new Set([...expectedDependencies, 'ws'])) {
+  for (const dependency of expectedDependencies) {
     const dependencyMetadata = readJson(join(extractedApp, 'node_modules', ...dependency.split('/'), 'package.json'));
     if ('devDependencies' in dependencyMetadata) {
       throw new Error(`${dependency} package contains devDependencies`);
@@ -220,7 +221,19 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   execFileSync(join(contents, 'MacOS', APP_NAME), [
     '--input-type=module',
     '-e',
-    'import("@lingxi/bridge-client").then(({ BridgeClient }) => { if (typeof BridgeClient !== "function") process.exit(2); })',
+    `import { createRequire } from 'node:module';
+     import { dirname, join } from 'node:path';
+     import { existsSync } from 'node:fs';
+     const bridgeLoad = createRequire(import.meta.resolve('@lingxi/bridge-client'));
+     const wsManifest = bridgeLoad.resolve('ws/package.json');
+     if (!existsSync(join(dirname(wsManifest), 'lib', 'stream.js'))) {
+       throw new Error('ws stream implementation is missing');
+     }
+     if ('devDependencies' in bridgeLoad('ws/package.json')) {
+       throw new Error('ws package contains devDependencies');
+     }
+     const { BridgeClient } = await import('@lingxi/bridge-client');
+     if (typeof BridgeClient !== 'function') throw new Error('BridgeClient export is missing');`,
   ], {
     cwd: extractedApp,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
@@ -237,6 +250,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     `${APP_NAME}.app/Contents/Info.plist`,
     `${APP_NAME}.app/Contents/MacOS/${APP_NAME}`,
     `${APP_NAME}.app/Contents/Resources/bin/bridge-server`,
+    ...TEAM_BINARIES.map(name => `${APP_NAME}.app/Contents/Resources/bin/${name}`),
     `${APP_NAME}.app/Contents/Resources/bin/bun`,
     `${APP_NAME}.app/Contents/Resources/mod-bun.json`,
     `${APP_NAME}.app/Contents/Resources/Bun-LICENSE.md`,
@@ -260,6 +274,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   if (commandAvailable('/usr/bin/codesign')) {
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', paths.appPath], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, 'bin', 'bridge-server')], { stdio: 'pipe' });
+    for (const name of TEAM_BINARIES) execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, 'bin', name)], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, 'bin', 'bun')], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, AUDIO_HELPER_APP)], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, BROKER_RESOURCE_DIRNAME, 'bin', 'lingxi-credential-client')], { stdio: 'pipe' });
@@ -280,6 +295,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     if (teamId) {
       verifyIdentifier(paths.appPath, identifiers.desktopBundleId, teamId);
       verifyIdentifier(join(resources, 'bin', 'bridge-server'), identifiers.bridgeServerIdentifier, teamId);
+      for (const name of TEAM_BINARIES) verifyIdentifier(join(resources, 'bin', name), `${identifiers.desktopBundleId}.${name}`, teamId);
       verifyIdentifier(join(resources, 'bin', 'bun'), `${identifiers.desktopBundleId}.mod-compiler`, teamId);
       validateProvisioningProfile(
         join(resources, AUDIO_HELPER_APP, 'Contents', 'embedded.provisionprofile'),

@@ -42,11 +42,11 @@ struct ConversationTranscriptAgents: View {
                                     isActive: AgentStatusPresentation(rawValue: agent.status) == .running,
                                     highlightColor: t.text
                                 )
-                            Text(statusText(agent.status))
+                            Text(agent.reportStatusText ?? statusText(agent.status))
                                 .font(.caption)
-                                .foregroundStyle(statusColor(agent.status))
+                                .foregroundStyle(agent.reportDelivery == "withheld" ? t.danger : statusColor(agent.status))
                                 .lineLimit(1)
-                            if let activity = agent.latestActivity?.trimmingCharacters(in: .whitespacesAndNewlines), !activity.isEmpty {
+                            if let activity = agent.latestActivity?.trimmingCharacters(in: .whitespacesAndNewlines), !activity.isEmpty, activity != "SubagentHandback" {
                                 Text(activity)
                                     .font(.caption)
                                     .foregroundStyle(t.text3)
@@ -60,10 +60,6 @@ struct ConversationTranscriptAgents: View {
                         }
                         .frame(minHeight: 28)
                         .padding(.horizontal, 6)
-                        .background {
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(t.accent.opacity(isFocused || isExpanded ? 0.12 : 0))
-                        }
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -74,7 +70,6 @@ struct ConversationTranscriptAgents: View {
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 4)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("conversation.transcript-agents")
         }
@@ -96,8 +91,8 @@ struct ConversationTranscriptAgents: View {
     }
 
     private func accessibilityLabel(for agent: ConversationAgentSummary) -> String {
-        var values = [agent.name, statusText(agent.status)]
-        if let activity = agent.latestActivity?.trimmingCharacters(in: .whitespacesAndNewlines), !activity.isEmpty {
+        var values = [agent.name, agent.reportStatusText ?? statusText(agent.status)]
+        if let activity = agent.latestActivity?.trimmingCharacters(in: .whitespacesAndNewlines), !activity.isEmpty, activity != "SubagentHandback" {
             values.append(activity)
         }
         return values.joined(separator: " · ")

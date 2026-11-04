@@ -1,0 +1,23 @@
+{
+  "time_utc": "2026-10-29T04:44:31.736556+00:00",
+  "operation": "Byte-identical APFS clone replacement of completed iOS intermediate static-library copies; no library input removed",
+  "files": [
+    {
+      "source": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/gstreamer-sdk/ios-device/GStreamer.xcframework/ios-arm64/libGStreamer.a",
+      "preserved_path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-derived/Build/Products/FullDebug-iphoneos/libGStreamer.a",
+      "unchanged_sha256": "e26d425b4e7c31626bf4f2a36ebb5e561a2822279439c4afea1c1f66a8225200"
+    },
+    {
+      "source": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/libios_framework.a",
+      "preserved_path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/build/ios-derived/Build/Products/FullDebug-iphoneos/libios_framework.a",
+      "unchanged_sha256": "4d8fd10863884123e8cbf2ecccf65b90459d05224734492d343e76bae688bd93"
+    },
+    {
+      "source": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/libios_framework.a",
+      "preserved_path": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app/apps/ios/native/build/xcframework/aarch64-apple-ios/libios_framework.a",
+      "unchanged_sha256": "4d8fd10863884123e8cbf2ecccf65b90459d05224734492d343e76bae688bd93"
+    }
+  ],
+  "free_gib_before": 6.218,
+  "free_gib_after": 6.218
+}

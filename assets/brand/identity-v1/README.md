@@ -1,12 +1,12 @@
 # 灵犀 LingXi · 品牌视觉系统 v1
 
-本目录是一套覆盖灵犀产品系列的设计提案。打开 `index.html` 可查看品牌展示、切换产品、中英文 label 与深浅主题。资源均保存在当前目录，预览不依赖外网。
+本目录是灵犀产品系列共用的品牌资源源文件。打开 `index.html` 可查看品牌展示、切换产品、中英文 label 与深浅主题。资源均保存在当前目录，预览不依赖外网。
 
 ## 设计
 
-**灵犀结 / Resonance Link** 延续现有 Web 双环的连接意象：将双环调整为较紧凑的圆弧，并向右上方倾斜 35°。两个相连的环对应人与智能、理解与行动；使用单色即可成立。母品牌使用灵犀蓝 `#4167ED`，搭配墨色 `#202632`、纸白 `#F6F5F0`。
+**星芒 / Sparkles** 沿用界面中现有的 ✨ 四角星芒：一颗大星与两颗小星组成同一个单色标志。母品牌使用灵犀蓝 `#4167ED`，搭配墨色 `#202632`、纸白 `#F6F5F0`。
 
-应用图标使用相同母标志。48 px 及以上的系列图标加入一个功能符号：Code 的尖括号、Chat 的对话框、Control 的指针、Apps 的网格、Remote 的双向箭头、Harness 的层叠、SDK 的代码括号。16–32 px 使用简化母标志，并与可见的产品名称一起出现，避免只依靠颜色区分产品。
+所有产品、所有尺寸使用同一星芒造型，只通过既有产品颜色区分，不添加括号、对话框、指针、网格等功能符号。产品名称继续以可见文字及可访问名称呈现。
 
 ## 名称与 label
 
@@ -37,7 +37,7 @@ SDK 子项使用 `LingXi WebRTC`、`LingXi Mobile Linux`、`LingXi LLM Client`�
 - `svg/app-preview.svg`：带圆角的展示版。
 - `svg/maskable-icon.svg`：额外留安全区的图标；`svg/adaptive-foreground.svg` 为同一几何的透明前景。
 - `svg/favicon.svg`、`png/lingxi-{16,32,48,64,128,256,512}.png`：小图标与网页素材。
-- `products/<id>/`：各产品的彩色图标、简化图标、无圆角母版、深浅底字标，以及 16–1024 px PNG。
+- `products/<id>/`：各产品的彩色图标、同形小图标、无圆角母版、深浅底字标，以及 16–1024 px PNG。
 - `brand.json`：名称、角色、颜色和几何清单；`tokens.css`：CSS 色值。
 - `index.html`、`preview.css`、`preview.js`、`brand-data.js`：交互式品牌预览。
 - `lingxi-brand-kit.zip`：完整资源包。
@@ -47,22 +47,22 @@ SDK 子项使用 `LingXi WebRTC`、`LingXi Mobile Linux`、`LingXi LLM Client`�
 ## 使用约定
 
 1. 主标志最小尺寸 16 px；水平组合字标建议宽度不小于 96 px，中文或双语组合建议不小于 160 px。
-2. 主标志周围保留至少 20/128 图形宽度的空间；不拉伸、不改变倾角，不在双环内放文字。
+2. 主标志周围保留至少 20/128 图形宽度的空间；不拉伸、不旋转，不叠加文字或其他图形。
 3. 浅底使用蓝色或墨色，深底使用白色；系列色用于产品图标与辅助强调。
 4. 母品牌保持蓝色。系列色与产品名称固定对应，避免同一产品在不同平台换色。
 5. 系列 `icon-1024.png` 为不透明、无预切圆角的输入母版；较小 PNG 为展示图标。平台集成时选择对应源文件并由各平台打包流程生成最终资源。
-6. `maskable-icon.svg` / `adaptive-foreground.svg` 提供几何安全区素材，尚未接入具体平台资源目录或完成安装验证。不要把预览 PNG 当作平台集成完成的证据。
+6. `maskable-icon.svg` / `adaptive-foreground.svg` 提供几何安全区素材。平台导出由 `scripts/sync-brand-assets.py` 维护；资源校验与真实安装验证分别记录。
 
 ## 生成
 
 需要 Python 3、fontTools、librsvg 的 `rsvg-convert`，以及本机对应字体。生成不需要网络。可传入 `--latin-font` / `--cjk-font` 改变字体路径；默认集合索引分别为 Avenir Next 的 2、5 与 Hiragino Sans GB 的 2。
 
 ```sh
-python3 build.py --png
+python3 build.py --png --archive
 ```
 
-`build.py` 是矢量和 PNG 的生成源，预览页面单独维护。已有导出可直接使用，不需要运行生成脚本。
+`build.py` 是矢量和 PNG 的生成源，`--archive` 将当前源文件、导出与预览打入品牌包，预览页面单独维护。已有导出可直接使用，不需要运行生成脚本。
 
 ## 接入范围
 
-设计素材统一放在产品仓库 `assets/brand/identity-v1/`。后续接入点包括主应用 Desktop / iOS / Android / Web、Computer Use、Chat、应用市场以及 SDK 文档。当前交付没有替换线上图标或应用名称，也没有改动 bundle ID、包名、URL scheme、仓库名、签名配置或发布渠道。
+品牌源统一放在产品仓库 `assets/brand/identity-v1/`。接入点包括主应用 Desktop / iOS / Android / Web、Control、Chat、应用市场以及 SDK 文档。接入与验证范围见 `docs/brand-integration.md`；修改资源不代表已部署网站或安装新版客户端。

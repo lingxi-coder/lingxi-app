@@ -19,7 +19,6 @@ final class NativeEngineFactoryTests: XCTestCase {
         )
         var config = EngineConfig(
             apiBase: "https://example.invalid",
-            apiKey: "development-override",
             model: "interactive-model",
             appSandboxRoot: "/sandbox",
             projectCwd: "/workspace",
@@ -36,7 +35,6 @@ final class NativeEngineFactoryTests: XCTestCase {
         )).configuration
 
         XCTAssertFalse(launch.appAgentHost)
-        XCTAssertEqual(launch.apiKey, "development-override")
         XCTAssertEqual(launch.sessionMode, .chat)
         XCTAssertEqual(launch.projectCwd, "/workspace")
         XCTAssertEqual(launch.projectAdditionalDirectories, config.additionalWorkspaceDirectories)
@@ -62,7 +60,6 @@ final class NativeEngineFactoryTests: XCTestCase {
         )).configuration
 
         XCTAssertFalse(launch.appAgentHost)
-        XCTAssertEqual(launch.apiKey, "")
         XCTAssertEqual(launch.model, "task-model")
         XCTAssertEqual(launch.projectCwd, MobileUserStorage.directories().scheduledCwd)
         XCTAssertTrue(launch.projectAdditionalDirectories.isEmpty)
@@ -85,21 +82,15 @@ final class NativeEngineFactoryTests: XCTestCase {
         XCTAssertEqual(noTask.model, "default-model")
     }
 
-    func testStoreAppAgentUsesProviderOnlyConfiguration() throws {
+    func testStoreAppAgentUsesStructuredProviderOnlyConfiguration() throws {
         guard !LocalAppAgentModelHost.usesMobileLinuxRuntime else {
-            throw XCTSkip("The Full app prepares its real managed Linux workspace")
-        }
-        let credentialReader: (Keychain.Item) throws -> String? = { item in
-            item == .apiBase ? "https://agent.example.invalid" : "agent-key"
+            throw XCTSkip("The Full app prepares its managed Linux workspace")
         }
         let prepared = try NativeEngineFactory.prepare(.appAgent(
-            appSandboxRoot: "/sandbox", snapshot: makeSnapshot()
-        ), credentialReader: credentialReader)
+            appSandboxRoot: "/sandbox", snapshot: makeSnapshot()))
         let launch = prepared.configuration
-
         XCTAssertTrue(launch.appAgentHost)
-        XCTAssertEqual(launch.apiBase, "https://agent.example.invalid")
-        XCTAssertEqual(launch.apiKey, "agent-key")
+        XCTAssertEqual(launch.apiBase, "https://api.anthropic.com")
         XCTAssertEqual(launch.model, "default-model")
         XCTAssertFalse(launch.visionDelegationEnabled)
         XCTAssertNil(launch.projectCwd)
@@ -108,34 +99,14 @@ final class NativeEngineFactoryTests: XCTestCase {
         XCTAssertNil(launch.mobileLinux)
         XCTAssertNil(launch.hostEnvironment)
         XCTAssertNoThrow(try prepared.validateMediaHost(nil))
-
-        let changedModel = try NativeEngineFactory.prepare(.appAgent(
-            appSandboxRoot: "/sandbox", snapshot: makeSnapshot(model: "another-model")
-        ), credentialReader: credentialReader).configuration
-        XCTAssertNotEqual(
-            LocalAppAgentModelHostConfiguration.digest(launch),
-            LocalAppAgentModelHostConfiguration.digest(changedModel),
-            "a changed default model requires an explicit model-host restart"
-        )
-    }
-
-    func testAppAgentCredentialReadFailureDoesNotBecomeAnEmptySetting() {
-        for unavailableItem in [Keychain.Item.apiBase, .apiKey] {
-            XCTAssertThrowsError(try NativeEngineFactory.prepare(.appAgent(
-                appSandboxRoot: "/sandbox", snapshot: makeSnapshot()
-            ), credentialReader: { item in
-                if item == unavailableItem { throw Keychain.ReadError.invalidData }
-                return "private-setting"
-            })) { error in
-                XCTAssertEqual((error as? LocalAppServiceFailure)?.code, "CREDENTIAL_STORAGE_UNAVAILABLE")
-                XCTAssertFalse(error.localizedDescription.contains("private-setting"))
-            }
-        }
+        let changed = try NativeEngineFactory.prepare(.appAgent(
+            appSandboxRoot: "/sandbox", snapshot: makeSnapshot(model: "another-model"))).configuration
+        XCTAssertNotEqual(LocalAppAgentModelHostConfiguration.digest(launch), LocalAppAgentModelHostConfiguration.digest(changed))
     }
 
     func testInteractiveAndScheduledEnginesStillRequireMediaHost() throws {
         let config = EngineConfig(
-            apiBase: "https://example.invalid", apiKey: "", model: "",
+            apiBase: "https://example.invalid", model: "",
             appSandboxRoot: "/sandbox", projectCwd: nil, sessionMode: .code,
             visionDelegationEnabled: false
         )
@@ -156,7 +127,7 @@ final class NativeEngineFactoryTests: XCTestCase {
 
     func testCancelledBootstrapDoesNotPublishConstructedHandle() async throws {
         let config = EngineConfig(
-            apiBase: "https://example.invalid", apiKey: "", model: "",
+            apiBase: "https://example.invalid", model: "",
             appSandboxRoot: "/sandbox", projectCwd: nil, sessionMode: .code,
             visionDelegationEnabled: false
         )

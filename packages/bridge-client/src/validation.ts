@@ -190,7 +190,10 @@ const VISUALIZATION_BLOCK_STATUSES: readonly VisualizationBlockStatusDto[] = ['p
 
 function conversationMessage(value: unknown): MessageDto {
   const input = object(value, 'session agent message');
-  exactKeys(input, ['role', 'blocks', 'images', 'loop_wakeup', 'visualization_context', 'sent_at_ms'], 'session agent message');
+  exactKeys(input, ['transcript_uuid', 'role', 'blocks', 'images', 'loop_wakeup', 'visualization_context', 'sent_at_ms'], 'session agent message');
+  if (input['transcript_uuid'] !== undefined && input['transcript_uuid'] !== null) {
+    string(input['transcript_uuid'], 'session agent transcript UUID');
+  }
   string(input['role'], 'session agent message role');
   if (input['sent_at_ms'] !== undefined && input['sent_at_ms'] !== null
       && !Number.isSafeInteger(input['sent_at_ms'])) throw new Error('invalid session agent message time');
@@ -1426,19 +1429,6 @@ export function validateClientEvent(value: unknown): ClientEvent {
       return { type, request_id: string(input['request_id'], 'request_id'),
         active_count: integer(input['active_count'], 'active_count'),
         ...(input['error'] === undefined ? {} : { error: string(input['error'], 'error') }) };
-    case 'openai_oauth_updated': {
-      exactKeys(input, ['type', 'session'], 'client event');
-      const session = object(input['session'], 'OAuth session');
-      exactKeys(session, ['access_token', 'refresh_token', 'expires_at', 'account_id', 'fedramp', 'email'], 'OAuth session');
-      if (typeof session['expires_at'] !== 'number' || !Number.isFinite(session['expires_at']) || typeof session['fedramp'] !== 'boolean') throw new Error('invalid OAuth session');
-      return { type, session: {
-        access_token: string(session['access_token'], 'access_token'),
-        ...(session['refresh_token'] == null ? {} : { refresh_token: string(session['refresh_token'], 'refresh_token') }),
-        ...(session['account_id'] == null ? {} : { account_id: string(session['account_id'], 'account_id') }),
-        ...(session['email'] == null ? {} : { email: string(session['email'], 'email') }),
-        expires_at: session['expires_at'], fedramp: session['fedramp'],
-      } };
-    }
     case 'session_started':
       exactKeys(input, ['type', 'session_id', 'mode'], 'client event');
       return {

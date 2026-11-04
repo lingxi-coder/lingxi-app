@@ -117,6 +117,54 @@ class RemoteConversationSourceTest {
         assertEquals(listOf(1L, 2L, 3L, 4L, 5L), items.map { it.turnId })
     }
 
+    @Test fun aBotsPromptIsLabelledWithTheBotsName() {
+        // A Bot's prompt still arrives as a scheduled one; the connection knows whose it was.
+        val named = RemoteFeedMapper(DefaultConversationStrings, thisDeviceName = "Pixel 9", botNameOf = { turn -> "Daily digest".takeIf { turn == 2uL } })
+        val items = named.map(
+            remoteUpdate(
+                records = listOf(
+                    prompt(1uL, RemotePromptOriginFfi.SCHEDULED),
+                    prompt(2uL, RemotePromptOriginFfi.SCHEDULED),
+                    prompt(3uL, RemotePromptOriginFfi.DESKTOP),
+                ),
+            ),
+        ).filterIsInstance<ExternalFeedItem.UserPrompt>()
+        assertEquals("定时任务", items[0].originLabel)
+        assertEquals("来自 Bot「Daily digest」", items[1].originLabel)
+        assertEquals("来自桌面", items[2].originLabel)
+    }
+
+    @Test fun onlyAScheduledPromptIsLookedUpForABot() {
+        val asked = mutableListOf<ULong>()
+        val named = RemoteFeedMapper(DefaultConversationStrings, thisDeviceName = "Pixel 9", botNameOf = { turn -> asked += turn; "Bot" })
+        named.map(
+            remoteUpdate(
+                records = listOf(
+                    prompt(1uL, RemotePromptOriginFfi.DESKTOP),
+                    prompt(2uL, RemotePromptOriginFfi.DEVICE, "iPad"),
+                    prompt(3uL, RemotePromptOriginFfi.SCHEDULED),
+                ),
+            ),
+        )
+        assertEquals(listOf(3uL), asked)
+    }
+
+    @Test fun theSourceAsksItsPortWhoseBotAPromptWas() = runTest(UnconfinedTestDispatcher()) {
+        val port = FakeRemoteSessionPort()
+        port.botNames[5uL] = "Inbox triage"
+        val source = RemoteConversationSource(port, "Pixel 9")
+        val items = mutableListOf<ExternalFeedItem>()
+        val job = launch { source.externalFeed.collect { items += it } }
+        port.updates.emit(
+            remoteUpdate(records = listOf(prompt(4uL, RemotePromptOriginFfi.SCHEDULED), prompt(5uL, RemotePromptOriginFfi.SCHEDULED))),
+        )
+        job.cancel()
+        assertEquals(
+            listOf("定时任务", "来自 Bot「Inbox triage」"),
+            items.filterIsInstance<ExternalFeedItem.UserPrompt>().map { it.originLabel },
+        )
+    }
+
     @Test fun promptImagesAreListedForFetching() {
         val update = remoteUpdate(
             records = listOf(prompt(7uL, RemotePromptOriginFfi.DESKTOP, images = listOf(RemoteImageRefFfi("ref-1", "image/png")))),

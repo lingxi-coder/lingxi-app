@@ -1,0 +1,132 @@
+{
+  "phase": "T2 local implementation; release acceptance open",
+  "base": "58f4cd232",
+  "branch": "claude/teams",
+  "productionMutations": false,
+  "validation": {
+    "teamEmulator": {
+      "backendAndRules": 35,
+      "sdk": 7,
+      "fail": 0,
+      "skip": 0
+    },
+    "web": {
+      "pass": 246,
+      "skip": 2,
+      "fail": 0
+    },
+    "backendNormal": {
+      "pass": 24,
+      "environmentSkip": 42,
+      "fail": 0
+    },
+    "desktopFocused": {
+      "pass": 17,
+      "fail": 0
+    },
+    "androidJvm": {
+      "pass": 17,
+      "fail": 0
+    },
+    "nativeSourceBuilds": [
+      "android probe",
+      "ios unsigned arm64 Release probe"
+    ],
+    "swiftHostProbes": [
+      "projection and atomic persistence",
+      "push recipient/expiry/routes"
+    ],
+    "electronSandbox": "final source passed",
+    "localizationNewKeys": 26,
+    "browserOfflineMs": 633482,
+    "review": "backend and client approved"
+  },
+  "limits": [
+    "No deployment/push/IAM mutation",
+    "No full signed products or native physical-device/offline UI acceptance",
+    "No real Team FCM/APNs delivery",
+    "Full localization freshness has pre-existing baseline drift"
+  ],
+  "sourceSha256": {
+    "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamMessageProjection.kt": "6afe246d1b9261cffbcd7bffc262492e4984e48ade6b97466d6ff9a7725b42b9",
+    "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamMessagesScreen.kt": "9fd190e5459bdfcd4213ad46312b3dfa99b01fbf9db31709ca7bb38f59f6c79e",
+    "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamMessagingModel.kt": "cc98ad93aad40e28101ac22296e5b3f0430781155a24ef291dc25555ad3d52ae",
+    "apps/android/native/app/src/test/java/com/lingxi/code/teams/TeamMessageProjectionTest.kt": "9247f1badfdc143c032bc6515dbca866b6a066533725857da4f86f8b70f40422",
+    "apps/electron/test/fixtures/teams-messages-main.ts": "ea1fd75db5d8745577c82642bb1c8d4b07bf645171aad54cf72b348d515e859e",
+    "apps/electron/test/fixtures/teams-messages-renderer.ts": "d6028b03e516994589ac5cf2a48a10348aa562c3e8024c452cd68f2855c52a89",
+    "apps/firebase/src/team-message-push.mjs": "670b7bcf761e4440e7baf94ce6e445163189d7199c13eaf9bc9acc9f5ea7b82a",
+    "apps/firebase/src/team-messages.mjs": "fd24c9b7ad084887dd518cf93d6c049f5c5d239f6da1943654a309e6818163a7",
+    "apps/firebase/test/team-message-push.test.mjs": "7a22d5bab4164d8ad3d105790d4c2adec514c2c6923eafb3e0b1a542ebbc0141",
+    "apps/firebase/test/teams.messages.emulator.test.mjs": "59b7e613505aa7fb28be7db148ec37645805a5344f9154c80806fa8f7f44d0db",
+    "apps/ios/native/Sources/Teams/TeamMessageProjection.swift": "e649849f5c6f94c809bde40f7ba4f431406f91bfc69f5052a77a2c98355ac38e",
+    "apps/ios/native/Sources/Teams/TeamMessagesPage.swift": "6ae0523c426fdea94a683a6eac1608f016c616284d6fc05167b6359823a40298",
+    "apps/ios/native/Sources/Teams/TeamMessagingModel.swift": "820c2a49a30b95a88743cef24c8ef8d1cfc2e1ae06bb09428c55075fc9288b3a",
+    "apps/web/test/teams-api.test.ts": "5c2bb0062404d29a8e6ec4e4639657d7405439b51d5e7fd9d1bb5aea313dd38f",
+    "apps/web/test/teams-messages.test.ts": "1ce77588051af8d3a318f1ba8ad416c215f7092277b34a3d6779bc597d5b43bc",
+    "packages/teams/MessagesPanel.tsx": "cb8fd58fa323cd015a3ab8ffd08a4375795e052a8ddb72dd3ab80b92af606a8c",
+    "packages/teams/fixtures/messaging.json": "ef5b8958bfc90e12d9205fbd5e5d3b68b5a7eaa812013b901d042713b064ef6d",
+    "packages/teams/message-storage.ts": "803b2089095bd2d5159587139917325b183f9d759f41f7e48e3a3c4093dc04ca",
+    "packages/teams/messages.ts": "cc14ffe09494f69dc7b098148d339fe599acb9bf34f463bd04fc343ee56ec1b4",
+    "apps/android/native/app/src/main/java/com/lingxi/code/MainActivity.kt": "71be1779e806a991cf83db192aeafdfa01606e2f52f5669379cc7e5fab1522b5",
+    "apps/android/native/app/src/main/java/com/lingxi/code/navigation/DeepLink.kt": "255163d0cac6ce47bba180a976d04b71e6483d5968ba84e8278d599a926bc898",
+    "apps/android/native/app/src/main/java/com/lingxi/code/navigation/DeepLinkInbox.kt": "37b76008d4fa835ac9ca12f6aa8184be337bb239d84abcb6a0d50c5dd5cb3d86",
+    "apps/android/native/app/src/main/java/com/lingxi/code/push/LingxiMessagingService.kt": "4c2332076d889fa26b40419d8df4b065da6959845421d77b9728cf9f2b30299b",
+    "apps/android/native/app/src/main/java/com/lingxi/code/push/PushRoute.kt": "e55e4d5116f450657ed38c2de821f9dea76fe80dd5a7d89e3c8ae74e722de263",
+    "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamsScreen.kt": "c84946cda0c360852d530219ae54dd4ba92c3e664ba7c538254fb820501c30a7",
+    "apps/android/native/app/src/main/res/values-en/strings.xml": "d52c7bc44f9014ca43eded652c7358a9e5d9c87cc388fe461cb8223076eb7a08",
+    "apps/android/native/app/src/main/res/values-ja/strings.xml": "9941ef101e3139720c7825155a57db2be4006a7f737b2415dc9de66b375833ac",
+    "apps/android/native/app/src/main/res/values-ko/strings.xml": "a10284ff8fa4d02432665a10ea296a402f9a4cfcc3ddad5a0d985d82e3f4daad",
+    "apps/android/native/app/src/main/res/values-zh-rTW/strings.xml": "a96d45ad7594f10829efbfe444da1acf6b445a69ac12544f80589a4e369a73c0",
+    "apps/android/native/app/src/main/res/values/strings.xml": "f30a73040de9259e3455ca9d93c52a4d549cd8d3e4038628779735f0e8f1c0f5",
+    "apps/android/native/app/src/test/java/com/lingxi/code/teams/TeamInvitationTest.kt": "e03830d8059cd882ea56fd3467b3b6a28f1ee6840b916457827f71d225f0b6c4",
+    "apps/electron/src/main/teams/ipc.ts": "427eb4d173d0f965215566117c234b0d3aaafb81d79dbca9fd414125816b486d",
+    "apps/electron/src/main/teams/service.ts": "2129d94ac4aae1ef7066ce308057cd366d6055631b4aea1fdd50a792352574fa",
+    "apps/electron/src/preload/index.ts": "61d1234878bb52aa4fcd23543187ac3ee53ef57550e75fd8ba5c1f7919059649",
+    "apps/electron/src/renderer/App.tsx": "ffebeb8ad4a86bd4e116cc72f3f1ae985d4080c7b9b100b732684d26f16170b8",
+    "apps/electron/src/renderer/components/Teams.tsx": "2ca43b8b27aec0542f80109cbfff29b6cc5f06c09403989d29b848497eb83fac",
+    "apps/firebase/scripts/teams-members-runtime.mjs": "a69673140b2aac892ac29d766b622d8cb794498a145fa9e74cc3f24ef242224f",
+    "apps/firebase/scripts/test-teams.mjs": "e748056f04a25efb93c4c700f8f1f996c20ca517a6dd013ebee7180c49c42098",
+    "apps/firebase/src/index.mjs": "848161cead03c0f7935c69c8043bde249e3310befcae6eeb8fbff8e7e074d405",
+    "apps/firebase/src/push.mjs": "d45eef364e58788f257985f437d9c6aa52b5e7e2f1d2f11b4a51ce40666a0ca2",
+    "apps/firebase/src/team-conversations.mjs": "cbad78eab41912ab1f74c242d08fa8d2dd59ed65eb4516f103928166013f4658",
+    "apps/firebase/src/teams.mjs": "f1bf712b5744f8aa94efc24211ac7d212fe9d0df54651990640bc0646f6bfb9f",
+    "apps/firebase/test/teams.rules.emulator.test.mjs": "63b5dcc92f55e6a3bdcd96159e4a26142e39a48ab9b892209b47418e9b3f9526",
+    "apps/ios/native/Resources/Localizable.xcstrings": "bacbf6fe892137c379f36e2645959f1c0c5ec1f5b8d8d05386f9a07c3dab7689",
+    "apps/ios/native/Sources/Account/PushMessagePolicy.swift": "d480f0fc32c558021559f73a5d32e71f85f0c13b78235738c2b703e9a254f6b5",
+    "apps/ios/native/Sources/App/CanonicalDeepLink.swift": "f320f2f7ec9b47e28da263a6e4dc7cad5c7b8e7d1958584cd0aeb0ed9f370849",
+    "apps/ios/native/Sources/Teams/TeamsPage.swift": "fb7d0685c6bef0728f33bb9f8e66f02292f15eae889336187ecce8254ac6c5f9",
+    "apps/web/src/pages/OpenLinkPage.tsx": "351a56066bc8b4a04ca7e0b0a99fe101ecb8ed18a41c7828c8f7e4412f48c71c",
+    "apps/web/src/teams/api.ts": "5007036b96a4df8e549663bd50d7a0c7136170ba5ba0983d647ec7b76b409022",
+    "docs/TEAMS.md": "e12d4f9829acbc931ea62bad8f127aea0f34f9101981425d0b21f6f45aa6e21a",
+    "docs/firebase-backend-resources.md": "ab0e8ff50cf5f389cd4a9fc4cd11bcac9cfc567d3c1837d5ded5fec6358c69a6",
+    "infra/firebase/firestore.default.rules": "51cbf8aabbe72dc2b0973c22403444de66a62f14a885c3c18cdeba79555b6e4b",
+    "packages/deep-links/fixtures.json": "ae4c32aa59bdaf3f2a421ed3da2157eaf6b9a9e69621d06c79e9b0ada280a56d",
+    "packages/deep-links/index.ts": "d45774c8d18f7f2a453e195ac0780b12b155c26af09329960d8cbbd9216c6c6e",
+    "packages/teams/TeamsPanel.tsx": "eb9410755a81b07c2a81615fbbec9965b90086e842c52f99679348cc8f3a89ad",
+    "packages/teams/index.ts": "a953f522f17dea7199fb79ab2c0de9b14319c90cc77d3ffa736779614edbd501",
+    "packages/teams/teams.css": "2286acd65ca54d7448211c960ff55ab3bddccb0f2280b5e8e0f8224fcb3bbb67",
+    "resources/translations/en.json": "c81f6e68959b9f78d724f234a299df023e04a2b8952e895b605ebc7f006e56a4",
+    "resources/translations/ja.json": "5ef4c9e6d9aa6d8820abd3c296a1ce7ff663f61cb9bd54c927ed74def463cba9",
+    "resources/translations/ko.json": "13556504e46ec52f810442b4343b306ff4994ff77c359b3014bf4a9b73778d27",
+    "resources/translations/zh-Hans.json": "d5eae7c0b839201410a2afeedf0467028de5f2b81a2adf358c2bd5e201e188fc",
+    "resources/translations/zh-Hant.json": "c0cda7a7a408df541a3b445ede66804b1a497e856730708797b1e9ab387fd0b6"
+  },
+  "logSha256": {
+    "android-final.log.gz": "63fd6a653ac5cb7877e3f63e84360f725bf372390df3b156d85b994be747fad3",
+    "backend-tests-final.log.gz": "8e041abd704cb15ae1fc9eb3e659d678de0602f9559be69c203ce93ed104c825",
+    "desktop-build-final.log.gz": "53402ee0c9ce1116e03171c0cd43557931f1eb643f0d6e33f2bfd75f5c7a261c",
+    "desktop-tests.log.gz": "0676113dd0bc7431ca774438337a0a8aacb4d4c4a56482b4cdf89fdf7f35413c",
+    "desktop-types-final.log.gz": "04f1d96f62e62e4a94d952d01e482448a2e7df2bf662060dbd91aa17e053ded0",
+    "emulator-final.log.gz": "08c673415e5dd325bc47031ecdf5c76c4c3d2c56c167dc67fbf5cc356a01c846",
+    "ios-final.log.gz": "1d23a872656e05f4c5af1584e7e9642705e9bd4f04e0188e3ac83837f1456a22",
+    "projection.log.gz": "0678e9eb7132609c14937601da2813a41eb3d99da2ce37d58257edb68d305081",
+    "push-test.log.gz": "1bc771f00b285eb68e37933e28bb5a741d5f8126e9f6631b294e29890fd53722",
+    "runtime-final.log.gz": "9177c0af4a8b9341af2f3543855f186fc1b761fc947a03693b0d341e37788259",
+    "runtime.log.gz": "7dd504d0d786dedd3a74bbfb778feaec7cf869ddfd36c65e65321066b8ffc129",
+    "swift-projection.log.gz": "99f459d821ebc6546d1ffe1e75f70944cbd97d6824904bbaece32ad1176b6d88",
+    "swift-push.log.gz": "e1038f06309b745ca82a263aeafaa2e9a209e51c840d7c39b6bb4446fc4a26e6",
+    "web-build-final.log.gz": "b23802835356f9cc578a17b5101db163c0803a5842b3f722c62b65498df6aba1",
+    "web-tests-final.log.gz": "8a2f9fe45c3766b5d9e1b823cc86c84998c6c196782d56f56d4bd8c40b8b2499",
+    "web-types-final.log.gz": "2aea2fd5d000300bc3e8f1672f281ccb0c04ff3b66ec20d61287b8dcf8bc31bd"
+  }
+}

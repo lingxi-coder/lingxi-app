@@ -613,6 +613,8 @@ export function SettingsScreen({
     const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     backRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
+      // A native modal owns focus and Escape until its task is dismissed.
+      if (panelRef.current?.querySelector('dialog[open]')) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         if (closeRequestRef.current) closeRequestRef.current();
@@ -795,7 +797,7 @@ export function SettingsScreen({
         <div className="settings-content-viewport" style={{ paddingTop: SETTINGS_SIDEBAR_TOP_INSET }}>
           <div ref={contentScrollRef} className="settings-content-scroll settings-scroll-area">
             <div className={page === 'computer-use' ? 'settings-content-inner settings-computer-use-content' : 'settings-content-inner'}>
-              {page !== 'computer-use' && <div className="settings-page-header" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
+              {page !== 'computer-use' && page !== 'provider-credentials' && <div className="settings-page-header" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
                 <div>
                   <div className="settings-page-title" style={{ fontSize: 20, fontWeight: 550, letterSpacing: '-0.025em' }}>{pageTitle}</div>
                 </div>

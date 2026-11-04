@@ -10,8 +10,6 @@ import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.ListingKindDto
 import com.lingxi.code.bindings.client.PromptModeDto
-import com.lingxi.code.bindings.runtime.ProviderConnectionTestDto
-import com.lingxi.code.bindings.client.ProviderCredentialSecretDto
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.bindings.runtime.VisualizationHost
 import com.lingxi.code.bindings.android.AndroidNativeMediaHost
@@ -73,45 +71,10 @@ import kotlinx.coroutines.sync.withLock
  * exercised by JVM unit tests. The pure [clientEventToReply] mapper carries the
  * mapping coverage; this wiring is covered by the on-device integration build.
  */
-private class MediaAudioSessionContextBindings(
-    private val mediaHost: AndroidNativeMediaHost,
-) {
-    private val lock = Any()
-    private val generations = mutableMapOf<String, ULong>()
-    private var closed = false
-
-    fun register(sessionId: String, generation: ULong) {
-        val removeImmediately = synchronized(lock) {
-            if (closed) true else {
-                generations[sessionId] = generation
-                false
-            }
-        }
-        if (removeImmediately) {
-            runCatching { mediaHost.removeAudioSessionContext(sessionId, generation) }
-        }
-    }
-
-    fun remove(sessionId: String) {
-        val generation = synchronized(lock) { generations.remove(sessionId) } ?: return
-        runCatching { mediaHost.removeAudioSessionContext(sessionId, generation) }
-    }
-
-    fun close() {
-        val registrations = synchronized(lock) {
-            closed = true
-            generations.toList().also { generations.clear() }
-        }
-        registrations.forEach { (sessionId, generation) ->
-            runCatching { mediaHost.removeAudioSessionContext(sessionId, generation) }
-        }
-    }
-}
-
 class EngineConversationSource private constructor(
     private val handle: MobileEngineHandle,
     private val mediaHost: AndroidNativeMediaHost,
-    private val mediaContextBindings: MediaAudioSessionContextBindings,
+    private val mediaContextBindings: MediaAudioSessionContextBindings<MobileEngineHandle>,
     private val events: SharedFlow<ClientEvent>,
     private val eventRelay: LosslessEventRelay<ClientEvent>,
     private val workflowEvents: SharedFlow<WorkflowProgressUpdate>,
@@ -193,15 +156,10 @@ class EngineConversationSource private constructor(
         handle.submit(command)
     }
 
-    override suspend fun testProviderConnection(
-        providerId: String,
-        providerPreset: String,
-        apiBase: String,
-        model: String,
-        credentialOverride: ProviderCredentialSecretDto?,
-    ): ProviderConnectionTestDto {
-        return handle.testProviderConnection(providerId, providerPreset, apiBase, model, credentialOverride)
-    }
+    override suspend fun providerAccountsSnapshot(): String = handle.providerAccountsSnapshot()
+
+    override suspend fun providerAccountCommand(requestJson: String, credential: String?): String =
+        handle.providerAccountCommand(requestJson, credential)
 
     override suspend fun refreshExecutionStatus() {
         handle.submit(ClientCommand.TaskList(statusFilter = null, requestId = null))
@@ -694,12 +652,27 @@ class EngineConversationSource private constructor(
             val environment = resolveEngineEnvironmentOverrides(System.getenv())
             val providerLaunch = ProviderSettingsRepository(context).engineLaunchConfig()
             val mediaHost = AndroidNativeMediaHostProvider.get(context.applicationContext)
-            val mediaContextBindings = MediaAudioSessionContextBindings(mediaHost)
+            val mediaContextBindings = MediaAudioSessionContextBindings<MobileEngineHandle> { _, binding ->
+                mediaHost.removeAudioSessionContext(binding)
+            }
             var mediaContextEngine: MobileEngineHandle? = null
+            val mediaContextUpdate = Mutex()
+            suspend fun refreshMediaContext(engine: MobileEngineHandle) = mediaContextUpdate.withLock {
+                try {
+                    val binding = mediaHost.updateAudioSessionContext(engine)
+                    mediaContextBindings.register(engine, binding)
+                } catch (error: Exception) {
+                    if (error is kotlinx.coroutines.CancellationException) throw error
+                    mediaContextBindings.removeEngine(engine)
+                    eventRelay.offer(ClientEvent.SystemNotice(
+                        message = "Media provider routes are unavailable: ${error.message ?: error.javaClass.simpleName}".toClientTextDto(),
+                        isError = true,
+                    ))
+                }
+            }
             val handle = NativeEngineFactory.build(
                 context = context,
                 apiBase = environment.apiBase,
-                apiKey = environment.apiKey,
                 // Empty environment model → use the current provider setting,
                 // which is a real wire id rather than a branded `lx-*` mock id.
                 // The shared engine restores the last confirmed model for an
@@ -731,13 +704,10 @@ class EngineConversationSource private constructor(
                             when (event) {
                                 is ClientEvent.SessionStarted,
                                 is ClientEvent.SessionResumed,
-                                is ClientEvent.ModelChanged -> runCatching {
-                                    mediaContextEngine?.let { engine ->
-                                        val binding = mediaHost.updateAudioSessionContext(engine)
-                                        mediaContextBindings.register(binding.sessionId, binding.generation)
-                                    }
+                                is ClientEvent.ModelChanged -> mediaContextEngine?.let { refreshMediaContext(it) }
+                                ClientEvent.SessionEnded -> previousActiveSessionId?.let { sessionId ->
+                                    mediaContextEngine?.let { engine -> mediaContextBindings.remove(engine, sessionId) }
                                 }
-                                ClientEvent.SessionEnded -> previousActiveSessionId?.let(mediaContextBindings::remove)
                                 else -> Unit
                             }
                             if (event is ClientEvent.WorkspaceChanged) {
@@ -752,7 +722,7 @@ class EngineConversationSource private constructor(
                             if (event is ClientEvent.SettingsSnapshot) {
                                 runCatching {
                                     val repository = ProviderSettingsRepository(context)
-                                    try { repository.recordAudioProviderRegion(event.effectiveJson) } finally { repository.close() }
+                                    repository.recordAudioProviderRegion(event.effectiveJson)
                                 }
                             }
                             if (event is ClientEvent.TurnStarted) permissionIngress.confirmTurnStarted()
@@ -811,9 +781,9 @@ class EngineConversationSource private constructor(
                 )
             }
             mediaContextEngine = handle
+            // Account management must remain available before an inference/audio route exists.
+            kotlinx.coroutines.runBlocking { refreshMediaContext(handle) }
             val workspaceRestore = runCatching { kotlinx.coroutines.runBlocking {
-                val binding = mediaHost.updateAudioSessionContext(handle)
-                mediaContextBindings.register(binding.sessionId, binding.generation)
                 val owner = handle.workspaceState().sessionId
                 val userDirectories = com.lingxi.code.project.MobileUserStorage.directories(context)
                 val home = userDirectories.guestHome
@@ -840,8 +810,7 @@ class EngineConversationSource private constructor(
             // failed ListModels leaves the catalog explicitly empty; it never
             // blocks building the source.
             CoroutineScope(Dispatchers.Default).launch {
-                // The initial media context was bound before the source was
-                // returned; this listing only primes session-agent UI state.
+                // Session/model events retry media routing once account setup supplies a route.
                 try {
                     handle.submit(ClientCommand.ListSessionAgents)
                     val value = handle.workspaceState()

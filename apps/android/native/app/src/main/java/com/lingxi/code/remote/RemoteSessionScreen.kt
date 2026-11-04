@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
@@ -60,6 +61,12 @@ import com.lingxi.code.theme.LingXiTheme
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewmodel.initializer
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import com.lingxi.code.settings.ProviderAccountModelAvailability
+import com.lingxi.code.settings.decodeProviderAccounts
 
 /** A followed session: its source and the view model that renders it. */
 class RemoteChat internal constructor(
@@ -110,7 +117,10 @@ class RemoteSessionHolder : ViewModel() {
     }
 }
 
-/** One session of a computer, with the conversation UI of the app. Side chat and voice are off. */
+/**
+ * One session of a computer, with the conversation UI of the app. Side chat and voice are off.
+ * [botName] is the Bot the session is a chat of, if it is one: back leads to that Bot.
+ */
 @Composable
 internal fun RemoteSessionScreen(
     manager: RemoteControlManager,
@@ -118,6 +128,7 @@ internal fun RemoteSessionScreen(
     hostName: String,
     sessionId: String,
     title: String?,
+    botName: String?,
     isDark: Boolean,
     onBack: () -> Unit,
 ) {
@@ -143,6 +154,23 @@ internal fun RemoteSessionScreen(
 
     val scope = rememberCoroutineScope()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    var accountAvailability by remember(remote) { mutableStateOf(emptyList<ProviderAccountModelAvailability>()) }
+    LaunchedEffect(remote, lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                try {
+                    accountAvailability = decodeProviderAccounts(withTimeout(10_000) { remote.source.providerAccountsSnapshot() }).modelAvailability
+                } catch (_: TimeoutCancellationException) {
+                    accountAvailability = emptyList()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    accountAvailability = emptyList()
+                }
+                delay(15_000)
+            }
+        }
+    }
     DisposableEffect(remote, lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -200,11 +228,14 @@ internal fun RemoteSessionScreen(
     Column(Modifier.fillMaxSize().background(t.windowBg)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onBack) {
-                LXIcon(LXIconName.X, size = 20.dp, color = t.text2, contentDescription = stringResource(R.string.remote_back))
+                LXIcon(
+                    LXIconName.X, size = 20.dp, color = t.text2,
+                    contentDescription = botName?.let { stringResource(R.string.remote_back_to_bot_fmt, it) } ?: stringResource(R.string.remote_back),
+                )
             }
             Column(Modifier.weight(1f)) {
                 Text(state.session.title, color = t.text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text(hostName, color = t.text3, fontSize = 12.sp, maxLines = 1)
+                Text(listOfNotNull(botName, hostName).joinToString(" · "), color = t.text3, fontSize = 12.sp, maxLines = 1)
             }
         }
         if (meta.hasOlder) {
@@ -228,6 +259,7 @@ internal fun RemoteSessionScreen(
             onNewChat = {},
             onSelectModel = chat::selectModel,
             remoteModelSelection = true,
+            accountModelAvailability = accountAvailability,
             onSelectReasoning = chat::selectReasoning,
             isDark = isDark,
             showTopBar = false,

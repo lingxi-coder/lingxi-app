@@ -16,13 +16,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.lingxi.code.R
+import com.lingxi.code.model.ModelProviderStatus
+import com.lingxi.code.settings.ProviderAccountModelAvailability
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun SideChatSheet(manager: SideChatManager, isDark: Boolean, onCreate: () -> Unit) {
+internal fun SideChatSheet(
+    manager: SideChatManager,
+    isDark: Boolean,
+    onCreate: () -> Unit,
+    modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
+    accountModelAvailability: List<ProviderAccountModelAvailability> = emptyList(),
+) {
     val chats by manager.chats.collectAsState()
     val selected by manager.selected.collectAsState()
     val visible by manager.visible.collectAsState()
@@ -107,6 +115,8 @@ internal fun SideChatSheet(manager: SideChatManager, isDark: Boolean, onCreate: 
                         onSendPreflight = { text, attachment -> entry.viewModel.admitComposerSend(text, attachment != null) },
                         onNewChat = { manager.visible.value = false },
                         onSelectModel = entry.viewModel::selectModel,
+                        modelProviderStatuses = modelProviderStatuses,
+                        accountModelAvailability = accountModelAvailability,
                         isDark = isDark, modifier = Modifier.weight(1f), showTopBar = false, showNewChatControls = false,
                         effectivePermissionMode = controls?.permission?.effective ?: "auto",
                         onOpenPermissionSettings = { controlsOpen = true },

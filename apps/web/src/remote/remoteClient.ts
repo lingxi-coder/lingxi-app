@@ -13,8 +13,10 @@ import {
   RemoteRpcError,
   randomId,
   systemClock,
+  type BotThreadCreateResult,
   type Clock,
   type ModelsListResult,
+  type RemoteBotSummary,
   type RemoteCursor,
   type RemotePending,
   type RemoteSeqRecord,
@@ -76,6 +78,8 @@ const ATTACH_TIMEOUT_MS = 60_000;
 const RESET_SNAPSHOT_WAIT_MS = 3000;
 /** Live events kept while a snapshot is still being assembled. */
 const MAX_BUFFERED_EVENTS = 5000;
+/** How long a request that the link dropped under waits for the link to come back, before it is given up. */
+const RECONNECT_WAIT_MS = 30_000;
 
 function initialState(sessionId: string): SessionState {
   return {
@@ -548,12 +552,119 @@ export class SessionController {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// A Bot's chats
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface BotThreadsState {
+  /** The Bot's chats, newest first, as the desktop listed them last; `undefined` until it has. */
+  threads: readonly RemoteSessionSummary[] | undefined;
+  /** Why the last listing failed; the next one that works clears it. */
+  error?: { code: string; message: string };
+}
+
+interface BotThreadsIo {
+  request: Request;
+  /** Whether a request can go out now: the connection is ready and the desktop knows Bots. */
+  canRequest(): boolean;
+  /** The chats just listed, for the client to remember whose they are. */
+  listed(sessionIds: readonly string[]): void;
+}
+
+/**
+ * The chats of one Bot. The desktop has no `bot.threads.watch`, so the list is
+ * asked for again whenever something says it may have changed, and only while
+ * a page shows it (`activate`): when the page opens, after each reconnect, and
+ * when `bots.changed` reports other activity for the Bot (`refresh`).
+ */
+export class BotThreads {
+  private current: BotThreadsState = { threads: undefined };
+  private readonly listeners = new Set<() => void>();
+  private shown = 0;
+  private fetching = false;
+  /** A change came in while a listing was on its way: that listing may be out of date. */
+  private stale = false;
+
+  constructor(
+    readonly botId: string,
+    private readonly io: BotThreadsIo,
+  ) {}
+
+  getState = (): BotThreadsState => this.current;
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+
+  private commit(change: Partial<BotThreadsState>): void {
+    this.current = { ...this.current, ...change };
+    for (const listener of [...this.listeners]) listener();
+  }
+
+  /** A page is showing the Bot's chats: list them now, and keep them current until `deactivate`. */
+  activate(): void {
+    this.shown += 1;
+    if (!this.fetching) this.refresh();
+  }
+
+  deactivate(): void {
+    this.shown = Math.max(0, this.shown - 1);
+  }
+
+  /** The connection became ready again. */
+  connectionReady(): void {
+    this.refresh();
+  }
+
+  /** List the chats again, if a page is showing them. */
+  refresh(): void {
+    if (this.shown === 0 || !this.io.canRequest()) return;
+    if (this.fetching) {
+      this.stale = true;
+      return;
+    }
+    this.fetching = true;
+    void this.load();
+  }
+
+  private async load(): Promise<void> {
+    try {
+      const result = await this.io.request('bot.threads.list', { bot_id: this.botId });
+      const threads = result.sessions.map(cleanSummary);
+      this.io.listed(threads.map((thread) => thread.session_id));
+      this.commit({ threads, error: undefined });
+    } catch (error) {
+      // The link dropped: the next `connectionReady` asks again.
+      if (!(error instanceof RemoteRpcError && error.code === 'closed')) this.commit({ error: errorMessage(error) });
+    } finally {
+      this.fetching = false;
+      if (this.stale) {
+        this.stale = false;
+        this.refresh();
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // RemoteClient
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface RemoteClientState {
   /** `undefined` until the first list arrives. */
   sessions: readonly RemoteSessionSummary[] | undefined;
+  /**
+   * The Bots whose Remote Control switch is on, as the desktop sent them last.
+   * `undefined` until it has answered; `'unsupported'` when it answered that it
+   * does not know Bots (a version from before them), which is asked again after
+   * every reconnect.
+   */
+  bots: readonly RemoteBotSummary[] | undefined | 'unsupported';
+}
+
+/** The Bots of a client state, none while they are not known or the desktop has none to give. */
+export function knownBots(state: RemoteClientState): readonly RemoteBotSummary[] {
+  return state.bots === undefined || state.bots === 'unsupported' ? [] : state.bots;
 }
 
 function cleanSummary(summary: RemoteSessionSummary): RemoteSessionSummary {
@@ -567,16 +678,38 @@ function cleanSummary(summary: RemoteSessionSummary): RemoteSessionSummary {
   return clean;
 }
 
+function cleanBot(bot: RemoteBotSummary): RemoteBotSummary {
+  return {
+    ...bot,
+    name: displayText(bot.name, 60),
+    description: displayText(bot.description, 160),
+    waiting_threads: typeof bot.waiting_threads === 'number' ? bot.waiting_threads : 0,
+  };
+}
+
+/** What a desktop that has never heard of a method answers: `invalid_params`, "unknown method <name>". */
+function isUnknownMethod(error: unknown): boolean {
+  return error instanceof RemoteRpcError && error.code === 'invalid_params' && error.message.startsWith('unknown method');
+}
+
+/** Whether `bots.changed` shows something in the Bot's chats that its last summary did not. */
+function activityChanged(was: RemoteBotSummary | undefined, now: RemoteBotSummary): boolean {
+  return was === undefined || was.last_activity_at !== now.last_activity_at || was.status !== now.status || was.waiting_threads !== now.waiting_threads;
+}
+
 /**
  * Everything above one connection that the pages share: the list of shared
- * sessions, the per-session controllers (kept for the life of the tab so a
- * session's `(epoch, seq)` survives going back to the list and a reconnect),
- * and the routing of host notifications to them.
+ * sessions, the Bots and their chats, the per-session controllers (kept for the
+ * life of the tab so a session's `(epoch, seq)` survives going back to the list
+ * and a reconnect), and the routing of host notifications to them.
  */
 export class RemoteClient {
-  private current: RemoteClientState = { sessions: undefined };
+  private current: RemoteClientState = { sessions: undefined, bots: undefined };
   private readonly listeners = new Set<() => void>();
   private readonly controllers = new Map<string, SessionController>();
+  private readonly threadStores = new Map<string, BotThreads>();
+  /** The Bot each chat belongs to, for the chats listed to this browser and the ones it started. */
+  private readonly threadBots = new Map<string, string>();
   private readonly clock: Clock;
   private modelsCache: Promise<ModelsListResult> | undefined;
   private readonly offs: Array<() => void> = [];
@@ -625,6 +758,65 @@ export class RemoteClient {
     return controller;
   }
 
+  /** The chats of a Bot, created on first use and kept. A page must `activate` it for it to list anything. */
+  botThreads(botId: string): BotThreads {
+    let store = this.threadStores.get(botId);
+    if (store === undefined) {
+      store = new BotThreads(botId, {
+        request: (method, params, options) => this.connection.request(method, params, options),
+        canRequest: () => this.connection.state.phase === 'ready' && this.current.bots !== 'unsupported',
+        listed: (sessionIds) => {
+          for (const sessionId of sessionIds) this.threadBots.set(sessionId, botId);
+        },
+      });
+      this.threadStores.set(botId, store);
+    }
+    return store;
+  }
+
+  /** The Bot a chat belongs to, if this browser has been told: from a list of the Bot's chats, or by starting the chat. */
+  botOfThread(sessionId: string): string | undefined {
+    return this.threadBots.get(sessionId);
+  }
+
+  /**
+   * Start a new chat of a Bot and resolve to its session id. If the link drops
+   * with the request on it, the desktop may have made the chat already: ask once
+   * more when the link is back, with the same `client_request_id`, which the
+   * desktop answers with the first chat instead of a second.
+   */
+  async createBotThread(botId: string): Promise<string> {
+    if (this.current.bots === 'unsupported') throw new RemoteRpcError('unknown_session', 'this computer does not know Bots');
+    const params = { bot_id: botId, client_request_id: randomId() };
+    let created: BotThreadCreateResult;
+    try {
+      created = await this.connection.request('bot.thread.create', params);
+    } catch (error) {
+      if (!(error instanceof RemoteRpcError && error.code === 'closed')) throw error;
+      await this.untilReady();
+      created = await this.connection.request('bot.thread.create', params);
+    }
+    if (typeof created.session_id !== 'string' || created.session_id.length === 0) throw new RemoteRpcError('internal', 'no session id');
+    this.threadBots.set(created.session_id, botId);
+    return created.session_id;
+  }
+
+  /** Resolve once the connection is ready (now, if it is); reject with `closed` if it is not within {@link RECONNECT_WAIT_MS}. */
+  private untilReady(): Promise<void> {
+    if (this.connection.state.phase === 'ready') return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const stop = this.connection.onReady(() => {
+        this.clock.clearTimeout(timer);
+        stop();
+        resolve();
+      });
+      const timer = this.clock.setTimeout(() => {
+        stop();
+        reject(new RemoteRpcError('closed', 'not connected'));
+      }, RECONNECT_WAIT_MS);
+    });
+  }
+
   listFiles(session_id: string): Promise<FileReceipt[]> { return this.connection.request('file.list', { session_id }).then(result => result.files.map(file => {
     const offer = validateFileOffer(file);
     if (offer.session_id !== session_id || file.ref !== offer.transfer_id) throw new Error('Invalid file receipt');
@@ -650,7 +842,39 @@ export class RemoteClient {
       .request('sessions.watch', {})
       .then((result) => this.commit({ sessions: result.sessions.map(cleanSummary) }))
       .catch(() => undefined);
+    this.watchBots();
+    for (const store of this.threadStores.values()) store.connectionReady();
     for (const controller of this.controllers.values()) controller.connectionReady();
+  }
+
+  /**
+   * Ask for the Bots and to be told when they change. A desktop built before
+   * Bots answers with the unknown-method error: it has none, and nothing more
+   * about Bots is asked of it until the next connection. Any other failure
+   * leaves the list as it was.
+   */
+  private watchBots(): void {
+    this.connection
+      .request('bots.watch', {})
+      .then(
+        (result) => this.setBots(result.bots),
+        (error: unknown) => {
+          if (isUnknownMethod(error)) this.commit({ bots: 'unsupported' });
+        },
+      )
+      .catch(() => undefined);
+  }
+
+  /** Replace the list of Bots; a Bot whose chats a page is showing has them listed again if its activity changed. */
+  private setBots(value: unknown): void {
+    if (!Array.isArray(value)) return;
+    const bots = (value as RemoteBotSummary[]).filter((bot) => typeof bot?.bot_id === 'string').map(cleanBot);
+    const before = knownBots(this.current);
+    this.commit({ bots });
+    for (const [botId, store] of this.threadStores) {
+      const now = bots.find((bot) => bot.bot_id === botId);
+      if (now !== undefined && activityChanged(before.find((bot) => bot.bot_id === botId), now)) store.refresh();
+    }
   }
 
   private route(method: string, params: unknown): void {
@@ -659,6 +883,10 @@ export class RemoteClient {
     if (method === 'sessions.changed') {
       const sessions = body['sessions'];
       if (Array.isArray(sessions)) this.commit({ sessions: (sessions as RemoteSessionSummary[]).map(cleanSummary) });
+      return;
+    }
+    if (method === 'bots.changed') {
+      this.setBots(body['bots']);
       return;
     }
     const sessionId = body['session_id'];

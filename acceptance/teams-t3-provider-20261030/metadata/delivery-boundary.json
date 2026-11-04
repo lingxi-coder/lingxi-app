@@ -1,0 +1,25 @@
+{
+  "scope": "Final product documentation and acceptance evidence; compiled binary source remains the tested commit",
+  "productSourceCommit": "ea59210a827015d0ac316aee393bcb08f22f40f1",
+  "runtimeCommit": "b09033fa446dfdee48e71ea18ca16095b068a353",
+  "finalProductTrackedChangesAfterTest": [
+    "docs/TEAMS.md"
+  ],
+  "productionCodeChangedAfterTest": false,
+  "productSourceManifestComparison": "12 hashes verified against tested Git objects; 11 code/manifests also match current files; current docs status intentionally updated",
+  "testedDocumentationSHA256": "24322d3c58b06c702e1fedcdd5ceb4bc1c3676c2ec8566e49db98319f784cd6d",
+  "finalDocumentationSHA256": "140c14b901bd3a5e2ee0e1a4876432edfca784b235cb29f32d68ea94a2347488",
+  "publicationBranches": [
+    "claude/teams",
+    "codex/teams-runtime"
+  ],
+  "thisDeliveryMergesPushesOrWritesMain": false,
+  "mainObservation": "Other tasks independently advanced main; no global main-unchanged claim",
+  "excludedUntrackedFileHashes": {
+    ".build/.buildSystem_debug": "cd1ba1c9604b794d71cd3cb482cc02e4c16bdea56c361333fabe801a74db2b90",
+    ".build/CACHEDIR.TAG": "61833598201b8d9bb6a18003b6be9fd00ae014cfbd583253c1f23b746bf035d1"
+  },
+  "excludedFilesPreservedAtFinalPreparation": true,
+  "accountAndSigningInputs": "Private Git-ignored local inputs and sessions retained; none included in the publication manifest",
+  "actualNativeMobileScope": "Full iOS Simulator and Android Direct Debug arm64 owned AVD; no physical-device, Store or push-delivery claim"
+}

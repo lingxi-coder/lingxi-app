@@ -1,3 +1,5 @@
+import type { ProviderAccountSnapshot, ProviderAccountRouting } from '../shared/providerAccounts.js';
+import type { RuntimeProviderAccountCredential } from './provider-accounts.js';
 import type {
   AudioCapabilitySnapshotDto,
   AudioOperationIdDto,
@@ -15,8 +17,6 @@ import type { RemotePending, RemotePromptOrigin, RemoteRecord, RemoteTurnState }
 import type { SessionRuntime } from './bridge.js';
 import type { ProcessCommand, listProcessCommands, readProcessCommand } from './bridgeDiscovery.js';
 import { DiagnosticBuffer } from './host-utils.js';
-import type { OpenAiOAuthSession } from './host-utils.js';
-import type { CodexTokenManager } from './codex-tokens.js';
 import type { HostNotifier } from './notifications.js';
 
 export type { HostPermissionRequest } from '../shared/permission.js';
@@ -70,9 +70,9 @@ export interface BridgeLaunchConfig {
   initialProjectRoot?: string;
   configHome?: string;
   globalConfigPath?: string;
-  apiKey?: string;
-  providerCredentials?: Record<string, string>;
-  openaiOAuth?: OpenAiOAuthSession;
+  providerAccounts?: ProviderAccountSnapshot;
+  providerAccountHome?: string;
+  providerAccountCredentials?: Record<string, RuntimeProviderAccountCredential>;
   /** Broker-owned sensitive plugin options, passed only over child stdin. */
   pluginSecrets?: Record<string, Record<string, string>>;
   trusted: boolean;
@@ -82,6 +82,8 @@ export interface BridgeLaunchConfig {
   allowTeamOnboarding?: boolean;
   scheduledController?: boolean;
   remoteControlEnabled?: boolean;
+  /** How long the engine waits for a permission answer from a remote device; its remote default (30 minutes) when absent. */
+  permissionTimeoutSecs?: number;
   model?: string;
   apiBaseUrl?: string;
 }
@@ -93,6 +95,9 @@ export interface BridgeRuntimeVersions {
 }
 
 export interface BridgeManagerOptions {
+  onProviderAccountRouting?: (event: ProviderAccountRouting) => void;
+  renewProviderAccount?: (accountId: string, identityGeneration: number, credentialRevision: number) => Promise<void>;
+  resolveProviderAccounts?: () => Promise<{providerAccounts: ProviderAccountSnapshot; providerAccountCredentials: Record<string, RuntimeProviderAccountCredential>;providerAccountHome?: string} | undefined>;
   /** Actual desktop package version; absent in deterministic test hosts. */
   appVersion?: string;
   getTelemetryConfig?: () => import('./telemetryPolicy.js').DesktopTelemetryConfig;
@@ -146,18 +151,9 @@ export interface BridgeManagerOptions {
    * is a separate `Frame` arm handled by `client.on('permission')` below.
    */
   notifier?: HostNotifier;
-  /** Resolve a broker-owned credential only when this session first selects its provider. */
-  resolveProviderCredential?: (providerId: string) => Promise<string | undefined>;
-  /** The host's current Codex session, refreshed first when about to expire. */
-  resolveOpenAiOAuth?: () => Promise<OpenAiOAuthSession | undefined>;
-  /** An engine's Codex access token expired or was rejected: refresh it. */
-  renewOpenAiOAuth?: () => Promise<OpenAiOAuthSession | undefined>;
-  /** A Codex sign-in made inside an engine, for the host to adopt. */
-  onOpenAiOAuthUpdated?: (session: OpenAiOAuthSession) => Promise<void>;
   /** Internal cache hook used by SessionRuntimeManager; never exposed to renderer IPC. */
   onActivityChanged?: () => void;
   /** Invalidate Electron-main launch material after a credential/config mutation. */
-  invalidateLaunchConfigCache?: () => void;
   onFirstPromptSent?: () => boolean | void;
   /** SECURITY: consulted before a `set_permission_mode: bypassPermissions`
    * command is forwarded to the engine. Must show a blocking acceptance dialog
@@ -166,7 +162,6 @@ export interface BridgeManagerOptions {
   confirmBypassPermissions?: () => Promise<boolean>;
 }
 
-export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
 
 export interface SessionRef {
   projectPath: string;
@@ -187,6 +182,8 @@ export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEvent
 export interface SessionRuntimeSummary {
   projectPath: string;
   sessionId: string;
+  /** Set when the session is a Bot's. It is not a project's session and is listed with its Bot, not with the projects. */
+  botId?: string;
   connection: ConnectionState;
   turnActive: boolean;
   pendingInteractions: number;
@@ -194,18 +191,22 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
-  workspaceSettings?: (projectPath: string) => Promise<WorkspaceLaunchSettings>;
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
+  /** What a session of a working directory is launched with; it is told which session, for settings that belong to the one. */
+  workspaceSettings?: (projectPath: string, ref: SessionRef) => Promise<WorkspaceLaunchSettings>;
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
   onModelSelected?: (ref: SessionRef, model: string) => void;
   getSavedModel?: (ref: SessionRef) => string | undefined;
+  // The owner's last permission mode and Fast mode are preferences of the owner's sessions; asking per session lets a Bot's sessions keep clear of them.
+  getSavedPermissionMode?: (ref: SessionRef) => PermissionModeId | undefined;
+  onPermissionModeSelected?: (ref: SessionRef, mode: PermissionModeId) => void;
+  getSavedFastMode?: (ref: SessionRef) => boolean | undefined;
+  onFastModeSelected?: (ref: SessionRef, enabled: boolean) => void;
   onFirstPromptSent?: (ref: SessionRef) => boolean | void;
   /** Maximum retained runtimes when enough idle sessions are evictable. */
   maxCachedRuntimes?: number;
-  /** The one refresher of the Codex session; every engine is served its access tokens. */
-  codexTokens?: CodexTokenManager;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +218,32 @@ export interface PromptSource {
   origin: RemotePromptOrigin;
   /** The sending device when `origin` is `device`. */
   deviceName?: string;
+  /** The sending Bot when `origin` is `bot`. */
+  fromBotName?: string;
+}
+
+/** How {@link SessionRuntime.runHostTurn} is asked to run a turn. */
+export interface HostTurnOptions {
+  /** Who the prompt shows as coming from; the host's own by default. */
+  source?: PromptSource;
+  /** Aborting it cancels the turn, which then ends as `cancelled`. */
+  signal?: AbortSignal;
+  /** How long a cancelled turn is given to end before it is let go as `cancelled` all the same; ten seconds by default. */
+  cancelGraceMs?: number;
+  /** Called once the engine has been handed the prompt, and not at all when it was not. */
+  onSent?: () => void;
+}
+
+/** How a turn that {@link SessionRuntime.runHostTurn} ran ended. */
+export interface HostTurnResult {
+  /** `failed`: the engine reported an error, or the reply was cut short. */
+  status: 'completed' | 'failed' | 'cancelled';
+  /** The last thing the assistant said in the turn. */
+  text: string;
+  /** What went wrong, when `status` is `failed`. */
+  error?: string;
+  /** What the turn cost, in US dollars, when the engine said. */
+  costUsd?: number;
 }
 
 /**
@@ -230,6 +257,7 @@ export interface PromptJournalEntry {
   text: string;
   origin: RemotePromptOrigin;
   deviceName?: string;
+  fromBotName?: string;
   /** The bytes are kept for the latest entries that have images; an older entry keeps only the media type. */
   images: ReadonlyArray<{ media_type: string; base64?: string }>;
 }
@@ -290,4 +318,6 @@ export interface WorkspaceLaunchSettings {
   environment: Record<string, string>;
   configHome: string;
   globalConfigPath?: string;
+  /** Directories granted to every session of this workspace unless the session carries grants of its own. */
+  additionalDirectories?: readonly string[];
 }

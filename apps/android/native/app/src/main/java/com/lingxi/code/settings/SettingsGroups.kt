@@ -63,7 +63,7 @@ internal data class SettingsGroupEntry(
  */
 private val allEntries = listOf(
     SettingsGroupEntry(SettingsGroup.Models, SettingsRoutes.providerList(ProviderKind.Llm.name), "Models & providers", listOf("model", "llm", "provider", "vision")),
-    SettingsGroupEntry(SettingsGroup.Models, SettingsRoutes.CREDENTIALS, "Provider credentials", listOf("api key", "auth")),
+    SettingsGroupEntry(SettingsGroup.Models, SettingsRoutes.PROVIDER_ACCOUNTS, "Provider credentials", listOf("api key", "auth")),
     SettingsGroupEntry(SettingsGroup.Models, SettingsRoutes.CUSTOM_PROVIDERS, "Custom providers & routing", listOf("providers", "aliases", "fallback", "retry")),
     SettingsGroupEntry(SettingsGroup.Models, SettingsRoutes.providerList(ProviderKind.Search.name), "Web search providers", listOf("search")),
     SettingsGroupEntry(SettingsGroup.Models, SettingsRoutes.providerList(ProviderKind.Fetch.name), "Web fetch providers", listOf("fetch")),

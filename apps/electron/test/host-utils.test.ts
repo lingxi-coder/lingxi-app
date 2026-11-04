@@ -5,10 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  BOT_PERMISSION_TIMEOUT_SECS,
   DiagnosticBuffer,
   MAX_DIAGNOSTICS,
   MAX_PINNED_SESSIONS,
   MAX_PROJECTS,
+  REMOTE_PERMISSION_TIMEOUT_SECS,
   buildBridgeArguments,
   buildBridgeEnvironment,
   buildCredentialEnvelope,
@@ -356,50 +358,48 @@ test('Mod UI Bun resolution uses the packaged sidecar and otherwise only an expl
 
 test('bridge arguments carry trust and stdin intent but never credential material', () => {
   const trusted = buildBridgeArguments({
-    workspace: '/workspace', bridgeDir: '/private/bridge', model: 'model-id', hasApiKey: true, trusted: true,
+    workspace: '/workspace', bridgeDir: '/private/bridge', model: 'model-id', trusted: true,
   });
   assert.deepEqual(trusted, [
     '--cwd', '/workspace', '--bridge-dir', '/private/bridge', '--model', 'model-id',
-    '--api-key-stdin', '--trusted-workspace',
+    '--trusted-workspace',
   ]);
   assert.equal(trusted.some((argument) => argument.includes('credential-value')), false);
-  assert.equal(buildBridgeArguments({ workspace: '/w', bridgeDir: '/b', hasApiKey: false, trusted: false }).includes('--trusted-workspace'), false);
+  assert.equal(buildBridgeArguments({ workspace: '/w', bridgeDir: '/b', trusted: false }).includes('--trusted-workspace'), false);
 });
 
 test('bridge arguments carry the actual desktop version for catalog filtering', () => {
-  const args = buildBridgeArguments({ workspace: '/w', bridgeDir: '/b', hasApiKey: false, trusted: false, appVersion: '0.1.0+desktop.7' });
+  const args = buildBridgeArguments({ workspace: '/w', bridgeDir: '/b', trusted: false, appVersion: '0.1.0+desktop.7' });
   assert.equal(args[args.indexOf('--app-version') + 1], '0.1.0+desktop.7');
   assert.equal(args.includes('--api-key-stdin'), false);
 });
 
 test('private bridge arguments carry explicit local Insights policy without a user CLI switch', () => {
-  const allowed = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, allowInsights: true });
-  const denied = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, allowInsights: false });
+  const allowed = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', trusted: true, allowInsights: true });
+  const denied = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', trusted: true, allowInsights: false });
   assert.deepEqual(allowed.slice(-2), ['--host-insights-policy-gate', 'true']);
   assert.deepEqual(denied.slice(-2), ['--host-insights-policy-gate', 'false']);
-  assert.ok(!buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true }).includes('--host-insights-policy-gate'));
+  assert.ok(!buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', trusted: true }).includes('--host-insights-policy-gate'));
 });
 
 test('private bridge arguments preserve an explicit team-onboarding deny', () => {
-  const allowed = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, allowTeamOnboarding: true });
-  const denied = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, allowTeamOnboarding: false });
+  const allowed = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', trusted: true, allowTeamOnboarding: true });
+  const denied = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', trusted: true, allowTeamOnboarding: false });
   assert.deepEqual(allowed.slice(-2), ['--host-team-onboarding-policy-gate', 'true']);
   assert.deepEqual(denied.slice(-2), ['--host-team-onboarding-policy-gate', 'false']);
-  assert.ok(!buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true }).includes('--host-team-onboarding-policy-gate'));
+  assert.ok(!buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', trusted: true }).includes('--host-team-onboarding-policy-gate'));
 });
 
 test('packaged bridge arguments enforce stdin-only credentials without embedding secrets', () => {
   const packaged = buildBridgeArguments({
     workspace: '/workspace',
     bridgeDir: '/private/bridge',
-    hasApiKey: true,
     trusted: true,
     packagedCredentialBoundary: true,
   });
   assert.deepEqual(packaged, [
     '--cwd', '/workspace',
     '--bridge-dir', '/private/bridge',
-    '--api-key-stdin',
     '--trusted-workspace',
     '--packaged-credential-stdin-only',
   ]);
@@ -407,26 +407,15 @@ test('packaged bridge arguments enforce stdin-only credentials without embedding
 
 test('provider bridge arguments request a JSON credential envelope without embedding keys', () => {
   const args = buildBridgeArguments({
-    workspace: '/workspace', bridgeDir: '/private/bridge', hasApiKey: true,
-    hasCredentialStdin: true, trusted: true, packagedCredentialBoundary: true,
+    workspace: '/workspace', bridgeDir: '/private/bridge', hasCredentialStdin: true, trusted: true, packagedCredentialBoundary: true,
   });
   assert.ok(args.includes('--credential-stdin'));
   assert.equal(args.includes('--api-key-stdin'), false);
   assert.equal(args.join(' ').includes('sk-provider-secret'), false);
 });
 
-test('credential envelope uses the bridge-server snake_case contract', () => {
-  const payload = buildCredentialEnvelope({
-    apiKey: 'anthropic-secret',
-    providerCredentials: { deepseek: 'provider-secret' },
-    pluginSecrets: { 'weather@official': { API_KEY: 'plugin-secret' } },
-  });
-  assert.deepEqual(JSON.parse(payload), {
-    api_key: 'anthropic-secret',
-    provider_keys: { deepseek: 'provider-secret' },
-    plugin_secrets: { 'weather@official': { API_KEY: 'plugin-secret' } },
-  });
-  assert.doesNotMatch(payload, /apiKey|providerKeys|pluginSecrets/);
+test('credential envelope keeps plugin secrets on the private channel', () => {
+  assert.deepEqual(JSON.parse(buildCredentialEnvelope({ pluginSecrets: { 'weather@official': { API_KEY: 'plugin-secret' } } })), { plugin_secrets: { 'weather@official': { API_KEY: 'plugin-secret' } } });
 });
 
 test('diagnostics redact secrets, strip control characters, truncate, and remain bounded', () => {
@@ -622,17 +611,8 @@ test('an unreadable existing settings file disables audio and is preserved on sa
   assert.equal(new SettingsStore(userData).getPublic().audioConfigurationError !== undefined, true);
 });
 
-test('Codex OAuth credentials use only the private stdin envelope', () => {
-  const session = { access_token: 'oauth-access-secret', refresh_token: 'oauth-refresh-secret', expires_at: 123, account_id: 'account', fedramp: false };
-  assert.deepEqual(JSON.parse(buildCredentialEnvelope({ openaiOAuth: session })).openai_oauth, session);
-  const args = buildBridgeArguments({ workspace: '/tmp', bridgeDir: '/tmp/bridge', hasApiKey: false, hasCredentialStdin: true, trusted: true });
-  assert.ok(args.includes('--credential-stdin'));
-  assert.ok(!JSON.stringify(args).includes('oauth-access-secret'));
-  assert.equal(buildBridgeEnvironment({ OPENAI_ACCESS_TOKEN: session.access_token }).OPENAI_ACCESS_TOKEN, undefined);
-});
-
 test('only a controller session asks the engine to run the automation scheduler', () => {
-  const base = { workspace: '/w', bridgeDir: '/w/bridge', hasApiKey: false, trusted: true };
+  const base = { workspace: '/w', bridgeDir: '/w/bridge', trusted: true };
   assert.ok(!buildBridgeArguments(base).includes('--scheduled-controller'));
   assert.ok(!buildBridgeArguments({ ...base, scheduledController: false }).includes('--scheduled-controller'));
   assert.ok(buildBridgeArguments({ ...base, scheduledController: true }).includes('--scheduled-controller'));
@@ -657,9 +637,29 @@ test('old audio configuration and migration markers are discarded on ordinary v4
 
 
 test('remote-capable runtimes wait for phone approvals while ordinary runtimes keep defaults', () => {
-  const base = { workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true };
+  const base = { workspace: '/workspace', bridgeDir: '/bridge', trusted: true };
   const remote = buildBridgeArguments({ ...base, remoteControlEnabled: true });
   assert.deepEqual(remote.slice(-4), ['--permission-timeout-secs', '1800', '--ask-user-question-timeout', 'never']);
   assert.ok(!buildBridgeArguments(base).includes('--permission-timeout-secs'));
   assert.ok(!buildBridgeArguments({ ...base, remoteControlEnabled: true, listSessionsJson: true }).includes('--permission-timeout-secs'));
+});
+
+test('a remote runtime waits half an hour for an answer unless it is told to wait longer, and the longest wait is a day', () => {
+  const base = { workspace: '/workspace', bridgeDir: '/bridge', trusted: true, remoteControlEnabled: true };
+  assert.equal(REMOTE_PERMISSION_TIMEOUT_SECS, 1800);
+  assert.equal(BOT_PERMISSION_TIMEOUT_SECS, 86_400, 'the most bridge-server accepts');
+  assert.deepEqual(buildBridgeArguments(base).slice(-4), ['--permission-timeout-secs', '1800', '--ask-user-question-timeout', 'never']);
+  assert.deepEqual(buildBridgeArguments({ ...base, permissionTimeoutSecs: BOT_PERMISSION_TIMEOUT_SECS }).slice(-4), ['--permission-timeout-secs', '86400', '--ask-user-question-timeout', 'never'], 'the question timeout stays as it is');
+  const longer = buildBridgeArguments({ ...base, permissionTimeoutSecs: BOT_PERMISSION_TIMEOUT_SECS });
+  assert.equal(longer.filter((argument) => argument === '--permission-timeout-secs').length, 1, 'the one flag, not a second one');
+  assert.deepEqual(longer.filter((argument) => argument === '--ask-user-question-timeout').length, 1);
+});
+
+test('a timeout is only a remote runtime\'s: without Remote Control the engine keeps its own defaults, whatever the timeout says', () => {
+  const base = { workspace: '/workspace', bridgeDir: '/bridge', trusted: true, permissionTimeoutSecs: BOT_PERMISSION_TIMEOUT_SECS };
+  for (const config of [base, { ...base, remoteControlEnabled: false }, { ...base, remoteControlEnabled: true, listSessionsJson: true }]) {
+    const args = buildBridgeArguments(config);
+    assert.ok(!args.includes('--permission-timeout-secs'), JSON.stringify(config));
+    assert.ok(!args.includes('--ask-user-question-timeout'), JSON.stringify(config));
+  }
 });

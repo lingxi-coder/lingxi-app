@@ -372,7 +372,7 @@ struct SettingsHost: View {
     private func saveProviderAndClose(_ providerID: String) {
         Task {
             await providerRepository.applyChanges(providerID)
-            store.llmProviders = providerRepository.legacyProviders()
+            store.llmProviders = providerRepository.settingsProviders()
             guard providerRepository.state(for: providerID)?.connectionState != .failed else {
                 return
             }

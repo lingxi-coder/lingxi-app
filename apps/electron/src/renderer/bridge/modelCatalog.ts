@@ -1,3 +1,4 @@
+import { logicalProviderId, type ProviderAccountModelAvailability } from '../../shared/providerAccounts';
 import type { ModelDetailsDto, ProviderModelCatalogEntryDto } from '@lingxi/bridge-client';
 import { formatTokens } from '../formatTokens';
 import { providerById } from '../../shared/providers';
@@ -32,7 +33,7 @@ export interface VisibleProviderCatalog {
 }
 
 export interface ModelBillingGroup {
-  readonly label: 'Paid' | 'Free' | null;
+  readonly label: 'Paid' | 'Free' | 'subscription' | 'api_key' | null;
   readonly models: readonly ModelReference[];
 }
 
@@ -99,26 +100,19 @@ export async function waitForModelSelection(
   });
 }
 
-/**
- * Resolve a model click without coupling the picker to credential storage.
- * Unknown provider prefixes are engine-authoritative and remain selectable;
- * only providers with a desktop credential flow can open Settings.
- */
-export function resolveModelSelection(
-  reference: string,
-  credentials?: readonly { providerId: string; configured: boolean }[],
-): ModelSelectionDecision {
+/** Eligibility is projected by the shared runtime, never inferred from provider configuration. */
+export function accountModelAvailability(reference: string, rows?: readonly ProviderAccountModelAvailability[]): ProviderAccountModelAvailability | undefined {
+  const model = modelReference(reference);
+  const profile = model.providerId === 'builtin' ? 'anthropic' : model.providerId;
+  return rows?.find(row => (!profile || row.executionBindingId === profile) && row.modelId === model.requestModel);
+}
+export function resolveModelSelection(reference: string, availability?: readonly ProviderAccountModelAvailability[]): ModelSelectionDecision {
   const parsed = modelReference(reference);
-  if (!parsed.providerId) return { kind: 'select', reference };
-
-  const providerId = parsed.providerId === 'builtin' ? 'anthropic' : parsed.providerId;
-  if (!providerById(providerId)) return { kind: 'select', reference };
-  if (!credentials) return { kind: 'loading', providerId, reference };
-
-  const metadata = credentials.find((entry) => entry.providerId === providerId);
-  return metadata?.configured
-    ? { kind: 'select', reference }
-    : { kind: 'connect', providerId, reference };
+  const providerId = parsed.providerId === 'builtin' ? 'anthropic' : parsed.providerId ?? '';
+  if (!availability) return { kind: 'loading', providerId, reference };
+  const row = accountModelAvailability(reference, availability);
+  return row?.eligibleAccountIds.length ? { kind: 'select', reference }
+    : { kind: 'connect', providerId: providerId || row?.executionBindingId || '', reference };
 }
 
 function titleCase(value: string): string {
@@ -193,7 +187,17 @@ export function filterModelGroups(
 export function modelBillingGroups(
   group: ModelProviderGroup,
   details: readonly ModelCatalogDetail[] = [],
+  availability?: readonly ProviderAccountModelAvailability[],
 ): readonly ModelBillingGroup[] {
+  if (group.providerId === 'openai') {
+    const subscription = group.models.filter(model => model.providerId === 'openai-chatgpt');
+    const api = group.models.filter(model => model.providerId !== 'openai-chatgpt');
+    const bindings: ModelBillingGroup[] = [
+      ...(subscription.length ? [{ label: 'subscription' as const, models: subscription }] : []),
+      ...(api.length ? [{ label: 'api_key' as const, models: api }] : []),
+    ];
+    return bindings.sort((a, b) => Number(b.models.some(model => accountModelAvailability(model.reference, availability)?.eligibleAccountIds.length)) - Number(a.models.some(model => accountModelAvailability(model.reference, availability)?.eligibleAccountIds.length)));
+  }
   if (group.providerId !== 'openrouter') return [{ label: null, models: group.models }];
 
   const free: ModelReference[] = [];
@@ -221,18 +225,19 @@ export function groupModelReferences(references: readonly string[]): readonly Mo
     seen.add(reference);
 
     const model = modelReference(reference);
-    const existing = groups.get(model.providerId);
+    const groupId = model.providerId ? logicalProviderId(model.providerId) : null;
+    const existing = groups.get(groupId);
     if (existing) {
-      groups.set(model.providerId, { ...existing, models: [...existing.models, model] });
+      groups.set(groupId, { ...existing, models: [...existing.models, model] });
       continue;
     }
 
-    const provider = model.providerId ? providerById(model.providerId) : undefined;
+    const provider = groupId ? providerById(groupId) : undefined;
     const providerLabel = model.providerId === 'builtin'
       ? 'Anthropic (Built-in)'
       : provider?.label ?? (model.providerId ? titleCase(model.providerId) : 'Models');
-    groups.set(model.providerId, {
-      providerId: model.providerId,
+    groups.set(groupId, {
+      providerId: groupId,
       providerLabel,
       models: [model],
     });
@@ -245,7 +250,7 @@ export function providerVisibilityConfig(
   settings: ModelPickerVisibilitySettings | undefined,
   providerId: string,
 ): ProviderModelPickerVisibility | undefined {
-  return settings?.[providerId];
+  return settings?.[logicalProviderId(providerId)];
 }
 
 export function visibleModelsForProvider(
@@ -287,6 +292,7 @@ export function filterVisibleModelReferences(
   references: readonly string[],
   providers: readonly ProviderModelCatalogEntryDto[] | undefined,
   settings: ModelPickerVisibilitySettings | undefined,
+  accountAvailability?: readonly ProviderAccountModelAvailability[],
 ): readonly string[] {
   const catalog = providers ?? [];
   if (catalog.length === 0 && (!settings || Object.keys(settings).length === 0)) return references;
@@ -299,6 +305,10 @@ export function filterVisibleModelReferences(
     if (!parsed.providerId) return true;
     if (visible.has(reference)) return true;
     const config = providerVisibilityConfig(settings, parsed.providerId);
+    if (accountModelAvailability(reference, accountAvailability)?.eligibleAccountIds.length) {
+      return config?.showInModelPicker !== false
+        && (config?.visibleModelIds === undefined || config.visibleModelIds.includes(parsed.requestModel));
+    }
     if (!providerIds.has(parsed.providerId)) {
       if (!config) return true;
       if (config.showInModelPicker === false) return false;

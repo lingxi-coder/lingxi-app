@@ -8,38 +8,8 @@ import { buildBridgeArguments, buildCredentialEnvelope } from '../src/main/host-
 import {
   createMacCredentialBrokerClient,
   deletePluginSecretsForPlugin,
-  resolveProviderCredential,
-  resolveProviderIdForModel,
-  resolveModelCredentialProviderIds,
-  resolveProfileCredentialIds,
-  configuredCredentialProviderIds,
-  fusionCredentialSelection,
-  resolveFusionCredentialProviderIds,
-  resolveProviderTestCredential,
-  resolveSessionLaunchCredentials,
   resolveSessionLaunchPluginSecrets,
-  SessionLaunchCache,
 } from '../src/main/credential-broker';
-
-test('session launch cache single-flights repeated runtime startup reads and invalidates', async () => {
-  let reads = 0;
-  const broker = { resolve: async () => { reads += 1; await new Promise((resolve) => setTimeout(resolve, 2)); return 'cached-secret'; } };
-  const cache = new SessionLaunchCache(60_000);
-
-  const [first, second] = await Promise.all([
-    cache.credentials('openrouter/model', broker),
-    cache.credentials('openrouter/model', broker),
-  ]);
-  assert.deepEqual(first, { providerCredentials: { openrouter: 'cached-secret' } });
-  assert.deepEqual(second, first);
-  assert.equal(reads, 1);
-  await cache.credentials('openrouter/model', broker);
-  assert.equal(reads, 1);
-
-  cache.invalidate();
-  await cache.credentials('openrouter/model', broker);
-  assert.equal(reads, 2);
-});
 
 test('plugin secrets use an independent broker service and launch envelope map', async () => {
   const requests: Array<Record<string, unknown>> = [];
@@ -115,201 +85,6 @@ test('plugin secret cleanup aborts if the registry guard changes before deleting
   assert.deepEqual(result, { deletedCount: 0, failedCount: 0, aborted: true });
   assert.deepEqual(deleted, []);
   assert.equal(guardCalls, 2, 'the post-list and per-key guards prevent broker deletes');
-});
-
-test('OpenRouter nested model references resolve to the OpenRouter credential', async () => {
-  const resolved: string[] = [];
-  const credential = await resolveProviderCredential('openrouter', {
-    environment: { OPENROUTER_API_KEY: '' },
-    credentialBroker: {
-      health: async () => ({ protocolVersion: 1, buildVersion: 'test' }),
-      listStatus: async () => [],
-      preview: async () => ({ providerId: 'openrouter', configured: true }),
-      resolve: async (providerId) => { resolved.push(providerId); return 'or-secret'; },
-      set: async () => ({ providerId: 'openrouter', configured: true }),
-      delete: async () => undefined,
-    },
-  });
-
-  assert.equal(resolveProviderIdForModel('openrouter/minimax/minimax-m3:free'), 'openrouter');
-  assert.equal(credential, 'or-secret');
-  assert.deepEqual(resolved, ['openrouter']);
-});
-
-test('session launch resolves only the current provider from the broker', async () => {
-  const resolved: string[] = [];
-  const broker = createMacCredentialBrokerClient({
-    transport: {
-      request: async (request) => {
-        if ((request as { op: string }).op === 'health') {
-          return { ok: true, protocol_version: 1, build_version: 'test' };
-        }
-        if ((request as { op: string }).op === 'retrieve') {
-          resolved.push((request as { account: string }).account);
-          return {
-            ok: true,
-            protocol_version: 1,
-            present: true,
-            payload: 'or-secret',
-          };
-        }
-        throw new Error(`unexpected request: ${JSON.stringify(request)}`);
-      },
-    },
-  });
-
-  const launch = await resolveSessionLaunchCredentials('openrouter/openai/gpt-5.4', {
-    credentialBroker: broker,
-    environment: {
-      OPENAI_API_KEY: 'must-not-be-read',
-      OPENROUTER_API_KEY: '',
-    },
-  });
-
-  assert.deepEqual(resolved, ['openrouter']);
-  assert.deepEqual(launch, {
-    providerCredentials: { openrouter: 'or-secret' },
-  });
-});
-
-test('session launch resolves a normalized custom provider prefix', async () => {
-  const resolved: string[] = [];
-  const launch = await resolveSessionLaunchCredentials('my-provider/model-a', {
-    environment: {},
-    credentialBroker: {
-      health: async () => ({ protocolVersion: 1, buildVersion: 'test' }),
-      listStatus: async () => [],
-      preview: async () => ({ providerId: 'my-provider', configured: true, maskedValue: '••••cret' }),
-      resolve: async (providerId) => { resolved.push(providerId); return 'custom-secret'; },
-      set: async () => ({ providerId: 'my-provider', configured: true }),
-      delete: async () => undefined,
-    },
-  });
-  assert.deepEqual(resolved, ['my-provider']);
-  assert.deepEqual(launch, { providerCredentials: { 'my-provider': 'custom-secret' } });
-});
-
-test('session launch prefers environment credentials and maps Claude references to Anthropic', async () => {
-  const broker = createMacCredentialBrokerClient({
-    transport: {
-      request: async (request) => {
-        if ((request as { op: string }).op === 'health') {
-          return { ok: true, protocol_version: 1, build_version: 'test' };
-        }
-        if ((request as { op: string }).op === 'retrieve') {
-          throw new Error('broker resolve should not run when the env already provides the key');
-        }
-        throw new Error(`unexpected request: ${JSON.stringify(request)}`);
-      },
-    },
-  });
-
-  const builtIn = await resolveSessionLaunchCredentials('builtin/claude-sonnet-5', {
-    credentialBroker: broker,
-    environment: { ANTHROPIC_API_KEY: 'env-anthropic' },
-  });
-  const unqualified = await resolveSessionLaunchCredentials('claude-opus-5', {
-    credentialBroker: broker,
-    environment: { ANTHROPIC_API_KEY: 'env-anthropic' },
-  });
-
-  assert.deepEqual(builtIn, { providerCredentials: { anthropic: 'env-anthropic' } });
-  assert.deepEqual(unqualified, { providerCredentials: { anthropic: 'env-anthropic' } });
-});
-
-test('launch cache retries a credential read invalidated by a concurrent save or delete', async () => {
-  let finish!: (value: string | undefined) => void;
-  let reads = 0;
-  let current: string | undefined = 'replacement';
-  const broker = { resolve: () => ++reads === 1
-    ? new Promise<string | undefined>((resolve) => { finish = resolve; })
-    : Promise.resolve(current) };
-  const cache = new SessionLaunchCache();
-  const loading = cache.credentials('deepseek/model', broker);
-  cache.invalidate();
-  finish('retired');
-  assert.deepEqual(await loading, { providerCredentials: { deepseek: 'replacement' } });
-  current = undefined;
-  cache.invalidate();
-  assert.deepEqual(await cache.credentials('deepseek/model', broker), {});
-});
-
-test('stored Anthropic keys use the mutable provider-key launch envelope', async () => {
-  const launch = await resolveSessionLaunchCredentials('anthropic/claude-sonnet-5', {
-    environment: {}, credentialBroker: { resolve: async () => 'stored-anthropic' },
-  });
-  const envelope = JSON.parse(buildCredentialEnvelope(launch));
-  assert.equal(envelope.api_key, null);
-  assert.deepEqual(envelope.provider_keys, { anthropic: 'stored-anthropic' });
-  const args = buildBridgeArguments({
-    workspace: '/workspace', bridgeDir: '/bridge', trusted: true,
-    hasApiKey: !!launch.apiKey, hasCredentialStdin: !!launch.providerCredentials,
-  });
-  assert.equal(args.includes('--credential-stdin'), true);
-  assert.equal(args.includes('--api-key-stdin'), false);
-});
-
-test('model aliases and qualified connections hydrate referenced provider keys and same-group failover slots', () => {
-  const settings = {
-    providers: {
-      custom: {
-        models: [{ id: 'm', aliases: ['fast'] }], credentialIds: ['inherited-key'],
-        connections: [
-          { id: 'cn', credentialIds: ['cn-one', 'cn-two'] },
-          { id: 'us' },
-        ],
-      },
-      backup: { models: ['b'], credentialIds: ['backup-key'] },
-      unrelated: { models: ['u'], credentialIds: ['unrelated-key'] },
-    },
-    routing: { aliases: { picked: 'custom:cn#0/m' }, fallback: { m: ['backup/b'] } },
-  };
-  assert.deepEqual(resolveProfileCredentialIds('custom:cn#0', settings), ['cn-one', 'cn-two', 'inherited-key']);
-  for (const reference of ['fast', 'custom/m', 'custom:cn#0/m', 'picked']) {
-    assert.deepEqual(resolveModelCredentialProviderIds(reference, settings), ['cn-one', 'cn-two', 'inherited-key', 'backup-key']);
-  }
-  assert.deepEqual(resolveFusionCredentialProviderIds(settings, {
-    config: { enabled: true, panelModels: [{ profile: 'custom:cn#0', model: 'm' }] },
-  }), ['cn-one', 'cn-two', 'inherited-key'], 'Fusion loads exact chosen groups without ordinary routing fallback');
-  assert.deepEqual(resolveProfileCredentialIds('custom:missing', settings), []);
-  assert.deepEqual(configuredCredentialProviderIds(settings), [
-    'custom', 'cn-one', 'cn-two', 'inherited-key', 'backup', 'backup-key', 'unrelated', 'unrelated-key',
-  ]);
-});
-
-test('connection-level model overrides hydrate the selected group even without top-level models', () => {
-  const settings = { providers: { custom: { connections: [
-    { id: 'cn', models: ['cn-model'], credentialIds: ['cn-key'] },
-    { id: 'us', models: ['us-model'] },
-  ] } } };
-  assert.deepEqual(resolveModelCredentialProviderIds('custom:cn#0/cn-model', settings), ['cn-key', 'custom']);
-  assert.deepEqual(resolveModelCredentialProviderIds('us-model', settings), ['cn-key', 'custom']);
-});
-
-test('provider connection tests resolve only the selected broker credential', async () => {
-  const resolved: string[] = [];
-  const broker = {
-    health: async () => ({ protocolVersion: 1, buildVersion: 'test' }),
-    listStatus: async () => [],
-    preview: async (providerId: string) => ({ providerId, configured: true }),
-    resolve: async (providerId: string) => {
-      resolved.push(providerId);
-      return 'stored-test-key';
-    },
-    set: async (providerId: string) => ({ providerId, configured: true }),
-    delete: async () => undefined,
-  };
-
-  assert.equal(
-    await resolveProviderTestCredential('deepseek', undefined, broker),
-    'stored-test-key',
-  );
-  assert.deepEqual(resolved, ['deepseek']);
-  assert.equal(
-    await resolveProviderTestCredential('deepseek', 'draft-test-key', broker),
-    'draft-test-key',
-  );
-  assert.deepEqual(resolved, ['deepseek']);
 });
 
 test('provider status and preview use the channel-scoped generic broker protocol', async () => {
@@ -396,37 +171,6 @@ test('unpackaged macOS refuses to execute an unverified helper path', async () =
     binaryPath: '/tmp/untrusted/lingxi-credential-client',
   });
   await assert.rejects(broker!.health(), /Apple Development signed package/);
-});
-
-test('custom aliases resolve only the selected profile and its model fallback chain', () => {
-  const settings = {
-    providers: {
-      primary: { models: [{ id: 'model', aliases: ['fast', 'vendor/wire'] }] },
-      backup: { models: ['backup-model'] },
-      unrelated: { models: ['other-model'] },
-    },
-    routing: { aliases: { boss: 'primary/model' }, fallback: { model: ['backup/backup-model', 'missing/model'] } },
-  };
-  for (const model of ['boss', 'fast', 'model', 'primary/model', 'primary/fast', 'vendor/wire']) {
-    assert.deepEqual(resolveModelCredentialProviderIds(model, settings), ['primary', 'backup']);
-  }
-  assert.deepEqual(resolveModelCredentialProviderIds('unknown', settings), []);
-  assert.deepEqual(resolveModelCredentialProviderIds('unrelated/other-model', settings), ['unrelated']);
-  assert.deepEqual(resolveModelCredentialProviderIds('fast', { providers: { ...settings.providers, duplicate: { models: [{ id: 'second', aliases: ['fast'] }] } } }), []);
-});
-
-test('Fusion credential routes require opt-in and use exact profiles without ordinary fallbacks', () => {
-  const settings = {
-    providers: { custom: { models: [{ id: 'real-model', aliases: ['fast'] }] }, backup: { models: ['backup-model'] } },
-    routing: { fallback: { 'real-model': ['backup/backup-model'] } },
-    fusion: { strategies: [{ id: 'unselected', name: 'Unselected', config: { panelModels: [{ profile: 'openai-chatgpt', model: 'gpt' }] } }] },
-  };
-  const selection = { config: { enabled: false, panelModels: [{ profile: 'custom', model: 'real-model' }], analystModel: { profile: 'kimi', model: 'kimi-k3' } } };
-  assert.deepEqual(resolveFusionCredentialProviderIds(settings, selection), []);
-  assert.deepEqual(resolveFusionCredentialProviderIds(settings, selection, true), ['custom', 'kimi']);
-  selection.config.enabled = true;
-  assert.deepEqual(resolveFusionCredentialProviderIds(settings, selection), ['custom', 'kimi']);
-  assert.deepEqual(resolveFusionCredentialProviderIds({}, { config: { enabled: true, panelModels: [null, 'broken', { profile: 42 }] } }), []);
 });
 
 
@@ -529,46 +273,6 @@ test('credential helper accepts a response exactly at its raw byte limit with a 
   assert.deepEqual(await broker!.health(), { protocolVersion: 1, buildVersion: 'tëst' });
 });
 
-
-test('Fusion credential views apply preset counts and max-panel without mutating the snapshot revision', () => {
-  const selection = { reference: { scope: 'user', id: 'review' }, revision: 'original-revision', config: {
-    enabled: true, panelModels: [
-      { profile: 'deepseek', model: 'a' }, { profile: 'kimi', model: 'b' },
-      { profile: 'openai-chatgpt', model: 'c' }, { profile: 'openai', model: 'd' },
-    ], analystModel: { profile: 'deepseek', model: 'judge' }, qualityPanelCount: 4,
-  } };
-  const fast = fusionCredentialSelection(selection, { preset: 'fast' });
-  assert.deepEqual(resolveFusionCredentialProviderIds({}, fast, true), ['deepseek', 'kimi']);
-  assert.equal(fast.revision, 'original-revision');
-  assert.equal(selection.config.panelModels.length, 4);
-  assert.notEqual(fast.config, selection.config);
-  const capped = fusionCredentialSelection(selection, { maxPanel: 2 });
-  assert.deepEqual(resolveFusionCredentialProviderIds({}, capped, true), ['deepseek', 'kimi']);
-  const required = fusionCredentialSelection({ config: { ...selection.config, minSuccessfulPanels: 3 } }, { preset: 'fast' });
-  assert.equal(required.config.panelModels.length, 3);
-  assert.deepEqual(resolveFusionCredentialProviderIds({}, fusionCredentialSelection({ config: { ...selection.config, preset: 'fast' } }), true), ['deepseek', 'kimi']);
-});
-
-test('Fusion explicit models replace the roster and bare ids inherit the captured parent profile', () => {
-  const settings = { providers: { primary: { models: [{ id: 'actual', aliases: ['fast'] }] }, alternate: { models: ['other'] } }, routing: { aliases: { boss: 'alternate/other' } } };
-  const snapshot = { config: { enabled: true, panelModels: [{ profile: 'openai-chatgpt', model: 'not-selected' }], analystModel: { profile: 'deepseek', model: 'judge' } } };
-  const inherited = fusionCredentialSelection(snapshot, { models: ['fast', 'boss'] }, 'primary');
-  assert.deepEqual(inherited.config.panelModels, [{ profile: 'primary', model: 'fast' }, { profile: 'primary', model: 'boss' }]);
-  assert.deepEqual(resolveFusionCredentialProviderIds(settings, inherited, true), ['primary', 'deepseek']);
-  assert.throws(() => fusionCredentialSelection(snapshot, { models: ['fast', 'boss'] }), /conversation provider is unavailable/);
-  const explicit = fusionCredentialSelection(snapshot, { models: ['openai-chatgpt:chosen', 'kimi:kimi-k3'], preset: 'fast', maxPanel: 2 });
-  assert.deepEqual(resolveFusionCredentialProviderIds({}, explicit, true), ['openai-chatgpt', 'kimi', 'deepseek']);
-  assert.deepEqual(snapshot.config.panelModels, [{ profile: 'openai-chatgpt', model: 'not-selected' }]);
-});
-
-test('Fusion configured pairs trim whitespace and cannot be shadowed by another profile model id', () => {
-  const settings = { providers: { unrelated: { models: ['deepseek/a'] } }, routing: { fallback: { a: ['openai-chatgpt/unused'] } } };
-  const selection = { config: { panelModels: [{ profile: ' deepseek ', model: ' a ' }], analystModel: { profile: ' kimi ', model: ' judge ' } } };
-  assert.deepEqual(resolveFusionCredentialProviderIds(settings, selection, true), ['deepseek', 'kimi']);
-  assert.deepEqual(resolveFusionCredentialProviderIds({ providers: { claude: { models: ['custom'] } } },
-    { config: { panelModels: [{ profile: 'claude', model: 'custom' }] } }, true), ['claude']);
-});
-
 test('repeated Anthropic status and preview queries never send credential mutations', async () => {
   const requests: string[] = [];
   const broker = createMacCredentialBrokerClient({
@@ -622,17 +326,4 @@ test('cold credential helper may finish after the former process deadline but re
   t.mock.timers.tick(90_000);
   await rejection;
   assert.equal(killed, true, 'a stalled helper must still be terminated');
-});
-
-
-test('a newly published official provider resolves only its declared model credential route', () => {
-  const directory = [{
-    provider_id: 'new-cloud', display_name: 'New Cloud',
-    models: [{ model_id: 'new-model', display_name: 'New model' }],
-    definition: { base_url: 'https://example.com/v1', protocol: 'open_ai', auth: 'bearer',
-      credential_env: 'NEW_CLOUD_KEY', default_model_id: 'new-model', description: '' },
-  }];
-  assert.deepEqual(resolveModelCredentialProviderIds('new-cloud/new-model', {}, directory), ['new-cloud']);
-  assert.deepEqual(resolveModelCredentialProviderIds('new-cloud/undeclared', {}, directory), []);
-  assert.deepEqual(resolveModelCredentialProviderIds('another-cloud/new-model', {}, directory), []);
 });

@@ -1,0 +1,22 @@
+{
+  "pid": 82913,
+  "command": [
+    "adb",
+    "-s",
+    "adb-RFCY419G0ZY-0PklpP._adb-tls-connect._tcp",
+    "shell",
+    "am",
+    "instrument",
+    "-w",
+    "-e",
+    "class",
+    "com.lingxi.code.remote.RemoteBotsUiTest",
+    "com.lingxi.code.debug.test/androidx.test.runner.AndroidJUnitRunner"
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/desktop-bot/lingxi-app",
+  "floor_gib": 4,
+  "started_at": 1793246398.152912,
+  "exit_code": 0,
+  "stopped_for_disk": false,
+  "free_gib": 8.448
+}

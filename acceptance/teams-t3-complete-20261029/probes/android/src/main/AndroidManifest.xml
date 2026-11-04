@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-permission android:name="android.permission.INTERNET" />
+  <!-- Cleartext is allowed only in this distinct demo-emulator application. -->
+  <application android:name="com.lingxi.code.teams.ProbeApplication" android:label="Teams T3 feature harness" android:usesCleartextTraffic="true" android:allowBackup="false">
+    <activity android:name="com.lingxi.code.teams.ProbeActivity" android:exported="true">
+      <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+    </activity>
+  </application>
+</manifest>

@@ -14,14 +14,34 @@ Bilingual system and SDK documentation for the current working tree. Generated f
 ## Use LingXi
 
 - [Command line](using-cli.md) — Talk to LingXi in the terminal, print one answer, or reopen a session.
+- [Sessions](sessions.md) — Continue the latest session, pick an older one, or keep working from a copy.
+- [Common tasks](tasks.md) — Read a repository, change a bug, or run tests, and choose how much LingXi may do first.
 - [Desktop](using-desktop.md) — The Mac desktop app runs LingXi on that computer. Other desktop systems are not downloadable yet.
 - [iPhone and Android](using-mobile.md) — The phone apps are internal betas. Store links are not published on this site.
 - [Permissions](permissions.md) — Choose whether LingXi asks before it uses a tool. The permission mode is separate from an operating-system sandbox.
+
+## Customize
+
+- [Project instructions](instructions.md) — Tell LingXi how this repository works. The files are ordinary Markdown on disk.
+- [Skills](skills.md) — A skill is a directory with a SKILL.md file. LingXi lists it under the directory name.
+- [Subagents](subagents.md) — Define a subagent with a Markdown file, or ask LingXi to write one. /agents is not a manager.
+- [Hooks](hooks.md) — A hook is a command, HTTP call, or MCP tool that runs when a session event happens.
+- [MCP](mcp.md) — Connect LingXi to an MCP server with lingxi mcp. A project server waits until you approve it.
+- [Plugins](plugins.md) — Install a plugin from a marketplace, or keep one in your skills directory.
+
+## Reference
+
+- [Settings files](settings.md) — User settings live in the config directory. Project settings live in the repository. They do not merge the same way for every key.
+- [Environment variables](environment.md) — A short list of variables you set yourself. LingXi also sets variables for a plugin or a background session; leave those alone.
+- [CLI flags](cli-flags.md) — Flags for everyday launches. lingxi --help lists everything this build accepts, including flags this page leaves out.
+- [Slash commands](slash-commands.md) — Commands you type inside a session. /help lists the ones this build will run.
 
 ## On your devices
 
 - [Models](models.md) — Pick a model for this session. LingXi keeps the choice in your config directory.
 - [Remote control](remote-control.md) — Open a session on your own computer from a signed-in browser. The computer has to approve the browser first.
+- [On-device execution](mobile-execution.md) — On iPhone and Android, commands run in a Linux environment on that phone.
+- [Remote, bots, and apps](related-products.md) — A signed-in browser can open a computer that is already running LingXi, including its bots, sessions, and local apps.
 - [Help](help.md) — Check the local setup, then write to LingXi support. Privacy requests use the same address.
 
 ## API

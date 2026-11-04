@@ -4,7 +4,7 @@ import { Brand } from '../components/Brand';
 import { IconClose, IconSearch } from '../components/Icons';
 import { RouteLink } from '../components/RouteLink';
 import { ThemeToggle } from '../components/ThemeToggle';
-import { docGroups, docPages } from '../data/docs';
+import { docGroups, docPages, userDocGroupIds } from '../data/docs';
 
 interface DocsLayoutProps extends PropsWithChildren {
   locale: Locale;
@@ -25,11 +25,10 @@ export function DocsLayout({ children, locale, pageId, theme, onThemeToggle, onL
   const t = (en: string, zh: string) => locale === 'zh' ? zh : en;
   const activeGroup = docPages.find((page) => page.id === pageId)?.group ?? 'guide';
   const isReference = pageId === 'api-reference';
-  const userGroupIds = ['guide', 'use', 'product'];
-  const isUserGuide = userGroupIds.includes(activeGroup);
+  const isUserGuide = userDocGroupIds.includes(activeGroup);
   const isInternals = activeGroup === 'system' || activeGroup === 'operations';
   const visibleGroups = docGroups.filter((group) => {
-    if (isUserGuide) return userGroupIds.includes(group.id);
+    if (isUserGuide) return userDocGroupIds.includes(group.id);
     if (isInternals) return group.id === 'system' || group.id === 'operations';
     if (isReference) return group.id === 'start';
     return group.id === activeGroup;

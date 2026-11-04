@@ -66,18 +66,18 @@ Android store／full 标志描述编译能力，运行时仍须获得权限。iO
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app/tree/main/apps/ios/native/scripts/build-xcframework.sh)
 
-- [lingxi-app/apps/ios/native/scripts/build-xcframework.sh](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/ios/native/scripts/build-xcframework.sh) — 已提交源码 (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/ios/native/scripts/build-linux-runtime.sh](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/ios/native/scripts/build-linux-runtime.sh) — 已提交源码 (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/ios/native/scripts/verify-linux-runtime.sh](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/ios/native/scripts/verify-linux-runtime.sh) — 已提交源码 (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/ios/native/project.yml](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/ios/native/project.yml) — 已提交源码 (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/android/native/scripts/build-jni.sh](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/android/native/scripts/build-jni.sh) — 已提交源码 (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/android/native/app/build.gradle.kts](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/android/native/app/build.gradle.kts) — 已提交源码 (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/android/ffi/uniffi.toml](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/android/ffi/uniffi.toml) — 已提交源码 (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/ios/ffi/uniffi.toml](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/ios/ffi/uniffi.toml) — 已提交源码 (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/electron/scripts/package-macos-flare.sh](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/electron/scripts/package-macos-flare.sh) — 已提交源码 (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
+- [lingxi-app/apps/ios/native/scripts/build-xcframework.sh](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/ios/native/scripts/build-xcframework.sh) — 已提交源码 (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/ios/native/scripts/build-linux-runtime.sh](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/ios/native/scripts/build-linux-runtime.sh) — 已提交源码 (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/ios/native/scripts/verify-linux-runtime.sh](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/ios/native/scripts/verify-linux-runtime.sh) — 已提交源码 (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/ios/native/project.yml](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/ios/native/project.yml) — 已提交源码 (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/android/native/scripts/build-jni.sh](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/android/native/scripts/build-jni.sh) — 已提交源码 (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/android/native/app/build.gradle.kts](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/android/native/app/build.gradle.kts) — 已提交源码 (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/android/ffi/uniffi.toml](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/android/ffi/uniffi.toml) — 已提交源码 (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/ios/ffi/uniffi.toml](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/ios/ffi/uniffi.toml) — 已提交源码 (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/electron/scripts/package-macos-flare.sh](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/electron/scripts/package-macos-flare.sh) — 已提交源码 (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
 - [mobile-linux-runtime/scripts/checks/check-resource-contracts.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/scripts/checks/check-resource-contracts.sh) — 已提交源码 (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
 
-- lingxi-app: HEAD 4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87; 所据文件指纹 sha256:40b76956c72557655c95a9de37a4fed9d6afad2dc25a52556454f55b9fc0a60a
+- lingxi-app: HEAD fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64; 所据文件指纹 sha256:a5bfcf25a49c613b97f21fc4507c7f97a198e934f9d09398cb8794e7d86f49e3
 - mobile-linux-runtime: HEAD 25cf8a273bcd572b9be48e18fc9807e01dcdfce1; 所据文件指纹 sha256:3f654be245e2810979441677e37d079538d03bf98bfb68f98d054e4cc79d84df; 产品固定版本 43382a20161e371a0a31526412164b3d35545ab5
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

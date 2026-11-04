@@ -11,7 +11,7 @@ interface DocsSearchProps {
   focus?: 'product' | 'sdk';
 }
 
-const productSuggestions = ['install', 'first-session', 'accounts', 'using-cli', 'permissions', 'help'];
+const productSuggestions = ['install', 'first-session', 'sessions', 'skills', 'settings', 'help'];
 const sdkSuggestions = ['harness', 'llm-client', 'mobile-linux', 'bridge-client', 'api-reference', 'overview'];
 
 export function DocsSearch({ locale, open, onClose, focus = 'product' }: DocsSearchProps) {

@@ -4,7 +4,7 @@ import { RouteLink } from '../components/RouteLink';
 import { DocCodeBlock } from '../components/DocCodeBlock';
 import { DocsSearch } from '../components/DocsSearch';
 import { DocsLayout } from '../layouts/DocsLayout';
-import { docGroups, docMarkdown, docPages, getDocPage } from '../data/docs';
+import { docGroups, docMarkdown, docPages, getDocPage, userDocGroupIds } from '../data/docs';
 import { DocPage, DocSection } from '../data/docs/types';
 import { docsBaseline, resolveDocSources, type ResolvedDocSource } from '../data/docs/sources';
 import { Locale, Region } from '../utils/locale';
@@ -138,7 +138,7 @@ function ApiReference({ locale }: { locale: Locale }) {
 function DocArticle({ page, locale }: { page: DocPage; locale: Locale }) {
   const [copyStatus, setCopyStatus] = useState('');
   const t = (en: string, zh: string) => locale === 'zh' ? zh : en;
-  const userGuide = page.group === 'guide' || page.group === 'use' || page.group === 'product';
+  const userGuide = userDocGroupIds.includes(page.group);
   const index = docPages.findIndex((candidate) => candidate.id === page.id);
   const previous = docPages[index - 1];
   const next = docPages[index + 1];
@@ -183,6 +183,6 @@ export function DocsPage(props: DocsPageProps) {
     return () => window.cancelAnimationFrame(frame);
   }, [page.id]);
   const tocItems = page.sections.map((section) => ({ id: section.id, label: section.title[locale] }));
-  const userGuide = page.group === 'guide' || page.group === 'use' || page.group === 'product';
+  const userGuide = userDocGroupIds.includes(page.group);
   return <DocsLayout {...props} pageId={page.id} tocItems={tocItems} onSearch={() => setSearchOpen(true)}><DocArticle key={page.id} page={page} locale={locale} /><DocsSearch locale={locale} focus={userGuide ? 'product' : 'sdk'} open={searchOpen} onClose={() => setSearchOpen(false)} /></DocsLayout>;
 }

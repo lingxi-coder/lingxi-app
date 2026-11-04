@@ -64,12 +64,12 @@ export const guidePages: DocPage[] = [
         t('LingXi reads LINGXI.md at the project root, .lingxi/LINGXI.md, and LINGXI.local.md. Your personal copy lives at ~/.lingxi/LINGXI.md. Type /init in a session to create a project LINGXI.md.', '灵犀读取项目根目录的 LINGXI.md、.lingxi/LINGXI.md 和 LINGXI.local.md。你自己的那份在 ~/.lingxi/LINGXI.md。在会话里输入 /init 可以创建项目的 LINGXI.md。'),
         t('When the project has none of those files, the default setting reads AGENTS.md or .lingxi/AGENTS.md instead. A project that already has a LINGXI.md file does not also load AGENTS.md under that default.', '项目里没有这些文件时，默认改为读取 AGENTS.md 或 .lingxi/AGENTS.md。项目里已经有 LINGXI.md 时，这个默认设置不会再同时加载 AGENTS.md。'),
         t('If a LINGXI.md file imports something outside the project, LingXi asks before reading it.', '如果 LINGXI.md 引用了项目以外的文件，灵犀会先询问再读取。'),
-      ] },
+      ], links: [{ label: t('Project instructions', '项目说明'), href: '/docs/instructions' }] },
       { id: 'resume', title: t('Come back to a session', '回到一个会话'), paragraphs: [
         t('Use --continue for the latest session in this directory. Use --resume to pick one, or pass its id. Add --fork-session to continue from that history under a new session id.', '用 --continue 打开当前目录里最近的会话。用 --resume 选择一个会话，也可以直接写上它的 id。加上 --fork-session 会沿用那段历史，但使用新的会话 id。'),
       ], code: [
         { label: t('Continue or resume', '继续或恢复'), language: 'shell', code: 'lingxi --continue\nlingxi --resume\nlingxi --resume SESSION_ID' },
-      ] },
+      ], links: [{ label: t('Sessions', '会话'), href: '/docs/sessions' }] },
       { id: 'config-home', title: t('Where settings live', '设置放在哪里'), paragraphs: [
         t('The config directory is $LINGXI_CONFIG_DIR when that variable is set, including when it is set to an empty value. Otherwise it is ~/.lingxi. Session settings are in settings.json inside that directory. /doctor prints the config directory it is using.', '设置了 LINGXI_CONFIG_DIR 时，配置目录就是它的值，即使这个值是空的。否则配置目录是 ~/.lingxi。会话设置写在该目录的 settings.json 里。/doctor 会打印当前使用的配置目录。'),
       ] },
@@ -140,11 +140,13 @@ export const usePages: DocPage[] = [
         ],
       }], links: [
         { label: t('First session', '第一次会话'), href: '/docs/first-session' },
+        { label: t('Sessions', '会话'), href: '/docs/sessions' },
         { label: t('Permissions', '权限'), href: '/docs/permissions' },
+        { label: t('CLI flags', '命令行参数'), href: '/docs/cli-flags' },
       ] },
       { id: 'slash', title: t('Inside the session', '会话里'), paragraphs: [
         t('Type / to see commands. /init creates LINGXI.md. /model changes the model. /memory lists the instruction files loaded for this session. /doctor shows the version, config directory, working directory, and MCP connection counts.', '输入 / 查看命令。/init 创建 LINGXI.md。/model 切换模型。/memory 列出这次会话加载的说明文件。/doctor 显示版本、配置目录、工作目录和 MCP 连接数量。'),
-      ] },
+      ], links: [{ label: t('Slash commands', '斜杠命令'), href: '/docs/slash-commands' }] },
     ],
   },
   {
@@ -182,7 +184,10 @@ export const usePages: DocPage[] = [
       ], links: [{ label: t('Download page', '下载页'), href: '/download' }] },
       { id: 'on-device', title: t('What the phone app is', '手机应用是什么'), paragraphs: [
         t('The phone app is a LingXi client on that device. It is not a remote view of a cloud virtual machine. Embedding the on-device Linux environment into another app is covered by the Mobile Linux SDK.', '手机应用是这台设备上的灵犀客户端，不是去看一台云端虚拟机。把设备上的 Linux 环境嵌进另一个应用，见 Mobile Linux SDK。'),
-      ], links: [{ label: t('Mobile Linux SDK', 'Mobile Linux SDK'), href: '/docs/mobile-linux' }] },
+      ], links: [
+        { label: t('On-device execution', '在手机上执行'), href: '/docs/mobile-execution' },
+        { label: t('Mobile Linux SDK', 'Mobile Linux SDK'), href: '/docs/mobile-linux' },
+      ] },
     ],
   },
   {
@@ -260,7 +265,7 @@ export const productPages: DocPage[] = [
       { id: 'direct', title: t('The browser talks to your computer', '浏览器直接连接你的电脑'), paragraphs: [
         t('Remote control lists your computers and opens one session at a time. The browser connects to the desktop app. The computer must be on, online, and running LingXi with remote control enabled.', '远控列出你的电脑，一次打开一个会话。浏览器连接的是桌面应用。电脑需要开机、在线，并且灵犀正在运行且已开启远程控制。'),
         t('Private browsing may be unable to keep the pairing. Forgetting a computer in the browser does not remove it from the desktop app. Remove it in the desktop settings as well.', '无痕浏览可能无法保留配对。在浏览器里忘记一台电脑，不会把它从桌面应用里删掉。还要在桌面版设置里移除。'),
-      ], note: t('This connects you to a computer where you already run LingXi. It does not start a cloud virtual machine.', '这是连接到一台已经在运行灵犀的电脑，不会因此启动一台云端虚拟机。') },
+      ], note: t('This connects you to a computer where you already run LingXi. The browser page is the remote control documented here. lingxi remote-control exits unimplemented, and --remote-control does not open this page.', '这是连接到一台已经在运行灵犀的电脑。这里记录的远控是这个浏览器页面。lingxi remote-control 会以未实现退出，--remote-control 也不会打开这个页面。') },
     ],
   },
   {

@@ -80,17 +80,17 @@ Verification method: Environment validation
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app/tree/main/apps/electron/src/main/bridge.ts)
 
-- [lingxi-app/apps/electron/src/main/index.ts](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/electron/src/main/index.ts) — Committed source (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/electron/src/main/bridge.ts](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/electron/src/main/bridge.ts) — Committed source (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/electron/src/main/bridgeDiscovery.ts](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/electron/src/main/bridgeDiscovery.ts) — Committed source (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/electron/src/main/validation.ts](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/electron/src/main/validation.ts) — Committed source (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/electron/src/main/host-utils.ts](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/electron/src/main/host-utils.ts) — Committed source (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/electron/src/preload/index.ts](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/electron/src/preload/index.ts) — Committed source (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/electron/src/preload/event-replay.ts](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/electron/src/preload/event-replay.ts) — Committed source (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/electron/src/renderer/bridge/useBridge.ts](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/electron/src/renderer/bridge/useBridge.ts) — Committed source (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/electron/scripts/package-macos-flare.sh](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/electron/scripts/package-macos-flare.sh) — Committed source (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
-- [lingxi-app/apps/electron/package.json](https://github.com/lingxi-coder/lingxi-app/blob/4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87/apps/electron/package.json) — Committed source (4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87)
+- [lingxi-app/apps/electron/src/main/index.ts](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/electron/src/main/index.ts) — Committed source (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/electron/src/main/bridge.ts](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/electron/src/main/bridge.ts) — Committed source (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/electron/src/main/bridgeDiscovery.ts](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/electron/src/main/bridgeDiscovery.ts) — Committed source (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/electron/src/main/validation.ts](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/electron/src/main/validation.ts) — Committed source (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/electron/src/main/host-utils.ts](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/electron/src/main/host-utils.ts) — Committed source (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/electron/src/preload/index.ts](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/electron/src/preload/index.ts) — Committed source (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/electron/src/preload/event-replay.ts](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/electron/src/preload/event-replay.ts) — Committed source (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/electron/src/renderer/bridge/useBridge.ts](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/electron/src/renderer/bridge/useBridge.ts) — Committed source (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/electron/scripts/package-macos-flare.sh](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/electron/scripts/package-macos-flare.sh) — Committed source (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
+- [lingxi-app/apps/electron/package.json](https://github.com/lingxi-coder/lingxi-app/blob/fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64/apps/electron/package.json) — Committed source (fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64)
 
-- lingxi-app: HEAD 4c38c5f194b7fd0864d18e2f85e0ae4bd83f7e87; Referenced input fingerprint sha256:40b76956c72557655c95a9de37a4fed9d6afad2dc25a52556454f55b9fc0a60a
+- lingxi-app: HEAD fbc7cc304c20cf4122e53636fd9a3eec7fd9bc64; Referenced input fingerprint sha256:a5bfcf25a49c613b97f21fc4507c7f97a198e934f9d09398cb8794e7d86f49e3
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

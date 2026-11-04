@@ -14,14 +14,34 @@
 ## 使用
 
 - [命令行](using-cli.md) — 在终端里和灵犀对话，打印一次回答，或重新打开会话。
+- [会话](sessions.md) — 继续最近的会话，挑选更早的一次，或从一份副本接着做。
+- [常见任务](tasks.md) — 阅读仓库、修改一个 bug 或运行测试，并先决定灵犀可以做到哪一步。
 - [桌面](using-desktop.md) — Mac 桌面应用在那台电脑上运行灵犀。其他桌面系统还不能下载。
 - [iPhone 与 Android](using-mobile.md) — 手机应用是内部测试版。本站还没有公布商店链接。
 - [权限](permissions.md) — 选择灵犀使用工具之前是否先询问你。权限模式和操作系统沙箱是两件事。
+
+## 定制
+
+- [项目说明](instructions.md) — 告诉灵犀这个仓库如何工作。这些文件就是磁盘上的普通 Markdown。
+- [Skills](skills.md) — 一个 skill 是含有 SKILL.md 的目录。灵犀用目录名来显示它。
+- [子 Agent](subagents.md) — 用 Markdown 文件定义子 Agent，或让灵犀写一份。/agents 不是管理界面。
+- [Hooks](hooks.md) — Hook 是在会话事件发生时运行的命令、HTTP 调用或 MCP 工具。
+- [MCP](mcp.md) — 用 lingxi mcp 把灵犀接到 MCP 服务器。项目里的服务器要等你批准后才会连接。
+- [插件](plugins.md) — 从市场安装插件，或把插件放在 skills 目录里。
+
+## 参考
+
+- [设置文件](settings.md) — 用户设置在配置目录里。项目设置在仓库里。并不是每个键都按同一种方式合并。
+- [环境变量](environment.md) — 一份你自己会设置的变量清单。灵犀还会为插件或后台会话设置变量，那些不用自己导出。
+- [命令行参数](cli-flags.md) — 日常启动会用到的参数。lingxi --help 列出这个构建接受的全部参数，包括本页没有展开的那些。
+- [斜杠命令](slash-commands.md) — 在会话里输入的命令。/help 列出这个构建会运行的那些。
 
 ## 在你的设备上
 
 - [模型](models.md) — 为这次会话选择模型。灵犀把选择记在你的配置目录里。
 - [远控](remote-control.md) — 用已登录的浏览器打开你自己电脑上的会话。电脑需要先允许这个浏览器。
+- [在手机上执行](mobile-execution.md) — 在 iPhone 和 Android 上，命令运行在这台手机里的 Linux 环境中。
+- [远控、Bot 和应用](related-products.md) — 已登录的浏览器可以打开一台已经在运行灵犀的电脑，包括它的 Bot、会话和本地应用。
 - [帮助](help.md) — 先检查本机环境，再写信给灵犀支持。隐私请求使用同一个地址。
 
 ## API

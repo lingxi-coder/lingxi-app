@@ -9,11 +9,17 @@ import { llmServicePages } from './llm-services';
 import { platformPages } from './platforms';
 import { agentWorkflowPages } from './agent-workflows';
 import { guidePages, productPages, usePages } from './guide';
+import { customizePages, extraProductPages, handbookReferencePages, sessionPages } from './handbook';
 export { docMarkdown } from './markdown';
+
+/** Product handbook groups. SDK and operations pages stay outside this list. */
+export const userDocGroupIds: Array<DocPage['group']> = ['guide', 'use', 'customize', 'reference', 'product'];
 
 export const docGroups: Array<{ id: DocPage['group']; title: DocText }> = [
   { id: 'guide', title: { en: 'Get started', zh: '开始' } },
   { id: 'use', title: { en: 'Use LingXi', zh: '使用' } },
+  { id: 'customize', title: { en: 'Customize', zh: '定制' } },
+  { id: 'reference', title: { en: 'Reference', zh: '参考' } },
   { id: 'product', title: { en: 'On your devices', zh: '在你的设备上' } },
   { id: 'start', title: { en: 'API', zh: 'API' } },
   { id: 'harness', title: { en: 'Harness Runtime', zh: 'Harness Runtime' } },
@@ -44,6 +50,15 @@ const overview: DocPage = {
       { label: { en: 'Permissions', zh: '权限' }, href: '/docs/permissions' },
       { label: { en: 'Remote control', zh: '远控' }, href: '/docs/remote-control' },
       { label: { en: 'Help', zh: '帮助' }, href: '/docs/help' },
+    ] },
+    { id: 'make-it-yours', title: { en: 'Make it yours', zh: '按你的项目来' }, paragraphs: [{ en: 'Write project instructions, add a skill or an MCP server, and look up the settings and commands this build accepts.', zh: '写项目说明，添加 skill 或 MCP 服务器，并查阅这个构建接受的设置和命令。' }], links: [
+      { label: { en: 'Sessions', zh: '会话' }, href: '/docs/sessions' },
+      { label: { en: 'Common tasks', zh: '常见任务' }, href: '/docs/tasks' },
+      { label: { en: 'Project instructions', zh: '项目说明' }, href: '/docs/instructions' },
+      { label: { en: 'Skills', zh: 'Skills' }, href: '/docs/skills' },
+      { label: { en: 'MCP', zh: 'MCP' }, href: '/docs/mcp' },
+      { label: { en: 'Settings files', zh: '设置文件' }, href: '/docs/settings' },
+      { label: { en: 'Slash commands', zh: '斜杠命令' }, href: '/docs/slash-commands' },
     ] },
     { id: 'sdk-map', title: { en: 'At a glance', zh: '能力一览' }, paragraphs: [{ en: 'Three independent SDK repositories, plus the TypeScript bridge and native host integration in the product repository. The API index links byte-identical committed files to their exact revision and marks changed files as working-tree sources.', zh: '三个独立 SDK 仓库，以及产品仓库中的 TypeScript Bridge 和原生宿主集成。API 索引为与提交一致的文件提供精确版本链接，并将修改文件标记为工作树源码。' }], tables: [{ headers: [{ en: 'SDK / integration', zh: 'SDK / 集成' }, { en: 'Responsibility', zh: '职责' }, { en: 'Entry points', zh: '入口' }], rows: [
       [{ en: 'Harness Runtime', zh: 'Harness Runtime' }, { en: 'Agent loop, sessions, tools, permissions and lifecycle', zh: 'Agent 循环、会话、工具、权限与生命周期' }, { en: 'Rust facade; desktop/mobile/headless', zh: 'Rust 门面；desktop/mobile/headless' }],
@@ -109,7 +124,12 @@ const reference: DocPage = {
   ],
 };
 
-export const docPages: DocPage[] = [overview, ...guidePages, ...usePages, ...productPages, reference, ...harnessPages, ...agentWorkflowPages, ...llmPages, ...mobilePages, ...bridgePages, ...runtimeSystemPages, ...llmServicePages, ...platformPages, ...operationsPages];
+const cliPage = usePages.filter((page) => page.id === 'using-cli');
+const useAfterCli = usePages.filter((page) => page.id !== 'using-cli');
+const productBeforeHelp = productPages.filter((page) => page.id !== 'help');
+const helpPage = productPages.filter((page) => page.id === 'help');
+
+export const docPages: DocPage[] = [overview, ...guidePages, ...cliPage, ...sessionPages, ...useAfterCli, ...customizePages, ...handbookReferencePages, ...productBeforeHelp, ...extraProductPages, ...helpPage, reference, ...harnessPages, ...agentWorkflowPages, ...llmPages, ...mobilePages, ...bridgePages, ...runtimeSystemPages, ...llmServicePages, ...platformPages, ...operationsPages];
 
 export function getDocPage(id: string): DocPage | undefined {
   return docPages.find((page) => page.id === id);

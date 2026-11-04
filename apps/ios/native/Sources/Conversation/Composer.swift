@@ -62,6 +62,8 @@ struct Composer: View {
     var promptSuggestionSourceCodeUnits: [UInt16]? = nil
     var promptSuggestionNotice: String? = nil
     var suggestionTurnKey: String = ""
+    var historySessionKey: String = ""
+    var historyMessages: [String] = []
     var onSuggestionFeedback: (String) -> Void = { _ in }
     @State private var shownSuggestionKey: String?
     @State private var rejectedSuggestionKey: String?
@@ -159,6 +161,8 @@ struct Composer: View {
         promptSuggestionSourceCodeUnits: [UInt16]? = nil,
         promptSuggestionNotice: String? = nil,
         suggestionTurnKey: String = "",
+        historySessionKey: String = "",
+        historyMessages: [String] = [],
         onSuggestionFeedback: @escaping (String) -> Void = { _ in },
         slashCommands: [ConversationSlashCommand] = [],
         slashCommandsLoaded: Bool = false,
@@ -222,6 +226,8 @@ struct Composer: View {
         self.promptSuggestionSourceCodeUnits = promptSuggestionSourceCodeUnits
         self.promptSuggestionNotice = promptSuggestionNotice
         self.suggestionTurnKey = suggestionTurnKey
+        self.historySessionKey = historySessionKey
+        self.historyMessages = historyMessages
         self.onSuggestionFeedback = onSuggestionFeedback
         self.slashCommands = slashCommands
         self.slashCommandsLoaded = slashCommandsLoaded
@@ -287,7 +293,9 @@ struct Composer: View {
                         return SlashCommandMatcher.argumentHint(for: text, catalog: slashCommands, cursor: cursor)
                     },
                     onSubmit: send,
-                    onAcceptSuggestion: visibleSuggestion == nil ? nil : acceptSuggestion
+                    onAcceptSuggestion: visibleSuggestion == nil ? nil : acceptSuggestion,
+                    historySessionKey: historySessionKey,
+                    historyMessages: historyMessages
                 )
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .onChange(of: Array(draft.utf16)) { _, newDisplayCodeUnits in

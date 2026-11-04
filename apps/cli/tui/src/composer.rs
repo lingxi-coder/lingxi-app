@@ -8,7 +8,7 @@
 //!
 //! Multi-line: `Enter` submits, a modified `Enter` (Alt/Shift) inserts a
 //! newline. `Up`/`Down` move the cursor between lines, and recall history only
-//! when already on the first/last line — the standard CLI composer feel.
+//! from an empty buffer or an unedited recalled entry at a text boundary.
 //!
 //! Rendering lives in the separate [`ComposerView`] (the model above stays
 //! backend-neutral): a [`Renderable`] that draws codex's borderless shape (a
@@ -820,9 +820,14 @@ impl Composer {
 
     /// `Up`: move the cursor to the previous VISUAL row preserving the display
     /// column (sticky across shorter lines), or recall the previous history
-    /// entry when already on the first row. Falls back to logical-line
+    /// entry from an empty draft or unedited recall at either text boundary.
+    /// Falls back to logical-line
     /// movement before the first render (codex `move_cursor_up`).
     pub fn up(&mut self) {
+        if self.can_recall_history() {
+            self.history_prev();
+            return;
+        }
         if let Some(rows) = self.visual_rows() {
             let idx = row_index(&rows, self.cursor);
             if idx == 0 {
@@ -846,9 +851,13 @@ impl Composer {
 
     /// `Down`: move the cursor to the next VISUAL row preserving the display
     /// column (sticky across shorter lines), or recall the next history entry
-    /// when already on the last row. Falls back to logical-line movement
+    /// from unedited recall at either text boundary. Falls back to logical-line movement
     /// before the first render (codex `move_cursor_down`).
     pub fn down(&mut self) {
+        if self.can_recall_history() {
+            self.history_next();
+            return;
+        }
         if let Some(rows) = self.visual_rows() {
             let idx = row_index(&rows, self.cursor);
             if idx + 1 >= rows.len() {
@@ -909,9 +918,15 @@ impl Composer {
             .expect("composer display is derived from its exact source units")
     }
 
+    fn can_recall_history(&self) -> bool {
+        !self.has_selection()
+            && (self.chars.is_empty()
+                || (self.browse.is_some() && (self.cursor == 0 || self.cursor == self.chars.len())))
+    }
+
     /// Recall the previous (older) history entry.
     fn history_prev(&mut self) {
-        if self.history.is_empty() {
+        if self.history.is_empty() || !self.can_recall_history() {
             return;
         }
         let next = match self.browse {
@@ -927,6 +942,9 @@ impl Composer {
 
     /// Recall the next (newer) history entry, or restore the live buffer.
     fn history_next(&mut self) {
+        if !self.can_recall_history() {
+            return;
+        }
         match self.browse {
             None => {}
             Some(i) if i + 1 < self.history.len() => self.load_history(i + 1),
@@ -1302,7 +1320,7 @@ mod tests {
     }
 
     #[test]
-    fn down_returns_to_live_stash() {
+    fn live_draft_is_not_replaced_by_history() {
         let mut c = Composer::default();
         for ch in "old".chars() {
             c.insert(ch);
@@ -1311,9 +1329,9 @@ mod tests {
         for ch in "draft".chars() {
             c.insert(ch);
         }
-        c.up(); // browse "old", stashing "draft"
-        assert_eq!(c.text(), "old");
-        c.down(); // restore the live draft
+        c.up(); // Ordinary drafts retain cursor movement, without history recall.
+        assert_eq!(c.text(), "draft");
+        c.down();
         assert_eq!(c.text(), "draft");
     }
 
@@ -1327,8 +1345,31 @@ mod tests {
         c.up(); // recall "abc"
         c.insert('!'); // edit → becomes live
         assert_eq!(c.text(), "abc!");
+        c.up(); // editing exits recall, including the older direction
+        assert_eq!(c.text(), "abc!");
         c.down(); // no live stash to restore; stays put
         assert_eq!(c.text(), "abc!");
+    }
+
+    #[test]
+    fn recalled_multiline_history_navigates_only_at_text_boundaries() {
+        let mut c = Composer::default();
+        c.seed_history(vec!["old".into(), "one\ntwo".into(), "latest".into()]);
+        c.up();
+        c.up();
+        assert_eq!(c.text(), "one\ntwo");
+        c.move_left();
+        c.up(); // Interior cursor moves within the text.
+        assert_eq!(c.text(), "one\ntwo");
+        c.cursor = 0;
+        c.up();
+        assert_eq!(c.text(), "old");
+        c.down();
+        assert_eq!(c.text(), "one\ntwo");
+        c.down();
+        assert_eq!(c.text(), "latest");
+        c.down();
+        assert!(c.text().is_empty());
     }
 
     #[test]

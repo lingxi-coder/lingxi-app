@@ -4,22 +4,29 @@
 
 [英文目录](../en/README.md)
 
-## 开始使用
+## 开始
 
-- [SDK 与开发者工具](overview.md) — 用灵犀构建你的应用。从模型调用、Agent 编排，到移动端 Linux 运行时，选择适合你的 SDK，开始创造。
+- [灵犀](overview.md) — 灵犀是运行在你正在使用的电脑和手机上的个人 Agent。这些页面说明如何安装、开始会话、选择模型，以及它能做什么。
+- [安装灵犀](install.md) — 查看今天可以安装的灵犀应用，以及命令行工具的名称。
+- [第一次会话](first-session.md) — 在项目里打开灵犀，确认文件夹，并查看说明与设置的保存位置。
+- [模型与 API key](accounts.md) — 接入你要使用的模型服务。密钥保存在这台电脑的凭据存储里。
+
+## 使用
+
+- [命令行](using-cli.md) — 在终端里和灵犀对话，打印一次回答，或重新打开会话。
+- [桌面](using-desktop.md) — Mac 桌面应用在那台电脑上运行灵犀。其他桌面系统还不能下载。
+- [iPhone 与 Android](using-mobile.md) — 手机应用是内部测试版。本站还没有公布商店链接。
+- [权限](permissions.md) — 选择灵犀使用工具之前是否先询问你。权限模式和操作系统沙箱是两件事。
+
+## 在你的设备上
+
+- [模型](models.md) — 为这次会话选择模型。灵犀把选择记在你的配置目录里。
+- [远控](remote-control.md) — 用已登录的浏览器打开你自己电脑上的会话。电脑需要先允许这个浏览器。
+- [帮助](help.md) — 先检查本机环境，再写信给灵犀支持。隐私请求使用同一个地址。
+
+## API
+
 - [API 参考](api-reference.md) — 按任务找到推荐 API，跟随完整集成指南，再检索对应的公开接口声明。
-
-## 系统机制
-
-- [Agent 执行与恢复](agent-execution.md) — 追踪已准入轮次从宿主输入，到模型请求、流式工具执行及持久化终态的全过程。
-- [配置、凭据与隔离](configuration-security.md) — 追踪设置来源，明确模型路由、授权、凭据存储与操作系统隔离的宿主职责。
-- [会话标识与持久化存储](session-storage.md) — 理解 JSONL 图、稳定 UUID、冷恢复、分支及上下文压缩与对话存储回收的区别。
-- [工具、Skills、Hooks、MCP 与 LSP](extensions-lifecycle.md) — 经可信注册表发现扩展，并在激活、更新、调用和清理过程中保持权限归属。
-- [子 Agent 与后台任务](agents-background.md) — 区分前台与脱离前台工作中的 Agent 池准入、任务归属、邮箱交付与终态发布。
-- [Cron、Workflow 与 Fusion](automation-workflows-fusion.md) — 理解计划任务、脚本 Agent 编排及多模型证据工作的实际执行路径。
-- [附件、音频与实时宿主](multimodal-host.md) — 经显式供应商能力与原生资源负责人路由多模态输入和音频。
-- [内联可视化集成](runtime-visualization.md) — 发布不可变可视化 revision，并在 Electron、Android 与 iOS 中经同一授权服务挂载。
-- [系统架构与责任边界](system-overview.md) — 理解产品宿主、共享 Agent 运行时、模型 SDK 和本地执行层的关系，以及各层的责任与实现边界。
 
 ## Harness Runtime
 
@@ -67,6 +74,18 @@
 - [CLI、TUI 与无界面宿主](cli-tui.md) — 使用产品命令行、区分终端与 print 模式，并在保留运行时准入的前提下集成确定输出。
 - [Web · SDK 官网与 UI 原型](web-product.md) — 当前浏览器应用发布 SDK 文档，并在未连接运行时后端的情况下展示账号／控制台 UI。
 - [原生构建、绑定与发布验收](platform-builds.md) — 构建匹配的 Rust／原生产物、选择分发变体，并区分编译、模拟器与实体设备验收。
+
+## 系统机制
+
+- [Agent 执行与恢复](agent-execution.md) — 追踪已准入轮次从宿主输入，到模型请求、流式工具执行及持久化终态的全过程。
+- [配置、凭据与隔离](configuration-security.md) — 追踪设置来源，明确模型路由、授权、凭据存储与操作系统隔离的宿主职责。
+- [会话标识与持久化存储](session-storage.md) — 理解 JSONL 图、稳定 UUID、冷恢复、分支及上下文压缩与对话存储回收的区别。
+- [工具、Skills、Hooks、MCP 与 LSP](extensions-lifecycle.md) — 经可信注册表发现扩展，并在激活、更新、调用和清理过程中保持权限归属。
+- [子 Agent 与后台任务](agents-background.md) — 区分前台与脱离前台工作中的 Agent 池准入、任务归属、邮箱交付与终态发布。
+- [Cron、Workflow 与 Fusion](automation-workflows-fusion.md) — 理解计划任务、脚本 Agent 编排及多模型证据工作的实际执行路径。
+- [附件、音频与实时宿主](multimodal-host.md) — 经显式供应商能力与原生资源负责人路由多模态输入和音频。
+- [内联可视化集成](runtime-visualization.md) — 发布不可变可视化 revision，并在 Electron、Android 与 iOS 中经同一授权服务挂载。
+- [系统架构与责任边界](system-overview.md) — 理解产品宿主、共享 Agent 运行时、模型 SDK 和本地执行层的关系，以及各层的责任与实现边界。
 
 ## 开发与运维
 

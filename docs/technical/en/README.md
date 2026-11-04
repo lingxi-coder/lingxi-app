@@ -6,20 +6,27 @@ Bilingual system and SDK documentation for the current working tree. Generated f
 
 ## Get started
 
-- [SDKs & libraries](overview.md) — Build with LingXi. Connect models, orchestrate agents, and bring a Linux runtime to mobile — with a toolkit that fits your application.
+- [LingXi](overview.md) — LingXi is a personal agent for the computer and phone you already use. These pages explain how to install it, start a session, choose a model, and decide what it may do.
+- [Install LingXi](install.md) — See which LingXi apps you can install today, and how the command-line tool is named.
+- [Your first session](first-session.md) — Open LingXi in a project, confirm the folder, and see where instructions and settings are stored.
+- [Models and API keys](accounts.md) — Connect the model provider you want to use. Keys stay in the credential store on this computer.
+
+## Use LingXi
+
+- [Command line](using-cli.md) — Talk to LingXi in the terminal, print one answer, or reopen a session.
+- [Desktop](using-desktop.md) — The Mac desktop app runs LingXi on that computer. Other desktop systems are not downloadable yet.
+- [iPhone and Android](using-mobile.md) — The phone apps are internal betas. Store links are not published on this site.
+- [Permissions](permissions.md) — Choose whether LingXi asks before it uses a tool. The permission mode is separate from an operating-system sandbox.
+
+## On your devices
+
+- [Models](models.md) — Pick a model for this session. LingXi keeps the choice in your config directory.
+- [Remote control](remote-control.md) — Open a session on your own computer from a signed-in browser. The computer has to approve the browser first.
+- [Help](help.md) — Check the local setup, then write to LingXi support. Privacy requests use the same address.
+
+## API
+
 - [API reference](api-reference.md) — Find the API for your task, follow a complete integration guide, and search the underlying public declarations.
-
-## System internals
-
-- [Agent execution and recovery](agent-execution.md) — Follow one admitted turn from host input to model requests, streamed tool execution and a durable terminal state.
-- [Configuration, credentials and isolation](configuration-security.md) — Trace settings provenance and keep model routing, authorization, credential storage and OS isolation as explicit host responsibilities.
-- [Session identity and durable storage](session-storage.md) — Understand JSONL graphs, stable UUIDs, cold restoration, forks and the difference between context compaction and transcript reclamation.
-- [Tools, skills, hooks, MCP and LSP](extensions-lifecycle.md) — Discover extensions through trusted registries and retain authority across activation, refresh, invocation and teardown.
-- [Subagents and background tasks](agents-background.md) — Separate agent-pool admission, task ownership, mailbox delivery and terminal publication across foreground and detached work.
-- [Cron, Workflow and Fusion](automation-workflows-fusion.md) — Understand the live execution paths for schedules, scripted agent orchestration and evidence-based multi-model work.
-- [Attachments, audio and realtime hosts](multimodal-host.md) — Route multimodal input and audio through explicit provider capability and native resource owners.
-- [Inline visualization integration](runtime-visualization.md) — Publish immutable visualization revisions and mount them through one shared authorized service on Electron, Android and iOS.
-- [System architecture & ownership](system-overview.md) — Follow the product hosts, shared Agent runtime, model SDK and local execution layer, with explicit ownership and implementation boundaries.
 
 ## Harness Runtime
 
@@ -67,6 +74,18 @@ Bilingual system and SDK documentation for the current working tree. Generated f
 - [CLI, TUI and headless hosts](cli-tui.md) — Use the product command line, distinguish terminal and print modes, and integrate deterministic output without bypassing runtime admission.
 - [Web · SDK site and UI prototype](web-product.md) — The current browser application publishes SDK documentation and demonstrates account/console UI without a connected runtime backend.
 - [Native builds, bindings and release acceptance](platform-builds.md) — Build matched Rust/native artifacts, select distribution variants and separate compile, simulator and physical-device acceptance.
+
+## System internals
+
+- [Agent execution and recovery](agent-execution.md) — Follow one admitted turn from host input to model requests, streamed tool execution and a durable terminal state.
+- [Configuration, credentials and isolation](configuration-security.md) — Trace settings provenance and keep model routing, authorization, credential storage and OS isolation as explicit host responsibilities.
+- [Session identity and durable storage](session-storage.md) — Understand JSONL graphs, stable UUIDs, cold restoration, forks and the difference between context compaction and transcript reclamation.
+- [Tools, skills, hooks, MCP and LSP](extensions-lifecycle.md) — Discover extensions through trusted registries and retain authority across activation, refresh, invocation and teardown.
+- [Subagents and background tasks](agents-background.md) — Separate agent-pool admission, task ownership, mailbox delivery and terminal publication across foreground and detached work.
+- [Cron, Workflow and Fusion](automation-workflows-fusion.md) — Understand the live execution paths for schedules, scripted agent orchestration and evidence-based multi-model work.
+- [Attachments, audio and realtime hosts](multimodal-host.md) — Route multimodal input and audio through explicit provider capability and native resource owners.
+- [Inline visualization integration](runtime-visualization.md) — Publish immutable visualization revisions and mount them through one shared authorized service on Electron, Android and iOS.
+- [System architecture & ownership](system-overview.md) — Follow the product hosts, shared Agent runtime, model SDK and local execution layer, with explicit ownership and implementation boundaries.
 
 ## Development & operations
 

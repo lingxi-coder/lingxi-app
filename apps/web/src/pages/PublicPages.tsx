@@ -64,7 +64,7 @@ export function HomePage({ locale }: { locale: Locale; region: Region }) {
           </RouteLink>
           <RouteLink href="/docs" className="landing-entry">
             <IconDocs width={22} height={22} />
-            <span><strong>{t('Developer docs', '开发者文档')}</strong><small>{t('Explore the SDKs & APIs', '探索 SDK 与 API')}</small></span>
+            <span><strong>{t('Documentation', '使用文档')}</strong><small>{t('Install, sessions, and models', '安装、会话与模型')}</small></span>
             <IconArrowRight width={17} height={17} />
           </RouteLink>
         </div>

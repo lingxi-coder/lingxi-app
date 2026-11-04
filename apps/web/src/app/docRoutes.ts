@@ -2,6 +2,16 @@
 // router.test.ts checks this list against every handbook page.
 export const docPageIds = [
   'overview',
+  'install',
+  'first-session',
+  'accounts',
+  'using-cli',
+  'using-desktop',
+  'using-mobile',
+  'permissions',
+  'models',
+  'remote-control',
+  'help',
   'api-reference',
   'harness',
   'harness-sessions',

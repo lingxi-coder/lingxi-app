@@ -8,42 +8,42 @@ import { runtimeSystemPages } from './runtime-system';
 import { llmServicePages } from './llm-services';
 import { platformPages } from './platforms';
 import { agentWorkflowPages } from './agent-workflows';
+import { guidePages, productPages, usePages } from './guide';
 export { docMarkdown } from './markdown';
 
 export const docGroups: Array<{ id: DocPage['group']; title: DocText }> = [
-  { id: 'start', title: { en: 'Get started', zh: '开始使用' } },
-  { id: 'system', title: { en: 'System internals', zh: '系统机制' } },
+  { id: 'guide', title: { en: 'Get started', zh: '开始' } },
+  { id: 'use', title: { en: 'Use LingXi', zh: '使用' } },
+  { id: 'product', title: { en: 'On your devices', zh: '在你的设备上' } },
+  { id: 'start', title: { en: 'API', zh: 'API' } },
   { id: 'harness', title: { en: 'Harness Runtime', zh: 'Harness Runtime' } },
   { id: 'llm', title: { en: 'LLM Client', zh: 'LLM Client' } },
   { id: 'mobile', title: { en: 'Mobile Linux', zh: 'Mobile Linux' } },
   { id: 'bridge', title: { en: 'Product integrations', zh: '产品集成' } },
+  { id: 'system', title: { en: 'System internals', zh: '系统机制' } },
   { id: 'operations', title: { en: 'Development & operations', zh: '开发与运维' } },
 ];
 
 const overview: DocPage = {
-  id: 'overview', group: 'start',
-  title: { en: 'SDKs & libraries', zh: 'SDK 与开发者工具' },
+  id: 'overview', group: 'guide',
+  title: { en: 'LingXi', zh: '灵犀' },
   description: {
-    en: 'Build with LingXi. Connect models, orchestrate agents, and bring a Linux runtime to mobile — with a toolkit that fits your application.',
-    zh: '用灵犀构建你的应用。从模型调用、Agent 编排，到移动端 Linux 运行时，选择适合你的 SDK，开始创造。',
+    en: 'LingXi is a personal agent for the computer and phone you already use. These pages explain how to install it, start a session, choose a model, and decide what it may do.',
+    zh: '灵犀是运行在你正在使用的电脑和手机上的个人 Agent。这些页面说明如何安装、开始会话、选择模型，以及它能做什么。',
   },
   sourceUrl: 'https://github.com/lingxi-coder/lingxi-app',
   sources: [{ repo: 'lingxi-app', path: 'Cargo.toml' }, { repo: 'harness-runtime', path: 'crates/runtime/Cargo.toml' }, { repo: 'llm-client', path: 'src/lib.rs' }, { repo: 'mobile-linux-runtime', path: 'Cargo.toml' }],
   sections: [
-    { id: 'choose-sdk', title: { en: 'Find your starting point', zh: '选择你的起点' }, paragraphs: [{ en: 'The SDKs form distinct layers. Use LLM Client for direct model calls, Harness Runtime for the agent loop, and Mobile Linux for local execution on Android and iOS.', zh: '每个 SDK 负责一层清晰的能力：LLM Client 连接模型，Harness Runtime 管理 Agent 执行，Mobile Linux 为 Android 和 iOS 提供本地运行环境。你可以独立使用，也可以组合集成。' }], links: [
-      { label: { en: 'Harness Runtime', zh: 'Harness Runtime' }, href: '/docs/harness' },
-      { label: { en: 'LLM Client', zh: 'LLM Client' }, href: '/docs/llm-client' },
-      { label: { en: 'Mobile Linux', zh: 'Mobile Linux' }, href: '/docs/mobile-linux' },
-      { label: { en: 'Product Bridge', zh: '产品 Bridge' }, href: '/docs/bridge-client' },
-    ] },
-    { id: 'agent-guides', title: { en: 'Build an agent, step by step', zh: '从一个任务开始构建 Agent' }, paragraphs: [{ en: 'Follow a complete task instead of piecing together declarations. These guides connect the session lifecycle, output events, approvals, tools, and host responsibilities.', zh: '沿着完整任务接入，不必自己拼凑零散声明。这些指南串起会话生命周期、输出事件、审批、工具与宿主职责。' }], links: [
-      { label: { en: 'Choose the API when coming from Claude Agent SDK', zh: '从 Claude Agent SDK 选择对应入口' }, href: '/docs/agent-sdk-guide' },
-      { label: { en: 'Run and cancel the first turn', zh: '运行并取消第一个轮次' }, href: '/docs/agent-first-turn' },
-      { label: { en: 'Connect agent events to your UI', zh: '将 Agent 事件连接到界面' }, href: '/docs/agent-ui-streaming' },
-      { label: { en: 'Resume and fork a session', zh: '恢复与分支会话' }, href: '/docs/agent-session-workflows' },
-      { label: { en: 'Add tools and handle approvals', zh: '添加工具并处理审批' }, href: '/docs/agent-tool-workflows' },
-      { label: { en: 'Compose MCP, skills, and hooks', zh: '组合 MCP、技能与 Hooks' }, href: '/docs/agent-extension-recipes' },
-      { label: { en: 'Coordinate parallel agent tasks', zh: '协调并行 Agent 任务' }, href: '/docs/agent-parallel-tasks' },
+    { id: 'start-here', title: { en: 'Start here', zh: '从这里开始' }, paragraphs: [{ en: 'Install the app for your device, open a project you trust, and connect the model provider you want LingXi to call.', zh: '安装适合你设备的应用，打开一个你信任的项目，再接入你希望灵犀调用的模型服务。' }], links: [
+      { label: { en: 'Install', zh: '安装' }, href: '/docs/install' },
+      { label: { en: 'Your first session', zh: '第一次会话' }, href: '/docs/first-session' },
+      { label: { en: 'Models and API keys', zh: '模型与 API key' }, href: '/docs/accounts' },
+      { label: { en: 'Command line', zh: '命令行' }, href: '/docs/using-cli' },
+      { label: { en: 'Desktop', zh: '桌面' }, href: '/docs/using-desktop' },
+      { label: { en: 'iPhone and Android', zh: 'iPhone 与 Android' }, href: '/docs/using-mobile' },
+      { label: { en: 'Permissions', zh: '权限' }, href: '/docs/permissions' },
+      { label: { en: 'Remote control', zh: '远控' }, href: '/docs/remote-control' },
+      { label: { en: 'Help', zh: '帮助' }, href: '/docs/help' },
     ] },
     { id: 'sdk-map', title: { en: 'At a glance', zh: '能力一览' }, paragraphs: [{ en: 'Three independent SDK repositories, plus the TypeScript bridge and native host integration in the product repository. The API index links byte-identical committed files to their exact revision and marks changed files as working-tree sources.', zh: '三个独立 SDK 仓库，以及产品仓库中的 TypeScript Bridge 和原生宿主集成。API 索引为与提交一致的文件提供精确版本链接，并将修改文件标记为工作树源码。' }], tables: [{ headers: [{ en: 'SDK / integration', zh: 'SDK / 集成' }, { en: 'Responsibility', zh: '职责' }, { en: 'Entry points', zh: '入口' }], rows: [
       [{ en: 'Harness Runtime', zh: 'Harness Runtime' }, { en: 'Agent loop, sessions, tools, permissions and lifecycle', zh: 'Agent 循环、会话、工具、权限与生命周期' }, { en: 'Rust facade; desktop/mobile/headless', zh: 'Rust 门面；desktop/mobile/headless' }],
@@ -51,6 +51,13 @@ const overview: DocPage = {
       [{ en: 'Mobile Linux', zh: 'Mobile Linux' }, { en: 'Local execution, PTY and verified resources', zh: '本地执行、PTY 与验证资源' }, { en: 'Rust contracts, Kotlin/Swift facade', zh: 'Rust 契约、Kotlin/Swift 门面' }],
       [{ en: 'Product Bridge', zh: '产品 Bridge' }, { en: 'Product host transport and client DTOs', zh: '产品宿主传输与客户端 DTO' }, { en: 'Private Node.js client and native FFI', zh: '内部 Node.js 客户端与原生 FFI' }],
     ] }] },
+    { id: 'for-developers', title: { en: 'Build with the SDKs', zh: '用 SDK 构建' }, paragraphs: [{ en: 'The SDKs are a separate set of pages. Use LLM Client for direct model calls, Harness Runtime for the agent loop, and Mobile Linux to embed local execution in an Android or iOS app.', zh: 'SDK 是另外一组页面。直接调用模型用 LLM Client，运行 Agent 循环用 Harness Runtime，把本地执行嵌进 Android 或 iOS 应用用 Mobile Linux。' }], links: [
+      { label: { en: 'Harness Runtime', zh: 'Harness Runtime' }, href: '/docs/harness' },
+      { label: { en: 'LLM Client', zh: 'LLM Client' }, href: '/docs/llm-client' },
+      { label: { en: 'Mobile Linux', zh: 'Mobile Linux' }, href: '/docs/mobile-linux' },
+      { label: { en: 'Product Bridge', zh: '产品 Bridge' }, href: '/docs/bridge-client' },
+      { label: { en: 'API reference', zh: 'API 参考' }, href: '/docs/api-reference' },
+    ] },
     { id: 'integration', title: { en: 'Build your integration', zh: '开始集成' }, bullets: [
       { en: 'Connect models: choose LLM Client and configure your own provider credentials.', zh: '调用模型：使用 LLM Client，配置你自己的模型服务商凭据。' },
       { en: 'Run agents: provide Harness Runtime with a session runtime and host lifecycle.', zh: '运行 Agent：为 Harness Runtime 提供会话运行时与宿主生命周期。' },
@@ -102,27 +109,46 @@ const reference: DocPage = {
   ],
 };
 
-export const docPages: DocPage[] = [overview, reference, ...harnessPages, ...agentWorkflowPages, ...llmPages, ...mobilePages, ...bridgePages, ...runtimeSystemPages, ...llmServicePages, ...platformPages, ...operationsPages];
+export const docPages: DocPage[] = [overview, ...guidePages, ...usePages, ...productPages, reference, ...harnessPages, ...agentWorkflowPages, ...llmPages, ...mobilePages, ...bridgePages, ...runtimeSystemPages, ...llmServicePages, ...platformPages, ...operationsPages];
 
 export function getDocPage(id: string): DocPage | undefined {
   return docPages.find((page) => page.id === id);
 }
 
+function docSearchBlocks(page: DocPage, locale: 'en' | 'zh'): string[] {
+  return [page.description[locale], ...page.sections.flatMap((section) => [
+    section.title[locale], ...(section.paragraphs ?? []).map((text) => text[locale]),
+    ...(section.bullets ?? []).map((text) => text[locale]), ...(section.steps ?? []).map((text) => text[locale]),
+    ...(section.tables ?? []).flatMap((table) => [...table.headers, ...table.rows.flat()].map((text) => text[locale])),
+    ...(section.links ?? []).map((link) => link.label[locale]), section.diagram?.alt[locale] ?? '', section.diagram?.caption?.[locale] ?? '',
+    section.note?.[locale] ?? '', ...(section.apis ?? []).flatMap((api) => [api.name, api.signature, api.description[locale]]),
+    ...(section.code ?? []).flatMap((code) => [typeof code.label === 'string' ? code.label : code.label[locale], code.code]),
+  ])];
+}
+
+const docSearchRecords: Record<'en' | 'zh', Array<{ page: DocPage; haystack: string; blocks: string[]; loweredBlocks: string[] }>> = {
+  en: [],
+  zh: [],
+};
+for (const locale of ['en', 'zh'] as const) {
+  docSearchRecords[locale] = docPages.map((page) => {
+    const blocks = docSearchBlocks(page, locale);
+    return {
+      page,
+      blocks,
+      loweredBlocks: blocks.map((block) => block.toLocaleLowerCase()),
+      haystack: [page.title.en, page.title.zh, page.packageName ?? '', ...blocks].join(' ').toLocaleLowerCase(),
+    };
+  });
+}
+
 export function searchDocs(query: string, locale: 'en' | 'zh') {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
   if (!terms.length) return docPages.slice(0, 7).map((page) => ({ page, excerpt: page.description[locale] }));
-  return docPages.flatMap((page) => {
-    const blocks = [page.description[locale], ...page.sections.flatMap((section) => [
-      section.title[locale], ...(section.paragraphs ?? []).map((text) => text[locale]),
-      ...(section.bullets ?? []).map((text) => text[locale]), ...(section.steps ?? []).map((text) => text[locale]),
-      ...(section.tables ?? []).flatMap((table) => [...table.headers, ...table.rows.flat()].map((text) => text[locale])),
-      ...(section.links ?? []).map((link) => link.label[locale]), section.diagram?.alt[locale] ?? '', section.diagram?.caption?.[locale] ?? '',
-      section.note?.[locale] ?? '', ...(section.apis ?? []).flatMap((api) => [api.name, api.signature, api.description[locale]]),
-      ...(section.code ?? []).flatMap((code) => [typeof code.label === 'string' ? code.label : code.label[locale], code.code]),
-    ])];
-    const haystack = [page.title.en, page.title.zh, page.packageName ?? '', ...blocks].join(' ').toLocaleLowerCase();
-    if (!terms.every((term) => haystack.includes(term))) return [];
-    const excerpt = blocks.find((block) => terms.some((term) => block.toLocaleLowerCase().includes(term))) ?? page.description[locale];
-    return [{ page, excerpt: excerpt.slice(0, 180) }];
+  return docSearchRecords[locale].flatMap((entry) => {
+    if (!terms.every((term) => entry.haystack.includes(term))) return [];
+    const matchIndex = entry.loweredBlocks.findIndex((block) => terms.some((term) => block.includes(term)));
+    const excerpt = matchIndex >= 0 ? entry.blocks[matchIndex]! : entry.page.description[locale];
+    return [{ page: entry.page, excerpt: excerpt.slice(0, 180) }];
   });
 }

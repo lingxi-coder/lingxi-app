@@ -56,6 +56,20 @@ interface ApiCatalog {
   repositories: Array<{ sdk: string; revision: string; sourceUrl: string; dirty: boolean; published?: boolean; treeFingerprint: string; productPinnedRevision?: string }>;
   entries: ApiEntry[];
 }
+interface IndexedApiCatalog extends ApiCatalog { haystacks: string[] }
+let apiCatalogPromise: Promise<IndexedApiCatalog> | undefined;
+function loadApiCatalog(): Promise<IndexedApiCatalog> {
+  if (!apiCatalogPromise) {
+    apiCatalogPromise = fetch('/api-index.json').then((response) => {
+      if (!response.ok) throw new Error('API index unavailable');
+      return response.json() as Promise<ApiCatalog>;
+    }).then((data) => {
+      if (!Array.isArray(data.entries)) throw new Error('Invalid API index');
+      return { ...data, haystacks: data.entries.map((entry) => `${entry.name} ${entry.signature} ${entry.summary} ${entry.file}`.toLowerCase()) };
+    }).catch((error: unknown) => { apiCatalogPromise = undefined; throw error; });
+  }
+  return apiCatalogPromise;
+}
 
 export function ApiDeclaration({ entry, locale }: { entry: ApiEntry; locale: Locale }) {
   const url = entry.sourceState === 'committed' ? entry.url : undefined;
@@ -85,7 +99,7 @@ function DocSources({ page, locale }: { page: DocPage; locale: Locale }) {
 }
 
 function ApiReference({ locale }: { locale: Locale }) {
-  const [catalog, setCatalog] = useState<ApiCatalog | null>(null);
+  const [catalog, setCatalog] = useState<IndexedApiCatalog | null>(null);
   const [rustdoc, setRustdoc] = useState<RustdocManifest | null>(null);
   const [error, setError] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -95,14 +109,16 @@ function ApiReference({ locale }: { locale: Locale }) {
   const t = (en: string, zh: string) => locale === 'zh' ? zh : en;
   useEffect(() => {
     const controller = new AbortController();
+    let active = true;
     setError(false);
-    fetch('/rustdoc-manifest.json', { signal: controller.signal }).then((response) => response.ok ? response.json() : null).then((data: RustdocManifest | null) => { if (Array.isArray(data?.profiles)) setRustdoc(data); }).catch(() => {});
-    fetch('/api-index.json', { signal: controller.signal }).then((response) => { if (!response.ok) throw new Error('API index unavailable'); return response.json(); }).then((data: ApiCatalog) => { if (!Array.isArray(data.entries)) throw new Error('Invalid API index'); setCatalog(data); }).catch(() => { if (!controller.signal.aborted) setError(true); });
-    return () => controller.abort();
+    fetch('/rustdoc-manifest.json', { signal: controller.signal }).then((response) => response.ok ? response.json() : null).then((data: RustdocManifest | null) => { if (active && Array.isArray(data?.profiles)) setRustdoc(data); }).catch(() => {});
+    loadApiCatalog().then((data) => { if (active) setCatalog(data); }).catch(() => { if (active) setError(true); });
+    return () => { active = false; controller.abort(); };
   }, [attempt]);
   const matches = useMemo(() => {
     const terms = query.trim().toLowerCase().split(/\s+/u).filter(Boolean);
-    return (catalog?.entries ?? []).filter((entry) => (sdk === 'all' || entry.sdk === sdk) && terms.every((term) => `${entry.name} ${entry.signature} ${entry.summary} ${entry.file}`.toLowerCase().includes(term)));
+    const haystacks = catalog?.haystacks ?? [];
+    return (catalog?.entries ?? []).filter((entry, index) => (sdk === 'all' || entry.sdk === sdk) && terms.every((term) => haystacks[index].includes(term)));
   }, [catalog, query, sdk]);
   if (error) return <div className="developer-note" role="alert">{t('The API index could not be loaded.', 'API 索引暂时无法加载。')} <button type="button" onClick={() => setAttempt((value) => value + 1)}>{t('Retry', '重试')}</button></div>;
   if (!catalog) return <p role="status">{t('Loading API declarations…', '正在加载 API 声明…')}</p>;
@@ -119,42 +135,24 @@ function ApiReference({ locale }: { locale: Locale }) {
   </div>;
 }
 
-function DocsQuickstart({ locale }: { locale: Locale }) {
-  const example = getDocPage('llm-client')?.sections.find((section) => section.id === 'first-request')?.code?.[0];
-  if (!example) return null;
-  const start = example.code.indexOf('    let mut request');
-  const end = example.code.indexOf('    Ok(())', start);
-  if (start < 0 || end < 0) return null;
-  const code = example.code.slice(start, end).replace(/^ {4}/gmu, '').trimEnd();
-  return <section id="quickstart" className="developer-quickstart">
-    <div className="developer-quickstart-copy">
-      <span className="developer-eyebrow">{locale === 'zh' ? '快速开始' : 'QUICKSTART'}</span>
-      <h2>{locale === 'zh' ? '从第一个请求开始' : 'Make your first request'}</h2>
-      <p>{locale === 'zh' ? '安装 LLM Client，配置模型连接与凭据，发送你的第一个请求。' : 'Install LLM Client, configure your provider and credentials, and send a model request.'}</p>
-      <a href="/docs/llm-client#first-request">{locale === 'zh' ? '查看完整示例' : 'Follow the quickstart'} <IconArrowRight width={16} height={16} /></a>
-    </div>
-    <DocCodeBlock blocks={[{ label: 'Rust', language: example.language, code, verification: 'excerpt' }]} locale={locale} />
-  </section>;
-}
-
 function DocArticle({ page, locale }: { page: DocPage; locale: Locale }) {
   const [copyStatus, setCopyStatus] = useState('');
   const t = (en: string, zh: string) => locale === 'zh' ? zh : en;
+  const userGuide = page.group === 'guide' || page.group === 'use' || page.group === 'product';
   const index = docPages.findIndex((candidate) => candidate.id === page.id);
   const previous = docPages[index - 1];
   const next = docPages[index + 1];
   const copyPage = async () => { try { await navigator.clipboard.writeText(docMarkdown(page, locale)); setCopyStatus(t('Page copied', '已复制页面')); } catch { setCopyStatus(t('Select page text to copy manually', '请选中页面文字手动复制')); } };
   return <article className={`developer-article${page.id === 'overview' ? ' developer-overview' : ''}`}>
-    <div className="developer-breadcrumb"><RouteLink href="/docs">{t('Documentation', '开发者文档')}</RouteLink> <span>/</span> {page.packageName ?? docGroups.find((group) => group.id === page.group)?.title[locale]}</div>
+    <div className="developer-breadcrumb"><RouteLink href="/docs">{userGuide ? t('Docs', '文档') : t('Documentation', '开发者文档')}</RouteLink> <span>/</span> {page.packageName ?? docGroups.find((group) => group.id === page.group)?.title[locale]}</div>
     <div className="developer-title-row"><h1>{page.title[locale]}</h1><button type="button" className="developer-copy-page" onClick={copyPage}><IconCopy width={15} height={15} />{t('Copy page', '复制页面')}</button></div>
     {copyStatus ? <span className="developer-copy-status" role="status">{copyStatus}</span> : null}
     <p className="developer-lead">{page.description[locale]}</p>
-    {page.id === 'overview' ? <><div className="developer-overview-actions"><a className="developer-primary-action" href="#choose-sdk">{t('Choose your SDK', '选择你的 SDK')} <IconArrowRight width={16} height={16} /></a><RouteLink href="/docs/api-reference">{t('Explore the API reference', '浏览 API 参考')} <span aria-hidden="true">↗</span></RouteLink></div><DocsQuickstart locale={locale} /></> : <div className="developer-package-row">{page.packageName ? <code>{page.packageName}</code> : <span>{t('Source documentation', '源码文档')}</span>}<a href={page.sourceUrl} target="_blank" rel="noreferrer">{t('Browse repository', '查看仓库')} ↗</a></div>}
-    {page.sections.map((section) => <section key={section.id} id={section.id} className="developer-section"><h2><a href={`#${section.id}`}>{section.title[locale]}<span className="developer-anchor" aria-hidden="true">#</span></a></h2><DocSectionContent key={`${page.id}-${section.id}-${locale}`} section={section} locale={locale} cards={page.id === 'overview' && section.id === 'choose-sdk'} />
+    {page.id === 'overview' ? <div className="developer-overview-actions"><RouteLink className="developer-primary-action" href="/docs/install">{t('Install LingXi', '安装灵犀')} <IconArrowRight width={16} height={16} /></RouteLink><RouteLink href="/docs/first-session">{t('Start your first session', '开始第一次会话')} <span aria-hidden="true">→</span></RouteLink></div> : userGuide ? null : <div className="developer-package-row">{page.packageName ? <code>{page.packageName}</code> : <span>{t('Source documentation', '源码文档')}</span>}<a href={page.sourceUrl} target="_blank" rel="noreferrer">{t('Browse repository', '查看仓库')} ↗</a></div>}
+    {page.sections.map((section) => <section key={section.id} id={section.id} className="developer-section"><h2><a href={`#${section.id}`}>{section.title[locale]}<span className="developer-anchor" aria-hidden="true">#</span></a></h2><DocSectionContent key={`${page.id}-${section.id}-${locale}`} section={section} locale={locale} />
       {page.id === 'api-reference' && section.id === 'declarations' ? <ApiReference locale={locale} /> : null}
     </section>)}
-    <DocBaseline locale={locale} />
-    <DocSources page={page} locale={locale} />
+    {userGuide ? null : <><DocBaseline locale={locale} /><DocSources page={page} locale={locale} /></>}
     <nav className="developer-page-navigation" aria-label={t('Previous and next page', '上下页导航')}>{previous ? <RouteLink href={previous.id === 'overview' ? '/docs' : `/docs/${previous.id}`} className="developer-previous-page"><span>← {t('Previous', '上一页')}</span><strong>{previous.title[locale]}</strong></RouteLink> : <div />}{next ? <RouteLink href={`/docs/${next.id}`} className="developer-next-page"><span>{t('Next', '下一页')} →</span><strong>{next.title[locale]}</strong></RouteLink> : null}</nav>
     <footer className="developer-doc-footer"><span>© {new Date().getFullYear()} LingXi</span><RouteLink href="/">{t('Back to home', '返回主页')} ↗</RouteLink></footer>
   </article>;
@@ -185,6 +183,6 @@ export function DocsPage(props: DocsPageProps) {
     return () => window.cancelAnimationFrame(frame);
   }, [page.id]);
   const tocItems = page.sections.map((section) => ({ id: section.id, label: section.title[locale] }));
-  if (page.id === 'overview') tocItems.unshift({ id: 'quickstart', label: locale === 'zh' ? '快速开始' : 'Quickstart' });
-  return <DocsLayout {...props} pageId={page.id} tocItems={tocItems} onSearch={() => setSearchOpen(true)}><DocArticle key={page.id} page={page} locale={locale} /><DocsSearch locale={locale} open={searchOpen} onClose={() => setSearchOpen(false)} /></DocsLayout>;
+  const userGuide = page.group === 'guide' || page.group === 'use' || page.group === 'product';
+  return <DocsLayout {...props} pageId={page.id} tocItems={tocItems} onSearch={() => setSearchOpen(true)}><DocArticle key={page.id} page={page} locale={locale} /><DocsSearch locale={locale} focus={userGuide ? 'product' : 'sdk'} open={searchOpen} onClose={() => setSearchOpen(false)} /></DocsLayout>;
 }

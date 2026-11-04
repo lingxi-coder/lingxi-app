@@ -81,9 +81,27 @@ jobs:
         with:
           path: ${{ runner.temp }}/gstreamer-sdk/linux-static
           key: ${{ steps.gstreamer-sdk-cache.outputs.cache-primary-key }}
-      - name: Test all retained product packages
+      - name: Build all retained product tests for stack diagnosis
         working-directory: .
-        run: cargo test --locked --workspace --all-features --no-fail-fast
+        run: cargo test --locked --workspace --all-features --no-run --message-format=json > "$RUNNER_TEMP/stack-artifacts.json"
+      - name: Capture the CLI worker guard fault and thread backtraces
+        working-directory: .
+        run: |
+          if ! command -v gdb >/dev/null; then sudo apt-get install -y gdb; fi
+          test_exe=$(python3 -c 'import json,sys; xs=[o["executable"] for line in open(sys.argv[1]) for o in [json.loads(line)] if o.get("reason")=="compiler-artifact" and o.get("target",{}).get("name")=="cli_print" and o.get("executable")]; assert len(xs)==1, xs; print(xs[0])' "$RUNNER_TEMP/stack-artifacts.json")
+          set -o pipefail
+          timeout --kill-after=15s 180s gdb --batch --quiet \
+            -ex 'set pagination off' \
+            -ex 'set follow-fork-mode child' \
+            -ex 'set detach-on-fork on' \
+            -ex 'set print thread-events off' \
+            -ex 'handle SIGPIPE nostop noprint pass' \
+            -ex run \
+            -ex 'info threads' \
+            -ex 'bt 80' \
+            -ex 'thread apply all bt 30' \
+            --args "$test_exe" unknown_slash_command_runs_fallback_through_loopback_provider --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/stack-gdb.log"
+          python3 -c 'import pathlib,sys; s=pathlib.Path(sys.argv[1]).read_text(errors="replace"); assert "received signal SIGSEGV" in s, "no SIGSEGV guard fault captured"' "$RUNNER_TEMP/stack-gdb.log"
 
   lint:
     # Match the GStreamer API baseline used by unit-tests and bridge-server.

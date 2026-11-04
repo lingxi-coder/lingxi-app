@@ -1,0 +1,141 @@
+{
+  "head": "1203357f591186686798438d16c5e1940c89c19b",
+  "metadata_command": "cargo +1.94.0 metadata --format-version 1 --all-features --locked --frozen",
+  "metadata_sha256": "2561a51c0a9d8db79a375209689a73586efc64742bb3648fc376250376ec2c04",
+  "package_count": 1052,
+  "package_id": "registry+https://github.com/rust-lang/crates.io-index#futures-sink@0.3.32",
+  "resolved_features": [
+    "alloc",
+    "default",
+    "std"
+  ],
+  "resolved_dependencies": [],
+  "reverse_parents_all_targets": [
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures@0.3.32",
+      "edge": {
+        "name": "futures_sink",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-sink@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d",
+      "selected_file": "src/lib.rs",
+      "selected_file_sha256": "a865c0ac6cd7a7323d206b32dc1b4965bb75f1e7e32c8c718e41a7b252507f79",
+      "selected_line": 109,
+      "selected_text": "pub use futures_sink::Sink;"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures-channel@0.3.32",
+      "edge": {
+        "name": "futures_sink",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-sink@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d",
+      "selected_file": "src/mpsc/sink_impl.rs",
+      "selected_file_sha256": "c9977b530187e82c912fcd46e08316e48ed246e77bb2419d53020e69e403d086",
+      "selected_line": 6,
+      "selected_text": "impl<T> Sink<T> for Sender<T> {"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#futures-util@0.3.32",
+      "edge": {
+        "name": "futures_sink",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-sink@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6",
+      "selected_file": "src/sink/mod.rs",
+      "selected_file_sha256": "37cf379170f3099992eb59f3181be4c4e4a5c2d3581dbe424d22ab360840d321",
+      "selected_line": 65,
+      "selected_text": "pub trait SinkExt<Item>: Sink<Item> {"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#gstreamer-app@0.25.2",
+      "edge": {
+        "name": "futures_sink",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-sink@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "97f8ae9238c2352398dcc084de28df3f7099af216ac6c160b52318d23f25c010",
+      "selected_file": "src/app_src.rs",
+      "selected_file_sha256": "846bfa0742e6d9f0af5928be87155a11edce2cddc8675368284847da09074e83",
+      "selected_line": 732,
+      "selected_text": "impl Sink<gst::Sample> for AppSrcSink {"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.19",
+      "edge": {
+        "name": "futures_sink",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-sink@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16",
+      "selected_file": "src/codec/mod.rs",
+      "selected_file_sha256": "806fc32706d789f8e48a6867df014d945c438334e981205ff8f43d5b7f8ce0ef",
+      "selected_line": 177,
+      "selected_text": "impl<T, B> Sink<Frame<B>> for Codec<T, B>"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#opentelemetry@0.31.0",
+      "edge": {
+        "name": "futures_sink",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-sink@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "b84bcd6ae87133e903af7ef497404dda70c60d0ea14895fc8a5e6722754fc2a0",
+      "selected_file": "src/context/future_ext.rs",
+      "selected_file_sha256": "6fee52ffc9672539020d5b84700ec264fed69dc16303bcf7894a633180365146",
+      "selected_line": 41,
+      "selected_text": "impl<I, T: Sink<I>> Sink<I> for WithContext<T>"
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#tokio-util@0.7.18",
+      "edge": {
+        "name": "futures_sink",
+        "pkg": "registry+https://github.com/rust-lang/crates.io-index#futures-sink@0.3.32",
+        "dep_kinds": [
+          {
+            "kind": null,
+            "target": null
+          }
+        ]
+      },
+      "archive_sha256": "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098",
+      "selected_file": "src/io/sink_writer.rs",
+      "selected_file_sha256": "4cba10005f6a99073d8449726464432f1b4917daa129590879661a51fa3bb4d9",
+      "selected_line": 1,
+      "selected_text": "use futures_sink::Sink;"
+    }
+  ]
+}

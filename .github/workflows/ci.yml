@@ -99,6 +99,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Test curated audit rejection cases
+        run: python3 scripts/tests/test_curated_audits.py
+      - name: Validate curated audit snapshots and imports
+        run: python3 scripts/check-curated-audits.py
       # Use the workspace toolchain for both builds and dependency metadata.
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Install cargo-deny

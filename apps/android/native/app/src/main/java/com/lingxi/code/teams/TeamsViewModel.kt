@@ -1,12 +1,11 @@
 package com.lingxi.code.teams
 
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.MetadataChanges
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,13 +20,15 @@ data class TeamMember(val uid: String, val displayName: String, val role: String
 data class TeamInvite(val id: String, val role: String, val expiresAt: String, val uses: Int, val maxUses: Int, val revoked: Boolean)
 data class TeamDetail(val team: TeamSummary, val members: List<TeamMember>, val invites: List<TeamInvite>)
 data class TeamsState(val uid: String? = null, val teams: List<TeamSummary> = emptyList(), val detail: TeamDetail? = null,
-    val selectedId: String = "", val busy: Boolean = false, val loading: Boolean = false, val error: String? = null, val invitationLink: String = "")
+    val selectedId: String = "", val busy: Boolean = false, val loading: Boolean = false, val error: String? = null, val invitationLink: String = "", val loaded: Boolean = false, val loadError: String? = null)
 
 
-/** SDK listeners invalidate; only authenticated HTTP responses populate the UI. */
-class TeamsViewModel internal constructor(private val apiRoot: String = "https://lingxios.net") : ViewModel() {
-    private val auth = FirebaseAuth.getInstance()
-    private val db = FirebaseFirestore.getInstance()
+/**
+ * The teams list, the selected team's members and invites, and the team commands (create, join, invite, roles, leave, delete).
+ * SDK listeners invalidate; only authenticated HTTP responses populate the UI. Owned by [TeamsWorkspace] for the life of the
+ * process (it is stopped on sign-out, not when a page closes); [scope] runs on the main thread.
+ */
+class TeamsViewModel internal constructor(private val scope: CoroutineScope, private val apiRoot: String = TEAMS_API_ROOT, private val auth: FirebaseAuth = FirebaseAuth.getInstance(), private val db: FirebaseFirestore = FirebaseFirestore.getInstance()) {
     private val mutableState = MutableStateFlow(TeamsState())
     val state = mutableState.asStateFlow()
     private val listeners = mutableMapOf<String, ListenerRegistration>()
@@ -65,11 +66,19 @@ class TeamsViewModel internal constructor(private val apiRoot: String = "https:/
     }
     private fun changed(expected: Long, invalidated: Boolean) {
         if (expected != epoch || !started) return
-        if (invalidated) { revision++; authority++; mutableState.update { it.copy(teams = emptyList(), detail = null, invitationLink = "") } }
+        // A cache or error snapshot only says "ask again": the last list stays on screen (the server remains the authority for every command).
+        if (invalidated) { revision++; authority++; mutableState.update { it.copy(invitationLink = "", loading = true) } }
         refresh()
     }
+    fun deselect() {
+        for (key in listeners.keys.toList()) if (key != "index") listeners.remove(key)?.remove()
+        mutableState.update { it.copy(selectedId = "", detail = null, invitationLink = "") }
+    }
+    fun clearInvitation() { mutableState.update { it.copy(invitationLink = "") } }
+    fun clearError() { mutableState.update { it.copy(error = null) } }
     fun select(teamId: String) {
         mutableState.update { it.copy(selectedId = teamId, detail = null, invitationLink = "") }
+        for (key in listeners.keys.toList()) if (key != "index" && key != teamId) listeners.remove(key)?.remove()
         if (!listeners.containsKey(teamId)) {
             val expected = epoch
             listeners[teamId] = db.collection("teams").document(teamId).collection("members").addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
@@ -81,7 +90,7 @@ class TeamsViewModel internal constructor(private val apiRoot: String = "https:/
     }
     fun refresh() {
         refreshJob?.cancel()
-        refreshJob = viewModelScope.launch { delay(80); refreshNow() }
+        refreshJob = scope.launch { delay(80); refreshNow() }
     }
     private suspend fun refreshNow() {
         if (mutableState.value.uid == null) return
@@ -90,19 +99,23 @@ class TeamsViewModel internal constructor(private val apiRoot: String = "https:/
         try {
             val list = call().getJSONArray("teams")
             if (request != revision || expected != epoch) return
-            mutableState.update { it.copy(teams = (0 until list.length()).map { index -> summary(list.getJSONObject(index)) }, error = null) }
+            mutableState.update { it.copy(teams = (0 until list.length()).map { index -> summary(list.getJSONObject(index)) }, loadError = null, loaded = true) }
             if (selected.isNotEmpty()) {
                 try {
                     val value = detail(call("/$selected"))
                     if (request == revision && expected == epoch) mutableState.update { it.copy(detail = value) }
                 } catch (error: CancellationException) { throw error }
                 catch (error: Exception) {
-                    if (request == revision && expected == epoch) mutableState.update { it.copy(selectedId = "", detail = null, invitationLink = "", error = errorCode(error)) }
+                    if (request == revision && expected == epoch) {
+                        // Only a lost membership drops the selection; a network blip keeps the team and its last members.
+                        val code = errorCode(error)
+                        mutableState.update { if (code in membershipLost) it.copy(selectedId = "", detail = null, invitationLink = "", loadError = code) else it.copy(loadError = code) }
+                    }
                 }
             }
         } catch (error: CancellationException) { throw error }
         catch (error: Exception) {
-            if (request == revision && expected == epoch) mutableState.update { it.copy(teams = emptyList(), detail = null, error = errorCode(error)) }
+            if (request == revision && expected == epoch) mutableState.update { it.copy(loadError = errorCode(error)) }
         } finally { if (request == revision && expected == epoch) mutableState.update { it.copy(loading = false) } }
     }
     fun execute(input: Map<String, Any>, onSuccess: () -> Unit = {}) {
@@ -110,7 +123,7 @@ class TeamsViewModel internal constructor(private val apiRoot: String = "https:/
         val expected = epoch
         val authorized = authority
         mutableState.update { it.copy(busy = true, error = null) }
-        commandJob = viewModelScope.launch {
+        commandJob = scope.launch {
             try {
                 val result = call(body = JSONObject(input))
                 if (expected != epoch) return@launch
@@ -134,8 +147,8 @@ class TeamsViewModel internal constructor(private val apiRoot: String = "https:/
         check(auth.currentUser?.uid == uid)
         return result
     }
+    private val membershipLost = setOf("MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "NOT_FOUND", "INVALID_SESSION", "SIGN_IN_REQUIRED")
     private fun errorCode(error: Exception) = (error as? TeamMessageFailure)?.code ?: "SERVICE_UNAVAILABLE"
-    override fun onCleared() { stop() }
     companion object {
         internal fun summary(value: JSONObject) = TeamSummary(value.getString("id"), value.getString("name"), value.getInt("memberCount"), value.getString("role"), value.getLong("generation"))
         internal fun detail(value: JSONObject): TeamDetail {

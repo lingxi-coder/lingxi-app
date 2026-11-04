@@ -35,11 +35,17 @@ internal data class TeamBotQuestion(val id: String, val questions: List<String>)
     companion object { fun parse(v: JSONObject) = TeamBotQuestion(v.getString("id"), v.getJSONArray("questions").strings()) }
 }
 
-internal data class TeamBotCard(val key: String, val ownerUid: String, val name: String, val description: String, val revision: Long, val use: String, val permitted: Boolean, val online: Boolean, val enabled: Boolean = true, val onlineUntil: Long = 0) {
+/**
+ * A Bot shared with the team (HTTP `bots`). [botId] / [hostId] are the backend's own fields of the key
+ * `bot:<owner>:<host>:<botId>`; the avatar is drawn from [botId], and from the key's last segment before the card has loaded
+ * (`AvatarIdentity.teamBotAvatarId`). Both are null only for cards built in code, never for parsed ones.
+ */
+internal data class TeamBotCard(val key: String, val ownerUid: String, val name: String, val description: String, val revision: Long, val use: String, val permitted: Boolean, val online: Boolean, val enabled: Boolean = true, val onlineUntil: Long = 0, val botId: String? = null, val hostId: String? = null) {
     val selectable get() = enabled && permitted
     fun canUnbind(uid: String) = enabled && ownerUid == uid
-    val inactiveLabel get() = "Inactive · revision $revision. Rebind on Desktop."
-    companion object { fun parse(v: JSONObject) = TeamBotCard(v.getString("key"), v.getString("ownerUid"), v.getString("name"), v.getString("description"), v.getLong("revision"), v.getString("use"), v.getBoolean("permitted"), v.getBoolean("online"), v.optBoolean("enabled", true), v.optLong("onlineUntil")) }
+    /** The id [com.lingxi.code.theme.AgentAvatar] draws this Bot from. */
+    val avatarId get() = botId ?: com.lingxi.code.theme.AvatarIdentity.teamBotAvatarId(key)
+    companion object { fun parse(v: JSONObject) = TeamBotCard(v.getString("key"), v.getString("ownerUid"), v.getString("name"), v.getString("description"), v.getLong("revision"), v.getString("use"), v.getBoolean("permitted"), v.getBoolean("online"), v.optBoolean("enabled", true), v.optLong("onlineUntil"), v.getString("botId"), v.getString("hostId")) }
 }
 
 /** Preserve selected keys until the human clears them; never downgrade a Bot draft to plain text. */
@@ -51,19 +57,20 @@ internal fun requireTeamBotSelections(selected: Collection<String>, bots: List<T
 }
 
 /** Never persisted as authority: only a fresh authenticated observation enables an answer. */
-internal data class TeamBotRun(val state: String, val ownerUid: String, val botKey: String, val originUid: String, val originGeneration: Long, val leaseUntil: Long, val questionId: String?, val answered: Boolean) {
+/** [hostStatus] is what the owner's Desktop reports about the run (`retrying`, `result_pending`, ...); only the owner sees it. */
+internal data class TeamBotRun(val state: String, val ownerUid: String, val botKey: String, val originUid: String, val originGeneration: Long, val leaseUntil: Long, val questionId: String?, val answered: Boolean, val hostStatus: String? = null) {
     fun canAnswer(message: TeamMessage, uid: String, generation: Long, now: Long): Boolean =
         state == "running" && leaseUntil > now && !answered && questionId == message.question?.id &&
             originUid == uid && originGeneration == generation && message.originUid == uid && message.originGeneration == generation &&
             message.authorKind == "bot" && message.botKey == botKey && !message.recalled
-    fun canRecover(uid: String, now: Long) = ownerUid == uid && (state == "recovery" || (state in setOf("running", "claimed") && leaseUntil <= now))
+    fun canRecover(uid: String, now: Long) = ownerUid == uid && hostStatus != "result_pending" && (state == "recovery" || (state in setOf("running", "claimed") && leaseUntil <= now))
     fun canRetryAnswer(intent: JSONObject, uid: String, generation: Long, now: Long) =
         originUid == uid && originGeneration == generation && questionId == intent.getString("questionId") &&
             (answered || (state == "running" && leaseUntil > now))
     companion object {
         fun parse(v: JSONObject): TeamBotRun {
             val origin = v.getJSONObject("origin")
-            return TeamBotRun(v.getString("state"), v.getString("ownerUid"), v.getString("botKey"), origin.getString("uid"), origin.getLong("generation"), v.optLong("leaseUntil"), v.stringOrNull("questionId"), v.getBoolean("answered"))
+            return TeamBotRun(v.getString("state"), v.getString("ownerUid"), v.getString("botKey"), origin.getString("uid"), origin.getLong("generation"), v.optLong("leaseUntil"), v.stringOrNull("questionId"), v.getBoolean("answered"), v.stringOrNull("hostStatus"))
         }
     }
 }

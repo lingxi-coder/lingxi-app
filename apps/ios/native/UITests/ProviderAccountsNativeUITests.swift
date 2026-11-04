@@ -15,6 +15,7 @@ final class ProviderAccountsNativeUITests: XCTestCase {
         let add = app.buttons["provider.account.add"]
         waitEnabled(add)
         add.tap()
+        app.buttons["provider.account.options"].tap()
         let submit = app.buttons["provider.account.submit"]
         waitEnabled(submit)
         submit.tap()
@@ -72,10 +73,11 @@ final class ProviderAccountsNativeUITests: XCTestCase {
         let add = app.buttons["provider.account.add"]
         waitEnabled(add)
         add.tap()
+        XCTAssertFalse(app.textFields["provider.account.name"].exists)
+        attach(app, name: "Provider-account-simple-add")
+        app.buttons["provider.account.options"].tap()
         let submit = app.buttons["provider.account.submit"]
         waitEnabled(submit)
-        submit.tap()
-        XCTAssertTrue(app.staticTexts["provider.account.add.error"].waitForExistence(timeout: 5))
         let name = app.textFields["provider.account.name"]
         name.tap()
         name.typeText("OAuth fixture")
@@ -109,6 +111,7 @@ final class ProviderAccountsNativeUITests: XCTestCase {
         let add = app.buttons["provider.account.add"]
         waitEnabled(add)
         add.tap()
+        app.buttons["provider.account.options"].tap()
         let name = app.textFields["provider.account.name"]
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         name.tap()
@@ -143,6 +146,7 @@ final class ProviderAccountsNativeUITests: XCTestCase {
         let add = app.buttons["provider.account.add"]
         waitEnabled(add)
         add.tap()
+        app.buttons["provider.account.options"].tap()
         let name = app.textFields["provider.account.name"]
         XCTAssertTrue(name.waitForExistence(timeout: 8))
         name.tap()

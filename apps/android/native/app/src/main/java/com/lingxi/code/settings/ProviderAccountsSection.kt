@@ -54,7 +54,7 @@ private fun providerCredentialManagementUrl(providerId: String): String? = when 
 
 /** Stable user order is rendered directly; the Host owns temporary health and request scheduling. */
 @Composable
-internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAccountsRepository, onChanged: () -> Unit, canAddAccounts: Boolean = true) {
+internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAccountsRepository, onChanged: () -> Unit, canAddAccounts: Boolean = true, providerName: String = bindingId) {
     val context = LocalContext.current
     val state by repository.state.collectAsState()
     val scope = rememberCoroutineScope()
@@ -65,6 +65,7 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
     var message by remember(bindingId) { mutableStateOf<String?>(null) }
     var messageIsError by remember(bindingId) { mutableStateOf(true) }
     var edit by remember(bindingId) { mutableStateOf<ProviderAccountRow?>(null) }
+    var showAccountOptions by remember(bindingId) { mutableStateOf(false) }
     var adding by remember(bindingId) { mutableStateOf(false) }
     var oauth by remember(bindingId) { mutableStateOf(false) }
     var confirmRemove by remember(bindingId) { mutableStateOf<ProviderAccountRow?>(null) }
@@ -96,7 +97,7 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
             } finally { busy = false }
         }
     }
-    SettingsSection(label = stringResource(R.string.provider_accounts_title), footer = stringResource(R.string.provider_accounts_order_hint)) {
+    SettingsSection(label = stringResource(R.string.provider_accounts_title), footer = if (accounts.size > 1) stringResource(R.string.provider_accounts_order_hint) else null) {
         if (!state.loaded) Text(state.error ?: stringResource(R.string.provider_accounts_loading), color = palette.text3)
         if (state.loaded && accounts.isEmpty()) Text(stringResource(R.string.provider_accounts_empty), color = palette.text3)
         if (state.allAccountsUnavailable) Text(stringResource(R.string.provider_account_all_unavailable), color = palette.danger)
@@ -201,10 +202,10 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
         if (!canAddAccounts) Text(stringResource(R.string.provider_account_apply_configuration_first), color = palette.text3)
         Row {
             if (bindingId != "openai-chatgpt") TextButton(enabled = !busy && state.loaded && canAddAccounts, onClick = {
-                adding = true; oauth = false; edit = null; name = ""; key = ""
+                adding = true; oauth = false; edit = null; name = ""; key = ""; showAccountOptions = false
             }) { Text(stringResource(R.string.provider_account_add_key)) }
             if (logicalProviderId == "openai" && state.oauthSupported) TextButton(enabled = !busy && state.loaded && canAddAccounts, onClick = {
-                adding = true; oauth = true; edit = null; name = ""; key = ""
+                adding = true; oauth = true; edit = null; name = ""; key = ""; showAccountOptions = false
             }) { Text(stringResource(R.string.provider_account_add_oauth)) }
         }
         if (!state.oauthSupported && logicalProviderId == "openai") Text(stringResource(R.string.provider_account_remote_oauth_hint), color = palette.text3)
@@ -267,10 +268,11 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
             onDismissRequest = { if (!busy) { adding = false; edit = null; key = "" } },
             title = { Text(stringResource(if (adding) R.string.provider_account_add_title else R.string.provider_account_edit)) },
             text = {
-                Column {
+                Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
+                    if (adding) Text(providerName, color = palette.text3)
                     if (busy) androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
                     if (message != null) Text(message.orEmpty(), color = palette.danger)
-                    OutlinedTextField(value = name, onValueChange = { name = it }, enabled = !busy, singleLine = true,
+                    if (!adding) OutlinedTextField(value = name, onValueChange = { name = it }, enabled = !busy, singleLine = true,
                         label = { Text(stringResource(R.string.settings_display_name)) })
                     if (!oauth) OutlinedTextField(value = key, onValueChange = { key = it }, enabled = !busy, singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
@@ -281,6 +283,14 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                                 .onFailure { message = context.getString(R.string.provider_account_device_browser_failed); messageIsError = true }
                         }) { Text(stringResource(R.string.provider_account_manage_api_key)) }
                     }
+                    if (adding) TextButton(enabled = !busy, onClick = { showAccountOptions = !showAccountOptions }) {
+                        Text(stringResource(R.string.settings_section_advanced))
+                    }
+                    if (adding && showAccountOptions) OutlinedTextField(
+                        value = name, onValueChange = { name = it }, enabled = !busy, singleLine = true,
+                        placeholder = { Text(providerName) },
+                        label = { Text(stringResource(R.string.provider_account_optional_name)) },
+                    )
                     edit?.let { account ->
                         TextButton(enabled = !busy, onClick = {
                             execute("clear_credential", JSONObject().put("accountId", account.accountId)) { edit = null; key = "" }
@@ -291,10 +301,10 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                     }
                 }
             },
-            confirmButton = { TextButton(enabled = !busy && name.isNotBlank() && (!adding || oauth || key.isNotBlank()), onClick = {
+            confirmButton = { TextButton(enabled = !busy && (adding || name.isNotBlank()) && (!adding || oauth || key.isNotBlank()), onClick = {
                 val account = edit
                 if (account == null) {
-                    val fields = JSONObject().put("displayName", name.trim()).put("providerId", logicalProviderId)
+                    val fields = JSONObject().put("displayName", name.trim().ifEmpty { providerName }).put("providerId", logicalProviderId)
                         .put("executionBindingId", if (oauth) "openai-chatgpt" else bindingId).put("authKind", if (oauth) "oauth" else "api_key")
                     execute("add", fields, key.takeIf { it.isNotBlank() }) { adding = false; edit = null; key = "" }
                 } else {
@@ -307,7 +317,7 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                         } finally { busy = false }
                     }
                 }
-            }) { Text(stringResource(R.string.voice_save_button)) } },
+            }) { Text(stringResource(if (adding) { if (oauth) R.string.provider_account_add_oauth else R.string.provider_account_add_key } else R.string.voice_save_button)) } },
             dismissButton = { TextButton(enabled = !busy, onClick = { adding = false; edit = null; key = "" }) { Text(stringResource(android.R.string.cancel)) } },
         )
     }

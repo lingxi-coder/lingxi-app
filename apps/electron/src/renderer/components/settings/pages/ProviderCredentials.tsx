@@ -105,7 +105,9 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
     {bridge.providerSettingsApplyPending && <div className="pa-feedback pa-error" role="alert"><span>{bridge.providerSettingsError}</span><button className="pa-button" disabled={applying} onClick={() => { setApplying(true); void bridge.updateProviderSettings({}).catch(cause => setApplyError(cause instanceof Error ? cause.message : tr('provider_accounts_error'))).finally(() => setApplying(false)); }}>{tr('common_retry')}</button></div>}
     {bridge.providerAccounts ? <ProviderAccounts key={selectedProvider.id} api={bridge.providerAccounts} provider={selectedProvider} running={bridge.running || applying} onConfigured={configured} /> : <p role="alert">{tr('provider_accounts_status_error')}</p>}
     {applyError && <p role="alert" style={{ color: t.danger }}>{applyError}<button type="button" disabled={applying} onClick={() => void configured()} className="pa-button">{tr('desktop_settings_00a58a5b98')}</button></p>}
-    <ProviderProtocol providerId={selectedProvider.id} bridge={bridge} onLayerLockChange={onLayerLockChange} />
+    <details className="provider-models-disclosure"><summary><span><strong>{tr('desktop_settings_e06568d15f')}</strong></span><Icon name="chevron" size={15} /></summary>
+      <ProviderProtocol providerId={selectedProvider.id} bridge={bridge} onLayerLockChange={onLayerLockChange} />
+    </details>
     <details className="provider-models-disclosure"><summary><span><strong>{tr('provider_accounts_models_title')}</strong><small>{providerCatalogEntry ? tr('desktop_settings_28e11f6cd1', selectedModelIds.length, providerCatalogEntry.models.length) : tr('provider_accounts_presets_only')}</small></span><Icon name="chevron" size={15} /></summary><Card>
         {!providerCatalogEntry && <Row title={tr('provider_accounts_presets_only')}><span /></Row>}
         {selectedProvider.available && providerCatalogEntry && (

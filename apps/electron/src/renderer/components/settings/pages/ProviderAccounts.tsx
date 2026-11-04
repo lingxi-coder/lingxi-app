@@ -35,7 +35,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
   const generation = useRef(0);
   const busyRef = useRef(false);
   const activeOperation = useRef<number>();
-  const form = useRef<HTMLDialogElement>(null);
+  const form = useRef<HTMLFormElement>(null);
   const confirmation = useRef<HTMLDialogElement>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -49,15 +49,6 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
     return () => { ++generation.current; clearInterval(timer); unsubscribe?.(); if (activeOperation.current !== undefined) void api.cancel(activeOperation.current).catch(() => undefined); };
   }, [api, provider.id]);
   useEffect(() => {
-    if (formOpen) {
-      if (!form.current?.open) {
-        form.current?.showModal();
-        form.current?.querySelector<HTMLInputElement>('input:not(:disabled)')?.focus();
-      }
-    }
-    else if (form.current?.open) { form.current.close(); addButton.current?.focus(); }
-  }, [formOpen]);
-  useEffect(() => {
     if (removalId) { if (!confirmation.current?.open) confirmation.current?.showModal(); }
     else confirmation.current?.close();
   }, [removalId]);
@@ -65,6 +56,13 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
   const locked = busy || running || !snapshot;
   const supportsKey = provider.authMethods.includes('api_key') || provider.authMethods.includes('token');
   const supportsOAuth = provider.authMethods.includes('oauth');
+  const showForm = Boolean(snapshot) && provider.available && (formOpen || accounts.length === 0);
+  useEffect(() => {
+    if (!showForm) return;
+    const target = form.current?.querySelector<HTMLElement>('input[type="password"]:not(:disabled), button[type="submit"]');
+    target?.focus({ preventScroll: true });
+    if (formOpen) form.current?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  }, [showForm, authKind, formOpen]);
   const perform = async (command: Omit<ProviderAccountCommand, 'expectedRevision'>, credential?: string) => {
     if (!snapshot || busyRef.current) return;
     const current = generation.current;
@@ -96,7 +94,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
   };
   const closeForm = () => {
     if (busy) return;
-    setFormOpen(false); setKey(''); setName(''); setReplacementId(undefined); setError(undefined);
+    setFormOpen(false); setKey(''); setName(''); setReplacementId(undefined); setError(undefined); addButton.current?.focus();
   };
   const openForm = (accountId?: string) => {
     const existing = accounts.find(account => account.accountId === accountId);
@@ -112,14 +110,14 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
   const theme = { '--pa-bg': t.surface, '--pa-text': t.text, '--pa-secondary': t.text3, '--pa-border': t.border, '--pa-accent': t.accent, '--pa-ok': t.ok, '--pa-danger': t.danger } as CSSProperties;
   const menuAction = (button: HTMLButtonElement, action: () => void) => { button.closest('details')?.removeAttribute('open'); action(); };
   return <section className="pa-panel" style={theme} aria-label={tr('provider_accounts_accounts')} aria-busy={busy}>
-    <header className="pa-section-heading">
-      <div><h3>{tr('provider_accounts_accounts')} {snapshot && <span className="pa-count">{accounts.length}</span>}</h3><p>{tr('provider_accounts_priority_desc')}</p></div>
+    {(!snapshot || accounts.length > 0) && <header className="pa-section-heading">
+      <div><h3>{tr('provider_accounts_accounts')} {snapshot && <span className="pa-count">{accounts.length}</span>}</h3>{accounts.length > 1 && <p>{tr('provider_accounts_priority_desc')}</p>}</div>
       <div className="pa-toolbar">
         <button className="pa-icon-button" aria-label={tr('provider_accounts_refresh')} disabled={busy} onClick={() => void api.snapshot().then(setSnapshot).catch(() => setError(tr('provider_accounts_status_error')))}><Icon name="refresh" size={16} /></button>
         {provider.available && <button ref={addButton} className="pa-button pa-primary" disabled={locked} onClick={() => openForm()}><Icon name="plus" size={15} />{tr('provider_accounts_add')}</button>}
       </div>
-    </header>
-    <div className="pa-list">
+    </header>}
+    {(!snapshot || accounts.length > 0) && <div className="pa-list">
       {!snapshot ? <div className="pa-empty" role="status"><span className="pa-spinner" />{tr('provider_accounts_loading')}</div>
         : accounts.length === 0 ? <div className="pa-empty"><span className="pa-empty-icon"><Icon name="user" size={24} /></span><h4>{tr('provider_accounts_empty')}</h4><p>{tr('provider_accounts_empty_desc')}</p></div>
         : accounts.map((account, index) => {
@@ -148,24 +146,25 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
             </div>
           </article>;
         })}
-    </div>
+    </div>}
     {running && <p className="pa-caption">{tr('provider_accounts_running')}</p>}
-    {logicalProviderId(provider.id) === 'openai' && snapshot && <div className="pa-billing"><div><h4>{tr('provider_accounts_billing')}</h4><p>{tr('provider_accounts_billing_desc')}</p></div><label className="pa-switch"><input type="checkbox" role="switch" aria-label={tr('provider_accounts_billing_allow')} checked={snapshot.providerPolicies?.openai?.allowSubscriptionToMetered === true} disabled={locked} onChange={event => void perform({ action: 'set_policy', providerId: 'openai', allowSubscriptionToMetered: event.currentTarget.checked })} /><span /></label></div>}
-    {error && !formOpen && !removalId && <p className="pa-feedback pa-error" role="alert">{error}</p>}
+    {logicalProviderId(provider.id) === 'openai' && snapshot && accounts.length > 0 && <div className="pa-billing"><div><h4>{tr('provider_accounts_billing')}</h4><p>{tr('provider_accounts_billing_desc')}</p></div><label className="pa-switch"><input type="checkbox" role="switch" aria-label={tr('provider_accounts_billing_allow')} checked={snapshot.providerPolicies?.openai?.allowSubscriptionToMetered === true} disabled={locked} onChange={event => void perform({ action: 'set_policy', providerId: 'openai', allowSubscriptionToMetered: event.currentTarget.checked })} /><span /></label></div>}
+    {error && !showForm && !removalId && <p className="pa-feedback pa-error" role="alert">{error}</p>}
     {notice && <p className="pa-feedback pa-success" role="status"><Icon name="check" size={15} />{notice}</p>}
-    <dialog ref={form} className="pa-dialog" aria-labelledby="pa-form-title" onCancel={event => { event.preventDefault(); if (busy && oauthBusy) cancelLogin(); else closeForm(); }} onKeyDown={event => { if (event.key === 'Escape') event.stopPropagation(); }}>
-      <form onSubmit={event => { event.preventDefault(); if (!locked && (authKind === 'oauth' || key.trim())) void perform({ action: replacementId ? 'reconnect' : 'add', accountId: replacementId, providerId: logicalProviderId(provider.id), displayName: name.trim(), authKind, executionBindingId: authKind === 'oauth' ? 'openai-chatgpt' : logicalProviderId(provider.id) }, authKind === 'api_key' ? key : undefined); }}>
-        <header><span className="pa-dialog-icon"><Icon name={authKind === 'oauth' ? 'user' : 'key'} size={24} /></span><h3 id="pa-form-title">{tr(replacementId ? authKind === 'oauth' ? 'provider_accounts_reconnect' : 'provider_accounts_replace' : 'provider_accounts_add')}</h3><p>{provider.label}</p></header>
+    {showForm && <form ref={form} className="pa-inline-form" aria-labelledby="pa-form-title" onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); if (busy && oauthBusy) cancelLogin(); else closeForm(); } }} onSubmit={event => { event.preventDefault(); if (!locked && (authKind === 'oauth' || key.trim())) { setFormOpen(true); void perform({ action: replacementId ? 'reconnect' : 'add', accountId: replacementId, providerId: logicalProviderId(provider.id), displayName: name.trim() || provider.label, authKind, executionBindingId: authKind === 'oauth' ? 'openai-chatgpt' : logicalProviderId(provider.id) }, authKind === 'api_key' ? key : undefined); } }}>
+        <header><h3 id="pa-form-title">{tr(replacementId ? authKind === 'oauth' ? 'provider_accounts_reconnect' : 'provider_accounts_replace' : 'provider_accounts_add')}</h3></header>
         {supportsKey && supportsOAuth && !replacementId && <div className="pa-segment" aria-label={tr('provider_accounts_method')}><button type="button" aria-pressed={authKind === 'oauth'} disabled={busy} onClick={() => setAuthKind('oauth')}>ChatGPT</button><button type="button" aria-pressed={authKind === 'api_key'} disabled={busy} onClick={() => setAuthKind('api_key')}>{tr('provider_accounts_key')}</button></div>}
-        <label className="pa-field">{tr('provider_accounts_name')}<input autoFocus autoComplete="off" value={name} onChange={event => setName(event.target.value)} disabled={busy || Boolean(replacementId)} maxLength={128} placeholder={provider.label} /></label>
+
         {authKind === 'api_key' && <label className="pa-field">{tr('provider_accounts_key')}<input type="password" autoComplete="new-password" value={key} onChange={event => setKey(event.target.value)} disabled={busy} required /></label>}
         {authKind === 'api_key' && provider.credentialManagementUrl && <p className="pa-key-link"><a href={provider.credentialManagementUrl} target="_blank" rel="noopener noreferrer">{tr('desktop_settings_aab39b9ba5')}</a></p>}
+        <details className="pa-form-options"><summary>{tr('desktop_advanced')}</summary>
+        <label className="pa-field">{tr('provider_accounts_optional_name')}<input autoComplete="off" value={name} onChange={event => setName(event.target.value)} disabled={busy || Boolean(replacementId)} maxLength={128} placeholder={provider.label} /></label>
+        </details>
         <p className="pa-dialog-note">{tr(authKind === 'oauth' ? 'provider_accounts_browser_hint' : 'provider_accounts_storage')}</p>
         {busy && <p className="pa-progress" role="status"><span className="pa-spinner" />{tr(oauthBusy ? 'provider_accounts_browser_wait' : 'provider_accounts_saving')}</p>}
         {error && <p className="pa-feedback pa-error" role="alert">{error}</p>}
-        <footer><button type="button" className="pa-button" disabled={busy && !oauthBusy} onClick={() => busy && oauthBusy ? cancelLogin() : closeForm()}>{tr(busy && oauthBusy ? 'provider_accounts_cancel_login' : 'provider_accounts_cancel')}</button><button type="submit" className="pa-button pa-primary" disabled={locked || (authKind === 'api_key' && !key.trim())}>{tr(replacementId ? authKind === 'oauth' ? 'provider_accounts_reconnect' : 'provider_accounts_save' : authKind === 'oauth' ? 'provider_accounts_add_oauth' : 'provider_accounts_add_key')}</button></footer>
-      </form>
-    </dialog>
+        <footer>{(accounts.length > 0 || formOpen || (busy && oauthBusy)) && <button type="button" className="pa-button" disabled={busy && !oauthBusy} onClick={() => busy && oauthBusy ? cancelLogin() : closeForm()}>{tr(busy && oauthBusy ? 'provider_accounts_cancel_login' : 'provider_accounts_cancel')}</button>}<button type="submit" className="pa-button pa-primary" disabled={locked || (authKind === 'api_key' && !key.trim())}>{tr(replacementId ? authKind === 'oauth' ? 'provider_accounts_reconnect' : 'provider_accounts_save' : authKind === 'oauth' ? 'provider_accounts_add_oauth' : 'provider_accounts_add_key')}</button></footer>
+    </form>}
     <dialog ref={confirmation} className="pa-dialog" aria-labelledby="pa-remove-title" onCancel={event => { event.preventDefault(); if (!busy) setRemovalId(undefined); }} onKeyDown={event => { if (event.key === 'Escape') event.stopPropagation(); }}><h3 id="pa-remove-title">{tr('provider_accounts_remove')} {accounts.find(account => account.accountId === removalId)?.displayName}?</h3><p className="pa-dialog-note">{tr('provider_accounts_remove_hint')}</p>{error && <p className="pa-feedback pa-error" role="alert">{error}</p>}<footer><button className="pa-button" disabled={busy} onClick={() => setRemovalId(undefined)}>{tr('provider_accounts_cancel')}</button><button className="pa-button pa-danger-button" disabled={locked} onClick={() => removalId && void perform({ action: 'remove', accountId: removalId })}>{tr('provider_accounts_remove')}</button></footer></dialog>
   </section>;
 }

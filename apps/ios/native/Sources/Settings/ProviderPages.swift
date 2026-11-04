@@ -502,13 +502,15 @@ struct ProviderEditorForm: View {
 
     var body: some View {
         Form {
-            identitySection
+            if !repository.isOfficialEndpoint(for: draft.profile) { identitySection }
             accountsSection
-            statusSection
-            modelSection
+            if !draft.isNew || draft.validationMessage != nil || actionError != nil { statusSection }
+            if !draft.isNew { modelSection }
             Section {
                 NavigationLink {
                     Form {
+                        if repository.isOfficialEndpoint(for: draft.profile) { identitySection }
+                        if draft.isNew { modelSection }
                         stateSection
                         connectionsSection
                     }
@@ -621,6 +623,7 @@ struct ProviderEditorForm: View {
                 NavigationLink {
                     ProviderAccountsPage(providerId: repository.logicalProviderID(for: draft.profile),
                         executionBindingId: repository.engineProfileID(for: draft.profile),
+                        providerName: draft.profile.name,
                         executionBindingIds: repository.executionBindingIDs(for: draft.profile),
                         allowsAPIKey: !isOAuthOnly,
                         allowsOAuth: repository.accountOAuthAvailable(for: draft.profile))

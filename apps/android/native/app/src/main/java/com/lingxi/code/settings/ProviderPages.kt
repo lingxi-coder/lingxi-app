@@ -444,7 +444,8 @@ fun ProviderEditPage(
         .filter { it.executionBindingId == ProviderSettingsRepository.profileNameFor(editing) }.map { it.modelId }).distinct()
     val applyState = providerApplyUiState(providerId in state.pendingLlmProviderChanges, applying)
 
-    Column(Modifier.fillMaxWidth()) {
+    val usesPresetDefaults = kind == ProviderKind.Llm && preset.id != "custom"
+    val connectionFields: @Composable () -> Unit = {
         FieldLabel(stringResource(R.string.settings_display_name))
         SettingsField(
             value = editing.name,
@@ -463,10 +464,14 @@ fun ProviderEditPage(
             modifier = Modifier.testTag("provider.api-base"),
         )
         FieldHint(stringResource(R.string.settings_provider_url_hint_fmt, preset.defaultUrl.ifEmpty { "—" }))
+    }
+    Column(Modifier.fillMaxWidth()) {
+        if (!usesPresetDefaults) connectionFields()
 
         if (kind == ProviderKind.Llm) {
             ProviderAccountsSection(
                 bindingId = ProviderSettingsRepository.profileNameFor(editing),
+                providerName = editing.name,
                 repository = store.providerAccounts,
                 canAddAccounts = providerId !in state.pendingLlmProviderChanges,
                 onChanged = { store.refreshAfterProviderAccountMutation() },
@@ -478,7 +483,7 @@ fun ProviderEditPage(
             FieldHint(stringResource(R.string.settings_provider_hint_local_only))
         }
 
-        if (kind == ProviderKind.Llm) {
+        if (kind == ProviderKind.Llm && providerId in state.pendingLlmProviderChanges) {
             SettingsSection(
                 label = stringResource(R.string.settings_provider_apply),
                 footer = stringResource(if (providerId in state.pendingLlmProviderChanges)
@@ -606,6 +611,7 @@ fun ProviderEditPage(
             onDismiss = { showAdvanced = false },
         ) {
             Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp)) {
+                if (usesPresetDefaults) connectionFields()
                 if (kind == ProviderKind.Llm) {
                     ProviderConnectionsSection(
                         provider = editing,

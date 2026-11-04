@@ -2591,4 +2591,5 @@
     <string name="slash_placement_temporary">No message</string>
     <string name="slash_placement_conditional">Depends on action</string>
     <string name="provider_account_manage_api_key">Get or manage API key ↗</string>
+    <string name="provider_account_optional_name">Account name (optional)</string>
 </resources>

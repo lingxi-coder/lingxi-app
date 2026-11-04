@@ -105,6 +105,13 @@ export const providerAccountsCatalog: Record<string, Record<string, string>> = {
     "ja": "API キーを追加するか、対応する方法でログインしてください。",
     "ko": "API 키를 추가하거나 지원되는 방법으로 로그인하세요."
   },
+  "provider_accounts_optional_name": {
+    "en": "Account name (optional)",
+    "zh-Hans": "账号名称（可选）",
+    "zh-Hant": "帳號名稱（選填）",
+    "ja": "アカウント名（任意）",
+    "ko": "계정 이름(선택 사항)"
+  },
   "provider_accounts_name": {
     "en": "Account name",
     "zh-Hans": "账号名称",

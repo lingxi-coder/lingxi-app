@@ -2,6 +2,40 @@
   "sourceLanguage": "zh-Hans",
   "version": "1.0",
   "strings": {
+    "Account name (optional)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账号名称（可选）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "帳號名稱（選填）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account name (optional)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アカウント名（任意）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계정 이름(선택 사항)"
+          }
+        }
+      }
+    },
     "Get or manage API key ↗": {
       "localizations": {
         "zh-Hans": {

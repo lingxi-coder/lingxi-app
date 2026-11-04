@@ -4,6 +4,7 @@ import UIKit
 struct ProviderAccountsPage: View {
     let providerId: String
     let executionBindingId: String
+    var providerName: String = ""
     var executionBindingIds: [String] = []
     let allowsAPIKey: Bool
     let allowsOAuth: Bool
@@ -37,9 +38,11 @@ struct ProviderAccountsPage: View {
                     .disabled(!repository.available || repository.snapshot.storeScope.isEmpty || (!allowsAPIKey && !(allowsOAuth && repository.oauthSupported)))
                     .accessibilityIdentifier("provider.account.add")
             } header: {
-                Text("Account priority")
+                if accounts.count > 1 { Text("Account priority") }
             } footer: {
-                Text("Requests use the highest priority available account. Temporary failures do not change this order.")
+                if accounts.count > 1 {
+                    Text("Requests use the highest priority available account. Temporary failures do not change this order.")
+                }
                 if !repository.oauthSupported {
                     Text("OAuth sign-in must be completed on the execution Host.")
                 }
@@ -93,7 +96,7 @@ struct ProviderAccountsPage: View {
                 switch page {
                 case .add:
                     ProviderAccountAddPage(providerId: providerId, executionBindingId: executionBindingId,
-                        executionBindingIds: executionBindingIds, allowsAPIKey: allowsAPIKey, allowsOAuth: allowsOAuth && repository.oauthSupported)
+                        providerName: providerName, executionBindingIds: executionBindingIds, allowsAPIKey: allowsAPIKey, allowsOAuth: allowsOAuth && repository.oauthSupported)
                 case .deviceCode:
                     ProviderDeviceCodePage()
                 }
@@ -171,6 +174,7 @@ private struct ProviderAccountAddPage: View {
     @Environment(\.dismiss) private var dismiss
     let providerId: String
     let executionBindingId: String
+    var providerName: String = ""
     var executionBindingIds: [String] = []
     let allowsAPIKey: Bool
     let allowsOAuth: Bool
@@ -179,6 +183,7 @@ private struct ProviderAccountAddPage: View {
     @State private var selectedBinding = ""
     @State private var secret = ""
     @State private var oauth = false
+    @State private var showAccountOptions = false
     @State private var createdAccountID: String?
     @State private var submissionGeneration: UInt64?
     @State private var accountIdentityGeneration: UInt64?
@@ -188,15 +193,19 @@ private struct ProviderAccountAddPage: View {
     var body: some View {
         Form {
             Section {
-                TextField("Account name", text: $name)
-                    .accessibilityIdentifier("provider.account.name")
-                    .disabled(createdAccountID != nil)
                 if !usesOAuth && executionBindingIds.count > 1 {
                     Picker("Connection", selection: $selectedBinding) {
                         ForEach(executionBindingIds, id: \.self) { Text($0).tag($0) }
                     }.disabled(createdAccountID != nil)
                 }
-                if allowsAPIKey && allowsOAuth { Toggle("OAuth", isOn: $oauth).disabled(createdAccountID != nil) }
+                if allowsAPIKey && allowsOAuth {
+                    Picker("Authentication", selection: $oauth) {
+                        Text("API key").tag(false)
+                        Text("ChatGPT").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(createdAccountID != nil)
+                }
                 if allowsAPIKey && !usesOAuth {
                     SecureField("API key", text: $secret)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -207,8 +216,26 @@ private struct ProviderAccountAddPage: View {
                             .accessibilityIdentifier("provider.account.manage-api-key")
                     }
                 }
+            } header: {
+                Text(defaultAccountName)
             } footer: {
                 if usesOAuth { Text("Choose the upstream account in the browser before approving your device code.") }
+            }
+            Section {
+                Button { showAccountOptions.toggle() } label: {
+                    HStack {
+                        Text("settings_section_advanced")
+                        Spacer()
+                        Image(systemName: showAccountOptions ? "chevron.up" : "chevron.down")
+                            .font(.caption.weight(.semibold))
+                    }
+                }
+                .accessibilityIdentifier("provider.account.options")
+                if showAccountOptions {
+                    TextField("Account name (optional)", text: $name, prompt: Text(defaultAccountName))
+                        .accessibilityIdentifier("provider.account.name")
+                        .disabled(createdAccountID != nil)
+                }
             }
             if let error = validationError ?? repository.errorMessage {
                 Section { Text(error).foregroundStyle(.red).accessibilityIdentifier("provider.account.add.error") }
@@ -242,14 +269,16 @@ private struct ProviderAccountAddPage: View {
         .onDisappear { secret = "" }
     }
 
+    private var defaultAccountName: String { providerName.isEmpty ? providerId : providerName }
+
     private var usesOAuth: Bool { allowsOAuth && (!allowsAPIKey || oauth) }
 
     private func add() {
         let accountID = createdAccountID ?? UUID().uuidString.lowercased()
         let authenticatesWithOAuth = usesOAuth
         let kind = authenticatesWithOAuth ? "oauth" : "api_key"
-        let submittedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !submittedName.isEmpty else { validationError = String(localized: "Enter an account name."); return }
+        let enteredName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let submittedName = enteredName.isEmpty ? defaultAccountName : enteredName
         guard authenticatesWithOAuth || !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             validationError = String(localized: "Enter an API key."); return
         }
@@ -260,7 +289,7 @@ private struct ProviderAccountAddPage: View {
         let binding = selectedBinding.isEmpty ? (executionBindingIds.first ?? executionBindingId) : selectedBinding
         let actualBinding = authenticatesWithOAuth && providerId == "openai" ? "openai-chatgpt" : binding
         let isRetry = createdAccountID != nil
-        if !isRetry { createdAccountID = accountID; submissionGeneration = repository.generation }
+        if !isRetry { name = submittedName; createdAccountID = accountID; submissionGeneration = repository.generation }
         Task {
             defer { submitting = false }
             guard submissionGeneration == repository.generation else {

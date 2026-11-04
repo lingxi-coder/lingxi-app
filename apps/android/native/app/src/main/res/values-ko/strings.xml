@@ -2591,4 +2591,5 @@
     <string name="slash_placement_temporary">메시지에 기록 안 함</string>
     <string name="slash_placement_conditional">작업에 따라 다름</string>
     <string name="provider_account_manage_api_key">API 키 발급 또는 관리 ↗</string>
+    <string name="provider_account_optional_name">계정 이름(선택 사항)</string>
 </resources>

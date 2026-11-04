@@ -98,9 +98,10 @@ class ProviderAccountsAppUiTest {
         var completed = false
         try {
             compose.onNodeWithText(label(R.string.provider_account_add_key)).performScrollTo().performClick()
-            formFields().onFirst().performTextInput(originalName)
-            formFields().onLast().performTextInput("synthetic-no-upstream-${UUID.randomUUID()}")
-            compose.onNodeWithText(label(R.string.voice_save_button)).performClick()
+            formFields().onFirst().performTextInput("synthetic-no-upstream-${UUID.randomUUID()}")
+            compose.onNode(hasText(label(R.string.settings_section_advanced)) and hasAnyAncestor(isDialog())).performClick()
+            formFields().onLast().performTextInput(originalName)
+            compose.onNode(hasText(label(R.string.provider_account_add_key)) and hasAnyAncestor(isDialog())).performClick()
             compose.waitUntil(30_000) { store.providerAccounts.state.value.accounts.any { it.displayName == originalName } }
             val added = store.providerAccounts.state.value.accounts.single { it.displayName == originalName }
             ownedAccountId = added.accountId

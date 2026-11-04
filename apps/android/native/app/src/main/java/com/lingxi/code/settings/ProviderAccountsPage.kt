@@ -43,7 +43,8 @@ internal fun ProviderAccountsPage(
             }
         }
         val binding = selected?.takeIf { it in choices } ?: choices.firstOrNull()
-        if (binding != null) ProviderAccountsSection(binding, repository, onChanged)
+        if (binding != null) ProviderAccountsSection(binding, repository, onChanged,
+            providerName = providers.firstOrNull { it.profileId == binding }?.displayName ?: binding)
         else Text(accounts.error ?: stringResource(R.string.provider_accounts_loading))
     }
 }

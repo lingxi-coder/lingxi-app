@@ -3543,13 +3543,17 @@ mod tests {
         assert!(!error.contains("DO_NOT_ECHO") && !error.contains("credential-like-value"));
     }
 
+    fn fixed_catalog_header(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type":"fixed-session-mode", "sessionId":id,
+            "sessionMode":"code", "instructionEpoch":0,
+        })
+    }
+
     fn write_workspace_catalog_row(home: &Path, cwd: &Path, id: &str) -> PathBuf {
         let path = session::jsonl::session_path(home, &cwd.to_string_lossy(), id);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let header = serde_json::json!({
-            "type":"fixed-session-mode", "sessionId":id,
-            "sessionMode":"code", "instructionEpoch":0,
-        });
+        let header = fixed_catalog_header(id);
         let row = serde_json::json!({
             "type":"user", "uuid":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "parentUuid":null,
             "sessionId":id, "timestamp":"2026-10-21T00:00:00.000Z", "cwd":cwd,
@@ -4221,7 +4225,12 @@ mod tests {
             "isSidechain": false,
             "message": {"role": "system", "content": "hook result"},
         });
-        std::fs::write(&historical_path, format!("{system_line}\n")).expect("write historical row");
+        let historical_header = fixed_catalog_header(historical_id);
+        std::fs::write(
+            &historical_path,
+            format!("{historical_header}\n{system_line}\n"),
+        )
+        .expect("write historical row");
         let empty_path =
             session::jsonl::session_path(home.path(), &cwd.path().to_string_lossy(), empty_id);
         let empty_line = serde_json::json!({
@@ -4229,8 +4238,11 @@ mod tests {
             "sessionId": empty_id,
             "customTitle": "New session",
             "mobileEmptySession": 1,
+            "cwd": cwd.path().to_string_lossy(),
         });
-        std::fs::write(&empty_path, format!("{empty_line}\n")).expect("write empty anchor");
+        let empty_header = fixed_catalog_header(empty_id);
+        std::fs::write(&empty_path, format!("{empty_header}\n{empty_line}\n"))
+            .expect("write empty anchor");
 
         let json = list_sessions_json_from(cwd.path(), home.path(), None)
             .await
@@ -4307,9 +4319,10 @@ mod tests {
                 "content": [{"type": "text", "text": "off branch"}]
             },
         });
+        let header = fixed_catalog_header(session_id);
         std::fs::write(
             &transcript,
-            format!("{user}\n{assistant}\n{newer_sidechain}\n"),
+            format!("{header}\n{user}\n{assistant}\n{newer_sidechain}\n"),
         )
         .expect("write transcript");
 
@@ -4348,7 +4361,8 @@ mod tests {
                 "isSidechain": false,
                 "message": {"role": "user", "content": format!("prompt {index}")},
             });
-            std::fs::write(&path, format!("{line}\n")).expect("write transcript");
+            let header = fixed_catalog_header(id);
+            std::fs::write(&path, format!("{header}\n{line}\n")).expect("write transcript");
         }
 
         let full: serde_json::Value = serde_json::from_str(

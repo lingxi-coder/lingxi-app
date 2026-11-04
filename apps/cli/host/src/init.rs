@@ -2611,16 +2611,29 @@ mod tests {
                 assert_eq!(runtime.session_cwd.cwd(), *destination);
                 let writer = runtime.orchestrator.session_transcript_writer().unwrap();
                 assert_eq!(writer.active_path(), std::fs::canonicalize(&path).unwrap());
+                let message_id = uuid::Uuid::new_v4().to_string();
                 let payload = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
-                    &serde_json::json!({"type":"custom-title", "sessionId":id.to_string(), "customTitle":format!("built-{index}")}).to_string(),
-                ).unwrap();
+                    &serde_json::json!({
+                        "type":"user", "uuid":message_id, "parentUuid":null,
+                        "sessionId":id.to_string(), "cwd":destination,
+                        "timestamp":"2026-10-21T00:00:01.000Z", "version":"test",
+                        "isSidechain":false,
+                        "message":{"role":"user", "content":format!("built-{index}")}
+                    })
+                    .to_string(),
+                )
+                .unwrap();
                 writer
                     .append_json_once_durable(&format!("test-{id}"), payload)
                     .await
                     .unwrap();
-                assert!(std::fs::read_to_string(&path)
-                    .unwrap()
-                    .contains(&format!("built-{index}")));
+                let written = std::fs::read_to_string(&path).unwrap();
+                let appended = written
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .find(|row| row["uuid"] == message_id)
+                    .expect("the selected transcript must contain the durable message");
+                assert_eq!(appended["message"]["content"], format!("built-{index}"));
                 assert!(!session::jsonl::session_path(
                     &home,
                     &destination.to_string_lossy(),

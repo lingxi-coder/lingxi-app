@@ -1,4 +1,4 @@
-/** User-facing text for Teams error codes. Shared by the panels and the workspace views; codes stay language-neutral until shown. */
+/** User-facing text for Teams error codes. Shared by the workspace views; codes stay language-neutral until shown. */
 
 const membership: Record<string, [string, string]> = {
   INVITE_UNAVAILABLE: ['This invite has expired, was revoked or has no uses left.', '邀请已过期、撤销或用尽。'],
@@ -9,12 +9,12 @@ const membership: Record<string, [string, string]> = {
   MEMBER_LIMIT: ['This team has reached 200 members.', '团队已达到 200 人上限。'],
 };
 
-/** Team membership, invitation and listing errors (the former TeamsPanel `translateError`). */
+/** Team membership, invitation and listing errors. */
 export function teamsErrorText(code: string, zh: boolean): string {
   return membership[code]?.[zh ? 1 : 0] ?? (zh ? '无法连接团队服务，请检查网络后重试。' : 'Could not connect to Teams. Check your connection and try again.');
 }
 
-/** Messaging, Bot and pending-command errors (the former MessagesPanel `errorText`). */
+/** Messaging, Bot and pending-command errors. */
 export function messageErrorText(code: string, zh: boolean): string {
   const t = (en: string, cn: string) => zh ? cn : en;
   if (['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED'].includes(code)) {
@@ -42,6 +42,8 @@ export function messageErrorText(code: string, zh: boolean): string {
       return t('Sharing a Team Bot currently requires macOS Desktop.', '共享团队 Bot 当前需要 macOS Desktop。');
     case 'TEAM_HOST_UNAVAILABLE':
       return t('The Desktop Bot host is unavailable. Check the Desktop service and try again.', 'Desktop Bot 主机不可用，请检查 Desktop 服务后重试。');
+    case 'INVALID_DATA':
+      return t('Some of this team’s data is in an unsupported format and cannot be shown.', '此团队的部分数据格式不受支持，无法显示。');
     case 'RECOVERY_NOT_REQUIRED':
       return t('The run is not eligible for a new settlement. Refresh and review its current status.', '此运行当前无法创建新的处理结果，请刷新并检查状态。');
     case 'BOT_RESULT_CONFLICT':

@@ -94,13 +94,14 @@ service cloud.firestore {
         && validPreview(last.preview);
     }
     // An edit/recall of an older message never touches the pointer. For the newest message only its
-    // preview may change, and a recall must blank it (a legacy pointer holds no excerpt to blank).
+    // preview may change (an edit that leaves it as it was is fine), and a recall must blank it. The
+    // pointer being changed must already be whole: a partial one is never completed by a client write.
     function isKeptLast(before, after, change) {
       let was = before.lastMessage;
       let next = after.lastMessage;
       let isLast = was != null && was.id == change.messageId;
-      return (next == was && (change.operation == 'edit' || !isLast || !('preview' in was)))
-        || (isLast && next != null
+      return (next == was && (change.operation == 'edit' || !isLast))
+        || (isLast && next != null && was.keys().hasAll(['id', 'seq', 'at', 'author', 'preview'])
           && ((change.operation == 'edit' && next.diff(was).affectedKeys().hasOnly(['preview']) && validPreview(next.preview))
             || (change.operation == 'recall' && next.diff(was).affectedKeys().hasOnly(['preview', 'recalled'])
               && next.preview == '' && next.recalled == true)));

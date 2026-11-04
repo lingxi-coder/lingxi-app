@@ -2,8 +2,8 @@ import { canRecoverBot, isQuestionRecipient, type TeamBotAnswer, type TeamBotCom
 export interface TeamConversation {
   id: string; kind: 'dm' | 'group' | 'channel' | 'bot_dm'; title: string; participants: string[];
   lastSeq: number; lastChangeSeq: number; lastReadSeq: number; botKey?: string;
-  /** Newest message for conversation lists. Conversations that predate previews have no preview/author. */
-  lastMessage?: { id: string; seq: number; at: string | null; preview?: string; recalled?: boolean; author?: { kind: 'user' | 'bot'; uid: string; botKey?: string } };
+  /** Newest message for conversation lists. Absent until the conversation has a message; then always the full pointer. */
+  lastMessage?: { id: string; seq: number; at: string | null; author: { kind: 'user' | 'bot'; uid: string; botKey?: string }; preview: string; recalled?: true };
 }
 export interface TeamMessage {
   id: string; seq: number; author: { kind: 'user' | 'bot'; uid: string; botKey?: string };
@@ -58,7 +58,7 @@ export function pendingCommands(value: PendingCommands): PendingCommands {
 export const projectionKey = (uid: string, scope: MessageScope) => JSON.stringify([uid, scope.teamId, scope.generation]);
 export const emptyProjection = (uid: string, scope: MessageScope): MessageProjection => ({ version: 1, uid, ...scope, conversations: [], threads: {}, outbox: [] });
 const sameLastMessage = (a: TeamConversation['lastMessage'], b: TeamConversation['lastMessage']) => a === b || (!!a && !!b && a.id === b.id && a.seq === b.seq && a.at === b.at
-  && a.preview === b.preview && !!a.recalled === !!b.recalled && a.author?.kind === b.author?.kind && a.author?.uid === b.author?.uid && a.author?.botKey === b.author?.botKey);
+  && a.preview === b.preview && a.recalled === b.recalled && a.author.kind === b.author.kind && a.author.uid === b.author.uid && a.author.botKey === b.author.botKey);
 export function mergeConversation(old: TeamConversation | undefined, value: TeamConversation): TeamConversation {
   // Like the cursors, never step back to an older message; the same seq is newer when its edit/recall changed the preview.
   const lastMessage = old?.lastMessage && (!value.lastMessage || old.lastMessage.seq > value.lastMessage.seq) ? old.lastMessage : value.lastMessage;

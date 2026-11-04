@@ -62,8 +62,8 @@ export interface SidebarPreferences {
   chatSort: 'priority' | 'updated' | 'manual';
   /** Session IDs in user-defined order, keyed by their canonical project path. */
   manualSessionOrder: Record<string, string[]>;
-  /** The mode the owner last chose. Omitted until they first switch it, and in files written before modes existed. */
-  mode?: SidebarMode;
+  /** The mode the owner last chose: Home until they first switch it. */
+  mode: SidebarMode;
   /** The Bots whose chats the Bots sidebar lists open. Omitted until the owner first opens or closes one. */
   expandedBots?: string[];
   /** The width, in CSS pixels, the owner gave the Teams details panel. Omitted until they first resize it. */

@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react';
 import { TeamSidebar } from '../../../../../packages/teams/TeamSidebar';
 import type { DrawerTab } from '../../../../../packages/teams/ui';
-import type { UseTeams } from '../bridge/useTeams';
+import type { UseTeams } from '../../../../../packages/teams/useTeamsWorkspace';
 import { tr } from '../i18n/locale';
 import { renderTeamAvatar } from './TeamAvatar';
 import { noteStyle, TeamsSignIn } from './TeamsSignIn';

@@ -121,16 +121,14 @@ export function defaultConversationTitle(uids: readonly string[], members: reado
 }
 
 /**
- * One line of a conversation's newest message. `lastMessage` absent: no messages yet. Legacy pointer
- * (no `preview`): nothing, so the row shows only its time. Recalled and non-text messages get a label.
- * "You: " prefixes the viewer's own message; `author` names the sender in groups and channels.
+ * One line of a conversation's newest message. `lastMessage` absent: no messages yet. Recalled and non-text
+ * messages get a label. "You: " prefixes the viewer's own message; `author` names the sender in groups and channels.
  */
 export function conversationPreview(conversation: TeamConversation, uid: string, zh: boolean, author?: (message: NonNullable<TeamConversation['lastMessage']>) => string): string {
   const last = conversation.lastMessage;
   if (!last) return zh ? '暂无消息' : 'No messages yet';
-  if (last.preview === undefined && !last.recalled) return '';
-  const mine = last.author?.kind === 'user' && last.author.uid === uid;
-  const prefix = mine ? (zh ? '你：' : 'You: ') : (conversation.kind === 'group' || conversation.kind === 'channel') && last.author && author ? `${author(last)}${zh ? '：' : ': '}` : '';
+  const mine = last.author.kind === 'user' && last.author.uid === uid;
+  const prefix = mine ? (zh ? '你：' : 'You: ') : (conversation.kind === 'group' || conversation.kind === 'channel') && author ? `${author(last)}${zh ? '：' : ': '}` : '';
   if (last.recalled) return `${prefix}${zh ? '消息已撤回' : 'Message recalled'}`;
   return `${prefix}${last.preview || (zh ? '[非文本消息]' : '[Non-text message]')}`;
 }
@@ -237,9 +235,9 @@ class BotCards {
  * team's detail, that team's {@link TeamMessaging} controller, its Bot cards, and unread counts for
  * the other teams. No React: `useSyncExternalStore(workspace.subscribe, workspace.getSnapshot)`.
  *
- * It ports `TeamsPanel` (epoch/authority guards, invalidation) and the lifecycle of `MessagesPanel`
- * (one controller per team and membership generation, refreshed on `online` and `focus`). Errors
- * are kept as codes; views translate them.
+ * Responses are applied only if no newer request or invalidation superseded them (epoch and authority
+ * guards). There is one controller per team and membership generation, refreshed on `online` and `focus`.
+ * Errors are kept as codes; views translate them.
  */
 export class TeamsWorkspace {
   readonly subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -255,7 +253,7 @@ export class TeamsWorkspace {
   private readonly stops: (() => void)[] = [];
   private closed = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
-  // Guards ported from TeamsPanel: a response is applied only if no newer request or invalidation superseded it.
+  // A response is applied only if no newer request or invalidation superseded it.
   private epoch = 0;
   private authority = 0;
   private selection = '';
@@ -347,7 +345,7 @@ export class TeamsWorkspace {
     this.publish();
   };
 
-  /** Run a team command. Same guards as `TeamsPanel`: one at a time; ignored after an invalidation; refetches afterwards. Resolves `true` when applied. */
+  /** Run a team command: one at a time; ignored after an invalidation; refetches afterwards. Resolves `true` when applied. */
   execute = async (command: TeamCommand): Promise<boolean> => {
     if (this.busy || this.closed) return false;
     const authorized = this.authority;
@@ -388,7 +386,7 @@ export class TeamsWorkspace {
     catch (error) { this.actionError = codeOf(error, 'UNKNOWN'); return false; }
     finally { this.submitting = false; this.messageBusy = false; this.publish(); }
   };
-  /** `run` for components that take the `MessagesPanel` shape. */
+  /** `run` for components that take an action and report nothing back. */
   attempt = async (action: () => Promise<unknown>): Promise<void> => { await this.run(action); };
 
   /** Create a dm, group or channel with people and Bots. Selects it. Bots must be usable now. */
@@ -398,7 +396,7 @@ export class TeamsWorkspace {
     if (botParties.some(key => !this.bots.some(bot => bot.key === key && teamBotUsable(bot)))) throw new Error('BOT_USE_REQUIRED');
     await model.create(kind, title.trim(), [this.uid, ...parties], botParties);
   });
-  /** Open the viewer's Bot DM, creating it when `fresh` or when there is none. Throws like `MessagesPanel`'s `onOpen`; wrap it in `attempt`. */
+  /** Open the viewer's Bot DM, creating it when `fresh` or when there is none. Throws when the Bot is not usable; wrap it in `attempt`. */
   startBotDm = async (bot: TeamBotCard, fresh = false): Promise<void> => {
     const model = this.messaging;
     if (!model) return;

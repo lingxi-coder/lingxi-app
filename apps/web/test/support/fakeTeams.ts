@@ -30,6 +30,8 @@ export interface Watch { scope: MessageScope; conversationId: string; next(snaps
 
 /** A scriptable TeamsApi: teams, details, directories and Bots are plain data; every listener is tracked so tests can prove it was released. */
 export class FakeTeams {
+  /** Whose directories and threads the listeners deliver: the signed-in account. */
+  constructor(readonly viewer: string = uid) {}
   teams: TeamSummary[] = [];
   details = new Map<string, TeamDetail>();
   conversations = new Map<string, TeamConversation[]>();
@@ -76,15 +78,15 @@ export class FakeTeams {
   /** Send a watch its current directory (and thread, when it follows a conversation). */
   deliver(watch: Watch, fromCache = false): void {
     const { teamId } = watch.scope;
-    watch.next({ uid, ...watch.scope, kind: 'directory', fromCache, conversations: structuredClone(this.conversations.get(teamId) ?? []) });
-    if (watch.conversationId) watch.next({ uid, ...watch.scope, kind: 'messages', conversationId: watch.conversationId, fromCache, replace: true, messages: structuredClone(this.threads.get(watch.conversationId) ?? []) });
+    watch.next({ uid: this.viewer, ...watch.scope, kind: 'directory', fromCache, conversations: structuredClone(this.conversations.get(teamId) ?? []) });
+    if (watch.conversationId) watch.next({ uid: this.viewer, ...watch.scope, kind: 'messages', conversationId: watch.conversationId, fromCache, replace: true, messages: structuredClone(this.threads.get(watch.conversationId) ?? []) });
   }
   open(teamId: string, conversationId?: string): Watch[] {
     return this.watches.filter(watch => watch.open && watch.scope.teamId === teamId && (conversationId === undefined || watch.conversationId === conversationId));
   }
   get openWatches(): number { return this.watches.filter(watch => watch.open).length; }
   emit(watch: Watch, snapshot: SnapshotBody): void {
-    watch.next({ uid, ...watch.scope, fromCache: false, ...snapshot } as MessageSnapshot);
+    watch.next({ uid: this.viewer, ...watch.scope, fromCache: false, ...snapshot } as MessageSnapshot);
   }
   invalidate(invalidated = true): void { for (const callback of [...this.changed]) callback({ invalidated }); }
   signal(signal?: MessageSignal): void { for (const callback of [...this.signals]) callback(signal); }

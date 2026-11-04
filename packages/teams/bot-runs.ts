@@ -17,10 +17,9 @@ export interface BotRuns {
 }
 
 /**
- * Which visible messages started Bot runs, and where those runs stand. This is `MessagesPanel`'s
- * trigger discovery and `botStates` polling, unchanged in behavior: a failed observation never
- * authorizes question or recovery controls, finished runs are remembered, and a running lease
- * schedules its own re-check.
+ * Which visible messages started Bot runs, and where those runs stand: trigger discovery and `botStates`
+ * polling. A failed observation never authorizes question or recovery controls, finished runs are remembered,
+ * and a running lease schedules its own re-check.
  */
 export function useBotRuns({ api, uid, team, selected, conversation, visibleMessages }: {
   api: TeamsApi; uid: string; team: { id: string; generation: number }; selected: string; conversation: TeamConversation | undefined; visibleMessages: readonly TeamMessage[];

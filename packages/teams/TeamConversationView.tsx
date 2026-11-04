@@ -4,7 +4,7 @@ import { snippet } from './compose.js';
 import { Composer, composerLock } from './Composer';
 import { messageErrorText } from './errors.js';
 import type { TeamConversation, TeamMessage } from './messages.js';
-import { BotQuestion, BotRun } from './MessagesPanel';
+import { BotQuestion, BotRun } from './BotRunCards';
 import { buildStreamRows, formatClock, visibleStart, WINDOW_SIZE } from './stream.js';
 import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useIsoLayoutEffect, type RenderAvatar } from './ui';
 import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';

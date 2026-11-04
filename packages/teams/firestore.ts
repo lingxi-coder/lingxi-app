@@ -6,16 +6,30 @@ function timestamp(value: unknown): string | null {
   return null;
 }
 
-/** Conversation `lastMessage` pointer -> list DTO. Legacy docs (id/seq/at only) and unexpected shapes
- * lose the fields they lack instead of failing the whole directory. */
+/** A stored document that breaks the contract the rules and the trusted backend enforce; the watcher reports it as `INVALID_DATA`. */
+const invalidData = () => new Error('INVALID_DATA');
+const record = (value: unknown): Record<string, unknown> => { if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>; throw invalidData(); };
+const text = (value: unknown): string => { if (typeof value === 'string' && value) return value; throw invalidData(); };
+type Pointer = NonNullable<TeamConversation['lastMessage']>;
+
+function pointerAuthor(value: unknown): Pointer['author'] {
+  const by = record(value);
+  if (by.kind === 'user') return { kind: 'user', uid: text(by.uid) };
+  if (by.kind === 'bot') return { kind: 'bot', uid: text(by.uid), botKey: text(by.botKey) };
+  throw invalidData();
+}
+
+/**
+ * Conversation `lastMessage` pointer -> list DTO. `null` is a conversation with no message yet. Any other value must be the whole pointer
+ * `{ id, seq, at, author, preview, recalled? }` that the rules and the backend write, or this throws `INVALID_DATA`. `at` is `null` only
+ * while the server has not yet stamped a write made on this device.
+ */
 export function firestoreLastMessage(value: unknown): TeamConversation['lastMessage'] {
-  if (!value || typeof value !== 'object') return undefined;
-  const { id, seq, at, preview, recalled, author } = value as Record<string, unknown>;
-  if (typeof id !== 'string' || !id || typeof seq !== 'number' || !Number.isSafeInteger(seq)) return undefined;
-  const by = author && typeof author === 'object' ? author as Record<string, unknown> : undefined;
-  return { id, seq, at: timestamp(at), ...(typeof preview === 'string' ? { preview } : {}), ...(recalled === true ? { recalled: true } : {}),
-    ...(by && (by.kind === 'user' || by.kind === 'bot') && typeof by.uid === 'string' && by.uid
-      ? { author: { kind: by.kind, uid: by.uid, ...(typeof by.botKey === 'string' && by.botKey ? { botKey: by.botKey } : {}) } } : {}) };
+  if (value === null) return undefined;
+  const { id, seq, at, author, preview, recalled } = record(value);
+  const time = at === null ? null : timestamp(at);
+  if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || (at !== null && time === null) || typeof preview !== 'string' || (recalled !== undefined && recalled !== true)) throw invalidData();
+  return { id: text(id), seq, at: time, author: pointerAuthor(author), preview, ...(recalled ? { recalled: true } : {}) };
 }
 
 export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
@@ -78,12 +92,21 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
   stops.push(onSnapshot(query(collection(db, ...root, 'conversations'), where('memberUids', 'array-contains', uid)),
     { includeMetadataChanges: true }, snapshot => {
       if (closed) return;
+      let conversations: TeamConversation[];
+      try {
+        conversations = snapshot.docs.map(snapshot => {
+          const value = snapshot.data(), lastMessage = firestoreLastMessage(value.lastMessage);
+          return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants, lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(snapshot.id) ?? 0, ...(value.botKey ? { botKey: value.botKey } : {}), ...(lastMessage ? { lastMessage } : {}) };
+        });
+      } catch {
+        // A conversation that breaks the stored contract is not shown half-parsed; the team's listeners stop with the error.
+        emit({ kind: 'error', fromCache: snapshot.metadata.fromCache, error: 'INVALID_DATA' });
+        close();
+        return;
+      }
       const allowed = new Set(snapshot.docs.map(value => value.id));
       for (const [id, stop] of reads) if (!allowed.has(id)) { stop(); reads.delete(id); readSeq.delete(id); }
-      directory = { fromCache: snapshot.metadata.fromCache, conversations: snapshot.docs.map(snapshot => {
-        const value = snapshot.data(), lastMessage = firestoreLastMessage(value.lastMessage);
-        return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants, lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(snapshot.id) ?? 0, ...(value.botKey ? { botKey: value.botKey } : {}), ...(lastMessage ? { lastMessage } : {}) };
-      }) };
+      directory = { fromCache: snapshot.metadata.fromCache, conversations };
       for (const id of allowed) if (!reads.has(id)) reads.set(id, onSnapshot(doc(db, ...root, 'conversations', id, 'reads', uid),
         { includeMetadataChanges: true }, mark => {
           if (closed) return;

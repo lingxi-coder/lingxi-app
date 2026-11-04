@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactElement } from 'react';
 import { messageErrorText, teamsErrorText } from './errors.js';
 import type { TeamCommand, TeamMember, TeamRole } from './index.js';
-import { BotDirectory } from './MessagesPanel';
+import { BotDirectory } from './BotDirectory';
 import { Avatar, Dialog, Icon, platformNotice, rovingIndex, type DrawerTab, type RenderAvatar } from './ui';
 import type { TeamsSnapshot, TeamsWorkspace } from './workspace.js';
 

@@ -8,7 +8,7 @@ interface DialogProps { workspace: TeamsWorkspace; snapshot: TeamsSnapshot; zh: 
 const MAX_BOTS = 8;
 
 /**
- * The form that used to sit in `MessagesPanel`'s "New conversation" details, as a dialog. A
+ * The "New channel" and "New message" dialogs. A
  * channel has a name and members; "direct" is either a DM (exactly one person; an existing DM
  * is opened instead of duplicated) or a group (people and Bots, optionally named). Creation
  * goes through `TeamsWorkspace.createConversation`: the viewer is added first and every chosen

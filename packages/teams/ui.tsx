@@ -225,7 +225,7 @@ export function rovingIndex(count: number, current: number, key: string, options
 /** Which tab of the details drawer to show. */
 export type DrawerTab = 'members' | 'invites' | 'bots';
 
-/** The disclosure `TeamsPanel` shows above everything: who can read Team data. */
+/** Who can read Team data. Shown wherever a person creates, joins or opens a team, and on the conversation header and the details panel. */
 export const platformNotice = (zh: boolean): string => zh
   ? '团队资料与消息平台可读。与 Bot 的对话对该 Bot 的所有者可见。'
   : 'Team data and messages are readable by the platform. A Bot’s owner can read conversations with their Bot.';

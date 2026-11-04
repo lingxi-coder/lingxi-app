@@ -15,8 +15,6 @@ test('conversation merge: rows without a lastMessage stay exactly as they were',
   const merged = mergeConversation(undefined, base);
   assert.deepEqual(merged, base); assert.ok(!('lastMessage' in merged));
   assert.equal(mergeConversation(base, { ...base }), base);
-  const legacy = { id: 'message-2', seq: 2, at }; // pointer from before previews: no preview or author
-  assert.deepEqual(mergeConversation(undefined, withLast(legacy)).lastMessage, legacy);
 });
 
 test('conversation merge: the higher seq wins and an edit or recall at the same seq replaces the preview', () => {
@@ -35,13 +33,11 @@ test('conversation merge: the higher seq wins and an edit or recall at the same 
 test('conversation merge: an identical pointer keeps the row identity, any visible difference does not', () => {
   const old = withLast(last(2));
   assert.equal(mergeConversation(old, withLast(last(2))), old); // a fresh but equal object from the next snapshot
-  for (const change of [{ preview: 'Other' }, { recalled: true }, { at: '2026-11-02T10:00:01.000Z' }, { id: 'message-9' }, { author: { kind: 'bot' as const, uid: 'owner', botKey: 'bot:owner:h:b' } },
-    { author: { kind: 'user' as const, uid: 'carol' } }, { author: undefined }]) {
+  for (const change of [{ preview: 'Other' }, { recalled: true as const }, { at: '2026-11-02T10:00:01.000Z' }, { id: 'message-9' }, { author: { kind: 'bot' as const, uid: 'owner', botKey: 'bot:owner:h:b' } },
+    { author: { kind: 'user' as const, uid: 'carol' } }]) {
     const next = mergeConversation(old, withLast(last(2, change)));
     assert.notEqual(next, old, JSON.stringify(change));
   }
-  const unmarked = withLast(last(2, { recalled: false }));
-  assert.equal(mergeConversation(unmarked, withLast(last(2))), unmarked); // recalled false and absent are the same
 });
 
 test('directory merge: unchanged snapshots reuse the projection and a preview change replaces only that row', () => {
@@ -61,52 +57,71 @@ test('Firestore pointer: timestamps become ISO strings and every field of the fu
   assert.deepEqual(firestoreLastMessage(value), { id: 'message-5', seq: 5, at, preview: 'Hello there', author: { kind: 'bot', uid: 'owner', botKey: 'bot:owner:h:b' } });
   assert.deepEqual(firestoreLastMessage({ ...value, author: { kind: 'user', uid: 'bob' }, preview: '', recalled: true }),
     { id: 'message-5', seq: 5, at, preview: '', recalled: true, author: { kind: 'user', uid: 'bob' } });
-  assert.ok(!('recalled' in firestoreLastMessage({ ...value, recalled: false })!));
+  assert.equal(firestoreLastMessage({ ...value, at: null })!.at, null, 'a write made on this device that the server has not stamped yet');
 });
 
-test('Firestore pointer: legacy and malformed pointers lose only the fields they lack, never throw', () => {
-  const stamp = Timestamp.fromDate(new Date(at));
-  assert.deepEqual(firestoreLastMessage({ id: 'message-2', seq: 2, at: stamp }), { id: 'message-2', seq: 2, at }); // written before previews
-  assert.equal(firestoreLastMessage({ id: 'message-2', seq: 2 })!.at, null);
-  assert.equal(firestoreLastMessage({ id: 'message-2', seq: 2, at: '2026-11-02' })!.at, null);
-  for (const value of [undefined, null, 0, 'message-2', [], {}, { id: 'message-2' }, { seq: 2 }, { id: '', seq: 2 }, { id: 7, seq: 2 }, { id: 'message-2', seq: '2' }, { id: 'message-2', seq: 2.5 }, { id: 'message-2', seq: Number.NaN }]) {
-    assert.equal(firestoreLastMessage(value), undefined, JSON.stringify(value));
-  }
-  const dropped = firestoreLastMessage({ id: 'message-2', seq: 2, at: stamp, preview: 7, recalled: 'yes', author: { kind: 'robot', uid: 'bob' } });
-  assert.deepEqual(dropped, { id: 'message-2', seq: 2, at });
-  for (const author of [null, 'bob', [], { kind: 'user' }, { kind: 'user', uid: '' }, { kind: 'user', uid: 5 }, { uid: 'bob' }]) {
-    assert.ok(!('author' in firestoreLastMessage({ id: 'message-2', seq: 2, at: stamp, author })!), JSON.stringify(author));
-  }
-  assert.deepEqual(firestoreLastMessage({ id: 'message-2', seq: 2, at: stamp, author: { kind: 'user', uid: 'bob', botKey: 7 } })!.author, { kind: 'user', uid: 'bob' });
+test('Firestore pointer: null is a conversation with no message yet, and anything but the whole pointer is a data error', () => {
+  const stamp = Timestamp.fromDate(new Date(at)), whole = { id: 'message-2', seq: 2, at: stamp, preview: 'Hi', author: { kind: 'user', uid: 'bob' } };
+  assert.equal(firestoreLastMessage(null), undefined);
+  assert.ok(firestoreLastMessage(whole));
+  const { author: _author, ...withoutAuthor } = whole, { preview: _preview, ...withoutPreview } = whole, { at: _at, ...withoutTime } = whole;
+  for (const value of [
+    undefined, 0, 'message-2', [], {}, { id: 'message-2' }, { seq: 2 },
+    { id: 'message-2', seq: 2, at: stamp }, // written before previews existed
+    withoutAuthor, withoutPreview, withoutTime,
+    { ...whole, id: '' }, { ...whole, id: 7 }, { ...whole, seq: '2' }, { ...whole, seq: 2.5 }, { ...whole, seq: Number.NaN }, { ...whole, at: '2026-11-02' },
+    { ...whole, preview: 7 }, { ...whole, preview: null }, { ...whole, recalled: false }, { ...whole, recalled: 'yes' },
+    ...[null, 'bob', [], {}, { kind: 'user' }, { kind: 'user', uid: '' }, { kind: 'user', uid: 5 }, { uid: 'bob' }, { kind: 'robot', uid: 'bob' }, { kind: 'bot', uid: 'owner' }, { kind: 'bot', uid: 'owner', botKey: '' }]
+      .map(author => ({ ...whole, author })),
+  ]) assert.throws(() => firestoreLastMessage(value), { message: 'INVALID_DATA' }, JSON.stringify(value));
 });
 
 type Listener = { path: string; next(snapshot: unknown): void };
-test('directory snapshots carry each conversation lastMessage through the Firestore watcher', () => {
+function watch() {
   const listeners: Listener[] = [];
+  let stopped = 0;
   const target = (kind: string, path: unknown[]) => ({ kind, path: path.filter(part => typeof part === 'string').join('/') });
   const sdk = {
     collection: (_db: unknown, ...path: string[]) => target('collection', path),
     doc: (_db: unknown, ...path: string[]) => target('doc', path),
     query: (source: { path: string }) => ({ ...source, kind: 'query' }),
     where: () => ({}), orderBy: () => ({}),
-    onSnapshot: (source: { kind: string; path: string }, _options: unknown, next: (snapshot: unknown) => void) => { listeners.push({ path: `${source.kind}:${source.path}`, next }); return () => {}; },
+    onSnapshot: (source: { kind: string; path: string }, _options: unknown, next: (snapshot: unknown) => void) => { listeners.push({ path: `${source.kind}:${source.path}`, next }); return () => { stopped++; }; },
   } as unknown as typeof import('firebase/firestore');
   const received: MessageSnapshot[] = [];
   const stop = watchFirestoreMessages(sdk, {} as never, uid, scope, '', value => received.push(value), () => true);
   const on = (path: string) => listeners.find(value => value.path === path)!;
   on('doc:teams/test-team/members/alice').next({ data: () => ({ generation: 1 }), metadata: { fromCache: false } });
-  const document = (id: string, value: Record<string, unknown>) => ({ id, data: () => ({ kind: 'dm', title: id, participants: ['user:alice'], lastSeq: 2, lastChangeSeq: 2, ...value }) });
-  on('query:teams/test-team/conversations').next({ metadata: { fromCache: false }, docChanges: () => [], docs: [
+  const document = (id: string, value: Record<string, unknown>) => ({ id, data: () => ({ kind: 'dm', title: id, participants: ['user:alice'], lastSeq: 2, lastChangeSeq: 2, lastMessage: null, ...value }) });
+  const directory = (docs: unknown[]) => on('query:teams/test-team/conversations').next({ metadata: { fromCache: false }, docChanges: () => [], docs });
+  return { received, directory, document, stop, stopped: () => stopped };
+}
+
+test('directory snapshots carry each conversation lastMessage through the Firestore watcher', () => {
+  const { received, directory, document, stop } = watch();
+  directory([
     document('with-preview', { lastMessage: { id: 'message-2', seq: 2, at: Timestamp.fromDate(new Date(at)), preview: 'Hello', author: { kind: 'user', uid: 'bob' } } }),
-    document('legacy', { lastMessage: { id: 'message-2', seq: 2, at: Timestamp.fromDate(new Date(at)) } }),
-    document('empty', { lastMessage: null }),
-    document('absent', {}),
-    document('malformed', { lastMessage: 'oops' }),
-  ] });
+    document('recalled', { lastMessage: { id: 'message-3', seq: 3, at: Timestamp.fromDate(new Date(at)), preview: '', recalled: true, author: { kind: 'bot', uid: 'owner', botKey: 'bot:owner:h:b' } } }),
+    document('empty', {}),
+  ]);
   stop();
-  const directory = received.find((value): value is Extract<MessageSnapshot, { kind: 'directory' }> => value.kind === 'directory')!;
-  const rows = new Map(directory.conversations.map(value => [value.id, value]));
+  const rows = new Map(received.find((value): value is Extract<MessageSnapshot, { kind: 'directory' }> => value.kind === 'directory')!.conversations.map(value => [value.id, value]));
   assert.deepEqual(rows.get('with-preview')!.lastMessage, { id: 'message-2', seq: 2, at, preview: 'Hello', author: { kind: 'user', uid: 'bob' } });
-  assert.deepEqual(rows.get('legacy')!.lastMessage, { id: 'message-2', seq: 2, at });
-  for (const id of ['empty', 'absent', 'malformed']) assert.ok(!('lastMessage' in rows.get(id)!), id);
+  assert.deepEqual(rows.get('recalled')!.lastMessage, { id: 'message-3', seq: 3, at, preview: '', recalled: true, author: { kind: 'bot', uid: 'owner', botKey: 'bot:owner:h:b' } });
+  assert.ok(!('lastMessage' in rows.get('empty')!));
+  assert.ok(!received.some(value => value.kind === 'error'));
+});
+
+test('a conversation whose pointer breaks the contract stops the listeners with INVALID_DATA instead of being shown half-parsed', () => {
+  const stamp = Timestamp.fromDate(new Date(at));
+  for (const lastMessage of [{ id: 'message-2', seq: 2, at: stamp }, 'oops', {}]) {
+    const { received, directory, document, stopped } = watch();
+    directory([document('fine', {}), document('broken', { lastMessage })]);
+    assert.ok(!received.some(value => value.kind === 'directory'), 'no directory with a guessed row');
+    const failure = received.find((value): value is Extract<MessageSnapshot, { kind: 'error' }> => value.kind === 'error');
+    assert.equal(failure?.error, 'INVALID_DATA', JSON.stringify(lastMessage));
+    assert.equal(stopped(), 3, 'the member, directory and signal listeners are released');
+    directory([document('fine', {})]);
+    assert.equal(received.filter(value => value.kind === 'error').length, 1, 'and nothing arrives afterwards');
+  }
 });

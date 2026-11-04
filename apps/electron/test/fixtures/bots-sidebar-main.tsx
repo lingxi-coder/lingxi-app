@@ -56,8 +56,8 @@ const runtime = (session: { projectPath: string; sessionId: string }, botId?: st
   }),
   updateSettings: async (patch: any) => {
     calls.push(['updateSettings', patch]);
-    // Like the host: the sidebar keys left out of an update keep what they were.
-    if (patch.sidebar) settings.sidebar = { organization: 'project', chatSort: 'updated', manualSessionOrder: {}, ...settings.sidebar, ...patch.sidebar };
+    // Like the host: the sidebar keys left out of an update keep what they were, and a first update starts from the defaults.
+    if (patch.sidebar) settings.sidebar = { organization: 'project', chatSort: 'updated', manualSessionOrder: {}, mode: 'home', ...settings.sidebar, ...patch.sidebar };
     return structuredClone(settings);
   },
   scheduled: { scopes: async () => [], context: async () => ({ models: [], currentModel: '', sessions: [] }), manage: async () => [] },

@@ -184,13 +184,3 @@ test('lastMessage: edits of the newest message keep the sender and are truncated
   await assert.rejects(execute(command({ messageId: 'message02', operation: 'edit', changeId: 'change004', text: 'Hijacked' })), { code: 'MESSAGE_AUTHOR_REQUIRED' });
   assert.equal((await pointer()).preview, 'x'.repeat(120)); // a rejected edit leaves the pointer alone
 });
-test('lastMessage: a pointer without preview or author gains only the preview on edit and recall', options, async () => {
-  await execute(command());
-  const { author: _author, preview: _preview, ...legacy } = await pointer();
-  await conversationRef().update({ lastMessage: legacy }); // written before previews existed
-  await execute(command({ operation: 'edit', changeId: 'change002', text: 'Edited legacy' }));
-  assert.deepEqual(await pointer(), { ...legacy, preview: 'Edited legacy' });
-  await conversationRef().update({ lastMessage: legacy });
-  await execute(command({ operation: 'recall', changeId: 'change003', text: '' }));
-  assert.deepEqual(await pointer(), { ...legacy, preview: '', recalled: true });
-});

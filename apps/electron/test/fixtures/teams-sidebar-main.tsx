@@ -100,7 +100,7 @@ const drawerWidth = Number(params.get('drawerWidth'));
 const settings: any = {
   version: 1, projects: [projectPath], activeProject: projectPath, activeSession: { projectPath, sessionId: 'project-session' },
   pinnedSessions: [], archivedSessions: [], theme: params.get('theme') === 'light' ? 'light' : 'dark',
-  ...(saved || drawerWidth ? { sidebar: { organization: 'project', chatSort: 'updated', manualSessionOrder: {}, ...(saved ? { mode: saved } : {}), ...(drawerWidth ? { teamsDrawerWidth: drawerWidth } : {}) } } : {}),
+  ...(saved || drawerWidth ? { sidebar: { organization: 'project', chatSort: 'updated', manualSessionOrder: {}, mode: saved || 'home', ...(drawerWidth ? { teamsDrawerWidth: drawerWidth } : {}) } } : {}),
 };
 let activeSession = { projectPath, sessionId: 'project-session' };
 const botRuntimes: Array<{ sessionId: string; projectPath: string; botId: string }> = [];
@@ -136,8 +136,8 @@ let links = 0;
   }),
   updateSettings: async (patch: any) => {
     calls.push(['updateSettings', patch]);
-    // Like the host: the sidebar keys left out of an update keep what they were.
-    if (patch.sidebar) settings.sidebar = { organization: 'project', chatSort: 'updated', manualSessionOrder: {}, ...settings.sidebar, ...patch.sidebar };
+    // Like the host: the sidebar keys left out of an update keep what they were, and a first update starts from the defaults.
+    if (patch.sidebar) settings.sidebar = { organization: 'project', chatSort: 'updated', manualSessionOrder: {}, mode: 'home', ...settings.sidebar, ...patch.sidebar };
     return structuredClone(settings);
   },
   deepLinks: {

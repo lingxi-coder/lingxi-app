@@ -1,6 +1,6 @@
 import { TeamConversationView } from '../../../../../packages/teams/TeamConversationView';
 import { TeamDetailsDrawer } from '../../../../../packages/teams/TeamDetailsDrawer';
-import type { UseTeams } from '../bridge/useTeams';
+import type { UseTeams } from '../../../../../packages/teams/useTeamsWorkspace';
 import type { TeamsDrawer } from '../bridge/useTeamsDrawer';
 import { tr } from '../i18n/locale';
 import { renderTeamAvatar } from './TeamAvatar';

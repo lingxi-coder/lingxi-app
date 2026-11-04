@@ -124,25 +124,26 @@ test('sidebar preferences persist only valid manual session orders', () => {
     organization: 'list',
     chatSort: 'manual',
     manualSessionOrder: { [project]: [sessionId] },
+    mode: 'home',
   });
   const publicCopy = publicSettings(settings);
   publicCopy.sidebar!.manualSessionOrder[project].push('123e4567-e89b-42d3-a456-426614174001');
   assert.deepEqual(settings.sidebar!.manualSessionOrder[project], [sessionId]);
 });
 
-test('the sidebar mode and the open Bots are kept when valid, absent from a file that never had them, and dropped when they are not ours', () => {
+test('the sidebar mode is Home unless it is one of ours, and the open Bots are unset until the owner opens or closes one', () => {
   const sidebar = (value: Record<string, unknown>) => parseSettings({ version: 1, projects: [], sidebar: value }).sidebar;
   const order = { organization: 'list', chatSort: 'manual', manualSessionOrder: {} };
 
-  // A file from before the Bots sidebar has neither key at all, not even as `undefined`.
-  assert.deepEqual(sidebar(order), order);
-  assert.ok(!('mode' in sidebar(order)!) && !('expandedBots' in sidebar(order)!));
-  assert.equal(parseSettings({ version: 1, projects: [] }).sidebar, undefined, 'and one with no sidebar still has none');
+  // Nothing chosen yet: Home, and no key for the open Bots at all, not even as `undefined`.
+  assert.deepEqual(sidebar(order), { ...order, mode: 'home' });
+  assert.ok(!('expandedBots' in sidebar(order)!));
+  assert.equal(parseSettings({ version: 1, projects: [] }).sidebar, undefined, 'and a file the owner never saved a sidebar preference to has no sidebar section');
 
   assert.deepEqual(sidebar({ ...order, mode: 'bots', expandedBots: ['a', 'b'] }), { ...order, mode: 'bots', expandedBots: ['a', 'b'] });
   for (const mode of ['home', 'bots', 'teams']) assert.equal(sidebar({ ...order, mode })!.mode, mode);
 
-  for (const mode of ['settings', 'Bots', '', 1, null, {}, []]) assert.ok(!('mode' in sidebar({ ...order, mode })!), `mode ${JSON.stringify(mode)}`);
+  for (const mode of ['settings', 'Bots', '', 1, null, {}, []]) assert.equal(sidebar({ ...order, mode })!.mode, 'home', `mode ${JSON.stringify(mode)}`);
   for (const expanded of ['a', 1, null, {}]) assert.ok(!('expandedBots' in sidebar({ ...order, expandedBots: expanded })!), `expandedBots ${JSON.stringify(expanded)}`);
 
   assert.deepEqual(sidebar({ ...order, expandedBots: ['a', 'a', '', 7, null, 'x'.repeat(129), 'b', 'y'.repeat(128)] })!.expandedBots, ['a', 'b', 'y'.repeat(128)]);
@@ -163,11 +164,11 @@ test('a sidebar update leaves the keys it does not mention as saved, and an upda
   store.update({ sidebar: { organization: 'project', chatSort: 'manual', manualSessionOrder: {} } });
   assert.deepEqual(store.getPublic().sidebar, { organization: 'project', chatSort: 'manual', manualSessionOrder: {}, mode: 'bots', expandedBots: ['a'] }, 'and saving the order does not forget the Bots');
   store.update({ sidebar: { mode: 'nonsense' } });
-  assert.equal(store.getPublic().sidebar!.mode, undefined, 'a value that is not a mode removes the saved one');
+  assert.equal(store.getPublic().sidebar!.mode, 'home', 'a value that is not a mode puts the saved one back to Home');
 
   assert.deepEqual(new SettingsStore(userData).getPublic().sidebar, store.getPublic().sidebar, 'what was saved is what is read back');
   store.update({ sidebar: 'reset' });
-  assert.deepEqual(store.getPublic().sidebar, { organization: 'project', chatSort: 'updated', manualSessionOrder: {} }, 'anything else starts over, as it always has');
+  assert.deepEqual(store.getPublic().sidebar, { organization: 'project', chatSort: 'updated', manualSessionOrder: {}, mode: 'home' }, 'anything else starts over from the defaults');
 
   const copy = store.getPublic();
   store.update({ sidebar: { expandedBots: ['x'] } });
@@ -177,13 +178,13 @@ test('a sidebar update leaves the keys it does not mention as saved, and an upda
   assert.equal(copy.sidebar!.expandedBots, undefined);
 });
 
-test('the width of the Teams details panel is kept when it can be a width, absent from a file that never had it, and dropped when it cannot', () => {
+test('the width of the Teams details panel is unset until the owner resizes it, kept when it can be a width, and dropped when it cannot', () => {
   const sidebar = (value: Record<string, unknown>) => parseSettings({ version: 1, projects: [], sidebar: value }).sidebar;
   const order = { organization: 'list', chatSort: 'manual', manualSessionOrder: {} };
 
-  // A file from before the panel has no key at all, not even as `undefined`.
+  // Unset is no key at all, not even `undefined`: the panel draws at its own default width.
   assert.ok(!('teamsDrawerWidth' in sidebar(order)!));
-  assert.deepEqual(sidebar({ ...order, teamsDrawerWidth: 360 }), { ...order, teamsDrawerWidth: 360 });
+  assert.deepEqual(sidebar({ ...order, teamsDrawerWidth: 360 }), { ...order, mode: 'home', teamsDrawerWidth: 360 });
   assert.equal(sidebar({ ...order, teamsDrawerWidth: 359.6 })!.teamsDrawerWidth, 360, 'a width is whole pixels');
   for (const edge of [200, 480, 1200]) assert.equal(sidebar({ ...order, teamsDrawerWidth: edge })!.teamsDrawerWidth, edge, `${edge}px`);
   // The panel clamps to its own range; the file only turns away what cannot be a width at all.

@@ -17,7 +17,8 @@ function locate(base: string): string | undefined {
  * Load a source file of `packages/teams` (a `.tsx` component and the sibling modules it imports)
  * the way the other Teams UI tests do: shared packages have no React install of their own, so their
  * bare imports (`react`, `react/jsx-runtime`) resolve through this Web package, as Vite does.
- * `name` is the module's path under `packages/teams`, with or without an extension.
+ * `name` is the module's path under `packages/teams`, with or without an extension; an absolute path loads a
+ * module from elsewhere (the Web app's own views), whose imports resolve the same way.
  */
 export function loadTeamsModule<T>(name: string): T {
   return load(locate(resolve(packageRoot, name)) ?? resolve(packageRoot, name)) as T;
@@ -30,6 +31,8 @@ function load(path: string): Record<string, unknown> {
   const module = { exports: {} as Record<string, unknown> };
   loaded.set(path, module.exports);
   const require = (id: string): unknown => {
+    // A style sheet changes how a page looks, not what a test can read from it.
+    if (id.endsWith('.css')) return {};
     if (!id.startsWith('.')) return webRequire(id);
     const target = locate(resolve(dirname(path), id));
     if (!target) throw new Error(`Cannot resolve ${id} from ${path}`);

@@ -36,9 +36,8 @@ export function reconcileSidebarMode(mode: SidebarMode, page: AppPage, botsAvail
  * The mode to open the window in: the one it was last left in, except that the
  * Bots, where they cannot be used, are not a mode to return to and Home is.
  */
-export function restoredSidebarMode(saved: SidebarMode | undefined, botsAvailable: boolean): SidebarMode {
-  if (saved === 'bots') return botsAvailable ? 'bots' : 'home';
-  return saved === 'teams' ? 'teams' : 'home';
+export function restoredSidebarMode(saved: SidebarMode, botsAvailable: boolean): SidebarMode {
+  return saved === 'bots' && !botsAvailable ? 'home' : saved;
 }
 
 /**
@@ -60,10 +59,10 @@ export class SidebarModeSync {
    * window should open on them, which it does only while it is still where it
    * opened: one that the owner or a link has already moved is left where it is.
    */
-  open({ saved, page, mode, botsAvailable }: { saved: SidebarMode | undefined; page: AppPage; mode: SidebarMode; botsAvailable: boolean }): 'bots' | 'teams' | undefined {
+  open({ saved, page, mode, botsAvailable }: { saved: SidebarMode; page: AppPage; mode: SidebarMode; botsAvailable: boolean }): 'bots' | 'teams' | undefined {
     if (this.settled) return undefined;
     this.settled = true;
-    this.written = saved ?? 'home';
+    this.written = saved;
     this.seen = mode;
     if (page !== 'chat' || mode !== 'home') return undefined;
     const restored = restoredSidebarMode(saved, botsAvailable);
@@ -71,10 +70,10 @@ export class SidebarModeSync {
   }
 
   /** A mode is about to be picked before the saved one was looked at: the saved one is not brought back over the pick. */
-  picked(saved: SidebarMode | undefined): void {
+  picked(saved: SidebarMode): void {
     if (this.settled) return;
     this.settled = true;
-    this.written = saved ?? 'home';
+    this.written = saved;
   }
 
   /** The mode to write to the settings file now that the window is in `mode`, if that is a change and the file does not hold it. */

@@ -18,7 +18,7 @@ async function fixture(client) {
   const batch = db.batch();
   batch.set(root, { state: 'active', name: 'SDK Cache Fixture' });
   batch.set(root.collection('members').doc(uid), { generation: 1, role: 'owner', displayName: 'Cache reader' });
-  batch.set(conversation, { kind: 'dm', title: 'SDK Cache Fixture', participants: [`user:${uid}`], memberUids: [uid], lastSeq: 125, lastChangeSeq: 125, lastMessage: { id: 'message-125', seq: 125, at: new Date() }, lastChange: { id: 'change-125', seq: 125 } });
+  batch.set(conversation, { kind: 'dm', title: 'SDK Cache Fixture', participants: [`user:${uid}`], memberUids: [uid], lastSeq: 125, lastChangeSeq: 125, lastMessage: { id: 'message-125', seq: 125, at: new Date(), author: { kind: 'user', uid }, preview: 'Body 125' }, lastChange: { id: 'change-125', seq: 125 } });
   for (let seq = 1; seq <= 125; seq++) batch.set(conversation.collection('messages').doc(`message-${seq}`), { seq, author: { kind: 'user', uid }, kind: 'text', text: `Body ${seq}`, changeSeq: seq, changeId: `change-${seq}`, createdAt: new Date() });
   await batch.commit();
   const value = { uid, teamId, conversationId, generation: 1, config: { projectId, apiKey: 'emulator-only', appId: `cache-${client}` }, customToken: await auth.createCustomToken(uid) };

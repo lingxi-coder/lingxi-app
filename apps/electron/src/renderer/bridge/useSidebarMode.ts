@@ -19,7 +19,8 @@ export function useSidebarMode({ page, setPage, botsAvailable, botsKnown, settin
 }): { mode: SidebarMode; setMode(mode: SidebarMode): void } {
   const [mode, setModeState] = useState<SidebarMode>('home');
   const [sync] = useState(() => new SidebarModeSync());
-  const saved = settings?.sidebar?.mode;
+  // The sidebar section is absent until the owner first changes a sidebar preference; the mode is then Home.
+  const saved = settings?.sidebar?.mode ?? 'home';
   const savedRef = useRef(saved);
   savedRef.current = saved;
   // A different `save` is no reason to write the mode again.

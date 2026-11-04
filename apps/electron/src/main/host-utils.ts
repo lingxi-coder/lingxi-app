@@ -41,8 +41,7 @@ export const MAX_PINNED_SESSIONS = 100;
 const MAX_EXPANDED_BOTS = 200;
 /**
  * The widths the Teams details panel may be saved at. The panel keeps itself inside its own, narrower range when it
- * draws; this only turns away what cannot be a width at all (a string, NaN, a few pixels, a few screens), so a
- * range that is later widened or narrowed does not make an older file's choice invalid.
+ * draws; this only turns away what cannot be a width at all (a string, NaN, a few pixels, a few screens).
  */
 const MIN_TEAMS_DRAWER_WIDTH = 200;
 const MAX_TEAMS_DRAWER_WIDTH = 1200;
@@ -404,10 +403,10 @@ export function parseSidebarPreferences(value: unknown, projects: readonly strin
       if (seen.size > 0) manualSessionOrder[projectPath] = [...seen];
     }
   }
-  const preferences: SidebarPreferences = { organization, chatSort, manualSessionOrder };
-  // `mode`, `expandedBots` and `teamsDrawerWidth` are optional: a file written before they existed, or a value that is not one of ours, yields none of them.
-  const mode = input['mode'];
-  if (mode === 'home' || mode === 'bots' || mode === 'teams') preferences.mode = mode;
+  // Like the organization and the sort, the mode is Home unless it is one of ours.
+  const mode = input['mode'] === 'bots' || input['mode'] === 'teams' ? input['mode'] : 'home';
+  const preferences: SidebarPreferences = { organization, chatSort, manualSessionOrder, mode };
+  // `expandedBots` and `teamsDrawerWidth` stay unset until the owner first sets them, and a value that is not one of ours leaves them unset.
   if (Array.isArray(input['expandedBots'])) {
     const expanded = new Set<string>();
     for (const botId of input['expandedBots']) {
@@ -428,7 +427,7 @@ export function parseSidebarPreferences(value: unknown, projects: readonly strin
 /**
  * Apply a sidebar update over what is saved. The keys the update leaves out keep their saved value, so the part of the
  * app that saves the sidebar mode, the open Bots or the Teams panel width need not know the organization and sort, and the
- * reverse. Anything that is not an object resets the preferences, as it always has.
+ * reverse. Anything that is not an object resets the preferences to the defaults.
  */
 export function patchSidebarPreferences(saved: SidebarPreferences | undefined, update: unknown, projects: readonly string[]): SidebarPreferences {
   return parseSidebarPreferences(isPlainObject(update) ? { ...saved, ...update } : update, projects);
@@ -441,7 +440,7 @@ function cloneSidebarPreferences(value: SidebarPreferences): SidebarPreferences 
     manualSessionOrder: Object.fromEntries(
       Object.entries(value.manualSessionOrder).map(([projectPath, sessionIds]) => [projectPath, [...sessionIds]]),
     ),
-    ...(value.mode ? { mode: value.mode } : {}),
+    mode: value.mode,
     ...(value.expandedBots ? { expandedBots: [...value.expandedBots] } : {}),
     ...(value.teamsDrawerWidth !== undefined ? { teamsDrawerWidth: value.teamsDrawerWidth } : {}),
   };

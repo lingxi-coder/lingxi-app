@@ -97,8 +97,6 @@ test('conversationPreview follows the lastMessage rules', () => {
   const row = (lastMessage?: TeamConversation['lastMessage'], kind: TeamConversation['kind'] = 'dm') => conversation('p', { kind, ...(lastMessage ? { lastMessage } : {}) });
   assert.equal(conversationPreview(row(), uid, false), 'No messages yet');
   assert.equal(conversationPreview(row(), uid, true), '暂无消息');
-  assert.equal(conversationPreview(row({ id: 'm', seq: 1, at: at(1) }), uid, false), '', 'legacy pointer: time only');
-  assert.equal(conversationPreview(row({ id: 'm', seq: 1, at: at(1), recalled: true }), uid, false), 'Message recalled', 'a recall of a legacy pointer still says so');
   assert.equal(conversationPreview(row(last(1)), uid, false), 'Hi');
   assert.equal(conversationPreview(row(last(1, { author: { kind: 'user', uid: 'alice' } })), uid, false), 'You: Hi');
   assert.equal(conversationPreview(row(last(1, { author: { kind: 'user', uid: 'alice' } })), uid, true), '你：Hi');
@@ -111,7 +109,6 @@ test('conversationPreview follows the lastMessage rules', () => {
   assert.equal(conversationPreview(row(last(1), 'channel'), uid, false, () => 'Bob'), 'Bob: Hi', 'so do channels');
   assert.equal(conversationPreview(row(last(1), 'bot_dm'), uid, false, () => 'Bob'), 'Hi', 'a Bot dm does not');
   assert.equal(conversationPreview(row(last(1), 'dm'), uid, false, () => 'Bob'), 'Hi', 'a dm does not');
-  assert.equal(conversationPreview(row(last(1, { author: undefined }), 'group'), uid, false, () => 'Bob'), 'Hi');
 });
 
 // ── Workspace ──

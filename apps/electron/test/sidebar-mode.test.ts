@@ -47,7 +47,6 @@ test('the window opens in the mode it was left in, except that the Bots, where t
   assert.equal(restoredSidebarMode('teams', true), 'teams');
   assert.equal(restoredSidebarMode('teams', false), 'teams', 'Teams does not depend on the Bots');
   assert.equal(restoredSidebarMode('home', true), 'home');
-  assert.equal(restoredSidebarMode(undefined, true), 'home', 'a settings file from before the modes');
 });
 
 test('the saved mode is looked at once, and a window that is still where it opened is taken to the Bots or the Teams', () => {
@@ -88,13 +87,13 @@ test('a window the owner or a link has moved is not taken anywhere, and its save
 test('nothing is written before the saved mode was looked at, and a pick before then is the one saved', () => {
   const early = new SidebarModeSync();
   assert.equal(early.toSave('bots'), undefined, 'a window that has not read the file cannot overwrite it');
-  early.picked(undefined);
+  early.picked('home');
   assert.equal(early.toSave('bots'), 'bots');
   assert.equal(early.open({ saved: 'bots', page: 'chat', mode: 'bots', botsAvailable: true }), undefined, 'the pick is not undone by the saved mode that arrives after');
 
   const fresh = new SidebarModeSync();
-  assert.equal(fresh.open({ saved: undefined, page: 'chat', mode: 'home', botsAvailable: true }), undefined);
-  assert.equal(fresh.toSave('home'), undefined, 'a file with no mode is Home');
+  assert.equal(fresh.open({ saved: 'home', page: 'chat', mode: 'home', botsAvailable: true }), undefined);
+  assert.equal(fresh.toSave('home'), undefined, 'staying on the Home the file holds writes nothing');
   assert.equal(fresh.toSave('bots'), 'bots');
 });
 

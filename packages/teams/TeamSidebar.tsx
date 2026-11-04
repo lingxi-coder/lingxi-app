@@ -91,7 +91,7 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
   const needle = (query ?? '').trim().toLocaleLowerCase(), searching = needle !== '';
   const matches = (conversation: TeamConversation): boolean => {
     const label = conversationLabel(conversation, snapshot.directory, uid, { bots: snapshot.bots, zh });
-    const preview = conversationPreview(conversation, uid, zh, last => last.author ? authorName(last.author) : '');
+    const preview = conversationPreview(conversation, uid, zh, last => authorName(last.author));
     return label.toLocaleLowerCase().includes(needle) || preview.toLocaleLowerCase().includes(needle);
   };
   const narrowed = (rows: TeamConversation[]) => searching ? rows.filter(matches) : rows;
@@ -208,7 +208,7 @@ function ConversationRow({ conversation, snapshot, zh, renderAvatar, selected, t
   const mainRef = useRef<HTMLButtonElement>(null), moreRef = useRef<HTMLButtonElement>(null), origin = useRef<'main' | 'more'>('more');
   const unread = unreadCount(conversation);
   const label = conversationLabel(conversation, snapshot.directory, snapshot.uid, { bots: snapshot.bots, zh });
-  const preview = conversationPreview(conversation, snapshot.uid, zh, last => last.author ? authorName(last.author) : '');
+  const preview = conversationPreview(conversation, snapshot.uid, zh, last => authorName(last.author));
   const time = formatListTime(conversation.lastMessage?.at, now, locale);
   const items: MenuItem[] = [
     ...(unread > 0 ? [{ id: 'read', label: t('Mark as read', '标为已读'), icon: 'check' as const, disabled: snapshot.offline, onSelect: () => onMarkRead(conversation.id) }] : []),

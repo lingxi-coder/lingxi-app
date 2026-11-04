@@ -1,0 +1,74 @@
+/*
+ * The Teams page of the website: a full-height workspace (packages/teams) under a slim bar.
+ *
+ * The workspace is themed through --teams-* variables. Here they come from the site's own tokens (theme.css), so
+ * the workspace follows the site's light/dark switch, not the system's. Text pairs meet 4.5:1 and control outlines
+ * 3:1 against the surfaces they sit on, in both palettes (test/teams-web-theme.test.ts).
+ */
+.teams-web {
+  --teams-bg: var(--bg);
+  --teams-sidebar-bg: var(--bg-strong);
+  --teams-surface: var(--surface);
+  --teams-fg: var(--ink);
+  --teams-muted: color-mix(in srgb, var(--ink-2) 75%, var(--ink));
+  /* Outlines of controls need 3:1, which the site's hairline does not give; the hairline is for dividers. */
+  --teams-border: color-mix(in srgb, var(--ink) 55%, var(--surface));
+  --teams-line: var(--line);
+  --teams-hover: color-mix(in srgb, var(--ink) 7%, var(--bg-strong));
+  --teams-selected: color-mix(in srgb, var(--accent) 14%, var(--bg-strong));
+  --teams-accent: var(--accent-strong);
+  --teams-accent-fg: var(--on-accent);
+  --teams-accent-text: var(--accent-strong);
+  --teams-danger: var(--danger);
+  --teams-badge-bg: var(--danger);
+  --teams-badge-fg: #ffffff;
+  --teams-online: #1f7a3a;
+  --teams-focus: var(--accent-strong);
+  --teams-font: var(--display);
+
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  background: var(--bg);
+  color: var(--ink);
+}
+:root[data-theme='dark'] .teams-web {
+  --teams-badge-fg: #1a0b0b;
+  --teams-online: #4ac26b;
+}
+
+/* The bar: the site, Remote Control, who is signed in. */
+.teams-web-nav { display: flex; flex: none; align-items: center; gap: 24px; padding: 10px 24px; border-bottom: 1px solid var(--line); }
+.teams-web-nav a { flex: none; color: inherit; text-decoration: none; white-space: nowrap; }
+.teams-web-nav h1 { flex: none; margin: 0; font-size: 15px; font-weight: 600; }
+.teams-web-nav span { margin-left: auto; overflow: hidden; color: var(--ink-2); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.teams-web-nav button { flex: none; background: none; border: 0; color: inherit; cursor: pointer; white-space: nowrap; }
+.teams-web-note { margin: auto; padding: 24px; color: var(--ink-2); }
+
+/* Signed out: the site's sign-in card, narrower. */
+.teams-login { width: min(480px, calc(100% - 32px)); margin: 48px auto; }
+.teams-login .button { width: 100%; }
+
+/* Signed in: sidebar | conversation | details. */
+.teams-web-body { display: flex; flex: 1; min-height: 0; }
+.teams-web-sidebar { display: flex; flex: none; flex-direction: column; width: 304px; min-height: 0; border-right: 1px solid var(--line); background: var(--teams-sidebar-bg); }
+.teams-web-sidebar > .tw-sidebar { flex: 1 1 0; height: auto; min-height: 0; }
+.teams-web-conversation { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.teams-web-conversation > .tw-conv { flex: 1 1 0; height: auto; min-height: 0; }
+.teams-web-body > .tw-drawer { height: auto; }
+.teams-web-back { display: none; align-self: flex-start; min-height: 36px; margin: 4px 8px 0; padding: 0 8px; background: none; border: 0; color: var(--accent-strong); font-size: 13px; cursor: pointer; }
+
+/* A narrow window has no room for the conversation and the details side by side: the details then lie over the right edge. */
+@media (max-width: 1100px) {
+  .teams-web-body { position: relative; }
+  .teams-web-body > .tw-drawer { position: absolute; inset: 0 0 0 auto; z-index: 4; box-shadow: -12px 0 28px rgb(0 0 0 / 16%); }
+}
+/* A phone shows the sidebar or the conversation, and the conversation has a way back. */
+@media (max-width: 760px) {
+  .teams-web-nav { gap: 16px; padding: 10px 16px; }
+  .teams-web-sidebar { width: 100%; border-right: 0; }
+  .teams-web-body[data-pane='list'] .teams-web-conversation { display: none; }
+  .teams-web-body[data-pane='conversation'] .teams-web-sidebar { display: none; }
+  .teams-web-back { display: inline-flex; align-items: center; }
+}

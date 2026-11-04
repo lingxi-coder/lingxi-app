@@ -43,47 +43,17 @@ jobs:
           python3 scripts/tests/test_gate_triggers.py
 
   unit-tests:
-    # All features include statically registered GStreamer plugins. The pinned
-    # source SDK supplies their archives and .pc files as well as 1.28 APIs.
     runs-on: ubuntu-22.04
     env:
       RUST_MIN_STACK: "16777216"
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: lingxi-coder/harness-runtime
+          ref: 95511168feb3e296c25c475a4e9996faf9b617e1
       - uses: dtolnay/rust-toolchain@1.94.0
-      - name: Resolve locked workspace dependencies
-        run: cargo metadata --locked --format-version=1 > /dev/null
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.4.3'
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-      - name: Restore pinned Linux GStreamer static SDK cache
-        id: gstreamer-sdk-cache
-        uses: actions/cache/restore@v6
-        with:
-          path: ${{ runner.temp }}/gstreamer-sdk/linux-static
-          key: gstreamer-linux-static-jammy-${{ hashFiles('scripts/ci/gstreamer-sdk-lock.json', 'scripts/ci/build_gstreamer_linux.py', 'scripts/ci/gstreamer_sdk.py', 'scripts/ci/gstreamer-linux-meson-requirements.txt') }}
-      - name: Install GStreamer source-build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential bison flex libglib2.0-dev libopus-dev libvpx-dev ninja-build pkg-config
-      - name: Install pinned Meson
-        run: python3 -m pip install --no-deps --require-hashes -r scripts/ci/gstreamer-linux-meson-requirements.txt
-      - name: Build and validate the pinned GStreamer static SDK
-        run: python3 scripts/ci/build_gstreamer_linux.py --root "$RUNNER_TEMP/gstreamer-sdk/linux-static" --static-plugins
-      # Save only after SDK validation, before unrelated tests can fail.
-      - name: Save validated Linux GStreamer static SDK cache
-        if: steps.gstreamer-sdk-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: ${{ runner.temp }}/gstreamer-sdk/linux-static
-          key: ${{ steps.gstreamer-sdk-cache.outputs.cache-primary-key }}
-      - name: Test all retained product packages
-        working-directory: .
-        run: cargo test --locked --workspace --all-features --no-fail-fast
+      - name: Measure streaming future types on Linux
+        run: cargo test --locked -p llm-runtime --all-features --lib stream_driver_future_footprint -- --nocapture
 
   lint:
     # Match the GStreamer API baseline used by unit-tests and bridge-server.

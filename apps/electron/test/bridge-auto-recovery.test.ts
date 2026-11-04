@@ -26,12 +26,12 @@ test('unexpected managed exit restores once without replaying foreground or Side
   f.internal.managedChildExited(f.child, 1, null, true);
   f.internal.managedChildExited(f.child, 1, null, true);
   assert.equal(f.internal.activeTurn, false);
-  assert.equal(f.internal.liveSideChats.size, 0);
+  assert.equal(f.internal.liveSideChats.size, 1);
   assert.equal(f.events.filter(e => e.type === 'turn_ended').length, 1);
   assert.deepEqual(f.events.find(e => e.type === 'turn_ended').outcome, { type: 'cancelled' });
-  assert.equal(f.events.filter(e => e.type === 'side_chat_ended').length, 1);
+  assert.equal(f.events.filter(e => e.type === 'side_chat_ended').length, 0);
   assert.equal(f.events.find(e => e.type === 'side_chat_error').request_id, 'create-1');
-  assert.match(f.events.find(e => e.type === 'system_notice').message, /Side Chats were interrupted/);
+  assert.match(f.events.find(e => e.type === 'system_notice').message, /Side Chats are being restored/);
   t.mock.timers.tick(250);
   await f.runtime.waitForLifecycle();
   assert.deepEqual(f.calls, ['stop', 'start', 'restore']);
@@ -149,5 +149,23 @@ test('an explicit restart resets the automatic recovery retry budget', async () 
   f.internal.startInternal = async (): Promise<void> => { f.calls.push('start'); };
   await f.runtime.restart();
   assert.equal(f.internal.recoveryAttempts.length, 0);
+  await f.runtime.dispose();
+});
+
+test('automatic recovery publishes connected only after Side Chat restoration settles', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  f.internal.sideChatRecovery.restore = async (): Promise<void> => { f.calls.push('sides'); await gate; };
+  f.internal.managedChildExited(f.child, 1, null, true);
+  t.mock.timers.tick(250);
+  for (let i = 0; i < 15; i++) await Promise.resolve();
+  assert.deepEqual(f.calls, ['stop', 'start', 'restore', 'sides']);
+  assert.notEqual(f.runtime.connectionState.status, 'connected');
+  const joined = f.runtime.start();
+  finish();
+  await joined;
+  assert.equal(f.runtime.connectionState.status, 'connected');
   await f.runtime.dispose();
 });

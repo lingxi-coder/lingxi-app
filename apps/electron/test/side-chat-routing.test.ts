@@ -59,3 +59,8 @@ test('child event envelope preserves a valid side identity and rejects an empty 
   assert.throws(() => validateClientEvent({ ...event, side_id: '' }), { message: 'invalid side chat id' });
   assert.throws(() => validateClientEvent({ ...event, side_id: 7 }), { message: 'invalid side chat id' });
 });
+
+test('Side Chat model checkpoints and restoration remain host-private', () => {
+  assert.throws(() => validateClientCommand({ type: 'side_chat_restore', side_id: 'side-1', checkpoint_json: '{}', events_json: [] }));
+  assert.throws(() => validateClientCommand(submit({ type: 'side_chat_restore', side_id: 'side-1', checkpoint_json: '{}', events_json: [] })));
+});

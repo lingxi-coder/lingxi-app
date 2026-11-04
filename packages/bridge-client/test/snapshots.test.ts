@@ -689,6 +689,11 @@ function validateCommand(name: string, v: unknown): void {
       exactObjectKeys(o, ['type', 'text']);
       assert.ok(isString(o['text']));
       break;
+    case 'side_chat_restore':
+      exactObjectKeys(o, ['type', 'side_id', 'checkpoint_json', 'events_json']);
+      assert.ok(isString(o['side_id']) && isString(o['checkpoint_json']));
+      validateStringArray(o['events_json']);
+      break;
     case 'side_chat_create':
       exactObjectKeys(o, ['type', 'request_id'], ['initial_input']);
       assert.ok(isString(o['request_id']));
@@ -1028,6 +1033,11 @@ function validateCommand(name: string, v: unknown): void {
     case 'media_control_response':
       exactObjectKeys(o, ['type', 'response'], [], `command snapshot ${name}`);
       assert.deepEqual(validateMediaControlResponse(o['response']), o['response']);
+      break;
+    case 'side_chat_restore':
+      exactObjectKeys(o, ['type', 'side_id', 'checkpoint_json', 'events_json']);
+      assert.ok(isString(o['side_id']) && isString(o['checkpoint_json']));
+      validateStringArray(o['events_json']);
       break;
     case 'side_chat_create':
       exactObjectKeys(o, ['type', 'request_id'], ['initial_input'], `command snapshot ${name}`);
@@ -1581,6 +1591,12 @@ function validateEvent(name: string, v: unknown): void {
     case 'side_chat_list':
       exactObjectKeys(o, ['type', 'side_ids'], [], `event snapshot ${name}`);
       validateStringArray(o['side_ids']);
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'side_chat_checkpoint':
+      exactObjectKeys(o, ['type', 'side_id', 'checkpoint_json', 'events_json']);
+      assert.ok(isString(o['side_id']) && isString(o['checkpoint_json']));
+      validateStringArray(o['events_json']);
       assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'side_chat_snapshot':

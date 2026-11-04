@@ -14,6 +14,7 @@ export interface SideChatState {
   draftRevision: number;
   permissions: PermissionRequest[];
   questions: AskUserQuestionRequestDto[];
+  restoring?: boolean;
   closing: boolean;
   ending: boolean;
   error?: string;
@@ -58,4 +59,10 @@ export function sideCommandInput(text: string, images: readonly ImageRefDto[] = 
 export function sideCreationInput(text: string, files: string[] = []): string | undefined | null {
   const match = /^\s*\/side(?:\s+([\s\S]*))?\s*$/.exec(text);
   return match ? promptWithFileMentions(match[1]?.trim() ?? '', files) || undefined : null;
+}
+
+/** Preserve drafts and visible history while releasing dead process interactions. */
+export function disconnectSideChat(side: SideChatState): SideChatState {
+  return { ...side, restoring: true, ending: false, permissions: [], questions: [],
+    conversation: { ...side.conversation, running: false } };
 }

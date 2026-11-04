@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ClientEvent, PermissionRequest, ImageRefDto } from '@lingxi/bridge-client';
 import type { AllowedClientCommand } from '../../shared/clientCommands';
 import type { ImageAttachment } from './imageInput';
-import { acknowledgeSidePrompt, newSideChat, reduceSideChat, sideCommandInput, type SideChatState } from './sideChatState';
+import { acknowledgeSidePrompt, disconnectSideChat, newSideChat, reduceSideChat, sideCommandInput, type SideChatState } from './sideChatState';
 import { acknowledgeSideSlashPrompt, isSideSlashTerminalError, restoreSideSlashPromptAfterError, type SideSlashSubmissionSnapshot } from './sideSlashDraftRecovery.js';
 
 type SideEnvelope = { type: string; side_id?: string; side_ids?: string[]; request_id?: string; events_json?: string[]; request?: PermissionRequest; event_json?: string; message?: string };
@@ -78,7 +78,7 @@ export function useSideChats(hostId?: string) {
             const previous = current[id];
             let side = newSideChat(id, sessionId);
             for (const inner of events) side = reduceSideChat(side, inner);
-            return { ...current, [id]: { ...side, draft: previous?.draft ?? '', images: previous?.images ?? [], draftRevision: previous?.draftRevision ?? side.draftRevision, closing: previous?.closing ?? false, ending: previous?.ending ?? false, error: previous?.error } };
+            return { ...current, [id]: { ...side, draft: previous?.draft ?? '', images: previous?.images ?? [], draftRevision: previous?.draftRevision ?? side.draftRevision, closing: previous?.closing ?? false, ending: previous?.ending ?? false, error: previous?.restoring ? undefined : previous?.error } };
           });
           reportHydration(sessionId, id);
         } catch { /* A malformed snapshot cannot alter the existing draft. */ }
@@ -156,6 +156,14 @@ export function useSideChats(hostId?: string) {
     if (!host) return;
     return host.onConnectionStateChanged(({ sessionId, event }) => {
       if (event.status === 'connected') void send(sessionId, { type: 'side_chat_list' }).catch(() => undefined);
+      if (event.status === 'disconnected' || event.status === 'error') {
+        for (const [id, request] of pending.current) if (request.hostId === sessionId) {
+          request.reject(new Error('The engine disconnected. This Side Chat request will not be replayed.'));
+          pending.current.delete(id);
+        }
+        for (const [key, slash] of pendingSlash.current) if (slash.hostId === sessionId) pendingSlash.current.delete(key);
+        setSides((current) => Object.fromEntries(Object.entries(current).map(([id, side]) => [id, side.hostId === sessionId ? disconnectSideChat(side) : side])));
+      }
     });
   }, [send]);
   useEffect(() => { if (hostId) void send(hostId, { type: 'side_chat_list' }).catch(() => undefined); }, [hostId, send]);
@@ -168,6 +176,7 @@ export function useSideChats(hostId?: string) {
     finally { submitting.current.delete(hostId); }
   }, [hostId, request]);
   const submit = useCallback(async (side: SideChatState, command: object, text?: string, images?: ImageAttachment[]) => {
+    if (side.restoring) throw new Error('This Side Chat is being restored.');
     if (side.closing) throw new Error('Side Chat is closing');
     const isPrompt = text !== undefined;
     if (isPrompt && submitting.current.has(side.id)) return;

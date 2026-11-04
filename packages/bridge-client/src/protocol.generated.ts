@@ -2,7 +2,7 @@
 // Do not edit. Run scripts/checks/generate-client-protocol.py after updating the pin.
 // Nested DTOs and semantic validation remain in protocol.ts and validation.ts.
 
-// Custom Serde fingerprints (review changes): command=af4073569e8ac93f event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=97999b148e4a9b02 event_source=736675594350ceb1
+// Custom Serde fingerprints (review changes): command=af4073569e8ac93f event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=8ba3dac180b143d5 event_source=d406295465930c20
 
 import type {
   AgentDto,
@@ -183,6 +183,7 @@ export type ClientCommand =
   | { type: 'media_control_response'; response: MediaControlResponseDto }
   | { type: 'update_media_session_modes'; modes: Array<MediaSessionModeDto> }
   | { type: 'refresh_provider_catalog'; trigger: string }
+  | { type: 'side_chat_restore'; side_id: string; checkpoint_json: string; events_json: Array<string> }
 ;
 
 export type ClientEvent =
@@ -299,6 +300,7 @@ export type ClientEvent =
   | { type: 'media_device_request'; request: MediaDeviceRequestEnvelopeDto }
   | { type: 'media_service_response'; response: MediaServiceResponseDto }
   | { type: 'media_control_request'; request: MediaControlRequestDto }
+  | { type: 'side_chat_checkpoint'; side_id: string; checkpoint_json: string; events_json: Array<string> }
 ;
 
 type BasicField = readonly [string, 'string' | 'boolean' | 'number' | 'integer' | 'unsigned' | 'array' | 'map' | 'opaque', boolean, boolean, boolean];
@@ -775,6 +777,11 @@ const CLIENT_EVENT_FIELDS: Record<ClientEvent['type'], readonly BasicField[]> = 
   media_control_request: [
     ['request', 'opaque', false, false, false],
   ],
+  side_chat_checkpoint: [
+    ['side_id', 'string', false, false, false],
+    ['checkpoint_json', 'string', false, false, false],
+    ['events_json', 'array', false, false, false],
+  ],
 };
 
 /** Check fields understood from Rust's top-level Serde declarations only.
@@ -892,6 +899,7 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   media_control_response: true,
   update_media_session_modes: true,
   refresh_provider_catalog: true,
+  side_chat_restore: true,
 };
 
 export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
@@ -1008,4 +1016,5 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   media_device_request: true,
   media_service_response: true,
   media_control_request: true,
+  side_chat_checkpoint: true,
 };

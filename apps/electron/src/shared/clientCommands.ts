@@ -7,6 +7,7 @@ import type {
 export type DesktopDisposition = 'exposed' | 'host_private' | 'degraded' | 'not_applicable';
 
 export const CLIENT_COMMAND_DISPOSITIONS = {
+  side_chat_restore: 'host_private',
   side_chat_create: 'exposed',
   side_chat_list: 'exposed',
   side_chat_get: 'exposed',
@@ -108,6 +109,7 @@ export const REFRESH_LISTING_DISPOSITIONS = {
 } as const satisfies Record<ListingKindDto['type'], DesktopDisposition>;
 
 export const CLIENT_EVENT_DISPOSITIONS = {
+  side_chat_checkpoint: 'host_private',
   side_chat_permission: 'exposed',
   side_chat_submitted: 'exposed',
   side_chat_created: 'exposed',
@@ -332,6 +334,7 @@ export type AllowedClientCommand =
 export type RemoteEventDisposition = 'forward' | 'coalesce' | 'state' | 'drop' | 'withheld';
 
 export const CLIENT_EVENT_REMOTE_DISPOSITIONS = {
+  side_chat_checkpoint: 'withheld',
   side_chat_permission: 'withheld',
   side_chat_submitted: 'withheld',
   side_chat_created: 'withheld',
@@ -464,6 +467,7 @@ export const REMOTE_STATE_EVENT_TYPES = [
 export type RemoteCommandDisposition = 'remote' | 'host_only';
 
 export const CLIENT_COMMAND_REMOTE_DISPOSITIONS = {
+  side_chat_restore: 'host_only',
   side_chat_create: 'host_only',
   side_chat_list: 'host_only',
   side_chat_get: 'host_only',

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { acknowledgeSidePrompt, newSideChat, reduceSideChat, sideCommandInput, sideCreationInput } from '../src/renderer/bridge/sideChatState';
+import { acknowledgeSidePrompt, disconnectSideChat, newSideChat, reduceSideChat, sideCommandInput, sideCreationInput } from '../src/renderer/bridge/sideChatState';
 
 test('/side parsing matches only a full invocation and preserves multiline initial input', () => {
   assert.equal(sideCreationInput('/side'), undefined);
@@ -60,4 +60,18 @@ test('/side creation retains selected rich-file mentions without matching /sidew
   assert.equal(sideCreationInput('/side explain ', ['src/app.ts', 'docs/my notes.md']), '@src/app.ts @"docs/my notes.md"\n\nexplain');
   assert.equal(sideCreationInput('/side', ['src/app.ts']), '@src/app.ts');
   assert.equal(sideCreationInput('/sideways explain', ['src/app.ts']), null);
+});
+
+
+test('bridge disconnect retains side history and drafts while clearing dead interactions', () => {
+  const base = acknowledgeSidePrompt(newSideChat('side', 'host'), 'remember private marker');
+  const side = { ...base, draft: 'unsent next question', conversation: { ...base.conversation, running: true }, permissions: [{ request_id: 1 }] as any[], questions: [{ request_id: 2 }] as any[] };
+  const next = disconnectSideChat(side);
+  assert.equal(next.id, side.id);
+  assert.equal(next.draft, side.draft);
+  assert.equal(next.conversation.items, side.conversation.items);
+  assert.equal(next.conversation.running, false);
+  assert.equal(next.restoring, true);
+  assert.deepEqual(next.permissions, []);
+  assert.deepEqual(next.questions, []);
 });

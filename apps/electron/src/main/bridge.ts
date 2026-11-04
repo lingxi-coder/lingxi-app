@@ -1,4 +1,5 @@
 import { providerAccountRenewFailureCode } from './provider-accounts.js';
+import { SideChatRecovery } from './sideChatRecovery.js';
 import { parseProviderAccountRouting } from '../shared/providerAccounts.js';
 import type { ProviderAccountConfiguration } from './session-catalog.js';
 import { DesktopTelemetry } from './telemetry.js';
@@ -1679,8 +1680,7 @@ export class SessionRuntime {
     this.ownedSessionResumeRequired ||= this.sessionHasHistory;
     const hadSideChats = this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0;
     for (const requestId of this.pendingSideCreates) this.broadcastClientEvent({ type: 'side_chat_error', request_id: requestId, message: 'The engine exited before the Side Chat was created.' });
-    for (const sideId of this.liveSideChats) this.broadcastClientEvent({ type: 'side_chat_ended', side_id: sideId });
-    this.liveSideChats.clear();
+
     this.pendingSideCreates.clear();
     if (interrupted) {
       this.broadcastClientEvent({ type: 'turn_ended', outcome: { type: 'cancelled' },
@@ -1690,7 +1690,7 @@ export class SessionRuntime {
       ? 'The engine exited. The interrupted turn will not be replayed; restoring this chat automatically.'
       : 'The engine exited. Restoring this chat automatically.';
     this.broadcastClientEvent({ type: 'system_notice', message: notice
-      + (hadSideChats ? ' Side Chats were interrupted and have ended.' : ''), is_error: false });
+      + (hadSideChats ? ' Side Chats are being restored; interrupted requests will not be replayed.' : ''), is_error: false });
     this.scheduleAutomaticRecovery();
   }
 
@@ -1715,6 +1715,7 @@ export class SessionRuntime {
         await this.startInternal(false);
         if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
         await this.restoreOwnedSessionIfNeeded();
+        await this.sideChatRecovery.restore((command) => this.requireClient().sendCommand(command));
         if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
         if (!this.child && !this.adoptedPid) throw new Error('The replacement engine exited during recovery.');
         this.setState({ status: 'connected' });
@@ -1743,6 +1744,7 @@ export class SessionRuntime {
     try { client.close(); } catch { /* a disconnected transport may already be closed */ }
   }
 
+  private readonly sideChatRecovery = new SideChatRecovery();
   private readonly liveSideChats = new Set<string>();
   private readonly pendingSideCreates = new Set<string>();
 
@@ -1792,6 +1794,7 @@ export class SessionRuntime {
       if (this.disposed) return;
       this.assertNoLiveSideChats();
       this.desiredRunning = false;
+      this.sideChatRecovery.clear();
       await this.stopBridge();
       this.setState({ status: 'idle' });
     });
@@ -1800,6 +1803,7 @@ export class SessionRuntime {
 
   /** Security revocation cannot wait for the user to close Side Chats. */
   stopForComputerPolicyFailure(): Promise<void> {
+    this.sideChatRecovery.clear();
     this.desiredRunning = false;
     this.cancelAutomaticRecovery();
     try { this.revokeComputerAccess(); }
@@ -2285,10 +2289,12 @@ export class SessionRuntime {
         })();
         return;
       }
+      if (this.sideChatRecovery.observe(event)) return;
       this.telemetry?.onEvent(event);
       if (event.type === 'side_chat_created') { this.pendingSideCreates.delete(event.request_id); this.liveSideChats.add(event.side_id); }
       if (event.type === 'side_chat_error' && event.request_id) this.pendingSideCreates.delete(event.request_id);
       if (event.type === 'side_chat_list') { this.pendingSideCreates.clear(); this.liveSideChats.clear(); for (const id of event.side_ids) this.liveSideChats.add(id); }
+      if (event.type === 'side_chat_snapshot') this.liveSideChats.add(event.side_id);
       if (event.type === 'side_chat_ended') this.liveSideChats.delete(event.side_id);
       if (event.type.startsWith('side_chat_')) {
         this.broadcastClientEvent(event);
@@ -3631,6 +3637,7 @@ export class SessionRuntime {
     if (mediaStopTimer) clearTimeout(mediaStopTimer);
     if (!mediaStopped) this.diagnostics.add('warn', 'bridge', 'native media cleanup is still awaiting confirmation');
     await this.oauthPersistence;
+    this.sideChatRecovery.interrupt();
     this.liveSideChats.clear();
     this.pendingSideCreates.clear();
     this.connectionLockfilePath = null;
@@ -3748,6 +3755,7 @@ export class SessionRuntime {
   async dispose(options?: { replacing?: boolean }): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.sideChatRecovery.clear();
     this.desiredRunning = false;
     this.cancelAutomaticRecovery();
     await this.restartChain.catch(() => undefined);

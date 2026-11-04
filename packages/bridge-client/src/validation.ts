@@ -1515,6 +1515,9 @@ export function validateClientEvent(value: unknown): ClientEvent {
     case 'side_chat_list':
       exactKeys(input, ['type', 'side_ids'], 'client event');
       return { type, side_ids: stringArray(input['side_ids'], 'side chat ids') };
+    case 'side_chat_checkpoint':
+      exactKeys(input, ['type', 'side_id', 'checkpoint_json', 'events_json'], 'host-private side checkpoint');
+      return { type, side_id: string(input['side_id'], 'side chat id'), checkpoint_json: string(input['checkpoint_json'], 'side chat checkpoint'), events_json: stringArray(input['events_json'], 'side chat replay events') };
     case 'side_chat_snapshot':
       exactKeys(input, ['type', 'side_id', 'events_json'], 'client event');
       return {

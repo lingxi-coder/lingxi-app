@@ -1,0 +1,20 @@
+{
+  "before_failures": 814,
+  "after_failures": 813,
+  "removed": [
+    {
+      "name": "futures-sink",
+      "version": "0.3.32",
+      "missing_criteria": [
+        "safe-to-deploy"
+      ]
+    }
+  ],
+  "added": [],
+  "before_output_sha256": "6773bc1d3ab088e08100a775d5178d1a730b5712def258c4bd27041a184cb6c6",
+  "after_output_sha256": "41d64d9ead015e6ebcf0ef3686fec220f928e48b6ce0ccb664373b0ce7373cbf",
+  "after_audits_sha256": "0eb3bf71668988541d1aa50617e3fa6b3388a7c3c4833d040b9d912d4891b34f",
+  "other_inputs_unchanged": true,
+  "only_audits_toml_change": "futures-sink 0.3.32 exact full record",
+  "overall_conclusion": "fail (vetting)"
+}

@@ -1,0 +1,63 @@
+{
+  "archive_files": {
+    ".cargo_vcs_info.json": {
+      "git_blob": "c7c58dea24715f32c7f48f2663b057d20fa1354b",
+      "mode": "0o644",
+      "sha256": "a1a85f2388fa9e27886f7e44272ac38aefadb80c852e406d50437ca37b22e3c8",
+      "size": 106
+    },
+    "Cargo.lock": {
+      "git_blob": "2207374ad04119809d151ff86a7c906fc7946421",
+      "mode": "0o644",
+      "sha256": "79ec71ba9b58857e26e335ad8e352359ec5e5a2a172b18e34b6d66d567727e17",
+      "size": 145
+    },
+    "Cargo.toml": {
+      "git_blob": "147716bad0e5d21dfdd5599af2cbef9e15204910",
+      "mode": "0o644",
+      "sha256": "735810b8578352403f118d3e0bd227e42775a4fae0e1e65cb1c793df8d17b2f2",
+      "size": 1302
+    },
+    "Cargo.toml.orig": {
+      "git_blob": "3613f0bb67ad0d03c83a69576492695742b02173",
+      "mode": "0o644",
+      "sha256": "59100b395194de757c7e78158789af49622527f4b8dac80b6633d311e625aeef",
+      "size": 545
+    },
+    "LICENSE-APACHE": {
+      "git_blob": "9eb0b097f5d0b5e147323e043b3adf35949b9f5a",
+      "mode": "0o644",
+      "sha256": "275c491d6d1160553c32fd6127061d7f9606c3ea25abfad6ca3f6ed088785427",
+      "size": 10874
+    },
+    "LICENSE-MIT": {
+      "git_blob": "8ad082ec4f93b748959a7634b12d25da2000c59e",
+      "mode": "0o644",
+      "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
+      "size": 1094
+    },
+    "README.md": {
+      "git_blob": "1d683e95b56e1b114886b41189bc97aa318fe0ef",
+      "mode": "0o644",
+      "sha256": "a509e1ce84f285190130def6d2b9e3861988f9be725f7697f09fba347601d86f",
+      "size": 582
+    },
+    "src/lib.rs": {
+      "git_blob": "52394e8c2af5e38d74c59070ddb4ed73a4d6289a",
+      "mode": "0o644",
+      "sha256": "ab6425171a64636d45e40cebab75a48feec17c5dd8a305b3a48c4b7345df3ce5",
+      "size": 9125
+    }
+  },
+  "archive_sha256": "c39754e157331b013978ec91992bde1ac089843443c49cbc7f46150b0fad0893",
+  "cache_checked": true,
+  "commit_object_verified": true,
+  "github_signature_status_at_capture": "unsigned",
+  "index_yanked_at_capture": false,
+  "lock_sha256": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+  "signature_independently_verified": false,
+  "tree_objects_checked": 65,
+  "upstream_blob_files_checked": 5,
+  "upstream_commit": "d9bba94c239daa1175a5bb2958f37a5c72db3f6a",
+  "upstream_root_tree": "3b895ace16b630e12aabf16f10a0110036e7abd6"
+}

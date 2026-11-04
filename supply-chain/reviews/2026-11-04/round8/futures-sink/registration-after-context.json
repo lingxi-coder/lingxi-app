@@ -1,0 +1,15 @@
+{
+  "head": "945b593a127b99648e50fbcb64482e8155936484",
+  "command": "cargo +1.94.0 vet check --locked --frozen --no-minimize-exemptions --no-registry-suggestions --cache-dir <fresh temp> --output-format json",
+  "cargo_vet_sha256": "bc8d963023f8a8a9102d2261922a817d59ceeabf41c55f1c9d7fa8ee8382ea82",
+  "exit_code": 255,
+  "failure_count": 813,
+  "output_sha256": "41d64d9ead015e6ebcf0ef3686fec220f928e48b6ce0ccb664373b0ce7373cbf",
+  "input_sha256": {
+    "Cargo.toml": "64b16f7acf3b9cb45f25564ce0c1143eefbbc6fa5fe67d11ff69abac3c39194e",
+    "Cargo.lock": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+    "supply-chain/config.toml": "8e1b2dc287f3a81dc84dda3de41984d17f2fed4d115347b6d3d85f979a93d5f2",
+    "supply-chain/audits.toml": "0eb3bf71668988541d1aa50617e3fa6b3388a7c3c4833d040b9d912d4891b34f",
+    "supply-chain/imports.lock": "38691e1bfc73d11d3fb1b46a820afff4bf5344d67d5852c7a1697d58e4dfb536"
+  }
+}

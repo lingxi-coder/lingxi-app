@@ -75,6 +75,10 @@ import com.lingxi.code.computeruse.ComputerUseUiState
 import com.lingxi.code.connectivity.rememberOnlineState
 import com.lingxi.code.connectivity.shouldShowOfflineBanner
 import com.lingxi.code.cron.AndroidCronRepository
+import com.lingxi.code.cron.CronPage
+import com.lingxi.code.cron.CronPageRoute
+import com.lingxi.code.tabs.AppTab
+import com.lingxi.code.tabs.OnTabReselected
 import com.lingxi.code.cron.CronRunStatus
 import com.lingxi.code.cron.CronSchedulingMode
 import com.lingxi.code.account.AccountViewModel
@@ -232,12 +236,16 @@ internal fun isBoundToScopeMode(
  * hosts the 对话/项目/定时 [DrawerContent] (the Android analog of the iOS
  * `RootView`, which overlaid the `Drawer` over `ChatView`). The conversation's
  * menu button opens the drawer; selecting a chat/session closes it and switches
- * the [ChatViewModel] to that session; the account row invokes [onOpenSettings]
- * (the settings nav graph is wired in a later phase). Drawer + conversation read
+ * the [ChatViewModel] to that session; the account row invokes [onOpenAccount]
+ * (Settings is a tab of the shell). Drawer + conversation read
  * the same hoisted state, and the system back gesture closes an open drawer
  * (handled by [ModalNavigationDrawer]).
  *
- * @param onOpenSettings opens the settings surface — a stub until A6 lands.
+ * This is the Chats tab of the app shell: it is always composed (it owns the live engine), reports
+ * its pushed pages, drawer and full-screen overlays through [onChromeChanged] so the shell can
+ * decide whether its tab bar shows, and asks the shell for every other tab through the callbacks.
+ *
+ * @param onOpenSettings opens the Settings tab (the shell remembers Chats as the way back).
  */
 @Composable
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -245,18 +253,23 @@ fun RootScreen(
     isDark: Boolean,
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit = {},
+    /** The drawer's account row: Settings / Account, with Back returning to Chats. */
+    onOpenAccount: () -> Unit = { onOpenSettings() },
     onOpenModelSettings: () -> Unit = {},
     onOpenPermissionSettings: () -> Unit = { onOpenSettings() },
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     onOpenComputerUseSettings: () -> Unit = { onOpenSettings() },
     onOpenVoiceSettings: () -> Unit = { onOpenSettings() },
-    onOpenCronSettings: (String?) -> Unit = { onOpenSettings() },
-    /** Open the scheduled-task page on a new task prefilled with the given prompt. */
-    onOpenCronCreate: (prompt: String) -> Unit = { onOpenCronSettings(null) },
     onOpenTerminal: (sessionId: String, initCommand: String?) -> Unit = { _, _ -> },
-    /** Open the Remote Control screens, which the host draws above this one. */
-    onOpenRemoteControl: () -> Unit = {},
-    onOpenTeams: () -> Unit = {},
+    /** Select the Bots tab (the Apps page's "browse apps shared by a computer"). */
+    onOpenBotsTab: () -> Unit = {},
+    /** A scheduled run's session was chosen on the scheduled-task page: the host opens it in the chat. */
+    onOpenScheduledSession: (com.lingxi.code.cron.CronRunRecord) -> Unit = {},
+    /**
+     * What the tab shell needs for its bar rule: how many pages are pushed over the chat, whether the
+     * phone drawer is open or opening, and whether a full-screen overlay (a running app, the voice flow) covers it.
+     */
+    onChromeChanged: (pushedPages: Int, drawerOpen: Boolean, fullScreenOverlay: Boolean) -> Unit = { _, _, _ -> },
     modelSetupRequired: Boolean = false,
     // FlowMode (心流) profile bits, read from the persisted AppearancePrefs and
     // passed down so the voice-orb overlay can label itself + gate its text input.
@@ -1567,6 +1580,8 @@ fun RootScreen(
     var projectPageId by rememberSaveable { mutableStateOf<String?>(null) }
     // 应用: the page, one app's page and the running app, each drawn over the last.
     var appsPageOpen by rememberSaveable { mutableStateOf(false) }
+    // 定时任务 is a page of the chat (decision D14), not a Settings page.
+    var cronPage by rememberSaveable(stateSaver = CronPageRoute.Saver) { mutableStateOf<CronPageRoute?>(null) }
     var marketInstallId by rememberSaveable { mutableStateOf<String?>(null) }
     var localAppDetailsId by rememberSaveable { mutableStateOf<String?>(null) }
     var runtimeAppId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -1644,7 +1659,7 @@ fun RootScreen(
                 }
                 try {
                     if (parts.first() !in setOf("project", "apps", "market")) {
-                        projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketInstallId = null; localAppDetailsId = null; sessionPanelOpen = false
+                        projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketInstallId = null; localAppDetailsId = null; sessionPanelOpen = false; cronPage = null
                     }
                     if (parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal", "runtime", "import") && link.params["workspace"] != null) {
                         val targetScope = resolveLinkedScope(link.params["workspace"])
@@ -1656,7 +1671,11 @@ fun RootScreen(
                         }
                     }
                     when (parts.first()) {
-                        "settings", "provider", "extensions", "cron", "terminal" -> onDeepLinkNativeReady(link)
+                        // settings/cron was the scheduled-task list when it was a Settings page: it opens it here now.
+                        "settings" -> if (id == "cron") cronPage = CronPageRoute.Tasks else onDeepLinkNativeReady(link)
+                        "provider", "extensions", "terminal" -> onDeepLinkNativeReady(link)
+                        // cron/run/<id> and cron/job/<id> open the scheduled-task page over the chat.
+                        "cron" -> cronPage = if (parts[1] == "run") CronPageRoute.Run(id) else CronPageRoute.task(id)
                         "session" -> {
                             val targetScope = resolveScope() ?: error(resources.getString(R.string.deep_link_conversation_ambiguous))
                             val rows = when (targetScope) {
@@ -2047,11 +2066,31 @@ fun RootScreen(
         }
     }
 
+    // The shell's bar rule: pages pushed over the chat, the phone drawer being open or opening, and
+    // full-screen overlays (a running app, the voice flow) that cover everything.
+    var drawerOpenOrOpening by remember { mutableStateOf(false) }
+    val pushedPages = listOf(
+        projectsPageOpen, projectPageId != null, appsPageOpen, marketInstallId != null,
+        localAppDetailsId != null, runtimeAppId != null, cronPage != null,
+    ).count { it }
+    val latestOnChromeChanged by rememberUpdatedState(onChromeChanged)
+    LaunchedEffect(pushedPages, drawerOpenOrOpening, runtimeAppId != null, voiceActive) {
+        latestOnChromeChanged(pushedPages, drawerOpenOrOpening, runtimeAppId != null || voiceActive)
+    }
+    // Tapping the Chats tab again with pages pushed (the wide rail stays reachable) pops back to the chat.
+    OnTabReselected(AppTab.Chats) { pushed ->
+        if (pushed > 0) {
+            projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketInstallId = null
+            localAppDetailsId = null; runtimeAppId = null; cronPage = null
+        }
+    }
+
     Box(modifier = modifier.fillMaxSize()) {
         AdaptiveConversationDrawer(
             modifier = Modifier.fillMaxSize(),
             drawerState = drawerState,
             scrimColor = Color.Black.copy(alpha = 0.4f),
+            onOpenOrOpeningChange = { drawerOpenOrOpening = it },
             drawerContent = {
                 ModalDrawerSheet(
                     drawerContainerColor = LingXiTheme.palette.sidebarBg,
@@ -2089,9 +2128,9 @@ fun RootScreen(
                             }
                             if (switched) closeDrawer()
                         },
-                        onOpenSettings = {
+                        onOpenAccount = {
                             closeDrawer()
-                            onOpenSettings()
+                            onOpenAccount()
                         },
                         onOpenTerminal = {
                             closeDrawer()
@@ -2149,12 +2188,12 @@ fun RootScreen(
                         onOpenCron = { taskKey ->
                             markCronResultsSeen()
                             closeDrawer()
-                            onOpenCronSettings(taskKey)
+                            cronPage = CronPageRoute.task(taskKey)
                         },
                         onOpenCronList = {
                             markCronResultsSeen()
                             closeDrawer()
-                            onOpenCronSettings(null)
+                            cronPage = CronPageRoute.Tasks
                         },
                         onOpenProjects = {
                             closeDrawer()
@@ -2179,11 +2218,6 @@ fun RootScreen(
                             closeDrawer()
                             runtimeAppId = appId
                         },
-                        onOpenRemoteControl = {
-                            closeDrawer()
-                            onOpenRemoteControl()
-                        },
-                        onOpenTeams = { closeDrawer(); onOpenTeams() },
                     )
                 }
             },
@@ -2476,7 +2510,7 @@ fun RootScreen(
                     onOpenCron = { taskKey ->
                         markCronResultsSeen()
                         closeProjectPages()
-                        onOpenCronSettings(taskKey)
+                        cronPage = CronPageRoute.task(taskKey)
                     },
                     onReimport = { runProjectSync(shown.id) { projectStore.reimport(shown.id) } },
                     onExport = { runProjectSync(shown.id) { projectStore.export(shown.id) } },
@@ -2499,7 +2533,7 @@ fun RootScreen(
             UnifiedAppsPage(
                 apps = localApps,
                 onBack = { appsPageOpen = false },
-                onRemoteApps = { appsPageOpen = false; onOpenRemoteControl() },
+                onRemoteApps = { appsPageOpen = false; onOpenBotsTab() },
                 onOpen = { runtimeAppId = it },
                 onDetails = { localAppDetailsId = it },
                 onAuthoring = ::openAppAuthoring,
@@ -2554,6 +2588,25 @@ fun RootScreen(
                 )
             }
         }
+        // 定时任务: drawn over the chat like the Apps page; it keeps its last route while sliding out.
+        var lastCronPage by remember { mutableStateOf<CronPageRoute?>(null) }
+        LaunchedEffect(cronPage) { if (cronPage != null) lastCronPage = cronPage }
+        AnimatedVisibility(
+            visible = cronPage != null,
+            enter = slideInHorizontally(initialOffsetX = { it }),
+            exit = slideOutHorizontally(targetOffsetX = { it }),
+        ) {
+            val shown = cronPage ?: lastCronPage
+            if (shown != null) {
+                CronPage(
+                    route = shown,
+                    engineSource = currentEngineSource,
+                    projectStore = projectStore,
+                    onOpenSession = { run -> cronPage = null; onOpenScheduledSession(run) },
+                    onClose = { cronPage = null },
+                )
+            }
+        }
         if (sessionPanelOpen) {
             val panelRow = SessionRow(
                 uuid = state.session.id,
@@ -2595,7 +2648,7 @@ fun RootScreen(
                 },
                 onMakeScheduled = {
                     sessionPanelOpen = false
-                    onOpenCronCreate(
+                    cronPage = CronPageRoute.new(
                         state.messages.firstOrNull { it.role == com.lingxi.code.model.Role.User }
                             ?.text.orEmpty().take(500),
                     )

@@ -54,8 +54,8 @@ class ProviderAccountsAppUiTest {
         compose.waitUntil(60_000) {
             compose.onAllNodesWithTag(UiTags.OPEN_DRAWER).fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithTag(UiTags.OPEN_DRAWER).performClick()
-        compose.onNodeWithTag(UiTags.DRAWER_SETTINGS).performClick()
+        // Settings is a tab of the bottom bar now (the drawer's gear is gone).
+        compose.onNodeWithTag(UiTags.TAB_SETTINGS).performClick()
         compose.onNodeWithTag(UiTags.settingsGroup("models")).performScrollTo().performClick()
         compose.onNodeWithTag("provider.list.advanced").performScrollTo().performClick()
         compose.onNodeWithTag(UiTags.settingsPage(SettingsRoutes.PROVIDER_ACCOUNTS)).performScrollTo().performClick()

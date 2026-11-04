@@ -17,7 +17,7 @@ import com.lingxi.code.R
 import java.util.UUID
 
 @Composable
-fun TeamsScreen(initialInvite: String?, onInviteHandled: () -> Unit, onOpenAccount: () -> Unit, onClose: () -> Unit, model: TeamsViewModel = viewModel()) {
+fun TeamsScreen(initialInvite: String?, onInviteHandled: () -> Unit, onOpenAccount: () -> Unit, onClose: () -> Unit, onDepthChanged: (Int) -> Unit = {}, model: TeamsViewModel = viewModel()) {
     val state by model.state.collectAsStateWithLifecycle()
     var messageContext by remember { mutableStateOf<TeamDetail?>(null) }
     var name by remember { mutableStateOf("") }
@@ -30,6 +30,9 @@ fun TeamsScreen(initialInvite: String?, onInviteHandled: () -> Unit, onOpenAccou
     DisposableEffect(model) { model.start(); onDispose { model.stop() } }
     LaunchedEffect(initialInvite) { initialInvite?.let { code = it } }
     LaunchedEffect(state.uid) { messageContext = null; confirmation = null; name = "" }
+    // The tab shell hides its bar while a team's conversations are open.
+    val inConversation = messageContext != null && state.uid != null
+    LaunchedEffect(inConversation) { onDepthChanged(if (inConversation) 1 else 0) }
     if (messageContext != null && state.uid != null) { TeamMessagesScreen(state.uid!!, messageContext!!, onClose = { messageContext = null }); return }
     BackHandler(onBack = onClose)
     Surface(modifier = Modifier.fillMaxSize()) {

@@ -46,9 +46,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingxi.code.cron.CronAlarmScheduler
 import com.lingxi.code.onboarding.SetupWizardOverlay
-import com.lingxi.code.settings.SettingsHost
 import com.lingxi.code.settings.SettingsRoutes
 import com.lingxi.code.settings.SettingsStore
+import com.lingxi.code.tabs.AppTab
+import com.lingxi.code.tabs.DeepLinkImportOverlay
+import com.lingxi.code.tabs.MainTabShell
+import com.lingxi.code.tabs.SettingsTab
+import com.lingxi.code.tabs.TabLogic
+import com.lingxi.code.tabs.rememberTabShellState
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.conversation.ConversationLaunchRequest
 import com.lingxi.code.terminal.TerminalRoute
@@ -62,9 +67,10 @@ import com.lingxi.code.theme.ThemeMode
 import kotlinx.coroutines.launch
 
 /**
- * The single Activity host. Edge-to-edge, Compose-only — everything else
- * (drawer, conversation, settings nav graph, voice overlay) is composed under
- * [RootScreen].
+ * The single Activity host. Edge-to-edge, Compose-only — everything else is
+ * composed under [MainTabShell]: the Chats tab ([RootScreen]: drawer, conversation,
+ * voice overlay), the Bots, Teams and Settings tabs. Onboarding, the terminal and
+ * the import preview are overlays above the shell.
  *
  * Theme + accent are read from the DataStore-backed [AppearanceStore] and fed
  * into [LingXiTheme], so the appearance is persisted and live. Later phases fill
@@ -249,11 +255,10 @@ class MainActivity : ComponentActivity() {
                 }
                 enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
             }
-            // Settings is a full-surface overlay that slides up over the
-            // conversation (the Android analog of the iOS settings sheet); the
-            // drawer's account row opens it, system-back / close dismisses it.
-            var settingsOpen by rememberSaveable { mutableStateOf(false) }
-            var settingsInitialRoute by rememberSaveable { mutableStateOf(SettingsRoutes.MAIN) }
+            // The app shell: four tabs (Chats / Bots / Teams / Settings) and what they ask of each
+            // other. Links and shortcuts drive it; the terminal, onboarding and the import preview
+            // stay overlays above it.
+            val tabState = rememberTabShellState()
             // Monotonic across configuration changes: rotation must not turn a
             // prior reconnect generation back into zero and rebuild a live engine.
             var engineReconnect by rememberSaveable { mutableIntStateOf(0) }
@@ -267,19 +272,6 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(settingsState.linuxRuntime.selectedMode.name)
             }
             var terminalOpen by rememberSaveable { mutableStateOf(false) }
-            // Remote Control is a full-surface overlay like settings; a link or a
-            // notification names the destination, which the overlay consumes once.
-            var remoteOpen by rememberSaveable { mutableStateOf(false) }
-            var teamsOpen by rememberSaveable { mutableStateOf(false) }
-            var teamInvite by rememberSaveable { mutableStateOf<String?>(null) }
-            val openTeams: () -> Unit = { teamsOpen = true; settingsOpen = false; terminalOpen = false; remoteOpen = false }
-            var requestedRemoteRoute by remember { mutableStateOf<com.lingxi.code.remote.RemoteRoute?>(null) }
-            val openRemote: (com.lingxi.code.remote.RemoteRoute) -> Unit = { route ->
-                requestedRemoteRoute = route
-                remoteOpen = true
-                settingsOpen = false
-                terminalOpen = false
-            }
             var terminalSessionId by rememberSaveable { mutableStateOf("interactive") }
             var terminalInitCommand by rememberSaveable { mutableStateOf<String?>(null) }
             var terminalLaunchGeneration by rememberSaveable { mutableIntStateOf(0) }
@@ -288,20 +280,22 @@ class MainActivity : ComponentActivity() {
                 terminalInitCommand = initCommand
                 terminalLaunchGeneration += 1
                 terminalOpen = true
-                settingsOpen = false
+                // The terminal belongs to Chats (decision D16): closing it lands on the chat.
+                tabState.select(AppTab.Chats)
             }
             var preparedNativeLink by remember { mutableStateOf<com.lingxi.code.navigation.DeepLink?>(null) }
             var requestedFeatureLink by remember { mutableStateOf<com.lingxi.code.navigation.DeepLink?>(null) }
             var deepLinkBlocked by remember { mutableStateOf(false) }
             var pendingImportRaw by rememberSaveable { mutableStateOf<String?>(null) }
             val pendingImport = com.lingxi.code.navigation.DeepLink.parse(pendingImportRaw)
-            LaunchedEffect(canonicalLinks, settingsOpen, terminalOpen, requestedFeatureLink, pendingImport, prefs.setupDone, activeConversationSource, activeConversationBusy, activityLifecycle, deepLinkBlocked) {
+            LaunchedEffect(canonicalLinks, terminalOpen, requestedFeatureLink, pendingImport, prefs.setupDone, activeConversationSource, activeConversationBusy, activityLifecycle, deepLinkBlocked) {
                 val raw = linkInbox.next(com.lingxi.code.navigation.DeepLinkReadiness(
                     foreground = activityLifecycle.isAtLeast(Lifecycle.State.RESUMED),
                     onboardingComplete = prefs.setupDone,
                     sourceBound = activeConversationSource != null,
                     engineBusy = activeConversationBusy,
-                    blockingSurfaceOpen = settingsOpen || terminalOpen || requestedFeatureLink != null || pendingImport != null || deepLinkBlocked,
+                    // Settings is a tab now, not a blocking surface (an unsaved edit is still guarded by its own page).
+                    blockingSurfaceOpen = terminalOpen || requestedFeatureLink != null || pendingImport != null || deepLinkBlocked,
                 ))
                 val link = com.lingxi.code.navigation.DeepLink.parse(raw)
                 if (link != null) {
@@ -309,30 +303,34 @@ class MainActivity : ComponentActivity() {
                     val id = parts.last()
                     var handled = true
                     var awaitingFeature = false
-                    // Any destination but a Remote Control session leaves the overlay behind.
-                    if (parts.first() != "remote") remoteOpen = false
-                    if (parts.first() != "team") teamsOpen = false
+                    // A link selects its tab first (an import preview stays on the current one); the route's
+                    // own handler then runs inside that tab.
+                    // (settings/cron is the scheduled-task page, which lives on the chat now.)
+                    val landingTab = if (link.route == "settings/cron") AppTab.Chats else TabLogic.tabForLink(link.route).tab
                     when {
-                        link.route in setOf("team/join", "team/inbox") -> { teamInvite = link.params["code"]; openTeams() }
-                        parts.first() == "remote" -> com.lingxi.code.remote.RemoteRoute.fromLink(link)?.let(openRemote) ?: run { handled = false }
-                        link.params["workspace"] != null && parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal") && preparedNativeLink != link -> { requestedFeatureLink = link; awaitingFeature = true }
-                        parts.first() in setOf("session", "new", "project", "apps", "market", "runtime", "import") -> { requestedFeatureLink = link; awaitingFeature = true }
+                        link.route in setOf("team/join", "team/inbox") -> tabState.requestTeams(link.params["code"])
+                        parts.first() == "remote" -> com.lingxi.code.remote.RemoteRoute.fromLink(link)
+                            ?.let { tabState.requestBots(it.hostId, it.sessionId) } ?: run { handled = false }
+                        link.params["workspace"] != null && link.route != "settings/cron" && parts.first() in setOf("settings", "provider", "extensions", "terminal") && preparedNativeLink != link -> { requestedFeatureLink = link; awaitingFeature = true }
+                        // Chats routes, including the scheduled-task pages (decision D14), are RootScreen's.
+                        parts.first() in setOf("session", "new", "project", "apps", "market", "runtime", "import", "cron") || link.route == "settings/cron" -> {
+                            landingTab?.let(tabState::select)
+                            requestedFeatureLink = link
+                            awaitingFeature = true
+                        }
                         parts.first() == "terminal" -> openTerminal(id, link.payload["command"] as? String)
                         parts.first() == "settings" -> {
-                            val pages = mapOf("general" to SettingsRoutes.GENERAL, "account" to SettingsRoutes.ACCOUNT, "appearance" to SettingsRoutes.APPEARANCE, "notifications" to SettingsRoutes.NOTIFICATIONS, "voice" to SettingsRoutes.VOICE, "custom-providers" to SettingsRoutes.CUSTOM_PROVIDERS, "fusion" to SettingsRoutes.FUSION, "permissions" to SettingsRoutes.ENGINE_PERMISSIONS, "tools-agent" to SettingsRoutes.TOOLS_AGENT, "skills" to SettingsRoutes.ENGINE_SKILLS, "mcp" to SettingsRoutes.ENGINE_MCP, "hooks" to SettingsRoutes.HOOKS, "plugins" to SettingsRoutes.PLUGINS, "diagnostics" to SettingsRoutes.DIAGNOSTICS, "about" to SettingsRoutes.ABOUT, "projects" to SettingsRoutes.PROJECTS, "archived-chats" to SettingsRoutes.ARCHIVED, "language" to SettingsRoutes.LANGUAGE, "input" to SettingsRoutes.INPUT, "privacy" to SettingsRoutes.PRIVACY, "permission-mode" to SettingsRoutes.PERMISSION_MODE, "open-source" to SettingsRoutes.OPEN_SOURCE, "linux-runtime" to SettingsRoutes.LINUX_RUNTIME, "typescript-lsp" to SettingsRoutes.TYPESCRIPT_LSP, "computer-use" to SettingsRoutes.COMPUTER_USE, "dream" to SettingsRoutes.DREAM, "cron" to SettingsRoutes.CRON, "provider-credentials" to SettingsRoutes.PROVIDER_ACCOUNTS)
-                            pages[id]?.let { settingsInitialRoute = it; settingsOpen = true } ?: run { handled = false }
+                            val pages = mapOf("general" to SettingsRoutes.GENERAL, "account" to SettingsRoutes.ACCOUNT, "appearance" to SettingsRoutes.APPEARANCE, "notifications" to SettingsRoutes.NOTIFICATIONS, "voice" to SettingsRoutes.VOICE, "custom-providers" to SettingsRoutes.CUSTOM_PROVIDERS, "fusion" to SettingsRoutes.FUSION, "permissions" to SettingsRoutes.ENGINE_PERMISSIONS, "tools-agent" to SettingsRoutes.TOOLS_AGENT, "skills" to SettingsRoutes.ENGINE_SKILLS, "mcp" to SettingsRoutes.ENGINE_MCP, "hooks" to SettingsRoutes.HOOKS, "plugins" to SettingsRoutes.PLUGINS, "diagnostics" to SettingsRoutes.DIAGNOSTICS, "about" to SettingsRoutes.ABOUT, "projects" to SettingsRoutes.PROJECTS, "archived-chats" to SettingsRoutes.ARCHIVED, "language" to SettingsRoutes.LANGUAGE, "input" to SettingsRoutes.INPUT, "privacy" to SettingsRoutes.PRIVACY, "permission-mode" to SettingsRoutes.PERMISSION_MODE, "open-source" to SettingsRoutes.OPEN_SOURCE, "linux-runtime" to SettingsRoutes.LINUX_RUNTIME, "typescript-lsp" to SettingsRoutes.TYPESCRIPT_LSP, "computer-use" to SettingsRoutes.COMPUTER_USE, "dream" to SettingsRoutes.DREAM, "provider-credentials" to SettingsRoutes.PROVIDER_ACCOUNTS)
+                            pages[id]?.let { tabState.openSettings(it) } ?: run { handled = false }
                         }
-                        parts.first() == "provider" -> { settingsInitialRoute = SettingsRoutes.providerEdit(ProviderKind.Llm.name, android.net.Uri.encode(id)); settingsOpen = true }
-                        parts.first() == "extensions" -> {
-                            settingsInitialRoute = when (parts[1]) {
+                        parts.first() == "provider" -> tabState.openSettings(SettingsRoutes.providerEdit(ProviderKind.Llm.name, android.net.Uri.encode(id)))
+                        parts.first() == "extensions" -> tabState.openSettings(
+                            when (parts[1]) {
                                 "plugin" -> SettingsRoutes.pluginDetail(id)
                                 "mcp" -> SettingsRoutes.mcpEdit(android.net.Uri.encode(id), link.params["scope"])
                                 else -> SettingsRoutes.skillDetail(android.net.Uri.encode(id))
-                            }
-                            settingsOpen = true
-                        }
-                        parts.take(2) == listOf("cron", "run") -> { settingsInitialRoute = SettingsRoutes.cronRun(id); settingsOpen = true }
-                        parts.take(2) == listOf("cron", "job") -> { settingsInitialRoute = SettingsRoutes.cron(id); settingsOpen = true }
+                            },
+                        )
                         else -> handled = false
                     }
                     if (!handled) android.widget.Toast.makeText(applicationContext, "This link destination is unavailable in this build", android.widget.Toast.LENGTH_LONG).show()
@@ -341,7 +339,7 @@ class MainActivity : ComponentActivity() {
             }
             LaunchedEffect(requestedConversationLaunch) {
                 if (requestedConversationLaunch != null) {
-                    settingsOpen = false
+                    tabState.select(AppTab.Chats)
                     terminalOpen = false
                 }
             }
@@ -372,175 +370,156 @@ class MainActivity : ComponentActivity() {
                 activeConversationSource?.let { lingxiMarketplace.ensure(it) }
             }
 
+            // A scheduled run's session was chosen (on the scheduled-task page, or on the Settings tab):
+            // the chat opens it.
+            val openScheduledSession: (com.lingxi.code.cron.CronRunRecord) -> Unit = { run ->
+                run.sessionId?.let { sessionId ->
+                    pendingConversationLaunch.value = ConversationLaunchRequest(
+                        sessionId = sessionId,
+                        turnId = null,
+                        workspaceKey = run.projectId?.let { "project.$it" } ?: "scheduled",
+                        sessionMode = desktopProjectStore.state.value.projects
+                            .firstOrNull { it.record.id == run.projectId }?.sessions
+                            ?.firstOrNull { it.sessionId == sessionId.removePrefix("sess:") }?.mode
+                            ?: com.lingxi.code.model.SessionMode.Code,
+                    )
+                    tabState.select(AppTab.Chats)
+                }
+            }
+
             LingXiTheme(darkTheme = darkTheme, accentId = prefs.accentId) {
                 Box(Modifier.fillMaxSize().background(LingXiTheme.palette.windowBg)) {
-                    RootScreen(
-                        isDark = darkTheme,
-                        onOpenPermissionSettings = {
-                            settingsInitialRoute = SettingsRoutes.PERMISSION_MODE
-                            settingsOpen = true
-                        },
-                        onOpenSettings = {
-                            settingsInitialRoute = SettingsRoutes.MAIN
-                            settingsOpen = true
-                        },
-                        onOpenModelSettings = {
-                            settingsInitialRoute = SettingsRoutes.providerList(ProviderKind.Llm.name)
-                            settingsOpen = true
-                        },
-                        onOpenProviderSettings = { providerSettingsId ->
-                            settingsInitialRoute = providerSettingsId
-                                ?.let { SettingsRoutes.providerEdit(ProviderKind.Llm.name, it) }
-                                ?: SettingsRoutes.providerList(ProviderKind.Llm.name)
-                            settingsOpen = true
-                        },
-                        onOpenVoiceSettings = {
-                            settingsInitialRoute = SettingsRoutes.VOICE
-                            settingsOpen = true
-                        },
-                        onOpenComputerUseSettings = {
-                            settingsInitialRoute = SettingsRoutes.COMPUTER_USE
-                            settingsOpen = true
-                        },
-                        onOpenCronSettings = { taskKey ->
-                            settingsInitialRoute = SettingsRoutes.cron(taskKey)
-                            settingsOpen = true
-                        },
-                        onOpenCronCreate = { prompt ->
-                            settingsInitialRoute = SettingsRoutes.cronNew(prompt)
-                            settingsOpen = true
-                        },
-                        onOpenTerminal = openTerminal,
-                        onOpenRemoteControl = { openRemote(com.lingxi.code.remote.RemoteRoute.Hosts) },
-                        onOpenTeams = openTeams,
-                        modelSetupRequired = settingsState.needsLlmSetup,
-                        assistantName = prefs.assistantName,
-                        inputDialog = prefs.inputDialog,
-                        reconnectToken = engineReconnect,
-                        settingsStore = settingsStore,
-                        onConversationSourceChanged = { activeConversationSource = it },
-                        requestedProjectSwitch = pendingProjectSwitch,
-                        onProjectSwitchHandled = { pendingProjectSwitch = null },
-                        onConversationBusyChanged = { activeConversationBusy = it },
-                        requestedDeepLink = requestedFeatureLink,
-                        onDeepLinkBlockingChanged = { deepLinkBlocked = it },
-                        onDeepLinkNativeReady = { link -> preparedNativeLink = link },
-                        onDeepLinkImportReady = { link ->
-                            pendingImportRaw = com.lingxi.code.navigation.DeepLink.build(link.route, link.params, link.payload)
-                            settingsOpen = true
-                        },
-                        onDeepLinkHandled = { handledLink ->
-                            if (requestedFeatureLink == handledLink) {
-                                if (pendingImportRaw == null && preparedNativeLink == null) canonicalLinks.firstOrNull()?.let(linkInbox::complete)
-                                requestedFeatureLink = null
-                            }
-                        },
-                        requestedConversationLaunch = requestedConversationLaunch,
-                        onConversationLaunchHandled = { pendingConversationLaunch.value = null },
-                    )
-                    AnimatedVisibility(
-                        visible = settingsOpen,
-                        enter = slideInVertically(initialOffsetY = { it }),
-                        exit = slideOutVertically(targetOffsetY = { it }),
-                    ) {
-                        SettingsHost(
-                            engineSource = activeConversationSource,
-                            deepLinkImport = pendingImport,
-                            onDeepLinkImportDismiss = { canonicalLinks.firstOrNull()?.let(linkInbox::complete); pendingImportRaw = null; settingsOpen = false },
-                            onOpenScheduledSession = { run ->
-                                run.sessionId?.let { sessionId ->
-                                    pendingConversationLaunch.value = ConversationLaunchRequest(
-                                        sessionId = sessionId,
-                                        turnId = null,
-                                        workspaceKey = run.projectId?.let { "project.$it" } ?: "scheduled",
-                                        sessionMode = desktopProjectStore.state.value.projects
-                                            .firstOrNull { it.record.id == run.projectId }?.sessions
-                                            ?.firstOrNull { it.sessionId == sessionId.removePrefix("sess:") }?.mode
-                                            ?: com.lingxi.code.model.SessionMode.Code,
+                    MainTabShell(
+                        state = tabState,
+                        // Full-screen overlays drawn above the shell cover its bar (and rail).
+                        overlayOpen = !prefs.setupDone || terminalOpen || pendingImport != null,
+                        chats = {
+                            RootScreen(
+                                isDark = darkTheme,
+                                // Every shortcut into Settings remembers Chats as the way back.
+                                onOpenPermissionSettings = {
+                                    tabState.openSettings(SettingsRoutes.PERMISSION_MODE, AppTab.Chats)
+                                },
+                                onOpenSettings = {
+                                    tabState.openSettings(SettingsRoutes.MAIN, AppTab.Chats)
+                                },
+                                onOpenAccount = {
+                                    tabState.openSettings(SettingsRoutes.ACCOUNT, AppTab.Chats)
+                                },
+                                onOpenModelSettings = {
+                                    tabState.openSettings(SettingsRoutes.providerList(ProviderKind.Llm.name), AppTab.Chats)
+                                },
+                                onOpenProviderSettings = { providerSettingsId ->
+                                    tabState.openSettings(
+                                        providerSettingsId
+                                            ?.let { SettingsRoutes.providerEdit(ProviderKind.Llm.name, it) }
+                                            ?: SettingsRoutes.providerList(ProviderKind.Llm.name),
+                                        AppTab.Chats,
                                     )
-                                    settingsOpen = false
-                                }
-                            },
-                            projectStore = desktopProjectStore,
-                            // 「在这里换项目」要真的把引擎换过去，而不是只挪一个记号：
-                            // 项目层写进哪个目录由引擎进程的 cwd 决定。关掉设置页、把
-                            // 请求交给 RootScreen 的 switchEngineScope，与抽屉里换项目
-                            // 走的是同一条路径。
-                            onSwitchProject = { projectId ->
-                                pendingProjectSwitch = projectId
-                                settingsOpen = false
-                            },
-                            appearanceStore = store,
-                            isDark = darkTheme,
-                            accentId = prefs.accentId,
-                            store = settingsStore,
-                            onPermissionModeChanged = { mode ->
-                                val source = activeConversationSource
-                                    ?: error("engine is not connected")
-                                source.setPermissionMode(mode)
-                            },
-                            onTypescriptLspModeChanged = { mode ->
-                                val source = activeConversationSource
-                                    ?: error("engine is not connected")
-                                source.submitClientCommand(
-                                    com.lingxi.code.bindings.client.ClientCommand.SetTypescriptLspMode(mode),
-                                )
-                            },
-                            initialRoute = settingsInitialRoute,
-                            onClose = {
-                                settingsOpen = false
-                                settingsInitialRoute = SettingsRoutes.MAIN
-                            },
-                            // 关于 → 重新观看引导: clear setupDone (replays the wizard)
-                            // and drop back to the conversation behind it.
-                            onReplayOnboarding = {
-                                scope.launch { store.setSetupDone(false) }
-                                settingsOpen = false
-                            },
-                            // 重新连接引擎: rebuild the engine against the just-saved key
-                            // and drop back to the (now-real) conversation.
-                            onReconnectEngine = {
-                                if (activeConversationBusy) {
-                                    android.widget.Toast.makeText(applicationContext, getString(R.string.voice_session_busy_retry), android.widget.Toast.LENGTH_SHORT).show()
-                                    false
-                                } else {
-                                    engineReconnect += 1
-                                    settingsOpen = false
-                                    true
-                                }
-                            },
-                            onOpenTerminal = {
-                                openTerminal(it.sessionId, it.initCommand)
-                            },
-                        )
-                    }
+                                },
+                                onOpenVoiceSettings = {
+                                    tabState.openSettings(SettingsRoutes.VOICE, AppTab.Chats)
+                                },
+                                onOpenComputerUseSettings = {
+                                    tabState.openSettings(SettingsRoutes.COMPUTER_USE, AppTab.Chats)
+                                },
+                                onOpenTerminal = openTerminal,
+                                onOpenBotsTab = { tabState.select(AppTab.Bots) },
+                                onOpenScheduledSession = openScheduledSession,
+                                onChromeChanged = tabState::reportChatsChrome,
+                                modelSetupRequired = settingsState.needsLlmSetup,
+                                assistantName = prefs.assistantName,
+                                inputDialog = prefs.inputDialog,
+                                reconnectToken = engineReconnect,
+                                settingsStore = settingsStore,
+                                onConversationSourceChanged = { activeConversationSource = it },
+                                requestedProjectSwitch = pendingProjectSwitch,
+                                onProjectSwitchHandled = { pendingProjectSwitch = null },
+                                onConversationBusyChanged = { activeConversationBusy = it },
+                                requestedDeepLink = requestedFeatureLink,
+                                onDeepLinkBlockingChanged = { deepLinkBlocked = it },
+                                onDeepLinkNativeReady = { link -> preparedNativeLink = link },
+                                onDeepLinkImportReady = { link ->
+                                    pendingImportRaw = com.lingxi.code.navigation.DeepLink.build(link.route, link.params, link.payload)
+                                },
+                                onDeepLinkHandled = { handledLink ->
+                                    if (requestedFeatureLink == handledLink) {
+                                        if (pendingImportRaw == null && preparedNativeLink == null) canonicalLinks.firstOrNull()?.let(linkInbox::complete)
+                                        requestedFeatureLink = null
+                                    }
+                                },
+                                requestedConversationLaunch = requestedConversationLaunch,
+                                onConversationLaunchHandled = { pendingConversationLaunch.value = null },
+                            )
+                        },
+                        settings = { body ->
+                            SettingsTab(
+                                state = tabState,
+                                appearanceStore = store,
+                                engineSource = activeConversationSource,
+                                projectStore = desktopProjectStore,
+                                store = settingsStore,
+                                isDark = darkTheme,
+                                accentId = prefs.accentId,
+                                onOpenScheduledSession = openScheduledSession,
+                                // 「在这里换项目」要真的把引擎换过去，而不是只挪一个记号：
+                                // 项目层写进哪个目录由引擎进程的 cwd 决定。回到对话页、
+                                // 把请求交给 RootScreen 的 switchEngineScope，与抽屉里换项目
+                                // 走的是同一条路径。
+                                onSwitchProject = { projectId ->
+                                    pendingProjectSwitch = projectId
+                                    tabState.select(AppTab.Chats)
+                                },
+                                // 关于 → 重新观看引导: clear setupDone (replays the wizard)
+                                // and drop back to the conversation behind it.
+                                onReplayOnboarding = {
+                                    scope.launch { store.setSetupDone(false) }
+                                    tabState.select(AppTab.Chats)
+                                },
+                                // 重新连接引擎: rebuild the engine against the just-saved key
+                                // and drop back to the (now-real) conversation.
+                                onReconnectEngine = {
+                                    if (activeConversationBusy) {
+                                        android.widget.Toast.makeText(applicationContext, getString(R.string.voice_session_busy_retry), android.widget.Toast.LENGTH_SHORT).show()
+                                        false
+                                    } else {
+                                        engineReconnect += 1
+                                        tabState.select(AppTab.Chats)
+                                        true
+                                    }
+                                },
+                                onOpenTerminal = {
+                                    openTerminal(it.sessionId, it.initCommand)
+                                },
+                                onPermissionModeChanged = { mode ->
+                                    val source = activeConversationSource
+                                        ?: error("engine is not connected")
+                                    source.setPermissionMode(mode)
+                                },
+                                onTypescriptLspModeChanged = { mode ->
+                                    val source = activeConversationSource
+                                        ?: error("engine is not connected")
+                                    source.submitClientCommand(
+                                        com.lingxi.code.bindings.client.ClientCommand.SetTypescriptLspMode(mode),
+                                    )
+                                },
+                                modifier = body,
+                            )
+                        },
+                    )
 
-                    AnimatedVisibility(
-                        visible = remoteOpen,
-                        enter = slideInVertically(initialOffsetY = { it }),
-                        exit = slideOutVertically(targetOffsetY = { it }),
-                    ) {
-                        com.lingxi.code.remote.RemoteOverlay(
-                            requestedRoute = requestedRemoteRoute,
-                            onRouteHandled = { requestedRemoteRoute = null },
-                            isDark = darkTheme,
-                            onOpenAccount = {
-                                remoteOpen = false
-                                settingsInitialRoute = SettingsRoutes.ACCOUNT
-                                settingsOpen = true
-                            },
-                            onClose = { remoteOpen = false },
-                        )
-                    }
-
-                    if (teamsOpen) {
-                        com.lingxi.code.teams.TeamsScreen(initialInvite = teamInvite, onInviteHandled = { teamInvite = null },
-                            onOpenAccount = { teamsOpen = false; settingsInitialRoute = SettingsRoutes.ACCOUNT; settingsOpen = true },
-                            onClose = { teamsOpen = false; teamInvite = null })
-                    }
+                    // The import preview of a lingxi://import link: above whichever tab is showing.
+                    DeepLinkImportOverlay(
+                        link = pendingImport,
+                        engineSource = activeConversationSource,
+                        onDismiss = {
+                            canonicalLinks.firstOrNull()?.let(linkInbox::complete)
+                            pendingImportRaw = null
+                        },
+                    )
 
                     // First-run setup wizard — shown until onboarding completes;
-                    // sits above settings so the replay path covers it too. On
+                    // sits above the tabs so the replay path covers them too. On
                     // finish it only flips setupDone.
                     SetupWizardOverlay(
                         visible = !prefs.setupDone,

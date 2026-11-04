@@ -42,6 +42,8 @@ import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.Construction
+import androidx.compose.material.icons.outlined.Groups
+import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -55,6 +57,10 @@ enum class LXIconName {
     Chevron, Sun, Moon, Check, Pin, Brain, ArrowUp, Folder, Clock, Message,
     ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share,
     ArrowRight, Terminal, Lightbulb, Apps, AppBuilder, McpFallback,
+    /** The Bots tab: a robot head, distinct from [Sparkle] (which already means "AI" elsewhere). */
+    Bot,
+    /** The Teams tab: a group of people ([Link], which the old Teams drawer row used, is not one). */
+    Users,
 }
 
 /** Shared semantic names resolve to Android's Material icon family. */
@@ -97,6 +103,8 @@ val LXIconName.materialIcon: ImageVector get() = when (this) {
     LXIconName.Apps -> Icons.Outlined.Apps
     LXIconName.AppBuilder -> Icons.Outlined.Construction
     LXIconName.ArrowRight -> Icons.AutoMirrored.Outlined.ArrowForward
+    LXIconName.Bot -> Icons.Outlined.SmartToy
+    LXIconName.Users -> Icons.Outlined.Groups
 }
 
 @Suppress("UNUSED_PARAMETER")

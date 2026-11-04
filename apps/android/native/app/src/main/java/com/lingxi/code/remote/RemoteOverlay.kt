@@ -16,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -42,6 +43,8 @@ fun RemoteOverlay(
     isDark: Boolean,
     onOpenAccount: () -> Unit,
     onClose: () -> Unit,
+    /** Screens pushed above the computers list (0 on the list, and while signed out); the tab shell hides its bar below it. */
+    onDepthChanged: (Int) -> Unit = {},
 ) {
     val context = LocalContext.current
     val manager = remember(context) { RemoteControl.manager(context) }
@@ -74,6 +77,9 @@ fun RemoteOverlay(
     val botChats by manager.botChats.collectAsState()
 
     val current = stack.last()
+    val depth = if (uid == null) 0 else stack.size - 1
+    val latestOnDepthChanged by rememberUpdatedState(onDepthChanged)
+    LaunchedEffect(depth) { latestOnDepthChanged(depth) }
     fun pop() {
         if (stack.size > 1) stack = RemoteRoute.afterBack(stack, manager::botOfThread) else onClose()
     }

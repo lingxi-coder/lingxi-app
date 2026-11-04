@@ -16,17 +16,51 @@ import { shellCatalog } from './shellCatalog';
 import { uiCatalog } from './uiCatalog';
 import { voiceSettingsCatalog } from './voiceSettingsCatalog';
 import { updateCatalog } from './updateCatalog';
-import hans from '../../../../../resources/translations/zh-Hans.json';
-import hant from '../../../../../resources/translations/zh-Hant.json';
 import en from '../../../../../resources/translations/en.json';
-import ja from '../../../../../resources/translations/ja.json';
-import ko from '../../../../../resources/translations/ko.json';
 
 export const DESKTOP_LOCALES = ['zh-Hans', 'zh-Hant', 'en', 'ja', 'ko'] as const;
 export type DesktopLocale = typeof DESKTOP_LOCALES[number];
 export type LanguagePreference = DesktopLocale | '';
 export const LANGUAGE_STORAGE_KEY = 'lingxi.desktop.language';
-const catalogs: Record<DesktopLocale, Record<string, unknown>> = { 'zh-Hans': hans, 'zh-Hant': hant, en, ja, ko };
+type TranslationCatalog = Record<string, unknown>;
+const loadedCatalogs: Partial<Record<Exclude<DesktopLocale, 'en'>, TranslationCatalog>> = {};
+const catalogRequests = new Map<Exclude<DesktopLocale, 'en'>, Promise<void>>();
+let translationRevisionValue = 0;
+
+/** Bumps when a non-English catalog arrives so the existing language-change subscribers repaint. */
+export function translationRevision(): number { return translationRevisionValue; }
+
+function catalogFromModule(module: unknown): TranslationCatalog {
+  if (module && typeof module === 'object' && 'default' in module && module.default && typeof module.default === 'object') {
+    return module.default as TranslationCatalog;
+  }
+  return module as TranslationCatalog;
+}
+
+function localeImporter(locale: Exclude<DesktopLocale, 'en'>): Promise<unknown> {
+  switch (locale) {
+    case 'zh-Hans': return import('../../../../../resources/translations/zh-Hans.json');
+    case 'zh-Hant': return import('../../../../../resources/translations/zh-Hant.json');
+    case 'ja': return import('../../../../../resources/translations/ja.json');
+    case 'ko': return import('../../../../../resources/translations/ko.json');
+  }
+}
+
+function publishTranslations(): void {
+  translationRevisionValue += 1;
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new Event('lingxi-language-change'));
+  }
+}
+
+function startLocaleCatalog(locale: DesktopLocale): void {
+  if (locale === 'en' || loadedCatalogs[locale] || catalogRequests.has(locale)) return;
+  const pending = localeImporter(locale).then((module) => {
+    loadedCatalogs[locale] = catalogFromModule(module);
+    publishTranslations();
+  }).catch(() => { catalogRequests.delete(locale); });
+  catalogRequests.set(locale, pending);
+}
 const extraCatalog = { ...providerAccountsCatalog, ...botsCatalog, ...chatCatalog, ...computerCatalog, ...desktopCatalog, ...extensionCatalog, ...flowCatalog, ...gitCatalog, ...imageCatalog, ...interactionCatalog, ...miscCatalog, ...navigationCatalog, ...runtimeCatalog, ...settingsCatalog, ...shellCatalog, ...uiCatalog, ...voiceSettingsCatalog, ...updateCatalog };
 
 export function matchLocale(tag: string): DesktopLocale | null {
@@ -58,13 +92,17 @@ export function readLanguagePreference(): LanguagePreference {
   } catch { return ''; }
 }
 export function currentLocale(): DesktopLocale {
-  return resolveLocale(readLanguagePreference(), typeof navigator === 'undefined' ? ['en'] : navigator.languages?.length ? navigator.languages : [navigator.language]);
+  const locale = resolveLocale(readLanguagePreference(), typeof navigator === 'undefined' ? ['en'] : navigator.languages?.length ? navigator.languages : [navigator.language]);
+  startLocaleCatalog(locale);
+  return locale;
 }
 
 /** Format both Android positional and iOS catalog placeholders without changing argument content. */
 export function translate(key: string, locale: DesktopLocale, ...args: readonly (string | number)[]): string {
+  startLocaleCatalog(locale);
   const extra = extraCatalog[key];
-  const value = extra?.[locale] ?? catalogs[locale][key] ?? extra?.en ?? en[key as keyof typeof en];
+  const localized = locale === 'en' ? en[key as keyof typeof en] : loadedCatalogs[locale]?.[key];
+  const value = extra?.[locale] ?? localized ?? extra?.en ?? en[key as keyof typeof en];
   let text: string | undefined = typeof value === 'string' ? value : undefined;
   if (!text && value && typeof value === 'object' && 'plural' in value) {
     const forms = (value as { plural?: Record<string, unknown> }).plural;

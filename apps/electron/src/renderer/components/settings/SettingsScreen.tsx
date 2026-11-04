@@ -1,6 +1,6 @@
 import { useI18n } from '../../i18n/useI18n';
 import { tr } from '../../i18n/locale';
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties, type ReactNode } from 'react';
 
 import type { SettingsLinkRequest } from '../../deepLinkRoutes';
 import { dialogFocusTarget } from '../../bridge/bridgeRuntimeState.js';
@@ -9,27 +9,67 @@ import { useT } from '../../theme/ThemeContext';
 import type { ThemeMode } from '../../theme/tokens';
 import { Icon } from '../Icon';
 import { SETTINGS_NAV, searchNav, navPageLabel, navGroupLabel, type NavPage } from './nav';
-import { About } from './pages/About';
-import { Account } from './pages/Account';
-import { Appearance } from './pages/Appearance';
-import { Notifications } from './pages/Notifications';
-import { CustomProviders } from './pages/CustomProviders';
-import { Fusion } from './pages/Fusion';
-import { Diagnostics } from './pages/Diagnostics';
-import { General } from './pages/General';
-import { Hooks } from './pages/Hooks';
-import { McpServers } from './pages/McpServers';
-import { Permissions } from './pages/Permissions';
-import { ComputerUse } from './pages/ComputerUse';
-import { Plugins } from './pages/Plugins';
-import { ArchivedChats } from './pages/ArchivedChats';
-import { Projects } from './pages/Projects';
-import { RemoteControl } from './pages/RemoteControl';
-import { ProviderCredentials } from './pages/ProviderCredentials';
-import { Skills } from './pages/Skills';
-import { ToolsAgent } from './pages/ToolsAgent';
 import { ExtensionGlyph } from './pages/ExtensionHubIcons';
-import { Voice } from './pages/Voice';
+
+// renderToStaticMarkup cannot wait on import(). Node tests preload the ESM graph; the packaged renderer still loads a page when it is shown.
+function nodeTestPreload(): boolean {
+  const proc = (globalThis as { process?: NodeJS.Process }).process;
+  return proc?.release?.name === 'node' && !proc.versions?.electron;
+}
+function bindSettingsPage(exportName: string, load: () => Promise<unknown>) {
+  return lazy(() => load().then((module) => ({
+    default: (module as Record<string, ComponentType<PageContentProps>>)[exportName]!,
+  })));
+}
+const settingsPageLoaders = {
+  About: () => import('./pages/About'),
+  Account: () => import('./pages/Account'),
+  Appearance: () => import('./pages/Appearance'),
+  Notifications: () => import('./pages/Notifications'),
+  CustomProviders: () => import('./pages/CustomProviders'),
+  Fusion: () => import('./pages/Fusion'),
+  Diagnostics: () => import('./pages/Diagnostics'),
+  General: () => import('./pages/General'),
+  Hooks: () => import('./pages/Hooks'),
+  McpServers: () => import('./pages/McpServers'),
+  Permissions: () => import('./pages/Permissions'),
+  ComputerUse: () => import('./pages/ComputerUse'),
+  Plugins: () => import('./pages/Plugins'),
+  ArchivedChats: () => import('./pages/ArchivedChats'),
+  Projects: () => import('./pages/Projects'),
+  RemoteControl: () => import('./pages/RemoteControl'),
+  ProviderCredentials: () => import('./pages/ProviderCredentials'),
+  Skills: () => import('./pages/Skills'),
+  ToolsAgent: () => import('./pages/ToolsAgent'),
+  Voice: () => import('./pages/Voice'),
+};
+const preloadSettingsPages = nodeTestPreload();
+const eagerSettingsPages: Partial<Record<keyof typeof settingsPageLoaders, ComponentType<PageContentProps>>> = preloadSettingsPages
+  ? Object.fromEntries(await Promise.all(Object.entries(settingsPageLoaders).map(async ([exportName, load]) => {
+      const module = await load() as Record<string, ComponentType<PageContentProps>>;
+      return [exportName, module[exportName]!];
+    })))
+  : {};
+const About = eagerSettingsPages.About ?? bindSettingsPage('About', settingsPageLoaders.About);
+const Account = eagerSettingsPages.Account ?? bindSettingsPage('Account', settingsPageLoaders.Account);
+const Appearance = eagerSettingsPages.Appearance ?? bindSettingsPage('Appearance', settingsPageLoaders.Appearance);
+const Notifications = eagerSettingsPages.Notifications ?? bindSettingsPage('Notifications', settingsPageLoaders.Notifications);
+const CustomProviders = eagerSettingsPages.CustomProviders ?? bindSettingsPage('CustomProviders', settingsPageLoaders.CustomProviders);
+const Fusion = eagerSettingsPages.Fusion ?? bindSettingsPage('Fusion', settingsPageLoaders.Fusion);
+const Diagnostics = eagerSettingsPages.Diagnostics ?? bindSettingsPage('Diagnostics', settingsPageLoaders.Diagnostics);
+const General = eagerSettingsPages.General ?? bindSettingsPage('General', settingsPageLoaders.General);
+const Hooks = eagerSettingsPages.Hooks ?? bindSettingsPage('Hooks', settingsPageLoaders.Hooks);
+const McpServers = eagerSettingsPages.McpServers ?? bindSettingsPage('McpServers', settingsPageLoaders.McpServers);
+const Permissions = eagerSettingsPages.Permissions ?? bindSettingsPage('Permissions', settingsPageLoaders.Permissions);
+const ComputerUse = eagerSettingsPages.ComputerUse ?? bindSettingsPage('ComputerUse', settingsPageLoaders.ComputerUse);
+const Plugins = eagerSettingsPages.Plugins ?? bindSettingsPage('Plugins', settingsPageLoaders.Plugins);
+const ArchivedChats = eagerSettingsPages.ArchivedChats ?? bindSettingsPage('ArchivedChats', settingsPageLoaders.ArchivedChats);
+const Projects = eagerSettingsPages.Projects ?? bindSettingsPage('Projects', settingsPageLoaders.Projects);
+const RemoteControl = eagerSettingsPages.RemoteControl ?? bindSettingsPage('RemoteControl', settingsPageLoaders.RemoteControl);
+const ProviderCredentials = eagerSettingsPages.ProviderCredentials ?? bindSettingsPage('ProviderCredentials', settingsPageLoaders.ProviderCredentials);
+const Skills = eagerSettingsPages.Skills ?? bindSettingsPage('Skills', settingsPageLoaders.Skills);
+const ToolsAgent = eagerSettingsPages.ToolsAgent ?? bindSettingsPage('ToolsAgent', settingsPageLoaders.ToolsAgent);
+const Voice = eagerSettingsPages.Voice ?? bindSettingsPage('Voice', settingsPageLoaders.Voice);
 import { provenanceDescription, provenanceLabel, type Provenance } from './rows';
 import { projectDirFromSnapshot, projectDisplayName } from './useEngineSettings';
 import type { SettingsSnapshot } from './useEngineSettings';
@@ -683,24 +723,26 @@ export function SettingsScreen({
       ? (
         // Drafts belong to both the session and the file layer. A new owner
         // gets a fresh page; ordinary snapshot refreshes keep unsaved input.
-        <Component
-          key={`${activeSessionId ?? 'no-session'}:${editingLayer}`}
-          bridge={bridge}
-          snapshot={snapshot}
-          editingLayer={editingLayer}
-          theme={theme}
-          onTheme={onTheme}
-          onNavigate={navigatePage}
-          onRegisterNavigationRequest={registerNavigationRequest}
-          onRegisterCloseRequest={registerCloseRequest}
-          linkRequest={pageLinkRequest}
-          initialPluginId={initialPluginId}
-          initialProviderId={initialProviderId}
-          pendingModelReference={pendingModelReference}
-          onClose={onClose}
-          onJumpToLayer={(layer) => { if (!layerLocked) setEditingLayer(layer); }}
-          onLayerLockChange={(locked) => setLayerLockCount((count) => Math.max(0, count + (locked ? 1 : -1)))}
-        />
+        <Suspense fallback={null}>
+          <Component
+            key={`${activeSessionId ?? 'no-session'}:${editingLayer}`}
+            bridge={bridge}
+            snapshot={snapshot}
+            editingLayer={editingLayer}
+            theme={theme}
+            onTheme={onTheme}
+            onNavigate={navigatePage}
+            onRegisterNavigationRequest={registerNavigationRequest}
+            onRegisterCloseRequest={registerCloseRequest}
+            linkRequest={pageLinkRequest}
+            initialPluginId={initialPluginId}
+            initialProviderId={initialProviderId}
+            pendingModelReference={pendingModelReference}
+            onClose={onClose}
+            onJumpToLayer={(layer) => { if (!layerLocked) setEditingLayer(layer); }}
+            onLayerLockChange={(locked) => setLayerLockCount((count) => Math.max(0, count + (locked ? 1 : -1)))}
+          />
+        </Suspense>
       )
       : <PagePlaceholder page={activePage} kind="not-wired" />;
   }

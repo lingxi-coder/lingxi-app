@@ -508,7 +508,8 @@ const remoteBridge = String.raw`(() => {
     return hostFetch(new Request(request, {credentials:'same-origin', headers}));
   };
   const invoke = async (method, args = {}) => {
-    const response = await fetch('/__lingxi_remote_invoke', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({method,args})});
+    const timeoutSignal = AbortSignal.timeout(15000);
+    const response = await fetch('/__lingxi_remote_invoke', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({method,args}), signal: timeoutSignal});
     if (!response.ok) throw new Error('Application operation is unavailable');
     return (await response.json()).result;
   };

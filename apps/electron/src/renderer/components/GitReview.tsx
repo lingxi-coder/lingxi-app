@@ -35,7 +35,21 @@ function GitWorkspaceSession({ scope, onOpen, onTerminal, children }: { scope: G
   const [loading, setLoading] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
   const live = useRef(true); const refreshing = useRef<Promise<void> | null>(null); const pendingRefresh = useRef(false); const mutation = useRef<number | null>(null);
   useEffect(() => () => { live.current = false; }, []);
-  const update = useCallback((change: Partial<ViewState>) => setView((old) => { const next = { ...(old.key === key ? old.value : views.get(key) ?? initialView()), ...change }; views.set(key, next); return { key, value: next }; }), [key]);
+  const update = useCallback((change: Partial<ViewState>) => setView((old) => {
+    const stored = views.get(key);
+    const base = old.key === key ? old.value : stored ?? initialView();
+    // Scroll-only updates skip React state, so the map holds the position the
+    // user last saw. A later edit must keep that position unless it sets scroll.
+    const scroll = Object.prototype.hasOwnProperty.call(change, 'scroll')
+      ? change.scroll!
+      : (stored?.scroll ?? base.scroll);
+    const next = { ...base, ...change, scroll };
+    views.set(key, next);
+    // Writing scroll into React state repaints the whole review, including the
+    // file catalog, on every wheel event.
+    if (old.key === key && Object.keys(change).every((name) => name === 'scroll')) return old;
+    return { key, value: next };
+  }), [key]);
   const refresh = useCallback(async () => {
     if (!scope || !api || (currentKey.current !== key || generation.current !== epoch)) return;
     if (refreshing.current) { pendingRefresh.current = true; return refreshing.current; }
@@ -244,6 +258,7 @@ function Changes({ fixedMode, fixedTarget }: { fixedMode?: Mode; fixedTarget?: s
   const [diff, setDiff] = useState<GitDiff>(); const [catalog, setCatalog] = useState<GitFile[]>([]); const [loading, setLoading] = useState(false);
   const [discard, setDiscard] = useState<{ file: GitFile; token: string }>(); const [conflict, setConflict] = useState<string>(); const scroll = useRef<HTMLDivElement>(null); const scrollReady = useRef(false);
   const comparison = JSON.stringify([mode, target, view.base, view.path]);
+  const storageKey = git.scope ? `${git.scope.projectPath}\0${git.scope.sessionId}` : '';
   const previousComparison = useRef<string>();
   useEffect(() => {
     let active = true;
@@ -260,7 +275,13 @@ function Changes({ fixedMode, fixedTarget }: { fixedMode?: Mode; fixedTarget?: s
     return () => { active = false; };
   }, [comparison, mode, target, view.base, view.path, status?.token, git.read]);
   useEffect(() => { if (mode === 'working' || mode === 'staged') { setCatalog(status?.files ?? []); return; } let active = true; if (!target) { setCatalog([]); return; } void git.read({ kind: 'diff', mode, base: view.base, target }).then((r) => { if (active) setCatalog(r?.diff?.files ?? []); }); return () => { active = false; }; }, [mode, target, view.base, status?.token, git.read]);
-  useLayoutEffect(() => { if (diff && scroll.current && !scrollReady.current) { scroll.current.scrollTop = view.scroll; scrollReady.current = true; } }, [diff, view.path, mode, target]);
+  useLayoutEffect(() => {
+    if (diff && scroll.current && !scrollReady.current) {
+      // The map is newer than React state: wheel events update only the map.
+      scroll.current.scrollTop = views.get(storageKey)?.scroll ?? view.scroll;
+      scrollReady.current = true;
+    }
+  }, [diff, view.path, mode, target, storageKey, view.scroll]);
   const groups: [string, GitFile[]][] = mode === 'working' || mode === 'staged' ? [
     ['Conflicts', catalog.filter((f) => f.conflict)], ['Staged', catalog.filter((f) => !f.conflict && f.index !== ' ' && f.index !== '?' && f.index !== '.')], ['Changes', catalog.filter((f) => !f.conflict && !f.untracked && f.working !== ' ' && f.working !== '.')], ['Untracked', catalog.filter((f) => f.untracked)],
   ] : [['Files', catalog]];

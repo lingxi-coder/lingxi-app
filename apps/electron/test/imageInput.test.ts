@@ -31,7 +31,11 @@ test('image input converts a File into an attachment with a preview URL', async 
     assert.equal(attachment.name, 'capture.png');
     assert.equal(attachment.media_type, 'image/png');
     assert.equal(attachment.base64, Buffer.from(PNG).toString('base64'));
-  assert.match(attachment.previewUrl, /^data:image\/png;base64,/);
+    if (typeof URL.createObjectURL === 'function') {
+      assert.match(attachment.previewUrl, /^blob:/);
+    } else {
+      assert.match(attachment.previewUrl, /^data:image\/png;base64,/);
+    }
   } finally {
     URL.revokeObjectURL(attachment.previewUrl);
   }

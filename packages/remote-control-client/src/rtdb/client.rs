@@ -364,6 +364,10 @@ fn fail(sender: &mpsc::UnboundedSender<ListenItem>, error: RtdbListenError) -> N
     Next::Stop
 }
 
+/// Response headers for a listen. The body is not covered; [`SSE_IDLE_TIMEOUT`]
+/// starts only after this handshake.
+const SSE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn connect_once(
     inner: &Arc<Inner>,
     path: &str,
@@ -389,17 +393,19 @@ async fn connect_once(
         .get(url)
         .header(header::ACCEPT, "text/event-stream")
         .send();
+    // `connect_timeout` does not cover a peer that accepts and then stalls
+    // before headers. Dropping this future aborts that send.
     let response = tokio::select! {
         () = control.cancel.cancelled() => return Next::Stop,
         () = control.reconnect.notified() => { state.attempt = 0; return Next::Now; }
-        result = request => match result {
-            Ok(response) => response,
-            Err(_) if !state.quick_retried => {
+        result = tokio::time::timeout(SSE_HANDSHAKE_TIMEOUT, request) => match result {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) | Err(_) if !state.quick_retried => {
                 state.quick_retried = true;
                 state.retry_token = Some((token, refreshed));
                 return Next::Now;
             }
-            Err(_) => {
+            Ok(Err(_)) | Err(_) => {
                 state.force_refresh = refreshed;
                 return Next::Backoff;
             }

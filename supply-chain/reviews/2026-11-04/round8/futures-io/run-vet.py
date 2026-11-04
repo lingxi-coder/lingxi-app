@@ -19,7 +19,7 @@ sha = lambda data: hashlib.sha256(data).hexdigest()
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('label', choices=('before', 'after'))
+    parser.add_argument('label', choices=('before', 'after', 'registration-before', 'registration-after'))
     parser.add_argument('--vet', type=Path, default=VET)
     args = parser.parse_args()
     binary = args.vet.resolve()

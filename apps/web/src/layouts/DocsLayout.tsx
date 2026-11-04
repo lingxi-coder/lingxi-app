@@ -40,7 +40,7 @@ export function DocsLayout({ children, locale, pageId, theme, onThemeToggle, onL
     { href: '/docs/bridge-client' as const, label: t('Product integrations', '产品集成') },
   ];
   const topLinks = [
-    { href: '/docs' as const, label: t('Guide', '使用指南'), selected: isUserGuide },
+    { href: '/docs' as const, label: t('Guide', '使用指南'), selected: isUserGuide && !['using-cli', 'using-desktop', 'using-mobile', 'remote-control'].includes(pageId) },
     { href: '/docs/using-cli' as const, label: t('Command line', '命令行'), selected: pageId === 'using-cli' },
     { href: '/docs/using-desktop' as const, label: t('Desktop', '桌面'), selected: pageId === 'using-desktop' },
     { href: '/docs/using-mobile' as const, label: t('Phone', '手机'), selected: pageId === 'using-mobile' },
@@ -120,12 +120,11 @@ export function DocsLayout({ children, locale, pageId, theme, onThemeToggle, onL
           const links = pages.map((page) => (
             <RouteLink key={page.id} href={page.id === 'overview' ? '/docs' : `/docs/${page.id}`} onClick={() => setMenuOpen(false)} className={pageId === page.id ? 'active' : ''} aria-current={pageId === page.id ? 'page' : undefined}>
               <span>{page.title[locale]}</span>
-              {pageId === page.id ? <i aria-hidden="true" /> : null}
             </RouteLink>
           ));
           return group.id === 'start'
             ? <div className="developer-nav-group" key={group.id}><h2>{group.title[locale]}</h2>{links}</div>
-            : <details className="developer-nav-group" key={`${activeGroup}-${group.id}`} open={group.id === activeGroup}><summary>{group.title[locale]}<span className="developer-nav-count">{pages.length}</span><span className="developer-nav-chevron" aria-hidden="true">⌄</span></summary><div className="developer-nav-items">{links}</div></details>;
+            : <details className="developer-nav-group" key={`${activeGroup}-${group.id}`} open={group.id === activeGroup}><summary>{group.title[locale]}<span className="developer-nav-chevron" aria-hidden="true" /></summary><div className="developer-nav-items">{links}</div></details>;
         })}
         {isUserGuide || isReference ? <div className="developer-nav-group developer-sdk-navigation"><h2>{t('SDKs & integrations', 'SDK 与集成')}</h2>{sdkLinks.map((link) => <RouteLink key={link.href} href={link.href} onClick={() => setMenuOpen(false)}><span>{link.label}</span><span aria-hidden="true">→</span></RouteLink>)}</div> : null}
       </nav>

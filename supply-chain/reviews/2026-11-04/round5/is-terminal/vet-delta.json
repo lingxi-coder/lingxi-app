@@ -1,0 +1,20 @@
+{
+  "before_failures": 819,
+  "after_failures": 818,
+  "removed": [
+    {
+      "name": "is_terminal_polyfill",
+      "version": "1.70.2",
+      "missing_criteria": [
+        "safe-to-deploy"
+      ]
+    }
+  ],
+  "added": [],
+  "before_output_sha256": "96ed809fd0bb97d827bfc1a97489d226c3b2a2d23a728740917041223b82ce2c",
+  "after_output_sha256": "195efd6be79b093cf10bee918e1c998625a7038cbc40e783e4c5bd77836bf378",
+  "after_audits_sha256": "bbd85301d00f50ea2095ba3cbfc2c2d0028e0ce2ade581d1c53041e426a64c5c",
+  "other_lock_and_store_inputs_unchanged": true,
+  "only_audits_toml_change": "is_terminal_polyfill 1.70.2 exact full record",
+  "overall_conclusion": "fail (vetting)"
+}

@@ -1,0 +1,9 @@
+# Independent source cross-review: once_cell_polyfill 1.70.2
+
+Root agent independently read both complete executable source files and both Cargo manifests, checked the exact registry archive checksum against Cargo.lock, enumerated all9 archive members and matched each to cached bytes. The original manifest has workspace-inherited fields; the normalized manifest defines one library, Rust1.70 minimum, no dependencies or build script/automatic executable targets. Full provenance verification remains the primary reviewer's responsibility.
+
+The wrapper contains only a private std::sync::OnceLock<T>, direct new/get/get_mut/set/get_or_init/into_inner/take delegations, derived Debug/Clone/Default/Eq/PartialEq and From<T>. All borrows, auto Send/Sync bounds, ownership transfer, initialization publication, panic retry, clone behavior and synchronization are inherited from std. No unsafe, FFI, raw pointer, custom synchronization, I/O, environment, process, network or independent global state occurs here. An initializer can have arbitrary effects or deadlock when reentrant, as in std; this package does not certify user closures or the standard library. The consumer's Windows Console FFI is a separate audit subject.
+
+Independently compiled exact cached src/lib.rs with Rust1.94 and a separate API probe: empty/get/set/duplicate set/get_mut/take/clone independence/into_inner/From, expected panic catch followed by successful retry, and16 concurrent callers with exactly one initializer execution all passed. Actual execution was macOS; no Windows or Linux runtime claim. These probes support source reasoning, not exhaustive scheduling verification. Packaged source has no alternate target-specific implementation.
+
+Cross-review supports safe-to-deploy for this exact registry version only. Do not add exemptions or broaden publisher trust. Formal strict before/after solver delta and primary provenance checks remain required before gap reduction is claimed.

@@ -1,0 +1,37 @@
+$ cargo test --locked --frozen --all-features
+   Compiling is_terminal_polyfill v1.70.2 (/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/is-terminal-review-l3n53tzq/is_terminal_polyfill-1.70.2)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.76s
+     Running unittests src/lib.rs (/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/is-terminal-review-l3n53tzq/target/debug/deps/is_terminal_polyfill-9ca49006256b9756)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests is_terminal_polyfill
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+$ rustc --edition=2021 --crate-name is_terminal_polyfill --crate-type=lib /private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/is-terminal-review-l3n53tzq/exact.rs -o /private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/is-terminal-review-l3n53tzq/libexact.rlib
+$ rustc --edition=2021 /Users/luolingfeng/lingxi/worktrees/media-round5-source-audit-20261104/supply-chain/reviews/2026-11-04/round5/is-terminal/probe.rs --extern is_terminal_polyfill=/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/is-terminal-review-l3n53tzq/libexact.rlib -o /private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/is-terminal-review-l3n53tzq/probe-exact
+exact: pipe test
+regular-file: polyfill=false std=false
+stdin: polyfill=false std=false
+stdin-lock: polyfill=false std=false
+stdout: polyfill=false std=false
+stdout-lock: polyfill=false std=false
+stderr: polyfill=false std=false
+stderr-lock: polyfill=false std=false
+ exact: pty test
+$ rustc --edition=2021 --crate-name is_terminal_polyfill --crate-type=lib /private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/is-terminal-review-l3n53tzq/negative-control.rs -o /private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/is-terminal-review-l3n53tzq/libnegative_control.rlib
+$ rustc --edition=2021 /Users/luolingfeng/lingxi/worktrees/media-round5-source-audit-20261104/supply-chain/reviews/2026-11-04/round5/is-terminal/probe.rs --extern is_terminal_polyfill=/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/is-terminal-review-l3n53tzq/libnegative_control.rlib -o /private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/is-terminal-review-l3n53tzq/probe-negative-control
+negative-control: pipe test
+
+thread 'main' (7515626) panicked at /Users/luolingfeng/lingxi/worktrees/media-round5-source-audit-20261104/supply-chain/reviews/2026-11-04/round5/is-terminal/probe.rs:7:5:
+assertion `left == right` failed: regular-file differs from std
+  left: true
+ right: false
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+negative-control: pty test
+PASS: exact package matches std on regular file, pipes, and PTY; both negative controls rejected

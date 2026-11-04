@@ -2297,10 +2297,9 @@ async fn new_session_rejects_a_different_mode_before_clear_or_model_change() {
         model: Some("different-model".into()),
         mode: SessionModeDto::Chat,
     };
-    let (kind, error) = router
-        .preflight_session_transition(&command)
-        .await
-        .unwrap_err();
+    let Err((kind, error)) = router.preflight_session_transition(&command).await else {
+        panic!("a session with a different mode must be rejected");
+    };
     assert_eq!(kind, ErrorKindDto::Rejected);
     assert!(error.contains("session_mode_mismatch"));
     router.route(command, sink.clone()).await;
@@ -4349,7 +4348,6 @@ async fn context_manifest_reports_fixed_session_mode() {
     let handle = Arc::new(ResumingHandle::new());
     let router = EngineCommandRouter::new(
         handle,
-        Arc::new(MockAuth),
         Arc::new(MockTaskRegistry { rows: vec![] }),
         None,
         None,
@@ -4423,7 +4421,6 @@ async fn resumed_chat_restores_mode_from_same_transcript_as_messages() {
     }
     let router = EngineCommandRouter::new(
         handle.clone(),
-        Arc::new(MockAuth),
         Arc::new(MockTaskRegistry { rows: vec![] }),
         None,
         None,
@@ -4462,7 +4459,6 @@ async fn hot_resume_rejects_a_different_session_mode_before_adoption() {
     let handle = Arc::new(ResumingHandle::new());
     let router = EngineCommandRouter::new(
         handle.clone(),
-        Arc::new(MockAuth),
         Arc::new(MockTaskRegistry { rows: vec![] }),
         None,
         None,
@@ -4478,10 +4474,9 @@ async fn hot_resume_rejects_a_different_session_mode_before_adoption() {
         cwd: None,
         expected_mode: SessionModeDto::Chat,
     };
-    let (kind, error) = router
-        .preflight_session_transition(&wrong_runtime)
-        .await
-        .unwrap_err();
+    let Err((kind, error)) = router.preflight_session_transition(&wrong_runtime).await else {
+        panic!("a resume with a different runtime mode must be rejected");
+    };
     assert_eq!(kind, ErrorKindDto::Rejected);
     assert!(error.contains("session_mode_mismatch"));
     let command = ClientCommand::ResumeSession {
@@ -4489,10 +4484,9 @@ async fn hot_resume_rejects_a_different_session_mode_before_adoption() {
         cwd: None,
         expected_mode: SessionModeDto::Code,
     };
-    let (kind, error) = router
-        .preflight_session_transition(&command)
-        .await
-        .unwrap_err();
+    let Err((kind, error)) = router.preflight_session_transition(&command).await else {
+        panic!("a resume with a different transcript mode must be rejected");
+    };
     assert_eq!(kind, ErrorKindDto::Rejected);
     assert!(error.contains("session_mode_mismatch"));
     router.route(command, sink.clone()).await;
@@ -4509,7 +4503,6 @@ async fn session_started_reports_the_fixed_mode() {
     let handle = Arc::new(ResumingHandle::new());
     let router = EngineCommandRouter::new(
         handle,
-        Arc::new(MockAuth),
         Arc::new(MockTaskRegistry { rows: vec![] }),
         None,
         None,

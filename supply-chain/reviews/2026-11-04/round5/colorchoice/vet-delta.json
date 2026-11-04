@@ -1,0 +1,20 @@
+{
+  "before_failures": 818,
+  "after_failures": 817,
+  "removed": [
+    {
+      "name": "colorchoice",
+      "version": "1.0.5",
+      "missing_criteria": [
+        "safe-to-deploy"
+      ]
+    }
+  ],
+  "added": [],
+  "before_output_sha256": "195efd6be79b093cf10bee918e1c998625a7038cbc40e783e4c5bd77836bf378",
+  "after_output_sha256": "c5b76818a95bab71b38543221fd52e18ab1e2069a9ac03e0d3e099362dc5a4e3",
+  "after_audits_sha256": "937634019ab1a1baf5e3d5775db80df5a378993b83efb1947658231813a1690a",
+  "other_lock_and_store_inputs_unchanged": true,
+  "only_audits_toml_change": "colorchoice 1.0.5 exact full record",
+  "overall_conclusion": "fail (vetting)"
+}

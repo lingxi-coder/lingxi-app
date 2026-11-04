@@ -1,0 +1,62 @@
+{
+  "archive_files": {
+    ".cargo_vcs_info.json": {
+      "git_blob": "bc46d75aa35a1dd41cef6ffdf7379e70425aa9fd",
+      "mode": "0o644",
+      "sha256": "2c8cf91d264ad4efb1d6d5c46c07e7467c64156f727dd347d53274c9a63a3ae3",
+      "size": 112
+    },
+    "Cargo.lock": {
+      "git_blob": "2d55b5f2ffbab834aeabe13a4b43f6101bc6a783",
+      "mode": "0o644",
+      "sha256": "6ea206462f9bd8281d69ee7cc52c44c65feb425266e95c724a59dd57250afee7",
+      "size": 155
+    },
+    "Cargo.toml": {
+      "git_blob": "ac28755758c97d9bed1efca186782b389fb4d485",
+      "mode": "0o644",
+      "sha256": "403ea406945c6d350b0a0f6b5c01d5bee1e59d522059884b7f15a0b44c64b579",
+      "size": 3977
+    },
+    "Cargo.toml.orig": {
+      "git_blob": "eb88be49e301aa44a6a48849f9a98a4684d775d0",
+      "mode": "0o644",
+      "sha256": "954a31b1e693564aa84c38fbe0f71d1f7739aed2ab193b98f7966255bb48db14",
+      "size": 1071
+    },
+    "LICENSE-APACHE": {
+      "git_blob": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "mode": "0o644",
+      "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08",
+      "size": 11358
+    },
+    "LICENSE-MIT": {
+      "git_blob": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "mode": "0o644",
+      "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6",
+      "size": 1062
+    },
+    "README.md": {
+      "git_blob": "12340e00f644eb8da54e8b50e2abf0febe922d3e",
+      "mode": "0o644",
+      "sha256": "fc9b47302f5a3244b4e447e5bf6f86a35c64a16bd1abef8c27f31c4b5abac7a2",
+      "size": 1354
+    },
+    "src/lib.rs": {
+      "git_blob": "c80dfb81b8f5ca891347d4af65477f904cfc2d34",
+      "mode": "0o644",
+      "sha256": "9777ea67e426637377c2cb035ff41d2a4dd2a5bd6796d86e2afbfe70a8ba342d",
+      "size": 2951
+    }
+  },
+  "archive_sha256": "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570",
+  "cache_checked": true,
+  "commit_object_verified": true,
+  "index_yanked_at_capture": false,
+  "lock_sha256": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+  "normalized_inherited_values_match_upstream_workspace": true,
+  "tree_objects_checked": 59,
+  "upstream_blob_files_checked": 6,
+  "upstream_commit": "0fe6f0ff6d52e9f91d4071199bd0b24bd46f3d35",
+  "upstream_root_tree": "69dd6b3dbf25114676d274cca8b9dbaad18103a3"
+}

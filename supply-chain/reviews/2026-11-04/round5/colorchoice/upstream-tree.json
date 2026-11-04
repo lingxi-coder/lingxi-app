@@ -1,0 +1,2141 @@
+{
+  "sha": "0fe6f0ff6d52e9f91d4071199bd0b24bd46f3d35",
+  "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/0fe6f0ff6d52e9f91d4071199bd0b24bd46f3d35",
+  "tree": [
+    {
+      "path": ".cargo",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6c350f698c88d0734e1716a837f21c07da493096",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/6c350f698c88d0734e1716a837f21c07da493096"
+    },
+    {
+      "path": ".cargo/config.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4a6a1abdd612113aea698f0f51e28cb675ea8ead",
+      "size": 51,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/4a6a1abdd612113aea698f0f51e28cb675ea8ead"
+    },
+    {
+      "path": ".clippy.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1d4c5dc66f4e229b407587965d09da9816e06eac",
+      "size": 757,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/1d4c5dc66f4e229b407587965d09da9816e06eac"
+    },
+    {
+      "path": ".github",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "df37a9948d7163daa3ed3661ff2e0d5366c7120f",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/df37a9948d7163daa3ed3661ff2e0d5366c7120f"
+    },
+    {
+      "path": ".github/FUNDING.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a505dc1c59522c23574b8fde893088a32edc18dc",
+      "size": 16,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a505dc1c59522c23574b8fde893088a32edc18dc"
+    },
+    {
+      "path": ".github/renovate.json5",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cc1fefc3b51896c4f83c75763ca9a55776dcdb53",
+      "size": 3186,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/cc1fefc3b51896c4f83c75763ca9a55776dcdb53"
+    },
+    {
+      "path": ".github/settings.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d126ed82771a243663a517d448f39d61acd2fbf4",
+      "size": 1981,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/d126ed82771a243663a517d448f39d61acd2fbf4"
+    },
+    {
+      "path": ".github/workflows",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "68eb44ff29a50895f92c9d78bc4b777708c1a288",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/68eb44ff29a50895f92c9d78bc4b777708c1a288"
+    },
+    {
+      "path": ".github/workflows/audit.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7446e08ea367f652b2aec4ebeb3723d71ca18d8c",
+      "size": 1225,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/7446e08ea367f652b2aec4ebeb3723d71ca18d8c"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1a3897ca306db195e11408302b1b61b70208e04d",
+      "size": 5408,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/1a3897ca306db195e11408302b1b61b70208e04d"
+    },
+    {
+      "path": ".github/workflows/committed.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9138a8e3fc824971be7888ef3eaa8074095cd94d",
+      "size": 595,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/9138a8e3fc824971be7888ef3eaa8074095cd94d"
+    },
+    {
+      "path": ".github/workflows/pre-commit.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ef1a54ace2671a5aab8e6b7578b917f7e5a33df3",
+      "size": 455,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/ef1a54ace2671a5aab8e6b7578b917f7e5a33df3"
+    },
+    {
+      "path": ".github/workflows/rust-next.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c9ed9c07cbf29b4f2d2ceac0bd2fcd34a2b71d41",
+      "size": 1778,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/c9ed9c07cbf29b4f2d2ceac0bd2fcd34a2b71d41"
+    },
+    {
+      "path": ".github/workflows/spelling.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cf4c1bfb053c86eeb9a1dcf27051f14bdee9f5ec",
+      "size": 451,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/cf4c1bfb053c86eeb9a1dcf27051f14bdee9f5ec"
+    },
+    {
+      "path": ".github/workflows/template.yml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1d4fd850696ddf8d3d0b9e3387d47cb7cf8c66e4",
+      "size": 1661,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/1d4fd850696ddf8d3d0b9e3387d47cb7cf8c66e4"
+    },
+    {
+      "path": ".gitignore",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eb5a316cbd195d26e3f768c7dd8e1b47299e17f8",
+      "size": 7,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/eb5a316cbd195d26e3f768c7dd8e1b47299e17f8"
+    },
+    {
+      "path": ".pre-commit-config.yaml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "67c10aa2ea645cd0d1b781814293ce7db40da1e2",
+      "size": 485,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/67c10aa2ea645cd0d1b781814293ce7db40da1e2"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b9b5a8d9afac8ec9a8a8bca00a0ff0d8f86634ef",
+      "size": 3911,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/b9b5a8d9afac8ec9a8a8bca00a0ff0d8f86634ef"
+    },
+    {
+      "path": "Cargo.lock",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "11f51905ed49fb25f78db4554fd40047ecb247ae",
+      "size": 35876,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/11f51905ed49fb25f78db4554fd40047ecb247ae"
+    },
+    {
+      "path": "Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4fcfeed9c87773c8d94ec16a5dc3d295e9447272",
+      "size": 2438,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/4fcfeed9c87773c8d94ec16a5dc3d295e9447272"
+    },
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f86d6f6213c0fea0eff221ccc55c8d32bee9dc8d",
+      "size": 1453,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/f86d6f6213c0fea0eff221ccc55c8d32bee9dc8d"
+    },
+    {
+      "path": "committed.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4211ae3842810ba7207dfc2148a5354e28276bda",
+      "size": 83,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/4211ae3842810ba7207dfc2148a5354e28276bda"
+    },
+    {
+      "path": "crates",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6bf4e16762fe4ea2ac93b54c88d34ac6081a00fd",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/6bf4e16762fe4ea2ac93b54c88d34ac6081a00fd"
+    },
+    {
+      "path": "crates/anstream",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "9ab030dd515673b51e88199869448d17fb8d06dd",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/9ab030dd515673b51e88199869448d17fb8d06dd"
+    },
+    {
+      "path": "crates/anstream/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8c1e98923512710636dd55d624037e97e52109b1",
+      "size": 8152,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8c1e98923512710636dd55d624037e97e52109b1"
+    },
+    {
+      "path": "crates/anstream/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5a02365c8dd4fefa0da3d361186562faf1f18233",
+      "size": 2165,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/5a02365c8dd4fefa0da3d361186562faf1f18233"
+    },
+    {
+      "path": "crates/anstream/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstream/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstream/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "508dc72ba53cc47d8da5bdcb68f51fb7afb00e4d",
+      "size": 1211,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/508dc72ba53cc47d8da5bdcb68f51fb7afb00e4d"
+    },
+    {
+      "path": "crates/anstream/benches",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "c82b75ffe8d7216645b42dc39cf164113efc8e94",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/c82b75ffe8d7216645b42dc39cf164113efc8e94"
+    },
+    {
+      "path": "crates/anstream/benches/stream.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b42ad5cc514447434b9fa8eb43d62ab8bdffc435",
+      "size": 2491,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/b42ad5cc514447434b9fa8eb43d62ab8bdffc435"
+    },
+    {
+      "path": "crates/anstream/benches/strip.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7da54c6452155169fcef2e18c368d1d1e6832887",
+      "size": 3410,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/7da54c6452155169fcef2e18c368d1d1e6832887"
+    },
+    {
+      "path": "crates/anstream/benches/wincon.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2a74c1c1eddfdddf4e41fca8343324e0db773646",
+      "size": 1066,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/2a74c1c1eddfdddf4e41fca8343324e0db773646"
+    },
+    {
+      "path": "crates/anstream/examples",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "5623575f1123ae2bca354ac039a4a2c5d0a01ac0",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/5623575f1123ae2bca354ac039a4a2c5d0a01ac0"
+    },
+    {
+      "path": "crates/anstream/examples/dump-stream.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "18bd2eb22f99a070076b52b3c051e4adda673bd0",
+      "size": 4467,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/18bd2eb22f99a070076b52b3c051e4adda673bd0"
+    },
+    {
+      "path": "crates/anstream/examples/query-stream.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1c8670ecb140c603bfbad55c49cf18c697e57d23",
+      "size": 546,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/1c8670ecb140c603bfbad55c49cf18c697e57d23"
+    },
+    {
+      "path": "crates/anstream/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e972bb2ef1655ad27766107013d191c89793032a",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/e972bb2ef1655ad27766107013d191c89793032a"
+    },
+    {
+      "path": "crates/anstream/src/_macros.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a1fa97d3b6e92b5b6eab1daf30f464ecaa2fb2e7",
+      "size": 12831,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a1fa97d3b6e92b5b6eab1daf30f464ecaa2fb2e7"
+    },
+    {
+      "path": "crates/anstream/src/adapter",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "056269d32f8cc507d6d302c15e60d93877d7b860",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/056269d32f8cc507d6d302c15e60d93877d7b860"
+    },
+    {
+      "path": "crates/anstream/src/adapter/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f266b68055c5b33ab606a98727c82f02c9fb9a47",
+      "size": 348,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/f266b68055c5b33ab606a98727c82f02c9fb9a47"
+    },
+    {
+      "path": "crates/anstream/src/adapter/strip.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "dca414bbc46e1c6f86354e963b698d8cef456f7e",
+      "size": 14323,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/dca414bbc46e1c6f86354e963b698d8cef456f7e"
+    },
+    {
+      "path": "crates/anstream/src/adapter/wincon.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c2114919832ca8dfbd9323cfc44220774a416942",
+      "size": 13036,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/c2114919832ca8dfbd9323cfc44220774a416942"
+    },
+    {
+      "path": "crates/anstream/src/auto.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "16c995d0a5736aad776ac191d636efd9ce89fd54",
+      "size": 10735,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/16c995d0a5736aad776ac191d636efd9ce89fd54"
+    },
+    {
+      "path": "crates/anstream/src/buffer.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "92e5aafe88a5f0cafa47bab0eb5e5cdcfdc2e1ee",
+      "size": 1179,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/92e5aafe88a5f0cafa47bab0eb5e5cdcfdc2e1ee"
+    },
+    {
+      "path": "crates/anstream/src/fmt.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e673c26dd5230b0281c0df062f947eddcd311b4c",
+      "size": 1424,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/e673c26dd5230b0281c0df062f947eddcd311b4c"
+    },
+    {
+      "path": "crates/anstream/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5ada312eac2162015989f434e4a60c85345a5a91",
+      "size": 2731,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/5ada312eac2162015989f434e4a60c85345a5a91"
+    },
+    {
+      "path": "crates/anstream/src/stream.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "49103221a73f87479c68f4b666a1e5435556bd73",
+      "size": 7129,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/49103221a73f87479c68f4b666a1e5435556bd73"
+    },
+    {
+      "path": "crates/anstream/src/strip.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "47a0db0ddf3358865e0c5279ca7d578f0f4a7fd6",
+      "size": 6840,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/47a0db0ddf3358865e0c5279ca7d578f0f4a7fd6"
+    },
+    {
+      "path": "crates/anstream/src/wincon.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bb3fbdb8f765678fdbd741d04a9e8dd2177b0540",
+      "size": 7084,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/bb3fbdb8f765678fdbd741d04a9e8dd2177b0540"
+    },
+    {
+      "path": "crates/anstream/tests",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "0e9156c1ddfac81c04b2d661630f7d19f0739854",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/0e9156c1ddfac81c04b2d661630f7d19f0739854"
+    },
+    {
+      "path": "crates/anstream/tests/demo.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ed62b355ccfd62ae7fb8924ca06a73e6f0d65048",
+      "size": 13809,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/ed62b355ccfd62ae7fb8924ca06a73e6f0d65048"
+    },
+    {
+      "path": "crates/anstream/tests/macros.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f9df09c7c1c1a11eab0d23b2231162fa3319b3e5",
+      "size": 1047,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/f9df09c7c1c1a11eab0d23b2231162fa3319b3e5"
+    },
+    {
+      "path": "crates/anstream/tests/rg_help.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2362b7532bd52998418e1d3695210ed992db8555",
+      "size": 9291,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/2362b7532bd52998418e1d3695210ed992db8555"
+    },
+    {
+      "path": "crates/anstream/tests/rg_linus.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e4fb2bd9410241fc33725b2d69f1805944b7c728",
+      "size": 142974,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/e4fb2bd9410241fc33725b2d69f1805944b7c728"
+    },
+    {
+      "path": "crates/anstyle-ansi-term",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "5bb30e33bf8c42cc2b85ef5af0c5bb039bdbdd22",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/5bb30e33bf8c42cc2b85ef5af0c5bb039bdbdd22"
+    },
+    {
+      "path": "crates/anstyle-ansi-term/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b0a71b8f39fb77bdcc055e0c1a2a3817a22a5cb0",
+      "size": 1602,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/b0a71b8f39fb77bdcc055e0c1a2a3817a22a5cb0"
+    },
+    {
+      "path": "crates/anstyle-ansi-term/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3e4d9a1a53ea99ebb87be50b2cede8c72f944227",
+      "size": 1166,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/3e4d9a1a53ea99ebb87be50b2cede8c72f944227"
+    },
+    {
+      "path": "crates/anstyle-ansi-term/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-ansi-term/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-ansi-term/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7da5a3091af61e7ed8089d7452cfd780661e1c00",
+      "size": 1007,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/7da5a3091af61e7ed8089d7452cfd780661e1c00"
+    },
+    {
+      "path": "crates/anstyle-ansi-term/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "4efd1b4917fa155679acf02560823e19756e5af8",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/4efd1b4917fa155679acf02560823e19756e5af8"
+    },
+    {
+      "path": "crates/anstyle-ansi-term/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "872d504c03718fbfbf23b7d725213991369dd3e3",
+      "size": 3347,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/872d504c03718fbfbf23b7d725213991369dd3e3"
+    },
+    {
+      "path": "crates/anstyle-crossterm",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "947cd89927de90f99763e91b7007dee1b231d84f",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/947cd89927de90f99763e91b7007dee1b231d84f"
+    },
+    {
+      "path": "crates/anstyle-crossterm/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6c3cc897a08a863193efab59bdc0340c3a322c26",
+      "size": 2241,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/6c3cc897a08a863193efab59bdc0340c3a322c26"
+    },
+    {
+      "path": "crates/anstyle-crossterm/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f884a0bd11d1756a9b3212dd1ca65781fa3708a9",
+      "size": 1230,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/f884a0bd11d1756a9b3212dd1ca65781fa3708a9"
+    },
+    {
+      "path": "crates/anstyle-crossterm/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-crossterm/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-crossterm/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5b6cb47e2f95b8ef868e1b831241873b17ea0dc3",
+      "size": 1007,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/5b6cb47e2f95b8ef868e1b831241873b17ea0dc3"
+    },
+    {
+      "path": "crates/anstyle-crossterm/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "04fdd5bbbe4841da380fa3081e1e2592355dea2a",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/04fdd5bbbe4841da380fa3081e1e2592355dea2a"
+    },
+    {
+      "path": "crates/anstyle-crossterm/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7d5280bbc61be482a13421086425bef4c6211f7e",
+      "size": 3739,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/7d5280bbc61be482a13421086425bef4c6211f7e"
+    },
+    {
+      "path": "crates/anstyle-git",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "5843c17cb9e17f9eadd71138e3e3855054a01b73",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/5843c17cb9e17f9eadd71138e3e3855054a01b73"
+    },
+    {
+      "path": "crates/anstyle-git/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3f7b33c54b670fa715a8f097aec061b4cfe1a6bd",
+      "size": 1807,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/3f7b33c54b670fa715a8f097aec061b4cfe1a6bd"
+    },
+    {
+      "path": "crates/anstyle-git/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "87528822e0eb63b7ef151401f2c875b97bd3f2a9",
+      "size": 1140,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/87528822e0eb63b7ef151401f2c875b97bd3f2a9"
+    },
+    {
+      "path": "crates/anstyle-git/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-git/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-git/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "56785efab766afc9efdef5baa29c6021f49f9e4e",
+      "size": 1143,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/56785efab766afc9efdef5baa29c6021f49f9e4e"
+    },
+    {
+      "path": "crates/anstyle-git/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "1e6618d85bdfe6c1d8b8894524fb557cc27a6a00",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/1e6618d85bdfe6c1d8b8894524fb557cc27a6a00"
+    },
+    {
+      "path": "crates/anstyle-git/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a8aacae7156f0c28b57925396c83cdabf03573b9",
+      "size": 11390,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a8aacae7156f0c28b57925396c83cdabf03573b9"
+    },
+    {
+      "path": "crates/anstyle-hyperlink",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "eba41768c9cd5d63438c09dcd746acc41676e638",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/eba41768c9cd5d63438c09dcd746acc41676e638"
+    },
+    {
+      "path": "crates/anstyle-hyperlink/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7d7bad6739c1898db1293aa945ca5524929b2de5",
+      "size": 680,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/7d7bad6739c1898db1293aa945ca5524929b2de5"
+    },
+    {
+      "path": "crates/anstyle-hyperlink/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e504453990a426e5d2700a701d271f2a13a8faa6",
+      "size": 1305,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/e504453990a426e5d2700a701d271f2a13a8faa6"
+    },
+    {
+      "path": "crates/anstyle-hyperlink/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-hyperlink/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-hyperlink/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3907f2c47c82ecbe3af7237c0287f18bf62fac29",
+      "size": 961,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/3907f2c47c82ecbe3af7237c0287f18bf62fac29"
+    },
+    {
+      "path": "crates/anstyle-hyperlink/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "b97da3913c2e7790df3487f5390376cdbc23d53b",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/b97da3913c2e7790df3487f5390376cdbc23d53b"
+    },
+    {
+      "path": "crates/anstyle-hyperlink/src/file.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "624eafeef0978f16529ee96dbe5cce5e95ad671d",
+      "size": 2784,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/624eafeef0978f16529ee96dbe5cce5e95ad671d"
+    },
+    {
+      "path": "crates/anstyle-hyperlink/src/hostname.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a619ebbc0e4d521d110888e506a64c2fd19c8f97",
+      "size": 2789,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a619ebbc0e4d521d110888e506a64c2fd19c8f97"
+    },
+    {
+      "path": "crates/anstyle-hyperlink/src/hyperlink.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3051b1d83f4a1b7d9e639ff563021a0e3ce8d665",
+      "size": 1644,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/3051b1d83f4a1b7d9e639ff563021a0e3ce8d665"
+    },
+    {
+      "path": "crates/anstyle-hyperlink/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2147fe09ee8685c1843df922503fcfdb62fdc782",
+      "size": 969,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/2147fe09ee8685c1843df922503fcfdb62fdc782"
+    },
+    {
+      "path": "crates/anstyle-lossy",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "8b108604e656841eb4f5a898b6faac979a503e55",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/8b108604e656841eb4f5a898b6faac979a503e55"
+    },
+    {
+      "path": "crates/anstyle-lossy/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ce99fdfcece1db3f64b4c94c4db9f8b2a5f4db3a",
+      "size": 1643,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/ce99fdfcece1db3f64b4c94c4db9f8b2a5f4db3a"
+    },
+    {
+      "path": "crates/anstyle-lossy/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "476f4dcf75efc3d3fde2990d8b4f29f26275fef0",
+      "size": 1134,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/476f4dcf75efc3d3fde2990d8b4f29f26275fef0"
+    },
+    {
+      "path": "crates/anstyle-lossy/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-lossy/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-lossy/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "08f63a5e17af85c8976b4addd9d1b392054031e6",
+      "size": 943,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/08f63a5e17af85c8976b4addd9d1b392054031e6"
+    },
+    {
+      "path": "crates/anstyle-lossy/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "05e015569d5993b613ed22de08147d7ff60b2e24",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/05e015569d5993b613ed22de08147d7ff60b2e24"
+    },
+    {
+      "path": "crates/anstyle-lossy/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "545fc1db239145c75c05eef911dc9e7f608cfe96",
+      "size": 11433,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/545fc1db239145c75c05eef911dc9e7f608cfe96"
+    },
+    {
+      "path": "crates/anstyle-lossy/src/palette.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "17922f7b9e5e0878475451d0bf419dea20e5727d",
+      "size": 3516,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/17922f7b9e5e0878475451d0bf419dea20e5727d"
+    },
+    {
+      "path": "crates/anstyle-ls",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "daa2f16084ea46bb6ce5ff0b2e9455493537b77d",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/daa2f16084ea46bb6ce5ff0b2e9455493537b77d"
+    },
+    {
+      "path": "crates/anstyle-ls/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "88ebf3bb64509feb6ec7d3f670a76845e5d2f09f",
+      "size": 1490,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/88ebf3bb64509feb6ec7d3f670a76845e5d2f09f"
+    },
+    {
+      "path": "crates/anstyle-ls/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bbc05b9f6b38c6bef948bf44753be3ab1f05325d",
+      "size": 1144,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/bbc05b9f6b38c6bef948bf44753be3ab1f05325d"
+    },
+    {
+      "path": "crates/anstyle-ls/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-ls/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-ls/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "905fb94e5985576c27aa84e8f49dd224cc01d42f",
+      "size": 1591,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/905fb94e5985576c27aa84e8f49dd224cc01d42f"
+    },
+    {
+      "path": "crates/anstyle-ls/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "721328d2b1a14da0eb8c8691553aeb9ffb97f69b",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/721328d2b1a14da0eb8c8691553aeb9ffb97f69b"
+    },
+    {
+      "path": "crates/anstyle-ls/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1b6b4e0846772d517e184c9554222fa82eff63d5",
+      "size": 11280,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/1b6b4e0846772d517e184c9554222fa82eff63d5"
+    },
+    {
+      "path": "crates/anstyle-owo-colors",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e21e09c0be159eb796adbc2ba00c8e5b9ae343aa",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/e21e09c0be159eb796adbc2ba00c8e5b9ae343aa"
+    },
+    {
+      "path": "crates/anstyle-owo-colors/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "90c33ae6df4552580278541e9ebd48993792f532",
+      "size": 2222,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/90c33ae6df4552580278541e9ebd48993792f532"
+    },
+    {
+      "path": "crates/anstyle-owo-colors/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a1efb302dec03b2ba83f081d682d723611ebbfe6",
+      "size": 1169,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a1efb302dec03b2ba83f081d682d723611ebbfe6"
+    },
+    {
+      "path": "crates/anstyle-owo-colors/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-owo-colors/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-owo-colors/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e054f6f4c8e4cd6489c77de7d220f8a6bb537611",
+      "size": 1013,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/e054f6f4c8e4cd6489c77de7d220f8a6bb537611"
+    },
+    {
+      "path": "crates/anstyle-owo-colors/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "509e35ca1fb189e98c6545721c836a719b42cf91",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/509e35ca1fb189e98c6545721c836a719b42cf91"
+    },
+    {
+      "path": "crates/anstyle-owo-colors/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "33444a3cf6289eb7ef798018cba68a118869a366",
+      "size": 3603,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/33444a3cf6289eb7ef798018cba68a118869a366"
+    },
+    {
+      "path": "crates/anstyle-parse",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "064bec1359cb0e2609246856794742b8be0669f6",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/064bec1359cb0e2609246856794742b8be0669f6"
+    },
+    {
+      "path": "crates/anstyle-parse/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e7b7ab43b3c3b96d9e1a5f1ab878cd122af4bcdc",
+      "size": 2000,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/e7b7ab43b3c3b96d9e1a5f1ab878cd122af4bcdc"
+    },
+    {
+      "path": "crates/anstyle-parse/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4521eec7bb1eb745714c58d6541ce51db2b1e7c8",
+      "size": 1535,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/4521eec7bb1eb745714c58d6541ce51db2b1e7c8"
+    },
+    {
+      "path": "crates/anstyle-parse/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-parse/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-parse/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "88e95bcdf3a17e519855df5e4f15939f2fcf630c",
+      "size": 1248,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/88e95bcdf3a17e519855df5e4f15939f2fcf630c"
+    },
+    {
+      "path": "crates/anstyle-parse/benches",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "04fbe4f50b060b4906b0a1203302e520fe9e2dfa",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/04fbe4f50b060b4906b0a1203302e520fe9e2dfa"
+    },
+    {
+      "path": "crates/anstyle-parse/benches/parse.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4cfe9363cd1c60becb6414833e38310b9df7c68b",
+      "size": 5642,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/4cfe9363cd1c60becb6414833e38310b9df7c68b"
+    },
+    {
+      "path": "crates/anstyle-parse/examples",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e15ff3454a2045cea52d6522343a417f0558bbe6",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/e15ff3454a2045cea52d6522343a417f0558bbe6"
+    },
+    {
+      "path": "crates/anstyle-parse/examples/parselog.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "22b1711bf8a6cd0bd21c55b0b57ac5c0b36e77bd",
+      "size": 1961,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/22b1711bf8a6cd0bd21c55b0b57ac5c0b36e77bd"
+    },
+    {
+      "path": "crates/anstyle-parse/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6f845d8ba11e6d77be08ff5bf2cdfb98e2371ae8",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/6f845d8ba11e6d77be08ff5bf2cdfb98e2371ae8"
+    },
+    {
+      "path": "crates/anstyle-parse/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6bbdc6bf6fe583d2a38a58253f23131e1aea146f",
+      "size": 14849,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/6bbdc6bf6fe583d2a38a58253f23131e1aea146f"
+    },
+    {
+      "path": "crates/anstyle-parse/src/params.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7cc146fcdfa05466e6a25440eedf7878322aed6a",
+      "size": 3684,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/7cc146fcdfa05466e6a25440eedf7878322aed6a"
+    },
+    {
+      "path": "crates/anstyle-parse/src/state",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "694f1c5f94b2081112884be7c013e7deb51cc2ec",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/694f1c5f94b2081112884be7c013e7deb51cc2ec"
+    },
+    {
+      "path": "crates/anstyle-parse/src/state/codegen.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "60aae35ddad2e060fa299c994146f9125b44b192",
+      "size": 7182,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/60aae35ddad2e060fa299c994146f9125b44b192"
+    },
+    {
+      "path": "crates/anstyle-parse/src/state/definitions.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0b9f99a0fdf49af680ac67b98c2df3e533d2028c",
+      "size": 3739,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/0b9f99a0fdf49af680ac67b98c2df3e533d2028c"
+    },
+    {
+      "path": "crates/anstyle-parse/src/state/mod.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a1d869187a8bbe5e5be655fb60861a91d465d75c",
+      "size": 1327,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a1d869187a8bbe5e5be655fb60861a91d465d75c"
+    },
+    {
+      "path": "crates/anstyle-parse/src/state/table.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f6f10703cb7d2fbd5f22022a0781be9065760b64",
+      "size": 30658,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/f6f10703cb7d2fbd5f22022a0781be9065760b64"
+    },
+    {
+      "path": "crates/anstyle-parse/tests",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "a4939b294f7f62160b103fa159a09ff814d47440",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/a4939b294f7f62160b103fa159a09ff814d47440"
+    },
+    {
+      "path": "crates/anstyle-parse/tests/demo.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ed62b355ccfd62ae7fb8924ca06a73e6f0d65048",
+      "size": 13809,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/ed62b355ccfd62ae7fb8924ca06a73e6f0d65048"
+    },
+    {
+      "path": "crates/anstyle-parse/tests/rg_help.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2362b7532bd52998418e1d3695210ed992db8555",
+      "size": 9291,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/2362b7532bd52998418e1d3695210ed992db8555"
+    },
+    {
+      "path": "crates/anstyle-parse/tests/rg_linus.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e4fb2bd9410241fc33725b2d69f1805944b7c728",
+      "size": 142974,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/e4fb2bd9410241fc33725b2d69f1805944b7c728"
+    },
+    {
+      "path": "crates/anstyle-parse/tests/testsuite.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2aa63a0d0a899f0ea19e5a032f7e7ed205f9d88f",
+      "size": 12774,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/2aa63a0d0a899f0ea19e5a032f7e7ed205f9d88f"
+    },
+    {
+      "path": "crates/anstyle-query",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "d4e1a24385a3de0a47d53dd33757b4d704f0dacb",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/d4e1a24385a3de0a47d53dd33757b4d704f0dacb"
+    },
+    {
+      "path": "crates/anstyle-query/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "409275a4e436aa326982c4ca46262783130bacdb",
+      "size": 1981,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/409275a4e436aa326982c4ca46262783130bacdb"
+    },
+    {
+      "path": "crates/anstyle-query/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "084f20f526bee572e77e826b391d4f4b01c02110",
+      "size": 1218,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/084f20f526bee572e77e826b391d4f4b01c02110"
+    },
+    {
+      "path": "crates/anstyle-query/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-query/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-query/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cedce61621b2a9350c856810f53e301c5469d971",
+      "size": 891,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/cedce61621b2a9350c856810f53e301c5469d971"
+    },
+    {
+      "path": "crates/anstyle-query/examples",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "bac356e02398d254a82f6119de7f3a92eb10b3bb",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/bac356e02398d254a82f6119de7f3a92eb10b3bb"
+    },
+    {
+      "path": "crates/anstyle-query/examples/query.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e5d66205a84fb3d41ff4130bf8fe32897ca438cf",
+      "size": 835,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/e5d66205a84fb3d41ff4130bf8fe32897ca438cf"
+    },
+    {
+      "path": "crates/anstyle-query/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e7589ef74084699954dd18822e83896766ae908a",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/e7589ef74084699954dd18822e83896766ae908a"
+    },
+    {
+      "path": "crates/anstyle-query/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f17570a1611529d239278ff5d4e3fe571ad98c1d",
+      "size": 4636,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/f17570a1611529d239278ff5d4e3fe571ad98c1d"
+    },
+    {
+      "path": "crates/anstyle-query/src/windows.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "048272217e68ac739d8c8d9873943527b6c0086a",
+      "size": 2456,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/048272217e68ac739d8c8d9873943527b6c0086a"
+    },
+    {
+      "path": "crates/anstyle-roff",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "c4c1fe23744dd867d4098427b3387179957276e2",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/c4c1fe23744dd867d4098427b3387179957276e2"
+    },
+    {
+      "path": "crates/anstyle-roff/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fbd601134080b616c3b542401d998b83495ba9df",
+      "size": 2058,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/fbd601134080b616c3b542401d998b83495ba9df"
+    },
+    {
+      "path": "crates/anstyle-roff/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "27c2cfe225b3419996f71a052056df017e5509c7",
+      "size": 1256,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/27c2cfe225b3419996f71a052056df017e5509c7"
+    },
+    {
+      "path": "crates/anstyle-roff/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-roff/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-roff/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "56ba2acf85173fb1fc6b81634799a4039e5121c5",
+      "size": 1014,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/56ba2acf85173fb1fc6b81634799a4039e5121c5"
+    },
+    {
+      "path": "crates/anstyle-roff/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "32643b6216f4b2227540ad06366151742233c1f1",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/32643b6216f4b2227540ad06366151742233c1f1"
+    },
+    {
+      "path": "crates/anstyle-roff/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "10d0331f7ec2097c928ae79d592c3d66ec3e0aec",
+      "size": 6347,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/10d0331f7ec2097c928ae79d592c3d66ec3e0aec"
+    },
+    {
+      "path": "crates/anstyle-roff/src/styled_str.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cf5030d867365674715c3051fcb101bab1488bc3",
+      "size": 8128,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/cf5030d867365674715c3051fcb101bab1488bc3"
+    },
+    {
+      "path": "crates/anstyle-roff/tests",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "1806160730769d7eac5c43860d99e77385fc2526",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/1806160730769d7eac5c43860d99e77385fc2526"
+    },
+    {
+      "path": "crates/anstyle-roff/tests/roffs",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "a7ba320a1107485e27e4737ef709050159f2cc13",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/a7ba320a1107485e27e4737ef709050159f2cc13"
+    },
+    {
+      "path": "crates/anstyle-roff/tests/roffs/ansi_color.roff",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1f94d22c5bdcc4e57c95c8d8fe07286bddd8b2b9",
+      "size": 30,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/1f94d22c5bdcc4e57c95c8d8fe07286bddd8b2b9"
+    },
+    {
+      "path": "crates/anstyle-roff/tests/roffs/bold.roff",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "448da3e8c0cfffbfd0d1cb85c73dd28a9bf08954",
+      "size": 11,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/448da3e8c0cfffbfd0d1cb85c73dd28a9bf08954"
+    },
+    {
+      "path": "crates/anstyle-roff/tests/roffs/bright_ansi_colors.roff",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "046781960b7d49737320ae9fa75039472edc31b0",
+      "size": 36,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/046781960b7d49737320ae9fa75039472edc31b0"
+    },
+    {
+      "path": "crates/anstyle-roff/tests/roffs/italic.roff",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "02815a7e8d663632960cb06d98d2d7f5a5c1e1fa",
+      "size": 11,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/02815a7e8d663632960cb06d98d2d7f5a5c1e1fa"
+    },
+    {
+      "path": "crates/anstyle-roff/tests/test_roff.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0544b8d0ddb4d916b99b9b655aadc194f72070ee",
+      "size": 1455,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/0544b8d0ddb4d916b99b9b655aadc194f72070ee"
+    },
+    {
+      "path": "crates/anstyle-svg",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "448952b6fa44a0b69283b0b0dd36841a37541e04",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/448952b6fa44a0b69283b0b0dd36841a37541e04"
+    },
+    {
+      "path": "crates/anstyle-svg/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "afba0f10d035ebc9289e0daba7940fc57d3aab5c",
+      "size": 2837,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/afba0f10d035ebc9289e0daba7940fc57d3aab5c"
+    },
+    {
+      "path": "crates/anstyle-svg/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3cfea26c11798f706e2bfcc685c294ab9e0b421b",
+      "size": 1365,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/3cfea26c11798f706e2bfcc685c294ab9e0b421b"
+    },
+    {
+      "path": "crates/anstyle-svg/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-svg/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-svg/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b22255de09f0bdfc08a897110d44741d24e81bfa",
+      "size": 922,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/b22255de09f0bdfc08a897110d44741d24e81bfa"
+    },
+    {
+      "path": "crates/anstyle-svg/examples",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "d3e9162a5ceca4fee2531b99060e2dda757e9484",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/d3e9162a5ceca4fee2531b99060e2dda757e9484"
+    },
+    {
+      "path": "crates/anstyle-svg/examples/convert.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d413c6ab7736e9d1f0d597540d8eb18f46792884",
+      "size": 241,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/d413c6ab7736e9d1f0d597540d8eb18f46792884"
+    },
+    {
+      "path": "crates/anstyle-svg/rainbow.sh",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "109acdd22dd225da4f91426f690b1961d29da45a",
+      "size": 1330,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/109acdd22dd225da4f91426f690b1961d29da45a"
+    },
+    {
+      "path": "crates/anstyle-svg/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "bea38d5b44c97b7ede6c7d49e793507c90f90d50",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/bea38d5b44c97b7ede6c7d49e793507c90f90d50"
+    },
+    {
+      "path": "crates/anstyle-svg/src/adapter.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0c124fd7940745d98d54e96a5f36e6a894710bff",
+      "size": 22786,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/0c124fd7940745d98d54e96a5f36e6a894710bff"
+    },
+    {
+      "path": "crates/anstyle-svg/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e375684755f958f4f45b35ffd3f8464ff29c43ce",
+      "size": 22457,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/e375684755f958f4f45b35ffd3f8464ff29c43ce"
+    },
+    {
+      "path": "crates/anstyle-svg/tests",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "806e2e02df5a861a249b6f82dcede295f96c5d91",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/806e2e02df5a861a249b6f82dcede295f96c5d91"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/custom_background_color.html",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "536f217381c3dd25184b67f9638d5c209c7ef812",
+      "size": 20782,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/536f217381c3dd25184b67f9638d5c209c7ef812"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/custom_background_color.svg",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f5948f4e82429fe0ff98a9bb63e13a8e9df61ee4",
+      "size": 23908,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/f5948f4e82429fe0ff98a9bb63e13a8e9df61ee4"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/custom_background_color.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "52b187536887187f41aac6c25f3e5fe4b4ad035e",
+      "size": 11433,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/52b187536887187f41aac6c25f3e5fe4b4ad035e"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/hyperlink-demo.html",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "359196805f180b716cc3fcd4a0016621fd66047c",
+      "size": 30850,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/359196805f180b716cc3fcd4a0016621fd66047c"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/hyperlink-demo.svg",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "02d537f49de289b4116eb5cff0dc49f4d6081111",
+      "size": 34532,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/02d537f49de289b4116eb5cff0dc49f4d6081111"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/hyperlink-demo.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4b626916642343d676914baf0cce9b695621a558",
+      "size": 27078,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/4b626916642343d676914baf0cce9b695621a558"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/rainbow.html",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "411df1795c91afa3da5919e079ad86b64e807b88",
+      "size": 250124,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/411df1795c91afa3da5919e079ad86b64e807b88"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/rainbow.svg",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "dce7656dd427161f53e31403367168f37ba0c44c",
+      "size": 268805,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/dce7656dd427161f53e31403367168f37ba0c44c"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/rainbow.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3ce0974d6411e1fe879951e7bb925003a3b703de",
+      "size": 80950,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/3ce0974d6411e1fe879951e7bb925003a3b703de"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/rg_linus.html",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4455b6eb5e390f48bcd33b79d5f069501f9c9369",
+      "size": 229623,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/4455b6eb5e390f48bcd33b79d5f069501f9c9369"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/rg_linus.svg",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5719ce3ac28d3624fd08a850dc3cf77812e289f9",
+      "size": 279753,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/5719ce3ac28d3624fd08a850dc3cf77812e289f9"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/rg_linus.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e4fb2bd9410241fc33725b2d69f1805944b7c728",
+      "size": 142974,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/e4fb2bd9410241fc33725b2d69f1805944b7c728"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/sgr_off_codes.html",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c453d43e5e89289614ee4fcdf1c93b77cce75450",
+      "size": 1557,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/c453d43e5e89289614ee4fcdf1c93b77cce75450"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/sgr_off_codes.svg",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "703f4d97836532845daa43e94d95388ee9168e19",
+      "size": 1889,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/703f4d97836532845daa43e94d95388ee9168e19"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/sgr_off_codes.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "16011406b4c8f3ce36a8a6de19b6072a44095a0e",
+      "size": 223,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/16011406b4c8f3ce36a8a6de19b6072a44095a0e"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/term.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7e934a3c3dc12ef141909782d0abc6d85ac670a7",
+      "size": 4498,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/7e934a3c3dc12ef141909782d0abc6d85ac670a7"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/underline_color_reset.html",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b4360bf2947f297375a1aa611b901df0b1ec722f",
+      "size": 1327,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/b4360bf2947f297375a1aa611b901df0b1ec722f"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/underline_color_reset.svg",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5ce70e8cdab637ca7819c5a2d1f7fb9056040dfd",
+      "size": 1427,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/5ce70e8cdab637ca7819c5a2d1f7fb9056040dfd"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/underline_color_reset.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e9d85bdce9822fed892acdb91e349fa2d5bb2eea",
+      "size": 224,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/e9d85bdce9822fed892acdb91e349fa2d5bb2eea"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/underline_subparams.html",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "710977ccecc063da66bbe915f35377c3a4e798c6",
+      "size": 1304,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/710977ccecc063da66bbe915f35377c3a4e798c6"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/underline_subparams.svg",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "02d3c87cb3b11b7b48a5a161963248e457c924a3",
+      "size": 1473,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/02d3c87cb3b11b7b48a5a161963248e457c924a3"
+    },
+    {
+      "path": "crates/anstyle-svg/tests/underline_subparams.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "34bf43be4452f5a32b11e2d949160ef85aed6cd1",
+      "size": 130,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/34bf43be4452f5a32b11e2d949160ef85aed6cd1"
+    },
+    {
+      "path": "crates/anstyle-syntect",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "209f942ae761ffd04a9dc4a136019a70c5e620fc",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/209f942ae761ffd04a9dc4a136019a70c5e620fc"
+    },
+    {
+      "path": "crates/anstyle-syntect/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2046d767a5db66f58162e3fd5d924464fc92425a",
+      "size": 1696,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/2046d767a5db66f58162e3fd5d924464fc92425a"
+    },
+    {
+      "path": "crates/anstyle-syntect/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d9580bb077f269605a943f9c065204821bb3c338",
+      "size": 1344,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/d9580bb077f269605a943f9c065204821bb3c338"
+    },
+    {
+      "path": "crates/anstyle-syntect/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-syntect/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-syntect/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eabc80baa9d9a65883d24f7723cefa02adebca6d",
+      "size": 1004,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/eabc80baa9d9a65883d24f7723cefa02adebca6d"
+    },
+    {
+      "path": "crates/anstyle-syntect/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "7639e523d96839bd445dd739ca14b32915a3b42e",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/7639e523d96839bd445dd739ca14b32915a3b42e"
+    },
+    {
+      "path": "crates/anstyle-syntect/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "aa65ab065eaa0ce8ced9a32b0ddba3efad9d74da",
+      "size": 1395,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/aa65ab065eaa0ce8ced9a32b0ddba3efad9d74da"
+    },
+    {
+      "path": "crates/anstyle-termcolor",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "172e3cd918239440f7555f7fecc2a03ad0255fb6",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/172e3cd918239440f7555f7fecc2a03ad0255fb6"
+    },
+    {
+      "path": "crates/anstyle-termcolor/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e459c603e3c6ae1277a7b2c653f9676dca08ce92",
+      "size": 2175,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/e459c603e3c6ae1277a7b2c653f9676dca08ce92"
+    },
+    {
+      "path": "crates/anstyle-termcolor/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "56b7473e3ffc164ce052102018fe74a6adc5e496",
+      "size": 1165,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/56b7473e3ffc164ce052102018fe74a6adc5e496"
+    },
+    {
+      "path": "crates/anstyle-termcolor/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-termcolor/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-termcolor/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "95a42ffbc7027f6835dc6c9d960c1b3efb228dcd",
+      "size": 1005,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/95a42ffbc7027f6835dc6c9d960c1b3efb228dcd"
+    },
+    {
+      "path": "crates/anstyle-termcolor/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "c078c313ea87b01e93da233b73e409a8349bd567",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/c078c313ea87b01e93da233b73e409a8349bd567"
+    },
+    {
+      "path": "crates/anstyle-termcolor/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f53d8bfd7ce42b91566e9a6eed10e80124f7fcc3",
+      "size": 2690,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/f53d8bfd7ce42b91566e9a6eed10e80124f7fcc3"
+    },
+    {
+      "path": "crates/anstyle-wincon",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "67b57d4fa0a19607faff4416809adf703ea02f95",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/67b57d4fa0a19607faff4416809adf703ea02f95"
+    },
+    {
+      "path": "crates/anstyle-wincon/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "24d7d438a2b6a3bd1f8b47f4ce12f9aa58429d67",
+      "size": 4214,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/24d7d438a2b6a3bd1f8b47f4ce12f9aa58429d67"
+    },
+    {
+      "path": "crates/anstyle-wincon/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "15d8c4bed15a2b7d38ad1f8289801a9efdb0cbea",
+      "size": 1383,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/15d8c4bed15a2b7d38ad1f8289801a9efdb0cbea"
+    },
+    {
+      "path": "crates/anstyle-wincon/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-wincon/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-wincon/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cb7918997c5dc8b491e868737d578e4c65979a8f",
+      "size": 1096,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/cb7918997c5dc8b491e868737d578e4c65979a8f"
+    },
+    {
+      "path": "crates/anstyle-wincon/examples",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "3a4b42604830bd18142436c54ec0fbacf4da332e",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/3a4b42604830bd18142436c54ec0fbacf4da332e"
+    },
+    {
+      "path": "crates/anstyle-wincon/examples/dump-wincon.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fce11c6900e34de8f40c0d6f9980f1f2e8175d79",
+      "size": 4858,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/fce11c6900e34de8f40c0d6f9980f1f2e8175d79"
+    },
+    {
+      "path": "crates/anstyle-wincon/examples/set-wincon.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "14224d9f147773f69adde5990ea7a8f0a6ee6181",
+      "size": 1523,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/14224d9f147773f69adde5990ea7a8f0a6ee6181"
+    },
+    {
+      "path": "crates/anstyle-wincon/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "7d4669b9864b7f147711e93536d3cc6e4d7b126b",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/7d4669b9864b7f147711e93536d3cc6e4d7b126b"
+    },
+    {
+      "path": "crates/anstyle-wincon/src/ansi.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "48c2c1e255437e733a7df7dee8dda1f7cabf4565",
+      "size": 663,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/48c2c1e255437e733a7df7dee8dda1f7cabf4565"
+    },
+    {
+      "path": "crates/anstyle-wincon/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7be030d4e1608c685170c843a877904c7b377291",
+      "size": 707,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/7be030d4e1608c685170c843a877904c7b377291"
+    },
+    {
+      "path": "crates/anstyle-wincon/src/stream.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9692c7c21e4f692a0501591df03fa337d7c13fdf",
+      "size": 4470,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/9692c7c21e4f692a0501591df03fa337d7c13fdf"
+    },
+    {
+      "path": "crates/anstyle-wincon/src/windows.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "27dcd5c765788ed72d0c6202c8f21d461599740f",
+      "size": 9330,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/27dcd5c765788ed72d0c6202c8f21d461599740f"
+    },
+    {
+      "path": "crates/anstyle-yansi",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "d7345cfaca5970a4492bdbee80253154e45fb800",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/d7345cfaca5970a4492bdbee80253154e45fb800"
+    },
+    {
+      "path": "crates/anstyle-yansi/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "71ad99acf5c1222af68c477ea0ad6a538de07579",
+      "size": 2049,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/71ad99acf5c1222af68c477ea0ad6a538de07579"
+    },
+    {
+      "path": "crates/anstyle-yansi/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ac6f5d04895476c03f37750cbe2284665df88e6d",
+      "size": 1149,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/ac6f5d04895476c03f37750cbe2284665df88e6d"
+    },
+    {
+      "path": "crates/anstyle-yansi/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle-yansi/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle-yansi/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ce8f03e9ac2f924bd91aa218a7eafc7b8fec9093",
+      "size": 973,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/ce8f03e9ac2f924bd91aa218a7eafc7b8fec9093"
+    },
+    {
+      "path": "crates/anstyle-yansi/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e450c98a8e13c9a78d3bc21f8a11593213a611d8",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/e450c98a8e13c9a78d3bc21f8a11593213a611d8"
+    },
+    {
+      "path": "crates/anstyle-yansi/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "72b5745fabd91f40ca364062c3dfdd4e736717bb",
+      "size": 3114,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/72b5745fabd91f40ca364062c3dfdd4e736717bb"
+    },
+    {
+      "path": "crates/anstyle",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "b6845a9eebc15355e6400eb6de204f332bfa2988",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/b6845a9eebc15355e6400eb6de204f332bfa2988"
+    },
+    {
+      "path": "crates/anstyle/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "858707224049b70eeda50e2dccee24d844fe7bfc",
+      "size": 5423,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/858707224049b70eeda50e2dccee24d844fe7bfc"
+    },
+    {
+      "path": "crates/anstyle/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f532a4539cbda948e629bdf36b8c545cc3e88b9",
+      "size": 1154,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f532a4539cbda948e629bdf36b8c545cc3e88b9"
+    },
+    {
+      "path": "crates/anstyle/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/anstyle/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/anstyle/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "99ea5e1a1016494916f66ba02757def96649ebde",
+      "size": 1459,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/99ea5e1a1016494916f66ba02757def96649ebde"
+    },
+    {
+      "path": "crates/anstyle/examples",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "1bcb1167da0a38e36019da82be20db0fa1b72cc0",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/1bcb1167da0a38e36019da82be20db0fa1b72cc0"
+    },
+    {
+      "path": "crates/anstyle/examples/dump-style.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "2e539eb645ddc379f551ed65e8745001e2b74a99",
+      "size": 4463,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/2e539eb645ddc379f551ed65e8745001e2b74a99"
+    },
+    {
+      "path": "crates/anstyle/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "04cc75b29479fa00ac68199ede64329d689be0cf",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/04cc75b29479fa00ac68199ede64329d689be0cf"
+    },
+    {
+      "path": "crates/anstyle/src/color.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "828f9f05df6c142874d5322f6d8e7d9f0af11484",
+      "size": 20401,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/828f9f05df6c142874d5322f6d8e7d9f0af11484"
+    },
+    {
+      "path": "crates/anstyle/src/effect.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4a076d4ef21c51c67ee1d080d705bab6955b8f33",
+      "size": 10362,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/4a076d4ef21c51c67ee1d080d705bab6955b8f33"
+    },
+    {
+      "path": "crates/anstyle/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f1449fc57392c8283d62d282b0258f7cd707870f",
+      "size": 2400,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/f1449fc57392c8283d62d282b0258f7cd707870f"
+    },
+    {
+      "path": "crates/anstyle/src/macros.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f19666e6c349d8806ecb6d19219467ac8dda19ea",
+      "size": 102,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/f19666e6c349d8806ecb6d19219467ac8dda19ea"
+    },
+    {
+      "path": "crates/anstyle/src/reset.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b581e16d6bded74e1094f8e2f74199467aa1592d",
+      "size": 1099,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/b581e16d6bded74e1094f8e2f74199467aa1592d"
+    },
+    {
+      "path": "crates/anstyle/src/style.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7cc2bd5792f1fdb2e4016909bfac266be6fb8d40",
+      "size": 10264,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/7cc2bd5792f1fdb2e4016909bfac266be6fb8d40"
+    },
+    {
+      "path": "crates/anstyle/tests",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "f04e3880cc5591150075a9d21073e48cf9c75bfd",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/f04e3880cc5591150075a9d21073e48cf9c75bfd"
+    },
+    {
+      "path": "crates/anstyle/tests/no_leading_zero.vte",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b2374b7ff85b40f95c396bfed4ed06ab54ddefe2",
+      "size": 1692,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/b2374b7ff85b40f95c396bfed4ed06ab54ddefe2"
+    },
+    {
+      "path": "crates/anstyle/tests/testsuite.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "40e775a56df58504fe7b602f242a827500e3b320",
+      "size": 886,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/40e775a56df58504fe7b602f242a827500e3b320"
+    },
+    {
+      "path": "crates/colorchoice-clap",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "122c6b82f5eff083ace050c66bb781273655c91b",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/122c6b82f5eff083ace050c66bb781273655c91b"
+    },
+    {
+      "path": "crates/colorchoice-clap/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eb0217d737bdb22d65d6040e8e8895a302f8f296",
+      "size": 1749,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/eb0217d737bdb22d65d6040e8e8895a302f8f296"
+    },
+    {
+      "path": "crates/colorchoice-clap/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1189be27aacb14d7906515d690a7b9bd7aac8936",
+      "size": 1370,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/1189be27aacb14d7906515d690a7b9bd7aac8936"
+    },
+    {
+      "path": "crates/colorchoice-clap/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/colorchoice-clap/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/colorchoice-clap/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "680ff7bffe9fc52ccbd3ebff6463ccc485d63a4b",
+      "size": 938,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/680ff7bffe9fc52ccbd3ebff6463ccc485d63a4b"
+    },
+    {
+      "path": "crates/colorchoice-clap/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "50877f48ccb15d2a22bc722293d1636b4a8518f0",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/50877f48ccb15d2a22bc722293d1636b4a8518f0"
+    },
+    {
+      "path": "crates/colorchoice-clap/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1ced700086ae7a94d5dc2de4a9f7ff66c51670bf",
+      "size": 1859,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/1ced700086ae7a94d5dc2de4a9f7ff66c51670bf"
+    },
+    {
+      "path": "crates/colorchoice",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "b8ceb312a0362a11de9018a3eaf22d0066b3862e",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/b8ceb312a0362a11de9018a3eaf22d0066b3862e"
+    },
+    {
+      "path": "crates/colorchoice/CHANGELOG.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3726f1b4cca2734974ba3a9456dba05f1d8f7ab7",
+      "size": 1152,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/3726f1b4cca2734974ba3a9456dba05f1d8f7ab7"
+    },
+    {
+      "path": "crates/colorchoice/Cargo.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eb88be49e301aa44a6a48849f9a98a4684d775d0",
+      "size": 1071,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/eb88be49e301aa44a6a48849f9a98a4684d775d0"
+    },
+    {
+      "path": "crates/colorchoice/LICENSE-APACHE",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8f71f43fee3f78649d238238cbde51e6d7055c82",
+      "size": 11358,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/8f71f43fee3f78649d238238cbde51e6d7055c82"
+    },
+    {
+      "path": "crates/colorchoice/LICENSE-MIT",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2d01088b6ce55e837a6d193943580f978fb2d2e",
+      "size": 1062,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/a2d01088b6ce55e837a6d193943580f978fb2d2e"
+    },
+    {
+      "path": "crates/colorchoice/README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "12340e00f644eb8da54e8b50e2abf0febe922d3e",
+      "size": 1354,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/12340e00f644eb8da54e8b50e2abf0febe922d3e"
+    },
+    {
+      "path": "crates/colorchoice/src",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "9186512083162f2adae57e77f28f1b875d9f6269",
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/trees/9186512083162f2adae57e77f28f1b875d9f6269"
+    },
+    {
+      "path": "crates/colorchoice/src/lib.rs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c80dfb81b8f5ca891347d4af65477f904cfc2d34",
+      "size": 2951,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/c80dfb81b8f5ca891347d4af65477f904cfc2d34"
+    },
+    {
+      "path": "deny.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "27bf59a884cdc6948c686a9eb9b3f0fe99691c95",
+      "size": 10976,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/27bf59a884cdc6948c686a9eb9b3f0fe99691c95"
+    },
+    {
+      "path": "release.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e70fb7535a16d43b05d169d88bf2ef06f5ca213f",
+      "size": 91,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/e70fb7535a16d43b05d169d88bf2ef06f5ca213f"
+    },
+    {
+      "path": "typos.toml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9522e60404d7c7e15d48881805fd065268166048",
+      "size": 117,
+      "url": "https://api.github.com/repos/rust-cli/anstyle/git/blobs/9522e60404d7c7e15d48881805fd065268166048"
+    }
+  ],
+  "truncated": false
+}

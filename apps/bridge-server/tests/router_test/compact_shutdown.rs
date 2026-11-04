@@ -8,6 +8,7 @@ use orchestrator::test_support::{
     noop_hook_executor, with_scripted_compactor, MockApiClient, MockOutputStream,
     NoOpPermissionGate, StaticMemoryProvider,
 };
+use std::path::Path;
 use std::pin::Pin;
 use tokio::sync::Notify;
 
@@ -26,6 +27,14 @@ impl FileSystem for PauseAfterCompactBoundary {
         limit: Option<u64>,
     ) -> Result<FileContent, FsError> {
         self.inner.read_file(path, offset, limit).await
+    }
+
+    async fn read_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<FileContent, FsError> {
+        self.inner.read_file_rooted_no_follow(root, relative).await
     }
 
     async fn write_file(&self, path: &str, content: &str) -> Result<(), FsError> {

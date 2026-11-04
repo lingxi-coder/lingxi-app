@@ -37,6 +37,12 @@ criteria = "safe-to-deploy"
 version = "0.2.2"
 notes = "AI-assisted full source review and independent root cross-review; evidence: supply-chain/reviews/2026-11-03/batch002-lane-a.md (SHA-256 a0282f61bee7952f4b57d9d87f14bd5ca4cfd43612abd2a79845195c8325d47f). Scope: exact crates.io source and documented API use; dependencies reviewed separately. Explicit RNG limits recorded in evidence."
 
+[[audits.colorchoice]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.0.5"
+notes = "AI-assisted full exact-version source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-04/round5/colorchoice/review.md (SHA-256 015d08561055117ad139ec707c26679193096e75e2561464d7259421e87d468b); cross-review: supply-chain/reviews/2026-11-04/round5/colorchoice/root-cross-review.md (SHA-256 0e7379df52b8ea81764d61ef81ec5283def107431ab40e9a8acd788260e8553d). Shared atomic state and consumer, compiler, atomic implementation and platform boundaries are recorded."
+
 [[audits.crypto-common]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
@@ -67,6 +73,12 @@ criteria = "safe-to-deploy"
 version = "0.3.1"
 notes = "AI-assisted full package source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/batch002-lane-a-continuation.md (SHA-256 957c4eade00b63db081f53cac4ffa7c3639f5fd84b17dae862b2afd00cb1264f); cross-review: supply-chain/reviews/2026-11-03/batch002-lane-a-continuation-cross.md (SHA-256 597e868245e601e4f79a743f1e63c215570dd4fcc46412fd86defc8df2109189). Exact crates.io package source and documented API use; dependencies and cross-package conformance reviewed separately. Explicit limits and corrected IDNA consumer summary are recorded."
 
+[[audits.is_terminal_polyfill]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.70.2"
+notes = "AI-assisted full exact-version source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-04/round5/is-terminal/review.md (SHA-256 09697afd79089e272cd7ee80b1eeec0539996dfa246a12117ccd2311e39d3ecf); cross-review: supply-chain/reviews/2026-11-04/round5/is-terminal/root-cross-review.md (SHA-256 0ca09f989a1bde1869c99daef1cd80be9f48bc8faf29cec56114f0070960e71d). Seven standard-library delegations reviewed; compiler, standard library, operating systems and consumers are separate subjects."
+
 [[audits.mac]]
 who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
@@ -78,6 +90,12 @@ who = "Codex AI-assisted"
 criteria = "safe-to-deploy"
 version = "0.1.1"
 notes = "AI-assisted full source review and independent cross-review. Evidence: supply-chain/reviews/2026-11-03/memmem-0.1.1.md (SHA-256 98ac1ebca85ab781f8a35274b179c1d5e31d8e3140fb83909af1e94a8b2f1862); independent review: supply-chain/reviews/2026-11-03/batch002-lane-b-cross-3.md (SHA-256 3ae895feedbf790e9f6b0be20649e310d39fd10951c1702ec0e0a5e8e5df09fe). Exact crates.io version; documented API and disclosure limits in reports; dependencies reviewed separately."
+
+[[audits.once_cell_polyfill]]
+who = "Codex AI-assisted"
+criteria = "safe-to-deploy"
+version = "1.70.2"
+notes = "AI-assisted full exact-version source review and independent root cross-review. Evidence: supply-chain/reviews/2026-11-04/round5/lane-b/once_cell_polyfill/review.md (SHA-256 16eb43801527b79a908ea5d16dbf136d73005f7507ba400570125db518bbed9a); cross-review: supply-chain/reviews/2026-11-04/round5/lane-b/once_cell_polyfill/root-cross-review.md (SHA-256 e7e2032724158de08d689db166a6e9473990a7b04cd47f78f3853e16185979f9). Scope is this exact package; consumer Windows FFI, compiler, standard library and other dependencies remain separate."
 
 [[audits.opaque-debug]]
 who = "Codex AI-assisted"

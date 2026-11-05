@@ -209,7 +209,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         if (!active || mutable.value.revoked) return
         if (running) { again = true; return }
         running = true; val life = lifecycle
-        mutable.update { it.copy(botRuns = emptyMap()) }
+        // Keep question/recovery forms mounted while polling. Failures and scope changes clear them below.
         job = scope.launch {
             try {
                 reload(life)

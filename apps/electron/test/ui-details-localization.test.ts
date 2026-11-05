@@ -46,6 +46,7 @@ test('file and tool summaries translate counts, truncation, and accessible label
     view: { verb: 'generic', label: 'RawTool', title: 'Raw machine tool title' },
     result: { body: 'Raw engine output %1$s\nSecond line', body_lines: 9, body_truncated: true },
   };
+  const failed = { ...tool, id: 'failed', status: 'error' as const };
   for (const locale of DESKTOP_LOCALES) {
     const summary = render(locale, React.createElement(TurnFileSummary, { files: [file] }));
     contains(summary, locale, 'desktop_ui_edited_one', 1);
@@ -63,11 +64,20 @@ test('file and tool summaries translate counts, truncation, and accessible label
     assert.ok(call.includes('Raw engine output %1$s'));
     assert.ok(call.includes('Raw machine tool title'));
     const group = render(locale, React.createElement(ToolGroup, {
-      group: { type: 'tool-group', id: 'group', tools: [tool, { ...tool, id: 'failed', status: 'error' }] },
+      group: { type: 'tool-group', id: 'group', tools: [tool, failed] },
       open: true, toolOpen: () => false, onSetOpen() {},
     }));
-    contains(group, locale, 'desktop_ui_failed_count', 1);
-    contains(group, locale, 'chat_tool_batch_count %lld', 2);
+    const groupLabel = `RawTool · ${translate('desktop_ui_tool_call_count', locale, 2)}`;
+    assert.ok(group.includes(`aria-label="${escaped(groupLabel)}"`), `${locale}: mixed group label`);
+    contains(group, locale, 'desktop_ui_tool_attempt_unsuccessful');
+    assert.ok(group.includes('Raw machine tool title'));
+    const failedGroup = render(locale, React.createElement(ToolGroup, {
+      group: { type: 'tool-group', id: 'failed-group', tools: [failed, { ...failed, id: 'failed-2' }] },
+      open: false, toolOpen: () => false, onSetOpen() {},
+    }));
+    const failedLabel = `${groupLabel} · ${translate('desktop_ui_tool_calls_unsuccessful', locale)}`;
+    assert.ok(failedGroup.includes(`aria-label="${escaped(failedLabel)}"`), `${locale}: failed group label`);
+    assert.doesNotMatch(group + failedGroup, /desktop_ui_tool_/);
   }
 });
 

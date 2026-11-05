@@ -199,6 +199,12 @@ final class AppNavigationModel {
         adopt(settingsJump.reduced(by: .push(page)).state)
     }
 
+    func settingsBack() {
+        let result = settingsJump.reduced(by: .back)
+        adopt(result.state)
+        if let tab = result.leaveTo { leaveSettings(to: tab) }
+    }
+
     func popSettings() {
         guard !settingsPath.isEmpty else { return }
         writeSettingsPath(Array(settingsPath.dropLast()))

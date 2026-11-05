@@ -19,13 +19,15 @@ final class RemoteBotsDeviceAcceptanceUITests: XCTestCase {
         func openBot() {
             // Remote Control is the Bots tab now (it left the drawer); the bar button appears once the real app has started.
             app.openBotsTab(timeout: 30)
-            let host = app.buttons["remote.host.\(hostID)"]
+            let host = app.buttons["bots.host.\(hostID)"]
             XCTAssertTrue(host.waitForExistence(timeout: 45), "Acceptance host must be available to the existing account")
-            host.tap()
-            let bot = app.buttons["remote.bot.\(botID)"]
+            // Sections start expanded; connect only if presence has not auto-connected the paired host.
+            let connect = app.buttons["bots.connect.\(hostID)"]
+            if connect.waitForExistence(timeout: 3) { connect.tap() }
+            let bot = app.buttons["bots.bot.\(hostID).\(botID)"]
             XCTAssertTrue(bot.waitForExistence(timeout: 45), "Fresh native FFI must deliver the host's Bot list")
-            bot.tap()
-            XCTAssertTrue(app.buttons["remote.bot.new-chat"].waitForExistence(timeout: 20))
+            if !app.buttons["bots.new-chat.\(hostID).\(botID)"].exists { bot.tap() }
+            XCTAssertTrue(app.buttons["bots.new-chat.\(hostID).\(botID)"].waitForExistence(timeout: 20))
         }
 
         func waitForAssistant() {
@@ -47,7 +49,7 @@ final class RemoteBotsDeviceAcceptanceUITests: XCTestCase {
         openBot()
         let priorThreads = Set(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "remote.session."))
             .allElementsBoundByIndex.map(\.identifier))
-        app.buttons["remote.bot.new-chat"].tap()
+        app.buttons["bots.new-chat.\(hostID).\(botID)"].tap()
         let input = app.textViews["composer.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 30))
         let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: input)
@@ -65,7 +67,7 @@ final class RemoteBotsDeviceAcceptanceUITests: XCTestCase {
         add(attachment)
 
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(app.buttons["remote.bot.new-chat"].waitForExistence(timeout: 20), "Back must reactivate the Bot page")
+        XCTAssertTrue(app.buttons["bots.new-chat.\(hostID).\(botID)"].waitForExistence(timeout: 20), "Back must reactivate the Bot page")
         let newThread = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "remote.session."))
             .allElementsBoundByIndex.first { !priorThreads.contains($0.identifier) }
         let threadID = try XCTUnwrap(newThread?.identifier, "The newly created chat must appear in this Bot's thread list")

@@ -1,23 +1,61 @@
 import SwiftUI
 
 #if canImport(harness_runtimeFFI)
-/// Remote Control as the root of the Bots tab. The manager is app-level (created by `RootView`, read
-/// from the environment) so it outlives this view; the tab's `TabCoordinator` carries the deep-link
-/// request in and receives the stack depth and the re-tap requests.
+/// The Bots tab owns the tree and a stack whose Back destination is always that tree.
 @MainActor
 struct RemoteControlView: View {
     let openAccount: () -> Void
     @Environment(RemoteControlManager.self) private var manager
     @Environment(TabCoordinator.self) private var tabs
+    @Environment(\.isWideLayout) private var wide
     @State private var path: [RemoteRoute] = []
+    @State private var wideRoute: RemoteRoute?
     @State private var configuredUID: String?
-
-    init(openAccount: @escaping () -> Void) {
-        self.openAccount = openAccount
-    }
+    @SceneStorage("bots.navigation") private var savedNavigation = ""
 
     var body: some View {
-        NavigationStack(path: $path) {
+        Group {
+            if wide {
+                HStack(spacing: 0) {
+                    NavigationStack { tree }.frame(width: 360)
+                    Divider()
+                    NavigationStack {
+                        if let wideRoute { destination(wideRoute) }
+                        else { ContentUnavailableView("remote_sessions_title", systemImage: "bubble.left.and.bubble.right") }
+                    }.frame(maxWidth: .infinity)
+                }
+            } else {
+                NavigationStack(path: $path) {
+                    tree.navigationDestination(for: RemoteRoute.self) { destination($0).hidesTabBarWhenPushed(in: .bots) }
+                }
+            }
+        }
+        .task(id: FirebaseAccount.shared.user?.uid) {
+            let uid = FirebaseAccount.shared.user?.uid
+            if configuredUID != uid { path = []; wideRoute = nil; configuredUID = nil }
+            await manager.configure(uid: uid)
+            guard !Task.isCancelled, uid == FirebaseAccount.shared.user?.uid else { return }
+            if configuredUID != uid, let uid {
+                configuredUID = uid
+                restoreNavigation(uid: uid)
+            }
+            applyPendingRequest()
+            updatePresentation()
+        }
+        .onChange(of: tabs.botsRequest) { _, _ in applyPendingRequest() }
+        .onChange(of: path) { _, _ in saveNavigation(); updatePresentation() }
+        .onChange(of: wideRoute) { _, _ in saveNavigation(); updatePresentation() }
+        .onChange(of: tabs.selected) { _, _ in updatePresentation() }
+        .onChange(of: tabs.popToRootRequests[.bots]) { _, _ in path = []; wideRoute = nil }
+        .onChange(of: wide) { _, value in
+            if value { wideRoute = path.last; path = [] }
+            else if let wideRoute { path = [wideRoute]; self.wideRoute = nil }
+            updatePresentation()
+        }
+    }
+
+    private var tree: some View {
+        ScrollViewReader { proxy in
             Group {
                 if FirebaseAccount.shared.user == nil {
                     ContentUnavailableView {
@@ -25,7 +63,7 @@ struct RemoteControlView: View {
                     } description: { Text("remote_signed_out_body") } actions: {
                         Button("remote_sign_in", action: openAccount)
                     }
-                } else if let error = manager.error {
+                } else if let error = manager.error, manager.hosts.isEmpty {
                     ContentUnavailableView {
                         Label("remote_computers", systemImage: "desktopcomputer")
                     } description: { Text(error) } actions: {
@@ -37,83 +75,72 @@ struct RemoteControlView: View {
                     ContentUnavailableView("remote_no_computers", systemImage: "desktopcomputer", description: Text("remote_no_computers_help"))
                 } else {
                     List {
-                        Section { Text("remote_computers_intro").foregroundStyle(.secondary) }
-                        ForEach(manager.hosts, id: \.hostId) { host in
-                            Button { path.append(.host(host.hostId)) } label: {
-                                HStack {
-                                    Image(systemName: "desktopcomputer")
-                                    VStack(alignment: .leading) {
-                                        Text(host.name)
-                                        Text(host.online ? "remote_online" : "remote_offline").font(.caption).foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    if host.paired { Image(systemName: "checkmark.shield").accessibilityLabel(Text("remote_paired")) }
-                                    Image(systemName: "chevron.right").foregroundStyle(.secondary)
-                                }
-                            }.accessibilityIdentifier("remote.host.\(host.hostId)")
+                        Color.clear.frame(height: 0).id("bots.top").listRowSeparator(.hidden)
+                        if let error = manager.error {
+                            Text(error).foregroundStyle(.secondary)
+                            Button("common_retry") { Task { await manager.retryHosts() } }
+                        }
+                        ForEach(sortedHosts, id: \.hostId) { host in
+                            BotsHostSection(manager: manager, host: host,
+                                openComputer: { open(.host(host.hostId)) },
+                                openChat: { session, title in open(.session(host: host.hostId, session: session, title: title)) },
+                                canNavigate: { tabs.selected == .bots && configuredUID == manager.uid })
                         }
                     }
+                    .accessibilityIdentifier("bots.tree")
                 }
             }
-            .navigationTitle("remote_title")
-            .navigationDestination(for: RemoteRoute.self) { route in
-                switch route {
-                case let .host(id):
-                    RemoteHostView(manager: manager, hostID: id) { session in
-                        path.append(.session(host: id, session: session.sessionId, title: session.title))
-                    } openBot: { bot in
-                        path.append(.bot(host: id, bot: bot.botId))
-                    }
-                case let .bot(host, bot):
-                    RemoteBotView(manager: manager, hostID: host, botID: bot) { session, title in
-                        path.append(.session(host: host, session: session, title: title))
-                    }
-                case let .session(host, session, title):
-                    if let uid = configuredUID {
-                        RemoteSessionView(hostID: host, sessionID: session, title: title, uid: uid, manager: manager)
-                            .id(uid + ":" + host + ":" + session)
-                    }
-                }
-            }
+            .navigationTitle("remote_bots")
+            .onChange(of: tabs.scrollToTopRequests[.bots]) { _, _ in proxy.scrollTo("bots.top", anchor: .top) }
         }
-        .task(id: FirebaseAccount.shared.user?.uid) {
-            let uid = FirebaseAccount.shared.user?.uid
-            // Full-screen UIKit capture hides this navigation stack and starts
-            // its task again on return, and so does leaving and re-entering the
-            // tab. Reset routes only for an account change, so the session and
-            // its captured draft survive the camera and a tab switch.
-            guard configuredUID != uid else { applyPendingRequest(); return }
-            path = []
-            configuredUID = nil
-            await manager.configure(uid: uid)
-            guard !Task.isCancelled, uid == FirebaseAccount.shared.user?.uid else { return }
-            configuredUID = uid
-            applyPendingRequest()
-        }
-        .onChange(of: tabs.botsRequest) { _, _ in applyPendingRequest() }
-        .onChange(of: path) { _, routes in tabs.reportDepth(.bots, routes.count) }
-        .onChange(of: tabs.popToRootRequests[.bots]) { _, _ in path = [] }
     }
 
-    /// A deep link or push for a computer / chat: opens its stack once the manager is configured for the
-    /// signed-in account (until then, or while signed out, the request waits in the coordinator).
+    private var sortedHosts: [RemoteHostFfi] {
+        let byID = Dictionary(manager.hosts.map { ($0.hostId, $0) }, uniquingKeysWith: { _, b in b })
+        return BotsLogic.sortHosts(manager.hosts.map(BotsLogic.Host.init), connectedHostID: manager.connectedHostID).compactMap { byID[$0.id] }
+    }
+    @ViewBuilder private func destination(_ route: RemoteRoute) -> some View {
+        switch route {
+        case .host(let id):
+            RemoteHostView(manager: manager, hostID: id) { session in
+                open(.session(host: id, session: session.sessionId, title: session.title))
+            }
+        case let .session(host, session, title):
+            if let uid = configuredUID {
+                RemoteSessionView(hostID: host, sessionID: session, title: title, uid: uid, manager: manager)
+                    .id(uid + ":" + host + ":" + session)
+            }
+        }
+    }
+    private func open(_ route: RemoteRoute) {
+        if wide { wideRoute = route } else { path.append(route) }
+    }
     private func applyPendingRequest() {
         guard configuredUID != nil, let request = tabs.botsRequest else { return }
         tabs.botsRequest = nil
-        // A session id is unique across computers, so a push for a Bot's chat is routed like any other;
-        // its Bot is only known if this connection has already been told.
-        path = RemoteRoute.stack(host: request.hostID, session: request.sessionID,
-            title: String(localized: "remote_untitled"),
-            bot: request.sessionID.flatMap { manager.botOfThread($0) })
+        let routes = RemoteRoute.stack(host: request.hostID, session: request.sessionID, title: String(localized: "remote_untitled"))
+        if wide { wideRoute = routes.last } else { path = routes }
+    }
+    private func updatePresentation() {
+        tabs.reportDepth(.bots, wide ? 0 : path.count)
+        let route = wide ? wideRoute : path.last
+        manager.setPresentation(selected: tabs.selected == .bots, sessionOpen: route?.isSession == true)
+    }
+    private func saveNavigation() {
+        guard let uid = configuredUID, let data = try? JSONEncoder().encode(BotsNavigationState(uid: uid, routes: wide ? wideRoute.map { [$0] } ?? [] : path)) else { return }
+        savedNavigation = String(decoding: data, as: UTF8.self)
+    }
+    private func restoreNavigation(uid: String) {
+        guard let data = savedNavigation.data(using: .utf8), let saved = try? JSONDecoder().decode(BotsNavigationState.self, from: data), saved.uid == uid else { return }
+        if wide { wideRoute = saved.routes.last } else { path = saved.routes }
     }
 }
 
 @MainActor
-private struct RemoteHostView: View {
+struct RemoteHostView: View {
     let manager: RemoteControlManager
     let hostID: String
     let select: (RemoteSessionSummaryFfi) -> Void
-    let openBot: (RemoteBotSummaryFfi) -> Void
     @Environment(\.scenePhase) private var scenePhase
     @State private var error: String?
     @State private var appBrowser = RemoteAppBrowserLifetime()
@@ -121,7 +148,7 @@ private struct RemoteHostView: View {
 
     var body: some View {
         List {
-            RemoteConnectionSection(state: manager.connection, retry: { Task { await manager.retry() } },
+            RemoteConnectionSection(state: manager.connection?.hostId == hostID ? manager.connection : nil, retry: { Task { await manager.retry() } },
                 repair: { Task { try? await manager.repair(hostID) } })
             if let error { Text(error).foregroundStyle(.red) }
             if manager.connection?.phase == .ready, manager.connection?.hostId == hostID {
@@ -129,22 +156,21 @@ private struct RemoteHostView: View {
                     browserGeneration: { appBrowser.generation },
                     presentBrowser: { url, generation in appBrowser.present(url, generation: generation) },
                     invalidateBrowserLaunch: { appBrowser.invalidatePending() })
-                // Nothing at all while the computer has none to show or does not know Bots.
-                if case let .bots(bots) = manager.botDirectory.bots(host: hostID), !bots.isEmpty {
-                    RemoteBotsSection(bots: bots, open: openBot)
-                }
                 if manager.sessions.isEmpty {
                     Section { Text("remote_no_sessions_help").foregroundStyle(.secondary) } header: { Text("remote_no_sessions") }
                 }
-                ForEach(manager.sessions, id: \.sessionId) { session in
-                    Button { select(session) } label: { RemoteSessionRow(session: session) }
-                        .accessibilityIdentifier("remote.session.\(session.sessionId)")
-                }
+                Section {
+                    ForEach(manager.sessions, id: \.sessionId) { session in
+                        Button { select(session) } label: { RemoteSessionRow(session: session) }
+                            .accessibilityIdentifier("remote.session.\(session.sessionId)")
+                    }
+                } header: { Text("remote_sessions_title") }
             } else if host?.online == false {
                 Text("remote_offline_help").foregroundStyle(.secondary)
             }
             if host?.paired == true {
                 Section {
+                    Button("remote_pair_again") { Task { try? await manager.repair(hostID) } }
                     Button("remote_forget", role: .destructive) { Task { await manager.forget(hostID) } }
                 } footer: { Text("remote_forget_help") }
             }
@@ -251,7 +277,7 @@ private struct RemoteAppsSection: View {
     }
 }
 
-private struct RemoteConnectionSection: View {
+struct RemoteConnectionSection: View {
     let state: RemoteConnectionStateFfi?
     let retry: () -> Void
     let repair: () -> Void
@@ -297,7 +323,7 @@ private struct RemoteConnectionSection: View {
 }
 
 @MainActor
-private struct RemoteSessionView: View {
+struct RemoteSessionView: View {
     let title: String
     let manager: RemoteControlManager
     @Environment(\.scenePhase) private var scenePhase

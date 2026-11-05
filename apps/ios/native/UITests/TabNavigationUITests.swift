@@ -13,6 +13,8 @@ enum ShellTab: String, CaseIterable {
 extension XCUIApplication {
     /// The system tab bar button for `tab`.
     func tabButton(_ tab: ShellTab) -> XCUIElement {
+        let rail = descendants(matching: .any)["tabs.rail"].firstMatch
+        if rail.exists { return rail.buttons[tab.identifier].firstMatch }
         let byIdentifier = tabBars.buttons[tab.identifier]
         return byIdentifier.exists ? byIdentifier : tabBars.buttons.element(boundBy: tab.index)
     }
@@ -20,6 +22,8 @@ extension XCUIApplication {
     /// Whether the system tab bar is on screen and usable (it is hidden on pushed screens, with the
     /// keyboard, under the open drawer and under overlays).
     var tabBarIsShown: Bool {
+        let rail = descendants(matching: .any)["tabs.rail"].firstMatch
+        if rail.exists && rail.buttons[ShellTab.chats.identifier].firstMatch.isHittable { return true }
         let bar = tabBars.firstMatch
         return bar.exists && bar.isHittable
     }
@@ -61,15 +65,32 @@ extension XCUIApplication {
 /// document: they are what these tests verify first on a device.
 final class TabNavigationUITests: XCTestCase {
     private var app: XCUIApplication!
-    private var isPhone: Bool { UIDevice.current.userInterfaceIdiom == .phone }
+    private var isPhone: Bool { app.windows.firstMatch.frame.width < 840 }
 
     override func setUpWithError() throws {
         continueAfterFailure = false
         app = XCUIApplication()
+        XCUIDevice.shared.orientation = UIDevice.current.userInterfaceIdiom == .pad ? .landscapeLeft : .portrait
         app.launchEnvironment["LINGXI_UI_TESTING"] = "1"
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)"]
         app.launch()
         XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 20), app.debugDescription)
+    }
+
+    func testTabletRotationPreservesSelectionAcrossTheRailBreakpoint() throws {
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad)
+        app.openSettingsTab()
+        let rail = app.descendants(matching: .any)["tabs.rail"].firstMatch
+        XCTAssertTrue(rail.waitForExistence(timeout: 5))
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .landscapeLeft }
+        let hidden = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: rail)
+        XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 10), .completed)
+        XCTAssertTrue(app.waitForTabBar(shown: true))
+        XCTAssertTrue(app.tabButton(.settings).isSelected)
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCTAssertTrue(rail.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.tabButton(.settings).isSelected)
     }
 
     func testFourTabsArePresentAndChatsIsSelectedAtLaunch() {
@@ -132,14 +153,14 @@ final class TabNavigationUITests: XCTestCase {
         XCTAssertTrue(app.buttons["drawer.terminal"].exists, "the terminal button stays")
     }
 
-    func testTheSettingsTabDoneReturnsToChats() {
+    func testTheSettingsRootHasNoDismissActionAndTabsReturnToChats() {
         app.openSettingsTab()
         XCTAssertTrue(app.descendants(matching: .any)["settings.root"].firstMatch.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(app.tabButton(.settings).isSelected)
 
-        let close = app.descendants(matching: .any)["settings.close"].firstMatch
-        XCTAssertTrue(close.waitForExistence(timeout: 5), app.debugDescription)
-        close.tap()
+        XCTAssertFalse(app.buttons["settings.close"].exists)
+        XCTAssertFalse(app.buttons["settings.done"].exists)
+        app.tabButton(.chats).tap()
         XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(app.tabButton(.chats).isSelected)
     }
@@ -210,6 +231,8 @@ final class TabNavigationUITests: XCTestCase {
     /// Best effort across iPhone and iPad keyboards: the iPad's dismiss key, else a downward drag on the transcript.
     private func dismissKeyboard() {
         guard app.keyboards.firstMatch.exists else { return }
+        let composerDismiss = app.buttons["composer.keyboard.dismiss"]
+        if composerDismiss.waitForExistence(timeout: 2), composerDismiss.isHittable { composerDismiss.tap(); return }
         let hide = app.keyboards.buttons.matching(
             NSPredicate(format: "label IN {'Hide keyboard', '隐藏键盘', '收起键盘'}")
         ).firstMatch

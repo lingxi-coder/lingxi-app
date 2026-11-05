@@ -10,8 +10,7 @@ enum AppTab: String, CaseIterable, Hashable, Sendable {
 extension EnvironmentValues {
     /// `true` at >= 840 pt (`TabLogic.wideBreakpoint`), measured once by `TabShell` on the window (D3).
     /// Panes inside the tabs (Bots / Teams / Settings two-pane) read this instead of measuring themselves.
-    /// The shell's own tab bar is the system `TabView`; on iPad it is `.sidebarAdaptable`, on iPhone the
-    /// standard bottom bar, so this value never switches the bar's form.
+    /// The shell draws a rail at this breakpoint and hides the native TabView bar.
     @Entry var isWideLayout = false
 }
 
@@ -67,4 +66,11 @@ final class TabCoordinator {
     func requestScrollToTop(_ tab: AppTab) {
         scrollToTopRequests[tab, default: 0] += 1
     }
+}
+
+/// Reads the shell's width decision inside its environment, including content supplied by the app root.
+struct ShellWideLayout<Content: View>: View {
+    @Environment(\.isWideLayout) private var wide
+    @ViewBuilder var content: (Bool) -> Content
+    var body: some View { content(wide) }
 }

@@ -18,7 +18,7 @@ struct TeamConversationDetailsSheet: View {
                     ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .navigationTitle("Conversation details") // TODO(strings): teams_conversation_details
+            .navigationTitle("teams_conversation_details")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

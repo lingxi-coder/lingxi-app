@@ -820,9 +820,8 @@ final class LingxiCodeUITests: XCTestCase {
         // Settings — a tab; "Done" returns to Chats.
         app.openSettingsTab()
         XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 8), app.debugDescription)
-        let settingsClose = app.descendants(matching: .any)["settings.close"].firstMatch
-        XCTAssertTrue(settingsClose.waitForExistence(timeout: 5), app.debugDescription)
-        settingsClose.tap()
+        XCTAssertFalse(app.buttons["settings.close"].exists)
+        app.tabButton(.chats).tap()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
 
         // Terminal — a push onto the detail column's stack, i.e. the one route
@@ -918,9 +917,8 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(settingsBack.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(settingsBack, timeout: 5), app.debugDescription)
         settingsBack.tap()
-        let settingsClose = app.descendants(matching: .any)["settings.close"].firstMatch
-        XCTAssertTrue(settingsClose.waitForExistence(timeout: 5), app.debugDescription)
-        settingsClose.tap()
+        XCTAssertFalse(app.buttons["settings.close"].exists)
+        app.tabButton(.chats).tap()
         openDrawer()
         // Scheduled tasks are an unconditional sidebar entry, so what this leg
         // can honestly pin is that the provider round-trip leaves the sidebar

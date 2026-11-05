@@ -437,7 +437,7 @@ struct RootView: View {
     private var rootStack: some View {
         ZStack {
             TabShell(navigation: navigation) {
-                chatsTab
+                ShellWideLayout { chatsTab(wide: $0) }
             } settings: {
                 settingsTab
             }
@@ -466,11 +466,18 @@ struct RootView: View {
         .environment(teamsWorkspace)
         #if canImport(harness_runtimeFFI)
         .environment(remoteManager)
+        .task(id: FirebaseAccount.shared.user?.uid) {
+            await remoteManager.configure(uid: FirebaseAccount.shared.user?.uid, watchHosts: false)
+        }
+        .onChange(of: remoteManager.waitingChats, initial: true) { _, count in botsBadge.count = count }
+        .onChange(of: navigation.tabs.selected) { _, selected in
+            remoteManager.setSelected(selected == .bots)
+        }
         #endif
     }
 
     /// The Chats tab: the conversation, its drawer and the pages pushed above it.
-    private var chatsTab: some View {
+    private func chatsTab(wide: Bool) -> some View {
         @Bindable var navigation = navigation
         return GeometryReader { geometry in
           ZStack {
@@ -518,7 +525,7 @@ struct RootView: View {
                         }
                     }
                         .toolbar {
-                            if (UIDevice.current.userInterfaceIdiom == .phone || geometry.size.width < 840) && navigation.path.isEmpty {
+                            if !wide && navigation.path.isEmpty {
                                 ToolbarItem(placement: .topBarLeading) {
                                     Button(action: navigation.showSidebar) {
                                         Label("drawer_open_sidebar_a11y", systemImage: UIDevice.current.userInterfaceIdiom == .phone
@@ -537,7 +544,7 @@ struct RootView: View {
                 }
             }
 
-            .environment(\.horizontalSizeClass, UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 840 ? .regular : .compact)
+            .environment(\.horizontalSizeClass, wide ? .regular : .compact)
           }
           .onAppear { workspaceWidth = geometry.size.width }
           .onChange(of: geometry.size.width) { _, width in
@@ -638,9 +645,9 @@ struct RootView: View {
                 if old == .settings, new != .settings { handleSettingsDismissed() }
             }
             .onChange(of: navigation.settingsPath) { old, new in
-                if old.contains(.voice), !new.contains(.voice) {
-                    Task { @MainActor in await VoicePreviewPlayback.shared.stop() }
-                }
+                let wasVoice = old.contains(.voice) || old.contains(.group(.voice))
+                let isVoice = new.contains(.voice) || new.contains(.group(.voice))
+                if wasVoice && !isVoice { handleSettingsDismissed() }
             }
             .onChange(of: source.model.sessionTransitionPending) { _, pending in
                 if !pending { retryDeferredAppActions(); resolvePendingMessageLink() }
@@ -813,8 +820,7 @@ struct RootView: View {
             }
     }
 
-    /// The Settings tab: today's settings host as a tab root. "Done" (`onClose`) leaves to the tab the
-    /// jump came from, else Chats.
+    /// Settings is a tab root; pushed pages return through its app-owned stack and jump origin.
     private var settingsTab: some View {
         SettingsHost(
             store: settingsStore,
@@ -842,6 +848,7 @@ struct RootView: View {
                       !source.model.agentSummaries.contains(where: { ["running", "working"].contains($0.status.lowercased()) })
                 else { throw NSError(domain: "LingXi.Settings", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "voice_session_busy_retry")]) }
                 try await rebuildSource(snapshot: providerRepository.makeLaunchSnapshot())
+                navigation.leaveSettings()
             },
             onRefreshMcp: { source.refreshMcpServers() },
             onRefreshSkills: {
@@ -867,7 +874,6 @@ struct RootView: View {
                     try await source.submitEngineCommand(.setTypescriptLspMode(mode: mode))
                 #endif
             },
-            onClose: { navigation.closeSettings() },
             navigation: navigation
         )
     }
@@ -1129,8 +1135,7 @@ struct RootView: View {
         defer { retryDeferredAppActions() }
         Task { @MainActor in
             await VoicePreviewPlayback.shared.stop()
-            guard !navigation.settingsOpen,
-                  navigation.path.isEmpty
+            guard navigation.path.isEmpty
             else { return }
             voiceInteraction.reloadConfigurationAndResumeIfPossible()
         }
@@ -2034,6 +2039,9 @@ struct RootView: View {
     }
 
     private func handleScenePhase(_ oldPhase: ScenePhase, _ phase: ScenePhase) {
+        #if canImport(harness_runtimeFFI)
+        if phase != .inactive { Task { await remoteManager.setForeground(phase == .active) } }
+        #endif
         conversationBackgroundAlerts.setScenePhase(phase)
         ProviderAccountRepository.shared.setForeground(phase == .active)
         switch phase {

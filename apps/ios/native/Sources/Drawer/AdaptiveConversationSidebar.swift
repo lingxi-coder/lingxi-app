@@ -4,14 +4,14 @@ import UIKit
 /// Native split navigation on iPad; a directly manipulated SwiftUI drawer on
 /// iPhone. Both layouts share the existing navigation model as their state source.
 struct AdaptiveConversationSidebar<Sidebar: View, Detail: View>: View {
-    @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.isWideLayout) private var wide
     @Bindable var navigation: AppNavigationModel
     let gesturesEnabled: Bool
     @ViewBuilder let sidebar: () -> Sidebar
     @ViewBuilder let detail: () -> Detail
 
     var body: some View {
-        if sizeClass == .regular {
+        if wide {
             NavigationSplitView(
                 columnVisibility: $navigation.columnVisibility,
                 preferredCompactColumn: $navigation.compactColumn,
@@ -77,7 +77,7 @@ private struct ConversationSideDrawer<Menu: View, Content: View>: View {
                     .allowsHitTesting(isOpen && drag.direction != .horizontal)
                     .disabled(drag.direction == .horizontal)
                     .accessibilityElement(children: .contain)
-                    .accessibilityAddTraits(.isModal)
+                    .accessibilityAddTraits(isOpen || drag.direction == .horizontal ? .isModal : [])
                     .accessibilityHidden(reveal == 0)
                     .accessibilityFocused($menuFocused)
                     .accessibilityAction(.escape) { setOpen(false) }

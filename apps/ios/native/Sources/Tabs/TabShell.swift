@@ -3,8 +3,8 @@ import UIKit
 
 /// The app shell (spec §2): Chats / Bots / Teams / Settings on the system `TabView`.
 ///
-/// - iPhone (portrait and landscape): the standard bottom tab bar. iPad: `.sidebarAdaptable`, i.e. the
-///   system tab bar at the top that the user can turn into a sidebar. There is no custom rail.
+/// - Below 840 pt: the native bottom tab bar. At 840 pt and above: a 76 pt rail, with the
+///   system bar hidden so it does not add a second sidebar to Chats.
 /// - Every tab keeps its own state (the system retains each tab's view). Chats is the first tab and is
 ///   composed first; it owns the live engine, so a restored selection only applies after it appeared.
 /// - The bar follows `TabLogic.tabBarVisible` (D2): visible on a tab's root only; hidden on pushed
@@ -65,13 +65,62 @@ struct TabShell<ChatsContent: View, SettingsContent: View>: View {
             .onChange(of: navigation.tabs.selected) { _, tab in storedTab = tab.rawValue }
     }
 
-    @ViewBuilder
     private var styledTabView: some View {
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            tabView.tabViewStyle(.sidebarAdaptable)
-        } else {
+        HStack(spacing: 0) {
+            if wide && !overlayOpen { rail }
             tabView
+                // Compact windows use the bottom system bar even on iPad; wide panes receive
+                // their own regular size class from the shell's single width decision.
+                .environment(\.horizontalSizeClass, .compact)
         }
+    }
+
+    private var rail: some View {
+        VStack(spacing: 12) {
+            ForEach(AppTab.allCases, id: \.self) { tab in
+                Button { navigation.userSelectedTab(tab) } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: symbol(for: tab))
+                            .symbolVariant(navigation.selectedTab == tab ? .fill : .none)
+                            .font(.title3)
+                        Text(label(for: tab)).font(.caption).multilineTextAlignment(.center)
+                        if let badge = badge(for: tab) { Text(badge).font(.caption2.bold()).foregroundStyle(.red) }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 56)
+                    .padding(.vertical, 4)
+                    .background(navigation.selectedTab == tab ? Color.accentColor.opacity(0.12) : .clear, in: .rect(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("tab." + tab.rawValue)
+                .accessibilityAddTraits(navigation.selectedTab == tab ? .isSelected : [])
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6).padding(.top, 12).frame(width: 76)
+        .background(.bar)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("tabs_navigation_a11y")
+        .accessibilityIdentifier("tabs.rail")
+    }
+    private func label(for tab: AppTab) -> LocalizedStringKey {
+        switch tab {
+        case .chats: "tabs_chats"
+        case .bots: "remote_bots"
+        case .teams: "teams_title"
+        case .settings: "settings_title_main"
+        }
+    }
+    private func symbol(for tab: AppTab) -> String {
+        switch tab {
+        case .chats: "bubble.left.and.bubble.right"
+        case .bots: "cpu"
+        case .teams: "person.2"
+        case .settings: "gearshape"
+        }
+    }
+    private func badge(for tab: AppTab) -> String? {
+        guard FirebaseAccount.shared.user != nil else { return nil }
+        return TabLogic.tabBadgeText(tab == .bots ? botsBadge.count : tab == .teams ? teamsWorkspace.totalUnread : 0)
     }
 
     private var selection: Binding<AppTab> {
@@ -125,7 +174,7 @@ struct TabShell<ChatsContent: View, SettingsContent: View>: View {
     }
 
     private func barVisibility(for tab: AppTab) -> Visibility {
-        TabLogic.tabBarVisible(
+        !wide && TabLogic.tabBarVisible(
             wide: wide,
             depth: navigation.depth(of: tab),
             keyboardVisible: keyboardVisible,
@@ -161,7 +210,7 @@ private struct PushedScreenTabBar: ViewModifier {
 
     func body(content: Content) -> some View {
         content.toolbar(
-            TabLogic.tabBarVisible(
+            !wide && TabLogic.tabBarVisible(
                 wide: wide, depth: 1, keyboardVisible: false, drawerOpen: false,
                 selectedTab: tab, overlayOpen: overlay
             ) ? .automatic : .hidden,

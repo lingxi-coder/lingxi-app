@@ -74,22 +74,38 @@ final class RemoteControlTests: XCTestCase {
     }
 
     @MainActor
-    func testManagerFilesBotReportsUnderTheirComputerAndDropsThoseOfAReplacedClient() {
+    func testBackgroundSuspensionPreservesTranscriptUntilAccountInvalidation() {
+        let remote = RemoteConversationSource(hostID: host, sessionID: session, uid: "A")
+        let projection = EngineConversationSource(config: EngineConfig(apiBase: "", model: "",
+            appSandboxRoot: "", projectCwd: nil, sessionMode: .code, visionDelegationEnabled: false), remoteProjection: true)
+        projection.appendRemotePrompt(turnID: 10, text: "keep this transcript", images: [], origin: "Desktop")
+        remote.model.messages = projection.model.messages
+        let ids = remote.model.messages.map(\.id)
+        remote.suspendConnection()
+        XCTAssertEqual(remote.phase, .offline)
+        XCTAssertEqual(remote.model.messages.map(\.id), ids)
+        remote.invalidate()
+        XCTAssertTrue(remote.model.messages.isEmpty)
+        XCTAssertEqual(remote.phase, .closed)
+    }
+
+    @MainActor
+    func testManagerDropsBotReportsWithoutAnActiveConnection() {
         let manager = RemoteControlManager()
         let bot = RemoteBotSummaryFfi(botId: "bot-1", name: "Scribe", description: "", status: .running,
             waitingThreads: 1, lastActivityAtMs: nil)
         let chats = RemoteBotThreadsStateFfi(threads: [], error: nil)
-        // A new manager is on its first client, whose reports carry generation 0.
+        // Reports with no current host, and reports from a replaced client, are both ignored.
         manager.receive(bots: .bots(bots: [bot]), hostID: host, generation: 0)
         manager.receive(botThreads: chats, hostID: host, botID: "bot-1", generation: 0)
-        XCTAssertEqual(manager.botDirectory.bots(host: host), .bots(bots: [bot]))
-        XCTAssertEqual(manager.botDirectory.chats(host: host, bot: "bot-1"), chats)
+        XCTAssertEqual(manager.botDirectory.bots(host: host), .unknown)
+        XCTAssertEqual(manager.botDirectory.chats(host: host, bot: "bot-1"), RemoteBotThreadsStateFfi(threads: nil, error: nil))
         XCTAssertEqual(manager.botDirectory.bots(host: "another-computer"), .unknown)
 
         manager.receive(bots: .unsupported, hostID: host, generation: 1)
         manager.receive(botThreads: RemoteBotThreadsStateFfi(threads: nil, error: nil), hostID: host, botID: "bot-1", generation: 1)
-        XCTAssertEqual(manager.botDirectory.bots(host: host), .bots(bots: [bot]))
-        XCTAssertEqual(manager.botDirectory.chats(host: host, bot: "bot-1"), chats)
+        XCTAssertEqual(manager.botDirectory.bots(host: host), .unknown)
+        XCTAssertEqual(manager.botDirectory.chats(host: host, bot: "bot-1"), RemoteBotThreadsStateFfi(threads: nil, error: nil))
     }
 
     @MainActor

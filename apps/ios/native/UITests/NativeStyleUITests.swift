@@ -91,7 +91,7 @@ final class NativeStyleUITests: XCTestCase {
             back.tap()
             previousQuery = page
         }
-        app.buttons["settings.close"].tap()
+        app.tabButton(.chats).tap()
         XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 8))
     }
 

@@ -69,6 +69,15 @@ final class RemoteConversationSource: ConversationSource {
 
     func stop() async { await manager.unfollow(self); phase = .offline }
 
+    /// A transient background disconnect preserves the transcript and the view's draft for reattachment.
+    func suspendConnection() {
+        guard valid else { return }
+        imageEpoch &+= 1
+        for task in imageTasks.values { task.cancel() }
+        imageTasks.removeAll()
+        phase = .offline
+    }
+
     func invalidate() {
         valid = false
         imageEpoch &+= 1

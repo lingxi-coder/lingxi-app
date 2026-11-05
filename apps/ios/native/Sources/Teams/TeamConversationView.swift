@@ -121,7 +121,7 @@ struct TeamConversationView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { if let onShowDetails { onShowDetails() } else { showDetails = true } } label: { Image(systemName: "info.circle") }
-                    .accessibilityLabel(Text("Conversation details")) // TODO(strings): teams_conversation_details
+                    .accessibilityLabel(Text("teams_conversation_details"))
                     .accessibilityIdentifier("teams.conversation.info")
             }
             if unread > 0 {

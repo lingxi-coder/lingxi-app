@@ -177,7 +177,8 @@ final class DesktopSettingsUITests: XCTestCase {
             let submit = app.buttons["account.submit"]
             XCTAssertTrue(submit.isEnabled)
             attach("Account-keyboard-\(theme)-\(largeText ? "large" : "standard")")
-            app.buttons["settings.done"].tap()
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+            app.tabButton(.chats).tap()
             XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 8))
             app.terminate()
         }
@@ -187,7 +188,7 @@ final class DesktopSettingsUITests: XCTestCase {
         try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad)
         for theme in ["light", "dark"] {
             let app = launch(theme: theme)
-            app.buttons["settings.close"].tap()
+            app.tabButton(.chats).tap()
             let transcript = app.scrollViews["conversation.message-list"]
             XCTAssertTrue(transcript.waitForExistence(timeout: 5), app.debugDescription)
             app.buttons["conversation.project-context"].tap()

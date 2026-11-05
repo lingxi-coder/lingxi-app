@@ -153,7 +153,7 @@ struct TeamsTab: View {
         let none = workspace.messaging?.cache?.conversations.isEmpty == true
         return TeamsStateView(
             systemImage: "bubble.left.and.bubble.right",
-            title: none ? "teams_no_conversations" : "Choose a conversation", // TODO(strings): teams_choose_conversation
+            title: none ? "teams_no_conversations" : "teams_choose_conversation",
             message: none ? "teams_no_conversations_hint" : nil)
     }
 

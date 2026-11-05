@@ -100,15 +100,11 @@ final class RemoteBotsTests: XCTestCase {
 
     // MARK: Where back goes
 
-    func testChatReturnsToItsBotWhenTheBotIsKnown() {
+    func testSessionBackReturnsDirectlyToTheBotsTree() {
         let title = "Untitled"
-        XCTAssertEqual(RemoteRoute.stack(host: host, session: nil, title: title, bot: nil), [.host(host)])
-        XCTAssertEqual(RemoteRoute.stack(host: host, session: "s1", title: title, bot: nil),
-            [.host(host), .session(host: host, session: "s1", title: title)])
-        XCTAssertEqual(RemoteRoute.stack(host: host, session: "s1", title: title, bot: bot.botId),
-            [.host(host), .bot(host: host, bot: bot.botId), .session(host: host, session: "s1", title: title)])
-        // A Bot with no chat to open is not pushed.
-        XCTAssertEqual(RemoteRoute.stack(host: host, session: nil, title: title, bot: bot.botId), [.host(host)])
+        XCTAssertEqual(RemoteRoute.stack(host: host, session: nil, title: title), [.host(host)])
+        XCTAssertEqual(RemoteRoute.stack(host: host, session: "s1", title: title),
+            [.session(host: host, session: "s1", title: title)])
     }
 
     // MARK: Starting a chat

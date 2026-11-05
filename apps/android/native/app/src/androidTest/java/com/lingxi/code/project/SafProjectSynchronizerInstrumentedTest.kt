@@ -2,6 +2,7 @@ package com.lingxi.code.project
 
 import android.net.Uri
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -128,12 +129,22 @@ class SafProjectSynchronizerInstrumentedTest {
 
     @Test
     fun onlyTheLocalSchedulerLedgerAndItsTransactionLockAreExcluded() {
-        assertTrue(isLocalSchedulerOwnerState(".lingxi/scheduled_owner_reservations.jsonl"))
-        assertTrue(isLocalSchedulerOwnerState(".lingxi/scheduled_tasks.lock"))
-        assertFalse(isLocalSchedulerOwnerState(".lingxi/scheduled_tasks.json"))
-        assertFalse(isLocalSchedulerOwnerState(".lingxi/session-cron/scheduled_tasks.lock"))
-        assertFalse(isLocalSchedulerOwnerState("project/.lingxi/scheduled_owner_reservations.jsonl"))
-        assertFalse(isLocalSchedulerOwnerState(".lingxi/notes.md"))
+        val configDir = MobileUserStorage.directories(InstrumentationRegistry.getInstrumentation().targetContext).configDirName
+        assertTrue(isLocalSchedulerOwnerState("$configDir/scheduled_owner_reservations.jsonl", configDir))
+        assertTrue(isLocalSchedulerOwnerState("$configDir/scheduled_tasks.lock", configDir))
+        assertFalse(isLocalSchedulerOwnerState("$configDir/scheduled_tasks.json", configDir))
+        assertFalse(isLocalSchedulerOwnerState("$configDir/session-cron/scheduled_tasks.lock", configDir))
+        assertFalse(isLocalSchedulerOwnerState("project/$configDir/scheduled_owner_reservations.jsonl", configDir))
+        assertFalse(isLocalSchedulerOwnerState("$configDir/notes.md", configDir))
+    }
+
+    @Test
+    fun schedulerOwnerExclusionsUseTheRuntimeBrandDirectory() {
+        assertTrue(isLocalSchedulerOwnerState(".atlas/scheduled_owner_reservations.jsonl", ".atlas"))
+        assertTrue(isLocalSchedulerOwnerState(".atlas/scheduled_tasks.lock", ".atlas"))
+        assertFalse(isLocalSchedulerOwnerState(".atlas/scheduled_tasks.json", ".atlas"))
+        assertFalse(isLocalSchedulerOwnerState("project/.atlas/scheduled_tasks.lock", ".atlas"))
+        assertFalse(isLocalSchedulerOwnerState(".orion/scheduled_tasks.lock", ".atlas"))
     }
 
     @Test

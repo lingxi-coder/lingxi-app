@@ -62,7 +62,7 @@ final class ProjectStore {
             projectsRoot: URL(fileURLWithPath: paths.projects, isDirectory: true),
             userHome: URL(fileURLWithPath: paths.home, isDirectory: true)
         )
-        let synchronizer = ProjectWorkspaceSynchronizer(repository: repository)
+        let synchronizer = ProjectWorkspaceSynchronizer(repository: repository, configDirName: paths.configDirName)
         self.init(repository: repository, synchronizer: synchronizer)
     }
 

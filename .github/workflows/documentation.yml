@@ -11,6 +11,8 @@ on:
       - 'apps/firebase/package*.json'
       - 'apps/electron/src/renderer/**'
       - 'apps/electron/src/shared/**'
+      - 'apps/electron/package*.json'
+      - 'apps/electron/vendor/local-app-agui/**'
       - 'docs/technical/**'
       - '.github/workflows/documentation.yml'
   push:
@@ -24,6 +26,8 @@ on:
       - 'apps/firebase/package*.json'
       - 'apps/electron/src/renderer/**'
       - 'apps/electron/src/shared/**'
+      - 'apps/electron/package*.json'
+      - 'apps/electron/vendor/local-app-agui/**'
       - 'docs/technical/**'
       - '.github/workflows/documentation.yml'
 jobs:
@@ -42,6 +46,7 @@ jobs:
             apps/web/package-lock.json
             packages/bridge-client/package-lock.json
             apps/firebase/package-lock.json
+            apps/electron/package-lock.json
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -53,6 +58,10 @@ jobs:
       - name: Install Firebase backend dependencies for Teams tests
         working-directory: apps/firebase
         run: npm ci
+      # Web typechecking follows shared Electron types into the pinned AG-UI adapter.
+      - name: Install Electron production dependencies for shared types
+        working-directory: apps/electron
+        run: npm ci --omit=dev --ignore-scripts
       - name: Check saved bilingual content and generated consumers
         run: npm run docs:check:content
       - run: npm run typecheck

@@ -345,7 +345,8 @@ function Fixture() {
           const selected = document.querySelector(`[data-nav-page="${id}"][aria-current="page"]`);
           const content = document.querySelector('.settings-content-inner');
           const body = content && [...content.children].some((child) =>
-            !child.matches('.settings-page-header, [data-testid="layer-context"], [data-testid="settings-snapshot-error"]'));
+            !child.matches('.settings-page-header, [data-testid="layer-context"], [data-testid="settings-snapshot-error"]')
+            && child.getClientRects().length > 0);
           if (selected && body) return;
           await new Promise<void>((resolve) => setTimeout(resolve, 20));
         }

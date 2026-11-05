@@ -174,6 +174,8 @@ export interface TeamsSnapshot {
   readonly creation: PendingCommands['creation'];
   /** Showing this device's saved data; sending waits for a connection. */
   readonly offline: boolean;
+  /** Waiting for the initial server snapshot; cached data alone is not an offline verdict. */
+  readonly messagingConnecting: boolean;
   /** `TeamMessaging.error`: the controller's own failure code. */
   readonly messagingError: string;
   readonly bots: TeamBotCard[];
@@ -572,7 +574,8 @@ export class TeamsWorkspace {
       inviteLink: this.link, messaging: model, conversations, selectedConversationId: selected,
       conversation: conversations.find(value => value.id === selected),
       messages: model?.state.threads[selected]?.messages ?? EMPTY_MESSAGES,
-      pending: this.outboxFor.value, creation: model?.state.creation, offline: model?.offline ?? false, messagingError: model?.error ?? '',
+      pending: this.outboxFor.value, creation: model?.state.creation, offline: model?.offline ?? false,
+      messagingConnecting: model?.connecting ?? !!this.selection, messagingError: model?.error ?? '',
       bots: this.bots, botsLoaded: this.botsLoaded, botsUnverified: this.botsUnverified,
       unreadByTeam, totalUnread: Object.values(unreadByTeam).reduce((sum, value) => sum + value, 0),
     };

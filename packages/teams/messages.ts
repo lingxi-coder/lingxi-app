@@ -106,6 +106,7 @@ export class TeamMessaging {
   state: MessageProjection;
   selected = '';
   offline = true;
+  connecting = true;
   error = '';
   private directoryCached = true;
   private messagesCached = true;
@@ -119,6 +120,7 @@ export class TeamMessaging {
   private retry?: ReturnType<typeof setTimeout>;
   private retryDelay = 1000;
   private stopWatch?: () => void;
+  private connectionTimeout?: ReturnType<typeof setTimeout>;
   constructor(private api: MessageApi, private storage: CommandStorage, readonly uid: string, readonly scope: MessageScope) {
     this.state = emptyProjection(uid, scope); this.key = projectionKey(uid, scope);
   }
@@ -138,11 +140,18 @@ export class TeamMessaging {
   }
   private watch(): void {
     this.stopWatch?.();
+    clearTimeout(this.connectionTimeout);
+    this.connecting = true;
+    // A cached SDK snapshot does not establish that the server is unreachable.
+    // Bound the initial confirmation period so an unavailable network still
+    // settles to offline even when the SDK only produces cached snapshots.
+    this.connectionTimeout = setTimeout(() => { this.connecting = false; this.emit(); }, 10000);
     this.stopWatch = this.api.watchMessages(this.scope, this.selected, snapshot => this.receive(snapshot));
   }
+  private finishConnecting(): void { clearTimeout(this.connectionTimeout); this.connectionTimeout = undefined; this.connecting = false; }
   private receive(snapshot: MessageSnapshot): void {
     if (this.closed || snapshot.uid !== this.uid || snapshot.teamId !== this.scope.teamId || snapshot.generation !== this.scope.generation) return;
-    if (snapshot.kind === 'error') { this.error = snapshot.error; this.offline = true; void this.deny(new Error(snapshot.error)); this.emit(); return; }
+    if (snapshot.kind === 'error') { this.finishConnecting(); this.error = snapshot.error; this.offline = true; void this.deny(new Error(snapshot.error)); this.emit(); return; }
     if (snapshot.kind === 'directory') {
       this.state = mergeDirectory(this.state, snapshot.conversations, true);
       const allowed = new Set(snapshot.conversations.map(value => value.id));
@@ -157,6 +166,7 @@ export class TeamMessaging {
       this.state = { ...this.state, conversations: this.state.conversations.map(value => value.id === snapshot.conversationId ? { ...value, lastReadSeq: Math.max(value.lastReadSeq, snapshot.lastReadSeq) } : value) };
     }
     this.offline = this.directoryCached || (!!this.selected && this.messagesCached);
+    if (!this.offline) this.finishConnecting();
     if (!snapshot.fromCache) { this.error = ''; this.retryDelay = 1000; void this.refresh(); }
     this.emit();
   }
@@ -176,10 +186,10 @@ export class TeamMessaging {
     if (stopCommands) this.stops.push(stopCommands);
     this.watch();
     try { await this.reload(); }
-    catch { this.error = 'STORAGE_FAILED'; this.emit(); return; }
+    catch { this.finishConnecting(); this.error = 'STORAGE_FAILED'; this.emit(); return; }
     if (!this.closed) void this.refresh();
   }
-  reconnect(): void { if (this.closed) return; this.error = ''; this.watch(); void this.refresh(); }
+  reconnect(): void { if (this.closed) return; this.error = ''; this.watch(); this.emit(); void this.refresh(); }
   select(id: string) { this.selected = id; this.messagesCached = true; this.offline = this.directoryCached || !!id; this.state = { ...this.state, threads: this.state.threads[id] ? { [id]: this.state.threads[id]! } : {} }; this.watch(); this.error = ''; this.emit(); void this.refresh(); }
   async create(kind: TeamConversation['kind'], title: string, participantUids: string[], botKeys: string[] = []) {
     if (this.closed) throw new Error('INVALID_SESSION');
@@ -369,10 +379,11 @@ export class TeamMessaging {
     } catch (error) {
       if (this.closed) return;
       this.again = false;
+      this.finishConnecting();
       this.offline = true; this.error = error instanceof Error ? error.message : 'SERVICE_UNAVAILABLE';
       await this.deny(error);
     }
     this.scheduleRetry(); this.emit();
   }
-  close() { this.closed = true; clearTimeout(this.retry); this.stopWatch?.(); this.stopWatch = undefined; this.stops.forEach(stop => stop()); this.stops = []; this.callbacks.clear(); }
+  close() { this.closed = true; this.finishConnecting(); clearTimeout(this.retry); this.stopWatch?.(); this.stopWatch = undefined; this.stops.forEach(stop => stop()); this.stops = []; this.callbacks.clear(); }
 }

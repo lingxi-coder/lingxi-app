@@ -40,17 +40,21 @@ export interface TeamSidebarProps {
   query?: string;
 }
 
-export interface ConnectionStatus { kind: 'ok' | 'offline' | 'error'; label: string; detail: string; action?: 'refresh' | 'reconnect' }
+export interface ConnectionStatus { kind: 'ok' | 'connecting' | 'offline' | 'error'; label: string; detail: string; action?: 'refresh' | 'reconnect' }
 /**
  * The line under the team switcher. A failed refetch of the team list is an error with a retry;
- * a controller that is offline says so and can reconnect; otherwise the team is connected. Nothing
- * while the first list is loading or when there is no team to be connected to.
+ * initial server confirmation is shown as connecting, then cached-only data is offline.
+ * Nothing while the first list is loading or when there is no team to connect to.
  */
-export function connectionStatus(snapshot: Pick<TeamsSnapshot, 'loading' | 'selectedTeamId' | 'loadError' | 'offline' | 'messagingError'>, zh: boolean): ConnectionStatus | undefined {
+export function connectionStatus(snapshot: Pick<TeamsSnapshot, 'loading' | 'selectedTeamId' | 'loadError' | 'offline' | 'messagingConnecting' | 'messagingError'>, zh: boolean): ConnectionStatus | undefined {
   const t = (en: string, cn: string) => zh ? cn : en;
   if (snapshot.loading) return undefined;
   if (snapshot.loadError) return { kind: 'error', label: t('Could not refresh teams', '无法刷新团队'), detail: teamsErrorText(snapshot.loadError, zh), action: 'refresh' };
   if (!snapshot.selectedTeamId) return undefined;
+  if (snapshot.messagingConnecting && !snapshot.messagingError) return {
+    kind: 'connecting', label: t('Connecting…', '正在连接…'),
+    detail: t('Waiting for the server to confirm the connection.', '正在等待服务器确认连接。'),
+  };
   if (snapshot.offline) {
     return {
       kind: 'offline', label: t('Offline · saved messages', '离线 · 本机缓存'), action: 'reconnect',

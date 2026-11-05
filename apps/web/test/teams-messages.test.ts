@@ -33,6 +33,31 @@ test('SDK deltas preserve unchanged rows and apply old edits, recalls, and remov
   assert.equal(applyMessageSnapshot(removed, { ...initial, messages: [] }).threads[conversation.id]!.messages.length, 0);
 });
 
+test('initial cache waits for server confirmation; errors and timeout still settle offline', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  let receive!: (snapshot: MessageSnapshot) => void;
+  const api: MessageApi = { messages: async () => { throw new Error('Unexpected command'); }, onMessagesChanged: () => () => {},
+    watchMessages(_scope, _id, next) { receive = next; return () => {}; } };
+  const model = new TeamMessaging(api, memoryStorage(), uid, scope); context.after(() => model.close());
+  await model.start();
+  const cached: MessageSnapshot = { uid, ...scope, kind: 'directory', fromCache: true, conversations: [conversation] };
+  receive(cached);
+  assert.equal(model.connecting, true); assert.equal(model.offline, true);
+  receive({ ...cached, uid: 'another-user', fromCache: false });
+  assert.equal(model.connecting, true, 'another account cannot confirm this connection');
+  receive({ ...cached, fromCache: false });
+  assert.equal(model.connecting, false); assert.equal(model.offline, false);
+  model.reconnect(); receive(cached);
+  assert.equal(model.connecting, true);
+  context.mock.timers.tick(10000);
+  assert.equal(model.connecting, false); assert.equal(model.offline, true);
+  model.reconnect();
+  receive({ uid, ...scope, kind: 'error', fromCache: false, error: 'SERVICE_UNAVAILABLE' });
+  assert.equal(model.connecting, false); assert.equal(model.offline, true);
+  model.reconnect(); model.close(); context.mock.timers.tick(10000);
+  assert.equal(model.connecting, false, 'closing cancels the pending connection period');
+});
+
 test('SDK message snapshots update views without any HTTP reads or durable history writes', async context => {
   const storage = memoryStorage(), source = fixture();
   let timers = 0;

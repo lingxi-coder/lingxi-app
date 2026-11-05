@@ -169,11 +169,14 @@ test('drawer width and rights', () => {
 });
 
 test('connectionStatus: errors first, then offline, then connected; nothing while loading or without a team', () => {
-  const base = { loading: false, selectedTeamId: 'team-aaaa', loadError: '', offline: false, messagingError: '' };
+  const base = { loading: false, selectedTeamId: 'team-aaaa', loadError: '', offline: false, messagingConnecting: false, messagingError: '' };
   assert.equal(connectionStatus({ ...base, loading: true, loadError: 'X' }, false), undefined);
   assert.equal(connectionStatus({ ...base, selectedTeamId: '' }, false), undefined);
   assert.equal(connectionStatus({ ...base, selectedTeamId: '', loadError: 'SERVICE_UNAVAILABLE' }, false)?.action, 'refresh', 'a failed team list can be retried even with no team');
   assert.deepEqual(connectionStatus(base, false), { kind: 'ok', label: 'Connected', detail: 'Recently loaded messages are available offline.' });
+  assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true }, false)?.kind, 'connecting');
+  assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true }, true)?.label, '正在连接…');
+  assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true, messagingError: 'SERVICE_UNAVAILABLE' }, false)?.kind, 'offline');
   const offline = connectionStatus({ ...base, offline: true }, false)!;
   assert.equal(offline.kind, 'offline'); assert.equal(offline.action, 'reconnect'); assert.match(offline.detail, /Reconnect to confirm access/);
   assert.match(connectionStatus({ ...base, offline: true, messagingError: 'STORAGE_FAILED' }, false)!.detail, /storage/i, 'the controller\'s own failure is explained');

@@ -81,28 +81,32 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
     for (const layout of result.thinkingLayouts) {
       assert.deepEqual(layout, result.thinkingLayouts[0], 'thinking visibility must preserve tail height and scroll position');
     }
-    for (const layout of result.activityLayouts) {
-      assert.deepEqual(layout, result.activityLayouts[0], 'tool results, grouped tools and streaming reasoning must preserve activity layout');
-      assert.equal(layout.toolHeight, 28, 'ordinary tools retain their compact row height');
+    for (const [index, layout] of result.activityLayouts.entries()) {
+      if (index !== 4) assert.deepEqual(layout, result.activityLayouts[0], 'tool results, completed groups and streaming reasoning preserve activity layout');
+      assert.equal(layout.toolHeight, index === 4 ? 62 : 28, 'the active group shows its running tool; other activity remains compact');
       assert.equal(layout.slotHeight, 40, 'the persistent thinking slot retains its reserved height');
       assert.equal(layout.toolGap, 12, 'the message wrapper must retain compact activity spacing');
       assert.equal(layout.thinkingGap, 12, 'hidden and visible thinking slots have the same activity spacing');
     }
+    assert.deepEqual(result.runningGroup, { expanded: 'false', activeCalls: 1 }, 'the closed group exposes its one active tool');
+    const activityBase = result.activityLayouts[0], activeGroup = result.activityLayouts[4];
+    assert.equal(activeGroup.scrollHeight - activityBase.scrollHeight, activeGroup.toolHeight - activityBase.toolHeight, 'only the running tool expands the transcript');
+    assert.ok(Math.abs((activeGroup.scrollTop - activityBase.scrollTop) - (activeGroup.scrollHeight - activityBase.scrollHeight)) <= 1, 'the tail follows the expanded running group');
 
     for (const offset of [0, 4]) {
       const baseline = result.deliveryLayouts[offset];
       for (const layout of result.deliveryLayouts.slice(offset, offset + 4)) assert.deepEqual(layout, baseline, 'delivery changes must not resize or move transcript messages');
     }
 
-    // Hover-revealed clock + copy button under a user message: the row reserves
-    // its box, so revealing it may not resize the message.
+    // Hover-revealed clock + copy button in the inter-message gap must not
+    // resize the message when it appears.
     assert.equal(result.messageAway.opacity, '0', 'the affordance starts hidden');
     assert.equal(result.messageHover.opacity, '1', 'hovering the message reveals it');
     assert.notEqual(result.messageAway.clock, '', 'the clock renders when the prompt has a send time');
-    assert.ok(result.messageAway.actions > 0, 'the hidden affordance still occupies its space');
+    assert.ok(result.messageAway.actions > 0, 'the hidden affordance retains its own box');
     assert.equal(result.messageHover.row, result.messageAway.row, 'revealing must not resize the message row');
     assert.equal(result.messageHover.bubble, result.messageAway.bubble, 'revealing must not resize the bubble');
-    assert.equal(result.messageHover.actions, result.messageAway.actions, 'the reserved box height is stable');
+    assert.equal(result.messageHover.actions, result.messageAway.actions, 'the affordance box height is stable');
 
     // The revealed button, clicked for real. Two prompts are on screen and the
     // click lands on the second, so this pins ROW SELECTION — not merely that

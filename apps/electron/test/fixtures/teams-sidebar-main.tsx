@@ -1,4 +1,5 @@
 import { DESKTOP_BRIDGE_GLOBAL } from '../../src/shared/desktopBridge';
+import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { createRoot } from 'react-dom/client';
 import { App } from '../../src/renderer/App';
 import { fixtureAccountSnapshot } from './provider-accounts-mock';
@@ -103,7 +104,7 @@ const settings: any = {
   pinnedSessions: [], archivedSessions: [], theme: params.get('theme') === 'light' ? 'light' : 'dark',
   ...(saved || drawerWidth ? { sidebar: { organization: 'project', chatSort: 'updated', manualSessionOrder: {}, mode: saved || 'home', ...(drawerWidth ? { teamsDrawerWidth: drawerWidth } : {}) } } : {}),
 };
-let activeSession = { projectPath, sessionId: 'project-session' };
+let activeSession: { projectPath: string; sessionId: string; mode: 'code'; projectId: string | null } = { projectPath, sessionId: 'project-session', mode: 'code', projectId: projectPath };
 const botRuntimes: Array<{ sessionId: string; projectPath: string; botId: string }> = [];
 let revision = 1;
 let fresh = 0;
@@ -132,6 +133,7 @@ let links = 0;
   command: async () => {}, listProjectSessions: async () => ({ projectPath, sessions: [] }),
   bootstrap: async () => ({
     revision: ++revision, settings: structuredClone(settings), activeSession, workspace: { path: projectPath, trusted: true }, connection: { status: 'connected' },
+    conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects: [projectPath], selectedProject: projectPath, activeSession: activeSession.projectId === null ? undefined : activeSession }),
     runtimes: [runtime({ projectPath, sessionId: 'project-session' }), ...botRuntimes.map((entry) => runtime(entry, entry.botId))],
     projectCatalogs: { [projectPath]: { sessions: [] } }, diagnostics: [], providerAccountSnapshot: fixtureAccountSnapshot(['openai']),
   }),
@@ -158,7 +160,7 @@ let links = 0;
     listSessions: async (botId: string) => ({ sessions: structuredClone(chats[botId] ?? []) }),
     openSession: async (botId: string, sessionId?: string) => {
       const id = sessionId ?? `fresh-${++fresh}`;
-      activeSession = { projectPath: botPath(botId), sessionId: id };
+      activeSession = { projectPath: botPath(botId), sessionId: id, mode: 'code', projectId: null };
       settings.activeSession = activeSession;
       if (!botRuntimes.some((entry) => entry.sessionId === id)) botRuntimes.push({ sessionId: id, projectPath: botPath(botId), botId });
       return { botId, projectPath: botPath(botId), sessionId: id };

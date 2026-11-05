@@ -22,7 +22,13 @@ function Fixture() {
     bootstrap: {
       settings: { projects: ['/fixture'], pinnedSessions: [{ projectPath: '/pinned', sessionId: 'pinned', title: 'pinned' }], activeProject: '/fixture', sidebar },
       workspace: { path: '/fixture' },
-      conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects: ['/fixture'], selectedProject: '/fixture' }),
+      conversationSpaces: fixtureConversationSpaces({
+        mode: 'code', projects: ['/fixture'], selectedProject: '/fixture',
+        sessions: [
+          ...catalogSessions.map(({ uuid }) => ({ projectPath: '/fixture', sessionId: uuid })),
+          { projectPath: '/pinned', sessionId: 'pinned', projectId: null },
+        ],
+      }),
       projectCatalogs: { '/fixture': { sessions: catalogSessions }, '/pinned': { sessions: [{ uuid: 'pinned', title: 'pinned', mode: 'code' }] } },
     },
     sessionRuntimeStatus: () => ({ connection: { status: 'connected' } }), listProjectSessions: async () => ({ sessions: [] }),

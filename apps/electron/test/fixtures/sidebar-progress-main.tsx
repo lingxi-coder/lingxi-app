@@ -4,7 +4,10 @@ import { BetaSidebar } from '../../src/renderer/components/BetaDesktop';
 import type { UseBridge } from '../../src/renderer/bridge/bridgeTypes.js';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
+import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
 import '../../src/renderer/global.css';
+
+setLanguagePreference('en');
 
 // UI-only fixture: never connects to an engine or a real session.
 const sessions = [
@@ -20,7 +23,10 @@ Object.assign(window, { sidebarProgressFixture: { finishOpen: () => finishOpen?.
 const bridge = {
   bootstrap: {
     settings: { projects: ['/fixture'], pinnedSessions: [{ projectPath: '/fixture', sessionId: 'pinned', title: 'Pinned agent' }], activeProject: '/fixture' },
-    conversationSpaces: fixtureConversationSpaces({ mode: 'code', projects: ['/fixture'], selectedProject: '/fixture' }),
+    conversationSpaces: fixtureConversationSpaces({
+      mode: 'code', projects: ['/fixture'], selectedProject: '/fixture',
+      sessions: sessions.map(({ uuid }) => ({ projectPath: '/fixture', sessionId: uuid })),
+    }),
     workspace: { path: '/fixture' }, projectCatalogs: { '/fixture': { sessions } },
   },
   sessionRuntimeStatus: (id: string) => ({

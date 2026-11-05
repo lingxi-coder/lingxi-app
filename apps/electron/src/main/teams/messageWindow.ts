@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { BrowserWindow, MessageChannelMain, type Event, type MessagePortMain } from 'electron';
+import { app, BrowserWindow, MessageChannelMain, type Event, type MessagePortMain } from 'electron';
 import type { MessageScope, MessageSnapshot } from '../../../../../packages/teams/messages.js';
 import type { TeamsFirestoreOptions } from './firestore.js';
 
@@ -12,8 +12,10 @@ export interface TeamsMessageSession {
 /** A UID-private, bundled data page owns the SDK cache/session; UI pages receive DTOs only. */
 export async function openTeamsMessageSession(options: Omit<TeamsFirestoreOptions, 'customToken'> & { customToken?: string }, onGone: () => void = () => {}): Promise<TeamsMessageSession> {
   const identity = createHash('sha256').update(JSON.stringify([options.config.projectId, options.uid])).digest('hex');
+  // This module is emitted into out/main/chunks; assets belong to the app root.
+  const outputRoot = join(app.getAppPath(), 'out');
   const window = new BrowserWindow({ show: false, webPreferences: {
-    preload: join(__dirname, '../preload/teamsData.cjs'), partition: `persist:teams-data-${identity}`,
+    preload: join(outputRoot, 'preload/teamsData.cjs'), partition: `persist:teams-data-${identity}`,
     sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false,
   } });
   const contents = window.webContents;
@@ -59,7 +61,7 @@ export async function openTeamsMessageSession(options: Omit<TeamsFirestoreOption
   try {
     const dev = process.env.ELECTRON_RENDERER_URL;
     if (dev) await window.loadURL(new URL('teams-data.html', dev).toString());
-    else await window.loadFile(join(__dirname, '../renderer/teams-data.html'));
+    else await window.loadFile(join(outputRoot, 'renderer/teams-data.html'));
     if (closed || window.isDestroyed()) throw new Error('MESSAGE_LISTENER_FAILED');
     const channel = new MessageChannelMain(); port = channel.port1;
     const initialized = new Promise<void>((resolve, reject) => { ready = resolve; rejectReady = reject; });

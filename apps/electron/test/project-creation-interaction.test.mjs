@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'project-creation-electron.mjs');
 
-test('Chat rejects Local App development and recovery without switching; Code project creation preserves its draft flow', async () => {
+test('Chat rejects Local App recovery and starts creation in Code; project creation preserves its draft flow', async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-project-creation-vite-'));
   const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-project-creation-electron-'));
   const vite = await createServer({

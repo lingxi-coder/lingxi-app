@@ -207,7 +207,8 @@ fn read_cli_mode_settings_at(
     // 2.1.257 `C("bypassPermissions")`: sticky true if ANY trusted tier
     // declared bypass. Project/local cannot grant it.
     let mut bypass_default_from_trusted = false;
-    // MODE-BG-DISCLAIMER-02: sticky across tiers (any tier accepting wins — `Pq()`).
+    // 2.1.318 `Ugt`: only persistent user/managed settings grant background
+    // bypass consent. Invocation-only --settings does not count.
     let mut skip_dangerous_mode_permission_prompt = false;
     let home = incl_user
         .then(|| crate::run::lingxi_home_dir().join("settings.json"))
@@ -249,13 +250,8 @@ fn read_cli_mode_settings_at(
             if permission::auto_mode_disabled_from_settings_json(&raw) {
                 auto_mode_disabled = true;
             }
-            // `Pq()` reads `skipDangerousModePermissionPrompt` from
-            // {userSettings, localSettings, flagSettings, policySettings} —
-            // DELIBERATELY EXCLUDING projectSettings, so a repo-controllable
-            // `.lingxi/settings.json` cannot suppress the bg-bypass disclaimer
-            // downgrade (same repo-trust threat MODE-SETTINGS-AUTO-TRUST-01
-            // guards). Only the user tier is loaded here; local/flag/policy are
-            // not read at this surface (their omission is over-ask-safe).
+            // `Ugt()` reads only userSettings and policySettings. This loop
+            // loads user/project files, so only its user row can grant consent.
             if source
                 != permission::PermissionRuleSource::Settings(
                     lingxi_core::types::SettingsScope::Project,
@@ -292,9 +288,6 @@ fn read_cli_mode_settings_at(
         if permission::auto_mode_disabled_from_settings_json(&raw) {
             auto_mode_disabled = true;
         }
-        if permission::loader::skip_dangerous_mode_permission_prompt_from_settings_json(&raw) {
-            skip_dangerous_mode_permission_prompt = true;
-        }
     }
     // MODE-BG-DISCLAIMER-02: bg-session downgrade inputs. `is_bg_session` is
     // `LINGXI_SESSION_KIND == "bg"` (claude-code `CLAUDE_CODE_SESSION_KIND`);
@@ -324,6 +317,18 @@ fn read_cli_mode_settings_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invocation_settings_do_not_grant_persistent_background_bypass_consent() {
+        let cwd = tempfile::tempdir().unwrap();
+        let argv = Argv {
+            setting_sources: Some("project".into()),
+            settings: Some(r#"{"skipDangerousModePermissionPrompt":true}"#.into()),
+            ..Argv::default()
+        };
+        let settings = read_cli_mode_settings_at(&argv, cwd.path());
+        assert!(!settings.skip_dangerous_mode_permission_prompt);
+    }
 
     #[test]
     fn permission_mode_uses_selected_workspace_and_respects_explicit_override() {

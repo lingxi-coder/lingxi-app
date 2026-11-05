@@ -1,0 +1,120 @@
+{
+  "version": "2.1.318",
+  "sha256": "677a2ea7bf576cedd20e191d973914ed8a41796f53a63b1923381ddc4d5b5e7d",
+  "ranges": {
+    "windows": [
+      279075097,
+      279075126
+    ],
+    "within": [
+      279075126,
+      279075200
+    ],
+    "answerGuard": [
+      296713746,
+      296714577
+    ],
+    "drawnAt": [
+      279075357,
+      279075891
+    ]
+  },
+  "scope": "Visible permission answer callback with an active unchanged request, no scroll clipping or user-invoked bypass; first-paint/composer-release timing, including Native Vk subscription-frame replay. Selector refusal extension and terminal presentation are separately covered by Rust tests.",
+  "cases": [
+    {
+      "name": "before first question grace",
+      "shown_at": 0,
+      "now": 149,
+      "allowed": false
+    },
+    {
+      "name": "first question boundary",
+      "shown_at": 0,
+      "now": 150,
+      "allowed": true
+    },
+    {
+      "name": "after submit",
+      "shown_at": 10,
+      "submitted_at": 0,
+      "now": 599,
+      "allowed": false
+    },
+    {
+      "name": "submit boundary",
+      "shown_at": 10,
+      "submitted_at": 0,
+      "now": 600,
+      "allowed": true
+    },
+    {
+      "name": "escape before short boundary",
+      "shown_at": 0,
+      "submitted_at": 0,
+      "now": 149,
+      "escape": true,
+      "allowed": false
+    },
+    {
+      "name": "escape short boundary",
+      "shown_at": 0,
+      "submitted_at": 0,
+      "now": 150,
+      "escape": true,
+      "allowed": true
+    },
+    {
+      "name": "slow prompt still needs a new grace",
+      "shown_at": 30000,
+      "now": 30149,
+      "allowed": false
+    },
+    {
+      "name": "slow prompt boundary",
+      "shown_at": 30000,
+      "now": 30150,
+      "allowed": true
+    },
+    {
+      "name": "slow release frame keeps submit grace",
+      "submitted_at": 0,
+      "submission_drawn_at": 1000,
+      "shown_at": 1000,
+      "now": 1150,
+      "allowed": false
+    },
+    {
+      "name": "slow release frame before boundary",
+      "submitted_at": 0,
+      "submission_drawn_at": 1000,
+      "shown_at": 1000,
+      "now": 1599,
+      "allowed": false
+    },
+    {
+      "name": "slow release frame boundary",
+      "submitted_at": 0,
+      "submission_drawn_at": 1000,
+      "shown_at": 1000,
+      "now": 1600,
+      "allowed": true
+    },
+    {
+      "name": "slow release escape boundary",
+      "submitted_at": 0,
+      "submission_drawn_at": 1000,
+      "shown_at": 1000,
+      "now": 1150,
+      "escape": true,
+      "allowed": true
+    },
+    {
+      "name": "earlier release frame is not restarted by question",
+      "submitted_at": 0,
+      "submission_drawn_at": 10,
+      "shown_at": 1000,
+      "now": 1150,
+      "allowed": true
+    }
+  ]
+}

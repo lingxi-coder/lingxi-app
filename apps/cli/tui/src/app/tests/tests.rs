@@ -759,6 +759,9 @@ fn esc_routes_to_active_view_before_the_interrupt_policy() {
     };
     let (exchange, resp_rx) = tool_exchange();
     app.open_permission(exchange);
+    app.chat_widget
+        .bottom_pane()
+        .settle_permission_input_for_test();
     // Layer 1 — the active view owns Esc: the permission resolves (deny);
     // the running turn is untouched.
     assert!(matches!(
@@ -828,6 +831,9 @@ fn ctrl_c_cancels_turn_and_dismisses_active_view() {
     };
     let (exchange, resp_rx) = tool_exchange();
     app.open_permission(exchange);
+    app.chat_widget
+        .bottom_pane()
+        .settle_permission_input_for_test();
     // Cancellation is global to the parent turn: a modal permission view
     // cannot swallow Ctrl-C and survive as a stale approval surface.
     assert!(matches!(
@@ -873,6 +879,9 @@ fn permission_prompt_owns_keyboard_and_enter_allows_once() {
     app.apply_turn_event(TurnEvent::TurnStarted);
     let (exchange, resp_rx) = tool_exchange();
     app.open_permission(exchange);
+    app.chat_widget
+        .bottom_pane()
+        .settle_permission_input_for_test();
     assert!(app.chat_widget.has_open_permission());
 
     // While a prompt is open, normal keys are swallowed by the dialog and
@@ -896,6 +905,9 @@ fn permission_prompt_esc_denies() {
     app.apply_turn_event(TurnEvent::TurnStarted);
     let (exchange, resp_rx) = tool_exchange();
     app.open_permission(exchange);
+    app.chat_widget
+        .bottom_pane()
+        .settle_permission_input_for_test();
     let outcome = app.on_key(press(KeyCode::Esc));
     assert!(matches!(outcome, ChatOutcome::Continue));
     assert!(!app.chat_widget.has_open_permission());
@@ -908,6 +920,9 @@ fn permission_prompt_number_three_denies() {
     app.apply_turn_event(TurnEvent::TurnStarted);
     let (exchange, resp_rx) = tool_exchange();
     app.open_permission(exchange);
+    app.chat_widget
+        .bottom_pane()
+        .settle_permission_input_for_test();
     // '3' shortcut = third option = Deny.
     app.on_key(press(KeyCode::Char('3')));
     assert!(!app.chat_widget.has_open_permission());
@@ -1252,6 +1267,9 @@ fn permission_stacks_over_picker_and_returns_keys_to_it() {
     // top and owns the keyboard.
     let (exchange, resp_rx) = tool_exchange();
     app.open_permission(exchange);
+    app.chat_widget
+        .bottom_pane()
+        .settle_permission_input_for_test();
     assert_eq!(app.chat_widget.bottom_pane().view_stack().len(), 2);
     let outcome = app.on_key(press(KeyCode::Enter)); // resolves permission
     assert!(matches!(outcome, ChatOutcome::Continue));
@@ -1380,6 +1398,9 @@ fn permission_prompt_second_option_allows_always() {
     app.apply_turn_event(TurnEvent::TurnStarted);
     let (exchange, resp_rx) = tool_exchange();
     app.open_permission(exchange);
+    app.chat_widget
+        .bottom_pane()
+        .settle_permission_input_for_test();
     app.on_key(press(KeyCode::Down)); // highlight "Yes, allow always"
     let outcome = app.on_key(press(KeyCode::Enter));
     assert!(matches!(outcome, ChatOutcome::Continue));
@@ -1396,6 +1417,9 @@ fn permission_resolution_is_single_shot_and_releases_keyboard() {
     app.apply_turn_event(TurnEvent::TurnStarted);
     let (exchange, resp_rx) = tool_exchange();
     app.open_permission(exchange);
+    app.chat_widget
+        .bottom_pane()
+        .settle_permission_input_for_test();
     // '1' shortcut resolves with the first option (AllowOnce)…
     app.on_key(press(KeyCode::Char('1')));
     assert!(!app.chat_widget.has_open_permission());
@@ -1766,6 +1790,9 @@ fn layout_permission_dialog_overlays_viewport() {
     app.apply_turn_event(TurnEvent::TurnStarted);
     let (exchange, _resp_rx) = tool_exchange();
     app.open_permission(exchange);
+    app.chat_widget
+        .bottom_pane()
+        .settle_permission_input_for_test();
     assert_eq!(app.viewport_height(80), 9, "permission viewport height");
     let terminal = draw_viewport(&mut app);
     let all = buffer_rows(&terminal).join("\n");
@@ -2029,6 +2056,9 @@ fn layout_40x12_narrow_permission_modal_clips_gracefully() {
     app.apply_turn_event(TurnEvent::TurnStarted);
     let (exchange, _resp_rx) = tool_exchange();
     app.open_permission(exchange);
+    app.chat_widget
+        .bottom_pane()
+        .settle_permission_input_for_test();
     assert_eq!(app.viewport_height(40), 9, "permission viewport height");
     let terminal = draw_viewport_at(&mut app, 40, 12);
     let all = buffer_rows(&terminal).join("\n");
@@ -2102,6 +2132,9 @@ fn layout_minimum_height_terminals_clip_gracefully_without_panic() {
         let mut app = test_app(Vec::new());
         let (exchange, _resp_rx) = tool_exchange();
         app.open_permission(exchange);
+        app.chat_widget
+            .bottom_pane()
+            .settle_permission_input_for_test();
         assert_clips_gracefully("permission", app, height);
 
         let mut app = test_app(Vec::new());

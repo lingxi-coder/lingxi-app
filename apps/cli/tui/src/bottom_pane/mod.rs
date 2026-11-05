@@ -32,6 +32,7 @@ pub mod input_status;
 pub mod model_picker_view;
 mod paste_burst;
 pub mod pending_input_preview;
+mod permission_input_guard;
 pub mod permission_mode_indicator;
 pub mod permission_view;
 pub mod permissions_editor_view;
@@ -292,6 +293,9 @@ pub struct BottomPane {
     /// second press within [`CTRL_C_EXIT_WINDOW`] surfaces
     /// [`BottomPaneOutcome::Quit`].
     ctrl_c_at: Option<Instant>,
+    /// Composer release stamp for the permission dialog's 600ms input guard.
+    last_submission_at: std::cell::Cell<Option<Instant>>,
+    submission_needs_frame: std::cell::Cell<bool>,
     /// First idle `Esc` on an empty prompt; the second within
     /// [`ESC_REWIND_WINDOW`] opens `/rewind`.
     esc_rewind_at: Option<Instant>,
@@ -413,6 +417,8 @@ impl BottomPane {
             vim_insert_mode_remaps: BTreeMap::new(),
             vim_insert_remap_pending: None,
             ctrl_c_at: None,
+            last_submission_at: std::cell::Cell::new(None),
+            submission_needs_frame: std::cell::Cell::new(false),
             esc_rewind_at: None,
             left_arrow: tui_core::left_arrow_gesture::LeftArrowState::default(),
             left_arrow_opens_agents: true,
@@ -687,6 +693,10 @@ impl BottomPane {
         }
         let had_text = !self.composer.is_empty();
         let outcome = self.on_editor_key(key);
+        if matches!(outcome, BottomPaneOutcome::Submitted(_)) {
+            self.last_submission_at.set(Some(Instant::now()));
+            self.submission_needs_frame.set(true);
+        }
         if had_text && self.composer.is_empty() {
             let now_ms = self.left_arrow_epoch.elapsed().as_millis() as u64 + 1;
             self.left_arrow.note_edited_to_empty(now_ms);
@@ -975,8 +985,38 @@ impl BottomPane {
         if exchange.resp_tx.is_closed() {
             return;
         }
-        self.view_stack
-            .push(Box::new(PermissionView::new(exchange)));
+        self.view_stack.push(Box::new(
+            PermissionView::new(exchange).with_submission_at(self.last_submission_at.get()),
+        ));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settle_permission_input_for_test(&self) {
+        for view in &self.view_stack.views {
+            if let Some(permission) = view.as_any().downcast_ref::<PermissionView>() {
+                permission.settle_input_for_test();
+            }
+        }
+    }
+
+    pub(crate) fn note_permission_frame_presented(&self, now: Instant) {
+        // Native Vk anchors the release to its first completed frame, even if
+        // the permission question arrives in a later frame.
+        if self.submission_needs_frame.replace(false) {
+            self.last_submission_at.set(Some(now));
+            for view in &self.view_stack.views {
+                if let Some(permission) = view.as_any().downcast_ref::<PermissionView>() {
+                    permission.note_submission_frame_presented(now);
+                }
+            }
+        }
+        if let Some(permission) = self
+            .view_stack
+            .active()
+            .and_then(|view| view.as_any().downcast_ref::<PermissionView>())
+        {
+            permission.note_frame_presented(now);
+        }
     }
 
     /// Open the `/cd` confirm dialog for the (already-resolved, absolute)
@@ -5320,11 +5360,54 @@ mod tests {
     fn a_dead_permission_exchange_is_not_stacked() {
         let mut p = pane();
         p.show_permission(dead_permission_exchange());
+        p.settle_permission_input_for_test();
         assert!(
             !p.view_stack().contains::<PermissionView>(),
             "an ask whose oneshot receiver is gone must not open a dialog"
         );
         assert_eq!(p.view_stack().len(), 0, "and nothing is left on the stack");
+    }
+
+    #[test]
+    fn permission_submit_grace_uses_the_release_frame_once() {
+        for earlier_release_frame in [false, true] {
+            let mut p = pane();
+            let now = Instant::now();
+            p.last_submission_at
+                .set(Some(now - std::time::Duration::from_secs(3)));
+            p.submission_needs_frame.set(true);
+            if earlier_release_frame {
+                p.note_permission_frame_presented(now - std::time::Duration::from_secs(2));
+            }
+            let (tx, mut rx) = tokio::sync::oneshot::channel();
+            let mut exchange = dead_permission_exchange();
+            exchange.resp_tx = tx;
+            p.show_permission(exchange);
+            let area = ratatui::layout::Rect::new(0, 0, 80, 12);
+            p.view_stack
+                .active()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<PermissionView>()
+                .unwrap()
+                .render(area, &mut ratatui::buffer::Buffer::empty(area));
+            p.note_permission_frame_presented(now - std::time::Duration::from_millis(200));
+            p.handle_key(k(KeyCode::Enter));
+            if earlier_release_frame {
+                assert!(
+                    rx.try_recv().is_ok(),
+                    "a later question must not restart release grace"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        rx.try_recv(),
+                        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                    ),
+                    "a slow release frame must retain its 600ms grace"
+                );
+            }
+        }
     }
 
     /// The same rule for the other two one-shot exchanges that stack a
@@ -5386,6 +5469,7 @@ mod tests {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         exchange.resp_tx = resp_tx;
         p.show_permission(exchange);
+        p.settle_permission_input_for_test();
         assert_eq!(p.view_stack().len(), 1, "it opened while still live");
 
         // Ctrl-C is not a way out: the background view survives it.
@@ -5414,6 +5498,7 @@ mod tests {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         exchange.resp_tx = resp_tx;
         p.show_permission(exchange);
+        p.settle_permission_input_for_test();
         p.drop_abandoned_prompts();
         assert_eq!(
             p.view_stack().len(),
@@ -5432,6 +5517,7 @@ mod tests {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         exchange.resp_tx = resp_tx;
         p.show_permission(exchange);
+        p.settle_permission_input_for_test();
         assert!(
             p.view_stack().contains::<PermissionView>(),
             "a live background ask must still open its dialog"

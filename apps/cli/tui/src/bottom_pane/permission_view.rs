@@ -15,6 +15,8 @@
 //!
 //! While on the view stack it owns the keyboard: `Enter`/`1`–`3` resolve the
 //! select dialogs with the highlighted/numbered option, `n`/`N`/`Esc` deny.
+//! Answers wait for the first terminal frame and its short input grace period;
+//! a prompt released by submitting composer text also keeps the 600ms grace.
 //! The response sender is consumed by the FIRST resolution (single-shot
 //! guarantee — the regression net lives in
 //! `app.rs`:`permission_resolution_is_single_shot_and_releases_keyboard`);
@@ -22,6 +24,8 @@
 //! maps to a deny.
 
 use std::any::Any;
+use std::cell::Cell;
+use std::time::Instant;
 
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -35,6 +39,7 @@ use tokio::sync::oneshot;
 use tui_core::permission_bridge::PermissionExchange;
 
 use crate::bottom_pane::dialog_view::{centered_rect, DialogOutcome, DialogView};
+use crate::bottom_pane::permission_input_guard::PermissionInputGuard;
 use crate::bottom_pane::view::{BottomPaneView, ViewOutcome};
 use crate::renderable::Renderable;
 
@@ -82,6 +87,8 @@ enum Prompt {
 /// A permission request awaiting the user's decision.
 pub struct PermissionView {
     prompt: Prompt,
+    input_guard: PermissionInputGuard,
+    rendered_in_frame: Cell<bool>,
     /// One-shot response sender, consumed by the first resolution.
     resp_tx: Option<oneshot::Sender<PermissionResponse>>,
     /// Whether this exchange belongs to a turn-independent owner (finding
@@ -261,9 +268,31 @@ impl PermissionView {
         };
         Self {
             prompt,
+            input_guard: PermissionInputGuard::default(),
+            rendered_in_frame: Cell::new(false),
             resp_tx: Some(exchange.resp_tx),
             background,
         }
+    }
+
+    pub(super) fn with_submission_at(mut self, submitted_at: Option<Instant>) -> Self {
+        self.input_guard = PermissionInputGuard::new(submitted_at);
+        self
+    }
+
+    pub(super) fn note_frame_presented(&self, now: Instant) {
+        if self.rendered_in_frame.replace(false) {
+            self.input_guard.note_presented(now);
+        }
+    }
+
+    pub(super) fn note_submission_frame_presented(&self, now: Instant) {
+        self.input_guard.note_submission_presented(now);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settle_input_for_test(&self) {
+        self.input_guard.settle_for_test();
     }
 
     /// Deliver `response` through the one-shot channel (first resolution only)
@@ -305,6 +334,9 @@ impl PermissionView {
 
 impl Renderable for PermissionView {
     fn render(&self, area: Rect, buf: &mut Buffer) {
+        if area.width > 0 && area.height > 0 {
+            self.rendered_in_frame.set(true);
+        }
         match &self.prompt {
             Prompt::Select { dialog, .. } => dialog.render(area, buf),
             Prompt::TypedConfirm { typed } => {
@@ -403,7 +435,16 @@ impl BottomPaneView for PermissionView {
                 _ => None,
             },
         };
-        response.map_or(ViewOutcome::Pending, |response| self.resolve(response))
+        response.map_or(ViewOutcome::Pending, |response| {
+            if self
+                .input_guard
+                .may_answer(Instant::now(), key.code == KeyCode::Esc)
+            {
+                self.resolve(response)
+            } else {
+                ViewOutcome::Pending
+            }
+        })
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -418,6 +459,67 @@ mod tests {
     use ratatui::layout::Position;
 
     use super::*;
+
+    fn settled_view(exchange: PermissionExchange) -> PermissionView {
+        let view = PermissionView::new(exchange);
+        view.settle_input_for_test();
+        view
+    }
+
+    #[test]
+    fn permission_input_windows_match_the_2_1_318_artifact_oracle() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/permission_prompt_2_1_318.json"
+        ))
+        .unwrap();
+        let anchor = Instant::now();
+        for case in fixture["cases"].as_array().unwrap() {
+            let at = |name: &str| {
+                case[name]
+                    .as_u64()
+                    .map(|ms| anchor + std::time::Duration::from_millis(ms))
+            };
+            let guard = PermissionInputGuard::new(at("submitted_at"));
+            if let Some(drawn) = at("submission_drawn_at") {
+                guard.note_submission_presented(drawn);
+            }
+            guard.note_presented(at("shown_at").unwrap());
+            assert_eq!(
+                guard.may_answer(
+                    at("now").unwrap(),
+                    case["escape"].as_bool().unwrap_or(false)
+                ),
+                case["allowed"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn confirmation_waits_for_the_frame_to_reach_the_terminal() {
+        let (exchange, mut rx) = tool_exchange();
+        let mut view = PermissionView::new(exchange);
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(view.handle_key(key), ViewOutcome::Pending));
+        let area = Rect::new(0, 0, 80, 12);
+        view.render(area, &mut Buffer::empty(area));
+        // Buffer construction is not presentation: a slow terminal write
+        // still has not made the authorization question visible.
+        assert!(matches!(view.handle_key(key), ViewOutcome::Pending));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        view.note_frame_presented(Instant::now());
+        assert!(matches!(view.handle_key(key), ViewOutcome::Pending));
+        view.settle_input_for_test();
+        assert!(matches!(
+            view.handle_key(key),
+            ViewOutcome::PermissionResponse(PermissionResponse::AllowOnce)
+        ));
+        assert_eq!(rx.try_recv().unwrap(), PermissionResponse::AllowOnce);
+    }
 
     fn exchange_for(
         request: PermissionRequest,
@@ -549,7 +651,7 @@ mod tests {
     #[test]
     fn enter_sends_allow_once_and_completes() {
         let (exchange, resp_rx) = tool_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         assert!(matches!(
             view.handle_key(press(KeyCode::Char('x'))),
             ViewOutcome::Pending
@@ -567,7 +669,7 @@ mod tests {
     #[test]
     fn arrow_navigation_plus_enter_sends_allow_always() {
         let (exchange, resp_rx) = tool_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         assert!(matches!(
             view.handle_key(press(KeyCode::Down)),
             ViewOutcome::Pending
@@ -585,7 +687,7 @@ mod tests {
     #[test]
     fn eligible_workflow_bash_renders_exact_auto_row_and_response() {
         let (exchange, resp_rx) = auto_tool_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         let text = buffer_text(&view, Rect::new(0, 0, 80, 9));
         assert!(text.contains("Yes, and switch to auto mode"), "{text}");
         assert!(!text.contains("don't ask again"), "{text}");
@@ -603,7 +705,7 @@ mod tests {
     fn suppressed_prompt_hides_allow_always_and_remaps_keys() {
         let (mut exchange, resp_rx) = tool_exchange();
         exchange.suppress_always_allow_rule = true;
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
 
         // The second visible row is now Deny, and there is no third row for
         // the old AllowAlways shortcut.
@@ -617,7 +719,7 @@ mod tests {
     #[test]
     fn esc_denies() {
         let (exchange, resp_rx) = tool_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         assert!(matches!(
             view.handle_key(press(KeyCode::Esc)),
             ViewOutcome::PermissionResponse(PermissionResponse::Deny)
@@ -628,7 +730,7 @@ mod tests {
     #[test]
     fn number_shortcut_three_denies() {
         let (exchange, resp_rx) = tool_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         assert!(matches!(
             view.handle_key(press(KeyCode::Char('3'))),
             ViewOutcome::PermissionResponse(PermissionResponse::Deny)
@@ -641,7 +743,7 @@ mod tests {
     #[test]
     fn suppressed_request_omits_the_allow_always_row() {
         let (exchange, _resp_rx) = suppressed_tool_exchange();
-        let view = PermissionView::new(exchange);
+        let view = settled_view(exchange);
         let text = buffer_text(&view, Rect::new(0, 0, 80, VIEWPORT_HEIGHT));
         assert!(
             !text.contains("don't ask again"),
@@ -655,7 +757,7 @@ mod tests {
     #[test]
     fn suggested_request_renders_dynamic_persistence_row() {
         let (exchange, _resp_rx) = tool_exchange();
-        let view = PermissionView::new(exchange);
+        let view = settled_view(exchange);
         let text = buffer_text(&view, Rect::new(0, 0, 80, VIEWPORT_HEIGHT));
         assert!(
             text.contains("Yes, and don't ask again for ls -la"),
@@ -666,7 +768,7 @@ mod tests {
     #[test]
     fn request_without_suggestion_omits_persistence_row() {
         let (exchange, _resp_rx) = tool_exchange_without_suggestion();
-        let view = PermissionView::new(exchange);
+        let view = settled_view(exchange);
         let text = buffer_text(&view, Rect::new(0, 0, 80, VIEWPORT_HEIGHT));
         assert!(!text.contains("don't ask again"), "{text}");
         assert!(text.contains("Yes"), "{text}");
@@ -677,7 +779,7 @@ mod tests {
     fn suppressed_request_with_suggestion_still_omits_persistence_row() {
         let (mut exchange, _resp_rx) = tool_exchange();
         exchange.suppress_always_allow_rule = true;
-        let view = PermissionView::new(exchange);
+        let view = settled_view(exchange);
         let text = buffer_text(&view, Rect::new(0, 0, 80, VIEWPORT_HEIGHT));
         assert!(!text.contains("don't ask again"), "{text}");
         assert!(text.contains("differently"), "{text}");
@@ -688,7 +790,7 @@ mod tests {
         // With the middle row gone, Down then Enter lands on the (now second)
         // row, which is Deny — NOT AllowAlways.
         let (exchange, resp_rx) = suppressed_tool_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         assert!(matches!(
             view.handle_key(press(KeyCode::Down)),
             ViewOutcome::Pending
@@ -706,7 +808,7 @@ mod tests {
         // is no row 3 to fall through to `_` from — this exercises the
         // `1 if *always_allow_offered` guard directly).
         let (exchange, resp_rx) = suppressed_tool_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         assert!(matches!(
             view.handle_key(press(KeyCode::Char('2'))),
             ViewOutcome::PermissionResponse(PermissionResponse::Deny)
@@ -717,7 +819,7 @@ mod tests {
     #[test]
     fn n_key_denies_but_ctrl_n_stays_swallowed() {
         let (exchange, resp_rx) = tool_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         // Ctrl-N is a swallowed chord (keyboard ownership), NOT a deny.
         assert!(matches!(
             view.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
@@ -734,7 +836,7 @@ mod tests {
     #[test]
     fn response_sender_is_consumed_exactly_once() {
         let (exchange, resp_rx) = tool_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         view.handle_key(press(KeyCode::Char('2')));
         assert_eq!(
             resp_rx.blocking_recv().unwrap(),
@@ -768,7 +870,7 @@ mod tests {
         ];
         for request in requests {
             let (exchange, resp_rx) = exchange_for(request);
-            let view = PermissionView::new(exchange);
+            let view = settled_view(exchange);
             drop(view);
             assert!(
                 resp_rx.blocking_recv().is_err(),
@@ -780,7 +882,7 @@ mod tests {
     #[test]
     fn desired_height_is_the_locked_permission_viewport() {
         let (exchange, _resp_rx) = tool_exchange();
-        let view = PermissionView::new(exchange);
+        let view = settled_view(exchange);
         assert_eq!(view.desired_height(80), 9);
         assert!(view.wants_status_line());
     }
@@ -790,7 +892,7 @@ mod tests {
     #[test]
     fn plan_approval_renders_plan_body_and_approval_options() {
         let (exchange, _resp_rx) = plan_exchange("1. Add tests\n2. Refactor");
-        let view = PermissionView::new(exchange);
+        let view = settled_view(exchange);
         let text = buffer_text(&view, Rect::new(0, 0, 80, 12));
         assert!(text.contains("Ready to code?"), "{text}");
         assert!(text.contains("1. Add tests"), "{text}");
@@ -807,7 +909,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let (exchange, _resp_rx) = plan_exchange(&plan);
-        let view = PermissionView::new(exchange);
+        let view = settled_view(exchange);
         // 6 plan lines + elision line + 3 options + separator + 4 chrome = 15,
         // safely under the 20-row viewport clamp.
         assert_eq!(view.desired_height(80), 15);
@@ -825,7 +927,7 @@ mod tests {
     fn plan_approval_allow_once_allow_always_and_deny_branches() {
         // '1' → AllowOnce (manually approve edits).
         let (exchange, resp_rx) = plan_exchange("plan");
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         assert!(matches!(
             view.handle_key(press(KeyCode::Char('1'))),
             ViewOutcome::PermissionResponse(PermissionResponse::AllowOnce)
@@ -837,7 +939,7 @@ mod tests {
 
         // '2' → AllowAlways (auto-accept edits).
         let (exchange, resp_rx) = plan_exchange("plan");
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         assert!(matches!(
             view.handle_key(press(KeyCode::Char('2'))),
             ViewOutcome::PermissionResponse(PermissionResponse::AllowAlways)
@@ -850,7 +952,7 @@ mod tests {
         // Esc, 'n', and the third option all keep planning (Deny).
         for deny_key in [KeyCode::Esc, KeyCode::Char('n'), KeyCode::Char('3')] {
             let (exchange, resp_rx) = plan_exchange("plan");
-            let mut view = PermissionView::new(exchange);
+            let mut view = settled_view(exchange);
             assert!(matches!(
                 view.handle_key(press(deny_key)),
                 ViewOutcome::PermissionResponse(PermissionResponse::Deny)
@@ -862,7 +964,7 @@ mod tests {
     #[test]
     fn eligible_exit_plan_renders_exact_auto_row_and_selects_allow_auto() {
         let (exchange, resp_rx) = auto_plan_exchange("plan");
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         let text = buffer_text(&view, Rect::new(0, 0, 80, 15));
         assert!(text.contains("Yes, and use auto mode"), "{text}");
         assert!(!text.contains("Yes, auto-accept edits"), "{text}");
@@ -879,7 +981,7 @@ mod tests {
     #[test]
     fn plan_approval_arrows_navigate_and_enter_confirms_highlight() {
         let (exchange, resp_rx) = plan_exchange("plan");
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         assert!(matches!(
             view.handle_key(press(KeyCode::Down)),
             ViewOutcome::Pending
@@ -900,7 +1002,7 @@ mod tests {
     #[test]
     fn bypass_renders_warning_and_typed_buffer() {
         let (exchange, _resp_rx) = bypass_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         typ(&mut view, "ye");
         let area = Rect::new(0, 0, 80, view.desired_height(80));
         let text = buffer_text(&view, area);
@@ -919,7 +1021,7 @@ mod tests {
     #[test]
     fn bypass_typed_yes_then_enter_allows_once_case_insensitively() {
         let (exchange, resp_rx) = bypass_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         typ(&mut view, "YeS");
         assert!(matches!(
             view.handle_key(press(KeyCode::Enter)),
@@ -934,7 +1036,7 @@ mod tests {
     #[test]
     fn bypass_enter_without_yes_does_not_resolve() {
         let (exchange, _resp_rx) = bypass_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         assert!(matches!(
             view.handle_key(press(KeyCode::Enter)),
             ViewOutcome::Pending
@@ -950,7 +1052,7 @@ mod tests {
     #[test]
     fn bypass_backspace_edits_the_typo_then_enter_resolves() {
         let (exchange, resp_rx) = bypass_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         typ(&mut view, "yez");
         view.handle_key(press(KeyCode::Backspace));
         typ(&mut view, "s");
@@ -968,7 +1070,7 @@ mod tests {
     fn bypass_esc_and_n_deny_even_with_partial_input() {
         for deny_key in [KeyCode::Esc, KeyCode::Char('n'), KeyCode::Char('N')] {
             let (exchange, resp_rx) = bypass_exchange();
-            let mut view = PermissionView::new(exchange);
+            let mut view = settled_view(exchange);
             typ(&mut view, "ye");
             assert!(matches!(
                 view.handle_key(press(deny_key)),
@@ -981,7 +1083,7 @@ mod tests {
     #[test]
     fn bypass_ignores_digits_and_ctrl_chords() {
         let (exchange, _resp_rx) = bypass_exchange();
-        let mut view = PermissionView::new(exchange);
+        let mut view = settled_view(exchange);
         // No '1'-'9' jump-select in the typed confirmation.
         assert!(matches!(
             view.handle_key(press(KeyCode::Char('1'))),
@@ -1004,7 +1106,7 @@ mod tests {
     #[test]
     fn bypass_desired_height_wraps_the_locked_body_at_the_pane_width() {
         let (exchange, _resp_rx) = bypass_exchange();
-        let view = PermissionView::new(exchange);
+        let view = settled_view(exchange);
         let wide = view.desired_height(120);
         let narrow = view.desired_height(60);
         assert!(wide >= 7, "body + prompt + chrome: {wide}");

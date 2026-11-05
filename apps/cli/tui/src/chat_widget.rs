@@ -7553,6 +7553,7 @@ mod tests {
 
         let (exchange, mut answer) = tool_exchange();
         pending.open_permission(exchange);
+        pending.bottom_pane().settle_permission_input_for_test();
         let (question, mut question_answer) = ask_exchange();
         pending.open_ask_user_question(question);
         assert!(!pending.can_switch_session());
@@ -12119,7 +12120,9 @@ mod tests {
         let (open, open_rx) = tool_exchange();
         let (queued, queued_rx) = tool_exchange();
         widget.open_permission(open);
+        widget.bottom_pane().settle_permission_input_for_test();
         widget.open_permission(queued);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert!(widget.has_open_permission());
         assert_eq!(widget.pending_prompts.len(), 1);
 
@@ -12131,6 +12134,7 @@ mod tests {
 
         let (late, late_rx) = tool_exchange();
         widget.open_permission(late);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert!(late_rx.blocking_recv().is_err());
         assert!(!widget.has_open_permission());
 
@@ -12150,6 +12154,7 @@ mod tests {
         );
         let (late_background, mut late_background_rx) = background_owned_tool_exchange();
         widget.open_permission(late_background);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert!(
             widget.has_open_permission(),
             "a background_owned ask arriving after Ctrl-C, before TurnEnded, must still open"
@@ -12187,12 +12192,14 @@ mod tests {
         // The OPEN dialog is the background-owned (Fusion panel) ask.
         let (background, mut background_rx) = background_owned_tool_exchange();
         widget.open_permission(background);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert!(widget.has_open_permission());
 
         // A second, DIRECT (turn-owned) ask queues behind it — this one
         // really does belong to the turn being interrupted.
         let (direct, direct_rx) = tool_exchange();
         widget.open_permission(direct);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert_eq!(widget.pending_prompts.len(), 1);
 
         widget.handle_key(ctrl(KeyCode::Char('c')));
@@ -12241,11 +12248,13 @@ mod tests {
         // The OPEN dialog is the DIRECT (turn-owned) ask.
         let (direct, direct_rx) = tool_exchange();
         widget.open_permission(direct);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert!(widget.has_open_permission());
 
         // A background-owned ask QUEUES behind it.
         let (background, mut background_rx) = background_owned_tool_exchange();
         widget.open_permission(background);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert_eq!(widget.pending_prompts.len(), 1);
 
         widget.handle_key(ctrl(KeyCode::Char('c')));
@@ -12281,6 +12290,7 @@ mod tests {
         // the rest of this test.
         let (unowned, unowned_rx) = tool_exchange();
         widget.open_permission(unowned);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert!(widget.has_open_permission(), "background ask must open");
         widget.handle_key(press(KeyCode::Esc));
         assert_eq!(
@@ -12340,6 +12350,7 @@ mod tests {
 
         let (background, background_rx) = tool_exchange();
         widget.open_permission(background);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert!(
             widget.has_open_permission(),
             "a background panel's ask must open even though the launching \
@@ -12389,6 +12400,7 @@ mod tests {
 
         let (late, late_rx) = tool_exchange();
         widget.open_permission(late);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert!(
             !widget.has_open_permission(),
             "mid-cancel ask must not open"
@@ -12488,6 +12500,7 @@ mod tests {
         let (exchange, _rx) = tool_exchange();
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.open_permission(exchange);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert!(
             !matches!(widget.handle_key(chord), ChatOutcome::PasteImage),
             "a modal owns the keyboard: the chord must not paste"
@@ -12508,6 +12521,7 @@ mod tests {
         // The OPEN dialog is the turn's own ask.
         let (direct, direct_rx) = tool_exchange();
         widget.open_permission(direct);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert!(widget.has_open_permission());
 
         // Behind it: a background ask whose panel has ALREADY died (its
@@ -12515,8 +12529,10 @@ mod tests {
         let (dead, dead_rx) = background_owned_tool_exchange();
         drop(dead_rx);
         widget.open_permission(dead);
+        widget.bottom_pane().settle_permission_input_for_test();
         let (live, live_rx) = background_owned_tool_exchange();
         widget.open_permission(live);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert_eq!(widget.pending_prompts.len(), 2);
 
         // ONE event resolves the open dialog and must surface the live ask.
@@ -12536,6 +12552,7 @@ mod tests {
         );
 
         // And it is the LIVE exchange that owns the dialog.
+        widget.bottom_pane().settle_permission_input_for_test();
         widget.handle_key(press(KeyCode::Esc));
         assert_eq!(live_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
     }
@@ -12551,6 +12568,7 @@ mod tests {
         widget.apply_turn_event(TurnEvent::TurnStarted);
         let (background, background_rx) = background_owned_tool_exchange();
         widget.open_permission(background);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert!(widget.has_open_permission(), "the dialog opened while live");
 
         // The panel dies off-thread.
@@ -12583,10 +12601,12 @@ mod tests {
 
         let (direct, _direct_rx) = tool_exchange();
         widget.open_permission(direct);
+        widget.bottom_pane().settle_permission_input_for_test();
 
         let (dead, dead_rx) = background_owned_tool_exchange();
         drop(dead_rx);
         widget.open_permission(dead);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert_eq!(widget.pending_prompts.len(), 1);
 
         widget.handle_key(ctrl(KeyCode::Char('c')));
@@ -12603,9 +12623,11 @@ mod tests {
         let mut widget = widget();
         widget.apply_turn_event(TurnEvent::TurnStarted);
         let (first, first_rx) = tool_exchange();
-        let (second, second_rx) = tool_exchange();
+        let (second, mut second_rx) = tool_exchange();
         widget.open_permission(first);
+        widget.bottom_pane().settle_permission_input_for_test();
         widget.open_permission(second);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert!(widget.has_open_permission());
         assert_eq!(
             widget.bottom_pane().view_stack().len(),
@@ -12623,6 +12645,14 @@ mod tests {
         assert!(widget.has_open_permission(), "queued prompt opened");
         assert!(widget.pending_prompts.is_empty());
 
+        // A buffered confirmation for the first prompt cannot approve its
+        // successor before the successor has actually been presented.
+        widget.handle_key(press(KeyCode::Char('1')));
+        assert!(matches!(
+            second_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        widget.bottom_pane().settle_permission_input_for_test();
         // The surfaced prompt owns the keyboard until resolved (Esc denies).
         widget.handle_key(press(KeyCode::Esc));
         assert_eq!(second_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
@@ -12651,13 +12681,16 @@ mod tests {
             background_owned: false,
         };
         widget.open_permission(first);
+        widget.bottom_pane().settle_permission_input_for_test();
         widget.open_permission(plan);
+        widget.bottom_pane().settle_permission_input_for_test();
         assert_eq!(widget.pending_prompts.len(), 1);
         // Resolve the first; the queued plan-approval prompt surfaces with its
         // own variant-specific keyboard ('2' = auto-accept edits).
         widget.handle_key(press(KeyCode::Esc));
         assert_eq!(first_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
         assert!(widget.has_open_permission(), "queued plan prompt surfaced");
+        widget.bottom_pane().settle_permission_input_for_test();
         widget.handle_key(press(KeyCode::Char('2')));
         assert_eq!(
             plan_rx.blocking_recv().unwrap(),
@@ -12673,7 +12706,9 @@ mod tests {
         let (open, open_rx) = tool_exchange();
         let (queued, queued_rx) = tool_exchange();
         widget.open_permission(open);
+        widget.bottom_pane().settle_permission_input_for_test();
         widget.open_permission(queued);
+        widget.bottom_pane().settle_permission_input_for_test();
         drop(widget);
         assert!(open_rx.blocking_recv().is_err());
         assert!(queued_rx.blocking_recv().is_err());
@@ -12686,6 +12721,7 @@ mod tests {
         let (permission, permission_rx) = tool_exchange();
         let (ask, ask_rx) = ask_exchange();
         widget.open_permission(permission);
+        widget.bottom_pane().settle_permission_input_for_test();
         widget.open_ask_user_question(ask);
         assert!(widget.has_open_permission());
         assert!(!widget.has_open_ask_user_question());

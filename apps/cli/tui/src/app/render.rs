@@ -93,6 +93,10 @@ impl<'cb> RataApp<'cb> {
             self.draw(terminal)
         })();
         let end = terminal.end_sync_update();
-        result.and(end)
+        result.and(end)?;
+        self.chat_widget
+            .bottom_pane()
+            .note_permission_frame_presented(std::time::Instant::now());
+        Ok(())
     }
 }

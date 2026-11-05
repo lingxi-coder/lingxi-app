@@ -901,6 +901,8 @@ async function runCustomizeScenario(window, webContents) {
   const afterConfirm = await run('window.__settingsScreenTest.state().extensionCalls');
   await click('.extension-breadcrumb button');
   await click('[data-nav-page="skills"]');
+  // Skills is lazy-loaded; the settings shell can switch before its catalog mounts.
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-skills-installed .extension-see-more"))');
   await capture('skills');
   shell.skills = await measureShell('skills');
   const installedPreview = await run('document.querySelectorAll(".extension-skills-installed .extension-hub-row").length === 6');

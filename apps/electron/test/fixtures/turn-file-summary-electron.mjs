@@ -19,6 +19,14 @@ async function main() {
     };
     await win.loadURL(url);
     await configureFixtureWindow(win);
+    // The host display may clamp the hidden window below the wide breakpoint.
+    // Set the renderer viewport explicitly before measuring the side-by-side panel.
+    const setViewport = async (width, height) => {
+      win.setSize(width, height);
+      await win.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+      await waitFor(`innerWidth === ${width} && innerHeight === ${height}`);
+    };
+    await setViewport(1300, 700);
     await waitFor('Boolean(document.querySelector(".turn-file-review"))');
     const result = await run(`({ files: document.querySelectorAll('.turn-file-summary li').length, initiallyClosed: !document.querySelector('#runtime-inspector'), inlineDiffs: document.querySelectorAll('main .turn-file-diffs').length })`);
     await run(`document.querySelector('.turn-file-review').click()`);
@@ -40,7 +48,7 @@ async function main() {
     await run(`document.querySelector('[aria-label="Toggle right panel"]').click()`);
     await waitFor(`!document.querySelector('#runtime-inspector')`);
     result.closedWithoutInlineDiffs = await run(`!document.querySelector('#runtime-inspector') && !document.querySelector('main .turn-file-diffs')`);
-    win.setSize(360, 480);
+    await setViewport(360, 480);
     await win.loadURL(`${url}?dark`);
     await waitFor('Boolean(document.querySelector(".turn-file-review"))');
     await run(`document.querySelector('.turn-file-review').click()`);

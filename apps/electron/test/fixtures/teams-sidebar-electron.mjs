@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { app, BrowserWindow } from 'electron';
+import { configureFixtureWindow } from './electron-test-environment.mjs';
 
 const url = process.argv.find(arg => arg.startsWith('http://'));
 // Opt-in: a directory to leave screenshots of the window in, for looking at the result (light and dark, Teams and Bots).
@@ -17,6 +18,13 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function wait(expression, tries = 300) {
   for (let i = 0; i < tries; i++) { if (await run(expression)) return; await delay(20); }
   throw new Error(`Timed out: ${expression}\n${await run('document.body.innerText')}`);
+}
+// The host display can clamp a hidden native window below the wide breakpoint.
+// Fix the renderer viewport so both responsive layouts are tested on CI too.
+async function setViewport(width, height) {
+  win.setSize(width, height);
+  await win.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+  await wait(`innerWidth === ${width} && innerHeight === ${height}`);
 }
 // A fresh renderer: the Teams commands a window keeps in IndexedDB (a message sent, say) must not follow it into the next one.
 async function load(query = '') {
@@ -41,6 +49,8 @@ const result = {};
 try {
   // The rail counts the unread messages of every team, before Teams is open: the number for the eye, the label for the rest.
   await load();
+  await configureFixtureWindow(win);
+  await setViewport(1280, 850);
   await wait(`document.querySelector('${railTeams}[aria-label="Teams, 7 unread"]')`);
   assert.equal(await run(`document.querySelector('${railTeams} .desktop-rail-count').textContent`), '7');
   assert.equal(await run(`document.querySelector('${railTeams} .desktop-rail-count').getAttribute('aria-hidden')`), 'true', 'the digits are not read out as well');
@@ -129,11 +139,11 @@ try {
   // In a narrow window the panel lies over the conversation, which keeps the whole page; in a wide one it stands beside it.
   const beside = () => run(`(() => { const page = document.querySelector('.teams-page').getBoundingClientRect(), conversation = document.querySelector('.teams-conversation').getBoundingClientRect(), panel = document.querySelector('.tw-drawer').getBoundingClientRect(); return { sameWidth: Math.round(conversation.width) === Math.round(page.width), flush: Math.round(panel.right) === Math.round(page.right), position: getComputedStyle(document.querySelector('.tw-drawer')).position }; })()`);
   assert.deepEqual(await beside(), { sameWidth: false, flush: true, position: 'relative' });
-  win.setSize(900, 700);
+  await setViewport(900, 700);
   await wait(`getComputedStyle(document.querySelector('.tw-drawer')).position === 'absolute'`);
   assert.deepEqual(await beside(), { sameWidth: true, flush: true, position: 'absolute' });
   assert.equal(await drawerWidth(), 376, 'as wide as it was, over the conversation');
-  win.setSize(1280, 850);
+  await setViewport(1280, 850);
   await wait(`getComputedStyle(document.querySelector('.tw-drawer')).position === 'relative'`);
   assert.deepEqual(await beside(), { sameWidth: false, flush: true, position: 'relative' });
   await click('.tw-drawer button[aria-label="Close details"]');
@@ -313,10 +323,10 @@ try {
     await run(`Array.from(document.querySelectorAll('.tw-drawer .tw-tab')).find(tab => tab.textContent.trim() === 'Bots').click()`);
     await delay(500);
     await snap('teams-drawer-bots-light.png');
-    win.setSize(900, 700);
+    await setViewport(900, 700);
     await delay(500);
     await snap('teams-narrow-light.png');
-    win.setSize(1280, 850);
+    await setViewport(1280, 850);
     await load('?signedOut=1&saved=teams&theme=light');
     await wait(`document.querySelector('main.desktop-main section h2')`);
     await delay(300);

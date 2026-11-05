@@ -181,7 +181,8 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
       {conversation.kind === 'bot_dm' ? t('Messages ask this Bot automatically. Its owner can read this conversation.', '发送消息会请求此 Bot。其所有者可阅读此会话。')
         : askable && !editing ? t('Type @ to ask a Bot. Only Bots chosen from the list run.', '输入 @ 请求 Bot。仅从列表中选择的 Bot 会执行。')
         : t('Enter to send, Shift+Enter for a new line.', '按 Enter 发送，Shift+Enter 换行。')}
-      {snapshot.offline ? ` ${t('Offline: messages are saved and sent when you reconnect.', '当前离线：消息将保存并在联网后发送。')}` : ''}
+      {snapshot.messagingConnecting ? ` ${t('Connecting: messages will send after server confirmation.', '正在连接：服务器确认后发送消息。')}`
+        : snapshot.offline ? ` ${t('Offline: messages are saved and sent when you reconnect.', '当前离线：消息将保存并在联网后发送。')}` : ''}
     </p>
   </form>;
 }

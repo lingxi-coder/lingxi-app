@@ -186,6 +186,8 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
     </header>
     {snapshot.messagingError
       ? <div className="tw-banner" role="alert" data-kind="error"><span>{messageErrorText(snapshot.messagingError, zh)}</span><button type="button" className="tw-link" onClick={() => workspace.reconnect()}>{t('Reconnect', '重新连接')}</button></div>
+      : snapshot.messagingConnecting
+        ? <div className="tw-banner" role="status" data-kind="connecting">{t('Connecting… Waiting for the server to confirm access.', '正在连接…等待服务器确认访问权限。')}</div>
       : snapshot.offline
         ? <div className="tw-banner" role="status" data-kind="offline"><span>{t('Saved on this device. Reconnect to confirm access and send pending messages.', '当前显示本机缓存。联网后确认权限并发送待发消息。')}</span><button type="button" className="tw-link" onClick={() => workspace.reconnect()}>{t('Reconnect', '重新连接')}</button></div>
         : null}

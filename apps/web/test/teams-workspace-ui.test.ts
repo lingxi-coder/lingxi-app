@@ -459,6 +459,10 @@ test('conversation view: pending messages show their state and can be discarded;
   const offline = html(view(workspace, snapshot()));
   assert.match(offline, /data-kind="offline"/); assert.match(offline, /Saved on this device\. Reconnect to confirm access/);
   assert.match(offline, /Offline: messages are saved and sent when you reconnect/); assert.match(offline, /disabled=""[^>]*>Mark as read/, 'marking read needs a connection');
+  const connecting = html(view(workspace, { ...snapshot(), messagingConnecting: true, messagingError: '' }));
+  assert.match(connecting, /data-kind="connecting"/);
+  assert.match(connecting, /messages will send after server confirmation/);
+  assert.doesNotMatch(connecting, /data-kind="offline"|Offline:|>Reconnect</);
 });
 
 test('conversation view: no team, no conversations, a pending creation', async context => {

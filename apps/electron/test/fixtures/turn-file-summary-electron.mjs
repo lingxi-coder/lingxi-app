@@ -37,7 +37,7 @@ async function main() {
     await waitFor(`document.querySelector('#runtime-inspector-panel')?.textContent.includes('Historical component change')`);
     result.reviewResetsAll = await run(`['Historical component change', 'Historical stylesheet change'].every(text => document.querySelector('#runtime-inspector-panel').textContent.includes(text))`);
     result.tabCount = await run(`document.querySelectorAll('.runtime-inspector-tabs [role="tab"]').length`);
-    await run(`document.querySelector('[aria-label="Hide right panel"]').click()`);
+    await run(`document.querySelector('[aria-label="Toggle right panel"]').click()`);
     await waitFor(`!document.querySelector('#runtime-inspector')`);
     result.closedWithoutInlineDiffs = await run(`!document.querySelector('#runtime-inspector') && !document.querySelector('main .turn-file-diffs')`);
     win.setSize(360, 480);

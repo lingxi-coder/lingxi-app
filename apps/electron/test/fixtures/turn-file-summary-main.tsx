@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Stage } from '../../src/renderer/components/Stage';
+import { BetaTopBar } from '../../src/renderer/components/BetaDesktop';
 import { RuntimeCenterInspector } from '../../src/renderer/components/RuntimeCenter';
 import {
   closeRuntimeCenterItem,
@@ -12,8 +13,11 @@ import { emptyDesktopState } from '../../src/renderer/bridge/desktopState';
 import type { UseBridge } from '../../src/renderer/bridge/bridgeTypes.js';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
+import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
 import '../../src/renderer/global.css';
 import '../../src/renderer/components/RuntimeCenter.css';
+
+setLanguagePreference('en');
 
 const files = ['apps/electron/src/renderer/components/Stage.tsx', 'apps/electron/src/renderer/global.css'].map((path, index) => ({
   path, additions: index ? 2 : 44, removals: index ? 0 : 10,
@@ -34,9 +38,8 @@ function Fixture() {
   } as UseBridge;
   return <Theme.Provider value={t}><div style={{ display: 'flex', position: 'relative', height: '100vh', overflow: 'hidden', background: t.transcriptBg }}>
     <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-      <header className="desktop-topbar" style={{ flexShrink: 0 }}>
-        <div id="runtime-inspector-topbar-controls" className="no-drag runtime-inspector-topbar-controls" />
-      </header>
+      <BetaTopBar bridge={bridge} runtimeCenterOpen={runtimeCenter.overviewOpen}
+        onToggleRuntimeCenter={() => bridge.setRuntimeCenterOverviewOpen(!runtimeCenter.overviewOpen)} />
       <Stage sessionKey="turn-review-fixture" liveItems={[{ type: 'meta', id: 'turn-1', dur: '', tokens: '', files }]}
         onReviewFiles={(id, changes, path) => bridge.openRuntimeItem({ kind: 'turn-review', id, files: changes, path })} />
     </main>

@@ -32,6 +32,8 @@ const inputs = [
   { name: 'submit boundary', shown_at: 10, submitted_at: 0, now: 600 },
   { name: 'escape before short boundary', shown_at: 0, submitted_at: 0, now: 149, escape: true },
   { name: 'escape short boundary', shown_at: 0, submitted_at: 0, now: 150, escape: true },
+  { name: 'repeated escape reaches short boundary', shown_at: 0, submitted_at: 0, prior_escapes: [0, 50, 100], now: 150, escape: true },
+  { name: 'repeated escape does not renew grace', shown_at: 0, submitted_at: 0, prior_escapes: [0, 50, 100, 150, 200], now: 250, escape: true },
   { name: 'slow prompt still needs a new grace', shown_at: 30000, now: 30149 },
   { name: 'slow prompt boundary', shown_at: 30000, now: 30150 },
   { name: 'slow release frame keeps submit grace', submitted_at: 0, submission_drawn_at: 1000, shown_at: 1000, now: 1150 },
@@ -61,7 +63,7 @@ function releaseDrawnAt(test) {
   return lookup;
 }
 const cases = inputs.map((test) => {
-  const now = 10000 + test.now;
+  let now = 10000 + test.now;
   const payload = {};
   class Key { constructor(name) { this.name = name; } }
   const active = { id: 'permission', payload, shownAt: 10000 + test.shown_at };
@@ -87,7 +89,13 @@ const cases = inputs.map((test) => {
       releaseGraceMs: test.submitted_at === undefined ? 150 : 600,
     },
   });
-  const allowed = vm.runInContext(`${constants}${within}${answerGuard};No()`, context, { timeout: 1000 });
+  vm.runInContext(`${constants}${within}${answerGuard}`, context, { timeout: 1000 });
+  for (const prior of test.prior_escapes ?? []) {
+    now = 10000 + prior;
+    vm.runInContext('No()', context, { timeout: 1000 });
+  }
+  now = 10000 + test.now;
+  const allowed = vm.runInContext('No()', context, { timeout: 1000 });
   return { ...test, allowed };
 });
 const fixture = {

@@ -484,6 +484,14 @@ mod tests {
                 guard.note_submission_presented(drawn);
             }
             guard.note_presented(at("shown_at").unwrap());
+            if let Some(prior) = case["prior_escapes"].as_array() {
+                for ms in prior {
+                    guard.may_answer(
+                        anchor + std::time::Duration::from_millis(ms.as_u64().unwrap()),
+                        true,
+                    );
+                }
+            }
             assert_eq!(
                 guard.may_answer(
                     at("now").unwrap(),

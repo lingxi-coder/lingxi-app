@@ -49,9 +49,13 @@ impl PermissionInputGuard {
                 self.submitted_at.get(),
                 if escape { SHOWN_GRACE } else { SUBMIT_GRACE },
             )
-            || within(self.refused_at.get(), SHOWN_GRACE)
+            || (!escape && within(self.refused_at.get(), SHOWN_GRACE))
         {
-            self.refused_at.set(Some(now));
+            // Native's Escape predicate does not pass through the selector's
+            // refusal tracker. Holding Escape cannot keep cancellation locked.
+            if !escape {
+                self.refused_at.set(Some(now));
+            }
             return false;
         }
         true
@@ -120,5 +124,21 @@ mod tests {
         guard.note_presented(now);
         assert!(guard.may_answer(now + SHOWN_GRACE, true));
         assert!(!guard.may_answer(now + SHOWN_GRACE, false));
+    }
+
+    #[test]
+    fn repeated_escape_does_not_extend_the_initial_window() {
+        let now = Instant::now();
+        let guard = PermissionInputGuard::new(Some(now));
+        guard.note_presented(now);
+        for ms in [0, 50, 100, 149] {
+            assert!(!guard.may_answer(now + Duration::from_millis(ms), true));
+        }
+        // A rejected confirmation key also cannot extend Escape's window.
+        assert!(!guard.may_answer(now + Duration::from_millis(149), false));
+        for ms in [150, 200, 250] {
+            assert!(guard.may_answer(now + Duration::from_millis(ms), true));
+        }
+        assert!(!guard.may_answer(now + Duration::from_millis(250), false));
     }
 }

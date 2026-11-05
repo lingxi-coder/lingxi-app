@@ -82,7 +82,7 @@ private fun ConversationDetailContent(key: String, state: ChatState, onClose: ()
             call != null -> ToolResultContent(call)
             agent != null -> {
                 com.lingxi.code.theme.AgentAvatar(agent.agentId, Modifier.size(48.dp))
-                Text(listOfNotNull(agent.agentId, agent.agentType, agent.model, agent.status, agent.latestActivity)
+                Text(listOfNotNull(agent.agentId, agent.agentType, agent.model, agent.status, agent.reportStatusText(), agent.latestActivity)
                     .filter(String::isNotBlank).joinToString("\n\n"), color = palette.text2, fontSize = 15.sp)
             }
             task != null -> Text(listOfNotNull(task.taskId, taskStatusText(task.status),

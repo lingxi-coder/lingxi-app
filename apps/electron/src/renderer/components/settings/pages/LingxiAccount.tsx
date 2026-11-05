@@ -1,9 +1,11 @@
 import { tr } from '../../../i18n/locale';
-import { useContext, useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { AccountCommand } from '../../../../shared/account';
 import { AccountSignInContext, useAccountState } from '../../../bridge/useAccountState';
 import { useT } from '../../../theme/ThemeContext';
 import { ghostButtonStyle } from './ghostButton';
+import { Icon } from '../../Icon';
+import './LingxiAccount.css';
 
 const googleIcon = new URL('../../../assets/google-g.png', import.meta.url).href;
 
@@ -48,20 +50,50 @@ export function LingxiAccount({ standalone = false }: { standalone?: boolean }) 
   const inputStyle = { background: t.surface, color: t.text, border: `1px solid ${t.border}`, borderRadius: 10, padding: '12px 14px', width: '100%', boxSizing: 'border-box' as const, font: 'inherit', minHeight: 46 };
   const primaryButton = { border: 0, borderRadius: 10, minHeight: 46, padding: '11px 16px', font: 'inherit', fontWeight: 550, cursor: busy ? 'default' : 'pointer' as const, opacity: busy ? .65 : 1 };
   if (!standalone && requestSignIn && state && !state.user) return null;
+  if (!standalone && !state) return <p role={readError ? 'alert' : 'status'} style={{ margin: 0, color: readError ? t.danger : t.text3 }}>{readError || tr('desktop_shell_account_loading')}</p>;
+  if (state?.user) {
+    const user = state.user;
+    const name = user.displayName?.trim() || user.email || tr('account_signed_in');
+    const initials = user.displayName?.trim().split(/\s+/).slice(0, 2).map(part => Array.from(part)[0]).join('').toLocaleUpperCase();
+    const feedback = state.error || readError || message;
+    return <section className="account-settings" aria-label={tr('settings_account')} style={{
+      '--account-surface': t.surface,
+      '--account-hover': t.surfaceHover,
+      '--account-border': t.border,
+      '--account-text': t.text,
+      '--account-secondary': t.text3,
+      '--account-accent': t.accent,
+      '--account-status': user.emailVerified ? t.ok : t.text3,
+      '--account-danger': t.danger,
+    } as CSSProperties}>
+      <div className="account-settings-card" aria-busy={busy}>
+        <div className="account-settings-profile">
+          <div className="account-settings-avatar" aria-hidden="true">{initials || <Icon name="user" size={26} />}</div>
+          <div className="account-settings-identity">
+            <h2 className="account-settings-name">{name}</h2>
+            {user.email && user.email !== name && <p className="account-settings-email">{user.email}</p>}
+            {user.email && <div className="account-settings-verification">
+              <span className="account-settings-status"><span aria-hidden="true"><Icon name={user.emailVerified ? 'shieldCheck' : 'circle'} size={14} /></span>{user.emailVerified ? tr('account_email_verified') : tr('account_email_unverified')}</span>
+              {!user.emailVerified && <button type="button" className="account-settings-link" disabled={busy} onClick={() => void run({ type: 'verifyEmail' })}>{tr('account_send_verification')}</button>}
+            </div>}
+          </div>
+        </div>
+        <div className="account-settings-actions">
+          <button type="button" className="account-settings-button" disabled={busy} onClick={() => void run({ type: 'reload' })}><span aria-hidden="true"><Icon name="refresh" size={15} /></span>{tr('account_refresh')}</button>
+          <button type="button" className="account-settings-button account-settings-signout" disabled={busy} onClick={() => void run({ type: 'signOut' })}>{tr('settings_logout')}</button>
+        </div>
+      </div>
+      {busy && <p className="account-settings-feedback" role="status">{tr('plugins_working')}</p>}
+      {feedback && <p className="account-settings-feedback" role={state.error || readError ? 'alert' : 'status'} style={{ color: state.error || readError ? t.danger : t.text3 }}>{feedback}</p>}
+      {state.persistence === 'session' && <p className="account-settings-feedback">{tr('desktop_shell_storage_unavailable')}</p>}
+      <a className="account-settings-privacy" href="https://lingxios.net/privacy" target="_blank" rel="noreferrer">{tr('desktop_shell_privacy_link')}</a>
+    </section>;
+  }
   return <div style={{ marginBottom: standalone ? 0 : 28 }}>
     <div style={{ padding: '34px 24px 28px', display: 'grid', justifyItems: 'center', gap: 22 }}>
-      <h2 style={{ margin: '0 0 4px', color: t.text, fontFamily: 'Georgia, "Times New Roman", serif', fontSize: 30, lineHeight: 1.15, letterSpacing: '-.035em', fontWeight: 600 }}>{tr('desktop_shell_sign_in')}</h2>
+      <h2 style={{ margin: '0 0 4px', color: t.text, fontFamily: 'inherit', fontSize: 26, lineHeight: 1.15, letterSpacing: '-.035em', fontWeight: 600 }}>{tr('desktop_shell_sign_in')}</h2>
       <div style={{ width: 'min(100%, 460px)', boxSizing: 'border-box', padding: '22px 24px 18px', display: 'grid', gap: 14, border: `1px solid ${t.border}`, borderRadius: 22, background: t.surface, boxShadow: '0 12px 40px rgba(0,0,0,.055)' }}>
-      {!state && !readError ? <p role="status">{tr('desktop_shell_account_loading')}</p> : state?.user ? <>
-        <strong>{state.user.displayName || state.user.email || tr('account_signed_in')}</strong>
-        <span style={{ color: t.text3 }}>{state.user.email}</span>
-        <span style={{ color: t.text3, fontSize: 12 }}>{state.user.emailVerified ? tr('account_email_verified') : tr('account_email_unverified')}</span>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-          {!state.user.emailVerified && state.user.email && <button type="button" disabled={busy} style={button} onClick={() => void run({ type: 'verifyEmail' })}>{tr('account_send_verification')}</button>}
-          <button type="button" disabled={busy} style={button} onClick={() => void run({ type: 'reload' })}>{tr('account_refresh')}</button>
-          <button type="button" disabled={busy} style={button} onClick={() => void run({ type: 'signOut' })}>{tr('settings_logout')}</button>
-        </div>
-      </> : <>
+      {!state && !readError ? <p role="status">{tr('desktop_shell_account_loading')}</p> : <>
         <button type="button" disabled={busy} style={{ ...primaryButton, width: '100%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 10, background: t.surfaceHover, color: t.text }} onClick={() => void run({ type: 'oauth', provider: 'google.com' })}><img src={googleIcon} alt="" width={20} height={20} />{tr('account_google')}</button>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, color: t.text3, fontSize: 13 }}><span style={{ height: 1, background: t.border, flex: 1 }} />OR<span style={{ height: 1, background: t.border, flex: 1 }} /></div>
         <form onSubmit={event => { event.preventDefault(); void run({ type: register ? 'register' : 'signIn', email, password }); }} style={{ display: 'grid', gap: 12 }}>

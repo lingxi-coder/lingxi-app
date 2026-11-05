@@ -278,6 +278,51 @@ for (const { mode, global } of [{ mode: 'code', global: false }, { mode: 'chat',
   });
 }
 
+for (const entry of ['switch', 'startup'] as const) test(`${entry}: entering an empty Chat space starts a trusted global draft for the composer`, async (t) => {
+  const f = hostFixture(t);
+  const host = f.host as any;
+  const bridge = f.bridge as any;
+  const projectPath = f.settings.conversationSpaces.globalWorkspaces.chat;
+  f.settings.conversationSpaces.setMode('chat');
+  host.navigationGeneration = 1;
+  let activated: unknown;
+  bridge.newSession = async (path: string, model: unknown, options: any) => {
+    assert.equal(path, projectPath);
+    assert.equal(model, undefined);
+    assert.equal(options.mode, 'chat');
+    assert.equal(options.projectId, null);
+    assert.equal(options.activate(), true);
+    return { projectPath: path, sessionId: otherId };
+  };
+  bridge.activateSession = (ref: unknown) => { activated = ref; };
+  if (entry === 'startup') await f.host.restoreConversationNavigation();
+  else await host.switchConversationSpace('chat', 1);
+  const snapshot = await host.bootstrap();
+  const expected = { projectPath, sessionId: otherId, mode: 'chat', projectId: null };
+  assert.deepEqual(snapshot.activeSession, expected);
+  assert.deepEqual(activated, expected);
+  assert.deepEqual(host.draftSelections.get('chat'), expected);
+  assert.equal(f.settings.isTrustedWorkspace(projectPath), true);
+});
+
+test('a late empty-space draft cannot replace a newer navigation', async (t) => {
+  const f = hostFixture(t);
+  const host = f.host as any;
+  const bridge = f.bridge as any;
+  f.settings.conversationSpaces.setMode('chat');
+  host.navigationGeneration = 1;
+  bridge.newSession = async (projectPath: string, _model: unknown, options: any) => {
+    host.navigationGeneration = 2;
+    f.settings.conversationSpaces.setMode('code');
+    assert.equal(options.activate(), false);
+    return { projectPath, sessionId: otherId };
+  };
+  bridge.activateSession = () => { assert.fail('stale draft was activated'); };
+  await host.switchConversationSpace('chat', 1);
+  assert.equal(f.settings.getPublic().activeSession?.sessionId, sessionId);
+  assert.equal(host.draftSelections.has('chat'), false);
+});
+
 test('startup restores the displayed Current alias path in its authoritative workspace', async (t) => {
   const f = hostFixture(t), moved = { projectPath: f.target, sessionId };
   f.runtimes.clear();

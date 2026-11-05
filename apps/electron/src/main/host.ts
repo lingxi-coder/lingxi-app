@@ -2350,9 +2350,16 @@ export class HostController {
     }
     const navigation = this.settings.conversationSpaces.snapshot().navigation[space];
     if (navigation.session) return this.openSessionAndActivateInternal(navigation.session, undefined, generation, space);
+    // An empty space still needs a live draft: the composer controls require
+    // an active engine even before the first message is sent.
+    const projectPath = this.settings.conversationSpaces.globalWorkspaces[space];
+    const ref = await this.bridge.newSession(projectPath, undefined, { mode: space, projectId: null, activate: current });
+    const owned: OwnedConversation = { ...ref, mode: space, projectId: null };
+    this.settings.conversationSpaces.register(owned);
     if (current()) {
-      this.bridge.clearActiveSelection();
-      this.settings.setActiveSession(undefined);
+      this.draftSelections.set(space, owned);
+      this.bridge.activateSession(owned);
+      this.settings.setActiveSessionDraft(owned);
     }
     return this.bootstrap();
   }
@@ -3102,10 +3109,13 @@ export class HostController {
 
   /** Restore the selected space without deriving project ownership from cwd. */
   restoreConversationNavigation(): Promise<void> {
+    const generation = this.navigationGeneration;
     return this.enqueueNavigation(async () => {
+      if (generation !== this.navigationGeneration) return;
       const snapshot = this.settings.conversationSpaces.snapshot();
       const session = snapshot.navigation[snapshot.activeMode].session;
       if (session) await this.openSessionAndActivateInternal(session, undefined, undefined, session.mode);
+      else await this.switchConversationSpace(snapshot.activeMode, generation);
     });
   }
 

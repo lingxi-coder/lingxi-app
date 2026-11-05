@@ -64,7 +64,7 @@ class NativeConversationParityFixtureTest {
                 null, null, row.getBoolean("suppress_always_allow"), null,
             ))
             assertEquals(row.getLong("request_id").toULong(), prompt.requestId)
-            assertEquals(row.getString("expected_detail"), prompt.detail)
+            assertEquals(row.getString("input_json"), prompt.detail)
             assertEquals(row.getBoolean("suppress_always_allow"), prompt.suppressAlwaysAllowRule)
         }
     }

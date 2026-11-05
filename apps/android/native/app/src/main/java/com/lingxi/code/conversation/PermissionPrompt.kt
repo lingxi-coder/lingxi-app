@@ -118,27 +118,12 @@ private const val DEFAULT_WORKER_COLOR = "#7C8CF8"
 private fun WorkerInfoDto.toPrompt(): WorkerPrompt =
     WorkerPrompt(name = name, color = color, team = team)
 
-/** Tool-input fields worth previewing, in priority order (mirrors Electron). */
-private val SALIENT_FIELDS = listOf("command", "file_path", "path", "pattern", "query")
-
 /**
- * Best-effort, never-throwing one-line preview of a tool's JSON input — the same
- * shape the Electron prompt shows: the most salient field (command / file_path /
- * path / pattern / query) when present, otherwise the raw JSON, otherwise empty.
- *
- * Implemented as a tiny dependency-free string scan (no `org.json`) so it is
- * exercised faithfully on the plain JVM unit host, where Android's bundled
- * `org.json` is a return-default stub. It reads the FIRST non-empty string value
- * for a salient key in a flat top-level object; anything it can't extract falls
- * back to the raw JSON.
+ * Keep the complete tool input available in the dialog's selectable, scrollable
+ * detail view. Choosing one field can hide executable code or additional targets.
+ * Preserve malformed input too, so approval never depends on a partial parse.
  */
-internal fun previewToolInput(inputJson: String): String {
-    if (inputJson.isBlank()) return ""
-    for (field in SALIENT_FIELDS) {
-        extractJsonStringValue(inputJson, field)?.let { if (it.isNotEmpty()) return it }
-    }
-    return inputJson
-}
+internal fun previewToolInput(inputJson: String): String = inputJson
 
 /**
  * Pull the string value for a top-level `"key": "value"` pair out of a flat JSON

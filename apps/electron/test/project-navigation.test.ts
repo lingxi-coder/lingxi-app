@@ -307,7 +307,7 @@ test('a running session does not lock global project and session navigation', ()
   ));
 
   for (const marker of [
-    'class="sidebar-primary-action"',
+    'class="sidebar-primary-action sidebar-new-chat"',
     'title="Pinned work\n/Users/tester/Projects/MLPlatform"',
     'aria-label="Add project"',
     'title="Session 1"',

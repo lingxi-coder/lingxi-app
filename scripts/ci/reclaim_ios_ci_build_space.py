@@ -14,6 +14,9 @@ class CleanupError(RuntimeError):
     pass
 
 
+FFI_ARCHIVE = "libios_framework.a"
+
+
 def _within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
@@ -44,13 +47,35 @@ def _archive_architectures(archive: Path) -> set[str]:
     return set(result.stdout.split())
 
 
+def _read_framework_metadata(framework: Path) -> dict:
+    try:
+        with (framework / "Info.plist").open("rb") as source:
+            metadata = plistlib.load(source)
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise CleanupError(f"cannot read XCFramework metadata: {framework}") from error
+    if not isinstance(metadata, dict) or metadata.get("CFBundlePackageType") != "XFWK":
+        raise CleanupError(f"output is not an XCFramework: {framework}")
+    libraries = metadata.get("AvailableLibraries")
+    if not isinstance(libraries, list) or not libraries or not all(isinstance(entry, dict) for entry in libraries):
+        raise CleanupError(f"invalid XCFramework library metadata: {framework}")
+    return metadata
+
+
+def find_ffi_framework(frameworks: Path) -> Path:
+    """Find the single staged XCFramework containing the expected Rust FFI ABI."""
+    candidates = []
+    for framework in sorted(frameworks.glob("*.xcframework")):
+        metadata = _read_framework_metadata(framework)
+        if any(entry.get("LibraryPath") == FFI_ARCHIVE for entry in metadata["AvailableLibraries"]):
+            candidates.append(framework)
+    if len(candidates) != 1:
+        raise CleanupError(f"expected exactly one FFI XCFramework, found {len(candidates)}")
+    return candidates[0]
+
+
 def validate_framework(framework: Path) -> tuple:
     """Check the assembled device and both simulator architectures for Xcode."""
-    with (framework / "Info.plist").open("rb") as source:
-        metadata = plistlib.load(source)
-    if metadata.get("CFBundlePackageType") != "XFWK":
-        raise CleanupError("LingxiCodeFFI output is not an XCFramework")
-    libraries = metadata.get("AvailableLibraries", [])
+    libraries = _read_framework_metadata(framework)["AvailableLibraries"]
     fingerprints = []
     for variant, required in ((None, {"arm64"}), ("simulator", {"arm64", "x86_64"})):
         matches = [entry for entry in libraries if entry.get("SupportedPlatform") == "ios"
@@ -64,6 +89,8 @@ def validate_framework(framework: Path) -> tuple:
         identifier = entry.get("LibraryIdentifier", "")
         library = entry.get("LibraryPath", "")
         headers = entry.get("HeadersPath", "")
+        if library != FFI_ARCHIVE:
+            raise CleanupError(f"iOS {variant or 'device'} library does not match the FFI ABI")
         if any(not value or Path(value).name != value or value in (".", "..")
                for value in (identifier, library, headers)):
             raise CleanupError("invalid XCFramework library paths")
@@ -97,7 +124,7 @@ def reclaim(repo: Path, runner_temp: Path, run_id: str, run_attempt: str) -> Non
         raise CleanupError("the private Cargo output must not overlap the repository")
     for output in (frameworks, generated):
         _check_links(output)
-    framework = frameworks / "LingxiCodeFFI.xcframework"
+    framework = find_ffi_framework(frameworks)
     before = validate_framework(framework)
 
     print("Disk usage before reclaiming completed iOS intermediates:", flush=True)
@@ -110,7 +137,7 @@ def reclaim(repo: Path, runner_temp: Path, run_id: str, run_attempt: str) -> Non
 
     for output in (frameworks, generated):
         _check_links(output)
-    if validate_framework(framework) != before:
+    if find_ffi_framework(frameworks) != framework or validate_framework(framework) != before:
         raise CleanupError("XCFramework changed after reclaiming intermediates")
     print("Disk usage after reclaiming completed iOS intermediates:", flush=True)
     subprocess.run(["df", "-h", str(repo)], check=True)

@@ -37,7 +37,7 @@ class CleanupTests(unittest.TestCase):
         (self.scratch / "intermediate").write_text("assembly")
         self.native = self.repo / "apps/ios/native"
         self.frameworks = self.native / "Frameworks"
-        self.framework = self.frameworks / "LingxiCodeFFI.xcframework"
+        self.framework = self.frameworks / "ClientFFI.xcframework"
         self.generated = self.native / "Generated"
         self.generated.mkdir()
         (self.generated / "client.swift").write_text("bindings")
@@ -95,6 +95,26 @@ class CleanupTests(unittest.TestCase):
             self.reclaim()
         self.assert_intermediates_preserved()
 
+    def test_rejects_a_framework_archive_link_into_an_intermediate(self):
+        archive = self.framework / "ios-arm64/libios_framework.a"
+        archive.unlink()
+        archive.symlink_to(self.scratch / "intermediate")
+        with self.assertRaisesRegex(cleanup.CleanupError, "output link leaves"):
+            self.reclaim()
+        self.assert_intermediates_preserved()
+
+    def test_ignores_unrelated_valid_framework_metadata(self):
+        other = self.frameworks / "Other.xcframework"
+        other.mkdir()
+        with (other / "Info.plist").open("wb") as output:
+            plistlib.dump({"CFBundlePackageType": "XFWK", "AvailableLibraries": [
+                {"LibraryPath": "libother.a", "SupportedPlatform": "ios"},
+            ]}, output)
+        self.reclaim()
+        self.assertTrue((other / "Info.plist").is_file())
+        self.assertFalse(self.target.exists())
+        self.assertFalse(self.scratch.exists())
+
     def test_rejects_missing_simulator_architecture_before_deleting(self):
         self.libraries[1]["SupportedArchitectures"] = ["arm64"]
         self.write_plist()
@@ -105,6 +125,33 @@ class CleanupTests(unittest.TestCase):
     def test_rejects_missing_archive_before_deleting(self):
         (self.framework / "ios-arm64/libios_framework.a").unlink()
         with self.assertRaisesRegex(cleanup.CleanupError, "incomplete XCFramework"):
+            self.reclaim()
+        self.assert_intermediates_preserved()
+
+    def test_rejects_multiple_matching_ffi_frameworks(self):
+        shutil.copytree(self.framework, self.frameworks / "AnotherFFI.xcframework")
+        with self.assertRaisesRegex(cleanup.CleanupError, "expected exactly one FFI XCFramework, found 2"):
+            self.reclaim()
+        self.assert_intermediates_preserved()
+
+    def test_rejects_missing_ffi_library_candidate(self):
+        for entry in self.libraries:
+            entry["LibraryPath"] = "libother.a"
+        self.write_plist()
+        with self.assertRaisesRegex(cleanup.CleanupError, "expected exactly one FFI XCFramework, found 0"):
+            self.reclaim()
+        self.assert_intermediates_preserved()
+
+    def test_rejects_one_matching_slice_and_one_unrelated_library(self):
+        self.libraries[0]["LibraryPath"] = "libother.a"
+        self.write_plist()
+        with self.assertRaisesRegex(cleanup.CleanupError, "does not match the FFI ABI"):
+            self.reclaim()
+        self.assert_intermediates_preserved()
+
+    def test_rejects_malformed_metadata_in_other_staged_framework(self):
+        (self.frameworks / "Unknown.xcframework").mkdir()
+        with self.assertRaisesRegex(cleanup.CleanupError, "cannot read XCFramework metadata"):
             self.reclaim()
         self.assert_intermediates_preserved()
 

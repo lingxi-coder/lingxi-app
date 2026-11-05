@@ -17,6 +17,12 @@ async function main() {
       throw new Error(`Timed out: ${expression}\n${await run('document.body.innerText')}`);
     };
     const check = async (expression, label) => { if (!await run(expression)) throw new Error(label); };
+    const expectCodeRequired = async () => {
+      await wait(`document.querySelector('.desktop-notification[role="alert"] .desktop-notification-detail')?.textContent === 'Chat mode does not support Local App development. Switch to Code mode to continue.'`);
+      // Dismiss between actions so each action must produce its own notification.
+      await run(`document.querySelector('.desktop-notification[role="alert"] .desktop-notification-close').click()`);
+      await wait(`!document.querySelector('.desktop-notification[role="alert"]')`);
+    };
     const open = async () => {
       await run(`document.querySelector('[aria-label="Add project"]').focus(); document.querySelector('[aria-label="Add project"]').click()`);
       await wait(`!!document.querySelector('[aria-label="Create project"]')`);
@@ -62,15 +68,18 @@ async function main() {
     await run(`document.querySelector('button[aria-label="Apps"]').click()`);
     await wait(`!!document.querySelector('aside[aria-label="Unfinished app publications"]')`);
     await run(`document.querySelector('aside[aria-label="Unfinished app publications"] button').click()`);
-    await wait(`document.querySelector('.local-app-error')?.textContent.includes('Switch to Code mode')`);
+    await expectCodeRequired();
     await check(`window.projectCreationFixture.publicationRecoveries.length === 0`, 'Chat may view pending publications but cannot resume one');
     await wait(`!!document.querySelector('aside[aria-label="Resume app development"]')`);
     await run(`document.querySelector('aside[aria-label="Resume app development"] button').click()`);
-    await wait(`document.querySelector('.local-app-error')?.textContent.includes('Switch to Code mode')`);
+    await expectCodeRequired();
     await check(`window.projectCreationFixture.sessionRecoveries.length === 0`, 'Chat may view pending sessions but cannot resume one');
     await run(`document.querySelector('.local-app-library-header button').click()`);
-    await wait(`document.querySelector('.desktop-main > .local-app-error')?.textContent.includes('Switch to Code mode')`);
-    await check(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.defaults === 0 && window.projectCreationFixture.newSessions.length === 0 && window.projectCreationFixture.switches.length === 0`, 'Chat must explain the Code requirement without switching or creating a project');
+    await wait(`!!document.querySelector('[aria-label="Create project"]') && !document.querySelector('form[aria-busy=true]') && document.querySelector('.create-project-selected-folder')?.textContent.includes('/fixture/.current-product/.apps')`);
+    await check(`window.projectCreationFixture.mode === 'code' && JSON.stringify(window.projectCreationFixture.switches) === '["code"]' && window.projectCreationFixture.defaults > 0 && document.querySelector('.create-project-selected-folder')?.textContent.includes('/fixture/.current-product/.apps') && window.projectCreationFixture.newSessions.length === 0 && window.projectCreationFixture.creates.length === 0`, 'Creating an app from Chat must switch to Code and stage a project without creating it');
+    await run(`document.querySelector('.create-project-cancel').click()`);
+    await wait(`!document.querySelector('[aria-label="Create project"]')`);
+    await check(`window.projectCreationFixture.creates.length === 0 && window.projectCreationFixture.newSessions.length === 0`, 'Cancelling the staged project must not create a project or session');
     await window.loadURL(`${url}?recover=1`);
     await wait(`!!document.querySelector('button[aria-label="Apps"]')`);
     await run(`document.querySelector('button[aria-label="Apps"]').click()`);

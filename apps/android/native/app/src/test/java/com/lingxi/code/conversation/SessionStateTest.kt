@@ -671,35 +671,6 @@ class SessionStateTest {
         assertNull(sessionActivationFrom(ClientEvent.SessionList(sessions = emptyList())))
     }
 
-    @Test
-    fun messageDtoText_foldsEveryBlockKind_droppingBlanks() {
-        val text = messageDtoText(
-            listOf(
-                MessageBlockDto.Text("正文".toClientTextDto()),
-                MessageBlockDto.Text("   ".toClientTextDto()), // blank → dropped
-                MessageBlockDto.ToolUse(id = "t1", tool = "bash", inputJson = "{}", header = currentToolHeaderFixture("Bash")),
-                MessageBlockDto.ToolResult(
-                    id = "t1", tool = "bash", resultJson = "ok", isError = false,
-                    display = currentToolDisplayFixture(),
-                ),
-                MessageBlockDto.RedactedThinking(data = "opaque"),
-                MessageBlockDto.CompactBoundary(
-                    messagesBefore = 8u,
-                    messagesAfter = 2u,
-                    summary = "hidden compact summary",
-                ),
-            ),
-        )
-        assertTrue(text.contains("正文"))
-        assertTrue(text.contains("bash")) // the tool-use activity line
-        assertTrue(text.contains("工具结果"))
-        assertTrue(text.contains("已折叠的思考"))
-        assertTrue(text.contains("对话已压缩"))
-        assertFalse(text.contains("hidden compact summary"))
-        // The blank text block left no dangling double-blank run.
-        assertFalse(text.contains("\n\n\n"))
-    }
-
     // --- ChatViewModel session activation rehydration -----------------------
 
     @Test

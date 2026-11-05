@@ -6,7 +6,7 @@ import android.content.Context
  * Resolves a localized string for conversation-package code that runs OUTSIDE a
  * `@Composable` body — [ChatViewModel], [ConversationSource] and the pure
  * top-level mappers below ([clientEventToReply], [userFacingEngineError],
- * [mapReplyStream], [messageDtoText]) — and therefore cannot call
+ * [mapReplyStream], [transcriptFromDtos]) — and therefore cannot call
  * `stringResource()`.
  *
  * [fallback] is always the exact zh-Hans base-locale copy for [id], passed in at

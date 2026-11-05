@@ -25,7 +25,6 @@ class PrivatePageTranscriptTest {
             assertEquals("Before\n\nPrivate page unavailable\n\nAfter", message.text)
             assertEquals(listOf("Before", "Private page unavailable", "After"),
                 message.blocks.map { (it as MessageContent.Text).text })
-            assertEquals(message.text, messageDtoText(blocks, strings))
         }
     }
 
@@ -36,11 +35,10 @@ class PrivatePageTranscriptTest {
             transcriptFromDtos(listOf(dto("assistant", blocks)), strings).single().text)
     }
 
-    @Test fun aPrivatePageReferenceCannotCreateAUserBubbleOrExposeItsIdentifier() {
+    @Test fun aPrivatePageReferenceCannotCreateAUserBubble() {
         val blocks = listOf(MessageBlockDto.Page(PageRefDto("desktop-private-notes", 2u)))
 
         assertTrue(transcriptFromDtos(listOf(dto("user", blocks)), strings).isEmpty())
-        assertEquals("Private page unavailable", messageDtoText(blocks, strings))
     }
 
     private fun dto(role: String, blocks: List<MessageBlockDto>) =

@@ -2283,6 +2283,9 @@ export function useBridge(): UseBridge {
       setSessionReady(false);
       sessionLoadingRef.current = false;
       setPendingSession(null);
+      // The Local App flow owns the saved-project recovery message. Let it
+      // present one classified error rather than also showing the raw cause.
+      if (purpose?.kind === 'local-app') throw cause;
       capture(cause);
     }
   }, [applyBootstrap, beginNavigationOperation, bootstrap, capture, desktop.currentModel, desktop.currentModelSource, host, isCurrentNavigationOperation]);

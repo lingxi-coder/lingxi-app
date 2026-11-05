@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { localAppAuthoringPrompt, localAppChatTarget, localAppDraftDisposition, type LocalAppChatNavigation, type LocalAppDraft } from '../src/renderer/bridge/localAppChat';
+import { LocalAppAuthoringError, localAppAuthoringPrompt, localAppChatTarget, localAppDraftDisposition, type LocalAppChatNavigation, type LocalAppDraft } from '../src/renderer/bridge/localAppChat';
 import type { DesktopAuthoringRef } from '../src/shared/localApps';
-import { localAppErrorMessage, localAppToolRequiresCode } from '../src/renderer/bridge/localAppErrors';
+import { localAppAuthoringErrorPresentation, localAppErrorMessage, localAppToolRequiresCode } from '../src/renderer/bridge/localAppErrors';
 
 const source = { projectPath: '/project/app', sessionId: 'session-app' };
 const active = { projectPath: '/project/other', sessionId: 'session-other' };
@@ -82,6 +82,35 @@ test('Create without a saved workspace asks for one and makes a real Code sessio
   }), () => true);
   assert.deepEqual(calls, ['pick', 'new:/selected/app']);
   assert.deepEqual(target, { projectPath: '/selected/app', sessionId: 'new-session' });
+});
+
+test('authoring startup errors retain the selected project and retry guidance without exposing host errors', async () => {
+  const projectPath = '/fixture/workspace/directory/App';
+  for (const [message, diagnostic] of [
+    ['ENOSPC: secret-host-token', 'Disk full; task paused'],
+    ['unknown failure: secret-host-token', ''],
+    ['Codex authentication unavailable. Sign in again. secret-host-token', 'Codex sign-in required'],
+    ['cancel the active turn before secret-host-token', 'Turn in progress'],
+    ['unexpected result: invalid type: newtype struct secret-host-token', 'Couldn’t read the response'],
+  ]) {
+    const cause = new Error(message);
+    await assert.rejects(localAppChatTarget(undefined, navigation({
+      addProject: async () => ({ path: projectPath }),
+      newSession: async () => { throw cause; },
+    }), () => true), (error: unknown) => {
+      assert.ok(error instanceof LocalAppAuthoringError);
+      assert.equal(error.cause, cause);
+      assert.equal(error.projectPath, projectPath);
+      const presentation = localAppAuthoringErrorPresentation(error);
+      assert.match(presentation.detail, /authoring chat/);
+      assert.ok(presentation.detail.includes(projectPath));
+      assert.match(presentation.detail, /Choose that source folder to retry/);
+      if (diagnostic) assert.ok(presentation.detail.includes(diagnostic));
+      assert.doesNotMatch(JSON.stringify(presentation), /secret-host-token/);
+      assert.equal(presentation.technicalDetail, undefined);
+      return true;
+    });
+  }
 });
 
 test('an unconfirmed source-only binding is registered without changing the current owner', async () => {

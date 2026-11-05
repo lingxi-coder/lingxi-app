@@ -3,22 +3,22 @@ import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { useEffect, useState, type CSSProperties } from 'react';
 import type { UseBridge } from '../bridge/bridgeTypes.js';
-import { classifyDesktopError } from '../bridge/errors';
+import { classifyDesktopError, type ActionableError } from '../bridge/errors';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 
-export function ErrorBanner({ bridge }: { bridge: Pick<UseBridge, 'error' | 'clearError'> }) {
-  return bridge.error ? <ErrorNotification key={bridge.error} message={bridge.error} onDismiss={bridge.clearError} /> : null;
+export function ErrorBanner({ bridge, presentation }: { bridge: Pick<UseBridge, 'error' | 'clearError'>; presentation?: ActionableError }) {
+  return bridge.error ? <ErrorNotification key={bridge.error} message={bridge.error} presentation={presentation} onDismiss={bridge.clearError} /> : null;
 }
 
-function ErrorNotification({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+function ErrorNotification({ message, presentation, onDismiss }: { message: string; presentation?: ActionableError; onDismiss: () => void }) {
   const t = useT();
   useI18n();
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const compactRejected = isCompactTurnRejection(message);
-  const error = classifyDesktopError(message);
+  const compactRejected = !presentation && isCompactTurnRejection(message);
+  const error = presentation ?? classifyDesktopError(message);
   useEffect(() => {
     if (hovered || focused || detailsOpen) return;
     const timeout = window.setTimeout(onDismiss, 5_000);

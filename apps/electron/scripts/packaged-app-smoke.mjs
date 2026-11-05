@@ -701,12 +701,11 @@ async function setupSmokeCollectors(page, sessionId = null) {
   })()`);
 }
 
-async function assertBundledSidecar(page, appPath, tempRoot) {
+async function assertBundledSidecar(page, appPath, tempRoot, workspace) {
   await setupSmokeCollectors(page);
-  const sessionBootstrap = await evaluate(page, `(async () => {
-    const current = await window.lingxi.bootstrap();
-    return await window.lingxi.newSession(current.workspace.path);
-  })()`);
+  // Startup can own a global draft whose cwd is not a Project. Exercise the
+  // explicitly registered fixture Project instead of deriving ownership from cwd.
+  const sessionBootstrap = await evaluate(page, `window.lingxi.newSession(${JSON.stringify(workspace)})`);
   const sessionId = sessionBootstrap?.activeSession?.sessionId;
   assert.equal(typeof sessionId, 'string', 'packaged smoke must create an active session before dispatching commands');
   const encodedSessionId = JSON.stringify(sessionId);
@@ -1676,7 +1675,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     log('checking renderer security');
     await assertSecurityBehavior(page);
     log('checking bundled sidecar');
-    await assertBundledSidecar(page, copiedAppPath, tempRoot);
+    await assertBundledSidecar(page, copiedAppPath, tempRoot, workspace);
     log('checking terminal');
     await assertBottomTerminal(page);
     log('checking Desktop Git');

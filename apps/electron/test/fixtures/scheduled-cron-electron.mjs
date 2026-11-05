@@ -90,8 +90,24 @@ async function main() {
     await clickLabel('Next month');
     const lastDay = await run('[...document.querySelectorAll("dialog[open] .lx-date-calendar button")].at(-1).getAttribute("aria-label")');
     await clickLabel(lastDay);
-    await run(`document.querySelector('dialog[open] button[aria-label="${lastDay}"]').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowRight', bubbles:true}))`);
-    await delay(50);
+    await run(`document.querySelector('dialog[open] button[aria-label="${lastDay}"]').focus()`);
+    await wait(`document.activeElement?.getAttribute('aria-label') === ${JSON.stringify(lastDay)}`);
+    // A busy hidden window may run the picker's animation-frame focus later
+    // than the selection update. Exercise that ordering deterministically.
+    await run(`(() => {
+      const requestFrame = window.requestAnimationFrame;
+      window.requestAnimationFrame = (callback) => requestFrame.call(window, (time) => setTimeout(() => callback(time), 200));
+      try {
+        document.querySelector('dialog[open] button[aria-label="${lastDay}"]').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowRight', bubbles:true}));
+      } finally {
+        window.requestAnimationFrame = requestFrame;
+      }
+    })()`);
+    await wait(`(() => {
+      const selected = document.querySelector('dialog[open] .lx-date-calendar button[aria-pressed="true"]');
+      const date = selected?.getAttribute('aria-label');
+      return date?.endsWith('-01') && date.slice(0, 7) !== ${JSON.stringify(lastDay.slice(0, 7))} && document.activeElement === selected;
+    })()`);
     const selectedDay = await run(`document.querySelector('dialog[open] button[aria-pressed="true"]').getAttribute('aria-label')`);
     picker.monthRollover = selectedDay.endsWith('-01') && selectedDay.slice(0, 7) !== lastDay.slice(0, 7);
     picker.calendarFocus = await run('document.activeElement?.getAttribute("aria-label")') === selectedDay;

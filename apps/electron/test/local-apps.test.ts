@@ -406,9 +406,13 @@ test('Python install creates an app-local venv and service dependencies receive 
   const row = await project(store, { schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Python', entry: { type: 'server', process: 'api' },
     install: [{ command: 'python -c "import sys; assert sys.prefix != sys.base_prefix"', venv: '.venv' }],
     processes: [{ name: 'api', command: 'python server.py', cwd: 'backend', venv: '.venv', ready: { timeoutMs: 15000 } }, { name: 'worker', command: `${node} -e "console.log(process.env.LOCAL_APP_API_URL); console.log('worker-ready');setInterval(()=>{},1000)"`, dependsOn: ['api'], ready: { output: 'worker-ready', timeoutMs: 5000 } }] }, {
-    'backend/server.py': "import os,sys\nfrom http.server import BaseHTTPRequestHandler,HTTPServer\nclass H(BaseHTTPRequestHandler):\n def do_GET(self):\n  self.send_response(200); self.end_headers(); self.wfile.write(sys.prefix.encode())\nHTTPServer(('127.0.0.1',int(os.environ['PORT'])),H).serve_forever()\n",
+    'backend/server.py': "import os,sys\nfrom http.server import BaseHTTPRequestHandler,HTTPServer\nclass H(BaseHTTPRequestHandler):\n def do_GET(self):\n  self.send_response(200); self.end_headers(); self.wfile.write(sys.prefix.encode())\nserver=HTTPServer(('127.0.0.1',int(os.environ['PORT'])),H)\nprint(f'api bound={server.server_address} python={sys.executable} prefix={sys.prefix}',file=sys.stderr,flush=True)\nserver.serve_forever()\n",
   });
-  await runtime.start(row.id);
+  try { await runtime.start(row.id); }
+  catch (error) {
+    t.diagnostic(`Python fixture runtime logs:\n${runtime.logs(row.id).map(log => `[${log.process}/${log.stream}] ${log.text}`).join('\n')}`);
+    throw error;
+  }
   const url = runtime.service(row.id, 'api')!.url;
   assert.match(await (await fetch(url)).text(), /\.venv$/);
   assert.ok(runtime.logs(row.id).some(log => log.process === 'worker' && log.text.includes(url)));

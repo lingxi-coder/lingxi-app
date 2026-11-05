@@ -43,9 +43,12 @@ export class LocalAppCoreClient implements LocalAppCoreTransport {
     });
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => this.report(chunk.slice(-4096)));
     child.once('error', error => { transportError ??= error; });
-    child.once('close', () => {
+    child.once('close', (code, signal) => {
       if (this.child === child) this.child = undefined;
       this.buffer = '';
+      if (!this.closed || code !== 0 || signal || transportError) {
+        this.report(`Local App library closed (code=${code}, signal=${signal})${transportError ? `: ${transportError.message}` : ''}\n`);
+      }
       const error = transportError ?? new Error('Local App library exited; restart the application after its running apps stop');
       this.fail(error);
       if (!this.closed) {

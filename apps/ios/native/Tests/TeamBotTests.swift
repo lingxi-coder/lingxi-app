@@ -15,7 +15,7 @@ final class TeamBotTests: XCTestCase {
     }
     func testDisabledOwnerCardRetainsRevisionWithoutBecomingSelectable() throws {
         let raw = """
-        {"key":"bot:owner:abcdefghijklmnopqrstuv:abcdefghijklmnopqrstuv","ownerUid":"owner","name":"Writer","description":"Writes reports","revision":12,"use":"all","enabled":false,"permitted":false,"online":false}
+        {"key":"bot:owner:abcdefghijklmnopqrstuv:abcdefghijklmnopqrstuv","ownerUid":"owner","hostId":"abcdefghijklmnopqrstuv","botId":"abcdefghijklmnopqrstuv","name":"Writer","description":"Writes reports","revision":12,"use":"all","enabled":false,"permitted":false,"online":false}
         """
         let card = try JSONDecoder().decode(TeamBotCard.self, from: Data(raw.utf8))
         XCTAssertEqual(card.revision, 12)
@@ -24,8 +24,43 @@ final class TeamBotTests: XCTestCase {
         let inconsistent = raw.replacingOccurrences(of: "\"permitted\":false", with: "\"permitted\":true")
         XCTAssertFalse(try JSONDecoder().decode(TeamBotCard.self, from: Data(inconsistent.utf8)).selectable, "A disabled binding cannot become a participant even with a stale permission hint")
     }
+    func testCardsCarryTheirHostAndBotIdAndNeverFallBack() throws {
+        let raw = """
+        {"key":"bot:owner:hostabcdefghijklmnopqrs:botabcdefghijklmnopqrs","ownerUid":"owner","hostId":"hostabcdefghijklmnopqrs","botId":"botabcdefghijklmnopqrs","name":"Writer","description":"","revision":2,"use":"listed","enabled":true,"permitted":true,"online":true}
+        """
+        let card = try JSONDecoder().decode(TeamBotCard.self, from: Data(raw.utf8))
+        XCTAssertEqual(card.hostId, "hostabcdefghijklmnopqrs")
+        XCTAssertEqual(card.botId, "botabcdefghijklmnopqrs")
+        XCTAssertEqual(card.avatarId, "botabcdefghijklmnopqrs", "The face is chosen by the Bot id")
+        let noHost = raw.replacingOccurrences(of: "\"hostId\":\"hostabcdefghijklmnopqrs\",", with: "")
+        XCTAssertThrowsError(try JSONDecoder().decode(TeamBotCard.self, from: Data(noHost.utf8)), "A card without its host is invalid data, not a Bot to guess about")
+        let noBot = raw.replacingOccurrences(of: "\"botId\":\"botabcdefghijklmnopqrs\",", with: "")
+        XCTAssertThrowsError(try JSONDecoder().decode(TeamBotCard.self, from: Data(noBot.utf8)))
+        let blank = TeamBotCard(key: "bot:owner:h:last", ownerUid: "owner", hostId: "h", botId: "", name: "", description: "", revision: 1, use: "all", enabled: true, permitted: true, online: false)
+        XCTAssertEqual(blank.avatarId, "last", "Without a Bot id the last segment of the key is used")
+    }
+    func testOwnerRecoveryWaitsWhileDesktopStillHoldsTheResult() throws {
+        var interrupted = state("recovery")
+        XCTAssertTrue(interrupted.canRecover(uid: "owner", now: 1000))
+        interrupted.hostStatus = "result_pending"
+        XCTAssertFalse(interrupted.canRecover(uid: "owner", now: 1000), "The exact result is saved on Desktop: delivery is retried, not settled by hand")
+        interrupted.hostStatus = "recovery_required"
+        XCTAssertTrue(interrupted.canRecover(uid: "owner", now: 1000))
+        interrupted.hostStatus = "retrying"
+        XCTAssertTrue(interrupted.canRecover(uid: "owner", now: 1000))
+        XCTAssertFalse(interrupted.canRecover(uid: "alice", now: 1000), "Only the owner settles")
+        let raw = """
+        {"state":"recovery","ownerUid":"owner","botKey":"bot:owner:abcdefghijklmnopqrstuv:abcdefghijklmnopqrstuv","origin":{"uid":"alice","generation":7},"leaseUntil":2000,"questionId":null,"answered":false,"hostStatus":"result_pending"}
+        """
+        let decoded = try JSONDecoder().decode(TeamBotState.self, from: Data(raw.utf8))
+        XCTAssertEqual(decoded.hostStatus, "result_pending")
+        XCTAssertFalse(decoded.canRecover(uid: "owner", now: 1000))
+        let plain = try JSONDecoder().decode(TeamBotState.self, from: Data(raw.replacingOccurrences(of: ",\"hostStatus\":\"result_pending\"", with: "").utf8))
+        XCTAssertNil(plain.hostStatus, "Only the owner is told what Desktop reports")
+        XCTAssertTrue(plain.canRecover(uid: "owner", now: 1000))
+    }
     func testMissingAndNonparticipatingCardsBlockDraftTargetsAndImplicitBotDM() throws {
-        let active = TeamBotCard(key: key, ownerUid: "owner", name: "Writer", description: "", revision: 1, use: "all", enabled: true, permitted: true, online: false)
+        let active = TeamBotCard(key: key, ownerUid: "owner", hostId: "abcdefghijklmnopqrstuv", botId: "abcdefghijklmnopqrstuv", name: "Writer", description: "", revision: 1, use: "all", enabled: true, permitted: true, online: false)
         let group = TeamMessageConversation(id: "thread_0001", kind: "group", title: "Group", participants: ["user:alice", key], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
         XCTAssertEqual(TeamBotSelection.unavailable([key], cards: []), [key], "Revoked other-owner cards are omitted from the list")
         XCTAssertFalse(TeamBotSelection.canSend(in: group, selected: [key], cards: []))

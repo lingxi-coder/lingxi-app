@@ -758,6 +758,8 @@ struct RootView: View {
             .task { await cronRepository.handleLaunch() }
         return launchLifecycle
             .task { await LocalApps.initializeOnce() }
+            // The Teams data layer lives with the app, not with the Teams tab: its unread counts feed the tab badge.
+            .task { teamsWorkspace.start() }
             .task {
                 await consumePendingAppActions()
                 syncConversationBackgroundSurfaces()

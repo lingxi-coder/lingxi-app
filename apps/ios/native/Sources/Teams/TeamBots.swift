@@ -1,8 +1,11 @@
 import Foundation
 
-struct TeamBotCard: Decodable, Identifiable, Sendable {
+struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
     let key: String
     let ownerUid: String
+    /// The computer the Bot runs on, and the Bot's id on it (the key is `bot:<owner>:<host>:<botId>`).
+    let hostId: String
+    let botId: String
     let name: String
     let description: String
     let revision: Int
@@ -13,10 +16,12 @@ struct TeamBotCard: Decodable, Identifiable, Sendable {
     var onlineUntil: Double? = nil
     var id: String { key }
     var selectable: Bool { enabled && permitted }
+    /// The id the Bot's avatar is drawn from on every surface (spec §7.1): `botId`, else the last segment of the key.
+    var avatarId: String { botId.isEmpty ? AvatarIdentity.teamBotAvatarId(key) : botId }
 }
 struct TeamBotOrigin: Codable, Sendable, Equatable { let uid: String; let generation: Int }
 struct TeamBotQuestion: Codable, Equatable, Sendable { let id: String; let questions: [String] }
-struct TeamBotState: Decodable, Sendable {
+struct TeamBotState: Decodable, Equatable, Sendable {
     let state: String
     let ownerUid: String
     let botKey: String
@@ -24,6 +29,9 @@ struct TeamBotState: Decodable, Sendable {
     let leaseUntil: Double?
     let questionId: String?
     let answered: Bool
+    /// What the owner's Desktop reports about the run (the owner alone receives it): `retrying`,
+    /// `result_pending`, `recovery_required`, `model_unavailable`, `runtime_unavailable`, `storage_error`.
+    var hostStatus: String? = nil
 
     func canAnswer(_ message: TeamMessage, uid: String, generation: Int, now: Double) -> Bool {
         message.author.kind == "bot" && message.kind == "question" && message.recalled != true
@@ -35,8 +43,9 @@ struct TeamBotState: Decodable, Sendable {
     func needsRecovery(now: Double) -> Bool {
         state == "recovery" || (["claimed", "running"].contains(state) && (leaseUntil ?? .infinity) <= now)
     }
+    /// Desktop `canRecoverBot`: only the owner, and not while Desktop still holds the exact result to deliver.
     func canRecover(uid: String, now: Double) -> Bool {
-        ownerUid == uid && needsRecovery(now: now)
+        ownerUid == uid && hostStatus != "result_pending" && needsRecovery(now: now)
     }
 }
 

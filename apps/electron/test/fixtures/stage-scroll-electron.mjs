@@ -22,7 +22,7 @@ async function main() {
     await settle();
     const metrics = `(() => { const node = document.querySelector('.desktop-stage'); return { top: node.scrollTop, gap: node.scrollHeight - node.clientHeight - node.scrollTop, ancestor: document.querySelector('#scroll-ancestor').scrollTop }; })()`;
     const initial = await run(metrics);
-    assert.equal(await run(`getComputedStyle(document.querySelectorAll('.transcript-row')[1]).marginTop`), '24px', 'messages have comfortable reading space');
+    assert.equal(await run(`getComputedStyle(document.querySelectorAll('.transcript-row')[1]).marginTop`), '16px', 'assistant messages retain the current reading spacing');
     const result = { initialGap: initial.gap, ancestorScroll: initial.ancestor };
     await run(`(() => { const node = document.querySelector('.desktop-stage'); node.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true})); node.scrollTop = node.scrollHeight - node.clientHeight - 40; })()`);
     await settle();
@@ -68,6 +68,13 @@ async function main() {
           toolGap: tool.getBoundingClientRect().top - previous.getBoundingClientRect().bottom,
           thinkingGap: slot.getBoundingClientRect().top - tool.getBoundingClientRect().bottom };
       })()`));
+      if (phase === 'next-tool') {
+        result.runningGroup = await run(`(() => {
+          const group = document.querySelector('[data-run-type="tool"]');
+          return { expanded: group.querySelector('.tool-group-trigger')?.getAttribute('aria-expanded'),
+            activeCalls: group.querySelectorAll('.tool-group-calls .tool-row-state-dot[role="status"]').length };
+        })()`);
+      }
     }
     await run('window.stageScrollFixture.longList()');
     await settle();
@@ -85,7 +92,7 @@ async function main() {
       for (const status of ['pending', undefined, 'failed', undefined]) {
         await run(`window.stageScrollFixture.delivery(${JSON.stringify(status)}, ${long})`);
         await settle();
-        assert.equal(await run(`getComputedStyle(document.querySelector('[data-message-role="user"] + .transcript-row')).marginTop`), '32px', 'user turns retain a clear boundary');
+        assert.equal(await run(`getComputedStyle(document.querySelector('[data-message-role="user"] + .transcript-row')).marginTop`), '24px', 'user turns retain a clear boundary');
         const alignment = await run(`(() => {
           const bubble = document.querySelector('.user-message-bubble').getBoundingClientRect();
           const row = document.querySelector('.transcript-user-message').getBoundingClientRect();
@@ -104,9 +111,8 @@ async function main() {
         }
       }
     }
-    // The clock/copy affordance under a user message reveals on hover. Its box
-    // is reserved, so revealing it must not change the message's height — the
-    // transcript would otherwise shift under the pointer mid-read.
+    // The clock/copy affordance occupies the inter-message gap and reveals on
+    // hover without changing the message's height under the reader's pointer.
     const messageBox = `(() => {
       const row = document.querySelector('.transcript-user-message');
       const bubble = row.querySelector('.user-message-bubble');

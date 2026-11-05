@@ -1,0 +1,22 @@
+[package]
+name = "futures-macro-source-audit-probe"
+version = "0.0.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+futures-util = "=0.3.32"
+futures-macro = "=0.3.32"
+futures-core = "=0.3.32"
+futures-task = "=0.3.32"
+proc-macro2 = "=1.0.106"
+quote = "=1.0.45"
+syn = "=2.0.117"
+unicode-ident = "=1.0.24"
+pin-project-lite = "=0.2.17"
+slab = "=0.4.12"
+
+[profile.dev]
+debug = 0
+incremental = false

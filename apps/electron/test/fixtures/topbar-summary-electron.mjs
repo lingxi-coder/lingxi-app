@@ -78,11 +78,11 @@ async function main() {
     await capture('tools-light');
     await pointerClick('.runtime-inspector-tool');
     await waitFor(wc, `Boolean(document.querySelector('[data-runtime-inspector-active="true"]'))`);
-    await pointerClick('[aria-label="Open tools"]');
+    await pointerClick('[aria-label="Close Review"]');
     await waitFor(wc, `Boolean(document.querySelector('.runtime-inspector-landing'))`);
     await pointerClick('.runtime-inspector-resource-grid button');
     await waitFor(wc, `document.querySelector('#runtime-inspector-panel')?.textContent.includes('Reference content')`);
-    await pointerClick('[aria-label="Open tools"]');
+    await pointerClick('[aria-label="Close desktop-reference.png"]');
     await waitFor(wc, `Boolean(document.querySelector('.runtime-inspector-landing'))`);
     await js(`window.dispatchEvent(new CustomEvent('fixture-reset', {detail:{theme:'dark'}}))`);
     await capture('tools-dark');
@@ -90,9 +90,8 @@ async function main() {
     await capture('tools-narrow');
     window.setContentSize(1400, 900);
     await js(`window.dispatchEvent(new CustomEvent('fixture-reset', {detail:{theme:'light'}}))`);
-    await pointerClick('[aria-label="Close Review"]');
-    await pointerClick('[aria-label="Close desktop-reference.png"]');
-    assert.equal(await js(`['Open tools', 'Expand right panel', 'Toggle right panel'].every(label => document.querySelector('.desktop-topbar [aria-label="' + label + '"]'))`), true);
+    assert.equal(await js(`['Expand right panel', 'Toggle right panel'].every(label => document.querySelector('.desktop-topbar [aria-label="' + label + '"]'))`), true);
+    assert.equal(await js(`document.querySelector('.desktop-topbar [aria-label="Open tools"]')`), null);
     assert.equal(await js(`document.querySelectorAll('.runtime-inspector-header button[aria-label="Open tools"], .runtime-inspector-header .runtime-panel-hide').length`), 0);
     await pointerClick('[aria-label="Open pinned summary"]');
     await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview'))`);

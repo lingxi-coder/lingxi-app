@@ -14,10 +14,13 @@ import {
 import { newSideChat } from '../../src/renderer/bridge/sideChatState';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
+import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
 import '../../src/renderer/global.css';
 import '../../src/renderer/components/RuntimeCenter.css';
 // `.desktop-chat-layout`'s flex row lives here, as it does in the app.
 import '../../src/renderer/components/TerminalPanel.css';
+
+setLanguagePreference('en');
 
 const idle = async () => undefined;
 const todos = [

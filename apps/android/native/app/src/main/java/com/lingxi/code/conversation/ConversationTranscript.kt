@@ -213,6 +213,11 @@ private class MessageBuild(
                         ?: MessageContent.Visualization(VisualizationSlotStatus.Unavailable, null),
                 )
             }
+            // Private pages stay on their publishing computer; mobile does not
+            // enable the Page tool or expose a private-page serving origin.
+            is MessageBlockDto.Page -> if (role == Role.Ai) {
+                addText(strings.resolve(R.string.private_page_unavailable, "打不开这个本机页面。"))
+            }
             is MessageBlockDto.ToolUse -> {
                 index[block.id] = ToolBlockRef(this, blocks.size)
                 blocks.add(
@@ -282,6 +287,7 @@ private class MessageBuild(
  *                       rendered as user-authored text.
  *  - ToolUse          → a compact "调用工具 <tool>" activity line.
  *  - ToolResult       → a compact "工具结果"/"工具失败" line.
+ *  - Page             → a localized unavailable notice; mobile does not serve private pages.
  * Blocks are joined by blank lines and blanks are dropped so an empty trailing
  * block never leaves dangling whitespace. The `when` is exhaustive over the
  * generated [MessageBlockDto] subclasses — a regen that adds a new block kind is
@@ -298,6 +304,7 @@ fun messageDtoText(
             is MessageBlockDto.RedactedThinking -> strings.resolve(R.string.chat_redacted_thinking, "[已折叠的思考]")
             is MessageBlockDto.CompactBoundary -> strings.resolve(R.string.chat_compacted_label, "对话已压缩")
             is MessageBlockDto.Visualization -> ""
+            is MessageBlockDto.Page -> strings.resolve(R.string.private_page_unavailable, "打不开这个本机页面。")
             is MessageBlockDto.ToolUse ->
                 strings.resolve(R.string.chat_tool_calling_label, "调用工具 %1\$s…", block.tool)
             is MessageBlockDto.ToolResult ->

@@ -1754,6 +1754,11 @@
     <string name="visualization_loading">正在加载可视化…</string>
     <string name="visualization_unavailable">此可视化已不可用。</string>
     <string name="visualization_label">可视化</string>
+    <string name="private_page_preparing">正在准备本机页面…</string>
+    <string name="private_page_unavailable">打不开这个本机页面。</string>
+    <string name="private_page_open">打开</string>
+    <string name="private_page_close">关闭</string>
+    <string name="private_page_label">本机私有页面</string>
     <string name="visualization_remove_context">移除可视化上下文</string>
     <string name="common_submit">提交</string>
     <string name="cron_run_section_overview">概览</string>

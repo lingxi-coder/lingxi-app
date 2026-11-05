@@ -1754,6 +1754,11 @@
     <string name="visualization_loading">正在載入視覺化…</string>
     <string name="visualization_unavailable">此視覺化已無法使用。</string>
     <string name="visualization_label">視覺化</string>
+    <string name="private_page_preparing">正在準備本機頁面…</string>
+    <string name="private_page_unavailable">打不開這個本機頁面。</string>
+    <string name="private_page_open">打開</string>
+    <string name="private_page_close">關閉</string>
+    <string name="private_page_label">本機私有頁面</string>
     <string name="visualization_remove_context">移除視覺化脈絡</string>
     <string name="common_submit">提交</string>
     <string name="cron_run_section_overview">概覽</string>

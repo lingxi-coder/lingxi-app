@@ -16,6 +16,13 @@ workspace.mkdir(parents=True, exist_ok=True)
 (workspace / "Package.resolved").write_bytes(lock.read_bytes())
 paths = sorted((root / "apps/ios/native/Sources/Teams").glob("*.swift"))
 paths += [root / "apps/ios/native/Sources/App/CanonicalDeepLink.swift", root / "apps/ios/native/Tests/TeamBotTests.swift", root / "apps/ios/native/Tests/TeamsTests.swift"]
+paths += [root / "apps/ios/native/Sources" / relative for relative in (
+    "Theme/LocalizationManager.swift", "Tabs/AppTab.swift", "Tabs/TabLogic.swift",
+    "Conversation/AgentAvatar.swift", "Conversation/AvatarIdentity.swift", "Conversation/PersonAvatar.swift")]
+paths += [root / "apps/ios/native/Resources/Localizable.xcstrings",
+          root / "acceptance/mobile-team-bot-20261104/probes/ios/TeamsProbeShell.swift"]
+harness = sorted(path for path in probe.rglob("*") if path.is_file() and path.suffix in {
+    ".swift", ".yml", ".py", ".md", ".plist", ".entitlements"})
 manifest = {
     "kind": "Teams feature harness; preparation only; no SDK build or runtime acceptance",
     "firebaseVersion": "12.19.2",
@@ -24,6 +31,7 @@ manifest = {
     "packageLockSource": str(lock.relative_to(root)),
     "packageLockSHA256": hashlib.sha256(lock.read_bytes()).hexdigest(),
     "actualSourceFiles": [{"path": str(path.relative_to(root)), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for path in paths],
+    "harnessFiles": [{"path": str(path.relative_to(root)), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for path in harness],
     "ffiFrameworksLinked": False,
     "previousCacheAtOutputTeamsT0IOSPresent": (root / "output/teams-t0-ios/SourcePackages/checkouts/firebase-ios-sdk").exists(),
 }

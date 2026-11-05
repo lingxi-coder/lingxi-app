@@ -1,6 +1,12 @@
+Updated 2026-11-04: the probe now hosts the production `TeamsTab` and app-level `TeamsWorkspace`.
+Its fixture must implement membership and messaging endpoints. Shared shell-only adapters live in
+`acceptance/mobile-team-bot-20261104/probes/android`; production avatars, tab contracts and Teams
+sources compile unchanged. Existing historical UI assertions require migration to the new list and
+conversation interactions before runtime acceptance; old hash/result manifests remain historical.
+
 # Android T3 feature acceptance harness
 
-This separate demo APK compiles **all eight actual production Teams Kotlin files**
+This separate demo APK compiles **all current production Teams Kotlin files**
 and their actual Compose screens, plus the product Team unit tests. It uses the
 product version catalog, Firebase BoM, Auth and Firestore Android SDKs. It does
 not include the unrelated product JNI/engine/MobileLinux/rootfs/voice modules.
@@ -9,7 +15,7 @@ physical-device, release, production-account or real-model result.
 
 `prepare.py` copies only existing `teams_*` strings from the product English XML
 into generated `output/teams-t3-android/resources/values/strings.xml`, verifies
-both production model constructor defaults remain `https://lingxios.net`, and
+all three production model/workspace constructor defaults remain `https://lingxios.net`, and
 records source/resource/catalog/harness hashes in `provenance.json`. Kotlin
 sources are compiled directly, without copies or patches. Build products and
 project caches belong in `output/teams-t3-android`, not the acceptance source.
@@ -18,9 +24,8 @@ The unchanged `TeamInvitationTest` also compiles the exact canonical production
 These direct file references and hashes retain invite/inbox/push coverage without
 adding unrelated product navigation, push services or native dependencies.
 
-The three small product DI changes preserve default construction: private final
-model API roots default to HTTPS and the messages screen defaults to its existing
-ViewModel. Only this separate probe's trusted Activity factory supplies a local
+The product DI changes preserve default construction: immutable constructor
+API roots default to HTTPS. Only this separate probe's trusted Activity factory supplies a local
 root. The production app has no Intent, environment or deep-link endpoint switch.
 The probe APK alone allows cleartext traffic. No global URL/TLS interception is
 used.

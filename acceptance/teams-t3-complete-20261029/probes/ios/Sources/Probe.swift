@@ -71,7 +71,7 @@ private final class ProbeNoRedirects: NSObject, URLSessionTaskDelegate, @uncheck
 @MainActor @Observable
 private final class ProbeModel {
     var detail: TeamDetail?
-    var messaging: TeamMessagingModel?
+    var workspace: TeamsWorkspace?
     var uid = ""
     var error = ""
     var closed = false
@@ -108,7 +108,10 @@ private final class ProbeModel {
                   fixture.detail.members.contains(where: { $0.uid == environment.uid && $0.generation == fixture.detail.team.generation })
             else { try? Auth.auth().signOut(); throw ProbeFailure.wrongDemoIdentity }
             uid = environment.uid
-            messaging = TeamMessagingModel(apiRoot: environment.messagesURL)
+            let workspace = TeamsWorkspace(apiRoot: environment.backend.appendingPathComponent("v1/teams").absoluteString,
+                                           auth: Auth.auth(), db: firestore)
+            self.workspace = workspace
+            workspace.start()
             detail = fixture.detail
             // Synthetic UID only. Never print the custom token or SDK session.
             print("TEAMS_PROBE_READY uid=\(uid) project=\(ProbeEnvironment.projectID)")
@@ -127,10 +130,10 @@ struct TeamsT3Probe: App {
         WindowGroup {
             VStack(spacing: 0) {
                 Text("Teams feature harness · emulators only").font(.caption).foregroundStyle(.secondary)
-                if let detail = model.detail, let messaging = model.messaging, !model.closed {
+                if model.detail != nil, let workspace = model.workspace, !model.closed {
                     Text("Demo account: \(model.uid)").font(.caption2).accessibilityIdentifier("teams.probe.ready")
                     NavigationStack {
-                        TeamMessagesPage(uid: model.uid, detail: detail, onClose: { model.closed = true }, model: messaging)
+                        TeamsTab().environment(workspace).environment(AppNavigationModel()).environment(TabCoordinator())
                     }
                 } else if model.closed {
                     Text("Teams feature harness closed").accessibilityIdentifier("teams.probe.closed")

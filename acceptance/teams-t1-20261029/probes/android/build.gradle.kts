@@ -26,7 +26,7 @@ val stageTeamsStrings by tasks.registering {
     doLast {
         val target = layout.buildDirectory.file("teams-res/values/strings.xml").get().asFile
         target.parentFile.mkdirs()
-        target.writeText("<resources>\n" + source.readLines().filter { it.contains("name=\"teams_") }.joinToString("\n") + "\n</resources>\n")
+        target.writeText("<resources>\n" + source.readLines().filter { it.contains("<string ") }.joinToString("\n") + "\n</resources>\n")
     }
 }
 tasks.named("preBuild") { dependsOn(stageTeamsStrings) }
@@ -53,3 +53,30 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.11.0")
     testImplementation(libs.junit); testImplementation(libs.json); testImplementation(libs.kotlinx.coroutines.test)
 }
+
+// Current tab dependencies, scoped to the feature probe.
+val sharedProbeSources = file("../../../../acceptance/mobile-team-bot-20261104/probes/android")
+android.sourceSets.getByName("main").java.srcDir(sharedProbeSources)
+val productRoot = file("../../../../apps/android/native/app/src/main/java/com/lingxi/code")
+val tabSupport = files(
+    productRoot.resolve("tabs/AppTab.kt"),
+    productRoot.resolve("tabs/TabLogic.kt"),
+    productRoot.resolve("theme/AvatarIdentity.kt"),
+    productRoot.resolve("theme/AgentAvatar.kt"),
+    productRoot.resolve("theme/PersonAvatar.kt"),
+)
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    if (name == "compileDebugKotlin") source(tabSupport)
+    if (name == "compileDebugUnitTestKotlin") source(file("../../../../apps/android/native/app/src/test/java/com/lingxi/code/tabs/SharedVectors.kt"))
+}
+val stageProbeAvatars = tasks.register<Sync>("stageProbeAvatars") {
+    from("../../../../apps/android/native/app/src/main/res") { include("drawable*/agent_avatar_*") }
+    into(layout.buildDirectory.dir("probe-avatar-res"))
+}
+android.sourceSets.getByName("main").res.srcDir(layout.buildDirectory.dir("probe-avatar-res").get().asFile)
+tasks.named("preBuild") { dependsOn(stageProbeAvatars) }
+dependencies { implementation(libs.androidx.datastore.preferences); implementation("androidx.compose.material:material-icons-extended") }
+
+android.sourceSets.getByName("test").resources.srcDir("../../../../packages/bridge-client/fixtures")
+
+tasks.withType<Test>().configureEach { workingDir(file("../../../../apps/android/native")) }

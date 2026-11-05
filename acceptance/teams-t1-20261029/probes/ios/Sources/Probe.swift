@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Compiles the actual product membership page/model/SDK; never contacts a real
-/// account during the unsigned build. Product packaging is a separate gate.
-@main struct TeamsMembersProbe: App {
+/// Compile-only current Teams tab; the workspace is intentionally not started or signed in.
+@main @MainActor struct TeamsMembersProbe: App {
+    @State private var workspace = TeamsWorkspace()
+    @State private var navigation = AppNavigationModel()
+    @State private var tabs = TabCoordinator()
     var body: some Scene {
-        WindowGroup { NavigationStack { TeamsPage(initialInvite: nil, onOpenAccount: {}) } }
+        WindowGroup { TeamsTab().environment(workspace).environment(navigation).environment(tabs) }
     }
 }

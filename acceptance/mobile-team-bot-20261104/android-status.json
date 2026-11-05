@@ -1,0 +1,17 @@
+{
+  "status": "paused_by_user",
+  "reason": "Another session is using the Android phones; resume only when the user notifies this chat.",
+  "debugTestProcessesStopped": true,
+  "rotationRestored": {
+    "accelerometer_rotation": "1",
+    "user_rotation": "0"
+  },
+  "lastPartialRun": "output/mobile-team-bot-20261104/samsung-portrait-clean-helper/results.json",
+  "partialCounts": {
+    "passed": 19,
+    "skipped": 0,
+    "failed": 1,
+    "timeout": 3
+  },
+  "fullDeviceAcceptance": false
+}

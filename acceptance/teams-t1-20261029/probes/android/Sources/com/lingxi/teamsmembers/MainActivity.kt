@@ -3,12 +3,13 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
-import com.lingxi.code.teams.TeamsScreen
+import com.lingxi.code.teams.TeamsTab
+import com.lingxi.code.teams.ProbeTabHost
 
 /** Compile-only fixture for actual product sources, not a signed product. */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme { TeamsScreen(null, {}, {}, {}) } }
+        setContent { MaterialTheme { ProbeTabHost { TeamsTab(null, {}) } } }
     }
 }

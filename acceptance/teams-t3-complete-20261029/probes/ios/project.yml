@@ -31,6 +31,13 @@ targets:
       - Sources
       - path: ../../../../apps/ios/native/Sources/Teams
       - path: ../../../../apps/ios/native/Sources/App/CanonicalDeepLink.swift
+      - path: ../../../../apps/ios/native/Sources/Theme/LocalizationManager.swift
+      - path: ../../../../apps/ios/native/Sources/Tabs/AppTab.swift
+      - path: ../../../../apps/ios/native/Sources/Tabs/TabLogic.swift
+      - path: ../../../../apps/ios/native/Sources/Conversation/AgentAvatar.swift
+      - path: ../../../../apps/ios/native/Sources/Conversation/AvatarIdentity.swift
+      - path: ../../../../apps/ios/native/Sources/Conversation/PersonAvatar.swift
+      - path: ../../../../acceptance/mobile-team-bot-20261104/probes/ios/TeamsProbeShell.swift
       - path: ../../../../apps/ios/native/Resources/Localizable.xcstrings
     settings:
       base:

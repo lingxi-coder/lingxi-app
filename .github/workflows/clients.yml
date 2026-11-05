@@ -346,6 +346,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Test iOS CI cleanup guard
+        run: python3 scripts/tests/test_ios_ci_cleanup.py
+
       # The three iOS rust targets the XCFramework is assembled from: device,
       # Apple-silicon simulator, and Intel simulator.
       - uses: dtolnay/rust-toolchain@1.94.0
@@ -378,7 +381,11 @@ jobs:
       - name: Build XCFramework + Swift bindings
         env:
           LINGXI_REUSE_STAGED_LINUX_RUNTIME: "1"
+          CARGO_TARGET_DIR: ${{ runner.temp }}/lingxi-ios-cargo-${{ github.run_id }}-${{ github.run_attempt }}
         run: bash apps/ios/native/scripts/build-xcframework.sh
+
+      - name: Reclaim completed iOS build intermediates
+        run: python3 scripts/ci/reclaim_ios_ci_build_space.py
 
       - name: Generate Xcode project
         working-directory: apps/ios/native

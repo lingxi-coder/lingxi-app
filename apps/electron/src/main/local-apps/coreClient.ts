@@ -16,6 +16,9 @@ export class LocalAppCoreClient implements LocalAppCoreTransport {
   private readonly pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void; timer?: ReturnType<typeof setTimeout>; waitForCompletion: boolean }>();
   constructor(private readonly executable: string, private readonly configHome: string, private readonly report: (message: string) => void = () => undefined,
     private readonly timeoutMs = 120_000) {}
+  private reportSafely(message: string): void {
+    try { this.report(message); } catch { /* Diagnostics must not interrupt transport cleanup. */ }
+  }
   private start(): ChildProcessWithoutNullStreams {
     if (this.closed) throw new Error('Local App library is closed');
     if (this.disconnected) throw this.disconnected;
@@ -41,13 +44,13 @@ export class LocalAppCoreClient implements LocalAppCoreTransport {
         } catch { invalidOutput = true; transportError = new Error('Invalid Local App library response'); child.kill(); return; }
       }
     });
-    child.stderr.setEncoding('utf8').on('data', (chunk: string) => this.report(chunk.slice(-4096)));
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => this.reportSafely(chunk.slice(-4096)));
     child.once('error', error => { transportError ??= error; });
     child.once('close', (code, signal) => {
       if (this.child === child) this.child = undefined;
       this.buffer = '';
       if (!this.closed || code !== 0 || signal || transportError) {
-        this.report(`Local App library closed (code=${code}, signal=${signal})${transportError ? `: ${transportError.message}` : ''}\n`);
+        this.reportSafely(`Local App library closed (code=${code}, signal=${signal})${transportError ? `: ${transportError.message}` : ''}\n`);
       }
       const error = transportError ?? new Error('Local App library exited; restart the application after its running apps stop');
       this.fail(error);

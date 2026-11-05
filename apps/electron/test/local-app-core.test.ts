@@ -395,22 +395,39 @@ for (const takeoverFails of [false, true]) {
   });
 }
 
-test('standalone library client rejects pending work on EOF and requires explicit host recovery', { skip: process.platform === 'win32' }, async t => {
+test('standalone library client rejects pending work on EOF and requires explicit host recovery', { skip: process.platform === 'win32', timeout: 10000 }, async t => {
   const root = await fs.mkdtemp(join(tmpdir(), 'local-app-client-test-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = join(root, 'server.mjs'), executable = join(root, 'bridge');
-  await fs.writeFile(source, `import {createInterface} from 'node:readline';\ncreateInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line); if(r.request.op==='exit')process.stderr.write('fixture failure\\n',()=>process.exit(17));else if(r.request.op==='signal')process.kill(process.pid,'SIGTERM');else process.stdout.write(JSON.stringify({id:r.id,ok:true,value:{op:r.request.op}})+'\\n');});`);
+  await fs.writeFile(source, `import {createInterface} from 'node:readline';\ncreateInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line); if(r.request.op==='exit')process.exit(0);else if(r.request.op==='fail')process.stderr.write('fixture failure\\n',()=>process.exit(17));else if(r.request.op==='signal')process.kill(process.pid,'SIGTERM');else if(r.request.op!=='hang')process.stdout.write(JSON.stringify({id:r.id,ok:true,value:{op:r.request.op}})+'\\n');});`);
   await fs.writeFile(executable, `#!/bin/sh\nexec '${process.execPath}' '${source}' "$@"\n`, { mode: 0o700 });
   const reports: string[] = [];
   const client = new LocalAppCoreClient(executable, root, message => reports.push(message)); t.after(() => client.dispose());
   assert.deepEqual(await client.request({ op: 'list' }), { op: 'list' });
-  await assert.rejects(client.request({ op: 'exit' }), (error: Error) => {
+  await assert.rejects(client.request({ op: 'exit' }), /exited/);
+  assert.match(reports.join(''), /code=0, signal=null/);
+  assert.throws(() => client.request({ op: 'list' }), /restart/);
+  const failureReports: string[] = [];
+  const failed = new LocalAppCoreClient(executable, root, message => failureReports.push(message)); t.after(() => failed.dispose());
+  assert.deepEqual(await failed.request({ op: 'list' }), { op: 'list' });
+  await assert.rejects(failed.request({ op: 'fail' }), (error: Error) => {
     assert.match(error.message, /exited/);
     assert.doesNotMatch(error.message, /fixture failure/);
     return true;
   });
-  assert.match(reports.join(''), /fixture failure/);
-  assert.match(reports.join(''), /code=17, signal=null/);
-  assert.throws(() => client.request({ op: 'list' }), /restart/);
+  assert.match(failureReports.join(''), /fixture failure/);
+  assert.match(failureReports.join(''), /code=17, signal=null/);
+  const thrownReports: string[] = [];
+  const throwing = new LocalAppCoreClient(executable, root, message => { thrownReports.push(message); throw new Error('report failed'); });
+  t.after(() => throwing.dispose());
+  let notified = false;
+  throwing.onDisconnected(() => { notified = true; });
+  assert.deepEqual(await throwing.request({ op: 'list' }), { op: 'list' });
+  const unknown = assert.rejects(throwing.request({ op: 'hang' }, { waitForCompletion: true }), /outcome is unknown.*exited/);
+  const rejected = assert.rejects(throwing.request({ op: 'fail' }), /exited/);
+  await Promise.all([unknown, rejected]);
+  assert.equal(notified, true);
+  assert.match(thrownReports.join(''), /fixture failure/);
+  assert.match(thrownReports.join(''), /code=17, signal=null/);
   const signalReports: string[] = [];
   const signaled = new LocalAppCoreClient(executable, root, message => signalReports.push(message)); t.after(() => signaled.dispose());
   assert.deepEqual(await signaled.request({ op: 'list' }), { op: 'list' });

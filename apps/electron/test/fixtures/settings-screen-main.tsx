@@ -335,7 +335,21 @@ function Fixture() {
           (document.querySelector('[aria-label="All settings"]') as HTMLButtonElement | null)?.click();
           await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         }
-        (document.querySelector(`[data-nav-page="${id}"]`) as HTMLButtonElement | null)?.click();
+        const button = document.querySelector(`[data-nav-page="${id}"]`) as HTMLButtonElement | null;
+        if (!button) throw new Error(`Settings navigation item ${id} is missing`);
+        button.click();
+        // Settings pages load lazily in Electron. The selected title and layer
+        // context can render before Suspense mounts the page's actual controls.
+        const deadline = performance.now() + 8_000;
+        while (performance.now() < deadline) {
+          const selected = document.querySelector(`[data-nav-page="${id}"][aria-current="page"]`);
+          const content = document.querySelector('.settings-content-inner');
+          const body = content && [...content.children].some((child) =>
+            !child.matches('.settings-page-header, [data-testid="layer-context"], [data-testid="settings-snapshot-error"]'));
+          if (selected && body) return;
+          await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        }
+        throw new Error(`Settings page ${id} did not finish rendering`);
       },
       setExtensionCatalogs,
       setHasProject,

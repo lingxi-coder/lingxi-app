@@ -874,7 +874,10 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       // The streamed assistant text is final; stop appending to it and seal
       // any open reasoning block. A visualization placeholder that never
       // resolved belongs to a cut stream: drop it.
-      const items = state.items.filter((item) => item.type !== 'visualization' || item.status !== 'pending');
+      const items = state.items.filter((item) => {
+        if (item.type === 'visualization' || item.type === 'page') return item.status !== 'pending';
+        return true;
+      });
       closeThinking(items, state.openThinkingIndex === -1 ? -1 : items.findIndex((item) => item.id === state.items[state.openThinkingIndex]?.id));
       return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1, pendingAssistantItems: [],
       };
@@ -882,6 +885,9 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
 
     case 'visualization_block':
       return reduceVisualizationBlock(state, event);
+
+    case 'page_block':
+      return reducePageBlock(state, event);
 
     case 'usage_update': {
       // OpenAI emits an all-zero placeholder at request start, before usage is
@@ -1262,6 +1268,51 @@ function reduceVisualizationBlock(
   };
 }
 
+/**
+ * Order a live private-page slot the same way as a visualization slot.
+ * The page stays on this computer and is not an inline widget.
+ */
+function reducePageBlock(
+  state: ConversationState,
+  event: Extract<ClientEvent, { type: 'page_block' }>,
+): ConversationState {
+  const items = state.items.slice();
+  closeThinking(items, state.openThinkingIndex);
+  let pendingIndex = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.type === 'page' && item.status === 'pending') {
+      pendingIndex = index;
+      break;
+    }
+  }
+  let nextId = state.nextId;
+  if (event.status === 'discarded') {
+    if (pendingIndex >= 0) items.splice(pendingIndex, 1);
+    return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1 };
+  }
+  const settled: Extract<RunItem, { type: 'page' }> = {
+    type: 'page',
+    id: pendingIndex >= 0 ? items[pendingIndex]!.id : itemId(nextId),
+    status: event.status,
+    ...(event.status === 'ready' && event.reference ? { reference: { id: event.reference.id, revision: event.reference.revision } } : {}),
+  };
+  if (pendingIndex >= 0 && event.status !== 'pending') {
+    items[pendingIndex] = settled;
+  } else if (pendingIndex < 0) {
+    items.push(settled);
+    nextId += 1;
+  }
+  return {
+    ...state,
+    items,
+    nextId,
+    openAssistantIndex: -1,
+    openThinkingIndex: -1,
+    pendingAssistantItems: [...new Set([...(state.pendingAssistantItems ?? []), settled.id])],
+  };
+}
+
 export function conversationFromMessages(
   messages: readonly MessageDto[],
 ): ConversationState {
@@ -1319,6 +1370,14 @@ export function conversationFromMessages(
         case 'visualization':
           items.push({
             type: 'visualization',
+            id: itemId(nextId++),
+            status: block.reference ? 'ready' : 'unavailable',
+            ...(block.reference ? { reference: { id: block.reference.id, revision: block.reference.revision } } : {}),
+          });
+          break;
+        case 'page':
+          items.push({
+            type: 'page',
             id: itemId(nextId++),
             status: block.reference ? 'ready' : 'unavailable',
             ...(block.reference ? { reference: { id: block.reference.id, revision: block.reference.revision } } : {}),

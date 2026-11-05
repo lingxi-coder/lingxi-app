@@ -6,7 +6,7 @@
 
 ## 能力与宿主显式启用
 
-桌面／移动组合仅在宿主 WebView 能呈现 widget 时通过 inline_visualization 显式启用。该 flag 同时注册 Visualization 与 visualize skill。CLI 和 headless 关闭它，两种能力均不声明。浏览器式呈现界面是显式前提。
+桌面／移动组合仅在宿主 WebView 能呈现 widget 时通过 inline_visualization 显式启用。该 flag 注册 Visualization 工具和 visualize skill。发布会在当前对话写入不可变 revision；list 只返回这些 revision，不会生成公开 URL。CLI 和 headless 关闭该 flag，这些能力均不声明。浏览器式呈现界面是显式前提。
 
 runtime 在进程中为每个 config-home 共享一个 store，让发布工具与宿主服务一致地串行化写入。宿主转发 scheme 请求与 shell 消息；共享服务负责路由、授权、文档组装、CSP 与状态比较并交换。
 
@@ -50,6 +50,22 @@ SendPrompt 可携带 visualization_context {id, revision}。runtime 在提示发
 验证方式: 接口摘录
 
 将示例 ID 替换为实际发布返回的 ID。该字段不授权读取其他对话可视化，虚构 ID 不会贡献后续上下文。
+
+<a id="private-pages"></a>
+
+## 本机私有页面留在这台电脑上
+
+本机私有页面使用另一个 flag：private_pages。Electron 打开它并注册 Page 工具。CLI、headless 和移动端保持关闭。页面存在 <config-home>/pages，在灵犀里打开。没有公开链接。
+
+发布保存一段 HTML fragment。文档外壳，包括离线内容安全策略，在打开时才套上。list 返回这台电脑上页面的 id、revision 和标题。引用行把页面放进对话。该会话的 bridge 提供这一 revision。内容不会上传。
+
+<a id="server-pages"></a>
+
+## 静态页面可以发布到灵犀服务器
+
+静态 Local App 的入口文件是完整 HTML 文档，且没有安装、构建或进程时，登录后可以从桌面市场动作发布。审核导出声明过的源文件。把这个应用发布到设备应用库不会上传。
+
+该版本已发布且列表可用时，市场返回形如 https://v-<版本 id>.lingxios.net/<入口路径> 的预览地址。服务器在这个地址提供包内文件。未知版本不可用。带 server 入口、安装、构建或进程的包按源码分发，服务器不会运行它。
 
 <a id="visualization-acceptance"></a>
 

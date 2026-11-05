@@ -54,6 +54,7 @@ import {
   type PermissionRequest,
   type PermissionResponseDto,
   type ServerHello,
+  type PrivatePageServeDto,
   type VisualizationMountDto,
   type VisualizationRefDto,
   type VisualizationRequest,
@@ -67,6 +68,7 @@ import {
   validatePermissionScope,
   validateRuntimeSnapshot,
   validateServerHello,
+  validatePrivatePageServe,
   validateVisualizationList,
   validateVisualizationMount,
   validateVisualizationServe,
@@ -776,6 +778,11 @@ export class BridgeClient extends EventEmitter {
   /** Stored revisions of a conversation. */
   async visualizationList(sessionId: string): Promise<VisualizationRevisionDto[]> {
     return validateVisualizationList(await this.visualization({ op: 'list', session_id: sessionId }));
+  }
+
+  /** Serve one private page on this computer. There is no public URL. */
+  async privatePageServe(id: string, revision: number): Promise<PrivatePageServeDto> {
+    return validatePrivatePageServe(await this.request('private_page', { op: 'serve', id, revision }));
   }
 
   /** Third-party notices bundled with the visualization runtime. */

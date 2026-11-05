@@ -1,5 +1,7 @@
 import { validateBasicClientEventFields } from './protocol.generated.js';
 import type {
+  PageBlockStatusDto,
+  PrivatePageServeDto,
   VisualizationBlockStatusDto,
   VisualizationMountDto,
   VisualizationRefDto,
@@ -187,6 +189,7 @@ export function visualizationRef(value: unknown, name: string): VisualizationRef
 }
 
 const VISUALIZATION_BLOCK_STATUSES: readonly VisualizationBlockStatusDto[] = ['pending', 'ready', 'unavailable', 'discarded'];
+const PAGE_BLOCK_STATUSES: readonly PageBlockStatusDto[] = ['pending', 'ready', 'unavailable', 'discarded'];
 
 function conversationMessage(value: unknown): MessageDto {
   const input = object(value, 'session agent message');
@@ -232,6 +235,10 @@ function conversationMessage(value: unknown): MessageDto {
       case 'visualization':
         exactKeys(block, ['type', 'reference'], 'session agent visualization block');
         if (block['reference'] !== undefined) visualizationRef(block['reference'], 'session agent visualization reference');
+        break;
+      case 'page':
+        exactKeys(block, ['type', 'reference'], 'session agent page block');
+        if (block['reference'] !== undefined) visualizationRef(block['reference'], 'session agent page reference');
         break;
       default: throw new Error('invalid session agent message block type');
     }
@@ -1264,6 +1271,24 @@ export function validateClientEvent(value: unknown): ClientEvent {
         ...(reference === undefined ? {} : { reference }),
       };
     }
+    case 'page_block': {
+      exactKeys(input, ['type', 'status', 'reference'], 'client event');
+      const status = input['status'];
+      if (!PAGE_BLOCK_STATUSES.includes(status as PageBlockStatusDto)) {
+        throw new Error('invalid page block status');
+      }
+      const reference = input['reference'] === undefined
+        ? undefined
+        : visualizationRef(input['reference'], 'page block reference');
+      if ((status === 'ready') !== (reference !== undefined)) {
+        throw new Error('a page block carries a reference exactly when it is ready');
+      }
+      return {
+        type,
+        status: status as PageBlockStatusDto,
+        ...(reference === undefined ? {} : { reference }),
+      };
+    }
     case 'tool_use_started':
       exactKeys(input, ['type', 'id', 'tool', 'input_json', 'header'], 'client event');
       return {
@@ -1772,6 +1797,22 @@ export function validateVisualizationServe(value: unknown): VisualizationServeDt
   });
   const body = input['body_base64'];
   if (typeof body !== 'string') throw new Error('invalid visualization response body');
+  return { status, headers, body_base64: body };
+}
+
+/** A `private_page` `serve` response. */
+export function validatePrivatePageServe(value: unknown): PrivatePageServeDto {
+  const input = object(value, 'private page response');
+  exactKeys(input, ['status', 'headers', 'body_base64'], 'private page response');
+  const status = integer(input['status'], 'private page response status');
+  if (status !== 200 && status !== 404) throw new Error('invalid private page response status');
+  if (!Array.isArray(input['headers'])) throw new Error('invalid private page response headers');
+  const headers = input['headers'].map((entry): [string, string] => {
+    if (!Array.isArray(entry) || entry.length !== 2) throw new Error('invalid private page response header');
+    return [string(entry[0], 'private page header name'), string(entry[1], 'private page header value')];
+  });
+  const body = input['body_base64'];
+  if (typeof body !== 'string') throw new Error('invalid private page response body');
   return { status, headers, body_base64: body };
 }
 

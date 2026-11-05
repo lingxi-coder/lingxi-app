@@ -3925,6 +3925,11 @@ export class SessionRuntime {
     return this.client !== null;
   }
 
+  /** Serve one private page through this session's bridge. */
+  pageServe(id: string, revision: number) {
+    return this.requireClient().privatePageServe(id, revision);
+  }
+
   private requireClient(allowDisposing = false): BridgeClient {
     if (this.disposing && !allowDisposing) throw new Error('The session is closing.');
     this.refreshAccessState();

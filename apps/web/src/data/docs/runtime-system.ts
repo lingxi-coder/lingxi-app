@@ -346,7 +346,7 @@ return await agent(
       {
         id: 'host-opt-in', title: t('Capability and host opt-in', '能力与宿主显式启用'),
         paragraphs: [
-          t('Desktop/mobile compositions opt in with inline_visualization only when the host WebView can render the widgets. The flag registers both Visualization and its visualize skill. CLI and headless leave it off, so neither capability is advertised. A browser-like rendering surface is an explicit prerequisite.', '桌面／移动组合仅在宿主 WebView 能呈现 widget 时通过 inline_visualization 显式启用。该 flag 同时注册 Visualization 与 visualize skill。CLI 和 headless 关闭它，两种能力均不声明。浏览器式呈现界面是显式前提。'),
+          t('Desktop/mobile compositions opt in with inline_visualization only when the host WebView can render the widgets. The flag registers the Visualization tool and the visualize skill. Publish stores an immutable revision in the current conversation; list returns those revisions and does not create a public URL. CLI and headless leave the flag off, so none of this is advertised. A browser-like rendering surface is an explicit prerequisite.', '桌面／移动组合仅在宿主 WebView 能呈现 widget 时通过 inline_visualization 显式启用。该 flag 注册 Visualization 工具和 visualize skill。发布会在当前对话写入不可变 revision；list 只返回这些 revision，不会生成公开 URL。CLI 和 headless 关闭该 flag，这些能力均不声明。浏览器式呈现界面是显式前提。'),
           t('The runtime shares one store per config-home in the process so the publishing tool and host service serialize writers consistently. Hosts forward scheme requests and shell messages; the shared service owns routing, authorization, document assembly, CSP and state comparison-and-swap.', 'runtime 在进程中为每个 config-home 共享一个 store，让发布工具与宿主服务一致地串行化写入。宿主转发 scheme 请求与 shell 消息；共享服务负责路由、授权、文档组装、CSP 与状态比较并交换。'),
         ],
       },
@@ -373,6 +373,20 @@ return await agent(
         ],
         code: [{ label: t('ClientCommand · follow up on revision 2', 'ClientCommand · 继续 revision 2'), language: 'json', verification: 'excerpt', code: '{\n  "type": "send_prompt",\n  "text": "Explain the selected option",\n  "images": [],\n  "visualization_context": {\n    "id": "viz-example",\n    "revision": 2\n  }\n}' }],
         note: t('Replace the example ID with an ID actually returned by publication. The field does not authorize reading a different conversation’s visualization, and an invented ID simply contributes no follow-up context.', '将示例 ID 替换为实际发布返回的 ID。该字段不授权读取其他对话可视化，虚构 ID 不会贡献后续上下文。'),
+      },
+      {
+        id: 'private-pages', title: t('Private pages stay on this computer', '本机私有页面留在这台电脑上'),
+        paragraphs: [
+          t('A private page is a different flag, private_pages. Electron turns it on and registers the Page tool. CLI, headless, and mobile leave it off. The page is stored at <config-home>/pages and opened inside LingXi. There is no public URL.', '本机私有页面使用另一个 flag：private_pages。Electron 打开它并注册 Page 工具。CLI、headless 和移动端保持关闭。页面存在 <config-home>/pages，在灵犀里打开。没有公开链接。'),
+          t('Publish stores an HTML fragment. The document shell, including the offline content security policy, is applied when the page is served. list returns id, revision, and title for pages on this computer. A reference line places the page in the transcript. The session bridge serves that revision. Nothing is uploaded.', '发布保存一段 HTML fragment。文档外壳，包括离线内容安全策略，在打开时才套上。list 返回这台电脑上页面的 id、revision 和标题。引用行把页面放进对话。该会话的 bridge 提供这一 revision。内容不会上传。'),
+        ],
+      },
+      {
+        id: 'server-pages', title: t('A static page can be published to the LingXi server', '静态页面可以发布到灵犀服务器'),
+        paragraphs: [
+          t('A static Local App whose entry file is a complete HTML document, and which declares no install, build, or process, can be published from the desktop market action after sign-in. The review exports the declared source files. Publishing that app into the device Apps library does not upload it.', '静态 Local App 的入口文件是完整 HTML 文档，且没有安装、构建或进程时，登录后可以从桌面市场动作发布。审核导出声明过的源文件。把这个应用发布到设备应用库不会上传。'),
+          t('When that release is published and the listing is available, the market returns a preview address of the form https://v-<version id>.lingxios.net/<entry path>. The server serves the package file at that address. An unknown version is unavailable. A package with a server entry, install, build, or process is distributed as source, and the server does not run it.', '该版本已发布且列表可用时，市场返回形如 https://v-<版本 id>.lingxios.net/<入口路径> 的预览地址。服务器在这个地址提供包内文件。未知版本不可用。带 server 入口、安装、构建或进程的包按源码分发，服务器不会运行它。'),
+        ],
       },
       {
         id: 'visualization-acceptance', title: t('Cross-platform acceptance', '跨平台验收'),

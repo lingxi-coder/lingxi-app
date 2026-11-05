@@ -42,6 +42,7 @@
     "platform-posix-minimal",
     "platform-windows",
     "plugin",
+    "private-page",
     "provider-config",
     "rooted-fs",
     "sandbox",

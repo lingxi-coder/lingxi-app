@@ -791,6 +791,9 @@ pub struct BridgeConnection {
     /// Inline visualizations: the `visualization` request host and the store
     /// a follow-up `SendPrompt` snapshots its widget state from.
     visualization: Option<Arc<BridgeVisualization>>,
+    /// Private pages on this computer. The `private_page` request serves one
+    /// revision through the session that owns this connection.
+    private_pages: Option<Arc<BridgePrivatePages>>,
 }
 
 #[derive(Default)]
@@ -969,6 +972,10 @@ struct BridgeVisualization {
     host: harness_runtime::desktop_visualization::DesktopVisualizationHost,
     fs: Arc<dyn lingxi_core::host::FileSystem>,
     config_home: std::path::PathBuf,
+}
+
+struct BridgePrivatePages {
+    host: harness_runtime::desktop_private_page::DesktopPrivatePageHost,
 }
 
 #[derive(Clone, Default)]
@@ -2948,6 +2955,7 @@ impl BridgeConnection {
             queue_wakeup_task: None,
             task_notification_registry: None,
             visualization: None,
+            private_pages: None,
         }
     }
 
@@ -2975,6 +2983,20 @@ impl BridgeConnection {
             ),
             fs,
             config_home: config_home.to_path_buf(),
+        }));
+        self
+    }
+
+    pub fn with_private_pages(
+        mut self,
+        fs: Arc<dyn lingxi_core::host::FileSystem>,
+        config_home: &std::path::Path,
+    ) -> Self {
+        self.private_pages = Some(Arc::new(BridgePrivatePages {
+            host: harness_runtime::desktop_private_page::DesktopPrivatePageHost::for_config_home(
+                fs,
+                config_home,
+            ),
         }));
         self
     }
@@ -5297,7 +5319,11 @@ impl FramePump for BridgeConnection {
         // Metadata writes use their own durable writer transaction.
         if matches!(
             request.method.as_str(),
-            "permission_request_scope" | "visualization" | "telemetry_disable" | "session_metadata"
+            "permission_request_scope"
+                | "visualization"
+                | "private_page"
+                | "telemetry_disable"
+                | "session_metadata"
         ) {
             return self.handshaken.load(Ordering::SeqCst);
         }
@@ -5459,6 +5485,30 @@ impl FramePump for BridgeConnection {
                     let out = self.out.clone();
                     tokio::spawn(async move {
                         let response = match visualization.host.handle(params).await {
+                            Ok(result) => Frame::Response(BridgeResponse {
+                                id,
+                                result: Some(result),
+                                error: None,
+                            }),
+                            Err(error) => Self::error_response(id, error),
+                        };
+                        if let Some(sink) = out.lock().await.as_ref() {
+                            let _ = sink.send(response);
+                        }
+                    });
+                    return;
+                }
+                if method == "private_page" {
+                    let Some(private_pages) = self.private_pages.clone() else {
+                        if let Some(sink) = self.out.lock().await.as_ref() {
+                            let _ =
+                                sink.send(Self::error_response(id, "private pages are unavailable"));
+                        }
+                        return;
+                    };
+                    let out = self.out.clone();
+                    tokio::spawn(async move {
+                        let response = match private_pages.host.handle(params).await {
                             Ok(result) => Frame::Response(BridgeResponse {
                                 id,
                                 result: Some(result),

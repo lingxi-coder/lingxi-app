@@ -1817,6 +1817,27 @@ function validateEvent(name: string, v: unknown): void {
       if ('instances_json' in o) assert.ok(isString(o['instances_json']));
       assert.deepEqual(validateClientEvent(v), v);
       break;
+    case 'page_block': {
+      exactObjectKeys(o, ['type', 'status'], ['reference'], `event snapshot ${name}`);
+      assert.ok(
+        ['pending', 'ready', 'unavailable', 'discarded'].includes(o['status'] as string),
+        `event snapshot ${name} has an unknown page status`,
+      );
+      assert.equal(o['status'] === 'ready', 'reference' in o,
+        `event snapshot ${name} carries a reference exactly when ready`);
+      if ('reference' in o) {
+        const reference = rec(o['reference']);
+        exactObjectKeys(reference, ['id', 'revision'], [], `page reference ${name}`);
+        assert.ok(isString(reference['id']));
+        assert.ok(
+          Number.isSafeInteger(reference['revision'])
+            && (reference['revision'] as number) >= 1
+            && (reference['revision'] as number) <= 0xffff_ffff,
+        );
+      }
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    }
     default:
       assert.fail(`snapshot ${name}: unknown ClientEvent type "${String(o['type'])}"`);
   }

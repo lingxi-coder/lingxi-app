@@ -8,6 +8,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { useT } from '../theme/ThemeContext';
 import type { CommandRunItem, RunItem, TurnFileChange, VisualizationFollowup } from '../model/runItem';
 import { VisualizationCard, VisualizationContextBadge, VisualizationPlaceholder, VisualizationUnavailable } from './VisualizationCard';
+import { PrivatePageCard, PrivatePagePlaceholder, PrivatePageUnavailable } from './PrivatePageCard';
 import {
   transcriptRowUuids,
   commandDefaultOpen,
@@ -852,6 +853,15 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
                 {item.status === 'ready' && item.reference && (visualizationSessionId || modUiSessionId)
                   ? <VisualizationCard sessionId={visualizationSessionId || modUiSessionId} reference={item.reference} onFollowup={onVisualizationFollowup} />
                   : item.status === 'pending' ? <VisualizationPlaceholder /> : <VisualizationUnavailable />}
+              </div>
+            );
+          }
+          if (item.type === 'page') {
+            return (
+              <div className="transcript-run-item" data-run-type="page" key={`${sessionKey}:${item.id}`} style={{ width: '100%' }}>
+                {item.status === 'ready' && item.reference && visualizationSessionId
+                  ? <PrivatePageCard sessionId={visualizationSessionId} reference={item.reference} />
+                  : item.status === 'pending' ? <PrivatePagePlaceholder /> : <PrivatePageUnavailable />}
               </div>
             );
           }

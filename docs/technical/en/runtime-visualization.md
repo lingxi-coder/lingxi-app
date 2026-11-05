@@ -6,7 +6,7 @@ Publish immutable visualization revisions and mount them through one shared auth
 
 ## Capability and host opt-in
 
-Desktop/mobile compositions opt in with inline_visualization only when the host WebView can render the widgets. The flag registers both Visualization and its visualize skill. CLI and headless leave it off, so neither capability is advertised. A browser-like rendering surface is an explicit prerequisite.
+Desktop/mobile compositions opt in with inline_visualization only when the host WebView can render the widgets. The flag registers the Visualization tool and the visualize skill. Publish stores an immutable revision in the current conversation; list returns those revisions and does not create a public URL. CLI and headless leave the flag off, so none of this is advertised. A browser-like rendering surface is an explicit prerequisite.
 
 The runtime shares one store per config-home in the process so the publishing tool and host service serialize writers consistently. Hosts forward scheme requests and shell messages; the shared service owns routing, authorization, document assembly, CSP and state comparison-and-swap.
 
@@ -50,6 +50,22 @@ A SendPrompt may carry visualization_context {id, revision}. The runtime reads t
 Verification method: API excerpt
 
 Replace the example ID with an ID actually returned by publication. The field does not authorize reading a different conversation’s visualization, and an invented ID simply contributes no follow-up context.
+
+<a id="private-pages"></a>
+
+## Private pages stay on this computer
+
+A private page is a different flag, private_pages. Electron turns it on and registers the Page tool. CLI, headless, and mobile leave it off. The page is stored at <config-home>/pages and opened inside LingXi. There is no public URL.
+
+Publish stores an HTML fragment. The document shell, including the offline content security policy, is applied when the page is served. list returns id, revision, and title for pages on this computer. A reference line places the page in the transcript. The session bridge serves that revision. Nothing is uploaded.
+
+<a id="server-pages"></a>
+
+## A static page can be published to the LingXi server
+
+A static Local App whose entry file is a complete HTML document, and which declares no install, build, or process, can be published from the desktop market action after sign-in. The review exports the declared source files. Publishing that app into the device Apps library does not upload it.
+
+When that release is published and the listing is available, the market returns a preview address of the form https://v-<version id>.lingxios.net/<entry path>. The server serves the package file at that address. An unknown version is unavailable. A package with a server entry, install, build, or process is distributed as source, and the server does not run it.
 
 <a id="visualization-acceptance"></a>
 

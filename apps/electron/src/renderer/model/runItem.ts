@@ -253,6 +253,21 @@ export interface VisualizationRunItem {
   readonly reference?: { readonly id: string; readonly revision: number };
 }
 
+/** Where a private-page slot stands in the stream. */
+export type PrivatePageStatus = 'pending' | 'ready' | 'unavailable';
+
+/**
+ * A private page the assistant placed with a reference line. Opening it uses
+ * the session that owns the transcript. There is no public URL.
+ */
+export interface PrivatePageRunItem {
+  readonly type: 'page';
+  readonly id: string;
+  readonly status: PrivatePageStatus;
+  /** The published revision; present exactly when `status` is `ready`. */
+  readonly reference?: { readonly id: string; readonly revision: number };
+}
+
 /** The widget a user message followed up on (rendered as a chip). */
 export interface VisualizationContextChip {
   readonly id: string;
@@ -271,6 +286,7 @@ export interface VisualizationFollowup {
 export type RunItem = (
   | NarrationRunItem
   | VisualizationRunItem
+  | PrivatePageRunItem
   | ToolRunItem
   | MetaRunItem
   | ModLogRunItem

@@ -823,7 +823,9 @@ export type MessageBlockDto =
       display: ToolResultDisplayDto;
     }
   /** An inline visualization placed by a reference line; no `reference` renders "unavailable". */
-  | { type: 'visualization'; reference?: VisualizationRefDto };
+  | { type: 'visualization'; reference?: VisualizationRefDto }
+  /** A private page placed by a reference line; no `reference` renders "unavailable". */
+  | { type: 'page'; reference?: PageRefDto };
 
 /** One published revision of an inline visualization (message.rs `VisualizationRefDto`). */
 export interface VisualizationRefDto {
@@ -840,6 +842,15 @@ export interface VisualizationContextDto {
 
 /** Progress of a live visualization slot (message.rs `VisualizationBlockStatusDto`). */
 export type VisualizationBlockStatusDto = 'pending' | 'ready' | 'unavailable' | 'discarded';
+
+/** One published revision of a private page (message.rs `PageRefDto`). */
+export interface PageRefDto {
+  id: string;
+  revision: number;
+}
+
+/** Progress of a live private-page slot (message.rs `PageBlockStatusDto`). */
+export type PageBlockStatusDto = 'pending' | 'ready' | 'unavailable' | 'discarded';
 
 /** A complete conversation message (message.rs `MessageDto`). */
 export interface LoopWakeupDto {
@@ -1638,6 +1649,16 @@ export interface VisualizationMountDto {
 
 /** One scheme-handler response; the body is base64. */
 export interface VisualizationServeDto {
+  status: number;
+  headers: Array<[string, string]>;
+  body_base64: string;
+}
+
+/** Parameters of the bridge `private_page` request. */
+export type PrivatePageRequest = { op: 'serve'; id: string; revision: number };
+
+/** One private-page scheme-handler response; the body is base64. */
+export interface PrivatePageServeDto {
   status: number;
   headers: Array<[string, string]>;
   body_base64: string;

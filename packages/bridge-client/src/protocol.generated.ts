@@ -2,7 +2,7 @@
 // Do not edit. Run scripts/checks/generate-client-protocol.py after updating the pin.
 // Nested DTOs and semantic validation remain in protocol.ts and validation.ts.
 
-// Custom Serde fingerprints (review changes): command=42b97d850372f8cd event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=096d34a3148b3e7c event_source=7487846584d8f324
+// Custom Serde fingerprints (review changes): command=42b97d850372f8cd event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=096d34a3148b3e7c event_source=e616c543d0d535a1
 
 import type {
   AgentDto,
@@ -42,6 +42,8 @@ import type {
   MemoryEntryDto,
   MessageDto,
   ModelDetailsDto,
+  PageBlockStatusDto,
+  PageRefDto,
   PermissionBehaviorDto,
   PermissionRequest,
   PermissionResolutionDto,
@@ -308,6 +310,7 @@ export type ClientEvent =
   | { type: 'session_handoff_prepared'; request_id: string; source_session_id: string; source_mode: SessionModeDto; target_mode: SessionModeDto; cutoff: string; summary: string }
   | { type: 'session_handoff_failed'; request_id: string; message: string }
   | { type: 'side_chat_checkpoint'; side_id: string; checkpoint_json: string; events_json: Array<string> }
+  | { type: 'page_block'; status: PageBlockStatusDto; reference?: PageRefDto }
 ;
 
 type BasicField = readonly [string, 'string' | 'boolean' | 'number' | 'integer' | 'unsigned' | 'array' | 'map' | 'opaque', boolean, boolean, boolean];
@@ -804,6 +807,10 @@ const CLIENT_EVENT_FIELDS: Record<ClientEvent['type'], readonly BasicField[]> = 
     ['checkpoint_json', 'string', false, false, false],
     ['events_json', 'array', false, false, false],
   ],
+  page_block: [
+    ['status', 'opaque', false, false, false],
+    ['reference', 'opaque', true, false, true],
+  ],
 };
 
 /** Check fields understood from Rust's top-level Serde declarations only.
@@ -1046,4 +1053,5 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   session_handoff_prepared: true,
   session_handoff_failed: true,
   side_chat_checkpoint: true,
+  page_block: true,
 };

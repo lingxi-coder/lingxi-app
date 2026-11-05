@@ -22,6 +22,7 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
   };
   switch (name) {
     case 'visualization': return <svg {...p}><rect x="3" y="3" width="18" height="18" rx="4" /><path d="M7 16v-4m5 4V8m5 8v-6" /></svg>;
+    case 'page': return <svg {...p}><path d="M7 3.5h7l4 4V20a1.5 1.5 0 0 1-1.5 1.5h-9.5A1.5 1.5 0 0 1 5.5 20V5A1.5 1.5 0 0 1 7 3.5z" /><path d="M14 3.5V8h4.5" /></svg>;
     // Codex avatar from app-primary and node-to-node-path-light-16 from
     // open-sources-side-panel-tab-65eeed587bdb.js (2026-09-07).
     case 'subagent': return <img src={new URL('../assets/codex-subagent.svg', import.meta.url).href} width={size} height={size} alt="" style={style} />;

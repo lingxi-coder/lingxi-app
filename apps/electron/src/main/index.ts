@@ -93,10 +93,16 @@ import {
   installVisualizationSession,
 } from './visualization.js';
 import {
+  guardPrivatePageWebview,
+  hardenPrivatePageGuest,
+  installPrivatePageSession,
+} from './privatePage.js';
+import {
   CH_VISUALIZATION_GUEST_EVENT,
   VISUALIZATION_PARTITION,
   VISUALIZATION_SCHEME,
 } from '../shared/visualization.js';
+import { parsePrivatePageUrl, PRIVATE_PAGE_PARTITION, PRIVATE_PAGE_SCHEME } from '../shared/privatePage.js';
 
 ignoreBrokenPipe(process.stdout);
 ignoreBrokenPipe(process.stderr);
@@ -111,6 +117,9 @@ protocol.registerSchemesAsPrivileged([{
   privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true, allowServiceWorkers: true },
 }, {
   scheme: VISUALIZATION_SCHEME,
+  privileges: { standard: true, secure: true, supportFetchAPI: false, corsEnabled: false, stream: false, codeCache: false },
+}, {
+  scheme: PRIVATE_PAGE_SCHEME,
   privileges: { standard: true, secure: true, supportFetchAPI: false, corsEnabled: false, stream: false, codeCache: false },
 }]);
 
@@ -304,6 +313,7 @@ function createWindow(): BrowserWindow {
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    if (guardPrivatePageWebview(event, webPreferences, params)) return;
     guardVisualizationWebview(
       event,
       webPreferences,
@@ -313,9 +323,16 @@ function createWindow(): BrowserWindow {
     );
   });
   mainWindow.webContents.on('did-attach-webview', (_event, guest) => {
-    hardenVisualizationGuest(guest, (guestEvent) => {
+    const notify = (guestEvent: { webContentsId: number; reason: 'crashed' | 'escape' }) => {
       if (!mainWindow.isDestroyed()) mainWindow.webContents.send(CH_VISUALIZATION_GUEST_EVENT, guestEvent);
-    });
+    };
+    const harden = (url: string) => {
+      if (parsePrivatePageUrl(url)) hardenPrivatePageGuest(guest);
+      else hardenVisualizationGuest(guest, notify);
+    };
+    const current = guest.getURL();
+    if (current) harden(current);
+    else guest.once('did-start-navigation', (_navigation, url) => harden(url));
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const expected = new URL(target.url);
@@ -1074,6 +1091,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   }
   try {
     await installVisualizationSession(electronSession.fromPartition(VISUALIZATION_PARTITION), bridge.visualizations);
+    await installPrivatePageSession(electronSession.fromPartition(PRIVATE_PAGE_PARTITION), bridge.pages);
   } catch (error) {
     diagnostics.add('warn', 'host', `inline visualizations unavailable: ${sanitizeDiagnostic(error)}`);
   }

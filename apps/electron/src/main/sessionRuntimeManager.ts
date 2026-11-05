@@ -32,6 +32,7 @@ import type {
 } from './bridgeTypes.js';
 import { sanitizeDiagnostic } from './host-utils.js';
 import { VisualizationRouter } from './visualization.js';
+import { PrivatePageRouter } from './privatePage.js';
 import {
   CH_VISUALIZATION_MOUNT,
   CH_VISUALIZATION_UNMOUNT,
@@ -147,6 +148,14 @@ export class SessionRuntimeManager {
       return runtime?.visualizationReady ? runtime : undefined;
     },
     any: () => [...this.runtimes.values()].find((runtime) => runtime.visualizationReady),
+  });
+
+  /** Routes a private page to the bridge of the session named in its URL. */
+  readonly pages = new PrivatePageRouter({
+    get: (sessionId) => {
+      const runtime = this.runtimes.get(sessionId);
+      return runtime?.visualizationReady ? runtime : undefined;
+    },
   });
 
   refreshProviderCatalog(trigger: string): void {

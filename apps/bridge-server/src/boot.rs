@@ -1024,6 +1024,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> Result<DesktopConfig, String
         // Electron renders inline widgets (`lingxi-viz://visualization`), so
         // the `Visualization` tool and `/visualize` skill are offered here.
         __desktop_config.inline_visualization = true;
+        // Electron opens a private page inside the app. The page stays on this computer.
+        __desktop_config.private_pages = true;
         // Electron owns the desktop project library, application windows and process lifecycle.
         __desktop_config.local_apps = true;
         Ok(__desktop_config)
@@ -2111,10 +2113,15 @@ pub async fn assemble_with_account_credentials(
         .collect();
     let receive_gate = Arc::new(lingxi_core::host::uds_inbox::PeerReceiveGateSlot::new());
     let mut live_session = initialize_live_session(&mut cfg, Some(receive_gate.clone()))?;
-    let connection = BridgeConnection::new().with_visualization(
-        Arc::new(HostFileSystem::new(cfg.cwd.clone())),
-        &cfg.lingxi_home,
-    );
+    let connection = BridgeConnection::new()
+        .with_visualization(
+            Arc::new(HostFileSystem::new(cfg.cwd.clone())),
+            &cfg.lingxi_home,
+        )
+        .with_private_pages(
+            Arc::new(HostFileSystem::new(cfg.cwd.clone())),
+            &cfg.lingxi_home,
+        );
 
     // Capture the persisted-session inputs before `cfg` moves into the desktop
     // composition root. The router uses the same cwd/config-home pair as the
@@ -5127,6 +5134,7 @@ mod tests {
             __desktop_config.audio = None;
             __desktop_config.inline_visualization = false;
             __desktop_config.local_apps = false;
+            __desktop_config.private_pages = false;
             __desktop_config
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");

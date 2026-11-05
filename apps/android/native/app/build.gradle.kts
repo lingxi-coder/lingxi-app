@@ -352,6 +352,7 @@ dependencies {
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.documentfile)
     implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.navigationevent.compose)
 
     // Compose UI
     implementation(libs.androidx.compose.ui)

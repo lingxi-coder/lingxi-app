@@ -172,7 +172,7 @@ internal class BotsActions(
  * notification named; it is consumed once through [onRequestHandled].
  *
  * Phone: the tree is the root; the Computer page and a session are pushed above it (the tab bar hides while one is
- * open). Wide (>= 840 dp): the tree and the page side by side, and the stack depth stays 0.
+ * open). Wide (>= 840 dp): the tree and page sit side by side; depth still describes what Back can pop.
  *
  * Connection (section 4.4): the list of computers is watched while the tab is shown and the app is in front; when
  * nothing is connected the last-used computer is dialled once it is known to be online and paired; leaving the tab
@@ -203,7 +203,7 @@ fun BotsTab(request: BotsRequest?, onRequestHandled: (Long) -> Unit, modifier: M
     }
 
     // The pages pushed above the tree, newest last; saved as text so the stack survives leaving the tab and process death.
-    var stack by rememberSaveable(uid, stateSaver = RemoteRoute.stackSaver) { mutableStateOf(emptyList<RemoteRoute>()) }
+    var stack by rememberSaveable(uid, stateSaver = RemoteRoute.ownedStackSaver(uid)) { mutableStateOf(emptyList<RemoteRoute>()) }
     val showAll = remember { mutableStateOf(emptySet<String>()) }
     val creating = remember { mutableStateListOf<String>() }
     val errors = remember { mutableStateMapOf<String, Int>() }
@@ -212,7 +212,7 @@ fun BotsTab(request: BotsRequest?, onRequestHandled: (Long) -> Unit, modifier: M
     fun push(route: RemoteRoute) { stack = if (wide) listOf(route) else stack + route }
 
     // The tab is shown: a teardown that was waiting is called off. The tab is left: one starts.
-    val sessionOpen by rememberUpdatedState(stack.lastOrNull() is RemoteRoute.Session)
+    val sessionOpen by rememberUpdatedState(uid != null && stack.lastOrNull() is RemoteRoute.Session)
     DisposableEffect(manager) {
         manager.cancelScheduledClose()
         onDispose { if (!sessionOpen) manager.scheduleCloseConnection() }
@@ -248,16 +248,19 @@ fun BotsTab(request: BotsRequest?, onRequestHandled: (Long) -> Unit, modifier: M
     }
 
     // A link or a notification names a session (back lands on the tree) or a computer.
-    LaunchedEffect(request?.id) {
+    LaunchedEffect(request?.id, uid) {
         val asked = request ?: return@LaunchedEffect
+        // Keep the link pending through the account jump. Following a session requires an
+        // account, and a restored wide pane must never create that source while signed out.
+        if (uid == null) return@LaunchedEffect
         stack = RemoteRoute.stackFor(asked.sessionId?.let { RemoteRoute.Session(asked.hostId, it) } ?: RemoteRoute.Host(asked.hostId))
         if (asked.sessionId == null) runCatching { manager.connect(asked.hostId) }
         onRequestHandled(asked.id)
     }
 
-    val depth = if (wide) 0 else stack.size
+    val depth = if (uid == null) 0 else stack.size
     LaunchedEffect(depth) { host.reportDepth(AppTab.Bots, depth) }
-    BackHandler(enabled = stack.isNotEmpty()) { stack = RemoteRoute.afterBack(stack) }
+    BackHandler(enabled = uid != null && stack.isNotEmpty()) { stack = RemoteRoute.afterBack(stack) }
     // Re-tapping the tab pops to the tree, then scrolls it to the top.
     OnTabReselected(AppTab.Bots) { atDepth -> if (atDepth > 0) stack = emptyList() else scrollTop++ }
     LaunchedEffect(scrollTop) { if (scrollTop > 0) listState.animateScrollToItem(0) }
@@ -394,7 +397,7 @@ fun BotsTab(request: BotsRequest?, onRequestHandled: (Long) -> Unit, modifier: M
         modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).windowInsetsPadding(WindowInsets.systemBars).imePadding().testTag(BotsTags.ROOT),
     ) {
         key(uid) {
-            if (wide) {
+            if (wide && uid != null) {
                 Row(Modifier.fillMaxSize()) {
                     root(Modifier.width(360.dp).fillMaxHeight())
                     VerticalDivider()

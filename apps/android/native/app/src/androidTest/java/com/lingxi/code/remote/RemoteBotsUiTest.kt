@@ -3,7 +3,7 @@ package com.lingxi.code.remote
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getBoundsInRoot
-import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -19,6 +19,8 @@ import com.lingxi.code.bindings.android.RemoteTransportFfi
 import com.lingxi.code.theme.LingXiTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import com.lingxi.code.testing.finishComposeFixture
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -30,7 +32,9 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class RemoteBotsUiTest {
-    @get:Rule val compose = createComposeRule()
+    @After fun closeFixture() = finishComposeFixture(compose.activity)
+
+    @get:Rule val compose = createAndroidComposeRule<androidx.activity.ComponentActivity>()
 
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
     private fun text(id: Int, vararg args: Any) = context.getString(id, *args)

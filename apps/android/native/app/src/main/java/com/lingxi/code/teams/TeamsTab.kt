@@ -52,7 +52,7 @@ import java.util.UUID
  * cleared through [onJoinCodeHandled] once it has been put there.
  *
  * Phone: the list is the root; a conversation or the team details are pushed above it (the tab bar hides while one is open).
- * Wide (>= 840 dp): list | conversation | team details side by side, and the stack depth stays 0.
+ * Wide (>= 840 dp): list | conversation | team details side by side; depth still describes what Back can pop.
  */
 @Composable
 internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier: Modifier = Modifier, workspaceOverride: TeamsWorkspace? = null) {
@@ -81,11 +81,11 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
         if (joinCode != null && uid != null) { joinPrefill = joinCode; sheet = "join"; onJoinCodeHandled() }
     }
     LaunchedEffect(uid) { if (uid == null) { stackText = ""; sheet = "" } }
-    val depth = if (wide) 0 else stack.size
+    val depth = stack.size
     LaunchedEffect(depth) { host.reportDepth(AppTab.Teams, depth) }
     BackHandler(enabled = stack.isNotEmpty()) { setStack(stack.dropLast(1)) }
     // Re-tapping the tab pops to the list, then scrolls it to the top.
-    OnTabReselected(AppTab.Teams) { if (!wide && stack.isNotEmpty()) stackText = "" else scrollTop++ }
+    OnTabReselected(AppTab.Teams) { if (stack.isNotEmpty()) setStack(emptyList()) else scrollTop++ }
     LaunchedEffect(scrollTop) { if (scrollTop > 0) listState.animateScrollToItem(0) }
 
     Box(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).windowInsetsPadding(WindowInsets.systemBars).imePadding().testTag(TeamsTags.ROOT)) {

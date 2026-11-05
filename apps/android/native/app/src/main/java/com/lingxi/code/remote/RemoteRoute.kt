@@ -57,10 +57,25 @@ sealed interface RemoteRoute {
          */
         val stackSaver: Saver<List<RemoteRoute>, Any> = listSaver(
             save = { stack -> stack.map { it.encode() } },
+            restore = ::restoreStack,
+        )
+
+        /** SaveableStateHolder can restore after this tab was disposed under a different account.
+         * rememberSaveable's inputs do not validate that restored value; the owner must travel with it. */
+        fun ownedStackSaver(ownerUid: String?): Saver<List<RemoteRoute>, Any> = listSaver(
+            save = { stack ->
+                if (ownerUid == null || stack.isEmpty()) emptyList()
+                else listOf("uid/$ownerUid") + stack.map { it.encode() }
+            },
             restore = { saved ->
-                val routes = saved.map { decode(it) }
-                if (routes.any { it == null || it == Hosts }) emptyList() else routes.filterNotNull()
+                if (ownerUid == null || saved.firstOrNull() != "uid/$ownerUid") emptyList()
+                else restoreStack(saved.drop(1))
             },
         )
+
+        private fun restoreStack(saved: List<String>): List<RemoteRoute> {
+            val routes = saved.map { decode(it) }
+            return if (routes.any { it == null || it == Hosts }) emptyList() else routes.filterNotNull()
+        }
     }
 }

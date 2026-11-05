@@ -70,6 +70,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import com.lingxi.code.settings.ProviderAccountModelAvailability
 import com.lingxi.code.settings.decodeProviderAccounts
+import com.lingxi.code.settings.SettingsRoutes
+import com.lingxi.code.tabs.AppTab
+import com.lingxi.code.tabs.LocalTabHost
 
 /** Test tags of the session page. */
 internal object RemoteSessionTags {
@@ -143,8 +146,17 @@ internal fun RemoteSessionScreen(
 ) {
     val context = LocalContext.current
     val t = LingXiTheme.palette
-    val holder: RemoteSessionHolder = viewModel()
     val ownerUid by manager.uid.collectAsState()
+    // The parent tab's lifecycle-aware account collector can still hold its previous value.
+    // Keep source creation safe at this boundary too, including while a retained page leaves.
+    if (ownerUid == null) {
+        val tabs = LocalTabHost.current
+        RemotePage(stringResource(R.string.remote_bots), onBack) {
+            RemoteSignedOut { tabs.openSettings(SettingsRoutes.ACCOUNT, origin = AppTab.Bots) }
+        }
+        return
+    }
+    val holder: RemoteSessionHolder = viewModel()
     val key = "$ownerUid/$hostId/$sessionId"
     val strings = remember(context) { conversationStrings(context.applicationContext) }
     val deviceName = remember { RemoteControl.deviceName() }

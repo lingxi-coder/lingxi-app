@@ -1,9 +1,6 @@
 package com.lingxi.code.tabs
 
-import androidx.activity.OnBackPressedDispatcher
-import androidx.activity.OnBackPressedDispatcherOwner
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.expandVertically
@@ -22,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.LocalContentColor
@@ -45,7 +43,7 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -55,11 +53,13 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.Lifecycle
+import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
+import androidx.navigationevent.compose.rememberNavigationEventDispatcherOwner
 import com.lingxi.code.R
 import com.lingxi.code.bots.BotsBadge
 import com.lingxi.code.bots.BotsTab
@@ -136,9 +136,11 @@ fun MainTabShell(
             LocalTabHost provides state,
             LocalTabReselects provides state.reselects,
         ) {
-            // The last link of the Back chain: any other tab's root goes back to Chats. The tab bodies
-            // register their own handlers after this one, so they pop their stacks first.
-            BackHandler(enabled = selected != AppTab.Chats) { state.select(AppTab.Chats) }
+            // Only roots leave their tab. Pushed screens and overlays own Back independently of
+            // callback registration order across recompositions.
+            BackHandler(enabled = selected != AppTab.Chats && state.depthOf(selected) == 0 && !fullScreenOverlay) {
+                state.select(AppTab.Chats)
+            }
             Row(Modifier.fillMaxSize()) {
                 if (wide && barVisible) {
                     TabRail(selected, botsCount, teamsCount, state::onTabClick)
@@ -213,38 +215,29 @@ private fun TabBodies(
 
 /**
  * Keeps the Chats tab composed while it is not the selected tab. Not placed, no semantics, and its
- * `BackHandler`s register on a dispatcher nobody dispatches to, so Back can never close a Chats page
- * the user cannot see.
+ * navigation dispatcher is disabled while hidden, so Back never closes a Chats page the user cannot see.
  */
 @Composable
 private fun ChatsHost(active: Boolean, content: @Composable () -> Unit) {
-    val parent = LocalOnBackPressedDispatcherOwner.current
-    val inert = remember(parent) { parent?.let(::InertBackDispatcherOwner) }
-    Box(Modifier.fillMaxSize().inactive(!active)) {
-        val owner = if (active) parent else inert
-        if (owner != null) {
-            CompositionLocalProvider(LocalOnBackPressedDispatcherOwner provides owner) { content() }
+    val navigation = rememberNavigationEventDispatcherOwner(enabled = active)
+    // Keep a real Layout parent so its measure policy resets the Box child's measuredByParent
+    // even after Chats was visible. Hidden streaming updates cannot schedule independent remeasure.
+    Layout(
+        content = {
+            CompositionLocalProvider(LocalNavigationEventDispatcherOwner provides navigation) {
+                Box(Modifier.fillMaxSize()) { content() }
+            }
+        },
+        modifier = Modifier.fillMaxSize().then(if (active) Modifier else Modifier.clearAndSetSemantics { }),
+    ) { children, constraints ->
+        if (active) {
+            val child = children.single().measure(constraints)
+            layout(child.width, child.height) { child.placeRelative(0, 0) }
         } else {
-            content()
+            layout(constraints.minWidth, constraints.minHeight) { }
         }
     }
 }
-
-/** A dispatcher owner whose callbacks are never invoked; it shares the real owner's lifecycle. */
-private class InertBackDispatcherOwner(private val parent: OnBackPressedDispatcherOwner) : OnBackPressedDispatcherOwner {
-    override val lifecycle: Lifecycle get() = parent.lifecycle
-    override val onBackPressedDispatcher: OnBackPressedDispatcher = OnBackPressedDispatcher()
-}
-
-/** Measured exactly like an active subtree (so nothing relayouts when it returns) but never placed or announced. */
-private fun Modifier.inactive(inactive: Boolean): Modifier =
-    if (!inactive) this
-    else this
-        .layout { measurable, constraints ->
-            val placeable = measurable.measure(constraints)
-            layout(placeable.width, placeable.height) { }
-        }
-        .clearAndSetSemantics { }
 
 // --- insets -------------------------------------------------------------------------------------
 
@@ -300,7 +293,7 @@ private fun PhoneBar(
                         icon = { TabIcon(tab, badgeCount(tab, botsCount, teamsCount)) },
                         label = { TabLabel(tab) },
                         alwaysShowLabel = true,
-                        modifier = Modifier.testTag(UiTags.tab(tab.key)),
+                        modifier = Modifier.testTag(UiTags.tab(tab.key)).tabBadgeState(tab, badgeCount(tab, botsCount, teamsCount)),
                     )
                 }
             }
@@ -311,7 +304,7 @@ private fun PhoneBar(
 @Composable
 private fun TabRail(selected: AppTab, botsCount: Int, teamsCount: Int, onSelect: (AppTab) -> Unit) {
     val label = stringResource(R.string.tabs_navigation_a11y)
-    NavigationRail(Modifier.testTag(UiTags.TABS_RAIL).semantics { contentDescription = label }) {
+    NavigationRail(Modifier.width(80.dp).testTag(UiTags.TABS_RAIL).semantics { contentDescription = label }) {
         AppTab.entries.forEach { tab ->
             NavigationRailItem(
                 selected = tab == selected,
@@ -319,7 +312,7 @@ private fun TabRail(selected: AppTab, botsCount: Int, teamsCount: Int, onSelect:
                 icon = { TabIcon(tab, badgeCount(tab, botsCount, teamsCount)) },
                 label = { TabLabel(tab) },
                 alwaysShowLabel = true,
-                modifier = Modifier.testTag(UiTags.tab(tab.key)),
+                modifier = Modifier.testTag(UiTags.tab(tab.key)).tabBadgeState(tab, badgeCount(tab, botsCount, teamsCount)),
             )
         }
     }
@@ -327,7 +320,8 @@ private fun TabRail(selected: AppTab, botsCount: Int, teamsCount: Int, onSelect:
 
 @Composable
 private fun TabLabel(tab: AppTab) {
-    Text(stringResource(tab.labelRes()), maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Text(stringResource(tab.labelRes()), minLines = if (LocalDensity.current.fontScale > 1.3f) 2 else 1,
+        maxLines = 2, overflow = TextOverflow.Ellipsis)
 }
 
 /** Teams shows the unread total, Bots the chats waiting for the user; Chats and Settings never badge. */
@@ -338,18 +332,24 @@ private fun badgeCount(tab: AppTab, botsCount: Int, teamsCount: Int): Int = when
 }
 
 @Composable
-private fun TabIcon(tab: AppTab, badge: Int) {
-    val text = TabLogic.tabBadgeText(badge)
+private fun Modifier.tabBadgeState(tab: AppTab, badge: Int): Modifier {
+    if (badge <= 0) return this
     val description = when (tab) {
         AppTab.Teams -> stringResource(R.string.tabs_badge_unread_fmt, badge)
         AppTab.Bots -> stringResource(R.string.remote_bot_waiting_fmt, badge)
         AppTab.Chats, AppTab.Settings -> ""
     }
+    return semantics { stateDescription = description }
+}
+
+@Composable
+private fun TabIcon(tab: AppTab, badge: Int) {
+    val text = TabLogic.tabBadgeText(badge)
     BadgedBox(
         badge = {
             if (text != null) {
-                // The badge reads "5 unread" once, not "5 unread, 5".
-                Badge(Modifier.clearAndSetSemantics { contentDescription = description }) { Text(text) }
+                // The tab announces its full count as state; the visual 99+ badge stays silent.
+                Badge(Modifier.clearAndSetSemantics { }) { Text(text) }
             }
         },
     ) {

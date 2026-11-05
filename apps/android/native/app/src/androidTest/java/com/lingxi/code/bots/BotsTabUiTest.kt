@@ -5,11 +5,13 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.getBoundsInRoot
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.R
@@ -31,6 +33,8 @@ import com.lingxi.code.remote.RemoteBotsState
 import com.lingxi.code.theme.LingXiTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import com.lingxi.code.testing.finishComposeFixture
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -42,13 +46,22 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class BotsTabUiTest {
     // These view assertions use the main dispatcher; no separate coroutine test scheduler is needed.
-    @get:Rule val compose = createComposeRule()
+    @After fun closeFixture() = finishComposeFixture(compose.activity)
+
+    @get:Rule val compose = createAndroidComposeRule<androidx.activity.ComponentActivity>()
 
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
     private fun text(id: Int, vararg args: Any) = context.getString(id, *args)
 
     /** What the rows asked for, in order. */
     private val events = mutableListOf<String>()
+
+    private fun assertEvents(vararg expected: String) = compose.runOnIdle {
+        assertEquals(expected.toList(), events)
+    }
+
+    private fun revealText(value: String) = compose.onNodeWithTag(BotsTags.TREE)
+        .performScrollToNode(hasText(value)).let { compose.onNodeWithText(value) }
 
     private val actions = BotsActions(
         onSignIn = { events += "signIn" },
@@ -134,7 +147,7 @@ class BotsTabUiTest {
         compose.onNodeWithText(text(R.string.remote_signed_out_title)).assertIsDisplayed()
         compose.onNodeWithText(text(R.string.remote_signed_out_body)).assertIsDisplayed()
         compose.onNodeWithText(text(R.string.remote_sign_in)).performClick()
-        assertEquals(listOf("signIn"), events)
+        assertEvents("signIn")
     }
 
     @Test fun theTabTitlesItselfBots() {
@@ -159,7 +172,7 @@ class BotsTabUiTest {
         compose.onNodeWithTag(BotsTags.HOSTS_ERROR).assertIsDisplayed()
         compose.onNodeWithText(text(R.string.remote_hosts_error)).assertIsDisplayed()
         compose.onNodeWithText(text(R.string.common_retry)).performClick()
-        assertEquals(listOf("retryHosts"), events)
+        assertEvents("retryHosts")
     }
 
     @Test fun noComputersExplainsHowToGetOne() {
@@ -174,7 +187,7 @@ class BotsTabUiTest {
         compose.onNodeWithTag(BotsTags.HOSTS_ERROR).assertIsDisplayed()
         compose.onNodeWithTag(BotsTags.host("h1")).assertIsDisplayed()
         compose.onNodeWithText(text(R.string.common_retry)).performClick()
-        assertEquals(listOf("retryHosts"), events)
+        assertEvents("retryHosts")
     }
 
     // --- computer headers -----------------------------------------------------------------------------------------
@@ -196,10 +209,10 @@ class BotsTabUiTest {
         compose.onNodeWithText(text(R.string.mobile_bots_connected)).assertIsDisplayed()
         compose.onNodeWithText("Laptop").assertIsDisplayed()
         compose.onNodeWithText(text(R.string.remote_online)).assertIsDisplayed()
-        compose.onNodeWithText(
+        revealText(
             text(R.string.remote_offline) + " · " + text(R.string.mobile_bots_last_seen_fmt, text(R.string.session_relative_days_ago_fmt, 2)),
         ).assertIsDisplayed()
-        compose.onNodeWithText(text(R.string.remote_online) + " · " + text(R.string.remote_not_paired)).assertIsDisplayed()
+        revealText(text(R.string.remote_online) + " · " + text(R.string.remote_not_paired)).assertIsDisplayed()
     }
 
     @Test fun theConnectedComputerComesFirst() {
@@ -212,13 +225,13 @@ class BotsTabUiTest {
         showTree(rows)
         compose.onNodeWithTag(BotsTags.host("h1")).performClick()
         compose.onNodeWithTag(BotsTags.host("h2")).performClick()
-        assertEquals(listOf("toggleHost:h1:true", "toggleHost:h2:false"), events)
+        assertEvents("toggleHost:h1:true", "toggleHost:h2:false")
     }
 
     @Test fun theDetailsButtonOpensTheComputerPageOfThatComputer() {
         showTree(tree(listOf(host("h1"), host("h2"))))
         compose.onNodeWithTag(BotsTags.info("h2")).performClick()
-        assertEquals(listOf("openHost:h2"), events)
+        assertEvents("openHost:h2")
     }
 
     @Test fun aCollapsedComputerShowsNoRowsUnderIt() {
@@ -249,7 +262,7 @@ class BotsTabUiTest {
         showTree(tree(listOf(host("h1"))))
         compose.onNodeWithText(text(R.string.mobile_bots_connect_to_load)).assertIsDisplayed()
         compose.onNodeWithTag(BotsTags.connect("h1")).performClick()
-        assertEquals(listOf("connect:h1"), events)
+        assertEvents("connect:h1")
     }
 
     @Test fun anOfflineComputerWithNothingSavedSaysOfflineAndHowToFixIt() {
@@ -262,7 +275,7 @@ class BotsTabUiTest {
         showTree(tree(listOf(host("h1", paired = false))))
         compose.onNodeWithText(text(R.string.remote_not_paired)).assertIsDisplayed()
         compose.onNodeWithTag(BotsTags.connect("h1")).performClick()
-        assertEquals(listOf("connect:h1"), events)
+        assertEvents("connect:h1")
     }
 
     // --- saved rows and their notes -------------------------------------------------------------------------------
@@ -310,7 +323,7 @@ class BotsTabUiTest {
         showTree(tree(listOf(host("h1")), connection("h1", RemoteConnectionPhaseFfi.FAILED, failure = failure)))
         compose.onNodeWithText(text(R.string.remote_fail_no_answer)).assertIsDisplayed()
         compose.onNodeWithText(text(R.string.common_retry)).performClick()
-        assertEquals(listOf("retryConnection"), events)
+        assertEvents("retryConnection")
     }
 
     @Test fun aRevokedPairingOffersToPairAgain() {
@@ -318,7 +331,7 @@ class BotsTabUiTest {
         showTree(tree(listOf(host("h1")), connection("h1", RemoteConnectionPhaseFfi.FAILED, failure = failure)))
         compose.onNodeWithText(text(R.string.remote_fail_revoked)).assertIsDisplayed()
         compose.onNodeWithText(text(R.string.remote_pair_again)).performClick()
-        assertEquals(listOf("repair:h1"), events)
+        assertEvents("repair:h1")
         compose.onNodeWithText(text(R.string.common_retry)).assertDoesNotExist()
     }
 
@@ -354,7 +367,7 @@ class BotsTabUiTest {
     @Test fun tappingABotAsksToToggleIt() {
         showTree(tree(listOf(host("h1")), ready("h1"), liveBots("h1", digest)))
         compose.onNodeWithTag(BotsTags.bot("h1", "b1")).performClick()
-        assertEquals(listOf("toggleBot:h1/b1"), events)
+        assertEvents("toggleBot:h1/b1")
     }
 
     @Test fun botsAreListedByActivityThenName() {
@@ -377,8 +390,8 @@ class BotsTabUiTest {
 
     @Test fun tappingNewChatAsksForOneOnThatBot() {
         showTree(openTree(heldChats("h1", "b1", emptyList())))
-        compose.onNodeWithTag(BotsTags.newChat("h1", "b1")).performClick()
-        assertEquals(listOf("newChat:b1"), events)
+        compose.onNodeWithTag(BotsTags.newChat("h1", "b1")).assertIsDisplayed().assertIsEnabled().performClick()
+        assertEvents("newChat:b1")
     }
 
     @Test fun newChatIsOffWhileTheLinkIsNotReady() {
@@ -420,7 +433,7 @@ class BotsTabUiTest {
         showTree(openTree(heldChats("h1", "b1", null, RemoteSessionErrorFfi("timeout", "slow"))))
         compose.onNodeWithText(text(R.string.mobile_bots_chats_failed)).assertIsDisplayed()
         compose.onNodeWithText(text(R.string.common_retry)).performClick()
-        assertEquals(listOf("retryChats:h1/b1"), events)
+        assertEvents("retryChats:h1/b1")
     }
 
     @Test fun aFailedListingKeepsTheChatsThatWereHeld() {
@@ -446,7 +459,7 @@ class BotsTabUiTest {
     @Test fun tappingAChatOpensIt() {
         showTree(openTree(heldChats("h1", "b1", listOf(liveChat("s1", "Monday run")))))
         compose.onNodeWithTag(BotsTags.chat("h1", "b1", "s1")).performClick()
-        assertEquals(listOf("openChat:s1"), events)
+        assertEvents("openChat:s1")
     }
 
     @Test fun aBlankChatTitleReadsAsUntitled() {
@@ -476,10 +489,10 @@ class BotsTabUiTest {
 
     @Test fun aBotShowsFiveChatsThenOffersTheRest() {
         showTree(openTree(heldChats("h1", "b1", manyChats(6))))
-        compose.onNodeWithText("Run 5").assertIsDisplayed()
+        revealText("Run 5").assertIsDisplayed()
         compose.onNodeWithText("Run 6").assertDoesNotExist()
-        compose.onNodeWithText(text(R.string.mobile_bots_show_more_fmt, 1)).performClick()
-        assertEquals(listOf("more:h1/b1"), events)
+        revealText(text(R.string.mobile_bots_show_more_fmt, 1)).performClick()
+        assertEvents("more:h1/b1")
     }
 
     @Test fun showingAllOffersToShowFewer() {
@@ -488,9 +501,9 @@ class BotsTabUiTest {
             expanded = setOf("h1/b1"), showAll = setOf("h1/b1"),
         )
         showTree(rows)
-        compose.onNodeWithText("Run 6").assertIsDisplayed()
-        compose.onNodeWithText(text(R.string.chat_tool_show_less)).performClick()
-        assertEquals(listOf("less:h1/b1"), events)
+        revealText("Run 6").assertIsDisplayed()
+        revealText(text(R.string.chat_tool_show_less)).performClick()
+        assertEvents("less:h1/b1")
     }
 
     @Test fun fiveChatsOfferNothingMore() {

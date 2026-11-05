@@ -252,7 +252,7 @@ fun SettingsHost(
                 startDestination = SettingsRoutes.MAIN,
                 modifier = Modifier.fillMaxSize(),
             ) {
-                page(SettingsRoutes.MAIN) {
+                page(SettingsRoutes.MAIN, scroll = rootScroll) {
                     if (wide) GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding)
                     else SettingsHomePage(onNavigate = { navController.navigate(it) })
                 }

@@ -8,7 +8,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
@@ -23,6 +23,8 @@ import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.SessionRef
 import com.lingxi.code.onboarding.SetupWizardOverlay
 import org.junit.Assert.*
+import com.lingxi.code.testing.finishComposeFixture
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -30,7 +32,9 @@ import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class NativeStyleUiTest {
-    @get:Rule val rule = createComposeRule()
+    @After fun closeFixture() = finishComposeFixture(rule.activity)
+
+    @get:Rule val rule = createAndroidComposeRule<androidx.activity.ComponentActivity>()
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
 
     private fun capture(name: String) {

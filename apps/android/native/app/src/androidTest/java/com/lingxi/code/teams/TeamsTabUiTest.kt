@@ -37,6 +37,8 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
+import com.lingxi.code.testing.finishComposeFixture
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -51,6 +53,8 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class TeamsTabUiTest {
+    @After fun closeFixture() = finishComposeFixture(rule.activity)
+
     @get:Rule
     val rule = createAndroidComposeRule<ComponentActivity>()
 

@@ -96,6 +96,27 @@ class RemoteRouteTest {
         assertNull(saved)
     }
 
+    @Test fun anOwnedStackRestoresOnlyForTheAccountThatSavedIt() {
+        val stack = listOf(RemoteRoute.Host(host), RemoteRoute.Session(host, session))
+        val saved = with(RemoteRoute.ownedStackSaver("user-a")) { SaverScope { true }.save(stack) }!!
+        assertEquals(stack, RemoteRoute.ownedStackSaver("user-a").restore(saved))
+        assertEquals(emptyList<RemoteRoute>(), RemoteRoute.ownedStackSaver("user-b").restore(saved))
+        assertEquals(emptyList<RemoteRoute>(), RemoteRoute.ownedStackSaver(null).restore(saved))
+    }
+
+    @Test fun anUnownedOrMalformedSavedStackStartsAtTheTree() {
+        val saver = RemoteRoute.ownedStackSaver("user-a")
+        for (saved in listOf(listOf("session/$host/$session"), listOf("uid/user-a", "hosts"),
+            listOf("uid/user-a", "host/$host", "nonsense"))) {
+            assertEquals(emptyList<RemoteRoute>(), saver.restore(saved))
+        }
+    }
+
+    @Test fun signedOutAndEmptyOwnedStacksSaveNothing() {
+        assertNull(with(RemoteRoute.ownedStackSaver(null)) { SaverScope { true }.save(listOf(RemoteRoute.Host(host))) })
+        assertNull(with(RemoteRoute.ownedStackSaver("user-a")) { SaverScope { true }.save(emptyList()) })
+    }
+
     @Test fun aSavedStackThatDoesNotReadBackWholeStartsAtTheTree() {
         val saver = RemoteRoute.stackSaver
         // The root is never saved, and the Bot page is gone: such a state starts at the tree, not at half a stack.

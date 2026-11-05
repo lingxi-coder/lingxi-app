@@ -3,6 +3,8 @@ package com.lingxi.code.tabs
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +14,8 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -29,9 +33,12 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
-import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.isDisplayed
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
@@ -50,9 +57,12 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
+import com.lingxi.code.testing.finishComposeFixture
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The app shell against stand-ins for its tab bodies (SPEC-mobile-team-bot-ui sections 2 and 9.2): the
@@ -67,6 +77,8 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class TabShellUiTest {
+    @After fun closeFixture() = finishComposeFixture(rule.activity)
+
     @get:Rule
     val rule = createAndroidComposeRule<ComponentActivity>()
 
@@ -89,7 +101,10 @@ class TabShellUiTest {
                 CompositionLocalProvider(LocalDensity provides Density(density = 0.5f, fontScale = 1f)) {
                     val shell = rememberTabShellState()
                     state = shell
-                    Box(Modifier.requiredSize(widthDp, 800.dp)) {
+                    // Only the explicit edge-to-edge cases exercise physical OEM insets. The
+                    // ordinary activity decor consumes them before this synthetic dp viewport.
+                    Box(Modifier.requiredSize(widthDp, 800.dp).then(
+                        if (edgeToEdge) Modifier else Modifier.consumeWindowInsets(WindowInsets.safeDrawing))) {
                         MainTabShell(
                             state = shell,
                             overlayOpen = overlayOpen,
@@ -113,6 +128,7 @@ class TabShellUiTest {
     }
 
     private fun pressBack() {
+        rule.waitForIdle()
         rule.runOnUiThread { rule.activity.onBackPressedDispatcher.onBackPressed() }
         rule.waitForIdle()
     }
@@ -227,13 +243,13 @@ class TabShellUiTest {
 
         rule.runOnUiThread { botsBadge.value = 3; teamsBadge.value = 120 }
         rule.waitForIdle()
-        rule.onNodeWithTag(UiTags.tab("bots")).assert(hasContentDescription(bots, substring = true))
-        rule.onNodeWithTag(UiTags.tab("teams")).assert(hasContentDescription(teams, substring = true))
+        rule.onNodeWithTag(UiTags.tab("bots")).assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, bots))
+        rule.onNodeWithTag(UiTags.tab("teams")).assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, teams))
 
         rule.runOnUiThread { botsBadge.value = 0; teamsBadge.value = 0 }
         rule.waitForIdle()
-        rule.onNodeWithTag(UiTags.tab("bots")).assert(!hasContentDescription(bots, substring = true))
-        rule.onNodeWithTag(UiTags.tab("teams")).assert(!hasContentDescription(teams, substring = true))
+        rule.onNodeWithTag(UiTags.tab("bots")).assert(!SemanticsMatcher.keyIsDefined(SemanticsProperties.StateDescription))
+        rule.onNodeWithTag(UiTags.tab("teams")).assert(!SemanticsMatcher.keyIsDefined(SemanticsProperties.StateDescription))
     }
 
     @Test
@@ -250,7 +266,9 @@ class TabShellUiTest {
 
         setIme(visible = false)
         rule.waitUntil(5_000) { !imeVisible() }
-        rule.waitForIdle()
+        // WindowInsetsCompat's visibility flag changes before the OEM hide animation's
+        // final zero inset reaches Compose. Wait for the resulting bar, not just the flag.
+        rule.waitUntil(5_000) { rule.onNodeWithTag(UiTags.TABS_BAR).isDisplayed() }
         assertBarShown()
     }
 
@@ -272,6 +290,37 @@ class TabShellUiTest {
     }
 
     // --- tab state --------------------------------------------------------------------------
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Test
+    fun hiddenChatsKeepsItsTopBarComposedWithoutMeasuringItEvenAfterItWasVisible() {
+        var title by mutableStateOf("first chat title")
+        val measures = AtomicInteger()
+        rule.setContent {
+            LingXiTheme {
+                state = remember { TabShellState(AppTab.Teams) }
+                MainTabShell(state, false, chats = {
+                    TopAppBar(title = { Column {
+                        Text(title, onTextLayout = { measures.incrementAndGet() })
+                        Text("A second line exercises the title baseline")
+                    } }, windowInsets = WindowInsets(0, 0, 0, 0))
+                }, settings = {}, teams = { Text("visible teams") })
+            }
+        }
+        rule.onNodeWithText("visible teams").assertIsDisplayed()
+        assertEquals("A cold hidden chat must not measure its title", 0, measures.get())
+        tap(AppTab.Chats)
+        rule.onNodeWithText("first chat title").assertIsDisplayed()
+        assertTrue(measures.get() > 0)
+        tap(AppTab.Teams)
+        val before = measures.get()
+        rule.runOnIdle { title = "Streaming changed this title while Teams is selected" }
+        rule.waitForIdle()
+        assertEquals("Hidden updates must stay out of layout", before, measures.get())
+        rule.onNodeWithText("visible teams").assertIsDisplayed()
+        tap(AppTab.Chats)
+        rule.onNodeWithText("Streaming changed this title while Teams is selected").assertIsDisplayed()
+    }
 
     @Test
     fun chatsStaysComposedWhileAnotherTabIsSelected() {
@@ -346,6 +395,7 @@ class TabShellUiTest {
         launch()
         tap(AppTab.Teams)
         rule.onNodeWithTag("teams.push").performClick()
+        rule.onNodeWithTag("teams.depth").assertTextEquals("depth=1")
 
         pressBack()
         rule.onNodeWithTag("teams.depth").assertTextEquals("depth=0")
@@ -380,6 +430,19 @@ class TabShellUiTest {
         assertEquals(listOf("chats.closePage"), log)
         rule.onNodeWithTag("chats.pages").assertTextEquals("pages=0")
         assertBarShown()
+    }
+
+    @Test
+    fun wide_backPopsTheVisibleTabBeforeReturningToChats() {
+        launch(WIDE_WIDTH)
+        tap(AppTab.Teams)
+        rule.onNodeWithTag("teams.push").performClick()
+        rule.onNodeWithTag("teams.depth").assertTextEquals("depth=1")
+        pressBack()
+        rule.onNodeWithTag("teams.depth").assertTextEquals("depth=0")
+        assertSelected(AppTab.Teams)
+        pressBack()
+        assertSelected(AppTab.Chats)
     }
 
     // --- links and shortcuts ----------------------------------------------------------------

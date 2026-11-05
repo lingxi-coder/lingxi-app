@@ -226,6 +226,7 @@ test('App page, settings, local app and picker navigation use the latest loading
   const context: any = {
     useCallback: (fn: unknown) => fn, localAppBridge: { current: { sessionLoading: false } },
     cancelLocalAppNavigation: () => calls.push('cancel-local'), setPage: (page: string) => calls.push(['page', page]),
+    setLocalAppNavigationError() {},
     setSettingsRoute: (route: unknown) => calls.push(['settings', route]),
   };
   evaluate('globalThis.sessionNavigationBlocked = ' + initializer(appSource, 'sessionNavigationBlocked'), context);
@@ -1054,6 +1055,28 @@ test('rapidly changing spaces retains the last click even before React renders',
       assert.equal(context.pendingSessionRef.current, null);
       assert.equal(context.sessionLoadingRef.current, false);
     }
+  }
+});
+
+test('failed Local App session creation clears its pending owner and delegates one error to the caller', async () => {
+  for (const purpose of [undefined, { kind: 'local-app', intent: { name: 'App', setCurrent: false } }, { kind: 'recover-local-app', requestId: 'saved' }]) {
+    const cause = new Error('host failed');
+    const captured: unknown[] = [], pending: unknown[] = [];
+    const context: any = {
+      useCallback: (fn: unknown) => fn,
+      host: { newSession: async () => { throw cause; } },
+      bootstrap: { conversationSpaces: { activeMode: 'code', globalWorkspaces: { code: '/global' } } },
+      desktop: {}, sessionLoadingRef: { current: false }, pendingSessionRef: { current: null },
+      beginNavigationOperation: () => 1, isCurrentNavigationOperation: (id: number) => id === 1,
+      setSessionReady() {}, setPendingSession: (value: unknown) => pending.push(value), setError() {}, applyBootstrap() {},
+      capture: (error: unknown) => { captured.push(error); throw error; },
+    };
+    evaluate('globalThis.start = ' + initializer(bridgeSource, 'newSession'), context);
+    await assert.rejects(context.start('/project', purpose), error => error === cause);
+    assert.equal(context.pendingSessionRef.current, null);
+    assert.equal(context.sessionLoadingRef.current, false);
+    assert.equal(pending.at(-1), null);
+    assert.deepEqual(captured, purpose?.kind === 'local-app' ? [] : [cause]);
   }
 });
 

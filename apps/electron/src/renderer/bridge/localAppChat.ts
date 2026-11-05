@@ -21,6 +21,14 @@ export interface LocalAppChatNavigation {
 }
 type LocalAppSessionTarget = SessionRef;
 
+/** An app project was saved, but its authoring session could not be opened. */
+export class LocalAppAuthoringError extends Error {
+  constructor(readonly projectPath: string, readonly cause: unknown) {
+    super(`Could not open the app authoring chat. The project is saved at ${projectPath}. Choose that source folder to retry.`);
+    this.name = 'LocalAppAuthoringError';
+  }
+}
+
 const agentRecoveryGuidance = '如果应用使用 Agent，请在提交前持久保存可恢复的应用状态及待处理的 runId、threadId；重新打开时读取宿主任务状态和事件或聊天历史，以只读方式重连同一 run 和 thread。请求结果不确定或任务中断时，不要自动提交、重发或重放工具；仅在宿主确认时显示正在运行；明确显示中断或未知状态和用户需要采取的操作。用户检查可能已发生的副作用后，新的尝试必须由用户明确发起并使用新的 runId；只有宿主终止结果支持时才显示完成。iOS 可能暂停或终止后台工作，不要承诺无限期运行。';
 
 /** Draft for either authoring entry; it is presented for review and never sent automatically. */
@@ -72,7 +80,6 @@ export async function localAppChatTarget(
 
   // Replace an unavailable authoring session inside its saved source project.
   // A chat session or an unrelated active repository is never used.
-  const failure = `Could not open the app authoring chat. The project is saved at ${project}. Choose that source folder to retry.`;
   let target: LocalAppSessionTarget | undefined | void;
   const setCurrent = Boolean(app?.id && (app.authoringSetCurrent === true || app.authoringSourceMissing === true || app.authoringAction === 'sourceMissing'));
   const name = app?.name.trim() || project.split(/[\\/]+/).filter(Boolean).at(-1) || 'Local App';
@@ -80,7 +87,7 @@ export async function localAppChatTarget(
     ...(app?.id ? { appId: app.id } : {}), ...(app?.authoringRequestId ? { sourceRequestId: app.authoringRequestId } : {}) }); }
   catch (cause) {
     if (!isCurrent()) return;
-    throw Object.assign(new Error(`${failure}\n${cause instanceof Error ? cause.message : String(cause)}`), { cause });
+    throw new LocalAppAuthoringError(project, cause);
   }
   if (!isCurrent()) return;
   // Host owns registration even if navigation changed while its runtime booted.

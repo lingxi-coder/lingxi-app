@@ -216,13 +216,13 @@ async function main() {
     await wait(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.newSessions.length === 3 && document.querySelector('[contenteditable=true]')?.textContent.includes('修改本地应用「Recovered reader」')`);
     await check(`window.projectCreationFixture.newSessions[2] === '/fixture/.current-product/.apps/Recovered reader' && window.projectCreationFixture.rendererErrors.length === 0`, 'Recovered apps must draft only into the confirmed workspace');
     const draftBeforeFailure = await run(`document.querySelector('[contenteditable=true]').textContent`);
-    await run(`window.projectCreationFixture.newSessionError='Fixture engine startup failed'`);
+    await run(`window.projectCreationFixture.newSessionError='socket disconnected secret-host-token'`);
     await openAppProject();
     await nameApp('Retry app');
     await run(`document.querySelector('.create-project-submit').click()`);
     await confirmTrust();
-    await wait(`!document.querySelector('[aria-label="Create project"]') && document.querySelector('.local-app-error')?.textContent.includes('authoring chat')`);
-    await check(`document.querySelector('.local-app-error').textContent.includes('/fixture/.current-product/.apps/Retry app') && document.querySelector('.local-app-error').textContent.includes('Fixture engine startup failed') && document.querySelector('[contenteditable=true]').textContent === ${JSON.stringify(draftBeforeFailure)}`, 'Authoring startup failures must identify the saved workspace, retain the cause and preserve the previous draft');
+    await wait(`!document.querySelector('[aria-label="Create project"]') && document.querySelector('.desktop-notification[role="alert"] .desktop-notification-detail')?.textContent.includes('authoring chat')`);
+    await check(`(() => { const notifications = Array.from(document.querySelectorAll('.desktop-notification[role="alert"]')); const text = notifications.map(item => item.textContent).join(' '); return notifications.length === 1 && text.includes('/fixture/.current-product/.apps/Retry app') && text.includes('Choose that source folder to retry') && text.includes('Engine connection interrupted') && !text.includes('secret-host-token') && document.querySelector('[contenteditable=true]').textContent === ${JSON.stringify(draftBeforeFailure)}; })()`, 'Authoring startup failures must identify the saved workspace, safely classify the cause and preserve the previous draft');
     await run(`window.projectCreationFixture.newSessionError=''`);
     await openAppProject();
     await run(`window.projectCreationFixture.nextFolder={id:'retry-workspace',path:'/fixture/.current-product/.apps/Retry app'}; document.querySelector('.create-project-add-folder').click()`);
@@ -230,7 +230,7 @@ async function main() {
     await run(`document.querySelector('.create-project-submit').click()`);
     await confirmTrust();
     await wait(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.newSessions.length === 5 && document.querySelector('[contenteditable=true]')?.textContent.includes('创建一个本地应用')`);
-    await check(`window.projectCreationFixture.projects.filter(path => path === '/fixture/.current-product/.apps/Retry app').length === 1 && !document.querySelector('.local-app-error') && window.projectCreationFixture.rendererErrors.length === 0`, 'Retry must use the saved workspace without duplicating a project or leaking a renderer error');
+    await check(`window.projectCreationFixture.projects.filter(path => path === '/fixture/.current-product/.apps/Retry app').length === 1 && !document.querySelector('.desktop-notification[role="alert"]') && window.projectCreationFixture.rendererErrors.length === 0`, 'Retry must use the saved workspace without duplicating a project or leaking a renderer error');
     const mixedRoot = '/fixture/Cloud\\Sync/.current-product/.apps';
     await run(`window.projectCreationFixture.appsRoot=${JSON.stringify(mixedRoot)}`);
     await openAppProject();

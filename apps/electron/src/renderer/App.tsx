@@ -18,8 +18,9 @@ import { useTeamsDrawer } from './bridge/useTeamsDrawer';
 import { teamsThemeVariables } from './theme/teamsTheme';
 import type { DrawerTab } from '../../../../packages/teams/ui';
 import { botScopesKey } from './bridge/botRoutines';
-import { localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
-import { localAppErrorMessage } from './bridge/localAppErrors';
+import { LocalAppAuthoringError, localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
+import { localAppAuthoringErrorPresentation, localAppErrorMessage } from './bridge/localAppErrors';
+import type { ActionableError } from './bridge/errors';
 import type { LocalAppEditRequest } from '../shared/localApps';
 import type { TerminalScope } from '../shared/terminal';
 import { settingsLinkRequest, runtimeLinkItem, type SettingsLinkRequest, type ScheduledLinkRequest } from './deepLinkRoutes';
@@ -93,8 +94,13 @@ export function App() {
   const [activityView, setActivityView] = useState(false);
   const [localAppDraft, setLocalAppDraft] = useState<LocalAppDraft>();
   const [localAppInstallStatus, setLocalAppInstallStatus] = useState('');
-  const [localAppNavigationError, setLocalAppNavigationError] = useState('');
-  const clearLocalAppNavigationError = useCallback(() => setLocalAppNavigationError(''), []);
+  const [localAppNavigationError, setLocalAppNavigationErrorState] = useState('');
+  const [localAppNavigationPresentation, setLocalAppNavigationPresentation] = useState<ActionableError>();
+  const setLocalAppNavigationError = useCallback((message: string, presentation?: ActionableError) => {
+    setLocalAppNavigationErrorState(message);
+    setLocalAppNavigationPresentation(presentation);
+  }, []);
+  const clearLocalAppNavigationError = useCallback(() => setLocalAppNavigationError(''), [setLocalAppNavigationError]);
   const localAppNavigation = useRef(0);
   const localAppNavigationQueue = useRef<Promise<void>>(Promise.resolve());
   const [page, setPage] = useState<AppPage>('chat');
@@ -148,9 +154,12 @@ export function App() {
       setLocalAppDraft({ id: app?.id ?? '', name: app?.name ?? '', nonce, target });
     };
     localAppNavigationQueue.current = localAppNavigationQueue.current.then(navigate, navigate).catch(error => {
-      if (localAppNavigation.current === nonce) setLocalAppNavigationError(localAppErrorMessage(error));
+      if (localAppNavigation.current === nonce) {
+        if (error instanceof LocalAppAuthoringError) setLocalAppNavigationError(error.message, localAppAuthoringErrorPresentation(error));
+        else setLocalAppNavigationError(localAppErrorMessage(error));
+      }
     });
-  }, [sessionNavigationBlocked]);
+  }, [sessionNavigationBlocked, setLocalAppNavigationError]);
   const consumeLocalAppDraft = useCallback((nonce: number) => {
     setLocalAppDraft(current => current?.nonce === nonce ? undefined : current);
   }, []);
@@ -158,7 +167,7 @@ export function App() {
     localAppNavigation.current++;
     setLocalAppDraft(undefined);
     setLocalAppNavigationError('');
-  }, []);
+  }, [setLocalAppNavigationError]);
   const openPage = useCallback((next: AppPage) => {
     if (sessionNavigationBlocked()) return;
     if (next !== 'chat' && localAppBridge.current.handoffPending) void localAppBridge.current.cancelSessionHandoff();
@@ -584,7 +593,7 @@ export function App() {
           <div className="desktop-workspace-upper">
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
-          <ErrorBanner bridge={{ error: localAppNavigationError, clearError: clearLocalAppNavigationError }} />
+          <ErrorBanner bridge={{ error: localAppNavigationError, clearError: clearLocalAppNavigationError }} presentation={localAppNavigationPresentation} />
           <ErrorBanner bridge={bridge} />
           {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} zh={zh} drawer={teamsDrawer} /></Suspense>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} onDevelopmentBlocked={() => setLocalAppNavigationError(tr('local_app_development_requires_code'))} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>

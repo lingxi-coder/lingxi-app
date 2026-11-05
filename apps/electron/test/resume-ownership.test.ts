@@ -63,6 +63,9 @@ test('a prior restart broker load cannot reject a newer generation resume', asyn
   const internal = runtime as any;
   wire(runtime);
   internal.sessionHasHistory = true;
+  const transcriptPath = `${ref.projectPath}/transcript.jsonl`;
+  runtime.rememberTranscriptSelection(transcriptPath);
+  const resumeSignals: AbortSignal[] = [];
   let launches = 0;
   let secondClient: ReturnType<typeof wire> | undefined;
   const secondSent = deferred<void>();
@@ -70,17 +73,25 @@ test('a prior restart broker load cannot reject a newer generation resume', asyn
     ++internal.generation;
     const client = wire(runtime);
     launches++;
-    client.sendCommand = (command) => {
-      if (command.type !== 'resume_session') return;
-      if (launches === 1) resumeProof(client);
-      else { secondClient = client; secondSent.resolve(); }
-    };
+    Object.assign(client, {
+      resumeSessionFromTranscript: async (sessionId: string, selectedPath: string, mode: string, signal: AbortSignal) => {
+        assert.equal(sessionId, ref.sessionId);
+        assert.equal(selectedPath, transcriptPath);
+        assert.equal(mode, ref.mode);
+        resumeSignals.push(signal);
+        if (launches === 1) resumeProof(client);
+        else { secondClient = client; secondSent.resolve(); }
+      },
+    });
   };
   await expired(manager.restart(ref));
+  assert.equal(resumeSignals[0].aborted, true);
   let settled = false;
   const second = manager.restart(ref).then(() => { settled = true; });
   await secondSent.promise;
   const pending = internal.pendingSessionResume;
+  assert.equal(resumeSignals.length, 2);
+  assert.equal(resumeSignals[1].aborted, false);
   credential.resolve(undefined);
   await new Promise((done) => setImmediate(done));
   assert.equal(settled, false);

@@ -485,7 +485,7 @@ mod explicit_cwd_tests {
                 Err(MobileLinuxApiErrorFfi::InvalidRequest { .. })
             ));
         }
-        let cwd = "/home/lingxi/.lingxi/chat".to_string();
+        let cwd = "/home/test-user/workspaces/chat".to_string();
         let mut command = command;
         command.cwd = Some(cwd.clone());
         assert_eq!(

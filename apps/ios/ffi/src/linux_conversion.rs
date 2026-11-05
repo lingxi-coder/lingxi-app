@@ -406,7 +406,7 @@ mod explicit_cwd_tests {
                 Err(MobileLinuxOperationFfiError::InvalidRequest { .. })
             ));
         }
-        let cwd = "/home/lingxi/.lingxi/code".to_string();
+        let cwd = "/home/test-user/workspaces/code".to_string();
         let mut command = command;
         command.cwd = Some(cwd.clone());
         assert_eq!(

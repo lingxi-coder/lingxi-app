@@ -10,7 +10,7 @@ import {
 } from '../src/renderer/bridge/runtimeCenterState';
 import { beginSideQuestion, finishSideQuestion } from '../src/renderer/bridge/sideQuestion';
 import type { UseBridge } from '../src/renderer/bridge/bridgeTypes.js';
-import { RuntimeCenterInspector } from '../src/renderer/components/RuntimeCenter';
+import { RuntimeCenterInspector, RuntimeCenterOverview } from '../src/renderer/components/RuntimeCenter';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import { installTestLocale } from './test-locale';
@@ -35,15 +35,28 @@ function renderInspector(runtimeCenter: RuntimeCenterState): string {
   ));
 }
 
+function renderOverview(runtimeCenter: RuntimeCenterState): string {
+  const bridge = {
+    runtimeCenter: { ...runtimeCenter, overviewOpen: true },
+    desktop: emptyDesktopState(),
+    conversation: { sessionKey: SESSION_ID, plan: [] },
+  } as unknown as UseBridge;
+  return renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) },
+    React.createElement(RuntimeCenterOverview, { bridge }),
+  ));
+}
+
 function begin(): RuntimeCenterState {
   return beginSideQuestion(emptyRuntimeCenterState(), SESSION_ID, 1, `/btw ${QUESTION}`);
 }
 
 test('/btw opens the existing subagent inspector with the question and running status', () => {
-  const html = renderInspector(begin());
+  const state = begin();
+  const html = renderInspector(state);
   assert.match(html, /aria-label="Runtime inspector"/);
-  assert.match(html, /role="tab"[^>]*aria-selected="true"/);
-  assert.match(html, />\/btw<\/span>/);
+  assert.deepEqual(state.activeItem, { kind: 'agent', id: 'btw:1' });
+  assert.deepEqual(state.tabs, [{ kind: 'agent', id: 'btw:1' }]);
+  assert.match(html, /role="tabpanel"[^>]*aria-labelledby="runtime-inspector-tab-agent%3Abtw%3A1"/);
   assert.ok(html.includes(QUESTION));
   assert.match(html, />running<\/span>/);
   assert.match(html, /role="status"/);
@@ -74,12 +87,18 @@ test('/btw stays available in its tab while ordinary subagents occupy their own 
     reviewer: { agent_id: 'reviewer', name: 'Existing reviewer', agent_type: 'general-purpose', status: 'running' },
   } }, SESSION_ID, 1, `/btw ${QUESTION}`);
   const completed = finishSideQuestion(state, SESSION_ID, 1, 'One verification task remains.');
-  const list = renderInspector(openRuntimeCenterItem(completed, { kind: 'section', id: 'agents' }));
+  const agentsOpen = openRuntimeCenterItem(completed, { kind: 'section', id: 'agents' });
+  const list = renderInspector(agentsOpen);
   assert.ok(list.includes('Existing reviewer'));
-  assert.ok(list.includes('/btw'));
+  assert.ok(!list.includes('/btw'));
   assert.match(list, /No completed subagents/);
   assert.match(list, />running<\/span>/);
-  const reopened = renderInspector(openRuntimeCenterItem(completed, { kind: 'agent', id: 'btw:1' }));
+  const overview = renderOverview(agentsOpen);
+  assert.match(overview, /aria-label="Side chats"[^>]*>[\s\S]*?\/btw/);
+  const reopenedState = openRuntimeCenterItem(agentsOpen, { kind: 'agent', id: 'btw:1' });
+  assert.deepEqual(reopenedState.activeItem, { kind: 'agent', id: 'btw:1' });
+  assert.equal(reopenedState.tabs.filter((tab) => tab.kind === 'agent' && tab.id === 'btw:1').length, 1);
+  const reopened = renderInspector(reopenedState);
   assert.ok(reopened.includes(QUESTION));
   assert.ok(reopened.includes('One verification task remains.'));
 });

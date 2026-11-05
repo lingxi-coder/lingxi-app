@@ -1,5 +1,6 @@
 import { app, BrowserWindow } from 'electron';
 import { writeFileSync } from 'node:fs';
+import { configureFixtureWindow } from './electron-test-environment.mjs';
 const url = process.argv.find((argument) => argument.startsWith('http://'));
 if (!url || !process.env.LINGXI_TEST_USER_DATA) throw new Error('fixture URL and isolated user data required');
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
@@ -9,6 +10,7 @@ async function main() {
   const window = new BrowserWindow({ show: false, width: 1100, height: 800, webPreferences: { sandbox: true } });
   try {
     await window.loadURL(url);
+    await configureFixtureWindow(window);
     const run = (script) => window.webContents.executeJavaScript(script);
     const wait = async (expression) => {
       const deadline = Date.now() + 6000;
@@ -28,8 +30,9 @@ async function main() {
     await run(`[...document.querySelectorAll('button')].find(button => button.textContent.trim() === '取消').click()`); await delay(60);
     await run(`[...document.querySelectorAll('button')].find(button => button.textContent.includes('新建策略')).click()`);
     await wait(`Boolean(${trigger})`);
-    await run(`${trigger}.scrollIntoView({block: 'center'})`);
-    await delay(100);
+    // The picker dismisses on an outer scroll. Flush the scrollIntoView event
+    // before opening it, even when the hidden renderer is running slowly.
+    await run(`new Promise(resolve => { ${trigger}.scrollIntoView({block: 'center', behavior: 'instant'}); requestAnimationFrame(() => requestAnimationFrame(resolve)); })`);
     await run(`${trigger}.click()`);
     await wait('document.querySelectorAll("[role=option]").length === 73');
     const result = await run(`(() => { const list = document.querySelector('[role=listbox]'); return {

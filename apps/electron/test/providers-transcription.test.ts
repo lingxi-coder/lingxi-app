@@ -43,10 +43,10 @@ test('every provider exposes a secure official API base and credential-managemen
   }
 });
 
-test('the providers with no hosted transcription endpoint stay false', () => {
+test('providers without evidenced hosted transcription support stay false', () => {
   const incapable = PROVIDERS.filter((p) => !p.transcriptionCapable).map((p) => p.id).sort();
   assert.deepEqual(
     incapable,
-    ['anthropic', 'deepseek', 'github-copilot', 'glm-coding', 'kimi', 'kimi-code', 'openai-chatgpt'].sort(),
+    ['anthropic', 'deepseek', 'github-copilot', 'glm-coding', 'kimi', 'kimi-code', 'openai-chatgpt', 'xai'].sort(),
   );
 });

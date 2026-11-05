@@ -24,6 +24,8 @@ const trace = (message: string): void => { process.stderr.write(`remote-rtc fixt
 process.on('uncaughtException', (error) => { process.stderr.write(`Uncaught: ${error.stack}\n`); app.exit(1); });
 process.on('unhandledRejection', (error) => { process.stderr.write(`Unhandled: ${String(error)}\n`); app.exit(1); });
 app.setPath('userData', join(root, 'profile'));
+// Ensure the capture-denial checks exercise a device even on headless hosts.
+app.commandLine.appendSwitch('use-fake-device-for-media-stream');
 // Keep production privacy defaults: the host must enumerate usable interfaces
 // without relying on global mDNS or loopback flags.
 app.on('window-all-closed', () => undefined);
@@ -83,6 +85,7 @@ async function main(): Promise<void> {
 
   const database = await fakeDatabase();
   let rtcWindow: BrowserWindow | undefined;
+  const captureDecisions: Array<{ sameContents: boolean; mediaTypes: string[]; allowed: boolean }> = [];
   const peers = new PeerHost({
     createWindow: () => createRtcWindow({
       preload: join(root, 'remoteRtc.cjs'),
@@ -111,7 +114,11 @@ async function main(): Promise<void> {
               trace(`media request ${JSON.stringify({ sameContents: contents === window.webContents, details })}`);
             }
             handler(contents, permission, (allowed) => {
-              if (permission === 'media') trace(`media request decision ${JSON.stringify({ allowed })}`);
+              if (permission === 'media') {
+                const mediaTypes = 'mediaTypes' in details ? details.mediaTypes ?? [] : [];
+                captureDecisions.push({ sameContents: contents === window.webContents, mediaTypes, allowed });
+                trace(`media request decision ${JSON.stringify({ allowed })}`);
+              }
               callback(allowed);
             }, details);
           });
@@ -222,7 +229,7 @@ async function main(): Promise<void> {
     camera: !navigator.mediaDevices ? 'unavailable' : await Promise.race([navigator.mediaDevices.getUserMedia({ video: true }).then(() => 'allowed', (error) => error.name), new Promise((resolve) => setTimeout(() => resolve('never granted'), 3000))]),
     popup: window.open('about:blank') === null,
   }))()`) as { require: string; process: string; exposed: string[]; csp: string; fetch: string; media: string; camera: string; popup: boolean };
-  trace(`lockdown capture results ${JSON.stringify({ audio: lockdown.media, video: lockdown.camera })}`);
+  trace(`lockdown capture results ${JSON.stringify({ audio: lockdown.media, video: lockdown.camera, captureDecisions })}`);
   assert.equal(lockdown.require, 'undefined');
   assert.equal(lockdown.process, 'undefined');
   assert.deepEqual(lockdown.exposed, []);
@@ -230,6 +237,11 @@ async function main(): Promise<void> {
   assert.equal(lockdown.fetch, 'blocked');
   assert.equal(lockdown.media, 'NotAllowedError');
   assert.equal(lockdown.camera, 'NotAllowedError');
+  for (const mediaType of ['audio', 'video']) {
+    assert.ok(captureDecisions.some((decision) => decision.sameContents && decision.mediaTypes.includes(mediaType) && !decision.allowed),
+      `the production permission handler did not deny ${mediaType} capture: ${JSON.stringify(captureDecisions)}`);
+  }
+  assert.ok(captureDecisions.every((decision) => !decision.allowed), 'a capture request was granted');
   assert.equal(lockdown.popup, true);
   assert.ok(!database.calls.some((call) => call.includes('probe')), 'the page reached the network');
   await rtcWindow.webContents.executeJavaScript(`location.href = 'data:text/html,hijacked'`).catch(() => undefined);

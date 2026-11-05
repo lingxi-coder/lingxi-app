@@ -1,0 +1,46 @@
+{
+  "source": "c5068f6d245dabcaf0d9420cad729701c4ec4ca5",
+  "testDriverCommit": "45743f943",
+  "mainBase": "560d481348d1516eaa9dcb2bec9c679944f90f5b",
+  "audioFixAlreadyOnMain": "d3a32a21dc7d01828b6feacbae9d434c55298bac",
+  "desktop": {
+    "zipSha256": "27142c612f54f2366bcfa3d1d77e5cbe85de3ccb83c696251cb2b761f1e5c67d",
+    "asarSha256": "2fb70a8acf5cc5523c6ec417c6ca4ec06461f8df059b7107204da1c82522fe8e",
+    "wrapperStaticAndRuntime": "passed",
+    "miniRemoteZipAndInstalledAsarHash": "matched",
+    "miniDeepStrictCodeSignature": "passed",
+    "bothComputersTeamsConnected": true,
+    "sharedTeamsTests": 84,
+    "smokeUnitTests": 18,
+    "realSplitChunkAssetTest": 1,
+    "typecheck": "passed"
+  },
+  "live": {
+    "scope": "Dedicated Mobile QA 20261105 only; current owner account retained",
+    "earlierApk": "Channel phone/Mini, independent-member DM/group, actual FCM arrival and team/inbox return observed",
+    "finalApk": "New group roundtrip, preview/unread synchronization, actual background FCM, team/inbox return, Bot DM phone -> Desktop execution -> phone Completed reply; paired Mini automatic reconnect",
+    "phoneBotReply": "QA-20261105-SAMSUNG-BOT-OK",
+    "desktopBotReply": "QA-20261105-TEAM-DEEPSEEK-OK",
+    "provider": "deepseek/deepseek-flash",
+    "botAccess": "Owner only; no added folders; Ask for approval",
+    "unsupportedRoute": "ChatGPT subscription route refused bounded Team execution because it has no enforceable provider output-token limit. No limits bypassed. The test Bot was changed to configured DeepSeek and rebound.",
+    "phoneNetwork": "Intermittent Firestore DNS EAI_NODATA observed, subsequently reconnected; no proxy settings changed"
+  },
+  "restoration": {
+    "appDataCleared": false,
+    "accountsSignedOut": false,
+    "portraitRotationLock": [
+      0,
+      0
+    ],
+    "mediaVolume": 0,
+    "notificationVolume": 0,
+    "originalCredentialBrokerFilesPreserved": true
+  },
+  "overallAcceptance": "incomplete",
+  "remaining": [
+    "Second-host remote pairing/forget/session and full remote push/deep-link journeys; main Mac remote access is off and action-time consent pending.",
+    "Full manual TalkBack/VoiceOver review, real voice recording/playback/provider configuration, terminal/runtime live journeys, long Bot-run and longer performance/release checks.",
+    "Complete iOS spec acceptance is outside the Android/package evidence recorded here."
+  ]
+}

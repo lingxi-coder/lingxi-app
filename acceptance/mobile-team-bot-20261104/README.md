@@ -1,5 +1,9 @@
 # Mobile Bot/Team port: implementation and validation
 
+Latest follow-up: [2026-11-05 Android and Desktop receipt](closeout-20261105/README.md).
+The two audio failures and current translation gates below are resolved; the
+original record remains historical. Full spec acceptance is still incomplete.
+
 Recorded 2026-11-04 (America/Los_Angeles), on local branch `claude/team-bot-mobile`.
 This continues `../../../SPEC-mobile-team-bot-ui.md` in the parent worktree. Implementation is
 committed locally. Android testing resumed after explicit user notification; see the

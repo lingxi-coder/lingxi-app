@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
+import http.client
 import json
 import os
 import pathlib
 import plistlib
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from fnmatch import fnmatch
@@ -60,6 +65,7 @@ IOS_SLICES = (
 )
 MAX_ARCHIVE_BYTES = 8 * 1024**3
 MAX_DOWNLOAD_BYTES = 2 * 1024**3
+DOWNLOAD_ATTEMPTS = 3
 
 
 class SetupError(RuntimeError):
@@ -109,6 +115,132 @@ def verify_artifact(path: pathlib.Path, artifact: dict) -> None:
         )
 
 
+class _DownloadFailure(Exception):
+    def __init__(self, reason: str, *, retryable: bool = False) -> None:
+        super().__init__(reason)
+        self.retryable = retryable
+
+
+def _transient_network_error(error: BaseException) -> bool:
+    if isinstance(error, urllib.error.URLError):
+        error = error.reason
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return False
+    if isinstance(error, (TimeoutError, ConnectionError, socket.gaierror, socket.herror,
+                          ssl.SSLEOFError, http.client.IncompleteRead, http.client.RemoteDisconnected)):
+        return True
+    return isinstance(error, OSError) and error.errno in {
+        errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ENETDOWN, errno.ENETRESET,
+        errno.ECONNRESET, errno.ECONNABORTED, errno.ECONNREFUSED, errno.EPIPE, errno.ETIMEDOUT,
+    }
+
+
+def _download_headers(response, details: dict) -> int | None:
+    details["status"] = response.getcode()
+    content_type = response.headers.get("Content-Type")
+    if content_type:
+        content_type = content_type.split(";", 1)[0].strip().lower()
+        details["content_type"] = content_type if re.fullmatch(
+            r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", content_type
+        ) else "invalid"
+    lengths = response.headers.get_all("Content-Length", [])
+    if not lengths:
+        return None
+    if len(lengths) != 1 or not re.fullmatch(r"[0-9]+", lengths[0].strip()):
+        details["content_length"] = "invalid"
+        raise _DownloadFailure("invalid Content-Length")
+    digits = lengths[0].strip().lstrip("0") or "0"
+    if len(digits) > len(str(MAX_DOWNLOAD_BYTES)):
+        details["content_length"] = "over-limit"
+        raise _DownloadFailure(f"SDK artifact exceeds the {MAX_DOWNLOAD_BYTES}-byte download limit")
+    length = int(digits)
+    details["content_length"] = length
+    if length == 0:
+        raise _DownloadFailure("invalid Content-Length")
+    if length > MAX_DOWNLOAD_BYTES:
+        raise _DownloadFailure(f"SDK artifact exceeds the {MAX_DOWNLOAD_BYTES}-byte download limit")
+    return length
+
+
+def _download_once(artifact: dict, destination: pathlib.Path, details: dict) -> None:
+    request = urllib.request.Request(
+        artifact["url"], headers={"User-Agent": "LingXi-CI-GStreamer-SDK/1.0"}
+    )
+    try:
+        response = urllib.request.urlopen(request, timeout=60)
+    except urllib.error.HTTPError as error:
+        try:
+            _download_headers(error, details)
+        finally:
+            error.close()
+        status = error.code
+        raise _DownloadFailure(
+            f"HTTP {status}", retryable=status in (408, 429) or 500 <= status <= 599
+        ) from error
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
+        raise _DownloadFailure("network connection failure", retryable=_transient_network_error(error)) from error
+
+    partial = None
+    try:
+        length = _download_headers(response, details)
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=f".{destination.name}.", suffix=".part",
+                dir=destination.parent, delete=False,
+            ) as output:
+                partial = pathlib.Path(output.name)
+                while True:
+                    try:
+                        block = response.read(1024 * 1024)
+                    except http.client.IncompleteRead as error:
+                        details["bytes"] += len(error.partial)
+                        details["digest"].update(error.partial)
+                        if details["bytes"] > MAX_DOWNLOAD_BYTES:
+                            raise _DownloadFailure(
+                                f"SDK artifact exceeds the {MAX_DOWNLOAD_BYTES}-byte download limit"
+                            ) from error
+                        raise _DownloadFailure("short read", retryable=True) from error
+                    except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
+                        raise _DownloadFailure(
+                            "network read failure", retryable=_transient_network_error(error)
+                        ) from error
+                    if not block:
+                        break
+                    details["bytes"] += len(block)
+                    details["digest"].update(block)
+                    if details["bytes"] > MAX_DOWNLOAD_BYTES:
+                        raise _DownloadFailure(f"SDK artifact exceeds the {MAX_DOWNLOAD_BYTES}-byte download limit")
+                    if length is not None and details["bytes"] > length:
+                        raise _DownloadFailure("response exceeds Content-Length")
+                    if output.write(block) != len(block):
+                        raise _DownloadFailure("local disk write was incomplete")
+        except OSError as error:
+            raise _DownloadFailure("local disk error") from error
+        if length is not None and details["bytes"] != length:
+            raise _DownloadFailure("short read", retryable=True)
+        try:
+            details["file_sha256"] = sha256_file(partial)
+        except OSError as error:
+            raise _DownloadFailure("local disk error") from error
+        if details["file_sha256"] != artifact["sha256"]:
+            raise _DownloadFailure("SHA-256 mismatch", retryable=True)
+        try:
+            partial.replace(destination)
+        except OSError as error:
+            raise _DownloadFailure("local disk error") from error
+        partial = None
+    finally:
+        try:
+            response.close()
+        except OSError:
+            pass
+        if partial is not None:
+            try:
+                partial.unlink(missing_ok=True)
+            except OSError as error:
+                raise _DownloadFailure("local disk cleanup error") from error
+
+
 def download_artifact(artifact: dict, download_dir: pathlib.Path) -> pathlib.Path:
     download_dir.mkdir(parents=True, exist_ok=True)
     destination = download_dir / artifact["filename"]
@@ -116,33 +248,30 @@ def download_artifact(artifact: dict, download_dir: pathlib.Path) -> pathlib.Pat
         verify_artifact(destination, artifact)
         return destination
 
-    partial = destination.with_suffix(destination.suffix + ".part")
-    partial.unlink(missing_ok=True)
-    request = urllib.request.Request(
-        artifact["url"], headers={"User-Agent": "LingXi-CI-GStreamer-SDK/1.0"}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
-            length = response.headers.get("Content-Length")
-            if length:
-                try:
-                    expected_length = int(length)
-                except ValueError as error:
-                    raise SetupError(f"invalid Content-Length for {artifact['filename']}: {length}") from error
-                if expected_length > MAX_DOWNLOAD_BYTES:
-                    raise SetupError(f"SDK artifact exceeds the {MAX_DOWNLOAD_BYTES}-byte download limit")
-            total = 0
-            while block := response.read(1024 * 1024):
-                total += len(block)
-                if total > MAX_DOWNLOAD_BYTES:
-                    raise SetupError(f"SDK artifact exceeds the {MAX_DOWNLOAD_BYTES}-byte download limit")
-                output.write(block)
-        verify_artifact(partial, artifact)
-        partial.replace(destination)
-    except (OSError, urllib.error.URLError, SetupError) as error:
-        partial.unlink(missing_ok=True)
-        raise SetupError(f"failed to fetch verified SDK artifact {artifact['filename']}: {error}") from error
-    return destination
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        details = {"status": "-", "content_length": "-", "content_type": "-",
+                   "bytes": 0, "digest": hashlib.sha256()}
+        failure = None
+        try:
+            _download_once(artifact, destination, details)
+        except _DownloadFailure as error:
+            failure = error
+        reason = str(failure) if failure else "verified"
+        print(
+            f"gstreamer-sdk: download {artifact['filename']} attempt={attempt}/{DOWNLOAD_ATTEMPTS} "
+            f"status={details['status']} content-length={details['content_length']} "
+            f"content-type={details['content_type']} bytes={details['bytes']} "
+            f"sha256={details.get('file_sha256', details['digest'].hexdigest())} reason={reason}",
+            file=sys.stderr,
+        )
+        if failure is None:
+            return destination
+        if not failure.retryable or attempt == DOWNLOAD_ATTEMPTS:
+            raise SetupError(
+                f"failed to fetch verified SDK artifact {artifact['filename']} after {attempt} attempt(s): {failure}"
+            ) from failure
+        time.sleep(attempt)
+    raise AssertionError("unreachable download retry state")
 
 
 def _inside(root: pathlib.Path, candidate: pathlib.Path) -> bool:

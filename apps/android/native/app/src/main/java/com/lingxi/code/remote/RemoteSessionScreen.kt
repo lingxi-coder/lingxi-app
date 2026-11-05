@@ -15,7 +15,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,6 +36,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -46,8 +51,6 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingxi.code.R
 import com.lingxi.code.bindings.client.ImageRefDto
-import com.lingxi.code.components.LXIcon
-import com.lingxi.code.components.LXIconName
 import com.lingxi.code.conversation.ChatScreen
 import com.lingxi.code.conversation.ChatViewModel
 import com.lingxi.code.conversation.ComposerAttachment
@@ -67,6 +70,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import com.lingxi.code.settings.ProviderAccountModelAvailability
 import com.lingxi.code.settings.decodeProviderAccounts
+
+/** Test tags of the session page. */
+internal object RemoteSessionTags {
+    const val BACK = "remote.session.back"
+}
 
 /** A followed session: its source and the view model that renders it. */
 class RemoteChat internal constructor(
@@ -119,7 +127,8 @@ class RemoteSessionHolder : ViewModel() {
 
 /**
  * One session of a computer, with the conversation UI of the app. Side chat and voice are off.
- * [botName] is the Bot the session is a chat of, if it is one: back leads to that Bot.
+ * [botName] is the Bot the session is a chat of, if it is one; it is only named under the title. Back leads to
+ * what the page was opened from: the tree of computers and Bots, or the Computer page.
  */
 @Composable
 internal fun RemoteSessionScreen(
@@ -227,10 +236,12 @@ internal fun RemoteSessionScreen(
 
     Column(Modifier.fillMaxSize().background(t.windowBg)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) {
-                LXIcon(
-                    LXIconName.X, size = 20.dp, color = t.text2,
-                    contentDescription = botName?.let { stringResource(R.string.remote_back_to_bot_fmt, it) } ?: stringResource(R.string.remote_back),
+            // Back leads to the tree of computers and Bots (section 4.6), whichever Bot the chat belongs to.
+            IconButton(onClick = onBack, modifier = Modifier.testTag(RemoteSessionTags.BACK)) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.remote_back),
+                    tint = t.text2,
                 )
             }
             Column(Modifier.weight(1f)) {

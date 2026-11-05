@@ -53,8 +53,9 @@ class SettingsGroupsTest {
 
     @Test
     fun `scheduled tasks and placeholder pages are not settings pages`() {
-        val routes = all.map { it.route }
-        assertFalse(routes.any { SettingsRoutes.isStandalone(it) })
+        // Scheduling is a pushed page of the Chats tab (decision D14), so no settings route names it.
+        val routes = all.map { it.route } + desktopSettingsEntries.map { it.route }
+        assertFalse(routes.any { it.startsWith("settings/cron") })
         assertFalse(SettingsRoutes.SKILLS in routes)
         assertFalse(SettingsRoutes.FUSION in routes)
         assertFalse(SettingsRoutes.DREAM in routes)
@@ -110,22 +111,5 @@ class SettingsGroupsTest {
         }
         assertNull(SettingsGroup.fromKey("missing"))
         assertNull(SettingsGroup.fromKey(null))
-    }
-
-    @Test
-    fun `only the scheduled task routes are standalone pages`() {
-        assertTrue(SettingsRoutes.isStandalone(SettingsRoutes.CRON))
-        assertTrue(SettingsRoutes.isStandalone("settings/cron/task/abc"))
-        assertTrue(SettingsRoutes.isStandalone("settings/cron/run/abc"))
-        assertTrue(SettingsRoutes.isStandalone("settings/cron/new/abc"))
-        assertFalse(SettingsRoutes.isStandalone(SettingsRoutes.MAIN))
-        assertFalse(SettingsRoutes.isStandalone(SettingsRoutes.APPEARANCE))
-        assertFalse(SettingsRoutes.isStandalone("settings/cronjobs"))
-    }
-
-    @Test
-    fun `a blank prompt opens the task list instead of an empty path segment`() {
-        assertEquals(SettingsRoutes.CRON, SettingsRoutes.cronNew(""))
-        assertEquals(SettingsRoutes.CRON, SettingsRoutes.cronNew("  \n"))
     }
 }

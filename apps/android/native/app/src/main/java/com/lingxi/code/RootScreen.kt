@@ -1671,9 +1671,7 @@ fun RootScreen(
                         }
                     }
                     when (parts.first()) {
-                        // settings/cron was the scheduled-task list when it was a Settings page: it opens it here now.
-                        "settings" -> if (id == "cron") cronPage = CronPageRoute.Tasks else onDeepLinkNativeReady(link)
-                        "provider", "extensions", "terminal" -> onDeepLinkNativeReady(link)
+                        "settings", "provider", "extensions", "terminal" -> onDeepLinkNativeReady(link)
                         // cron/run/<id> and cron/job/<id> open the scheduled-task page over the chat.
                         "cron" -> cronPage = if (parts[1] == "run") CronPageRoute.Run(id) else CronPageRoute.task(id)
                         "session" -> {

@@ -106,6 +106,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        com.lingxi.code.remote.RemoteControl.foreground()
         com.lingxi.code.push.PushRegistration.enqueue(applicationContext)
     }
 
@@ -305,15 +306,14 @@ class MainActivity : ComponentActivity() {
                     var awaitingFeature = false
                     // A link selects its tab first (an import preview stays on the current one); the route's
                     // own handler then runs inside that tab.
-                    // (settings/cron is the scheduled-task page, which lives on the chat now.)
-                    val landingTab = if (link.route == "settings/cron") AppTab.Chats else TabLogic.tabForLink(link.route).tab
+                    val landingTab = TabLogic.tabForLink(link.route).tab
                     when {
                         link.route in setOf("team/join", "team/inbox") -> tabState.requestTeams(link.params["code"])
                         parts.first() == "remote" -> com.lingxi.code.remote.RemoteRoute.fromLink(link)
                             ?.let { tabState.requestBots(it.hostId, it.sessionId) } ?: run { handled = false }
-                        link.params["workspace"] != null && link.route != "settings/cron" && parts.first() in setOf("settings", "provider", "extensions", "terminal") && preparedNativeLink != link -> { requestedFeatureLink = link; awaitingFeature = true }
+                        link.params["workspace"] != null && parts.first() in setOf("settings", "provider", "extensions", "terminal") && preparedNativeLink != link -> { requestedFeatureLink = link; awaitingFeature = true }
                         // Chats routes, including the scheduled-task pages (decision D14), are RootScreen's.
-                        parts.first() in setOf("session", "new", "project", "apps", "market", "runtime", "import", "cron") || link.route == "settings/cron" -> {
+                        parts.first() in setOf("session", "new", "project", "apps", "market", "runtime", "import", "cron") -> {
                             landingTab?.let(tabState::select)
                             requestedFeatureLink = link
                             awaitingFeature = true
@@ -370,8 +370,7 @@ class MainActivity : ComponentActivity() {
                 activeConversationSource?.let { lingxiMarketplace.ensure(it) }
             }
 
-            // A scheduled run's session was chosen (on the scheduled-task page, or on the Settings tab):
-            // the chat opens it.
+            // A scheduled run's session was chosen on the scheduled-task page: the chat opens it.
             val openScheduledSession: (com.lingxi.code.cron.CronRunRecord) -> Unit = { run ->
                 run.sessionId?.let { sessionId ->
                     pendingConversationLaunch.value = ConversationLaunchRequest(
@@ -461,7 +460,6 @@ class MainActivity : ComponentActivity() {
                                 store = settingsStore,
                                 isDark = darkTheme,
                                 accentId = prefs.accentId,
-                                onOpenScheduledSession = openScheduledSession,
                                 // 「在这里换项目」要真的把引擎换过去，而不是只挪一个记号：
                                 // 项目层写进哪个目录由引擎进程的 cwd 决定。回到对话页、
                                 // 把请求交给 RootScreen 的 switchEngineScope，与抽屉里换项目
@@ -567,6 +565,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onStop() {
+        if (!isChangingConfigurations) com.lingxi.code.remote.RemoteControl.background()
+        super.onStop()
     }
 
     override fun onDestroy() {

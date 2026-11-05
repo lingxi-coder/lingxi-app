@@ -1,6 +1,7 @@
 package com.lingxi.code.cron
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +17,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
@@ -69,10 +71,20 @@ sealed interface CronPageRoute {
     }
 }
 
+/** Test tags of the scheduled-task page (this slice owns them). */
+internal object CronPageTags {
+    const val ROOT = "cron.page"
+    const val BACK = "cron.back"
+}
+
 /**
- * The scheduled-task page, mounted by `RootScreen` above the chat. Shell stub (SPEC-mobile-team-bot-ui
- * section 9.2): the page the Settings graph used to carry, re-hosted unchanged under a back-arrow
- * top bar; the A-SETTINGS slice owns it from here and keeps this signature.
+ * The scheduled-task page, mounted by `RootScreen` above the chat as a pushed page of the Chats tab
+ * (SPEC-mobile-team-bot-ui decision D14: scheduling is not a Settings page). A back-arrow top bar over
+ * [CronScreen]; [onClose] leaves the page.
+ *
+ * The arrow and the system Back are one thing. [CronScreen] closes its task form first (and asks
+ * before discarding edits) through a handler of its own, so the arrow sends its press through the same
+ * dispatcher instead of calling [onClose] directly, which would skip the form and drop the edits.
  */
 @Composable
 fun CronPage(
@@ -82,18 +94,24 @@ fun CronPage(
     onOpenSession: (CronRunRecord) -> Unit,
     onClose: () -> Unit,
 ) {
-    // Registered before the screen's own handler (which closes its detail view first), so this one
-    // only runs when the screen has nothing left to close.
+    // Registered before the screen's own handler (which closes its form first), so this one only
+    // runs when the screen has nothing left to close.
     BackHandler(onBack = onClose)
+    val dispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
     Column(
         Modifier
             .fillMaxSize()
             .background(LingXiTheme.palette.windowBg)
             .blockTouchesBehind()
             .windowInsetsPadding(WindowInsets.systemBars)
-            .imePadding(),
+            .imePadding()
+            .testTag(CronPageTags.ROOT),
     ) {
-        PageTopBar(title = stringResource(R.string.settings_title_cron), onBack = onClose)
+        PageTopBar(
+            title = stringResource(R.string.settings_title_cron),
+            onBack = { dispatcher?.onBackPressed() ?: onClose() },
+            modifier = Modifier.testTag(CronPageTags.BACK),
+        )
         Box(
             Modifier
                 .weight(1f)

@@ -55,9 +55,9 @@ import java.util.UUID
  * Wide (>= 840 dp): list | conversation | team details side by side, and the stack depth stays 0.
  */
 @Composable
-fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier: Modifier = Modifier) {
+internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier: Modifier = Modifier, workspaceOverride: TeamsWorkspace? = null) {
     val context = LocalContext.current
-    val workspace = remember(context) { TeamsWorkspace.get(context.applicationContext) }
+    val workspace = workspaceOverride ?: remember(context) { TeamsWorkspace.get(context.applicationContext) }
     val teams by workspace.teams.collectAsStateWithLifecycle()
     val messaging by workspace.messaging.collectAsStateWithLifecycle()
     val collapsed by workspace.collapsed.collectAsStateWithLifecycle()

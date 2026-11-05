@@ -2477,7 +2477,6 @@
     <string name="remote_bot_waiting_fmt">%1$d 个对话等你回复</string>
     <string name="remote_back_to_bot_fmt">返回 %1$s</string>
     <string name="teams_title">团队</string>
-    <string name="teams_my">我的团队</string>
     <string name="teams_new">新建团队</string>
     <string name="teams_name">团队名称</string>
     <string name="teams_create">创建团队</string>
@@ -2505,7 +2504,6 @@
     <string name="teams_delete">删除团队</string>
     <string name="teams_confirm">确认</string>
     <string name="teams_cancel">取消</string>
-    <string name="teams_refresh">刷新</string>
     <string name="teams_loading">正在加载…</string>
     <string name="teams_signin">请登录灵犀账号以使用团队。</string>
     <string name="teams_error">无法连接团队服务，请检查网络后重试。</string>
@@ -2519,7 +2517,6 @@
     <string name="teams_confirm_leave">退出此团队？</string>
     <string name="teams_conversations">会话</string>
     <string name="teams_messages_offline">当前显示本机缓存。联网后确认权限并发送待发消息。</string>
-    <string name="teams_messages_connected">已连接。消息历史保存在本机。</string>
     <string name="teams_mark_read">标为已读</string>
     <string name="teams_messages_earlier">显示更早消息</string>
     <string name="teams_message_recalled">消息已撤回</string>
@@ -2529,16 +2526,13 @@
     <string name="teams_message_recall">撤回</string>
     <string name="teams_message_pending">待发送 · 联网后发送</string>
     <string name="teams_message_discard">丢弃</string>
-    <string name="teams_message_input">消息</string>
     <string name="teams_message_save">保存修改</string>
     <string name="teams_message_send">发送</string>
     <string name="teams_conversation_new">新建会话</string>
-    <string name="teams_conversation_title">标题</string>
     <string name="teams_conversation_type">类型</string>
     <string name="teams_conversation_dm">私聊</string>
     <string name="teams_conversation_group">群聊</string>
     <string name="teams_conversation_channel">频道</string>
-    <string name="teams_conversation_create">创建会话</string>
     <string name="teams_recall_confirm">为所有人撤回此消息？</string>
     <string name="teams_message_confirming">等待服务器确认，重试会沿用同一条消息。</string>
     <string name="teams_message_failed">此待发操作未被接受，请丢弃后重试。</string>
@@ -2679,4 +2673,6 @@
     <string name="teams_error_sync_failed">消息同步未完成，请检查网络后重试。</string>
     <string name="teams_error_bot_access_changed">Bot 权限已变化，请同步并检查所选 Bot 后重试。</string>
     <string name="teams_error_answer_rejected">此答案无法接收，请检查问题与原始请求人身份。</string>
+    <string name="teams_conversation_details">会话详情</string>
+    <string name="teams_choose_conversation">选择会话</string>
 </resources>

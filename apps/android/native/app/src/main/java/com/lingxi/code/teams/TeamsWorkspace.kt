@@ -57,9 +57,10 @@ internal class TeamsWorkspace(
     auth: FirebaseAuth,
     private val db: FirebaseFirestore,
     private val prefs: TeamsPrefs,
+    apiRoot: String = TEAMS_API_ROOT,
 ) {
-    val teamsModel = TeamsViewModel(scope, TEAMS_API_ROOT, auth, db)
-    val messagingModel = TeamMessagingModel(scope, File(context.noBackupFilesDir, "team-messages"), TEAMS_API_ROOT, auth, db)
+    val teamsModel = TeamsViewModel(scope, apiRoot, auth, db)
+    val messagingModel = TeamMessagingModel(scope, File(context.noBackupFilesDir, "team-messages"), apiRoot, auth, db)
 
     val teams: StateFlow<TeamsState> get() = teamsModel.state
     val messaging: StateFlow<TeamMessagingState> get() = messagingModel.state

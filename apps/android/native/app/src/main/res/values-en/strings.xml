@@ -2477,7 +2477,6 @@
     <string name="remote_bot_waiting_fmt">%1$d waiting for you</string>
     <string name="remote_back_to_bot_fmt">Back to %1$s</string>
     <string name="teams_title">Teams</string>
-    <string name="teams_my">My teams</string>
     <string name="teams_new">New team</string>
     <string name="teams_name">Team name</string>
     <string name="teams_create">Create team</string>
@@ -2505,7 +2504,6 @@
     <string name="teams_delete">Delete team</string>
     <string name="teams_confirm">Confirm</string>
     <string name="teams_cancel">Cancel</string>
-    <string name="teams_refresh">Refresh</string>
     <string name="teams_loading">Loading…</string>
     <string name="teams_signin">Sign in to your LingXi account to use Teams.</string>
     <string name="teams_error">Could not connect to Teams. Check your connection and try again.</string>
@@ -2519,7 +2517,6 @@
     <string name="teams_confirm_leave">Leave this team?</string>
     <string name="teams_conversations">Conversations</string>
     <string name="teams_messages_offline">Saved on this device. Reconnect to confirm access and send pending messages.</string>
-    <string name="teams_messages_connected">Connected. Message history is saved on this device.</string>
     <string name="teams_mark_read">Mark read</string>
     <string name="teams_messages_earlier">Show earlier messages</string>
     <string name="teams_message_recalled">Message recalled</string>
@@ -2529,16 +2526,13 @@
     <string name="teams_message_recall">Recall</string>
     <string name="teams_message_pending">Pending · sends when connected</string>
     <string name="teams_message_discard">Discard</string>
-    <string name="teams_message_input">Message</string>
     <string name="teams_message_save">Save edit</string>
     <string name="teams_message_send">Send</string>
     <string name="teams_conversation_new">New conversation</string>
-    <string name="teams_conversation_title">Title</string>
     <string name="teams_conversation_type">Type</string>
     <string name="teams_conversation_dm">Direct message</string>
     <string name="teams_conversation_group">Group</string>
     <string name="teams_conversation_channel">Channel</string>
-    <string name="teams_conversation_create">Create conversation</string>
     <string name="teams_recall_confirm">Recall this message for everyone?</string>
     <string name="teams_message_confirming">Waiting for server confirmation. Retries keep the same message identity.</string>
     <string name="teams_message_failed">This pending change was rejected. Discard it and try again.</string>
@@ -2679,4 +2673,6 @@
     <string name="teams_error_sync_failed">Could not sync messages. Check your connection and try again.</string>
     <string name="teams_error_bot_access_changed">Bot access changed. Sync and check the selected Bots before sending again.</string>
     <string name="teams_error_answer_rejected">This answer cannot be accepted. Check the question and original requester.</string>
+    <string name="teams_conversation_details">Conversation details</string>
+    <string name="teams_choose_conversation">Choose a conversation</string>
 </resources>

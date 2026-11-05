@@ -17,6 +17,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.R
 import com.lingxi.code.components.LXToggle
 import com.lingxi.code.settings.*
+import com.lingxi.code.tabs.SettingsJump
 import com.lingxi.code.conversation.*
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.SessionRef
@@ -40,7 +41,7 @@ class NativeStyleUiTest {
     }
 
     @Test fun everySettingsDestinationInBothAppearances() {
-        val routes = (settingsGroupEntries(true).map { it.route } + SettingsRoutes.MAIN + SettingsRoutes.ACCOUNT + SettingsRoutes.CRON).distinct()
+        val routes = (settingsGroupEntries(true).map { it.route } + SettingsRoutes.MAIN + SettingsRoutes.ACCOUNT).distinct()
         File(context.getExternalFilesDir("native-ui-audit"), "routes.tsv").apply {
             parentFile?.mkdirs()
             writeText(routes.mapIndexed { index, value -> "$index\t$value" }.joinToString("\n"))
@@ -51,8 +52,9 @@ class NativeStyleUiTest {
         rule.setContent {
             LingXiTheme(darkTheme = dark.value) {
                 key(route.value, dark.value) {
+                    // Each route gets a fresh host (the key above), opened the way a deep link opens it.
                     SettingsHost(appearanceStore = appearance, isDark = dark.value,
-                        accentId = Accents.DEFAULT_ID, initialRoute = route.value)
+                        accentId = Accents.DEFAULT_ID, jump = SettingsJump(id = 1L, route = route.value, origin = null))
                 }
             }
         }

@@ -1,0 +1,151 @@
+{
+  "app_lock_package": {
+    "checksum": "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b",
+    "dependencies": [
+      "proc-macro2",
+      "quote",
+      "syn 2.0.117"
+    ],
+    "name": "futures-macro",
+    "source": "registry+https://github.com/rust-lang/crates.io-index",
+    "version": "0.3.32"
+  },
+  "app_lock_sha256": "0fa2e3751d53c3c3e6d455aad3cb5ecaf826909f6314ecd8caf8d005f998f015",
+  "archive_files": {
+    ".cargo_vcs_info.json": {
+      "bytes": 107,
+      "git_blob_sha1": "df2b9cbb52ab617c3c25dcba190db48436fd0a14",
+      "mode": "0o644",
+      "sha256": "8e043c81af3d1cef6559df7d7a8cdd30a9c7a004ac72c783e9e7b428c9503b28",
+      "upstream": "Cargo-generated; not asserted to be an upstream blob"
+    },
+    "Cargo.lock": {
+      "bytes": 1925,
+      "git_blob_sha1": "83414cfe3b6241104c87831b517c3796faea7488",
+      "mode": "0o644",
+      "sha256": "cbe930850a4af4ac1786e649cb4c2233aaba4d4ed429616442bf71caab97589e",
+      "upstream": "Cargo-generated; not asserted to be an upstream blob"
+    },
+    "Cargo.toml": {
+      "bytes": 1342,
+      "git_blob_sha1": "a0eeae26b5f6e56f9ddcd6076d368762dddbfce4",
+      "mode": "0o644",
+      "sha256": "2dc3d7322eb40cae2c4c15252e814675ef6ff1a33dbd5706d2941351d195d02a",
+      "upstream": "Cargo-generated; not asserted to be an upstream blob"
+    },
+    "Cargo.toml.orig": {
+      "bytes": 556,
+      "git_blob_sha1": "7d9e33e18a6d65a6842c8a86eb86f6adaab2588e",
+      "mode": "0o644",
+      "sha256": "a9616e10d5ea9f36f5aaba41d42c758e78204d672354273f0ea7efff543e4593",
+      "upstream_blob": "futures-macro/Cargo.toml"
+    },
+    "LICENSE-APACHE": {
+      "bytes": 10874,
+      "git_blob_sha1": "9eb0b097f5d0b5e147323e043b3adf35949b9f5a",
+      "mode": "0o644",
+      "sha256": "275c491d6d1160553c32fd6127061d7f9606c3ea25abfad6ca3f6ed088785427",
+      "upstream_blob": "LICENSE-APACHE",
+      "upstream_symlink": "futures-macro/LICENSE-APACHE -> ../LICENSE-APACHE"
+    },
+    "LICENSE-MIT": {
+      "bytes": 1094,
+      "git_blob_sha1": "8ad082ec4f93b748959a7634b12d25da2000c59e",
+      "mode": "0o644",
+      "sha256": "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd",
+      "upstream_blob": "LICENSE-MIT",
+      "upstream_symlink": "futures-macro/LICENSE-MIT -> ../LICENSE-MIT"
+    },
+    "src/executor.rs": {
+      "bytes": 1809,
+      "git_blob_sha1": "7f1d0a93f46ee25f245d277f6b521496f2d6ce75",
+      "mode": "0o644",
+      "sha256": "d2c8545c3438262484da3cddb6d998928bfef8d6d191480c13c0c390f15fe0f1",
+      "upstream_blob": "futures-macro/src/executor.rs"
+    },
+    "src/join.rs": {
+      "bytes": 4721,
+      "git_blob_sha1": "0e891b3aad3073aad8a577e7df76c22d2405e24a",
+      "mode": "0o644",
+      "sha256": "e60b42045401b16bf27b4b1ad5bbbea16348cd9db591b309e56a8987850c479a",
+      "upstream_blob": "futures-macro/src/join.rs"
+    },
+    "src/lib.rs": {
+      "bytes": 1398,
+      "git_blob_sha1": "c1b94785e8a6a7486c26f4f69711a5122b349959",
+      "mode": "0o644",
+      "sha256": "dc139b7703637521a39846beb8ecbfbaf836baa5b8bbc3a25aad0880b3103d29",
+      "upstream_blob": "futures-macro/src/lib.rs"
+    },
+    "src/select.rs": {
+      "bytes": 11599,
+      "git_blob_sha1": "30f7008bc55fa383c10020a253bd157af87ef9d3",
+      "mode": "0o644",
+      "sha256": "2d4767d640ad227fd5d5ad437da978bec32e38b24639a0a0e7064abb82ff9a1b",
+      "upstream_blob": "futures-macro/src/select.rs"
+    },
+    "src/stream_select.rs": {
+      "bytes": 5286,
+      "git_blob_sha1": "9927b5307348dc2302060481a2993078df984bc6",
+      "mode": "0o644",
+      "sha256": "5fb84834a40876ab1fd975c3af67594d0c5a4f8d724cb164db9bee71e70d14b1",
+      "upstream_blob": "futures-macro/src/stream_select.rs"
+    }
+  },
+  "archive_sha256": "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b",
+  "archive_source": "https://static.crates.io/crates/futures-macro/futures-macro-0.3.32.crate",
+  "cache_archive_and_each_extracted_file_equal": true,
+  "cache_only_extra": ".cargo-ok",
+  "commit_object_verified": true,
+  "github_signature_status_at_locator_capture": "unsigned",
+  "index_entry": {
+    "cksum": "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b",
+    "deps": [
+      {
+        "default_features": true,
+        "features": [],
+        "kind": "normal",
+        "name": "proc-macro2",
+        "optional": false,
+        "req": "^1.0.60",
+        "target": null
+      },
+      {
+        "default_features": true,
+        "features": [],
+        "kind": "normal",
+        "name": "quote",
+        "optional": false,
+        "req": "^1.0",
+        "target": null
+      },
+      {
+        "default_features": true,
+        "features": [
+          "full"
+        ],
+        "kind": "normal",
+        "name": "syn",
+        "optional": false,
+        "req": "^2.0.52",
+        "target": null
+      }
+    ],
+    "features": {},
+    "name": "futures-macro",
+    "pubtime": "2026-02-15T13:34:15Z",
+    "rust_version": "1.71",
+    "vers": "0.3.32",
+    "yanked": false
+  },
+  "index_sha256": "1b304903a71872441e43a64eb8886d7a84c0c31e78d16c2b1da7a4ad5f543710",
+  "index_source": "https://index.crates.io/fu/tu/futures-macro",
+  "normalized_manifest_library_proc_macro": true,
+  "normalized_manifest_no_build_script": true,
+  "own_upstream_blob_files_checked": 8,
+  "publisher_authentication_independently_verified": false,
+  "tree_objects_recomputed": 65,
+  "upstream_commit": "d9bba94c239daa1175a5bb2958f37a5c72db3f6a",
+  "upstream_locator": "../../round8/futures-core/upstream-{commit.json,commit.raw,tree.json}",
+  "upstream_root_tree": "3b895ace16b630e12aabf16f10a0110036e7abd6"
+}

@@ -627,6 +627,9 @@ async function assertRendererContract(page, leakPatterns) {
       screenLabel: document.querySelector('.desktop-shell')?.getAttribute('data-screen-label'),
       hasPrompt: Boolean(document.querySelector('[aria-label="Prompt"]')),
       promptPlaceholder: document.querySelector('[aria-label="Prompt"]')?.getAttribute('data-placeholder'),
+      appsNavigationCount: document.querySelectorAll('.desktop-nav-rail button[aria-label="Apps"]').length,
+      scheduledNavigationCount: document.querySelectorAll('.desktop-nav-rail button[aria-label="Scheduled tasks"]').length,
+      duplicateSidebarEntries: Array.from(document.querySelectorAll('.sidebar-primary-action')).filter(button => /^(Apps|Scheduled)$/.test(button.textContent.trim())).length,
       bodyText: document.body.innerText,
     }))()`).then((value) => {
       lastDetails = value;
@@ -655,7 +658,9 @@ async function assertRendererContract(page, leakPatterns) {
   assert.equal(details.hasPrompt, true, 'desktop prompt composer must render');
   assert.match(details.bodyText, /LingXi/);
   assert.match(details.bodyText, /New chat/);
-  assert.match(details.bodyText, /Scheduled/);
+  assert.equal(details.appsNavigationCount, 1, 'Apps must have one main navigation entry');
+  assert.equal(details.scheduledNavigationCount, 1, 'Scheduled tasks must have one main navigation entry');
+  assert.equal(details.duplicateSidebarEntries, 0, 'the chat sidebar must not duplicate Apps or Scheduled');
   assert.match(details.bodyText, /Projects/);
   assert.match(details.bodyText, /workspace/);
   assert.equal(

@@ -472,6 +472,7 @@ test('the sidebar offers Bots only where the host said they can be used, and onl
   const offered = render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true }));
   assert.match(offered, /class="desktop-rail-button" aria-label="Bots" title="Bots"/);
   assert.ok(!offered.includes('<span>Bots</span>') && !offered.includes('<span>Teams</span>'), 'Home does not repeat the rail\'s buttons');
+  assert.ok(!offered.includes('<span>Apps</span>') && !offered.includes('<span>Scheduled</span>'), 'Home does not repeat Apps or Scheduled from the rail');
 });
 
 test('the rail has the modes Home, Bots and Teams, then a divider, then the pages', () => {

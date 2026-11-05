@@ -987,22 +987,6 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
             : <DesktopIcon name="compose" size={18} color={t.accent} />}
           <span>{editingProject ? tr('desktop_chat_draft_loading') : tr('desktop_new_chat')}</span>
         </button>
-        <button
-          type="button"
-          className="sidebar-primary-action"
-          aria-current={scheduled ? 'page' : undefined}
-          onClick={onOpenScheduled}
-          style={{ width: '100%', minHeight: 36, marginTop: 0, display: 'flex', alignItems: 'center', gap: 9,
-            padding: '8px 10px', borderRadius: 10, border: 0, background: scheduled ? t.surfaceActive : 'transparent',
-            color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}
-        >
-          <DesktopIcon name="clock" size={18} />
-          <span>{tr('desktop_scheduled')}</span>
-        </button>
-        <button type="button" className="sidebar-primary-action" aria-current={apps ? 'page' : undefined} onClick={onOpenApps}
-          style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', borderRadius: 10, border: 0, background: apps ? t.surfaceActive : 'transparent', color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}>
-          <DesktopIcon name="apps" size={18}/><span>{tr('apps_title')}</span>
-        </button>
       </div>}
 
       {/* Electron drag regions discard pointer events. Keep every session control in

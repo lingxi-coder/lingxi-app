@@ -660,7 +660,8 @@ function ModUiParentSiteRuntime({
 
   const isAbovePrompt = component === ABOVE_PROMPT_COMPONENT;
   const siteRootStyle: React.CSSProperties = isAbovePrompt
-    ? { width: '100%', flexShrink: 0, display: 'flex', justifyContent: 'center', minWidth: 0 }
+    // Match the composer dock's responsive gutters before capping content width.
+    ? { width: '100%', boxSizing: 'border-box', paddingInline: 'var(--conversation-gutter, 32px)', flexShrink: 0, display: 'flex', justifyContent: 'center', minWidth: 0 }
     : { width: '100%', flexShrink: 0, minWidth: 0 };
   const siteContentStyle: React.CSSProperties = isAbovePrompt
     ? { width: '100%', maxWidth: 'var(--conversation-width, 860px)', minWidth: 0 }

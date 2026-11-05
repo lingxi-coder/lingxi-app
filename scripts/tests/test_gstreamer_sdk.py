@@ -2,8 +2,11 @@
 """Offline fixtures for the pinned GStreamer CI SDK contract."""
 from __future__ import annotations
 
-import importlib.util
+import contextlib
+import errno
 import hashlib
+import http.server
+import importlib.util
 import io
 import os
 import pathlib
@@ -12,8 +15,10 @@ import re
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
-from unittest.mock import patch
+import urllib.error
+from unittest.mock import call, patch
 
 
 sys.dont_write_bytecode = True
@@ -39,6 +44,223 @@ def job_block(path: pathlib.Path, job_name: str) -> str:
         len(lines),
     )
     return "\n".join(lines[start:end])
+
+
+@contextlib.contextmanager
+def download_server(responses: list[dict]):
+    requests = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requests.append((self.path, self.headers.get("Range")))
+            response = responses[min(len(requests) - 1, len(responses) - 1)]
+            if response.get("disconnect"):
+                self.close_connection = True
+                return
+            body = response.get("body", b"")
+            self.send_response(response.get("status", 200))
+            headers = response.get("headers", [])
+            for name, value in headers:
+                self.send_header(name, value)
+            if response.get("auto_length", True) and not any(
+                name.lower() == "content-length" for name, _ in headers
+            ):
+                self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            self.close_connection = True
+
+        def log_message(self, format: str, *args) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/sdk?secret=url-token", requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+class GStreamerDownloadTests(unittest.TestCase):
+    @staticmethod
+    def artifact(url: str, body: bytes) -> dict:
+        return {"filename": "sdk.tar.xz", "url": url, "sha256": hashlib.sha256(body).hexdigest()}
+
+    def test_http_retry_statuses_then_verify(self) -> None:
+        for status in (408, 429, 500, 503, 599):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory, \
+                    download_server([{"status": status, "body": b"error body"}, {"body": b"valid"}]) as (url, requests), \
+                    patch.object(gstreamer_sdk.time, "sleep") as sleep:
+                target = pathlib.Path(directory)
+                path = gstreamer_sdk.download_artifact(self.artifact(url, b"valid"), target)
+                self.assertEqual(path.read_bytes(), b"valid")
+                self.assertEqual(len(requests), 2)
+                self.assertTrue(all(request[1] is None for request in requests))
+                self.assertEqual(list(target.iterdir()), [path])
+                sleep.assert_called_once_with(1)
+
+    def test_disconnect_and_short_read_retry_full_gets(self) -> None:
+        responses = [
+            {"disconnect": True},
+            {"body": b"short", "headers": [("Content-Length", "50")]},
+            {"body": b"valid"},
+        ]
+        with tempfile.TemporaryDirectory() as directory, download_server(responses) as (url, requests), \
+                patch.object(gstreamer_sdk.time, "sleep") as sleep:
+            target = pathlib.Path(directory)
+            path = gstreamer_sdk.download_artifact(self.artifact(url, b"valid"), target)
+            self.assertEqual(path.read_bytes(), b"valid")
+            self.assertEqual(len(requests), 3)
+            self.assertTrue(all(request[1] is None for request in requests))
+            self.assertEqual(list(target.iterdir()), [path])
+            self.assertEqual(sleep.call_args_list, [call(1), call(2)])
+
+    def test_hash_mismatch_retries_with_fresh_parts_and_safe_logs(self) -> None:
+        responses = [
+            {"body": b"secret-body", "headers": [("Content-Type", "application/octet-stream; token=secret-header")]},
+            {"body": b"valid", "headers": [("Content-Type", "application/octet-stream")]},
+        ]
+        created_parts = []
+        new_temporary_file = tempfile.NamedTemporaryFile
+
+        def capture_part(*args, **kwargs):
+            handle = new_temporary_file(*args, **kwargs)
+            created_parts.append(pathlib.Path(handle.name))
+            return handle
+
+        with tempfile.TemporaryDirectory() as directory, download_server(responses) as (url, requests), \
+                patch.object(gstreamer_sdk.time, "sleep") as sleep, \
+                patch.object(gstreamer_sdk.tempfile, "NamedTemporaryFile", side_effect=capture_part), \
+                contextlib.redirect_stderr(io.StringIO()) as log:
+            target = pathlib.Path(directory)
+            path = gstreamer_sdk.download_artifact(self.artifact(url, b"valid"), target)
+            self.assertEqual(path.read_bytes(), b"valid")
+            self.assertEqual(len(requests), 2)
+            self.assertEqual(len(set(created_parts)), 2)
+            self.assertTrue(all(not part.exists() for part in created_parts))
+            self.assertEqual(list(target.iterdir()), [path])
+            sleep.assert_called_once_with(1)
+            output = log.getvalue()
+            self.assertIn("status=200 content-length=11 content-type=application/octet-stream bytes=11", output)
+            self.assertIn(f"sha256={hashlib.sha256(b'secret-body').hexdigest()} reason=SHA-256 mismatch", output)
+            self.assertIn("reason=verified", output)
+            self.assertNotIn("secret-body", output)
+            self.assertNotIn("secret-header", output)
+            self.assertNotIn("url-token", output)
+
+    def test_persistent_hash_mismatch_never_promotes_or_extracts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, download_server([{"body": b"bad"}]) as (url, requests), \
+                patch.object(gstreamer_sdk.time, "sleep") as sleep, \
+                patch.object(gstreamer_sdk, "safe_extract_tar") as extract:
+            base = pathlib.Path(directory)
+            with self.assertRaisesRegex(gstreamer_sdk.SetupError, "SHA-256 mismatch"):
+                gstreamer_sdk.prepare_archive_sdk("ios", base / "sdk", self.artifact(url, b"valid"))
+            self.assertEqual(len(requests), 3)
+            self.assertEqual(sleep.call_args_list, [call(1), call(2)])
+            self.assertEqual(list((base / "downloads").iterdir()), [])
+            self.assertFalse((base / "sdk").exists())
+            extract.assert_not_called()
+
+    def test_written_file_is_verified_before_promotion(self) -> None:
+        actual_sha256_file = gstreamer_sdk.sha256_file
+
+        def corrupt_before_verification(path):
+            path.write_bytes(b"corrupted on disk")
+            return actual_sha256_file(path)
+
+        with tempfile.TemporaryDirectory() as directory, download_server([{"body": b"valid"}]) as (url, requests), \
+                patch.object(gstreamer_sdk.time, "sleep"), \
+                patch.object(gstreamer_sdk, "sha256_file", side_effect=corrupt_before_verification):
+            with self.assertRaisesRegex(gstreamer_sdk.SetupError, "SHA-256 mismatch"):
+                gstreamer_sdk.download_artifact(self.artifact(url, b"valid"), pathlib.Path(directory))
+            self.assertEqual(len(requests), 3)
+            self.assertEqual(list(pathlib.Path(directory).iterdir()), [])
+
+    def test_missing_content_length_still_requires_pinned_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, \
+                download_server([{"body": b"valid", "auto_length": False}]) as (url, requests):
+            path = gstreamer_sdk.download_artifact(self.artifact(url, b"valid"), pathlib.Path(directory))
+            self.assertEqual(path.read_bytes(), b"valid")
+            self.assertEqual(len(requests), 1)
+        with tempfile.TemporaryDirectory() as directory, \
+                download_server([{"body": b"bad", "auto_length": False}]) as (url, requests), \
+                patch.object(gstreamer_sdk.time, "sleep") as sleep:
+            with self.assertRaisesRegex(gstreamer_sdk.SetupError, "SHA-256 mismatch"):
+                gstreamer_sdk.download_artifact(self.artifact(url, b"valid"), pathlib.Path(directory))
+            self.assertEqual(len(requests), 3)
+            self.assertEqual(list(pathlib.Path(directory).iterdir()), [])
+            self.assertEqual(sleep.call_args_list, [call(1), call(2)])
+
+    def test_invalid_or_oversized_responses_and_non_retryable_http_fail_immediately(self) -> None:
+        cases = (
+            ({"status": 404, "body": b"not found"}, "HTTP 404", None),
+            ({"headers": [("Content-Length", "invalid")]}, "invalid Content-Length", None),
+            ({"headers": [("Content-Length", "-1")]}, "invalid Content-Length", None),
+            ({"headers": [("Content-Length", "0")]}, "invalid Content-Length", None),
+            ({"headers": [("Content-Length", "0000")]}, "invalid Content-Length", None),
+            ({"headers": [("Content-Length", "3"), ("Content-Length", "3")]}, "invalid Content-Length", None),
+            ({"headers": [("Content-Length", str(gstreamer_sdk.MAX_DOWNLOAD_BYTES + 1))]}, "download limit", None),
+            ({"headers": [("Content-Length", "9" * 5000)]}, "download limit", None),
+            ({"body": b"123456", "auto_length": False}, "download limit", 5),
+        )
+        for index, (response, reason, limit) in enumerate(cases):
+            with self.subTest(case=index, limit=limit), tempfile.TemporaryDirectory() as directory, \
+                    download_server([response]) as (url, requests), \
+                    patch.object(gstreamer_sdk.time, "sleep") as sleep, \
+                    patch.object(gstreamer_sdk, "MAX_DOWNLOAD_BYTES", limit or gstreamer_sdk.MAX_DOWNLOAD_BYTES):
+                target = pathlib.Path(directory)
+                with self.assertRaisesRegex(gstreamer_sdk.SetupError, reason):
+                    gstreamer_sdk.download_artifact(self.artifact(url, b"valid"), target)
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(list(target.iterdir()), [])
+                sleep.assert_not_called()
+
+    def test_local_disk_and_certificate_errors_fail_immediately(self) -> None:
+        new_temporary_file = tempfile.NamedTemporaryFile
+
+        def fail_write(*args, **kwargs):
+            output = new_temporary_file(*args, **kwargs)
+
+            def write_error(block):
+                raise OSError(errno.ENOSPC, "disk full")
+
+            output.write = write_error
+            return output
+
+        for stage in ("open", "write", "verify", "rename"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory, \
+                    download_server([{"body": b"valid"}]) as (url, requests), \
+                    patch.object(gstreamer_sdk.time, "sleep") as sleep:
+                if stage == "open":
+                    fault = patch.object(gstreamer_sdk.tempfile, "NamedTemporaryFile",
+                                         side_effect=OSError(errno.ENOSPC, "disk full"))
+                elif stage == "write":
+                    fault = patch.object(gstreamer_sdk.tempfile, "NamedTemporaryFile", side_effect=fail_write)
+                elif stage == "verify":
+                    fault = patch.object(gstreamer_sdk, "sha256_file", side_effect=OSError(errno.EIO, "disk error"))
+                else:
+                    fault = patch.object(pathlib.Path, "replace", side_effect=OSError(errno.ENOSPC, "disk full"))
+                with fault, self.assertRaisesRegex(gstreamer_sdk.SetupError, "local disk error"):
+                    gstreamer_sdk.download_artifact(self.artifact(url, b"valid"), pathlib.Path(directory))
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(list(pathlib.Path(directory).iterdir()), [])
+                sleep.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(gstreamer_sdk.time, "sleep") as sleep, \
+                patch.object(gstreamer_sdk.urllib.request, "urlopen", side_effect=urllib.error.URLError(
+                    gstreamer_sdk.ssl.SSLCertVerificationError("sensitive details")
+                )) as open_url, contextlib.redirect_stderr(io.StringIO()) as log:
+            with self.assertRaisesRegex(gstreamer_sdk.SetupError, "network connection failure"):
+                gstreamer_sdk.download_artifact(self.artifact("https://example.test/secret", b"valid"), pathlib.Path(directory))
+            open_url.assert_called_once()
+            sleep.assert_not_called()
+            self.assertNotIn("sensitive details", log.getvalue())
 
 
 class GStreamerSDKTests(unittest.TestCase):

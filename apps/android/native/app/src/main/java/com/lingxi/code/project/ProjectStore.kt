@@ -736,7 +736,7 @@ class ProjectStore private constructor(
                     )
                     return ProjectStore(
                         repository = repository,
-                        synchronizer = SafProjectSynchronizer(appContext, repository),
+                        synchronizer = SafProjectSynchronizer(appContext, repository, paths.configDirName),
                         appContext = appContext,
                     ) as T
                 }

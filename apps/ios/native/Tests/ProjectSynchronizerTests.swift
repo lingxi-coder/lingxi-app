@@ -48,11 +48,13 @@ final class ProjectSynchronizerTests: XCTestCase {
     }
 
     func testSyncKeepsLocalAndExternalSchedulerOwnershipFilesSeparate() throws {
-        let ledger = ".lingxi/scheduled_owner_reservations.jsonl"
-        let lock = ".lingxi/scheduled_tasks.lock"
+        let configDir = MobileUserStorage.directories().configDirName
+        let ledger = "\(configDir)/scheduled_owner_reservations.jsonl"
+        let lock = "\(configDir)/scheduled_tasks.lock"
+        let config = "\(configDir)/config.toml"
         try writeExternal(ledger, "external ledger")
         try writeExternal(lock, "external lock")
-        try writeExternal(".lingxi/config.toml", "user configuration")
+        try writeExternal(config, "user configuration")
         let repository = ProjectRepository(projectsRoot: root)
         let resolver = TestBookmarkResolver()
         let project = try repository.createImported(name: "Repo", sourceBookmark: try resolver.makeBookmark(for: externalRoot))
@@ -63,7 +65,7 @@ final class ProjectSynchronizerTests: XCTestCase {
         let localLock = project.sourceWorkspace.hostURL.appendingPathComponent(lock)
         XCTAssertFalse(FileManager.default.fileExists(atPath: localLedger.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: localLock.path))
-        let localConfig = project.sourceWorkspace.hostURL.appendingPathComponent(".lingxi/config.toml")
+        let localConfig = project.sourceWorkspace.hostURL.appendingPathComponent(config)
         XCTAssertEqual(try String(contentsOf: localConfig, encoding: .utf8), "user configuration")
         try Data("local ledger".utf8).write(to: localLedger)
         try Data("local lock".utf8).write(to: localLock)
@@ -87,8 +89,45 @@ final class ProjectSynchronizerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: externalRoot.appendingPathComponent(backup)), Data("external backup".utf8))
         try Data("updated configuration".utf8).write(to: localConfig)
         _ = try synchronizer.export(projectId: project.record.id)
-        XCTAssertEqual(try String(contentsOf: externalRoot.appendingPathComponent(".lingxi/config.toml"), encoding: .utf8),
+        XCTAssertEqual(try String(contentsOf: externalRoot.appendingPathComponent(config), encoding: .utf8),
                        "updated configuration")
+    }
+
+    func testSyncExcludesOwnershipFilesInTheRuntimeBrandDirectory() throws {
+        let ledger = ".atlas/scheduled_owner_reservations.jsonl"
+        let lock = ".atlas/scheduled_tasks.lock"
+        let ordinary = ".orion/scheduled_tasks.lock"
+        let ownerBackup = ledger + ".__lingxi_backup__" + UUID().uuidString
+        let ownerTemp = lock + ".__lingxi_temp__" + UUID().uuidString
+        try writeExternal(ledger, "external ledger")
+        try writeExternal(lock, "external lock")
+        try writeExternal(ordinary, "ordinary file")
+        let repository = ProjectRepository(projectsRoot: root)
+        let resolver = TestBookmarkResolver()
+        let project = try repository.createImported(name: "Repo", sourceBookmark: try resolver.makeBookmark(for: externalRoot))
+        let synchronizer = ProjectWorkspaceSynchronizer(repository: repository, configDirName: ".atlas",
+            bookmarkResolver: resolver, coordinator: PassthroughCoordinator(), availableCapacity: { _ in Int64.max })
+
+        _ = try synchronizer.importInitial(projectId: project.record.id)
+        let localLedger = project.sourceWorkspace.hostURL.appendingPathComponent(ledger)
+        let localLock = project.sourceWorkspace.hostURL.appendingPathComponent(lock)
+        let localOrdinary = project.sourceWorkspace.hostURL.appendingPathComponent(ordinary)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: localLedger.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: localLock.path))
+        XCTAssertEqual(try String(contentsOf: localOrdinary, encoding: .utf8), "ordinary file")
+
+        try FileManager.default.createDirectory(at: localLedger.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("local ledger".utf8).write(to: localLedger)
+        try Data("local lock".utf8).write(to: localLock)
+        try Data("updated file".utf8).write(to: localOrdinary)
+        try writeExternal(ownerBackup, "protected backup")
+        try writeExternal(ownerTemp, "protected temporary file")
+        _ = try synchronizer.export(projectId: project.record.id)
+        XCTAssertEqual(try String(contentsOf: externalRoot.appendingPathComponent(ledger), encoding: .utf8), "external ledger")
+        XCTAssertEqual(try String(contentsOf: externalRoot.appendingPathComponent(lock), encoding: .utf8), "external lock")
+        XCTAssertEqual(try String(contentsOf: externalRoot.appendingPathComponent(ordinary), encoding: .utf8), "updated file")
+        XCTAssertEqual(try String(contentsOf: externalRoot.appendingPathComponent(ownerBackup), encoding: .utf8), "protected backup")
+        XCTAssertEqual(try String(contentsOf: externalRoot.appendingPathComponent(ownerTemp), encoding: .utf8), "protected temporary file")
     }
 
     func testInsufficientCapacityLeavesTheExternalSourceUntouched() throws {

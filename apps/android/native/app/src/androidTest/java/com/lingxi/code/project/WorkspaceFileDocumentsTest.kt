@@ -18,6 +18,50 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class WorkspaceFileDocumentsTest {
+    @Test fun recoveryPreservesRuntimeBrandSchedulerArtifacts() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val authority = "${instrumentation.context.packageName}.filesfixtures"
+        val tree = DocumentsContract.buildTreeDocumentUri(authority, "root")
+        instrumentation.context.startActivity(Intent(instrumentation.context, WorkspaceTestDocumentsActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        withTimeout(5_000) {
+            while (context.checkUriPermission(tree, Process.myPid(), Process.myUid(),
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
+                delay(25)
+            }
+        }
+        val root = requireNotNull(DocumentFile.fromTreeUri(context, tree))
+        val fixture = requireNotNull(root.createDirectory(UUID.randomUUID().toString()))
+        val native = File(context.cacheDir, "scheduler-recovery-${UUID.randomUUID()}").apply { mkdir() }
+        try {
+            val brand = requireNotNull(fixture.createDirectory(".atlas"))
+            val nested = requireNotNull(requireNotNull(fixture.createDirectory("project")).createDirectory(".atlas"))
+            val suffix = UUID.randomUUID().toString()
+            val ownerBackup = "scheduled_tasks.lock.__lingxi_backup__$suffix"
+            val ledgerBackup = "scheduled_owner_reservations.jsonl.__lingxi_backup__$suffix"
+            val ownerTemp = "scheduled_tasks.lock.__lingxi_temp__$suffix"
+            val nestedBackup = "scheduled_tasks.lock.__lingxi_backup__$suffix"
+            for ((directory, name) in listOf(
+                brand to "scheduled_tasks.lock", brand to ownerBackup, brand to ledgerBackup,
+                brand to ownerTemp, brand to "notes.txt.__lingxi_backup__$suffix", nested to nestedBackup,
+            )) requireNotNull(directory.createFile("application/octet-stream", name))
+            val fixtureTree = DocumentsContract.buildTreeDocumentUri(authority, DocumentsContract.getDocumentId(fixture.uri))
+            val repository = ProjectRepository(native, userHome = native,
+                projectsGuestRoot = "/home/test/projects", userHomeGuestPath = "/home/test")
+            SafProjectSynchronizer(context, repository, ".atlas").recoverExternalTransactions(fixtureTree)
+
+            assertNotNull(brand.findFile("scheduled_tasks.lock"))
+            assertNotNull(brand.findFile(ownerBackup))
+            assertNotNull(brand.findFile(ledgerBackup))
+            assertNotNull(brand.findFile(ownerTemp))
+            assertNull(brand.findFile("scheduled_owner_reservations.jsonl"))
+            assertNotNull(brand.findFile("notes.txt"))
+            assertNotNull(nested.findFile("scheduled_tasks.lock"))
+            assertNull(nested.findFile(nestedBackup))
+        } finally { fixture.delete(); native.deleteRecursively() }
+    }
+
     @Test fun importsAndExportsScopedDocumentTreesWithoutOverwriting() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext

@@ -184,7 +184,9 @@ async function runPageContentScenario(webContents) {
 
   // The Hooks shortcut must reach the diagnostics configuration files.
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("hooks")');
-  await webContents.executeJavaScript('document.querySelector(\'[data-testid="hooks-open-settings-files"]\')?.click()');
+  await waitFor(webContents, 'Boolean(document.querySelector(\'[data-testid="hooks-open-settings-files"]\'))');
+  await webContents.executeJavaScript('document.querySelector(\'[data-testid="hooks-open-settings-files"]\').click()');
+  await waitFor(webContents, 'document.querySelector(\'[data-nav-page="diagnostics"]\')?.getAttribute("aria-current") === "page" && document.body.textContent.includes("配置文件")');
   const afterHooksEscapeHatch = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
 
   const hasFiles = await webContents.executeJavaScript('document.body.textContent.includes("配置文件")');
@@ -193,7 +195,7 @@ async function runPageContentScenario(webContents) {
     { layer: 'project', path: '/test/project/.lingxi/settings.json', exists: false, parsed: true },
     { layer: 'local', path: '/test/project/.lingxi/settings.local.json', exists: true, parsed: false, parse_error: 'Invalid JSON' }
   ])`);
-  await delay(50);
+  await waitFor(webContents, 'Boolean(document.querySelector(\'[data-testid="settings-file-open-user"]\'))');
   const fileActions = await webContents.executeJavaScript(`(async () => {
     const opened = [];
     window.lingxi = { openSettingsFile: async (path) => { opened.push(path); } };
@@ -1126,10 +1128,12 @@ async function runMacosEditors(window, webContents) {
 async function runLocalizationScenario(window, webContents) {
   const run = expression => webContents.executeJavaScript(expression);
   const rows = [];
+  const generalLabels = { en: 'General', ja: '一般', ko: '일반', 'zh-Hant': '一般', 'zh-Hans': '通用' };
   window.setContentSize(760, 600);
   for (const locale of ['en', 'ja', 'ko', 'zh-Hant', 'zh-Hans']) {
     await run(`(() => { const select = document.querySelector('.settings-content-inner select'); window.__localeSelect = select; select.value = ${JSON.stringify(locale)}; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     await waitFor(webContents, `document.documentElement.lang === ${JSON.stringify(locale)}`);
+    await waitFor(webContents, `document.querySelector('[data-nav-page="general"]')?.textContent.trim() === ${JSON.stringify(generalLabels[locale])}`);
     rows.push(await run(`({locale: document.documentElement.lang, navigation: document.querySelector('[data-nav-page="general"]').textContent.trim(), search: document.querySelector('.settings-search input').placeholder, sameSelect: window.__localeSelect === document.querySelector('.settings-content-inner select'), selected: document.querySelector('.settings-content-inner select').value, overflow: document.querySelector('.settings-content-scroll').scrollWidth > document.querySelector('.settings-content-scroll').clientWidth + 1})`));
   }
   await run(`(() => { const search = document.querySelector('.settings-search input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(search, '音声'); search.dispatchEvent(new Event('input', { bubbles: true })); })()`);

@@ -21,7 +21,10 @@ function Fixture() {
     bootstrap: {
       settings: { projects: ['/fixture'], pinnedSessions: [], activeProject: '/fixture' },
       workspace: { path: '/fixture' },
-      conversationSpaces: fixtureConversationSpaces({ mode: 'chat', projects: ['/fixture'], selectedProject: '/fixture' }),
+      conversationSpaces: fixtureConversationSpaces({
+        mode: 'chat', projects: ['/fixture'], selectedProject: '/fixture',
+        sessions: [{ projectPath: '/fixture', sessionId: 'fixture-session' }],
+      }),
       projectCatalogs: { '/fixture': { sessions: [{ uuid: 'fixture-session', title: 'Sidebar chat', mode: 'chat', path: '/fixture/transcript.jsonl' }] } },
     },
     sessionRuntimeStatus: () => undefined, listProjectSessions: async () => ({ sessions: [] }),

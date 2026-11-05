@@ -5501,8 +5501,8 @@ impl FramePump for BridgeConnection {
                 if method == "private_page" {
                     let Some(private_pages) = self.private_pages.clone() else {
                         if let Some(sink) = self.out.lock().await.as_ref() {
-                            let _ =
-                                sink.send(Self::error_response(id, "private pages are unavailable"));
+                            let _ = sink
+                                .send(Self::error_response(id, "private pages are unavailable"));
                         }
                         return;
                     };

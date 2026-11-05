@@ -2,7 +2,9 @@
 
 Latest follow-up: [2026-11-05 Android and Desktop receipt](closeout-20261105/README.md).
 The two audio failures and current translation gates below are resolved; the
-original record remains historical. Full spec acceptance is still incomplete.
+original record remains historical. Scoped fixes and evidence were merged and
+pushed to main at `f707030c7`; the task worktree and build caches were cleaned.
+Full spec acceptance is still incomplete.
 
 Recorded 2026-11-04 (America/Los_Angeles), on local branch `claude/team-bot-mobile`.
 This continues `../../../SPEC-mobile-team-bot-ui.md` in the parent worktree. Implementation is
@@ -139,12 +141,8 @@ write new inventories only to their ignored output directories.
 
 ## Remaining acceptance
 
-Before merging, complete the open items listed in the resumed receipt: real
-Remote Control with online/offline computers and pairing/forget; real Teams
-channel/DM/group/Bot DM with Desktop synchronization; live remote push and the
-complete deep-link destination matrix; configured-provider streaming/voice and
-complete terminal/runtime checks; full manual screen-reader review and localized
-long Bot-run content; and longer performance/release-build validation. The
-original iOS navigation results also cover only a subset of §13.3. Existing
-translation gates and the two audio unit failures remain unresolved. Full
-acceptance, merge and push remain pending.
+The scoped follow-up was merged and pushed. The latest linked receipt records
+completed source, package, device and live-service checks and the remaining
+Remote Control, voice, accessibility and longer release/performance journeys.
+Full spec acceptance is still incomplete; historical iOS results cover only a
+subset of §13.3.

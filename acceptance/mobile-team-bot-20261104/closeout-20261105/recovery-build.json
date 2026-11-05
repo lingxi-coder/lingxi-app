@@ -1,0 +1,24 @@
+{
+  "source": "77e99b380c8d57771d8047dd7aba8efe22d491ec",
+  "baseMain": "f707030c72f4b2c3279c53bd7079d15c37911862",
+  "unit": {
+    "tests": 1882,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "artifacts": {
+    "artifacts/recovery-play-debug.apk": {
+      "sha256": "be0bcc9203c9ab8bb11faeaeb9fb870af2ce6c9d17473385ee12e1f7ee612e0e",
+      "bytes": 457457793
+    },
+    "artifacts/recovery-play-debug-androidTest.apk": {
+      "sha256": "d0d246f9ec42dfa63c0fb1f77124d724ade7356b1d8bced41090deb876ff1b8c",
+      "bytes": 5631644
+    }
+  },
+  "normalNativeArtifactGates": "passed",
+  "packagedJniSha256": "b9785ed9db0c7eac014282ded512aa95b38df0edfd7799deb7d4f5b42a1986d5",
+  "nativePairReusedFrom": "c5068f6d245dabcaf0d9420cad729701c4ec4ca5",
+  "harnessPin": "0c97200d3a858e623d4e8d8bbb0019858b7b9561"
+}

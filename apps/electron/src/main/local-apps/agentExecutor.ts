@@ -1,7 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import type { AskQuestionDto } from '@lingxi/bridge-client';
 import type { LocalAppAgentCatalog, LocalAppAgentToolChoice, LocalAppAgentUsage } from '../../shared/localAppAgent.js';
@@ -32,6 +31,7 @@ interface WireEvent extends Record<string, unknown> { type: string; protocolVers
 
 export interface LocalAppAgentExecutorOptions {
   configHome: string;
+  globalConfigPath?: string;
   root: string;
   isPackaged?: boolean;
   resourcesPath?: string;
@@ -127,10 +127,9 @@ export class LocalAppAgentExecutor {
 
   invalidateCatalog(): void { this.cached = undefined; this.catalogGeneration++; }
   private async configVersion(): Promise<string> {
-    const environment = this.options.environment ?? process.env;
     const paths = [join(this.options.configHome, 'settings.json'), join(this.options.configHome, '.config.json'),
       join(this.options.configHome, 'desktop-local-app-mcp.json'),
-      join(environment.LINGXI_CONFIG_DIR ?? environment.HOME ?? homedir(), '.lingxi.json')];
+      ...(this.options.globalConfigPath ? [this.options.globalConfigPath] : [])];
     const versions = await Promise.all(paths.map(async path => {
       try { const value = await fs.stat(path, { bigint: true }); return [path, String(value.ino), String(value.size), String(value.mtimeNs), String(value.ctimeNs)]; }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [path, 'absent']; throw error; }
@@ -151,7 +150,8 @@ export class LocalAppAgentExecutor {
         for (let attempt = 0; attempt < 2; attempt++) {
           const generation = this.catalogGeneration;
           let result: WireCatalog | undefined;
-          await this.exchange({ type: 'catalog', protocolVersion: 1, cwd, configHome: this.options.configHome, credentials: credentialEnvelope(await this.options.catalogCredentials?.() ?? {}) }, cwd, controller.signal, async event => {
+          await this.exchange({ type: 'catalog', protocolVersion: 1, cwd, configHome: this.options.configHome,
+            globalConfigPath: this.options.globalConfigPath, credentials: credentialEnvelope(await this.options.catalogCredentials?.() ?? {}) }, cwd, controller.signal, async event => {
             if (event.type !== 'catalog') throw protocolError();
             result = parseCatalog(event); return true;
           });
@@ -253,7 +253,7 @@ export class LocalAppAgentExecutor {
       await execution.emit({ phase });
     };
     const start = { type: 'start', protocolVersion: 1, runId, appId: owner.appId, versionId: owner.releaseDigest, invocationId: owner.invocationId,
-      cwd, configHome: this.options.configHome, model: `${model.providerId}/${model.modelId}`, providerProfiles: wire.providerProfiles, routing: wire.routing,
+      cwd, configHome: this.options.configHome, globalConfigPath: this.options.globalConfigPath, model: `${model.providerId}/${model.modelId}`, providerProfiles: wire.providerProfiles, routing: wire.routing,
       credentials: credentialEnvelope(credentials), mcpConfigs, toolPolicy: {
         builtinTools: authorization.settings.tools.flatMap(grant => grant.kind === 'builtin' ? [grant.name] : []),
         mcpTools: mcp.map(({ serverConfigId, configRevision, rawToolName, definitionFingerprint }) => ({ serverConfigId, configRevision, rawToolName, definitionFingerprint })),

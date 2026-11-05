@@ -970,6 +970,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     const agentRoot = join(productPaths.brandHome, 'local-apps', 'v2');
     const agentExecutor = new LocalAppAgentExecutor({
       configHome: productPaths.brandHome,
+      globalConfigPath: productPaths.globalConfigPath,
       root: agentRoot,
       isPackaged: app.isPackaged,
       resourcesPath: process.resourcesPath,

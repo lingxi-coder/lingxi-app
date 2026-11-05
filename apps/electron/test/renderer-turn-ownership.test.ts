@@ -138,14 +138,17 @@ test('admission binding ignores unrelated engine turns and ID allocation survive
 });
 
 function composerHarness() {
-  const queued = deferred<void>(), notices: unknown[] = [], revoked: string[] = [];
+  const queued = deferred<void>(), notices: unknown[] = [], revoked: string[] = [], dispatches: any[][] = [];
   let images: any[] = [];
   const editor = { innerHTML: 'First prompt', replaceChildren() { this.innerHTML = ''; } };
   const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() }, ready: true, flowModeRef: { current: false }, voiceState: 'idle', text: 'First prompt', selectedFiles: [], imageAttachments: images,
     draftSessionId: { current: 'A' }, draftsBySession: { current: new Map() }, imageDraftGeneration: { current: 1 }, composerDraftRevision: { current: 0 }, imageAttachmentsRef: { current: images },
-    input: { current: editor }, richPromptSnapshot: () => ({ text: editor.innerHTML, files: [] }), promptWithFileMentions: (text: string) => text,
+    input: { current: editor }, promptHistory: { current: { entries: ['First prompt'], index: 0, html: 'First prompt' } },
+    richPromptSnapshot: () => ({ text: editor.innerHTML, files: [] }), promptWithFileMentions: (text: string) => text,
     sideCreationInput, onCreateSide: undefined,
-    bridge: { running: false, desktop: { slashCommands: [] }, sendTrackedPrompt: () => ({ token: { sessionId: 'A', clientTurnId: 'A:1' }, queued: queued.promise }) },
+    bridge: { running: false, desktop: { slashCommands: [] }, sendTrackedPrompt: (...args: any[]) => {
+      dispatches.push(args); return { token: { sessionId: 'A', clientTurnId: 'A:1' }, queued: queued.promise };
+    } },
     autoplayOwner: { current: null }, autoplaySubscription: { current: null },
     voicePrefs: { autoPlayReplies: false }, audio: undefined, URL: { revokeObjectURL: (url: string) => revoked.push(url) }, slashDismissed: { current: false },
     setText: () => {}, setSelectedFiles: () => {}, setImageAttachments: (update: any) => { images = update(images); context.imageAttachmentsRef.current = images; },
@@ -159,7 +162,7 @@ function composerHarness() {
   }
   evaluate('globalThis.clearComposer = ' + declaration(composerSource, 'clearComposer'), context);
   evaluate('globalThis.submit = ' + declaration(composerSource, 'submit'), context);
-  return { queued, context, editor, notices, revoked, images: () => images,
+  return { queued, context, editor, notices, revoked, dispatches, images: () => images,
     changeImages(next: any[]) { images = next; context.imageAttachmentsRef.current = next; } };
 }
 
@@ -239,11 +242,41 @@ test('a delayed dispatch ACK preserves later text and attachment edits', async (
 
 test('unchanged submitted draft clears, while navigation and failed sends retain the original owner', async () => {
   const unchanged = composerHarness(), sent = unchanged.context.submit(); unchanged.queued.resolve(); await sent;
+  assert.equal(unchanged.dispatches.length, 1);
   assert.equal(unchanged.editor.innerHTML, '');
+  assert.equal(unchanged.context.promptHistory.current, null);
+  assert.deepEqual(unchanged.notices, [null]);
   const moved = composerHarness(), failed = moved.context.submit();
+  const saved = { text: 'First prompt', files: [], html: 'First prompt', images: [] };
+  moved.context.draftsBySession.current.set('A', saved);
   moved.context.draftSessionId.current = 'B'; moved.context.imageDraftGeneration.current += 1; moved.editor.innerHTML = 'Private B';
   moved.queued.reject(new Error('A dispatch failed')); await failed;
   assert.equal(moved.editor.innerHTML, 'Private B'); assert.deepEqual(moved.notices, []);
+  assert.equal(moved.context.draftsBySession.current.get('A'), saved);
+});
+
+test('a successful send after navigation clears only the submitted session draft', async () => {
+  const h = composerHarness();
+  const aImage = { id: 'A-image', name: 'a.png', media_type: 'image/png', base64: 'image-data', previewUrl: 'blob:A' };
+  h.changeImages([aImage]); h.context.imageAttachments = h.images();
+  const sent = h.context.submit();
+  h.context.draftsBySession.current.set('A', { text: 'First prompt', files: [], html: 'First prompt', images: [aImage] });
+  h.context.draftSessionId.current = 'B'; h.context.imageDraftGeneration.current += 1; h.editor.innerHTML = 'Private B';
+  const bHistory = { entries: ['Private B'], index: 0, html: 'Private B' };
+  h.context.promptHistory.current = bHistory;
+  h.changeImages([{ id: 'B-image', previewUrl: 'blob:B' }]);
+  h.queued.resolve(); await sent;
+  assert.equal(h.dispatches.length, 1);
+  assert.equal(h.context.draftsBySession.current.has('A'), false);
+  assert.equal(h.editor.innerHTML, 'Private B'); assert.equal(h.context.promptHistory.current, bHistory);
+  assert.equal(h.images()[0].id, 'B-image'); assert.deepEqual(h.revoked, ['blob:A']); assert.deepEqual(h.notices, []);
+});
+
+test('a failed send retains the current draft and reports the failure', async () => {
+  const h = composerHarness(), sent = h.context.submit(), history = h.context.promptHistory.current;
+  h.queued.reject(new Error('dispatch failed')); await sent;
+  assert.equal(h.editor.innerHTML, 'First prompt'); assert.equal(h.context.promptHistory.current, history);
+  assert.deepEqual(h.notices, ['发送失败，图片附件已保留，可以重试。']);
 });
 
 test('Flow stop and interruption cancel their captured prompt before any ID-bearing engine event', async () => {

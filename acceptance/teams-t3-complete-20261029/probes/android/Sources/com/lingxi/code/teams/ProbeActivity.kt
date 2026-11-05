@@ -47,24 +47,12 @@ class ProbeActivity : ComponentActivity() {
     private var fixture by mutableStateOf<JSONObject?>(null)
     private var failure by mutableStateOf("")
     internal var messagesModel: TeamMessagingModel? = null
+    private var workspace by mutableStateOf<TeamsWorkspace?>(null)
     internal val apiRoot: String get() {
         val port = intent.getIntExtra("fixture_port", 18783)
         check(port in 1024..65535)
         return "http://10.0.2.2:$port"
     }
-    override val defaultViewModelProviderFactory: ViewModelProvider.Factory
-        get() {
-            val fallback = super.defaultViewModelProviderFactory
-            return object : ViewModelProvider.Factory {
-                @Suppress("UNCHECKED_CAST")
-                override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T = when (modelClass) {
-                    TeamMessagingModel::class.java -> TeamMessagingModel(application, apiRoot) as T
-                    TeamsViewModel::class.java -> TeamsViewModel(apiRoot) as T
-                    else -> fallback.create(modelClass, extras)
-                }
-            }
-        }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         lifecycleScope.launch {
@@ -74,6 +62,11 @@ class ProbeActivity : ComponentActivity() {
                 val value = withContext(Dispatchers.IO) { request("GET", "/_acceptance/bootstrap?uid=${URLEncoder.encode(uid, "UTF-8")}") }
                 FirebaseAuth.getInstance().signInWithCustomToken(value.getString("customToken")).await()
                 check(FirebaseAuth.getInstance().currentUser?.uid == uid)
+                val prefs = androidx.datastore.preferences.core.PreferenceDataStoreFactory.create(scope = lifecycleScope) {
+                    java.io.File(noBackupFilesDir, "probe-teams.preferences_pb")
+                }
+                workspace = TeamsWorkspace(applicationContext, lifecycleScope, FirebaseAuth.getInstance(),
+                    FirebaseFirestore.getInstance(), TeamsPrefs(prefs), apiRoot).also { it.start(); messagesModel = it.messagingModel }
                 fixture = value
             } catch (error: Exception) { failure = "${error.javaClass.simpleName}: ${error.message}" }
         }
@@ -86,17 +79,9 @@ class ProbeActivity : ComponentActivity() {
                     if (failure.isNotEmpty()) Text("HARNESS ERROR: $failure", color = MaterialTheme.colorScheme.error)
                     else if (value == null) Text("Signing in to demo emulators…")
                     else {
-                        val detail = TeamsViewModel.detail(value.getJSONObject("detail"))
-                        val uid = requireNotNull(FirebaseAuth.getInstance().currentUser?.uid)
+                        val workspace = requireNotNull(workspace)
                         Box(Modifier.weight(1f)) {
-                            if (home) TeamsScreen(null, {}, {}, { home = false })
-                            else {
-                                val model: TeamMessagingModel = viewModel(key = "teams-messages:$uid:${detail.team.id}:${detail.team.generation}")
-                                messagesModel = model
-                                TeamMessagesScreen(uid, detail, { home = true }, model)
-                                val conversation = intent.getStringExtra("conversation_id")
-                                LaunchedEffect(model, conversation) { if (!conversation.isNullOrEmpty()) model.select(conversation) }
-                            }
+                            ProbeTabHost { TeamsTab(null, {}, workspaceOverride = workspace) }
                         }
                     }
                 }

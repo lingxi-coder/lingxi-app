@@ -38,9 +38,10 @@ struct ProviderKindBox: Equatable, Hashable {
     func hash(into h: inout Hasher) { h.combine(String(describing: kind)) }
 }
 
-// MARK: - Settings sheet host
+// MARK: - Settings tab host
 struct SettingsHost: View {
     @Environment(AppState.self) private var app
+    @Environment(\.isWideLayout) private var wide
     @Environment(\.theme) private var t
     @Bindable var store: SettingsStore
     /// The conversation model — its `mcpServers` carry the engine's real MCP
@@ -67,7 +68,6 @@ struct SettingsHost: View {
     var openTerminal: () -> Void = {}
     var onPermissionModeChanged: (String) async throws -> Void = { _ in }
     var onTypescriptLspModeChanged: (String) async throws -> Void = { _ in }
-    let onClose: () -> Void
 
     /// Settings deep links and in-sheet navigation share the app-owned typed
     /// navigation model instead of copying a View that owns a Binding.
@@ -120,22 +120,15 @@ struct SettingsHost: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            if geometry.size.width >= 840 {
+        Group {
+            if wide {
                 HStack(spacing: 0) {
-                    NavigationStack {
-                        navigationPage(for: .main)
-                    }
-                    .frame(width: 280)
+                    NavigationStack { navigationPage(for: .main) }.frame(width: 280)
                     Divider()
-                    NavigationStack {
-                        navigationPage(for: navigation.settingsPath.last ?? .general)
-                    }
-                    .frame(maxWidth: .infinity)
+                    NavigationStack { navigationPage(for: navigation.settingsPath.last ?? .general) }
+                        .frame(maxWidth: .infinity)
                 }
-            } else {
-                compactNavigation
-            }
+            } else { compactNavigation }
         }
         .task { await DesktopSettingsRepository.shared.refresh() }
         // 项目切换能力一次性注入给整棵设置树：`SettingsLayerPicker` 出现在四个页面
@@ -283,36 +276,24 @@ struct SettingsHost: View {
             .navigationTitle(title(of: page))
             .navigationBarTitleDisplayMode(page == .main ? .large : .inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    if page == .main {
-                        Button("settings_done", action: onClose)
-                        .accessibilityLabel(String(localized: "settings_close_accessibility"))
-                        .accessibilityIdentifier("settings.close")
-                    } else if case .providerEdit(let box, _) = page,
-                              box.kind == .llm {
-                        // The provider editor is now a self-contained draft
-                        // sheet and owns its Save/Cancel actions.
-                        EmptyView()
-                    } else if case .mcpEdit(let serverID) = page {
+                if case .mcpEdit(let serverID) = page {
+                    ToolbarItem(placement: .topBarTrailing) {
                         Button("settings_save") { saveMcpAndClose(serverID) }
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(t.accent)
-                    } else {
-                        Button("settings_done") { handleDone(for: page) }
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(t.accent)
-                            .accessibilityIdentifier("settings.done")
+                            .font(.subheadline.weight(.semibold)).foregroundStyle(t.accent)
+                    }
+                }
+                if wide, page != .main, !navigation.settingsPath.isEmpty {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { navigation.settingsBack() } label: { Image(systemName: "chevron.left") }
+                            .accessibilityLabel("remote_back").accessibilityIdentifier("settings.back")
                     }
                 }
             }
+            .toolbar(page == .main || wide ? .automatic : .hidden, for: .tabBar)
     }
 
     private func pageKey(for page: SettingsPage) -> String {
         page == .main ? "main" : "\(navigation.settingsPath.count)-\(title(of: page))"
-    }
-
-    private func handleDone(for page: SettingsPage) {
-        onClose()
     }
 
     func addMcpServer() {

@@ -1,0 +1,33 @@
+import Foundation
+
+/// Error code (from the Teams HTTP API or a local failure) to the string key the UI shows (spec §6.7).
+/// Foundation only, so the mapping is tested on macOS; Android has the same table in `teams/TeamsUi.kt`.
+enum TeamsErrors {
+    /// `Localizable.xcstrings` key for a failure code. Anything not listed is `teams_error`.
+    static func key(_ code: String) -> String {
+        switch code {
+        case "INVALID_DATA", "INVALID_MESSAGE_SNAPSHOT":
+            "teams_error_invalid_data"
+        case "MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED":
+            "teams_stale_error"
+        case "BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "BOT_SELECTION_STALE":
+            "teams_error_bot_access_changed"
+        case "QUESTION_RECIPIENT_REQUIRED", "ANSWER_CONFLICT", "INVALID_ANSWER":
+            "teams_error_answer_rejected"
+        case "MESSAGE_LISTENER_FAILED":
+            "teams_error_sync_failed"
+        case "MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT",
+             "RECOVERY_NOT_REQUIRED", "BOT_RESULT_CONFLICT", "BOT_REVISION_CONFLICT", "BOT_OWNER_REQUIRED", "MESSAGE_IN_FLIGHT", "REPLY_REQUIRED":
+            "teams_message_failed"
+        case "INVITE_UNAVAILABLE":
+            "teams_invite_error"
+        default:
+            code.contains("STORAGE") ? "teams_messages_storage_error" : "teams_error"
+        }
+    }
+
+    /// Codes after which the team's data is no longer shown and the viewer must refresh membership.
+    static func isMembershipLoss(_ code: String) -> Bool {
+        ["MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED", "CONVERSATION_REQUIRED"].contains(code)
+    }
+}

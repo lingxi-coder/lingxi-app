@@ -7,7 +7,8 @@ struct DrawerAccountSummary: Equatable, Sendable {
 }
 
 /// The sidebar: three entries (scheduled tasks, projects, ...), one recent-
-/// sessions list with a mode filter, and the account / terminal / settings bar.
+/// sessions list with a mode filter, and the account / terminal bar. Remote
+/// control, Teams and Settings are tabs of the app shell, not drawer rows.
 ///
 /// Mode is a property of a session, not a place: rows from both modes live in
 /// the same list and opening one carries its mode (and workspace) along.
@@ -25,9 +26,8 @@ struct Drawer: View {
     let statusForSession: ((String) -> RecentStatus)?
     let newCronResults: Int
     let account: DrawerAccountSummary?
-    let openSettings: () -> Void
+    /// The account row: Settings / Account, with Chats as the way back.
     let openAccount: () -> Void
-    let openRemoteControl: () -> Void
     let openTerminal: () -> Void
     let openCron: (String?, String?) -> Void
     let openProjects: () -> Void
@@ -39,7 +39,6 @@ struct Drawer: View {
     /// The independent app library remains available without a chat engine.
     let appLibrary: UnifiedLocalApps?
     let openApps: () -> Void
-    let openTeams: () -> Void
     let openApp: (String) -> Void
 
     @ObservedObject private var convo: ConversationModel
@@ -60,9 +59,7 @@ struct Drawer: View {
         statusForSession: ((String) -> RecentStatus)? = nil,
         newCronResults: Int = 0,
         account: DrawerAccountSummary? = nil,
-        openSettings: @escaping () -> Void,
         openAccount: @escaping () -> Void = {},
-        openRemoteControl: @escaping () -> Void = {},
         openTerminal: @escaping () -> Void,
         openCron: @escaping (String?, String?) -> Void = { _, _ in },
         openProjects: @escaping () -> Void = {},
@@ -74,7 +71,6 @@ struct Drawer: View {
         appLibrary: UnifiedLocalApps? = nil,
         appInfo: InstalledAppInfoStore,
         openApps: @escaping () -> Void = {},
-        openTeams: @escaping () -> Void = {},
         openApp: @escaping (String) -> Void = { _ in }
     ) {
         self.projectStore = projectStore
@@ -88,9 +84,7 @@ struct Drawer: View {
         self.statusForSession = statusForSession
         self.newCronResults = newCronResults
         self.account = account
-        self.openSettings = openSettings
         self.openAccount = openAccount
-        self.openRemoteControl = openRemoteControl
         self.openTerminal = openTerminal
         self.openCron = openCron
         self.openProjects = openProjects
@@ -102,7 +96,6 @@ struct Drawer: View {
         self.appLibrary = appLibrary
         self.appInfo = appInfo
         self.openApps = openApps
-        self.openTeams = openTeams
         self.openApp = openApp
         convo = source.model
     }
@@ -343,12 +336,6 @@ struct Drawer: View {
 
     private var entries: some View {
         VStack(spacing: 2) {
-            Button(action: openRemoteControl) {
-                Label("remote_title", systemImage: "desktopcomputer")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 20).padding(.vertical, 10)
-            }.buttonStyle(.plain).accessibilityIdentifier("drawer.remote-control")
-
             appsEntry
             entryRow(
                 icon: .clock,
@@ -373,9 +360,6 @@ struct Drawer: View {
     /// 应用, with the last apps opened one tap away.
     private var appsEntry: some View {
         VStack(alignment: .leading, spacing: 4) {
-        Button(action: openTeams) {
-            Label("teams_title", systemImage: "person.2").font(.subheadline.weight(.medium)).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 11)
-        }.buttonStyle(.plain).accessibilityIdentifier("drawer.entry.teams")
         HStack(spacing: 8) {
             Button(action: openApps) {
                 HStack(spacing: 12) {
@@ -602,7 +586,6 @@ struct Drawer: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("drawer.account")
             bottomIconButton(icon: .terminal, label: "settings_linux_section_terminal", identifier: "drawer.terminal", action: openTerminal)
-            bottomIconButton(icon: .cog, label: "settings_title_main", identifier: "drawer.settings", action: openSettings)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

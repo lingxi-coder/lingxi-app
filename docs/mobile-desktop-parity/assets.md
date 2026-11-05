@@ -9,7 +9,9 @@ node apps/electron/node_modules/electron/cli.js apps/electron/scripts/export-nat
 ```
 
 Android selects explicit light/dark drawable resources from the resolved palette.
-iOS uses paired asset catalog appearances and the resolved theme. Both hash UTF-16
-code units using base 31 modulo 2147483647 and then 28, exactly as Desktop does.
+iOS uses paired asset catalog appearances and the resolved theme. Like Desktop's
+`agentAvatarIndex`, both first prefix a bare id with `agent:`, then hash its UTF-16
+code units using base 31 modulo 2147483647 and then 28. A Bot's avatar is keyed by
+its botId on every client.
 Shared reference vectors: `packages/bridge-client/fixtures/agent-avatar-identities.json`.
 Keep the variant order stable; changing it changes existing agent identities.

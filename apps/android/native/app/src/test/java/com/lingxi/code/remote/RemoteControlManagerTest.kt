@@ -89,9 +89,11 @@ class RemoteControlManagerTest {
         override suspend fun nudge() { calls += "nudge" }
         override fun connectionState(): RemoteConnectionStateFfi? = state.also { onStateRead?.invoke() }
         override fun sessions(): List<RemoteSessionSummaryFfi>? = null
-        override suspend fun forgetHost(hostId: String) { calls += "forget:$hostId"; forgetGate?.await() }
+        var forgetFailure: Exception? = null
+        override suspend fun forgetHost(hostId: String) { calls += "forget:$hostId"; forgetGate?.await(); forgetFailure?.let { throw it } }
         override suspend fun repairHost(hostId: String) { calls += "repair:$hostId" }
-        override suspend fun attachSession(sessionId: String) { calls += "attach:$sessionId" }
+        var attachFailure: Exception? = null
+        override suspend fun attachSession(sessionId: String) { calls += "attach:$sessionId"; attachFailure?.let { throw it } }
         override suspend fun detachSession(sessionId: String) { calls += "detach:$sessionId" }
         override suspend fun setSessionForeground(sessionId: String, foreground: Boolean) { calls += "foreground:$sessionId:$foreground" }
         override suspend fun loadOlderMessages(sessionId: String) { calls += "older:$sessionId" }
@@ -140,15 +142,35 @@ class RemoteControlManagerTest {
         override suspend fun close() { closed = true }
     }
 
-    private class Harness(scope: TestScope, uid: String?) {
+    private class Harness(scope: TestScope, uid: String?, observer: RemoteBotsObserver = RemoteBotsObserver.None, onBuild: (String) -> Unit = {}) {
         val account = FakeAccount(uid)
         val clients = mutableListOf<FakeClient>()
         val manager = RemoteControlManager(
             scope = scope.backgroundScope,
             account = account,
-            factory = { id, listener -> FakeClient(id, listener).also { clients += it } },
+            factory = { id, listener -> onBuild(id); FakeClient(id, listener).also { clients += it } },
             pushInstallationId = { "push-1" },
+            observer = observer,
         )
+    }
+
+    /** What the Bots tab's recorder would be told, in order. */
+    private class RecordingObserver(val events: MutableList<String> = mutableListOf()) : RemoteBotsObserver {
+        val remembered = mutableMapOf<String, String?>()
+        override suspend fun lastHostId(uid: String): String? { events += "lastHostId:$uid"; return remembered[uid] }
+        override fun onAccount(uid: String?) { events += "account:$uid" }
+        override fun onConnected(uid: String, hostId: String) { events += "connected:$uid:$hostId" }
+        override fun onBots(uid: String, hostId: String, state: RemoteBotsStateFfi) {
+            events += "bots:$uid:$hostId:" + when (state) {
+                is RemoteBotsStateFfi.Bots -> state.bots.size.toString()
+                RemoteBotsStateFfi.Unsupported -> "unsupported"
+                RemoteBotsStateFfi.Unknown -> "unknown"
+            }
+        }
+        override fun onBotThreads(uid: String, hostId: String, botId: String, state: RemoteBotThreadsStateFfi) {
+            events += "threads:$uid:$hostId:$botId:" + (state.threads?.size?.toString() ?: "failed")
+        }
+        override fun onForgotten(uid: String, hostId: String) { events += "forgotten:$uid:$hostId" }
     }
 
     private fun connectionState(host: String, phase: RemoteConnectionPhaseFfi) = RemoteConnectionStateFfi(
@@ -1056,4 +1078,309 @@ class RemoteControlManagerTest {
         assertNull(port.promptOriginBotName(4uL))
     }
 
+    // --- the Bots tab: what the manager keeps and tells ----------------------------------
+
+    @Test fun theLastUsedComputerIsReadBeforeTheClientIsMade() = runTest(UnconfinedTestDispatcher()) {
+        val observer = RecordingObserver().also { it.remembered["u1"] = "h-last" }
+        val harness = Harness(this, "u1", observer) { observer.events += "build:$it" }
+        runCurrent()
+        // Known before any computer can be listed, so the first listing can already be compared with it.
+        assertEquals(listOf("account:u1", "lastHostId:u1", "build:u1"), observer.events)
+        assertEquals("h-last", harness.manager.lastHostId.value)
+    }
+
+    @Test fun eachAccountStartsWithItsOwnLastUsedComputer() = runTest(UnconfinedTestDispatcher()) {
+        val observer = RecordingObserver().also { it.remembered["u1"] = "a"; it.remembered["u2"] = "b" }
+        val harness = Harness(this, "u1", observer)
+        runCurrent()
+        assertEquals("a", harness.manager.lastHostId.value)
+        harness.account.mutableUid.value = "u2"
+        runCurrent()
+        assertEquals("b", harness.manager.lastHostId.value)
+        harness.account.mutableUid.value = null
+        runCurrent()
+        assertNull(harness.manager.lastHostId.value)
+        assertEquals(
+            listOf("account:u1", "lastHostId:u1", "account:u2", "lastHostId:u2", "account:null"),
+            observer.events.filter { it.startsWith("account:") || it.startsWith("lastHostId:") },
+        )
+    }
+
+    @Test fun noLastUsedComputerIsKnownBeforeTheFirstConnection() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1", RecordingObserver())
+        runCurrent()
+        assertNull(harness.manager.lastHostId.value)
+    }
+
+    @Test fun aReadyConnectionIsRememberedOncePerComputer() = runTest(UnconfinedTestDispatcher()) {
+        val observer = RecordingObserver()
+        val harness = Harness(this, "u1", observer)
+        runCurrent()
+        val listener = harness.clients.single().listener
+        listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.CONNECTING))
+        assertNull(harness.manager.lastHostId.value)
+        listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.READY))
+        assertEquals("h", harness.manager.lastHostId.value)
+        listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.RECONNECTING))
+        listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.READY))
+        listener.onConnectionState(connectionState("h2", RemoteConnectionPhaseFfi.CONNECTING))
+        assertEquals("h", harness.manager.lastHostId.value)
+        listener.onConnectionState(connectionState("h2", RemoteConnectionPhaseFfi.READY))
+        assertEquals("h2", harness.manager.lastHostId.value)
+        assertEquals(listOf("connected:u1:h", "connected:u1:h2"), observer.events.filter { it.startsWith("connected:") })
+    }
+
+    @Test fun forgettingTheLastUsedComputerForgetsTheMarkAndTellsTheObserver() = runTest(UnconfinedTestDispatcher()) {
+        val observer = RecordingObserver()
+        val harness = Harness(this, "u1", observer)
+        runCurrent()
+        harness.clients.single().listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.READY))
+        harness.manager.forget("h")
+        assertNull(harness.manager.lastHostId.value)
+        assertEquals(listOf("forgotten:u1:h"), observer.events.filter { it.startsWith("forgotten:") })
+    }
+
+    @Test fun forgettingAnotherComputerKeepsTheMark() = runTest(UnconfinedTestDispatcher()) {
+        val observer = RecordingObserver()
+        val harness = Harness(this, "u1", observer)
+        runCurrent()
+        harness.clients.single().listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.READY))
+        harness.manager.forget("other")
+        assertEquals("h", harness.manager.lastHostId.value)
+        assertEquals(listOf("forgotten:u1:other"), observer.events.filter { it.startsWith("forgotten:") })
+    }
+
+    @Test fun aForgetThatFailsKeepsTheMarkAndTellsNobody() = runTest(UnconfinedTestDispatcher()) {
+        val observer = RecordingObserver()
+        val harness = Harness(this, "u1", observer)
+        runCurrent()
+        val client = harness.clients.single()
+        client.listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.READY))
+        client.forgetFailure = IllegalStateException("keychain")
+        assertTrue(runCatching { harness.manager.forget("h") }.isFailure)
+        assertEquals("h", harness.manager.lastHostId.value)
+        assertTrue(observer.events.none { it.startsWith("forgotten:") })
+    }
+
+    @Test fun botsAndChatsAreToldToTheObserverWithTheirAccountAndComputer() = runTest(UnconfinedTestDispatcher()) {
+        val observer = RecordingObserver()
+        val harness = Harness(this, "u1", observer)
+        runCurrent()
+        val listener = harness.clients.single().boundBotsListener!!
+        listener.onBots("h", RemoteBotsStateFfi.Bots(listOf(bot("b1"), bot("b2"))))
+        listener.onBots("h", RemoteBotsStateFfi.Unsupported)
+        listener.onBotThreads("h", "b1", RemoteBotThreadsStateFfi(listOf(chat("s1")), null))
+        listener.onBotThreads("h", "b1", RemoteBotThreadsStateFfi(null, RemoteSessionErrorFfi("timeout", "slow")))
+        assertEquals(
+            listOf("bots:u1:h:2", "bots:u1:h:unsupported", "threads:u1:h:b1:1", "threads:u1:h:b1:failed"),
+            observer.events.filter { it.startsWith("bots:") || it.startsWith("threads:") },
+        )
+    }
+
+    @Test fun aReplacedClientsBotsNeverReachTheObserver() = runTest(UnconfinedTestDispatcher()) {
+        val observer = RecordingObserver()
+        val harness = Harness(this, "u1", observer)
+        runCurrent()
+        val stale = harness.clients.single().boundBotsListener!!
+        val staleListener = harness.clients.single().listener
+        harness.account.mutableUid.value = "u2"
+        runCurrent()
+        val before = observer.events.toList()
+        stale.onBots("h", RemoteBotsStateFfi.Bots(listOf(bot("b1"))))
+        stale.onBotThreads("h", "b1", RemoteBotThreadsStateFfi(emptyList(), null))
+        staleListener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.READY))
+        assertEquals(before, observer.events)
+        assertNull(harness.manager.lastHostId.value)
+    }
+
+    @Test fun backgroundDisconnectsAndForegroundReattachesAnOpenSession() = runTest {
+        val harness = Harness(this, "A")
+        runCurrent()
+        val client = harness.clients.single()
+        val following = backgroundScope.launch { harness.manager.followSession("host", "session").collect {} }
+        runCurrent()
+        assertTrue(client.calls.contains("attach:session"))
+        client.calls.clear()
+        harness.manager.background()
+        runCurrent()
+        assertTrue(client.calls.contains("disconnect"))
+        client.calls.clear()
+        harness.manager.foreground()
+        runCurrent()
+        assertEquals(listOf("connect:host", "attach:session", "foreground:session:true"), client.calls)
+        following.cancel()
+    }
+
+    @Test fun foregroundInvalidatesABackgroundDisconnectStillQueuedForTheSameClient() = runTest {
+        val harness = Harness(this, "A")
+        runCurrent()
+        val client = harness.clients.single()
+        val following = backgroundScope.launch { harness.manager.followSession("host", "session").collect {} }
+        runCurrent()
+        client.calls.clear()
+        harness.manager.background()
+        harness.manager.foreground()
+        runCurrent()
+        assertFalse(client.calls.contains("disconnect"))
+        assertTrue(client.calls.contains("attach:session"))
+        following.cancel()
+    }
+
+    @Test fun aFailedForegroundAttachmentDoesNotEscapeTheProcessCoroutine() = runTest {
+        val harness = Harness(this, "A")
+        runCurrent()
+        val client = harness.clients.single()
+        val following = backgroundScope.launch { harness.manager.followSession("host", "session").collect {} }
+        runCurrent()
+        harness.manager.background()
+        runCurrent()
+        client.attachFailure = IllegalStateException("connection closed during resume")
+        client.calls.clear()
+        harness.manager.foreground()
+        runCurrent()
+        assertTrue(client.calls.contains("attach:session"))
+        assertFalse(client.calls.contains("foreground:session:true"))
+        following.cancel()
+    }
+
+    // --- the grace after leaving the Bots tab (section 4.4) -------------------------------------
+
+    @Test fun leavingTheTabEndsTheConnectionAfterTheGraceAndNotBefore() = runTest(UnconfinedTestDispatcher()) {
+        assertEquals(60_000L, RemoteControlManager.LEAVE_GRACE_MS)
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        harness.manager.scheduleCloseConnection()
+        advanceTimeBy(RemoteControlManager.LEAVE_GRACE_MS - 1)
+        runCurrent()
+        assertEquals(emptyList<String>(), client.calls)
+        advanceTimeBy(2)
+        runCurrent()
+        assertEquals(listOf("stopWatchingHosts", "disconnect"), client.calls)
+    }
+
+    @Test fun comingBackBeforeTheGraceCallsTheTeardownOff() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        harness.manager.scheduleCloseConnection()
+        advanceTimeBy(30_000)
+        harness.manager.cancelScheduledClose()
+        advanceTimeBy(120_000)
+        runCurrent()
+        assertEquals(emptyList<String>(), client.calls)
+    }
+
+    @Test fun leavingAgainStartsTheWaitOver() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        harness.manager.scheduleCloseConnection()
+        advanceTimeBy(40_000)
+        harness.manager.scheduleCloseConnection()
+        advanceTimeBy(40_000)
+        runCurrent()
+        assertEquals(emptyList<String>(), client.calls)
+        advanceTimeBy(20_001)
+        runCurrent()
+        assertEquals(listOf("stopWatchingHosts", "disconnect"), client.calls)
+    }
+
+    @Test fun closingNowCallsOffAPendingTeardownAndClosesOnlyOnce() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        harness.manager.scheduleCloseConnection()
+        harness.manager.closeConnection()
+        runCurrent()
+        assertEquals(listOf("stopWatchingHosts", "disconnect"), client.calls)
+        advanceTimeBy(180_000)
+        runCurrent()
+        assertEquals(listOf("stopWatchingHosts", "disconnect"), client.calls)
+    }
+
+    @Test fun noGraceMeansClosingAtOnce() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        harness.manager.scheduleCloseConnection(graceMs = 0)
+        runCurrent()
+        assertEquals(listOf("stopWatchingHosts", "disconnect"), harness.clients.single().calls)
+    }
+
+    @Test fun aTeardownScheduledForTheOldAccountNeverEndsTheNextOnesConnection() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        harness.manager.scheduleCloseConnection()
+        harness.account.mutableUid.value = "u2"
+        runCurrent()
+        advanceTimeBy(180_000)
+        runCurrent()
+        assertEquals(emptyList<String>(), harness.clients.last().calls)
+    }
+
+    @Test fun theConnectionOfAComputerOpenedAfterTheGraceWasScheduledStaysUntilTheNextLeave() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        harness.manager.scheduleCloseConnection()
+        // The tab is entered again and a computer is dialled; the earlier wait must not close it.
+        harness.manager.cancelScheduledClose()
+        harness.manager.connect("h")
+        advanceTimeBy(180_000)
+        runCurrent()
+        assertEquals(listOf("connect:h"), client.calls)
+        harness.manager.scheduleCloseConnection()
+        advanceTimeBy(60_001)
+        runCurrent()
+        assertEquals(listOf("connect:h", "stopWatchingHosts", "disconnect"), client.calls)
+    }
+
+    // --- the Bots tab's badge --------------------------------------------------------------------
+
+    @Test fun theBadgeCountsTheChatsWaitingOnTheConnectedComputer() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        assertEquals(0, harness.manager.waitingChats.value)
+        client.listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.READY))
+        client.boundBotsListener!!.onBots("h", RemoteBotsStateFfi.Bots(listOf(bot("b1", 2u), bot("b2"), bot("b3", 3u))))
+        runCurrent()
+        assertEquals(5, harness.manager.waitingChats.value)
+        client.boundBotsListener!!.onBots("h", RemoteBotsStateFfi.Bots(listOf(bot("b1", 1u))))
+        runCurrent()
+        assertEquals(1, harness.manager.waitingChats.value)
+        // The link going away takes the count with it, whatever Bots are still held.
+        client.listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.IDLE))
+        runCurrent()
+        assertEquals(0, harness.manager.waitingChats.value)
+        client.listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.READY))
+        runCurrent()
+        assertEquals(1, harness.manager.waitingChats.value)
+    }
+
+    @Test fun theBadgeIgnoresAnotherComputersBotsAndAnOldDesktop() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        client.listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.READY))
+        client.boundBotsListener!!.onBots("other", RemoteBotsStateFfi.Bots(listOf(bot("b1", 4u))))
+        runCurrent()
+        assertEquals(0, harness.manager.waitingChats.value)
+        client.boundBotsListener!!.onBots("h", RemoteBotsStateFfi.Unsupported)
+        runCurrent()
+        assertEquals(0, harness.manager.waitingChats.value)
+    }
+
+    @Test fun theBadgeResetsWhenTheAccountChanges() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        client.listener.onConnectionState(connectionState("h", RemoteConnectionPhaseFfi.READY))
+        client.boundBotsListener!!.onBots("h", RemoteBotsStateFfi.Bots(listOf(bot("b1", 2u))))
+        runCurrent()
+        assertEquals(2, harness.manager.waitingChats.value)
+        harness.account.mutableUid.value = null
+        runCurrent()
+        assertEquals(0, harness.manager.waitingChats.value)
+    }
 }

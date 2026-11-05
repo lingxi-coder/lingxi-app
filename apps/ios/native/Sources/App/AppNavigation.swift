@@ -43,9 +43,17 @@ enum AppRoute: Hashable {
     case project(id: String)
     /// 应用: the installed apps and the market; one app's page.
     case apps
-    case teams(invite: String?)
     case localApp(id: String)
     case marketApp(id: String)
+}
+
+extension AppRoute {
+    /// The terminal is a full-screen overlay of the Chats tab (§2.2, D16): it hides the tab bar even on
+    /// wide layouts, where other pushed pages keep it.
+    var isTerminal: Bool {
+        if case .terminal = self { return true }
+        return false
+    }
 }
 
 extension AppRoute: Identifiable {
@@ -65,8 +73,6 @@ extension AppRoute: Identifiable {
             return "projects"
         case .apps:
             return "apps"
-        case .teams:
-            return "teams"
         case .localApp(let id):
             return "local-app:\(id)"
         case .marketApp(let id):
@@ -80,13 +86,14 @@ extension AppRoute: Identifiable {
 @Observable
 @MainActor
 final class AppNavigationModel {
-    private(set) var presentationRevision: UInt64 = 0
+    private var pagePresentationRevision: UInt64 = 0
+    var presentationRevision: UInt64 { pagePresentationRevision &+ tabs.selectionRevision }
     var path: [AppRoute] = [] {
-        didSet { if path != oldValue { presentationRevision &+= 1 } }
+        didSet { if path != oldValue { pagePresentationRevision &+= 1 } }
     }
     /// The installed app running full screen, if any.
     var runningAppID: String? {
-        didSet { if runningAppID != oldValue { presentationRevision &+= 1 } }
+        didSet { if runningAppID != oldValue { pagePresentationRevision &+= 1 } }
     }
     /// The sidebar's recents filter chip. A list filter only — it never decides
     /// which mode the live conversation is in.
@@ -98,10 +105,45 @@ final class AppNavigationModel {
     /// independent from iPad column visibility so choosing a session on iPad
     /// preserves the user's split layout.
     var compactColumn: NavigationSplitViewColumn = .detail
-    var settingsOpen = false {
-        didSet { if settingsOpen != oldValue { presentationRevision &+= 1 } }
-    }
+    /// The shell's tab state. The model owns it so every navigation entry point below can select a tab;
+    /// `TabShell` reads it and injects it with `.environment(_:)`.
+    let tabs: TabCoordinator
+    /// The Settings tab's stack. `SettingsHost` binds its `NavigationStack` to this array.
     var settingsPath: [SettingsPage] = []
+    /// The tab an in-app jump to Settings came from (§2.6): Back out of the stack, or "Done", returns
+    /// there. External links carry none. Tapping any tab forgets it.
+    private(set) var settingsOrigin: AppTab?
+    /// The last stack this model wrote itself, so `settingsPathDidChange` can tell the user's own
+    /// Back (swipe / chevron, written by the `NavigationStack` binding) from our programmatic writes.
+    @ObservationIgnored private var expectedSettingsPath: [SettingsPage] = []
+    /// True while the phone drawer is being dragged open (or is open); reported by the drawer so the
+    /// tab bar can leave before the drawer lands (§2.2).
+    var drawerRevealed = false
+
+    init(tabs: TabCoordinator? = nil) {
+        self.tabs = tabs ?? TabCoordinator()
+    }
+
+    var selectedTab: AppTab {
+        get { tabs.selected }
+        set { tabs.select(newValue) }
+    }
+
+    /// Settings is a tab now, not a presentation: "open" means it is the selected tab.
+    var settingsOpen: Bool { tabs.selected == .settings }
+
+    /// Pushed screens above `tab`'s root (§2.2). Chats and Settings are answered from the stacks this
+    /// model owns, so the answer is current in the same update as the push itself; Bots and Teams report.
+    func depth(of tab: AppTab) -> Int {
+        switch tab {
+        case .chats: path.count
+        case .settings: settingsPath.count
+        case .bots, .teams: tabs.depth[tab] ?? 0
+        }
+    }
+
+    /// The drawer of the Chats tab is open, or being dragged open (phone layout).
+    var drawerOpenOrOpening: Bool { drawerRevealed || compactColumn == .sidebar }
 
     /// Reveals the sidebar from the toolbar, deep links or app actions.
     /// The SwiftUI drawer writes interactive gesture results to this same state.
@@ -121,33 +163,109 @@ final class AppNavigationModel {
         compactColumn = .detail
     }
 
-    func showSettings(_ page: SettingsPage = .main) {
-        closeSidebar()
-        settingsPath = page == .main ? [] : [page]
-        settingsOpen = true
+    // MARK: Settings tab (the Jump API, §5)
+
+    private var settingsJump: SettingsJumpState<SettingsPage> {
+        SettingsJumpState(root: .main, stack: settingsPath, origin: settingsOrigin)
     }
 
+    private func adopt(_ state: SettingsJumpState<SettingsPage>) {
+        settingsOrigin = state.origin
+        if state.stack != settingsPath { writeSettingsPath(state.stack) }
+    }
+
+    private func writeSettingsPath(_ path: [SettingsPage]) {
+        expectedSettingsPath = path
+        settingsPath = path
+    }
+
+    /// The single entry for deep links and in-app shortcuts: select the Settings tab and replace its
+    /// stack with `[page]` (`.main` is the empty stack). In-app shortcuts pass the tab they came from;
+    /// external links pass none.
+    func showSettings(_ page: SettingsPage = .main, origin: AppTab? = nil) {
+        closeSidebar()
+        adopt(settingsJump.reduced(by: .jump(page, origin: origin)).state)
+        tabs.select(.settings)
+    }
+
+    /// "Close settings" (Done): the tab the user jumped from, else Chats; the stack is dropped.
     func closeSettings() {
-        settingsOpen = false
-        settingsPath = []
+        leaveSettings(to: settingsOrigin ?? .chats)
+    }
+
+    /// Leave Settings for `tab` and drop its stack and origin. For actions that belong to Chats
+    /// (switching project, opening the terminal) whatever the origin was.
+    func leaveSettings(to tab: AppTab = .chats) {
+        settingsOrigin = nil
+        writeSettingsPath([])
+        tabs.select(tab)
     }
 
     func pushSettings(_ page: SettingsPage) {
-        settingsPath.append(page)
+        adopt(settingsJump.reduced(by: .push(page)).state)
+    }
+
+    func settingsBack() {
+        let result = settingsJump.reduced(by: .back)
+        adopt(result.state)
+        if let tab = result.leaveTo { leaveSettings(to: tab) }
     }
 
     func popSettings() {
         guard !settingsPath.isEmpty else { return }
-        settingsPath.removeLast()
+        writeSettingsPath(Array(settingsPath.dropLast()))
     }
 
     func resetSettings() {
-        settingsPath.removeAll()
+        writeSettingsPath([])
     }
 
     func replaceSettingsTail(removing count: Int, with pages: [SettingsPage]) {
         let retainedCount = max(0, settingsPath.count - count)
-        settingsPath = Array(settingsPath.prefix(retainedCount)) + pages
+        writeSettingsPath(Array(settingsPath.prefix(retainedCount)) + pages)
+    }
+
+    /// Fed with every change of `settingsPath` by the Settings tab. Writes this model made itself are
+    /// recognised and ignored; what is left is the user going Back through the `NavigationStack`: each
+    /// level popped is a `back` event, and Back out of the last page leaves to the jump's origin.
+    func settingsPathDidChange(from old: [SettingsPage], to new: [SettingsPage]) {
+        guard new != expectedSettingsPath else { return }
+        expectedSettingsPath = new
+        guard new.count < old.count else { return }
+        var state = SettingsJumpState(root: SettingsPage.main, stack: old, origin: settingsOrigin)
+        var leaveTo: AppTab?
+        while state.stack.count > new.count {
+            let step = state.reduced(by: .back)
+            state = step.state
+            leaveTo = step.leaveTo ?? leaveTo
+            if state.stack.isEmpty { break }
+        }
+        settingsOrigin = state.origin
+        if let leaveTo { leaveSettings(to: leaveTo) }
+    }
+
+    // MARK: Tab taps
+
+    /// The user tapped `tab` in the bar. A new tab is selected and the Settings origin is forgotten
+    /// (`userSelectedTab`); the already-selected one unwinds its stack, or scrolls to top at its root.
+    func userSelectedTab(_ tab: AppTab) {
+        adopt(settingsJump.reduced(by: .userSelectedTab).state)
+        if tab == tabs.selected {
+            reselect(tab)
+        } else {
+            tabs.select(tab)
+        }
+    }
+
+    private func reselect(_ tab: AppTab) {
+        switch tab {
+        case .chats:
+            if !path.isEmpty { path.removeAll() }
+        case .settings:
+            if settingsPath.isEmpty { tabs.requestScrollToTop(.settings) } else { resetSettings() }
+        case .bots, .teams:
+            tabs.reselect(tab)
+        }
     }
 
     func openTerminal(
@@ -157,7 +275,7 @@ final class AppNavigationModel {
         requestedCwd: TerminalRouteCwd? = nil
     ) {
         closeSidebar()
-        settingsOpen = false
+        tabs.select(.chats)
         path.append(
             .terminal(
                 sessionID: sessionID,
@@ -206,12 +324,11 @@ final class AppNavigationModel {
     func openApps() {
         pushPage(.apps)
     }
-    func openTeams(invite: String? = nil) { pushPage(.teams(invite: invite)) }
 
     func openLocalApp(_ appID: String) { pushPage(.localApp(id: appID)) }
 
     func mayPresent(capturedRevision: UInt64, on route: AppRoute) -> Bool {
-        presentationRevision == capturedRevision && path.last == route && !settingsOpen && runningAppID == nil
+        presentationRevision == capturedRevision && path.last == route && selectedTab == .chats && runningAppID == nil
     }
 
     func mayPresentImportedApp(capturedRevision: UInt64) -> Bool {
@@ -225,7 +342,7 @@ final class AppNavigationModel {
     /// Runs an installed app full screen over everything else.
     func runApp(_ appID: String) {
         closeSidebar()
-        settingsOpen = false
+        tabs.select(.chats)
         runningAppID = appID
     }
 
@@ -235,7 +352,7 @@ final class AppNavigationModel {
     /// a project page).
     private func pushPage(_ route: AppRoute) {
         closeSidebar()
-        settingsOpen = false
+        tabs.select(.chats)
         if let last = path.last, last.isSamePage(as: route) {
             path[path.count - 1] = route
         } else if route == .projects, let index = path.lastIndex(of: .projects) {
@@ -247,7 +364,7 @@ final class AppNavigationModel {
 
     func openSessionDetails(sessionID: String) {
         closeSidebar()
-        settingsOpen = false
+        tabs.select(.chats)
         path.append(.sessionDetails(sessionID: sessionID))
     }
 
@@ -260,7 +377,7 @@ private extension AppRoute {
         case (.cron, .cron), (.cron, .cronRun), (.cronRun, .cron), (.cronRun, .cronRun),
              (.cronNew, .cronNew), (.cronNew, .cron), (.cron, .cronNew),
              (.projects, .projects), (.project, .project),
-             (.apps, .apps), (.teams, .teams), (.localApp, .localApp), (.marketApp, .marketApp):
+             (.apps, .apps), (.localApp, .localApp), (.marketApp, .marketApp):
             true
         default:
             false

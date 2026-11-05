@@ -2,12 +2,14 @@ package com.lingxi.code.settings
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import com.lingxi.code.conversation.ConversationSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,6 +39,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -45,37 +48,56 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.navigation.NavHostController
+import androidx.navigation.NavGraphBuilder
+import androidx.navigation.NavBackStackEntry
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.lingxi.code.R
-import com.lingxi.code.components.LXIcon
-import com.lingxi.code.components.LXIconName
 import com.lingxi.code.model.ProviderKind
+import com.lingxi.code.tabs.AppTab
+import com.lingxi.code.tabs.LocalWideLayout
+import com.lingxi.code.tabs.OnTabReselected
+import com.lingxi.code.tabs.SettingsJump
 import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.offline.VoiceModelDownloader
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 
-/** Native settings navigation shares device repositories and the active engine connection. */
+/**
+ * The Settings tab (SPEC-mobile-team-bot-ui section 5): the settings home and every page below it in one
+ * Navigation 2 `NavHost`, sharing the device repositories and the active engine connection.
+ *
+ * It is a tab body, not a surface the user closes: the root has no close action and no "Done", a page
+ * below it has a back arrow only. The shell talks to it through five hooks and keeps nothing of the stack:
+ *
+ * - [jump] replaces the stack with one page (a deep link or an in-app shortcut) and is answered once
+ *   through [onJumpHandled];
+ * - [origin] is the tab that jump came from. Back, from the system or from the top bar's arrow, on the
+ *   page the jump opened (or on the root after a jump to it) clears the stack and calls [onOriginBack];
+ *   deeper pages pop first. The shell clears [origin] when the user taps a tab;
+ * - [onDepthChanged] reports the pages above the root (0 = on the root), which is where the shell
+ *   shows its bottom bar;
+ * - at wide widths ([LocalWideLayout]) the 280 dp page list sits beside the page.
+ *
+ * Back on the root with no [origin] is not handled here: the shell sends it to Chats.
+ */
 @Composable
 fun SettingsHost(
     appearanceStore: AppearanceStore,
     engineSource: ConversationSource? = null,
-    deepLinkImport: com.lingxi.code.navigation.DeepLink? = null,
-    onDeepLinkImportDismiss: () -> Unit = {},
     projectStore: com.lingxi.code.project.ProjectStore? = null,
     isDark: Boolean,
     accentId: String,
     modifier: Modifier = Modifier,
-    navController: NavHostController = rememberNavController(),
     store: SettingsStore? = null,
-    initialRoute: String = SettingsRoutes.MAIN,
-    onClose: () -> Unit = {},
-    onOpenScheduledSession: (com.lingxi.code.cron.CronRunRecord) -> Unit = {},
+    jump: SettingsJump? = null,
+    onJumpHandled: (Long) -> Unit = {},
+    origin: AppTab? = null,
+    onOriginBack: (AppTab) -> Unit = {},
+    onDepthChanged: (Int) -> Unit = {},
     onReplayOnboarding: () -> Unit = {},
     onReconnectEngine: () -> Boolean = { false },
     onOpenTerminal: (LinuxRuntimeTerminalLaunchRequest) -> Unit = {},
@@ -86,6 +108,7 @@ fun SettingsHost(
     // null 表示本宿主不提供切换能力，此时层选择器下不画切换入口。
     onSwitchProject: ((String) -> Unit)? = null,
 ) {
+    val navController = rememberNavController()
     val catalogScope = androidx.compose.runtime.rememberCoroutineScope()
     val engineBridge = remember { SettingsEngineBridge() }
     val draftRegistry = remember(engineSource) { SettingsDraftRegistry() }
@@ -121,37 +144,64 @@ fun SettingsHost(
     }
     val backEntry by navController.currentBackStackEntryAsState()
     val route = backEntry?.destination?.route
-    val atRoot = route == null || route == SettingsRoutes.MAIN
-    // The scheduled-task pages are opened from the drawer, not from settings:
-    // they take the place of the settings home so back closes the surface.
-    val standalone = SettingsRoutes.isStandalone(initialRoute)
+    val navigationStack by navController.currentBackStack.collectAsStateWithLifecycle()
+    // The pages above the root, bottom first. The root is the start destination, so it is the first routed entry.
+    val pagesAboveRoot = remember(navigationStack) { navigationStack.mapNotNull { it.destination.route }.drop(1) }
+    val depth = pagesAboveRoot.size
+    val wide = LocalWideLayout.current
+    val rootScroll = rememberScrollState()
+    val listScroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
 
-    LaunchedEffect(navController, initialRoute) {
-        if (initialRoute != SettingsRoutes.MAIN) {
-            // The adaptive host composes its NavHost after measuring the
-            // available width. Await the graph before handling a deep link.
-            navController.currentBackStackEntryFlow.first()
-            navController.navigate(initialRoute) {
-                launchSingleTop = true
-                if (standalone) popUpTo(SettingsRoutes.MAIN) { inclusive = true }
+    // A deep link or a shortcut replaces the stack with its page: [root, page].
+    val latestOnJumpHandled by rememberUpdatedState(onJumpHandled)
+    LaunchedEffect(navController, jump?.id) {
+        val request = jump ?: return@LaunchedEffect
+        // The graph is set while the NavHost first composes; wait for it before navigating.
+        navController.currentBackStackEntryFlow.first()
+        if (request.route == SettingsRoutes.MAIN) {
+            navController.popBackStack(SettingsRoutes.MAIN, inclusive = false)
+        } else {
+            try {
+                navController.navigate(request.route) {
+                    launchSingleTop = true
+                    popUpTo(SettingsRoutes.MAIN) { inclusive = false }
+                }
+            } catch (unknown: IllegalArgumentException) {
+                // A page this build does not have: stay where we are rather than crash on a stale link.
             }
         }
+        latestOnJumpHandled(request.id)
     }
+
+    val latestOnDepthChanged by rememberUpdatedState(onDepthChanged)
+    LaunchedEffect(depth) { latestOnDepthChanged(depth) }
+
+    // Tapping the tab again: pop to the root, then scroll the root to its top (section 2.3).
+    OnTabReselected(AppTab.Settings) { shown ->
+        if (shown > 0) {
+            navController.popBackStack(SettingsRoutes.MAIN, inclusive = false)
+        } else {
+            scope.launch { launch { rootScroll.animateScrollTo(0) }; listScroll.animateScrollTo(0) }
+        }
+    }
+
     LaunchedEffect(probedVoiceCapability) {
         resolvedStore.setVoiceCapability(probedVoiceCapability)
     }
 
-    // Pop one page, or close the whole surface when there is no page below.
-    // Checked before popping so the host never empties its own back stack.
+    // Back from the top bar's arrow, or from a system press that ends a jump (see the handler below).
+    val backAction = settingsBackAction(pagesAboveRoot, origin)
     val goBack: () -> Unit = {
-        if (navController.previousBackStackEntry != null) navController.popBackStack() else onClose()
-    }
-    // System back.
-    BackHandler(enabled = true) { if (deepLinkImport != null) onDeepLinkImportDismiss() else goBack() }
-
-    if (deepLinkImport != null) {
-        DeepLinkImportPage(deepLinkImport, engineBridge, onDeepLinkImportDismiss)
-        return
+        when (val action = backAction) {
+            SettingsBackAction.Pop -> navController.popBackStack()
+            is SettingsBackAction.LeaveTo -> {
+                // Leave the stack cleared: coming back to Settings later starts at the root.
+                navController.popBackStack(SettingsRoutes.MAIN, inclusive = false)
+                onOriginBack(action.tab)
+            }
+            SettingsBackAction.ShellDecides -> Unit
+        }
     }
 
     androidx.compose.material3.Surface(
@@ -183,26 +233,26 @@ fun SettingsHost(
         Column(Modifier.fillMaxSize()) {
             SettingsTopBar(
                 title = titleFor(backEntry, state),
-                atRoot = atRoot,
+                showBack = depth > 0,
                 onBack = goBack,
-                onClose = onClose,
-                // 完成: back to the settings home, or close when it is not underneath.
-                onReset = { if (!navController.popBackStack(SettingsRoutes.MAIN, inclusive = false)) onClose() },
             )
 
             SettingsConnectionBanner(engineSettingsState, reconnectSafely)
-            BoxWithConstraints(Modifier.fillMaxSize()) {
-            val wide = maxWidth >= 840.dp
             Row(Modifier.fillMaxSize()) {
-            if (wide && !standalone) Box(Modifier.width(280.dp).verticalScroll(rememberScrollState()).padding(16.dp)) {
-                DesktopSettingsNavigation(onNavigate = { navController.navigate(it) { launchSingleTop = true } }, selected = route)
+            if (wide) Box(Modifier.width(280.dp).verticalScroll(listScroll).padding(16.dp).testTag(SettingsTags.DESKTOP_NAV)) {
+                // The root's right pane is the General page, so that entry is the one to mark there.
+                DesktopSettingsNavigation(
+                    // Replace the page on the right rather than stacking one per tap: Back then ends a jump in one step.
+                    onNavigate = { navController.navigate(it) { launchSingleTop = true; popUpTo(SettingsRoutes.MAIN) { inclusive = false } } },
+                    selected = if (route == SettingsRoutes.MAIN) SettingsRoutes.GENERAL else route,
+                )
             }
             NavHost(
                 navController = navController,
                 startDestination = SettingsRoutes.MAIN,
                 modifier = Modifier.fillMaxSize(),
             ) {
-                page(SettingsRoutes.MAIN) {
+                page(SettingsRoutes.MAIN, scroll = rootScroll) {
                     if (wide) GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding)
                     else SettingsHomePage(onNavigate = { navController.navigate(it) })
                 }
@@ -430,45 +480,32 @@ fun SettingsHost(
                 }
                 page(SettingsRoutes.MCP_EDIT) { entry -> McpConfigurationPage(engineBridge, initialName = entry.arguments?.getString("id"), initialScope = entry.arguments?.getString("scope")?.takeUnless { it == "_" }) }
                 page(SettingsRoutes.DREAM) { GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding) }
-                page(SettingsRoutes.CRON) {
-                    com.lingxi.code.cron.CronScreen(engineSource = engineSource, projectStore = projectStore, onOpenSession = onOpenScheduledSession)
-                }
-                page(SettingsRoutes.CRON_TASK) { entry ->
-                    com.lingxi.code.cron.CronScreen(
-                        engineSource = engineSource, projectStore = projectStore, onOpenSession = onOpenScheduledSession,
-                        initialTaskKey = entry.arguments?.getString("task"),
-                    )
-                }
-                page(SettingsRoutes.CRON_RUN) { entry ->
-                    com.lingxi.code.cron.CronScreen(
-                        engineSource = engineSource, projectStore = projectStore, onOpenSession = onOpenScheduledSession,
-                        initialRunId = entry.arguments?.getString("run"),
-                    )
-                }
-                page(SettingsRoutes.CRON_NEW) { entry ->
-                    com.lingxi.code.cron.CronScreen(
-                        engineSource = engineSource, projectStore = projectStore, onOpenSession = onOpenScheduledSession,
-                        initialPrompt = entry.arguments?.getString("prompt"),
-                    )
-                }
-            }
             }
             }
         }
         }
     }
+
+    // Registered after the NavHost (which pops pages with its own handler), so it wins over it, but only
+    // for the press that ends a jump: everything else is the NavHost's, with its predictive-back animation.
+    BackHandler(enabled = backAction is SettingsBackAction.LeaveTo, onBack = goBack)
 }
 
-/** Registers a destination whose body scrolls inside the standard page padding. */
-private fun androidx.navigation.NavGraphBuilder.page(
+/**
+ * Registers a destination whose body scrolls inside the standard page padding. [scroll] is for a page
+ * whose scroll position the host needs to reset (the root, when its tab is tapped again).
+ */
+private fun NavGraphBuilder.page(
     route: String,
-    content: @Composable (androidx.navigation.NavBackStackEntry) -> Unit,
+    scroll: ScrollState? = null,
+    content: @Composable (NavBackStackEntry) -> Unit,
 ) {
     composable(route) { entry ->
+        val scrollState = scroll ?: rememberScrollState()
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
                 .padding(horizontal = 16.dp)
                 .padding(top = 16.dp, bottom = 28.dp),
         ) { content(entry) }
@@ -504,11 +541,6 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
         SettingsRoutes.LINUX_RUNTIME -> stringResource(SettingsTitles.LINUX_RUNTIME)
         SettingsRoutes.COMPUTER_USE -> stringResource(SettingsTitles.COMPUTER_USE)
         SettingsRoutes.DREAM -> stringResource(SettingsTitles.DREAM)
-        SettingsRoutes.CRON,
-        SettingsRoutes.CRON_TASK,
-        SettingsRoutes.CRON_RUN,
-        SettingsRoutes.CRON_NEW,
-        -> stringResource(SettingsTitles.CRON)
         SettingsRoutes.GROUP ->
             SettingsGroup.fromKey(entry.arguments?.getString("group"))
                 ?.let { stringResource(it.title) }
@@ -535,28 +567,20 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
     }
 
 /**
- * Brand settings top bar — chevron-back (or close 'x' at the root) on the left,
- * centered title, and a 完成 action that resets to the root when nested.
+ * The Settings top bar: the title, and a back arrow only on a page below the root. The root has no
+ * navigation icon (it is a tab; the shell owns leaving it) and no page has a close or "Done" action.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-private fun SettingsTopBar(
-    title: String, atRoot: Boolean, onBack: () -> Unit,
-    onClose: () -> Unit, onReset: () -> Unit,
-) {
+private fun SettingsTopBar(title: String, showBack: Boolean, onBack: () -> Unit) {
     androidx.compose.material3.TopAppBar(
         title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        modifier = Modifier.testTag(SettingsTags.TOP_BAR),
         navigationIcon = {
-            androidx.compose.material3.IconButton(onClick = { if (atRoot) onClose() else onBack() }) {
-                if (atRoot) LXIcon(LXIconName.X, contentDescription = stringResource(R.string.settings_close_accessibility))
-                else androidx.compose.material3.Icon(
+            if (showBack) androidx.compose.material3.IconButton(onClick = onBack, modifier = Modifier.testTag(SettingsTags.BACK)) {
+                androidx.compose.material3.Icon(
                     androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = stringResource(R.string.onboarding_back))
-            }
-        },
-        actions = {
-            if (!atRoot) androidx.compose.material3.TextButton(onClick = onReset) {
-                Text(stringResource(R.string.settings_done))
             }
         },
         windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),

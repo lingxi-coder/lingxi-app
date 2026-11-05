@@ -16,7 +16,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,6 +36,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -77,6 +82,14 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
 import com.lingxi.code.settings.ProviderAccountModelAvailability
 import com.lingxi.code.settings.decodeProviderAccounts
+import com.lingxi.code.settings.SettingsRoutes
+import com.lingxi.code.tabs.AppTab
+import com.lingxi.code.tabs.LocalTabHost
+
+/** Test tags of the session page. */
+internal object RemoteSessionTags {
+    const val BACK = "remote.session.back"
+}
 
 /** A followed session: its source and the view model that renders it. */
 class RemoteChat internal constructor(
@@ -158,7 +171,8 @@ class RemoteSessionHolder : ViewModel() {
 
 /**
  * One session of a computer, with the conversation UI of the app. Side chat and voice are off.
- * [botName] is the Bot the session is a chat of, if it is one: back leads to that Bot.
+ * [botName] is the Bot the session is a chat of, if it is one; it is only named under the title. Back leads to
+ * what the page was opened from: the tree of computers and Bots, or the Computer page.
  */
 @Composable
 internal fun RemoteSessionScreen(
@@ -173,8 +187,17 @@ internal fun RemoteSessionScreen(
 ) {
     val context = LocalContext.current
     val t = LingXiTheme.palette
-    val holder: RemoteSessionHolder = viewModel()
     val ownerUid by manager.uid.collectAsState()
+    // The parent tab's lifecycle-aware account collector can still hold its previous value.
+    // Keep source creation safe at this boundary too, including while a retained page leaves.
+    if (ownerUid == null) {
+        val tabs = LocalTabHost.current
+        RemotePage(stringResource(R.string.remote_bots), onBack) {
+            RemoteSignedOut { tabs.openSettings(SettingsRoutes.ACCOUNT, origin = AppTab.Bots) }
+        }
+        return
+    }
+    val holder: RemoteSessionHolder = viewModel()
     val key = "$ownerUid/$hostId/$sessionId"
     val strings = remember(context) { conversationStrings(context.applicationContext) }
     val deviceName = remember { RemoteControl.deviceName() }
@@ -297,10 +320,12 @@ internal fun RemoteSessionScreen(
 
     Column(Modifier.fillMaxSize().background(t.windowBg)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) {
-                LXIcon(
-                    LXIconName.X, size = 20.dp, color = t.text2,
-                    contentDescription = botName?.let { stringResource(R.string.remote_back_to_bot_fmt, it) } ?: stringResource(R.string.remote_back),
+            // Back leads to the tree of computers and Bots (section 4.6), whichever Bot the chat belongs to.
+            IconButton(onClick = onBack, modifier = Modifier.testTag(RemoteSessionTags.BACK)) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.remote_back),
+                    tint = t.text2,
                 )
             }
             Column(Modifier.weight(1f)) {

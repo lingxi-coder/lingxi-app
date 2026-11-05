@@ -25,8 +25,8 @@ import org.junit.runner.Description
 import org.junit.runners.model.Statement
 
 /**
- * Instrumented Compose UI tests for the app shell — drawer tab switching,
- * settings push-navigation + system back, and the live theme / accent toggles.
+ * Instrumented Compose UI tests for the app shell — drawer recents filter,
+ * the Settings tab's push-navigation + system back, and the live theme / accent toggles.
  *
  * These exercise the real [MainActivity] composition (drawer + conversation +
  * settings NavHost + DataStore-backed theme), so they REQUIRE a connected
@@ -127,13 +127,11 @@ class AppFlowUiTest {
 
     @Test
     fun settings_pushNavToAppearance_andSystemBackReturnsToRoot() {
-        openDrawer()
-
-        // The bottom bar's settings button opens the settings surface.
-        rule.onNodeWithTag(UiTags.DRAWER_SETTINGS).performClick()
+        // The Settings tab of the bottom bar opens the settings surface.
+        rule.onNodeWithTag(UiTags.TAB_SETTINGS).performClick()
         rule.waitForIdle()
-        // Root settings title.
-        rule.onNodeWithText("设置").assertIsDisplayed()
+        // The root page (the tab label reads 设置 too, so the root is told apart by its search field).
+        rule.onNodeWithTag(UiTags.SETTINGS_SEARCH).assertIsDisplayed()
         rule.onNodeWithText("知识库").assertDoesNotExist()
         rule.onNodeWithText("记忆").assertDoesNotExist()
 
@@ -153,15 +151,19 @@ class AppFlowUiTest {
         androidx.test.platform.app.InstrumentationRegistry
             .getInstrumentation().runOnMainSync { rule.activity.onBackPressedDispatcher.onBackPressed() }
         rule.waitForIdle()
-        rule.onNodeWithText("设置").assertIsDisplayed()
+        rule.onNodeWithTag(UiTags.SETTINGS_SEARCH).assertIsDisplayed()
+        // Back on a tab root with no jump origin leaves the tab for Chats.
+        androidx.test.platform.app.InstrumentationRegistry
+            .getInstrumentation().runOnMainSync { rule.activity.onBackPressedDispatcher.onBackPressed() }
+        rule.waitForIdle()
+        rule.onNodeWithTag(UiTags.OPEN_DRAWER).assertIsDisplayed()
     }
 
     // --- 3. theme + accent toggle -----------------------------------------
 
     @Test
     fun appearance_themeRadioAndAccentSwatchApply() {
-        openDrawer()
-        rule.onNodeWithTag(UiTags.DRAWER_SETTINGS).performClick()
+        rule.onNodeWithTag(UiTags.TAB_SETTINGS).performClick()
         rule.waitForIdle()
         rule.onNodeWithTag(UiTags.settingsGroup("general")).performScrollTo().performClick()
         rule.onNodeWithText("外观").performScrollTo().performClick()

@@ -8,12 +8,21 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
 
-/** UTF-16 hash and palette order match the Desktop AgentAvatar. */
+/**
+ * UTF-16 hash and palette order match the Desktop AgentAvatar. Desktop
+ * normalises the id first ("tool results may use a bare UUID while the agent
+ * list uses `agent:<UUID>`"), so a bare id and its `agent:`-prefixed form draw
+ * the same face; hashing the raw id gave every sub-agent a different avatar on
+ * phone and desktop (SPEC-mobile-team-bot-ui section 7.2).
+ */
 fun agentAvatarIndex(agentId: String): Int {
+    val key = if (agentId.startsWith(AGENT_ID_PREFIX)) agentId else AGENT_ID_PREFIX + agentId
     var hash = 0L
-    for (unit in agentId) hash = (hash * 31 + unit.code) % 2147483647L
+    for (unit in key) hash = (hash * 31 + unit.code) % 2147483647L
     return (hash % 28).toInt()
 }
+
+private const val AGENT_ID_PREFIX = "agent:"
 
 private val avatarResources = listOf(
     R.drawable.agent_avatar_00_light to R.drawable.agent_avatar_00_dark,

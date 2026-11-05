@@ -16,7 +16,14 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
-/** External data is an editable proposal. Only the final confirmation can write configuration. */
+/**
+ * The import preview of a `lingxi://import/...` link: a full-screen page the shell shows above whichever
+ * tab is selected (SPEC-mobile-team-bot-ui decision D17). It is not a Settings page and needs nothing
+ * from [SettingsHost]: the caller owns the [bridge] (bound to the engine for as long as the page is
+ * shown) and [onClose]; the page pads the system bars and the keyboard itself.
+ *
+ * External data is an editable proposal. Only the final confirmation can write configuration.
+ */
 @Composable
 internal fun DeepLinkImportPage(link: DeepLink, bridge: SettingsEngineBridge, onClose: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -35,7 +42,6 @@ internal fun DeepLinkImportPage(link: DeepLink, bridge: SettingsEngineBridge, on
     var error by remember { mutableStateOf<String?>(null) }
     var applied by remember { mutableStateOf(false) }
     var conflicts by remember { mutableStateOf<List<String>>(emptyList()) }
-    ReportSettingsDraft("deep-link-import", !applied)
     LaunchedEffect(kind, state.connected) {
         if (state.connected) runCatching {
             when (kind) {

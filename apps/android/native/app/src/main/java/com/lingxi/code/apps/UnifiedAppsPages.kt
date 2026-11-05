@@ -131,7 +131,8 @@ fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String)
 @Composable
 fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> Unit, onOpen: (String) -> Unit,
     onAuthoring: (String?, String, AuthoringDirectory?) -> Unit, onRestoreAuthoring: (String, String, Boolean, Long) -> Unit,
-    canStartAuthoring: () -> Boolean = { false }, captureOperation: () -> AppAuthoringOperationHost? = { null }) {
+    canStartAuthoring: () -> Boolean = { false }, captureOperation: () -> AppAuthoringOperationHost? = { null },
+    captureNavigation: () -> (() -> Boolean) = { { true } }) {
     val scope = rememberCoroutineScope()
     var record by remember(appId) { mutableStateOf<AppRecord?>(null) }
     var releases by remember(appId) { mutableStateOf<List<AppRelease>>(emptyList()) }
@@ -293,7 +294,7 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
         }
     } }) { Text(stringResource(R.string.local_app_v2_publish_confirm)) } }, dismissButton = { TextButton(enabled = !busy, onClick = { publication = null }) { Text(stringResource(R.string.local_app_v2_cancel)) } }) }
     agentRelease?.let { release -> LocalAppAgentSettingsDialog(apps, release) { agentRelease = null } }
-    if (deleting) AlertDialog(onDismissRequest = { deleting = false }, title = { Text(stringResource(R.string.local_app_v2_remove_title)) }, text = { Text(stringResource(R.string.local_app_v2_remove_note)) }, confirmButton = { TextButton(onClick = { deleting = false; scope.launch { try { apps.remove(appId); onBack() } catch (e: Exception) { error = e.message } } }) { Text(stringResource(R.string.local_app_v2_remove_confirm)) } }, dismissButton = { TextButton(onClick = { deleting = false }) { Text(stringResource(R.string.local_app_v2_cancel)) } })
+    if (deleting) AlertDialog(onDismissRequest = { deleting = false }, title = { Text(stringResource(R.string.local_app_v2_remove_title)) }, text = { Text(stringResource(R.string.local_app_v2_remove_note)) }, confirmButton = { TextButton(onClick = { deleting = false; val current = captureNavigation(); scope.launch { try { apps.remove(appId); if (current()) onBack() } catch (e: Exception) { error = e.message } } }) { Text(stringResource(R.string.local_app_v2_remove_confirm)) } }, dismissButton = { TextButton(onClick = { deleting = false }) { Text(stringResource(R.string.local_app_v2_cancel)) } })
     RequiresCodeDialog(requiresCode) { requiresCode = false }
 }
 

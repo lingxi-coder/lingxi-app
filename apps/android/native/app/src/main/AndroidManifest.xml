@@ -120,7 +120,7 @@
         <activity
             android:name=".MainActivity"
             android:launchMode="singleTop"
-            android:screenOrientation="portrait"
+            android:resizeableActivity="true"
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.LingXiCode"
@@ -146,6 +146,7 @@
                 <data android:scheme="lingxi" android:host="runtime" />
                 <data android:scheme="lingxi" android:host="import" />
                 <data android:scheme="lingxi" android:host="remote" />
+                <data android:scheme="lingxi" android:host="team" />
             </intent-filter>
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />

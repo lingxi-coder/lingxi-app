@@ -8,13 +8,35 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
-internal data class TeamMessageConversation(val id: String, val kind: String, val title: String, val participants: List<String>, val lastSeq: Long, val lastChangeSeq: Long, val lastReadSeq: Long, val botKeys: List<String> = emptyList()) {
+/**
+ * The conversation's newest message as the backend writes it onto the conversation document
+ * (`TeamsPointerParser`, SPEC-mobile-team-bot-ui section 8.4). [atMs] is null while the server has not stamped it yet.
+ */
+internal data class TeamLastMessage(val id: String, val seq: Long, val atMs: Long?, val authorKind: String, val authorUid: String, val authorBotKey: String?, val preview: String, val recalled: Boolean = false)
+
+internal data class TeamMessageConversation(val id: String, val kind: String, val title: String, val participants: List<String>, val lastSeq: Long, val lastChangeSeq: Long, val lastReadSeq: Long, val botKeys: List<String> = emptyList(), val lastMessage: TeamLastMessage? = null) {
     fun merging(old: TeamMessageConversation?) = copy(lastSeq = maxOf(old?.lastSeq ?: 0, lastSeq), lastChangeSeq = maxOf(old?.lastChangeSeq ?: 0, lastChangeSeq), lastReadSeq = maxOf(old?.lastReadSeq ?: 0, lastReadSeq))
     val unread get() = (lastSeq - lastReadSeq).coerceAtLeast(0)
-    companion object { fun parse(v: JSONObject) = TeamMessageConversation(v.getString("id"), v.getString("kind"), v.getString("title"), v.getJSONArray("participants").strings(), v.getLong("lastSeq"), v.getLong("lastChangeSeq"), v.getLong("lastReadSeq"), v.optJSONArray("botKeys")?.strings() ?: v.getJSONArray("participants").strings().filter { it.startsWith("bot:") }) }
+    /** The Bot a Bot DM talks to (Desktop `botKeyOf`: the stored key, else the first `bot:` participant). */
+    val botKey: String? get() = botKeys.firstOrNull()
+    companion object {
+        /**
+         * One conversation document, read strictly: any field that breaks the stored contract is `INVALID_DATA`
+         * and the caller stops the team's listeners (a half-parsed list is never shown). [millis] converts a
+         * Firestore timestamp to epoch milliseconds, or returns null for anything that is not one.
+         */
+        fun fromDocument(id: String, data: Map<String, Any?>, lastReadSeq: Long, millis: (Any) -> Long?): TeamMessageConversation {
+            val participants = (data["participants"] as? List<*>)?.map { it as? String ?: throw TeamMessageFailure("INVALID_DATA") } ?: throw TeamMessageFailure("INVALID_DATA")
+            fun long(key: String) = (data[key] as? Number)?.toLong() ?: throw TeamMessageFailure("INVALID_DATA")
+            return TeamMessageConversation(id, data["kind"] as? String ?: throw TeamMessageFailure("INVALID_DATA"), data["title"] as? String ?: throw TeamMessageFailure("INVALID_DATA"), participants,
+                long("lastSeq"), long("lastChangeSeq"), lastReadSeq, participants.filter { it.startsWith("bot:") }, TeamsPointerParser.parseLastMessage(data.containsKey("lastMessage"), data["lastMessage"], millis))
+        }
+    }
 }
-internal data class TeamMessage(val id: String, val seq: Long, val authorUid: String, val authorKind: String, val text: String, val changeSeq: Long, val changeId: String, val recalled: Boolean, val replyTo: String?, val editedAt: String?, val kind: String = "text", val botKey: String? = null, val triggerId: String? = null, val originUid: String? = null, val originGeneration: Long? = null, val question: TeamBotQuestion? = null, val targets: List<String> = emptyList()) {
-    companion object { fun parse(v: JSONObject) = TeamMessage(v.getString("id"), v.getLong("seq"), v.getJSONObject("author").getString("uid"), v.getJSONObject("author").getString("kind"), v.getString("text"), v.getLong("changeSeq"), v.getString("changeId"), v.optBoolean("recalled"), v.stringOrNull("replyTo"), v.stringOrNull("editedAt"), v.optString("kind", "text"), v.optJSONObject("author")?.stringOrNull("botKey") ?: v.stringOrNull("botKey"), v.stringOrNull("triggerId"), v.optJSONObject("origin")?.stringOrNull("uid"), v.optJSONObject("origin")?.getLong("generation"), v.optJSONObject("question")?.let(TeamBotQuestion::parse), v.optJSONArray("targets")?.strings() ?: v.optJSONArray("mentions")?.strings()?.filter { it.startsWith("bot:") } ?: emptyList()) }
+internal data class TeamMessage(val id: String, val seq: Long, val authorUid: String, val authorKind: String, val text: String, val changeSeq: Long, val changeId: String, val recalled: Boolean, val replyTo: String?, val editedAt: String?, val kind: String = "text", val botKey: String? = null, val triggerId: String? = null, val originUid: String? = null, val originGeneration: Long? = null, val question: TeamBotQuestion? = null, val targets: List<String> = emptyList(), val createdAt: String? = null) {
+    /** [createdAt] (ISO-8601) as epoch milliseconds; null while the server has not stamped it. */
+    val createdAtMs: Long? get() = createdAt?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrNull() }
+    companion object { fun parse(v: JSONObject) = TeamMessage(v.getString("id"), v.getLong("seq"), v.getJSONObject("author").getString("uid"), v.getJSONObject("author").getString("kind"), v.getString("text"), v.getLong("changeSeq"), v.getString("changeId"), v.optBoolean("recalled"), v.stringOrNull("replyTo"), v.stringOrNull("editedAt"), v.optString("kind", "text"), v.optJSONObject("author")?.stringOrNull("botKey") ?: v.stringOrNull("botKey"), v.stringOrNull("triggerId"), v.optJSONObject("origin")?.stringOrNull("uid"), v.optJSONObject("origin")?.getLong("generation"), v.optJSONObject("question")?.let(TeamBotQuestion::parse), v.optJSONArray("targets")?.strings() ?: v.optJSONArray("mentions")?.strings()?.filter { it.startsWith("bot:") } ?: emptyList(), v.stringOrNull("createdAt")) }
 }
 internal data class TeamMessageThread(val messages: List<TeamMessage> = emptyList())
 internal data class TeamMessageCache(val uid: String, val teamId: String, val generation: Long,

@@ -1,6 +1,8 @@
 package com.lingxi.code.settings
 
 import com.lingxi.code.R
+import com.lingxi.code.tabs.AppTab
+import com.lingxi.code.tabs.SettingsJumpState
 
 /** Stable routes retain old deep links while new entries mirror desktop settings. */
 object SettingsRoutes {
@@ -42,12 +44,6 @@ object SettingsRoutes {
     const val TYPESCRIPT_LSP = "settings/typescript-lsp"
     const val COMPUTER_USE = "settings/computer-use"
     const val DREAM = "settings/dream"
-    const val CRON = "settings/cron"
-    const val CRON_TASK = "settings/cron/task/{task}"
-    const val CRON_RUN = "settings/cron/run/{run}"
-
-    /** The scheduled-task form, opened with `{prompt}` already filled in. */
-    const val CRON_NEW = "settings/cron/new/{prompt}"
 
     // Device settings
     const val APPEARANCE = "settings/appearance"
@@ -66,25 +62,7 @@ object SettingsRoutes {
     fun skillDetail(id: String) = "settings/skills/$id"
     fun mcpEdit(id: String, scope: String? = null) = "settings/mcp/$id/${android.net.Uri.encode(scope ?: "_")}"
     fun pluginDetail(id: String) = "settings/plugin/${android.net.Uri.encode(id)}"
-    fun cron(taskKey: String? = null): String =
-        taskKey?.takeIf(String::isNotBlank)
-            ?.let { "$CRON/task/${android.net.Uri.encode(it)}" }
-            ?: CRON
-    fun cronRun(runId: String): String = "$CRON/run/${android.net.Uri.encode(runId)}"
-    /** A blank prompt has no path segment to carry, so it falls back to the task list. */
-    fun cronNew(prompt: String): String =
-        prompt.takeIf(String::isNotBlank)
-            ?.let { "$CRON/new/${android.net.Uri.encode(it)}" }
-            ?: CRON
     fun group(key: String): String = "settings/group/$key"
-
-    /**
-     * The scheduled-task pages are not part of settings any more — the drawer
-     * opens them as a page of their own. Entered through [SettingsHost] they
-     * replace the settings home, so back closes the page instead of landing on
-     * a settings list the user never visited.
-     */
-    fun isStandalone(route: String): Boolean = route == CRON || route.startsWith("$CRON/")
 }
 
 /** The title resources shown in the [SettingsHost] TopAppBar (and the back chevron). */
@@ -105,5 +83,39 @@ object SettingsTitles {
     val TYPESCRIPT_LSP = R.string.settings_typescript_lsp_title
     val COMPUTER_USE = R.string.settings_title_computer_use
     val DREAM = R.string.settings_dream_mode
-    val CRON = R.string.settings_title_cron
+}
+
+/** Test tags of the Settings tab (this slice owns them; the shell only owns the four tab tags). */
+internal object SettingsTags {
+    const val TOP_BAR = "settings.topBar"
+    /** The top bar's back arrow: there is none on the root, and no close or "Done" anywhere. */
+    const val BACK = "settings.back"
+    /** The wide layout's 280 dp page list. */
+    const val DESKTOP_NAV = "settings.desktopNav"
+}
+
+/** What a Back press means to the Settings tab (SPEC-mobile-team-bot-ui section 2.6). */
+internal sealed interface SettingsBackAction {
+    /** Go up one page inside Settings. */
+    data object Pop : SettingsBackAction
+
+    /** A jump from [tab] brought the user here and this press ends it: clear the stack, then select [tab]. */
+    data class LeaveTo(val tab: AppTab) : SettingsBackAction
+
+    /** Nothing to pop and nowhere remembered to go: the root's Back belongs to the shell (it selects Chats). */
+    data object ShellDecides : SettingsBackAction
+}
+
+/**
+ * Back for [pagesAboveRoot] (the real navigation stack, bottom first) and the jump's [origin], by the
+ * shared [SettingsJumpState] rules: on the page a jump opened, or on the root after a jump to it, Back
+ * leaves for the origin; deeper pages pop; the root with no origin is the shell's.
+ */
+internal fun settingsBackAction(pagesAboveRoot: List<String>, origin: AppTab?): SettingsBackAction {
+    val reduction = SettingsJumpState(stack = pagesAboveRoot, origin = origin).reduce(SettingsJumpState.Event.Back, SettingsRoutes.MAIN)
+    return when {
+        reduction.leaveTo != null -> SettingsBackAction.LeaveTo(reduction.leaveTo)
+        reduction.state.stack.size < pagesAboveRoot.size -> SettingsBackAction.Pop
+        else -> SettingsBackAction.ShellDecides
+    }
 }

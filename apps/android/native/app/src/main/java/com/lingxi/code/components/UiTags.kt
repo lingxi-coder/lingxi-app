@@ -140,7 +140,6 @@ object UiTags {
 
     /** 应用: the drawer entry, the page with its 我的 / 市场 tabs, an app's page and the running app. */
     const val DRAWER_ENTRY_APPS = "tag.drawerEntryApps"
-    const val DRAWER_ENTRY_REMOTE = "tag.drawerEntryRemote"
     const val DRAWER_RECENT_APP_PREFIX = "tag.drawerRecentApp."
     const val APPS_PAGE = "tag.appsPage"
     const val APPS_TAB_PREFIX = "tag.appsTab."
@@ -160,9 +159,8 @@ object UiTags {
     fun appTile(appId: String): String = APP_TILE_PREFIX + appId
     fun marketRow(appId: String): String = MARKET_ROW_PREFIX + appId
 
-    /** The drawer's bottom account row and its settings button. */
+    /** The drawer's bottom account row (the gear is gone: Settings is a tab of the shell). */
     const val DRAWER_ACCOUNT = "tag.drawerAccount"
-    const val DRAWER_SETTINGS = "tag.drawerSettings"
 
     /** Prefixes for the recents filter chips and rows; suffixed with a filter key / session id. */
     const val DRAWER_FILTER_PREFIX = "tag.drawerFilter."
@@ -182,4 +180,19 @@ object UiTags {
 
     fun settingsGroup(groupKey: String): String = SETTINGS_GROUP_PREFIX + groupKey
     fun settingsPage(route: String): String = SETTINGS_PAGE_PREFIX + route
+
+    /**
+     * The main tab shell (SPEC-mobile-team-bot-ui section 2 / 9.2). The four tab
+     * buttons are shared by the bottom bar and the wide rail, so the same tag
+     * finds a tab in either layout; the container tags tell the two apart.
+     */
+    const val TAB_CHATS = "tab.chats"
+    const val TAB_BOTS = "tab.bots"
+    const val TAB_TEAMS = "tab.teams"
+    const val TAB_SETTINGS = "tab.settings"
+    const val TABS_BAR = "tabs.bar"
+    const val TABS_RAIL = "tabs.rail"
+
+    /** The tab button for an [com.lingxi.code.tabs.AppTab.key]. */
+    fun tab(key: String): String = "tab.$key"
 }

@@ -1,0 +1,32 @@
+{
+  "samsungMainActivity": {
+    "coldTeamsBeforeFix": "3/3 crashed; a layout-modifier-only attempt also crashed 5/5",
+    "coldTeamsWithStableLayoutContainer": "3/3 remained alive; subsequent gate, navigation and IME interactions succeeded",
+    "portraitToLandscapeKeepsTeamsSelected": true,
+    "signInAccountArrowReturnsToTeamsInLandscape": true,
+    "realOneUIKeyboardHidesBottomTabs": true,
+    "keyboardBackRestoresBottomTabs": true,
+    "composerTextEnteredOrSent": false,
+    "screenshotsCapturedFromFinalProduct": true
+  },
+  "tabletMainActivity": {
+    "wideSettingsRailAnd280DpPageList": true,
+    "resize1280To600DpKeepsSettingsSelected": true,
+    "darkFontScale2WideAndCompactInspected": true,
+    "settingsAppearanceColdLink": "COLD, actual Appearance page observed",
+    "foregroundTeamJoin": "Teams sign-in gate, no join executed",
+    "teamsSignInAccountArrowReturnsToTeams": true,
+    "remoteColdLinkAfterAccountGuardFix": "COLD, Bots sign-in gate observed instead of not-signed-in crash",
+    "newAndCronForegroundLinks": "Chats and Scheduled Tasks pages observed; no message or task saved",
+    "mcpImportPreview": "read-only proposal observed and cancelled; no import or command executed",
+    "screenshotsCapturedDuringResumedAcceptance": true,
+    "screenshotsPrecedeFinalHiddenChatsLayoutOnlyFix": true,
+    "finalAPKComponentRegressionEvidence": "tablet-accepted/results.json"
+  },
+  "scopeLimits": [
+    "No signed-in team or remote computers supplied",
+    "No provider/model configured",
+    "No real push, pairing/forget, send, or automatic join performed",
+    "Full manual TalkBack and all cold/foreground destination rows remain unverified"
+  ]
+}

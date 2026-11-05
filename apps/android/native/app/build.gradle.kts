@@ -181,6 +181,10 @@ android {
 
     sourceSets {
         getByName("test").resources.srcDir(rootProject.file("../../../resources/voice"))
+        // Shared mobile/Desktop vectors (mobile-team-bot-vectors.json,
+        // agent-avatar-identities.json): the unit suites load them from the
+        // class loader so Android and iOS pass the very same table.
+        getByName("test").resources.srcDir(rootProject.file("../../../packages/bridge-client/fixtures"))
         getByName("main").assets.srcDir(rootProject.file("../../../resources/extensions"))
         getByName("main").assets.srcDir(rootProject.file("../../../resources/mermaid"))
         // Native libraries are built independently so the Play artifact never
@@ -348,6 +352,7 @@ dependencies {
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.documentfile)
     implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.navigationevent.compose)
 
     // Compose UI
     implementation(libs.androidx.compose.ui)

@@ -5,6 +5,10 @@ import android.content.Context
 import android.os.Build
 import com.google.firebase.auth.FirebaseAuth
 import com.lingxi.code.BuildConfig
+import com.lingxi.code.bots.BotsLogic
+import com.lingxi.code.bots.BotsBadge
+import com.lingxi.code.bots.BotsRecorder
+import com.lingxi.code.bots.BotsStores
 import com.lingxi.code.bindings.android.AndroidRemoteControlClient
 import com.lingxi.code.bindings.android.AndroidRemoteBotsListener
 import com.lingxi.code.bindings.android.AndroidRemoteKeyStore
@@ -40,14 +44,17 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.buffer
@@ -56,6 +63,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -177,16 +185,47 @@ fun interface RemoteClientFactory {
 }
 
 /**
+ * What the Bots tab keeps of the manager's traffic (the last-used computer, a snapshot of each computer's Bots and
+ * chats). The manager only reports, in the order things happened and never for an account that has since changed;
+ * the calls must not block. Every call has a do-nothing default.
+ */
+interface RemoteBotsObserver {
+    /** The computer [uid] connected to last, or null; asked once per account, before its client is made. */
+    suspend fun lastHostId(uid: String): String? = null
+
+    /** The signed-in account is now [uid] (null = signed out). */
+    fun onAccount(uid: String?) {}
+
+    /** The connection to [hostId] became ready for [uid]. */
+    fun onConnected(uid: String, hostId: String) {}
+
+    /** The connected computer [hostId] delivered its Bots. */
+    fun onBots(uid: String, hostId: String, state: RemoteBotsStateFfi) {}
+
+    /** The connected computer [hostId] delivered the chats of its Bot [botId]. */
+    fun onBotThreads(uid: String, hostId: String, botId: String, state: RemoteBotThreadsStateFfi) {}
+
+    /** [uid] forgot [hostId] on this phone. */
+    fun onForgotten(uid: String, hostId: String) {}
+
+    companion object {
+        val None: RemoteBotsObserver = object : RemoteBotsObserver {}
+    }
+}
+
+/**
  * The one Remote Control client of the process: it is made for the signed-in
  * user, remade when the account changes, and turns the client's callbacks into
  * state the screens collect. The client runs nothing until a screen asks for a
- * computer; [closeConnection] ends it when the screens go away.
+ * computer; [closeConnection] ends it when the screens go away, and
+ * [scheduleCloseConnection] ends it a while after the Bots tab was left.
  */
 class RemoteControlManager(
     private val scope: CoroutineScope,
     private val account: RemoteAccount,
     private val factory: RemoteClientFactory,
     private val pushInstallationId: () -> String?,
+    private val observer: RemoteBotsObserver = RemoteBotsObserver.None,
 ) {
     private val mutableHosts = MutableStateFlow(RemoteHostsState())
     private val mutableConnection = MutableStateFlow<RemoteConnectionStateFfi?>(null)
@@ -209,12 +248,28 @@ class RemoteControlManager(
     private val screenGeneration = AtomicInteger()
     private val sessionLifecycle = Mutex()
     private val sessionOperations = MutableStateFlow(0)
+    @Volatile private var appForeground = true
+    private val foregroundEpoch = AtomicInteger()
+
+    private val mutableLastHostId = MutableStateFlow<String?>(null)
+    private val graceLock = Any()
+    private var graceJob: Job? = null
 
     val hosts: StateFlow<RemoteHostsState> = mutableHosts.asStateFlow()
     val connection: StateFlow<RemoteConnectionStateFfi?> = mutableConnection.asStateFlow()
     val sessions: StateFlow<RemoteSessionsState> = mutableSessions.asStateFlow()
     val bots: StateFlow<RemoteBotsState> = mutableBots.asStateFlow()
     val botChats: StateFlow<RemoteBotChatsState> = mutableBotChats.asStateFlow()
+
+    /**
+     * The computer the signed-in user was last connected to, kept across launches (null while signed out, and until one
+     * has connected). Known by the time any computer is listed, so it can be compared with the list.
+     */
+    val lastHostId: StateFlow<String?> = mutableLastHostId.asStateFlow()
+
+    /** Chats waiting for the user on the connected computer: the Bots tab's badge (0 while nothing is connected). */
+    val waitingChats: StateFlow<Int> = combine(mutableConnection, mutableBots) { connection, bots -> BotsLogic.waitingChats(connection, bots) }
+        .stateIn(scope, SharingStarted.Eagerly, 0)
 
     /** The signed-in uid, or null when the screens must ask the user to sign in. */
     val uid: StateFlow<String?> get() = account.uid
@@ -232,6 +287,9 @@ class RemoteControlManager(
     }
 
     private suspend fun rebuild(uid: String?) {
+        // A teardown scheduled for the previous account must not end the next one's connection.
+        cancelScheduledClose()
+        observer.onAccount(uid)
         val (mine, previous, oldSinks) = synchronized(appRequestLock) {
             val next = generation.incrementAndGet()
             forgetBarriers.clear()
@@ -244,6 +302,7 @@ class RemoteControlManager(
             mutableSessions.value = RemoteSessionsState()
             mutableBots.value = RemoteBotsState()
             mutableBotChats.value = RemoteBotChatsState()
+            mutableLastHostId.value = null
             Triple(next, old, oldSinks)
         }
         oldSinks.forEach { it.close() }
@@ -252,6 +311,17 @@ class RemoteControlManager(
             runCatching { old.client.close() }
         }
         if (uid == null) return
+        // Asked before the client exists, so no computer can be listed before the last-used one is known.
+        val remembered = try {
+            observer.lastHostId(uid)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+        synchronized(appRequestLock) {
+            if (mine == generation.get() && account.uid.value == uid && mutableLastHostId.value == null) mutableLastHostId.value = remembered
+        }
         val listener = ManagerListener(mine, uid)
         val client = try {
             factory.build(uid, listener)
@@ -344,8 +414,10 @@ class RemoteControlManager(
             synchronized(appRequestLock) {
                 if (account.uid.value == owner && mutableClient.value?.client === bound) {
                     mutableHosts.update { state -> state.copy(hosts = state.hosts.map { if (it.hostId == hostId) it.copy(paired = false) else it }) }
+                    if (mutableLastHostId.value == hostId) mutableLastHostId.value = null
                 }
             }
+            observer.onForgotten(owner, hostId)
         } finally {
             synchronized(appRequestLock) {
                 if (forgetBarriers.contains(barrier)) {
@@ -361,6 +433,36 @@ class RemoteControlManager(
 
     /** The screens went away: end the connection and stop watching. */
     fun closeConnection() {
+        cancelScheduledClose()
+        endConnection()
+    }
+
+    /**
+     * The Bots tab was left: end the connection and stop watching [graceMs] from now (section 4.4), unless the tab is
+     * entered again first ([cancelScheduledClose]). A second call starts the wait over.
+     */
+    fun scheduleCloseConnection(graceMs: Long = LEAVE_GRACE_MS) {
+        if (graceMs <= 0) return closeConnection()
+        synchronized(graceLock) {
+            graceJob?.cancel()
+            graceJob = scope.launch {
+                delay(graceMs)
+                // Only the teardown that is still the scheduled one may end the connection.
+                val mine = currentCoroutineContext()[Job]
+                if (synchronized(graceLock) { (graceJob === mine).also { if (it) graceJob = null } }) endConnection()
+            }
+        }
+    }
+
+    /** The Bots tab is shown again: whatever teardown was waiting is called off. */
+    fun cancelScheduledClose() {
+        synchronized(graceLock) {
+            graceJob?.cancel()
+            graceJob = null
+        }
+    }
+
+    private fun endConnection() {
         connectionEpoch.incrementAndGet()
         val mine = screenGeneration.incrementAndGet()
         val binding = mutableClient.value ?: return
@@ -373,6 +475,44 @@ class RemoteControlManager(
                 // A new screen may have requested this client while cleanup
                 // suspended. Its connect/watch runs after this lock is released.
                 if (mine == screenGeneration.get() && mutableClient.value === binding) binding.client.disconnect()
+            }
+        }
+    }
+
+    /** Background teardown and foreground attachment share the same transport lock. */
+    fun background() {
+        foregroundEpoch.incrementAndGet()
+        appForeground = false
+        closeConnection()
+    }
+
+    fun foreground() {
+        val resumeEpoch = foregroundEpoch.incrementAndGet()
+        screenGeneration.incrementAndGet() // invalidate a background teardown still queued for this client
+        appForeground = true
+        cancelScheduledClose()
+        val binding = mutableClient.value ?: return
+        scope.launch {
+            try {
+              sessionLifecycle.withLock {
+                if (!appForeground || resumeEpoch != foregroundEpoch.get() || mutableClient.value !== binding || account.uid.value != binding.uid) return@withLock
+                awaitSessionOperations()
+                if (!appForeground || resumeEpoch != foregroundEpoch.get() || mutableClient.value !== binding || account.uid.value != binding.uid) return@withLock
+                val followed = sinks.entries.filter { it.key.uid == binding.uid && it.value.isNotEmpty() }.map { it.key }
+                val host = followed.firstOrNull()?.hostId ?: return@withLock
+                binding.client.connect(host)
+                for (session in followed.filter { it.hostId == host }) {
+                    if (!appForeground || resumeEpoch != foregroundEpoch.get() || mutableClient.value !== binding) return@withLock
+                    binding.client.attachSession(session.sessionId)
+                    if (!appForeground || resumeEpoch != foregroundEpoch.get() || mutableClient.value !== binding) return@withLock
+                    binding.client.setSessionForeground(session.sessionId, true)
+                }
+              }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Resume can race an account change or a failed connection. Keep the offline source
+                // and its draft; connection callbacks and the next explicit open own recovery.
             }
         }
     }
@@ -663,6 +803,7 @@ class RemoteControlManager(
 
     private inner class ManagerListener(private val mine: Int, private val ownerUid: String) : AndroidRemoteListener {
         override suspend fun onConnectionState(state: RemoteConnectionStateFfi) {
+            var remembered = false
             synchronized(appRequestLock) {
                 if (mine != generation.get() || account.uid.value != ownerUid) return
                 forgetBarriers.forEach { barrier ->
@@ -678,7 +819,13 @@ class RemoteControlManager(
                 if (state.hostId != mutableSessions.value.hostId) mutableSessions.value = RemoteSessionsState(state.hostId)
                 if (state.hostId != mutableBots.value.hostId) mutableBots.value = RemoteBotsState(state.hostId)
                 if (state.hostId != mutableBotChats.value.hostId) mutableBotChats.value = RemoteBotChatsState(state.hostId)
+                // Written on every successful connect (section 4.4): the computer the next launch may dial by itself.
+                if (state.phase == RemoteConnectionPhaseFfi.READY && mutableLastHostId.value != state.hostId) {
+                    mutableLastHostId.value = state.hostId
+                    remembered = true
+                }
             }
+            if (remembered) observer.onConnected(ownerUid, state.hostId)
         }
 
         override suspend fun onHosts(hosts: List<RemoteHostFfi>) {
@@ -711,9 +858,10 @@ class RemoteControlManager(
 
     private inner class ManagerBotsListener(private val mine: Int, private val ownerUid: String) : AndroidRemoteBotsListener {
         override suspend fun onBots(hostId: String, state: RemoteBotsStateFfi) {
-            synchronized(appRequestLock) {
-                if (mine == generation.get() && account.uid.value == ownerUid) mutableBots.value = RemoteBotsState(hostId, state)
+            val accepted = synchronized(appRequestLock) {
+                (mine == generation.get() && account.uid.value == ownerUid).also { if (it) mutableBots.value = RemoteBotsState(hostId, state) }
             }
+            if (accepted) observer.onBots(ownerUid, hostId, state)
         }
 
         override suspend fun onBotThreads(hostId: String, botId: String, state: RemoteBotThreadsStateFfi) {
@@ -723,12 +871,16 @@ class RemoteControlManager(
                     RemoteBotChatsState(hostId, (if (held.hostId == hostId) held.byBot else emptyMap()) + (botId to state))
                 }
             }
+            observer.onBotThreads(ownerUid, hostId, botId, state)
         }
     }
 
     companion object {
         /** The default Realtime Database instance of the LingXi Firebase project. */
         const val DATABASE_URL = "https://lingxi-5e4b2-default-rtdb.firebaseio.com"
+
+        /** How long the connection outlives the Bots tab (section 11); a chat page open in the tab keeps it for as long. */
+        const val LEAVE_GRACE_MS = 60_000L
     }
 }
 
@@ -772,6 +924,9 @@ object RemoteControl {
         instance ?: create(context.applicationContext).also { instance = it }
     }
 
+    fun background() { instance?.background() }
+    fun foreground() { instance?.foreground() }
+
     private fun create(context: Context): RemoteControlManager {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val account = FirebaseRemoteAccount()
@@ -788,7 +943,8 @@ object RemoteControl {
                 AppRemoteMediaConfigProvider,
             ),
             pushInstallationId = { runCatching { PushRegistration.identity(context).id }.getOrNull() },
-        )
+            observer = BotsRecorder(BotsStores.get(context), scope),
+        ).also { BotsBadge.follow(it.waitingChats, scope) }
     }
 
     /** Shown next to the pairing code on the computer. */

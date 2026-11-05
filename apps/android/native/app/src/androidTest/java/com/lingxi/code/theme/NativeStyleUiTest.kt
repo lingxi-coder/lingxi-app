@@ -8,7 +8,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
@@ -17,11 +17,14 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.R
 import com.lingxi.code.components.LXToggle
 import com.lingxi.code.settings.*
+import com.lingxi.code.tabs.SettingsJump
 import com.lingxi.code.conversation.*
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.SessionRef
 import com.lingxi.code.onboarding.SetupWizardOverlay
 import org.junit.Assert.*
+import com.lingxi.code.testing.finishComposeFixture
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -29,7 +32,9 @@ import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class NativeStyleUiTest {
-    @get:Rule val rule = createComposeRule()
+    @After fun closeFixture() = finishComposeFixture(rule.activity)
+
+    @get:Rule val rule = createAndroidComposeRule<androidx.activity.ComponentActivity>()
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
 
     private fun capture(name: String) {
@@ -40,7 +45,7 @@ class NativeStyleUiTest {
     }
 
     @Test fun everySettingsDestinationInBothAppearances() {
-        val routes = (settingsGroupEntries(true).map { it.route } + SettingsRoutes.MAIN + SettingsRoutes.ACCOUNT + SettingsRoutes.CRON).distinct()
+        val routes = (settingsGroupEntries(true).map { it.route } + SettingsRoutes.MAIN + SettingsRoutes.ACCOUNT).distinct()
         File(context.getExternalFilesDir("native-ui-audit"), "routes.tsv").apply {
             parentFile?.mkdirs()
             writeText(routes.mapIndexed { index, value -> "$index\t$value" }.joinToString("\n"))
@@ -51,8 +56,9 @@ class NativeStyleUiTest {
         rule.setContent {
             LingXiTheme(darkTheme = dark.value) {
                 key(route.value, dark.value) {
+                    // Each route gets a fresh host (the key above), opened the way a deep link opens it.
                     SettingsHost(appearanceStore = appearance, isDark = dark.value,
-                        accentId = Accents.DEFAULT_ID, initialRoute = route.value)
+                        accentId = Accents.DEFAULT_ID, jump = SettingsJump(id = 1L, route = route.value, origin = null))
                 }
             }
         }

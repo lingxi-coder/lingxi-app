@@ -1,0 +1,694 @@
+{
+  "device": "<samsung-usb>",
+  "manufacturer": "samsung",
+  "transport": "<samsung-usb>            device usb:1048576X product:pa1qzcx model:SM_S9310 device:pa1q transport_id:13",
+  "dataCleared": false,
+  "processIsolation": true,
+  "testSourceSHA256": {
+    "com.lingxi.code.bots.BotsTabUiTest": "3d43d3bb59eddb534d05ab36e89f1a3801b40c910dbface5a55bc99c3ea6a570",
+    "com.lingxi.code.tabs.TabShellUiTest": "706bd7ac0b2a04f55f37140f7bd0557c64b280e7a587c77445b32dd7d3b6814c",
+    "com.lingxi.code.settings.SettingsTabUiTest": "aa951d4bb85403a76f22aa81bb6784707c7d3ec316f3904a2ab5126ac1a48a09",
+    "com.lingxi.code.teams.TeamsTabUiTest": "a01476528d5952e7494a1a1884ea00f2ac7dd5fbe842463318c903185430e100"
+  },
+  "systemAnimationsDisabled": false,
+  "tests": [
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#signedOutShowsTheGateAndLeadsToSignIn",
+      "result": "passed",
+      "seconds": 2.26,
+      "log": "001-BotsTabUiTest-signedOutShowsTheGateAndLeadsToSignIn.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#theTabTitlesItselfBots",
+      "result": "passed",
+      "seconds": 2.2,
+      "log": "002-BotsTabUiTest-theTabTitlesItselfBots.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#listedComputersLoadingShowsASpinnerAndLoadingText",
+      "result": "passed",
+      "seconds": 2.26,
+      "log": "003-BotsTabUiTest-listedComputersLoadingShowsASpinnerAndLoadingText.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#theTreeWaitsForItsSavedChoicesTooWithoutShowingRows",
+      "result": "passed",
+      "seconds": 2.27,
+      "log": "004-BotsTabUiTest-theTreeWaitsForItsSavedChoicesTooWithoutShowingRows.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aHostsErrorShowsTheMessageAndRetries",
+      "result": "passed",
+      "seconds": 2.48,
+      "log": "005-BotsTabUiTest-aHostsErrorShowsTheMessageAndRetries.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#noComputersExplainsHowToGetOne",
+      "result": "passed",
+      "seconds": 2.25,
+      "log": "006-BotsTabUiTest-noComputersExplainsHowToGetOne.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aHostsErrorOverAListedTreeKeepsTheTreeAndOffersARetry",
+      "result": "passed",
+      "seconds": 2.32,
+      "log": "007-BotsTabUiTest-aHostsErrorOverAListedTreeKeepsTheTreeAndOffersARetry.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#eachComputerHeaderSaysWhereTheComputerStands",
+      "result": "passed",
+      "seconds": 2.45,
+      "log": "008-BotsTabUiTest-eachComputerHeaderSaysWhereTheComputerStands.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#theConnectedComputerComesFirst",
+      "result": "passed",
+      "seconds": 2.27,
+      "log": "009-BotsTabUiTest-theConnectedComputerComesFirst.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#tappingAHeaderCollapsesItAndTappingACollapsedOneOpensIt",
+      "result": "passed",
+      "seconds": 2.31,
+      "log": "010-BotsTabUiTest-tappingAHeaderCollapsesItAndTappingACollapsedOneOpensIt.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#theDetailsButtonOpensTheComputerPageOfThatComputer",
+      "result": "passed",
+      "seconds": 2.29,
+      "log": "011-BotsTabUiTest-theDetailsButtonOpensTheComputerPageOfThatComputer.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aCollapsedComputerShowsNoRowsUnderIt",
+      "result": "passed",
+      "seconds": 2.32,
+      "log": "012-BotsTabUiTest-aCollapsedComputerShowsNoRowsUnderIt.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#connectedWithBotsNotYetDeliveredSaysLoading",
+      "result": "passed",
+      "seconds": 2.25,
+      "log": "013-BotsTabUiTest-connectedWithBotsNotYetDeliveredSaysLoading.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#anOldDesktopSaysItDoesNotSupportBots",
+      "result": "passed",
+      "seconds": 2.25,
+      "log": "014-BotsTabUiTest-anOldDesktopSaysItDoesNotSupportBots.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aComputerWithNoBotsSaysSo",
+      "result": "passed",
+      "seconds": 2.25,
+      "log": "015-BotsTabUiTest-aComputerWithNoBotsSaysSo.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aComputerNeverConnectedOffersToConnect",
+      "result": "passed",
+      "seconds": 2.3,
+      "log": "016-BotsTabUiTest-aComputerNeverConnectedOffersToConnect.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#anOfflineComputerWithNothingSavedSaysOfflineAndHowToFixIt",
+      "result": "passed",
+      "seconds": 2.25,
+      "log": "017-BotsTabUiTest-anOfflineComputerWithNothingSavedSaysOfflineAndHowToFixIt.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#anUnpairedComputerOffersToConnectAndPair",
+      "result": "passed",
+      "seconds": 2.34,
+      "log": "018-BotsTabUiTest-anUnpairedComputerOffersToConnectAndPair.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#savedRowsOfAnOnlineComputerCarryTheSavedNote",
+      "result": "passed",
+      "seconds": 2.3,
+      "log": "019-BotsTabUiTest-savedRowsOfAnOnlineComputerCarryTheSavedNote.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#savedRowsOfAnOfflineComputerSayTheirChatsCannotBeOpened",
+      "result": "passed",
+      "seconds": 2.31,
+      "log": "020-BotsTabUiTest-savedRowsOfAnOfflineComputerSayTheirChatsCannotBeOpened.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aComputerBeingDialledSaysSo",
+      "result": "passed",
+      "seconds": 2.25,
+      "log": "021-BotsTabUiTest-aComputerBeingDialledSaysSo.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aComputerThatWaitsForApprovalShowsTheCodeInsideItsSection",
+      "result": "passed",
+      "seconds": 2.28,
+      "log": "022-BotsTabUiTest-aComputerThatWaitsForApprovalShowsTheCodeInsideItsSection.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aDroppedLinkSaysItIsReconnecting",
+      "result": "passed",
+      "seconds": 2.24,
+      "log": "023-BotsTabUiTest-aDroppedLinkSaysItIsReconnecting.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aFailedConnectionShowsItsMessageAndARetry",
+      "result": "passed",
+      "seconds": 2.31,
+      "log": "024-BotsTabUiTest-aFailedConnectionShowsItsMessageAndARetry.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aRevokedPairingOffersToPairAgain",
+      "result": "passed",
+      "seconds": 2.26,
+      "log": "025-BotsTabUiTest-aRevokedPairingOffersToPairAgain.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aBotRowShowsItsNameDescriptionStatusAndWaitingCount",
+      "result": "passed",
+      "seconds": 2.34,
+      "log": "026-BotsTabUiTest-aBotRowShowsItsNameDescriptionStatusAndWaitingCount.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aBotThatNeedsTheUserSaysSoAndAnIdleOneIsQuiet",
+      "result": "passed",
+      "seconds": 2.3,
+      "log": "027-BotsTabUiTest-aBotThatNeedsTheUserSaysSoAndAnIdleOneIsQuiet.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aBotThatWaitsOnNobodyShowsNoWaitingBadge",
+      "result": "passed",
+      "seconds": 2.24,
+      "log": "028-BotsTabUiTest-aBotThatWaitsOnNobodyShowsNoWaitingBadge.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#tappingABotAsksToToggleIt",
+      "result": "passed",
+      "seconds": 2.31,
+      "log": "029-BotsTabUiTest-tappingABotAsksToToggleIt.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#botsAreListedByActivityThenName",
+      "result": "passed",
+      "seconds": 2.3,
+      "log": "030-BotsTabUiTest-botsAreListedByActivityThenName.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#anOpenBotOffersNewChatAboveItsChatsInTheHostsOrder",
+      "result": "passed",
+      "seconds": 2.33,
+      "log": "031-BotsTabUiTest-anOpenBotOffersNewChatAboveItsChatsInTheHostsOrder.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#tappingNewChatAsksForOneOnThatBot",
+      "result": "passed",
+      "seconds": 2.32,
+      "log": "032-BotsTabUiTest-tappingNewChatAsksForOneOnThatBot.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#newChatIsOffWhileTheLinkIsNotReady",
+      "result": "passed",
+      "seconds": 2.28,
+      "log": "033-BotsTabUiTest-newChatIsOffWhileTheLinkIsNotReady.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#newChatIsOffOnAnOfflineComputer",
+      "result": "passed",
+      "seconds": 2.29,
+      "log": "034-BotsTabUiTest-newChatIsOffOnAnOfflineComputer.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#newChatIsOffWhileOneIsBeingMade",
+      "result": "passed",
+      "seconds": 2.19,
+      "log": "035-BotsTabUiTest-newChatIsOffWhileOneIsBeingMade.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aChatThatCouldNotBeStartedSaysWhyUnderNewChat",
+      "result": "passed",
+      "seconds": 2.32,
+      "log": "036-BotsTabUiTest-aChatThatCouldNotBeStartedSaysWhyUnderNewChat.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#anOpenBotWhoseChatsLoadSaysSo",
+      "result": "passed",
+      "seconds": 2.29,
+      "log": "037-BotsTabUiTest-anOpenBotWhoseChatsLoadSaysSo.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#anOpenBotWhoseChatsFailedOffersARetry",
+      "result": "passed",
+      "seconds": 2.33,
+      "log": "038-BotsTabUiTest-anOpenBotWhoseChatsFailedOffersARetry.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aFailedListingKeepsTheChatsThatWereHeld",
+      "result": "passed",
+      "seconds": 2.32,
+      "log": "039-BotsTabUiTest-aFailedListingKeepsTheChatsThatWereHeld.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#anOpenBotWithNoChatsSaysSo",
+      "result": "passed",
+      "seconds": 2.63,
+      "log": "040-BotsTabUiTest-anOpenBotWithNoChatsSaysSo.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aBotThatIsGoneSaysSoAndOffersNoNewChat",
+      "result": "passed",
+      "seconds": 2.61,
+      "log": "041-BotsTabUiTest-aBotThatIsGoneSaysSoAndOffersNoNewChat.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#tappingAChatOpensIt",
+      "result": "passed",
+      "seconds": 2.62,
+      "log": "042-BotsTabUiTest-tappingAChatOpensIt.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aBlankChatTitleReadsAsUntitled",
+      "result": "passed",
+      "seconds": 2.63,
+      "log": "043-BotsTabUiTest-aBlankChatTitleReadsAsUntitled.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aChatShowsWhatItWaitsOnOrThatItRuns",
+      "result": "passed",
+      "seconds": 2.3,
+      "log": "044-BotsTabUiTest-aChatShowsWhatItWaitsOnOrThatItRuns.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#aBotShowsFiveChatsThenOffersTheRest",
+      "result": "passed",
+      "seconds": 2.51,
+      "log": "045-BotsTabUiTest-aBotShowsFiveChatsThenOffersTheRest.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#showingAllOffersToShowFewer",
+      "result": "passed",
+      "seconds": 2.44,
+      "log": "046-BotsTabUiTest-showingAllOffersToShowFewer.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsTabUiTest#fiveChatsOfferNothingMore",
+      "result": "passed",
+      "seconds": 2.29,
+      "log": "047-BotsTabUiTest-fiveChatsOfferNothingMore.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#phone_showsTheBarWithFourTabsAndSwitchesBetweenThem",
+      "result": "passed",
+      "seconds": 2.93,
+      "log": "048-TabShellUiTest-phone_showsTheBarWithFourTabsAndSwitchesBetweenThem.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#phone_hidesTheBarOnAPushedScreenAndBackBringsItBack",
+      "result": "passed",
+      "seconds": 2.76,
+      "log": "049-TabShellUiTest-phone_hidesTheBarOnAPushedScreenAndBackBringsItBack.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#phone_hidesTheBarWhileTheChatsDrawerIsOpenButOnlyOnChats",
+      "result": "passed",
+      "seconds": 2.73,
+      "log": "050-TabShellUiTest-phone_hidesTheBarWhileTheChatsDrawerIsOpenButOnlyOnChats.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#fullScreenOverlaysHideTheBar",
+      "result": "passed",
+      "seconds": 2.84,
+      "log": "051-TabShellUiTest-fullScreenOverlaysHideTheBar.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#badgesCountWaitingBotsAndUnreadTeamsCappedAt99",
+      "result": "passed",
+      "seconds": 2.49,
+      "log": "052-TabShellUiTest-badgesCountWaitingBotsAndUnreadTeamsCappedAt99.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#phone_hidesTheBarWhileTheKeyboardIsUp",
+      "result": "passed",
+      "seconds": 3.38,
+      "log": "053-TabShellUiTest-phone_hidesTheBarWhileTheKeyboardIsUp.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#phone_theBarPadsTheNavigationBarInsetSoTheContentDoesNotPadItAgain",
+      "result": "passed",
+      "seconds": 2.71,
+      "log": "054-TabShellUiTest-phone_theBarPadsTheNavigationBarInsetSoTheContentDoesNotPadItAgain.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#hiddenChatsKeepsItsTopBarComposedWithoutMeasuringItEvenAfterItWasVisible",
+      "result": "passed",
+      "seconds": 3.07,
+      "log": "055-TabShellUiTest-hiddenChatsKeepsItsTopBarComposedWithoutMeasuringItEvenAfterItWasVisible.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#chatsStaysComposedWhileAnotherTabIsSelected",
+      "result": "passed",
+      "seconds": 3.14,
+      "log": "056-TabShellUiTest-chatsStaysComposedWhileAnotherTabIsSelected.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#everyTabKeepsItsOwnStack",
+      "result": "passed",
+      "seconds": 3.19,
+      "log": "057-TabShellUiTest-everyTabKeepsItsOwnStack.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#retapOnATabRootScrollsItToTheTop",
+      "result": "passed",
+      "seconds": 2.49,
+      "log": "058-TabShellUiTest-retapOnATabRootScrollsItToTheTop.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#selectingAnotherTabDoesNotCountAsARetap",
+      "result": "passed",
+      "seconds": 2.57,
+      "log": "059-TabShellUiTest-selectingAnotherTabDoesNotCountAsARetap.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#back_onAnotherTabRootReturnsToChats",
+      "result": "passed",
+      "seconds": 2.58,
+      "log": "060-TabShellUiTest-back_onAnotherTabRootReturnsToChats.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#back_popsTheTabStackBeforeLeavingTheTab",
+      "result": "passed",
+      "seconds": 2.82,
+      "log": "061-TabShellUiTest-back_popsTheTabStackBeforeLeavingTheTab.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#back_neverReachesAChatsPageTheUserCannotSee",
+      "result": "passed",
+      "seconds": 2.89,
+      "log": "062-TabShellUiTest-back_neverReachesAChatsPageTheUserCannotSee.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#wide_backPopsTheVisibleTabBeforeReturningToChats",
+      "result": "passed",
+      "seconds": 2.67,
+      "log": "063-TabShellUiTest-wide_backPopsTheVisibleTabBeforeReturningToChats.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#openSettingsSelectsSettingsAndPublishesTheJumpOnce",
+      "result": "passed",
+      "seconds": 2.45,
+      "log": "064-TabShellUiTest-openSettingsSelectsSettingsAndPublishesTheJumpOnce.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#requestsForBotsAndTeamsSelectTheirTabs",
+      "result": "passed",
+      "seconds": 2.53,
+      "log": "065-TabShellUiTest-requestsForBotsAndTeamsSelectTheirTabs.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#wide_showsTheRailInsteadOfTheBar",
+      "result": "passed",
+      "seconds": 2.48,
+      "log": "066-TabShellUiTest-wide_showsTheRailInsteadOfTheBar.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#wide_keepsTheRailOnPushedScreensAndHidesItUnderOverlays",
+      "result": "passed",
+      "seconds": 2.6,
+      "log": "067-TabShellUiTest-wide_keepsTheRailOnPushedScreensAndHidesItUnderOverlays.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#wide_retapOnATabWithPushedScreensPopsToItsRoot",
+      "result": "passed",
+      "seconds": 2.59,
+      "log": "068-TabShellUiTest-wide_retapOnATabWithPushedScreensPopsToItsRoot.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#wide_retapOnChatsClosesItsPushedPages",
+      "result": "passed",
+      "seconds": 2.85,
+      "log": "069-TabShellUiTest-wide_retapOnChatsClosesItsPushedPages.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#breakpointIs840dp",
+      "result": "passed",
+      "seconds": 2.82,
+      "log": "070-TabShellUiTest-breakpointIs840dp.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#crossingTheBreakpointKeepsChatsAndTheSelectedTab",
+      "result": "passed",
+      "seconds": 3.13,
+      "log": "071-TabShellUiTest-crossingTheBreakpointKeepsChatsAndTheSelectedTab.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#theRootHasNoCloseNoDoneAndNoBackArrow",
+      "result": "passed",
+      "seconds": 2.4,
+      "log": "072-SettingsTabUiTest-theRootHasNoCloseNoDoneAndNoBackArrow.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#aPageHasABackArrowAndNothingElseToPress",
+      "result": "passed",
+      "seconds": 2.92,
+      "log": "073-SettingsTabUiTest-aPageHasABackArrowAndNothingElseToPress.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#depthFollowsThePagesAboveTheRoot",
+      "result": "passed",
+      "seconds": 3.05,
+      "log": "074-SettingsTabUiTest-depthFollowsThePagesAboveTheRoot.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#aJumpReplacesTheStackAndIsHandledOnce",
+      "result": "passed",
+      "seconds": 3.53,
+      "log": "075-SettingsTabUiTest-aJumpReplacesTheStackAndIsHandledOnce.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#aJumpToTheRootPopsEverything",
+      "result": "passed",
+      "seconds": 3.67,
+      "log": "076-SettingsTabUiTest-aJumpToTheRootPopsEverything.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#aPageThisBuildDoesNotHaveLeavesTheStackAlone",
+      "result": "passed",
+      "seconds": 2.87,
+      "log": "077-SettingsTabUiTest-aPageThisBuildDoesNotHaveLeavesTheStackAlone.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#theArrowOnAJumpedPageLeavesForTheOriginWithTheStackCleared",
+      "result": "passed",
+      "seconds": 3.44,
+      "log": "078-SettingsTabUiTest-theArrowOnAJumpedPageLeavesForTheOriginWithTheStackCleared.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#theSystemBackOnAJumpedPageLeavesForTheOriginToo",
+      "result": "passed",
+      "seconds": 3.44,
+      "log": "079-SettingsTabUiTest-theSystemBackOnAJumpedPageLeavesForTheOriginToo.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#deeperPagesPopBeforeTheOriginIsLeft",
+      "result": "passed",
+      "seconds": 3.41,
+      "log": "080-SettingsTabUiTest-deeperPagesPopBeforeTheOriginIsLeft.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#theRootAfterAJumpToItLeavesForTheOrigin",
+      "result": "passed",
+      "seconds": 2.47,
+      "log": "081-SettingsTabUiTest-theRootAfterAJumpToItLeavesForTheOrigin.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#aTabTapForgetsTheOrigin",
+      "result": "passed",
+      "seconds": 2.96,
+      "log": "082-SettingsTabUiTest-aTabTapForgetsTheOrigin.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#aSecondJumpReplacesTheOriginToo",
+      "result": "passed",
+      "seconds": 3.01,
+      "log": "083-SettingsTabUiTest-aSecondJumpReplacesTheOriginToo.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#tappingTheTabAgainPopsToTheRoot",
+      "result": "passed",
+      "seconds": 3.28,
+      "log": "084-SettingsTabUiTest-tappingTheTabAgainPopsToTheRoot.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#tappingTheTabAgainOnTheRootScrollsItToTheTop",
+      "result": "passed",
+      "seconds": 2.94,
+      "log": "085-SettingsTabUiTest-tappingTheTabAgainOnTheRootScrollsItToTheTop.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#phone_hasNoPageList",
+      "result": "passed",
+      "seconds": 2.77,
+      "log": "086-SettingsTabUiTest-phone_hasNoPageList.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#wide_showsThePageListBesideTheGeneralPageWithoutAClose",
+      "result": "passed",
+      "seconds": 2.9,
+      "log": "087-SettingsTabUiTest-wide_showsThePageListBesideTheGeneralPageWithoutAClose.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#wide_aPageFromTheListReplacesThePageOnTheRightInsteadOfStacking",
+      "result": "passed",
+      "seconds": 3.76,
+      "log": "088-SettingsTabUiTest-wide_aPageFromTheListReplacesThePageOnTheRightInsteadOfStacking.log"
+    },
+    {
+      "test": "com.lingxi.code.settings.SettingsTabUiTest#wide_aJumpAndItsOriginWorkLikeOnAPhone",
+      "result": "passed",
+      "seconds": 3.53,
+      "log": "089-SettingsTabUiTest-wide_aJumpAndItsOriginWorkLikeOnAPhone.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#conversationsAreGroupedIntoChannelsPeopleAndBotChatsEachNewestFirst",
+      "result": "passed",
+      "seconds": 2.79,
+      "log": "090-TeamsTabUiTest-conversationsAreGroupedIntoChannelsPeopleAndBotChatsEachNewestFirst.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#unreadCountsShowOnTheirRowsAndStopAtNinetyNinePlus",
+      "result": "passed",
+      "seconds": 2.38,
+      "log": "091-TeamsTabUiTest-unreadCountsShowOnTheirRowsAndStopAtNinetyNinePlus.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#nothingIsMarkedUnreadUntilEveryReadMarkerHasArrived",
+      "result": "passed",
+      "seconds": 2.32,
+      "log": "092-TeamsTabUiTest-nothingIsMarkedUnreadUntilEveryReadMarkerHasArrived.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#aRowOpensItsConversation",
+      "result": "passed",
+      "seconds": 2.36,
+      "log": "093-TeamsTabUiTest-aRowOpensItsConversation.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#aSectionHeaderCollapsesItsRowsAndKeepsTheirUnreadCount",
+      "result": "passed",
+      "seconds": 2.35,
+      "log": "094-TeamsTabUiTest-aSectionHeaderCollapsesItsRowsAndKeepsTheirUnreadCount.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#searchFiltersByTheRowLabelAndSaysWhenNothingMatches",
+      "result": "passed",
+      "seconds": 3.6,
+      "log": "095-TeamsTabUiTest-searchFiltersByTheRowLabelAndSaysWhenNothingMatches.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#anEmptyTeamOffersToStartAConversation",
+      "result": "passed",
+      "seconds": 2.62,
+      "log": "096-TeamsTabUiTest-anEmptyTeamOffersToStartAConversation.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#theNewMenuOffersMessageChannelAndBot",
+      "result": "passed",
+      "seconds": 3.28,
+      "log": "097-TeamsTabUiTest-theNewMenuOffersMessageChannelAndBot.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#theTeamChipOpensTheSwitcher",
+      "result": "passed",
+      "seconds": 2.67,
+      "log": "098-TeamsTabUiTest-theTeamChipOpensTheSwitcher.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#offlineShowsASavedMessagesBannerWithReconnect",
+      "result": "passed",
+      "seconds": 2.72,
+      "log": "099-TeamsTabUiTest-offlineShowsASavedMessagesBannerWithReconnect.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#noOfflineBannerFlashesBeforeTheDirectoryHasLoaded",
+      "result": "passed",
+      "seconds": 2.54,
+      "log": "100-TeamsTabUiTest-noOfflineBannerFlashesBeforeTheDirectoryHasLoaded.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#invalidServerDataStopsTheListInsteadOfShowingAPartialOne",
+      "result": "passed",
+      "seconds": 2.27,
+      "log": "101-TeamsTabUiTest-invalidServerDataStopsTheListInsteadOfShowingAPartialOne.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#longPressMarksAnUnreadConversationReadOnlyWhileOnline",
+      "result": "passed",
+      "seconds": 2.49,
+      "log": "102-TeamsTabUiTest-longPressMarksAnUnreadConversationReadOnlyWhileOnline.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#offlineAndReadConversationsOfferNoMarkRead",
+      "result": "passed",
+      "seconds": 2.36,
+      "log": "103-TeamsTabUiTest-offlineAndReadConversationsOfferNoMarkRead.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#aConversationBeingCreatedStaysVisibleWithoutShowingTheEmptyState",
+      "result": "passed",
+      "seconds": 2.27,
+      "log": "104-TeamsTabUiTest-aConversationBeingCreatedStaysVisibleWithoutShowingTheEmptyState.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#someoneElsesBotChatReplacesTheComposerWithAnExplanation",
+      "result": "passed",
+      "seconds": 2.21,
+      "log": "105-TeamsTabUiTest-someoneElsesBotChatReplacesTheComposerWithAnExplanation.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#aBotChatThatTheBotsAvailabilityHasNotConfirmedYetIsLocked",
+      "result": "passed",
+      "seconds": 2.22,
+      "log": "106-TeamsTabUiTest-aBotChatThatTheBotsAvailabilityHasNotConfirmedYetIsLocked.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#sendNeedsTextAndHandsTheTypedTextOverOnce",
+      "result": "passed",
+      "seconds": 3.11,
+      "log": "107-TeamsTabUiTest-sendNeedsTextAndHandsTheTypedTextOverOnce.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#anOversizedMessageShowsTheHintAndCannotBeSent",
+      "result": "passed",
+      "seconds": 2.35,
+      "log": "108-TeamsTabUiTest-anOversizedMessageShowsTheHintAndCannotBeSent.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#askingABotPicksItFromTheListAndKeepsItAsAChip",
+      "result": "passed",
+      "seconds": 3.44,
+      "log": "109-TeamsTabUiTest-askingABotPicksItFromTheListAndKeepsItAsAChip.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#aBotThatLeftTheChatBlocksSendingUntilTheChipIsRemoved",
+      "result": "passed",
+      "seconds": 2.64,
+      "log": "110-TeamsTabUiTest-aBotThatLeftTheChatBlocksSendingUntilTheChipIsRemoved.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#signedOutTheTabShowsTheGateAndSignInJumpsToAccountSettingsFromTeams",
+      "result": "passed",
+      "seconds": 2.6,
+      "log": "111-TeamsTabUiTest-signedOutTheTabShowsTheGateAndSignInJumpsToAccountSettingsFromTeams.log"
+    },
+    {
+      "test": "com.lingxi.code.teams.TeamsTabUiTest#aJoinCodeWaitsForSignInInsteadOfBeingConsumed",
+      "result": "passed",
+      "seconds": 2.23,
+      "log": "112-TeamsTabUiTest-aJoinCodeWaitsForSignInInsteadOfBeingConsumed.log"
+    }
+  ],
+  "counts": {
+    "passed": 112,
+    "skipped": 0,
+    "failed": 0,
+    "timeout": 0
+  }
+}

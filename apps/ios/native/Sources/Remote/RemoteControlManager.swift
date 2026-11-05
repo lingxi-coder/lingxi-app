@@ -18,6 +18,17 @@ final class RemoteControlManager {
     private(set) var sessions: [RemoteSessionSummaryFfi] = []
     private(set) var botDirectory = RemoteBotDirectory()
     private(set) var error: String?
+    let snapshots = BotsSnapshotStore()
+    private(set) var waitingChats = 0
+    @ObservationIgnored private var teardown: Task<Void, Never>?
+    @ObservationIgnored private var requestedHostID: String?
+    @ObservationIgnored private var watchingHosts = false
+    @ObservationIgnored private var foreground = true
+    @ObservationIgnored private var lifecycleEpoch = 0
+    @ObservationIgnored private var lifecycleTask: Task<Void, Never>?
+    @ObservationIgnored private var botsVisible = false
+    @ObservationIgnored private var sessionOpen = false
+    @ObservationIgnored private var autoConnectPending = true
     @ObservationIgnored private var client: IosRemoteControlClient?
     @ObservationIgnored private var generation: UInt64 = 0
     @ObservationIgnored private let connectionEpoch = RemoteAppRequestEpoch()
@@ -46,8 +57,12 @@ final class RemoteControlManager {
         self.mediaHostInitializationError = mediaHostInitializationError
     }
 
-    func configure(uid: String?) async {
-        guard uid != self.uid || client == nil else { return }
+    func configure(uid: String?, watchHosts: Bool = true) async {
+        if uid == self.uid, client != nil {
+            if watchHosts { await startWatchingHosts() }
+            return
+        }
+        teardown?.cancel(); teardown = nil
         generation &+= 1
         connectionFence.reset()
         connectionEpoch.reset()
@@ -59,15 +74,21 @@ final class RemoteControlManager {
         hosts = []
         hostsLoaded = false
         connection = nil
+        requestedHostID = nil
         sessions = []
         botDirectory.removeAll()
         shownBots.removeAll()
         error = nil
+        waitingChats = 0
+        watchingHosts = false
+        autoConnectPending = true
         for source in sources.values { source.value?.invalidate() }
         sources.removeAll()
         previous?.setBotsListener(listener: nil)
         await previous?.stopWatchingHosts()
         await previous?.disconnect()
+        guard mine == generation, !Task.isCancelled else { return }
+        await snapshots.configure(uid: uid)
         guard let uid, mine == generation, !Task.isCancelled else { return }
         guard let mediaHostComposition else {
             self.error = mediaHostInitializationError
@@ -91,7 +112,7 @@ final class RemoteControlManager {
             created.setBotsListener(listener: RemoteBotsListener(manager: self, generation: mine))
             created.setPushInstallationId(id: PushRegistration.shared.remoteInstallationId)
             client = created
-            await created.watchHosts()
+            if watchHosts || botsVisible { await startWatchingHosts() }
         } catch {
             guard mine == generation else { return }
             self.error = String(localized: "remote_hosts_error")
@@ -139,6 +160,8 @@ final class RemoteControlManager {
     }
 
     func connect(_ hostID: String) async throws {
+        guard foreground else { throw RemoteFfiError.NotConnected }
+        teardown?.cancel(); teardown = nil
         let client = try activeClient()
         let intent = connectionFence.begin(hostID)
         connectionEpoch.advance()
@@ -146,9 +169,10 @@ final class RemoteControlManager {
             sessions = []
             botDirectory.removeAll()
             shownBots.removeAll()
-            for source in sources.values { source.value?.invalidate() }
-            sources.removeAll()
+            let obsolete = sources.filter { $0.value.value?.hostID != hostID }
+            for (id, source) in obsolete { source.value?.invalidate(); sources.removeValue(forKey: id) }
         }
+        requestedHostID = hostID
         // Serialize native connects as well as calls: an older connect must
         // never replace the host after a newer selection has become usable.
         await connectionSerial.acquire()
@@ -172,6 +196,97 @@ final class RemoteControlManager {
             }
             throw error
         }
+    }
+
+    /// Presence remains cheap and independent of the one live connection.
+    private func startWatchingHosts() async {
+        guard foreground, !watchingHosts, let client else { return }
+        watchingHosts = true
+        await client.watchHosts()
+    }
+
+    func setSelected(_ selected: Bool) { setPresentation(selected: selected, sessionOpen: sessionOpen) }
+
+    func setPresentation(selected: Bool, sessionOpen: Bool) {
+        botsVisible = selected
+        self.sessionOpen = sessionOpen
+        teardown?.cancel(); teardown = nil
+        if selected {
+            Task { await startWatchingHosts(); autoConnectIfReady() }
+        } else if !sessionOpen {
+            teardown = Task { [weak self] in
+                do { try await Task.sleep(for: BotsLogic.connectionGrace) } catch { return }
+                guard let self, !self.botsVisible, !self.sessionOpen else { return }
+                await self.closeConnection()
+            }
+        }
+    }
+
+    func setForeground(_ active: Bool) async {
+        foreground = active
+        lifecycleEpoch += 1
+        let epoch = lifecycleEpoch, mine = generation, previous = lifecycleTask
+        let task = Task { [weak self] in
+            await previous?.value
+            guard let self, epoch == self.lifecycleEpoch, mine == self.generation else { return }
+            if active {
+                self.autoConnectPending = true
+                if self.botsVisible {
+                    await self.startWatchingHosts()
+                    guard epoch == self.lifecycleEpoch, mine == self.generation else { return }
+                    let openSources = self.sources.values.compactMap(\.value)
+                    if openSources.isEmpty { self.autoConnectIfReady() }
+                    else {
+                        for source in openSources {
+                            Task { [weak self] in
+                                guard let self, self.foreground, epoch == self.lifecycleEpoch, mine == self.generation else { return }
+                                await source.start()
+                            }
+                        }
+                    }
+                }
+            } else {
+                self.teardown?.cancel(); self.teardown = nil
+                self.watchingHosts = false
+                let closingClient = self.client
+                await self.closeConnection(preservingSessions: true)
+                guard epoch == self.lifecycleEpoch, mine == self.generation else { return }
+                await closingClient?.stopWatchingHosts()
+                guard epoch == self.lifecycleEpoch, mine == self.generation else { return }
+                await self.snapshots.flush()
+            }
+        }
+        lifecycleTask = task
+        await task.value
+    }
+
+    private func autoConnectIfReady() {
+        guard foreground, botsVisible, hostsLoaded, autoConnectPending else { return }
+        autoConnectPending = false
+        let activeHost = requestedHostID ?? connection.flatMap { $0.phase == .idle ? nil : $0.hostId }
+        guard let target = BotsLogic.autoConnectTarget(signedIn: uid != nil, connectedHostID: activeHost,
+            lastHostID: snapshots.lastHostID, hosts: hosts.map(BotsLogic.Host.init)) else { return }
+        Task { try? await connect(target) }
+    }
+
+    func closeConnection(preservingSessions: Bool = false) async {
+        requestedHostID = nil
+        connectionFence.reset()
+        connectionEpoch.advance()
+        let mine = generation, closingClient = client
+        if preservingSessions {
+            for source in sources.values { source.value?.suspendConnection() }
+        } else {
+            for source in sources.values { source.value?.invalidate() }
+            sources.removeAll()
+        }
+        shownBots.removeAll()
+        sessions = []; botDirectory.removeAll(); connection = nil; waitingChats = 0
+        await connectionSerial.acquire()
+        defer { connectionSerial.release() }
+        await sessionRequestDrain.waitUntilEmpty()
+        guard mine == generation, requestedHostID == nil, self.client === closingClient else { return }
+        await closingClient?.disconnect()
     }
 
     private func appRequestContext(hostID: String) throws -> (IosRemoteControlClient, UInt64, UInt64) {
@@ -222,11 +337,14 @@ final class RemoteControlManager {
     }
     func repair(_ hostID: String) async throws { try await activeClient().repairHost(hostId: hostID) }
     func forget(_ hostID: String) async {
+        let mine = generation, owner = uid
         let client = client
         let currentHostID = connection?.phase == .idle ? nil : connection?.hostId
         await connectionEpoch.forget(hostID: hostID, currentHostID: currentHostID) {
             await client?.forgetHost(hostId: hostID)
         }
+        guard mine == generation, owner == uid else { return }
+        await snapshots.forget(hostID)
     }
     func nudge() async {
         client?.setPushInstallationId(id: PushRegistration.shared.remoteInstallationId)
@@ -234,13 +352,14 @@ final class RemoteControlManager {
     }
 
     func follow(_ source: RemoteConversationSource) async throws {
+        guard foreground else { throw RemoteFfiError.NotConnected }
         let client = try activeClient()
         let mine = generation
         try await connect(source.hostID)
         // Attachment and detachment must not race a host switch or each other.
         await connectionSerial.acquire()
         defer { connectionSerial.release() }
-        guard mine == generation, !Task.isCancelled, (try? activeClient()) === client,
+        guard foreground, mine == generation, !Task.isCancelled, (try? activeClient()) === client,
               connectionFence.requestedHostID == source.hostID, !connectionFence.admissionClosed else { throw CancellationError() }
         sources[source.sessionID] = SourceReference(source)
         do {
@@ -276,16 +395,19 @@ final class RemoteControlManager {
     /// connection, so what a replaced connection held is gone, and this is what activates them again.
     func showBot(_ key: RemoteBotKey) async throws {
         let mine = generation
-        try await connect(key.hostID)
+        guard connection?.hostId == key.hostID, connection?.phase == .ready else { throw RemoteFfiError.NotConnected }
+        let epoch = connectionEpoch.value
         guard mine == generation, !Task.isCancelled else { throw CancellationError() }
         let client = try activeClient()
         guard shownBots.insert(key).inserted else { return }
         do { try await client.activateBotThreads(botId: key.botID) } catch {
-            shownBots.remove(key)
+            if mine == generation, epoch == connectionEpoch.value { shownBots.remove(key) }
             throw error
         }
         // The screen left while the call was on its way, and its `hideBot` found nothing to undo.
-        if !shownBots.contains(key) { client.deactivateBotThreads(botId: key.botID) }
+        if mine == generation, epoch == connectionEpoch.value, !shownBots.contains(key) {
+            client.deactivateBotThreads(botId: key.botID)
+        }
     }
 
     /// The Bot's screen is gone.
@@ -297,20 +419,37 @@ final class RemoteControlManager {
     /// List the Bot's chats again: the client has no call for it, so the screen is taken off and put on.
     func reloadBot(_ key: RemoteBotKey) async throws {
         guard shownBots.contains(key) else { return try await showBot(key) }
+        guard connection?.hostId == key.hostID, connection?.phase == .ready else { throw RemoteFfiError.NotConnected }
         let client = try activeClient()
+        let mine = generation, epoch = connectionEpoch.value
         client.deactivateBotThreads(botId: key.botID)
         do { try await client.activateBotThreads(botId: key.botID) } catch {
-            shownBots.remove(key)
+            if mine == generation, epoch == connectionEpoch.value { shownBots.remove(key) }
             throw error
         }
-        if !shownBots.contains(key) { client.deactivateBotThreads(botId: key.botID) }
+        if mine == generation, epoch == connectionEpoch.value, !shownBots.contains(key) { client.deactivateBotThreads(botId: key.botID) }
     }
 
     /// Start a chat with the Bot and return its session id, for the session screen to follow.
     func createBotChat(_ key: RemoteBotKey) async throws -> String {
-        let client = try activeClient()
-        guard connection?.hostId == key.hostID else { throw RemoteFfiError.NotConnected }
-        return try await client.createBotThread(botId: key.botID)
+        let (client, mine, epoch) = try appRequestContext(hostID: key.hostID)
+        let session = try await client.createBotThread(botId: key.botID)
+        try checkAppRequest(hostID: key.hostID, generation: mine, epoch: epoch)
+        return session
+    }
+
+    func waitForReady(_ hostID: String) async throws {
+        let mine = generation
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(120))
+        while clock.now < deadline {
+            try Task.checkCancellation()
+            guard mine == generation, requestedHostID == hostID else { throw CancellationError() }
+            if connection?.hostId == hostID, connection?.phase == .ready { return }
+            if connection?.hostId == hostID, connection?.phase == .failed || connection?.phase == .idle { throw RemoteFfiError.NotConnected }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw RemoteFfiError.NotConnected
     }
 
     /// The Bot a chat belongs to, when this connection has been told.
@@ -319,6 +458,7 @@ final class RemoteControlManager {
     }
 
     func close() async {
+        teardown?.cancel(); teardown = nil
         generation &+= 1
         connectionFence.reset()
         connectionEpoch.reset()
@@ -333,25 +473,30 @@ final class RemoteControlManager {
         botDirectory.removeAll()
         shownBots.removeAll()
         connection = nil
+        waitingChats = 0
+        requestedHostID = nil
         previous?.setBotsListener(listener: nil)
         await previous?.stopWatchingHosts()
         await previous?.disconnect()
     }
 
     fileprivate func receive(_ state: RemoteConnectionStateFfi, generation: UInt64) {
-        guard generation == self.generation else { return }
+        guard generation == self.generation, state.hostId == requestedHostID else { return }
         if state.phase == .ready { connectionFence.observeReadyHost(state.hostId) }
         connectionEpoch.observe(hostID: state.hostId, ready: state.phase == .ready)
         if state.hostId != connection?.hostId || state.phase != .ready || connection?.phase != .ready {
             connectionEpoch.advance()
         }
         connection = state
+        if state.phase == .ready { snapshots.connected(state.hostId) }
+        updateBadge()
     }
     fileprivate func receive(_ hosts: [RemoteHostFfi], generation: UInt64) {
         guard generation == self.generation else { return }
         self.hosts = hosts
         hostsLoaded = true
         error = nil
+        autoConnectIfReady()
     }
     fileprivate func hostsFailed(generation: UInt64) {
         guard generation == self.generation else { return }
@@ -366,12 +511,35 @@ final class RemoteControlManager {
         sources[update.sessionId]?.value?.receive(update)
     }
     func receive(bots state: RemoteBotsStateFfi, hostID: String, generation: UInt64) {
-        guard generation == self.generation else { return }
+        guard generation == self.generation, hostID == connection?.hostId else { return }
         botDirectory.set(state, host: hostID)
+        if case let .bots(bots) = state {
+            snapshots.receive(bots: bots.map(BotsItem.init), hostID: hostID, nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+        }
+        updateBadge()
     }
     func receive(botThreads state: RemoteBotThreadsStateFfi, hostID: String, botID: String, generation: UInt64) {
-        guard generation == self.generation else { return }
+        guard generation == self.generation, hostID == connection?.hostId else { return }
         botDirectory.set(state, host: hostID, bot: botID)
+        if let chats = state.threads {
+            snapshots.receive(chats: chats.map(BotsChat.init), hostID: hostID, botID: botID,
+                              nowMs: UInt64(Date().timeIntervalSince1970 * 1000))
+        }
+    }
+
+    var connectedHostID: String? {
+        guard let connection else { return nil }
+        switch connection.phase {
+        case .ready, .reconnecting: return connection.hostId
+        case .connecting: return connection.everReady ? connection.hostId : nil
+        default: return nil
+        }
+    }
+
+    private func updateBadge() {
+        guard let state = connection, state.phase == .ready || state.phase == .reconnecting,
+              case let .bots(bots) = botDirectory.bots(host: state.hostId) else { waitingChats = 0; return }
+        waitingChats = TabLogic.botsBadgeCount(waitingThreads: bots.map { Int($0.waitingThreads) })
     }
 }
 

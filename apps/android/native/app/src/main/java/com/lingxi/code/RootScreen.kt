@@ -88,6 +88,10 @@ import com.lingxi.code.computeruse.ComputerUseUiState
 import com.lingxi.code.connectivity.rememberOnlineState
 import com.lingxi.code.connectivity.shouldShowOfflineBanner
 import com.lingxi.code.cron.AndroidCronRepository
+import com.lingxi.code.cron.CronPage
+import com.lingxi.code.cron.CronPageRoute
+import com.lingxi.code.tabs.AppTab
+import com.lingxi.code.tabs.OnTabReselected
 import com.lingxi.code.cron.CronRunStatus
 import com.lingxi.code.cron.CronSchedulingMode
 import com.lingxi.code.account.AccountViewModel
@@ -278,31 +282,41 @@ internal fun shouldTransferNewDraft(
  * hosts the 对话/项目/定时 [DrawerContent] (the Android analog of the iOS
  * `RootView`, which overlaid the `Drawer` over `ChatView`). The conversation's
  * menu button opens the drawer; selecting a chat/session closes it and switches
- * the [ChatViewModel] to that session; the account row invokes [onOpenSettings]
- * (the settings nav graph is wired in a later phase). Drawer + conversation read
+ * the [ChatViewModel] to that session; the account row invokes [onOpenAccount]
+ * (Settings is a tab of the shell). Drawer + conversation read
  * the same hoisted state, and the system back gesture closes an open drawer
  * (handled by [ModalNavigationDrawer]).
  *
- * @param onOpenSettings opens the settings surface — a stub until A6 lands.
+ * This is the Chats tab of the app shell: it is always composed (it owns the live engine), reports
+ * its pushed pages, drawer and full-screen overlays through [onChromeChanged] so the shell can
+ * decide whether its tab bar shows, and asks the shell for every other tab through the callbacks.
+ *
+ * @param onOpenSettings opens the Settings tab (the shell remembers Chats as the way back).
  */
 @Composable
 @OptIn(ExperimentalCoroutinesApi::class)
 fun RootScreen(
     isDark: Boolean,
+    tabState: com.lingxi.code.tabs.TabShellState? = null,
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit = {},
+    /** The drawer's account row: Settings / Account, with Back returning to Chats. */
+    onOpenAccount: () -> Unit = { onOpenSettings() },
     onOpenModelSettings: () -> Unit = {},
     onOpenPermissionSettings: () -> Unit = { onOpenSettings() },
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     onOpenComputerUseSettings: () -> Unit = { onOpenSettings() },
     onOpenVoiceSettings: () -> Unit = { onOpenSettings() },
-    onOpenCronSettings: (String?) -> Unit = { onOpenSettings() },
-    /** Open the scheduled-task page on a new task prefilled with the given prompt. */
-    onOpenCronCreate: (prompt: String) -> Unit = { onOpenCronSettings(null) },
     onOpenTerminal: (sessionId: String, initCommand: String?, cwd: String, ownerKey: String) -> Unit = { _, _, _, _ -> },
-    /** Open the Remote Control screens, which the host draws above this one. */
-    onOpenRemoteControl: () -> Unit = {},
-    onOpenTeams: () -> Unit = {},
+    /** Select the Bots tab (the Apps page's "browse apps shared by a computer"). */
+    onOpenBotsTab: () -> Unit = {},
+    /** A scheduled run's session was chosen on the scheduled-task page: the host opens it in the chat. */
+    onOpenScheduledSession: (com.lingxi.code.cron.CronRunRecord) -> Unit = {},
+    /**
+     * What the tab shell needs for its bar rule: how many pages are pushed over the chat, whether the
+     * phone drawer is open or opening, and whether a full-screen overlay (a running app, the voice flow) covers it.
+     */
+    onChromeChanged: (pushedPages: Int, drawerOpen: Boolean, fullScreenOverlay: Boolean) -> Unit = { _, _, _ -> },
     modelSetupRequired: Boolean = false,
     // FlowMode (心流) profile bits, read from the persisted AppearancePrefs and
     // passed down so the voice-orb overlay can label itself + gate its text input.
@@ -1362,10 +1376,12 @@ fun RootScreen(
         preparedAuthoringGrant: com.lingxi.code.project.PreparedAuthoringGrant? = null,
         authoringIntent: com.lingxi.code.apps.AuthoringIntent? = null,
         onActivated: (ChatViewModel, Boolean) -> Unit = { _, _ -> },
+        presentationIsCurrent: () -> Boolean = { true },
     ): Boolean {
+        fun navigationIsCurrent() = navigationIntent == navigationSequence.get() && presentationIsCurrent()
         return try {
             val destination = target ?: SessionRef("new", resources.getString(R.string.chat_new_conversation))
-            if (viewModel != null || navigationIntent != navigationSequence.get()) return false
+            if (viewModel != null || !navigationIsCurrent()) return false
             val sessionId = destination.id.takeUnless { newSession || it == "new" }
             if (requireSelectedTranscript && (sessionId == null || selectedTranscriptPath?.startsWith('/') != true)) return false
             fun savedPathMatchesSelection(): Boolean = !requireSelectedTranscript || (sessionId != null &&
@@ -1413,10 +1429,10 @@ fun RootScreen(
                         }
                         val projectId = (engineScope as? ConversationScope.Project)?.projectId
                         val stillSelected = {
-                            navigationIntent == navigationSequence.get() && sessionHost.selected.value === retained.viewModel
+                            navigationIsCurrent() && sessionHost.selected.value === retained.viewModel
                         }
                         val selected = projectStore.publishRetainedActive(projectId, allowCommit = {
-                            navigationIntent == navigationSequence.get() && retainedAuthoringMatches() && savedPathMatchesSelection() && sessionHost.isRetainedLeaseCurrent(
+                            navigationIsCurrent() && retainedAuthoringMatches() && savedPathMatchesSelection() && sessionHost.isRetainedLeaseCurrent(
                                 retained, engineScope, sessionModeOverride, sessionId, expectedRuntimeGeneration,
                                 selectedTranscriptPath.takeIf { requireSelectedTranscript })
                         }) {
@@ -1443,7 +1459,7 @@ fun RootScreen(
                         fencedSource?.releaseAuthoringSelection()
                         sessionHost.release(retained)
                     }
-                    if (navigationIntent != navigationSequence.get()) return false
+                    if (!navigationIsCurrent()) return false
                 }
                 // A mismatching retained owner must not be reacquired through the cold path.
                 if (requireSelectedTranscript && sessionHost.find(engineScope, sessionId) != null) return false
@@ -1459,10 +1475,10 @@ fun RootScreen(
             data class PreparedTarget(val source: ConversationSource, val session: SessionRef, val path: String?)
             com.lingxi.code.conversation.withPreparedNavigation(
                 mutex = navigationMutex,
-                isCurrent = { navigationIntent == navigationSequence.get() },
+                isCurrent = { navigationIsCurrent() },
                 acquire = {
                     sessionHost.acquire(engineScope, sessionModeOverride, sessionId?.let { destination }, reconnectToken,
-                        expectedRuntimeGeneration, isCurrent = { navigationIntent == navigationSequence.get() }) {
+                        expectedRuntimeGeneration, isCurrent = { navigationIsCurrent() }) {
                         val indexedPath = sessionId?.let { id ->
                             com.lingxi.code.conversation.sessionTranscriptPath(engineScope, id, sessionModeOverride,
                                 projectStore.state.value, cronRepository.state.value.generatedSessions)
@@ -1474,7 +1490,7 @@ fun RootScreen(
                                 grant.identity.projectId == engineScope.projectId &&
                                 project?.workspace?.guestPath == grant.identity.guestPath &&
                                 project?.workspace?.hostPath == grant.identity.hostPath) { "Authoring source changed" }
-                            checkNotNull(grant.consume(grant.identity, navigationIntent, navigationIntent == navigationSequence.get())) {
+                            checkNotNull(grant.consume(grant.identity, navigationIntent, navigationIsCurrent())) {
                                 "Authoring source selection expired"
                             }
                         }
@@ -1535,22 +1551,22 @@ fun RootScreen(
                     val owner = lease.viewModel
                     val source = prepared.source
                     val confirmed = prepared.session
-                    if (owner.engineSource.value !== source || navigationIntent != navigationSequence.get() || !savedPathMatchesSelection()) return@commit false
+                    if (owner.engineSource.value !== source || !navigationIsCurrent() || !savedPathMatchesSelection()) return@commit false
                     if (requireSelectedTranscript && !com.lingxi.code.conversation.selectedTranscriptPathMatches(
                             selectedTranscriptPath, source.recoverySpec?.transcriptPath)) return@commit false
-                    if (navigationIntent != navigationSequence.get() || !validateOwnerIndexes()) return@commit false
+                    if (!navigationIsCurrent() || !validateOwnerIndexes()) return@commit false
                     if (projectStore.state.value.storageUnavailable ||
                         !scopeStore.claimSessionOwner(confirmed.id, engineScope.persistenceKey(), sessionModeOverride) {
-                            scopeStateValid == true && !projectStore.state.value.storageUnavailable && navigationIntent == navigationSequence.get()
+                            scopeStateValid == true && !projectStore.state.value.storageUnavailable && navigationIsCurrent()
                         }) return@commit false
                     sessionHost.register(owner, engineScope, sessionModeOverride)
                     ownerAdmitted = true
                     kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                        if (projectStore.state.value.storageUnavailable || navigationIntent != navigationSequence.get()) return@withContext
+                        if (projectStore.state.value.storageUnavailable || !navigationIsCurrent()) return@withContext
                         if (newSession && preparedAuthoringGrant != null) {
                             check(projectStore.recordStartedSession((engineScope as ConversationScope.Project).projectId,
                                 confirmed.id, confirmed.title, sessionModeOverride, transcriptPath = prepared.path,
-                                allowCommit = { navigationIntent == navigationSequence.get() }, markActive = { false })) {
+                                allowCommit = { navigationIsCurrent() }, markActive = { false })) {
                                 "Unable to save the authoring session"
                             }
                         }
@@ -1562,25 +1578,25 @@ fun RootScreen(
                         val previousMode = previousOwner.state.value.sessionMode ?: activeSessionMode
                         try {
                             val persisted = projectStore.persistActive((engineScope as? ConversationScope.Project)?.projectId) {
-                                navigationIntent == navigationSequence.get()
+                                navigationIsCurrent()
                             }
-                            if (navigationIntent != navigationSequence.get()) {
+                            if (!navigationIsCurrent()) {
                                 projectStore.persistActive(previousProject) { sessionHost.selected.value === previousOwner }
                                 return@withContext
                             }
                             if (!scopeStore.persistActiveSelection(engineScope.persistenceKey(), sessionModeOverride) {
-                                    scopeStateValid == true && !projectStore.state.value.storageUnavailable && navigationIntent == navigationSequence.get()
+                                    scopeStateValid == true && !projectStore.state.value.storageUnavailable && navigationIsCurrent()
                                 }) {
                                 runCatching { projectStore.persistActive(previousProject) { sessionHost.selected.value === previousOwner } }
                                 return@withContext
                             }
-                            if (navigationIntent != navigationSequence.get()) {
+                            if (!navigationIsCurrent()) {
                                 scopeStore.persistActiveSelection(previousScope.persistenceKey(), previousMode) { sessionHost.selected.value === previousOwner }
                                 projectStore.persistActive(previousProject) { sessionHost.selected.value === previousOwner }
                                 return@withContext
                             }
                             val published = synchronized(com.lingxi.code.conversation.SessionAdmissionGate.lock) {
-                                if (!projectStore.publishActive(persisted, allowCommit = { navigationIntent == navigationSequence.get() }) {
+                                if (!projectStore.publishActive(persisted, allowCommit = { navigationIsCurrent() }) {
                                         sessionHost.activate(lease)
                                         onActivated(owner, false)
                                     }) false
@@ -1617,7 +1633,7 @@ fun RootScreen(
                             runCatching {
                                 projectStore.recordStartedSession((engineScope as? ConversationScope.Project)?.projectId,
                                     confirmed.id, confirmed.title, sessionModeOverride, transcriptPath = prepared.path,
-                                    allowCommit = { navigationIntent == navigationSequence.get() || owner.state.value.requiresBackgroundExecution ||
+                                    allowCommit = { navigationIsCurrent() || owner.state.value.requiresBackgroundExecution ||
                                         owner.state.value.messages.any { it.role == com.lingxi.code.model.Role.User } },
                                     markActive = { sessionHost.selected.value === owner })
                             }.onFailure { owner.reportHostError(it.message.orEmpty()) }
@@ -2272,6 +2288,8 @@ fun RootScreen(
     var projectPageId by rememberSaveable { mutableStateOf<String?>(null) }
     // 应用: the page, one app's page and the running app, each drawn over the last.
     var appsPageOpen by rememberSaveable { mutableStateOf(false) }
+    // 定时任务 is a page of the chat (decision D14), not a Settings page.
+    var cronPage by rememberSaveable(stateSaver = CronPageRoute.Saver) { mutableStateOf<CronPageRoute?>(null) }
     var marketInstallId by rememberSaveable { mutableStateOf<String?>(null) }
     var localAppDetailsId by rememberSaveable { mutableStateOf<String?>(null) }
     var runtimeAppId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -2352,6 +2370,7 @@ fun RootScreen(
                     if (parts.first() !in setOf("project", "apps", "market")) {
                         appPageSequence.incrementAndGet()
                         projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketInstallId = null; localAppDetailsId = null; sessionPanelOpen = false
+                        projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketInstallId = null; localAppDetailsId = null; sessionPanelOpen = false; cronPage = null
                     }
                     if (parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal", "runtime", "import") && link.params["workspace"] != null) {
                         val targetScope = resolveLinkedScope(link.params["workspace"])
@@ -2363,7 +2382,9 @@ fun RootScreen(
                         }
                     }
                     when (parts.first()) {
-                        "settings", "provider", "extensions", "cron", "terminal" -> onDeepLinkNativeReady(link, currentEngineSource)
+                        "settings", "provider", "extensions", "terminal" -> onDeepLinkNativeReady(link, currentEngineSource)
+                        // cron/run/<id> and cron/job/<id> open the scheduled-task page over the chat.
+                        "cron" -> cronPage = if (parts[1] == "run") CronPageRoute.Run(id) else CronPageRoute.task(id)
                         "session" -> {
                             val targetScope = resolveScope() ?: error(resources.getString(R.string.deep_link_conversation_ambiguous))
                             val rows = when (targetScope) {
@@ -2658,11 +2679,14 @@ fun RootScreen(
         val owner = chatViewModel
         val navigation = navigationSequence.get()
         val pageNavigation = appPageSequence.get()
+        val tabRevision = tabState?.selectionRevision
         return object : com.lingxi.code.apps.AppAuthoringOperationHost {
             override fun <T> launch(work: suspend () -> T, complete: (Result<T>, Boolean) -> Unit) {
                 sessionHost.launchAuthoringOperation(work,
                     isCurrent = { rootCompositionAlive.get() && navigation == navigationSequence.get() && pageNavigation == appPageSequence.get() &&
-                        sessionHost.selected.value === owner && pageIsVisible() },
+                        sessionHost.selected.value === owner &&
+                        (tabState == null || (tabState.selected == com.lingxi.code.tabs.AppTab.Chats && tabRevision == tabState.selectionRevision)) &&
+                        pageIsVisible() },
                     hiddenFailure = { failure -> owner.reportHostError(if (com.lingxi.code.apps.isAppDevelopmentCodeRequired(failure))
                         resources.getString(R.string.local_app_development_requires_code) else failure.message ?: "App operation failed") }, complete = complete)
             }
@@ -2678,6 +2702,9 @@ fun RootScreen(
             return
         }
         val intent = nextNavigationIntent()
+        val tabRevision = tabState?.selectionRevision
+        fun presentationIsCurrent() = intent == navigationSequence.get() &&
+            (tabState == null || (tabState.selected == com.lingxi.code.tabs.AppTab.Chats && tabRevision == tabState.selectionRevision))
         scope.launch {
             var activatedOwner: ChatViewModel? = null
             var activatedRetained = false
@@ -2694,7 +2721,7 @@ fun RootScreen(
                 }
                 var generatedApp: com.lingxi.code.apps.AppRecord? = null
                 var generated = sourceRequest?.let { request ->
-                    if (intent != navigationSequence.get()) return@launch
+                    if (!presentationIsCurrent()) return@launch
                     check(request.operation in setOf("create", "restore", "remix", "bind") &&
                         projectStore.state.value.projects.any { it.record.id == request.projectId && it.record.authoringIntentId == request.selectionId }) {
                         "应用源码选择已失效。"
@@ -2709,7 +2736,7 @@ fun RootScreen(
                                     restored.directory
                                 }
                             }
-                        }, navigationIsCurrent = { intent == navigationSequence.get() },
+                        }, navigationIsCurrent = { presentationIsCurrent() },
                     ) ?: return@launch
                 }
                 val effectiveAppId = com.lingxi.code.apps.authoringResultAppId(generatedApp, appId)
@@ -2760,12 +2787,12 @@ fun RootScreen(
                     intentStore.saveRequest(request, entryMode)
                     if (existing == null) projectStore.createAuthoringPlaceholder(name, SessionMode.Code, projectId, request.selectionId)
                     else projectStore.registerAuthoringWorkspace(name, directory, SessionMode.Code, projectId, request.selectionId) {
-                        intent == navigationSequence.get()
+                        presentationIsCurrent()
                     }
-                    check(intent == navigationSequence.get()) { "应用源码选择已失效。" }
+                    check(presentationIsCurrent()) { "应用源码选择已失效。" }
                     generated = com.lingxi.code.apps.awaitAdmittedAuthoringSource(
                         submit = { localApps.bindAuthoringSource(request, entryMode) },
-                        navigationIsCurrent = { intent == navigationSequence.get() },
+                        navigationIsCurrent = { presentationIsCurrent() },
                     ) ?: return@launch
                     effectiveRequest = request
                 }
@@ -2776,7 +2803,7 @@ fun RootScreen(
                 val nativeSourcePath = resolution?.sourcePath ?: selectedDirectory.sourcePath
                 check(selectedDirectory.path == directory && selectedDirectory.sourceId == sourceId &&
                     selectedDirectory.sourcePath == nativeSourcePath) { "应用源码身份已变化。" }
-                check(!projectStore.state.value.storageUnavailable && intent == navigationSequence.get()) {
+                check(!projectStore.state.value.storageUnavailable && presentationIsCurrent()) {
                     "应用源码选择已失效。"
                 }
                 val roots = com.lingxi.code.project.MobileUserStorage.directories(appContext).projectGrantRoots()
@@ -2810,7 +2837,7 @@ fun RootScreen(
                 // A rebind may reuse an existing owner while its new request still needs recovery.
                 val projectSelectionId = effectiveRequest?.selectionId ?: selection.selectionId
                 val ownedProject = projectStore.registerAuthoringWorkspace(name, directory, SessionMode.Code, projectId, projectSelectionId) {
-                    intent == navigationSequence.get() && (recoverySelection == null || projectStore.state.value.projects.any {
+                    presentationIsCurrent() && (recoverySelection == null || projectStore.state.value.projects.any {
                         it.record.id == projectId && it.record.authoringIntentId == selection.selectionId
                     })
                 }
@@ -2842,7 +2869,7 @@ fun RootScreen(
                 check(switchEngineScope(authoringScope, project,
                     target?.let { SessionRef(it.sessionId, it.title) }, target == null,
                     sessionModeOverride = mode,
-                    navigationIntent = intent, selectedTranscriptPath = requestedTranscript,
+                    navigationIntent = intent, presentationIsCurrent = ::presentationIsCurrent, selectedTranscriptPath = requestedTranscript,
                     requireSelectedTranscript = requestedTranscript != null,
                     preparedAuthoringGrant = freshAuthoringGrant(), authoringIntent = selection,
                     onActivated = { owner, retained ->
@@ -2892,7 +2919,7 @@ fun RootScreen(
                         localApps.withAuthoringCurrentLock(effectiveAppId) {
                             com.lingxi.code.apps.registerAuthoringWithReceipt(
                                 submit = {
-                                    val setCurrent = firstRegistration.getAndSet(false) && navigationSequence.get() == intent
+                                    val setCurrent = firstRegistration.getAndSet(false) && presentationIsCurrent()
                                     localApps.registerAuthoring(sourceId, sourceRequestId, setCurrent, ownerMode, authoring); Unit
                                 },
                                 lookup = { localApps.getAuthoringGrant(directory, project.record.id, canonicalSessionId(confirmed.sessionId), ownerMode) },
@@ -2926,7 +2953,7 @@ fun RootScreen(
                 catch (failure: Exception) {
                     authoringVm.reportAuthoringBindingFailure(failure)
                 }
-                if (sessionHost.selected.value === authoringVm && intent == navigationSequence.get()) {
+                if (sessionHost.selected.value === authoringVm && presentationIsCurrent()) {
                     appsPageOpen = false; marketInstallId = null; localAppDetailsId = null; runtimeAppId = null
                     closeDrawer(); closeProjectPages()
                 }
@@ -2983,11 +3010,31 @@ fun RootScreen(
         }
     }
 
+    // The shell's bar rule: pages pushed over the chat, the phone drawer being open or opening, and
+    // full-screen overlays (a running app, the voice flow) that cover everything.
+    var drawerOpenOrOpening by remember { mutableStateOf(false) }
+    val pushedPages = listOf(
+        projectsPageOpen, projectPageId != null, appsPageOpen, marketInstallId != null,
+        localAppDetailsId != null, runtimeAppId != null, cronPage != null,
+    ).count { it }
+    val latestOnChromeChanged by rememberUpdatedState(onChromeChanged)
+    LaunchedEffect(pushedPages, drawerOpenOrOpening, runtimeAppId != null, voiceActive) {
+        latestOnChromeChanged(pushedPages, drawerOpenOrOpening, runtimeAppId != null || voiceActive)
+    }
+    // Tapping the Chats tab again with pages pushed (the wide rail stays reachable) pops back to the chat.
+    OnTabReselected(AppTab.Chats) { pushed ->
+        if (pushed > 0) {
+            projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketInstallId = null
+            localAppDetailsId = null; runtimeAppId = null; cronPage = null
+        }
+    }
+
     Box(modifier = modifier.fillMaxSize()) {
         AdaptiveConversationDrawer(
             modifier = Modifier.fillMaxSize(),
             drawerState = drawerState,
             scrimColor = Color.Black.copy(alpha = 0.4f),
+            onOpenOrOpeningChange = { drawerOpenOrOpening = it },
             drawerContent = {
                 ModalDrawerSheet(
                     drawerContainerColor = LingXiTheme.palette.sidebarBg,
@@ -3004,9 +3051,9 @@ fun RootScreen(
                                         sessionModeOverride = row.mode)) closeDrawer()
                             }
                         },
-                        onOpenSettings = {
+                        onOpenAccount = {
                             closeDrawer()
-                            onOpenSettings()
+                            onOpenAccount()
                         },
                         onOpenTerminal = {
                             closeDrawer()
@@ -3047,12 +3094,12 @@ fun RootScreen(
                         onOpenCron = { taskKey ->
                             markCronResultsSeen()
                             closeDrawer()
-                            onOpenCronSettings(taskKey)
+                            cronPage = CronPageRoute.task(taskKey)
                         },
                         onOpenCronList = {
                             markCronResultsSeen()
                             closeDrawer()
-                            onOpenCronSettings(null)
+                            cronPage = CronPageRoute.Tasks
                         },
                         onOpenProjects = {
                             closeDrawer()
@@ -3079,11 +3126,6 @@ fun RootScreen(
                             appPageSequence.incrementAndGet()
                             runtimeAppId = appId
                         },
-                        onOpenRemoteControl = {
-                            closeDrawer()
-                            onOpenRemoteControl()
-                        },
-                        onOpenTeams = { closeDrawer(); onOpenTeams() },
                     )
                 }
             },
@@ -3413,7 +3455,7 @@ fun RootScreen(
                     onOpenCron = { taskKey ->
                         markCronResultsSeen()
                         closeProjectPages()
-                        onOpenCronSettings(taskKey)
+                        cronPage = CronPageRoute.task(taskKey)
                     },
                     onReimport = { runProjectSync(shown.id) { projectStore.reimport(shown.id) } },
                     onExport = { runProjectSync(shown.id) { projectStore.export(shown.id) } },
@@ -3450,7 +3492,7 @@ fun RootScreen(
             UnifiedAppsPage(
                 apps = localApps,
                 onBack = { appPageSequence.incrementAndGet(); appsPageOpen = false },
-                onRemoteApps = { appPageSequence.incrementAndGet(); appsPageOpen = false; onOpenRemoteControl() },
+                onRemoteApps = { appPageSequence.incrementAndGet(); appsPageOpen = false; onOpenBotsTab() },
                 onOpen = { appPageSequence.incrementAndGet(); runtimeAppId = it },
                 onDetails = { appPageSequence.incrementAndGet(); localAppDetailsId = it },
                 onAuthoring = { appId, name, directory -> openAppAuthoring(appId, name, directory) },
@@ -3491,6 +3533,15 @@ fun RootScreen(
                     },
                     canStartAuthoring = { authoringEntryMode() != null },
                     captureOperation = { captureAppAuthoringOperation { localAppDetailsId == shownId } },
+                    captureNavigation = {
+                        val tabRevision = tabState?.selectionRevision
+                        val pageRevision = appPageSequence.get()
+                        val current = {
+                            rootCompositionAlive.get() && pageRevision == appPageSequence.get() && localAppDetailsId == shownId &&
+                                (tabState == null || (tabState.selected == com.lingxi.code.tabs.AppTab.Chats && tabRevision == tabState.selectionRevision))
+                        }
+                        current
+                    },
                 )
             }
         }
@@ -3513,6 +3564,25 @@ fun RootScreen(
                         runtimeAppId = null
                         localAppDetailsId = appId
                     },
+                )
+            }
+        }
+        // 定时任务: drawn over the chat like the Apps page; it keeps its last route while sliding out.
+        var lastCronPage by remember { mutableStateOf<CronPageRoute?>(null) }
+        LaunchedEffect(cronPage) { if (cronPage != null) lastCronPage = cronPage }
+        AnimatedVisibility(
+            visible = cronPage != null,
+            enter = slideInHorizontally(initialOffsetX = { it }),
+            exit = slideOutHorizontally(targetOffsetX = { it }),
+        ) {
+            val shown = cronPage ?: lastCronPage
+            if (shown != null) {
+                CronPage(
+                    route = shown,
+                    engineSource = currentEngineSource,
+                    projectStore = projectStore,
+                    onOpenSession = { run -> cronPage = null; onOpenScheduledSession(run) },
+                    onClose = { cronPage = null },
                 )
             }
         }
@@ -3577,7 +3647,7 @@ fun RootScreen(
                 },
                 onMakeScheduled = {
                     sessionPanelOpen = false
-                    onOpenCronCreate(
+                    cronPage = CronPageRoute.new(
                         state.messages.firstOrNull { it.role == com.lingxi.code.model.Role.User }
                             ?.text.orEmpty().take(500),
                     )

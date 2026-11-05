@@ -15,6 +15,9 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+/** The one origin of every Teams HTTP command (`POST /v1/teams`, `/v1/teams/messages`). */
+internal const val TEAMS_API_ROOT = "https://lingxios.net"
+
 /** Cancellation closes the socket, including while a blocking read is in flight.
  * A deadline and bounded executor also bound transports that ignore interruption. */
 internal object TeamHttp {

@@ -1,7 +1,24 @@
 import Foundation
 import CryptoKit
 
-struct TeamMessageConversation: Decodable, Equatable, Identifiable, Sendable {
+/// The newest message of a conversation as the backend stamps it onto the conversation document
+/// (`lastMessage`, spec §8.4). `nil` on the conversation means "no message yet".
+struct TeamLastMessage: Equatable, Sendable {
+    let id: String
+    let seq: Int
+    /// Epoch milliseconds; `nil` while the server has not stamped a write made on this device.
+    let atMs: Int64?
+    /// `user` or `bot`.
+    let authorKind: String
+    let authorUid: String
+    /// Set for Bot authors.
+    let authorBotKey: String?
+    /// May be empty (a non-text message).
+    let preview: String
+    let recalled: Bool
+}
+
+struct TeamMessageConversation: Equatable, Identifiable, Sendable {
     let id: String
     let kind: String
     let title: String
@@ -9,10 +26,16 @@ struct TeamMessageConversation: Decodable, Equatable, Identifiable, Sendable {
     var lastSeq: Int
     var lastChangeSeq: Int
     var lastReadSeq: Int
+    /// The `botKey` field of a Bot DM document.
+    var botKey: String? = nil
+    /// The pointer to the newest message; `nil` = no message yet. Parsed strictly (`TeamsPointerParser`).
+    var lastMessage: TeamLastMessage? = nil
     func merging(_ old: TeamMessageConversation?) -> TeamMessageConversation {
         var value = self; value.lastReadSeq = max(old?.lastReadSeq ?? 0, lastReadSeq); value.lastSeq = max(old?.lastSeq ?? 0, lastSeq); value.lastChangeSeq = max(old?.lastChangeSeq ?? 0, lastChangeSeq); return value
     }
     var unread: Int { max(0, lastSeq - lastReadSeq) }
+    /// The Bot of a Bot DM: the document's `botKey`, else the first `bot:` participant (Desktop `botKeyOf`).
+    var effectiveBotKey: String? { botKey ?? participants.first { $0.hasPrefix("bot:") } }
 }
 struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     struct Author: Decodable, Equatable, Sendable { let kind: String; let uid: String; let botKey: String? }

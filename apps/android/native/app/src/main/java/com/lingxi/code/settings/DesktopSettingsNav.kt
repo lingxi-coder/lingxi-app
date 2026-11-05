@@ -3,6 +3,7 @@ package com.lingxi.code.settings
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.model.ProviderKind
@@ -32,9 +33,13 @@ fun searchDesktopSettings(query: String): List<DesktopSettingsEntry> {
     return desktopSettingsEntries.filter { needle.isEmpty() || (listOf(it.title, it.route) + it.keys).any { value -> value.contains(needle, ignoreCase = true) } }
 }
 
+/**
+ * The wide layout's page list (280 dp, beside the page): a search field and every page by group. The search
+ * text is saved, so it survives the Settings tab being left and entered again.
+ */
 @Composable
 fun DesktopSettingsNavigation(onNavigate: (String) -> Unit, selected: String? = null) {
-    var query by remember { mutableStateOf("") }
+    var query by rememberSaveable { mutableStateOf("") }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(query, { query = it }, label = { Text(settingsLabel("Search settings")) }, singleLine = true, modifier = Modifier.fillMaxWidth())
         val translated = desktopSettingsEntries.map { it to settingsLabel(it.title) }

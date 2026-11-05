@@ -1,8 +1,10 @@
 package com.lingxi.code.remote
 
+import androidx.compose.runtime.saveable.SaverScope
 import com.lingxi.code.navigation.DeepLink
 import com.lingxi.code.push.PushRoute
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -15,13 +17,20 @@ class RemoteRouteTest {
     private val bot = "A-_b1234567890123456Zz"
 
     @Test fun encodeAndDecodeRoundTripEveryRoute() {
-        for (route in listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), RemoteRoute.Bot(host, bot), RemoteRoute.Session(host, session))) {
+        for (route in listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), RemoteRoute.Session(host, session))) {
             assertEquals(route, RemoteRoute.decode(route.encode()))
         }
     }
 
     @Test fun decodeRejectsMalformedText() {
-        for (text in listOf("", "host", "host/", "session/a", "session//b", "session/a/b/c", "other/x", "bot", "bot/a", "bot//b", "bot/a/", "bot/a/b/c")) {
+        for (text in listOf("", "host", "host/", "host/a/b", "session/a", "session//b", "session/a/", "session/a/b/c", "other/x", "hosts/x")) {
+            assertNull(text, RemoteRoute.decode(text))
+        }
+    }
+
+    @Test fun theRetiredBotPageIsNotReadBack() {
+        // Nothing older is decoded: the Bot page no longer exists, so its saved text names nothing.
+        for (text in listOf("bot", "bot/a", "bot//b", "bot/a/", "bot/a/b", "bot/$host/$bot", "bot/a/b/c")) {
             assertNull(text, RemoteRoute.decode(text))
         }
     }
@@ -49,47 +58,78 @@ class RemoteRouteTest {
         )) assertNull(raw, DeepLink.parse(raw))
     }
 
+    @Test fun theTreeIsTheRootAndNeverAStackEntry() {
+        assertEquals(emptyList<RemoteRoute>(), RemoteRoute.stackFor(RemoteRoute.Hosts))
+    }
+
     @Test fun directOpenKeepsAnHonestBackStack() {
+        // Back from a page a link or a notification opened lands on the tree, which is the root beneath the stack.
         val target = RemoteRoute.Session(host, session)
-        assertEquals(listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), target), RemoteRoute.stackFor(target))
-        assertEquals(listOf(RemoteRoute.Hosts), RemoteRoute.stackFor(RemoteRoute.Hosts))
+        assertEquals(listOf(target), RemoteRoute.stackFor(target))
+        assertEquals(listOf(RemoteRoute.Host(host)), RemoteRoute.stackFor(RemoteRoute.Host(host)))
+        assertEquals(emptyList<RemoteRoute>(), RemoteRoute.afterBack(RemoteRoute.stackFor(target)))
     }
 
-    @Test fun aBotPageKeepsAnHonestBackStack() {
-        val target = RemoteRoute.Bot(host, bot)
-        assertEquals(listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), target), RemoteRoute.stackFor(target))
+    @Test fun backPopsOnePageAtATime() {
+        val stack = listOf(RemoteRoute.Host(host), RemoteRoute.Session(host, session))
+        assertEquals(listOf(RemoteRoute.Host(host)), RemoteRoute.afterBack(stack))
+        assertEquals(emptyList<RemoteRoute>(), RemoteRoute.afterBack(RemoteRoute.afterBack(stack)))
+        // Back on the tree itself has nothing to pop.
+        assertEquals(emptyList<RemoteRoute>(), RemoteRoute.afterBack(emptyList()))
     }
 
-    @Test fun backFromAChatOpenedFromItsBotReturnsToTheBotOnce() {
-        val stack = listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), RemoteRoute.Bot(host, bot), RemoteRoute.Session(host, session))
-        // The Bot is already beneath: back leads there, and is not pushed a second time.
-        assertEquals(stack.dropLast(1), RemoteRoute.afterBack(stack) { _, _ -> bot })
-        assertEquals(stack.dropLast(1), RemoteRoute.afterBack(stack) { _, _ -> null })
+    private fun save(stack: List<RemoteRoute>): Any {
+        val saver = RemoteRoute.stackSaver
+        val saved = with(saver) { SaverScope { true }.save(stack) }
+        return checkNotNull(saved) { "the stack was not saved" }
     }
 
-    @Test fun backFromAChatOpenedByALinkGoesToItsBotWhenTheConnectionKnowsWhich() {
-        val stack = RemoteRoute.stackFor(RemoteRoute.Session(host, session))
-        val asked = mutableListOf<Pair<String, String>>()
-        val after = RemoteRoute.afterBack(stack) { hostId, sessionId -> asked += hostId to sessionId; bot }
-        assertEquals(listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), RemoteRoute.Bot(host, bot)), after)
-        assertEquals(listOf(host to session), asked)
-        // From the Bot, back is the computer, as for any page.
-        assertEquals(listOf(RemoteRoute.Hosts, RemoteRoute.Host(host)), RemoteRoute.afterBack(after) { _, _ -> bot })
+    @Test fun theStackSurvivesBeingSavedAndRestored() {
+        val stack = listOf(RemoteRoute.Host(host), RemoteRoute.Session(host, session))
+        assertEquals(stack, RemoteRoute.stackSaver.restore(save(stack)))
+        assertEquals(listOf(RemoteRoute.Session(host, session)), RemoteRoute.stackSaver.restore(save(listOf(RemoteRoute.Session(host, session)))))
     }
 
-    @Test fun backFromASessionThatIsNoBotsChatBehavesAsItAlwaysDid() {
-        val stack = RemoteRoute.stackFor(RemoteRoute.Session(host, session))
-        assertEquals(listOf(RemoteRoute.Hosts, RemoteRoute.Host(host)), RemoteRoute.afterBack(stack) { _, _ -> null })
+    @Test fun theTreeAloneSavesNothingAndRestoresAsTheTree() {
+        // An empty stack is the root: nothing is stored for it, and a missing state starts there.
+        val saved = with(RemoteRoute.stackSaver) { SaverScope { true }.save(emptyList()) }
+        assertNull(saved)
     }
 
-    @Test fun backFromAnythingButASessionNeverAsksForABot() {
-        var asked = false
-        val lookup = { _: String, _: String -> asked = true; bot }
-        val stack = listOf(RemoteRoute.Hosts, RemoteRoute.Host(host), RemoteRoute.Bot(host, bot))
-        assertEquals(stack.dropLast(1), RemoteRoute.afterBack(stack, lookup))
-        assertEquals(listOf(RemoteRoute.Hosts), RemoteRoute.afterBack(stack.dropLast(1), lookup))
-        assertEquals(emptyList<RemoteRoute>(), RemoteRoute.afterBack(listOf(RemoteRoute.Hosts), lookup))
-        assertTrue(!asked)
+    @Test fun anOwnedStackRestoresOnlyForTheAccountThatSavedIt() {
+        val stack = listOf(RemoteRoute.Host(host), RemoteRoute.Session(host, session))
+        val saved = with(RemoteRoute.ownedStackSaver("user-a")) { SaverScope { true }.save(stack) }!!
+        assertEquals(stack, RemoteRoute.ownedStackSaver("user-a").restore(saved))
+        assertEquals(emptyList<RemoteRoute>(), RemoteRoute.ownedStackSaver("user-b").restore(saved))
+        assertEquals(emptyList<RemoteRoute>(), RemoteRoute.ownedStackSaver(null).restore(saved))
+    }
+
+    @Test fun anUnownedOrMalformedSavedStackStartsAtTheTree() {
+        val saver = RemoteRoute.ownedStackSaver("user-a")
+        for (saved in listOf(listOf("session/$host/$session"), listOf("uid/user-a", "hosts"),
+            listOf("uid/user-a", "host/$host", "nonsense"))) {
+            assertEquals(emptyList<RemoteRoute>(), saver.restore(saved))
+        }
+    }
+
+    @Test fun signedOutAndEmptyOwnedStacksSaveNothing() {
+        assertNull(with(RemoteRoute.ownedStackSaver(null)) { SaverScope { true }.save(listOf(RemoteRoute.Host(host))) })
+        assertNull(with(RemoteRoute.ownedStackSaver("user-a")) { SaverScope { true }.save(emptyList()) })
+    }
+
+    @Test fun aSavedStackThatDoesNotReadBackWholeStartsAtTheTree() {
+        val saver = RemoteRoute.stackSaver
+        // The root is never saved, and the Bot page is gone: such a state starts at the tree, not at half a stack.
+        for (saved in listOf(
+            listOf("hosts", "host/$host"),
+            listOf("host/$host", "bot/$host/$bot"),
+            listOf("bot/$host/$bot"),
+            listOf("host/$host", "nonsense"),
+        )) {
+            val restored = saver.restore(saved)
+            assertNotNull(saved.toString(), restored)
+            assertEquals(saved.toString(), emptyList<RemoteRoute>(), restored)
+        }
     }
 
     @Test fun pushRouteBecomesTheSameLinkTheInboxVets() {
@@ -114,5 +154,11 @@ class RemoteRouteTest {
         assertNull(PushRoute.link("remote/host"))
         assertNull(PushRoute.link("remote/a/b/c"))
         assertNull(PushRoute.link("remote/a/b#payload=%7B%7D"))
+    }
+
+    @Test fun everyRouteEncodesWithoutTheSeparatorInItsIds() {
+        // Ids never contain `/`; the text of a route therefore splits back into exactly its parts.
+        assertTrue(RemoteRoute.Session(host, session).encode().split('/').size == 3)
+        assertTrue(RemoteRoute.Host(host).encode().split('/').size == 2)
     }
 }

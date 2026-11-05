@@ -27,7 +27,7 @@ class UnimplementedFeaturesUiTest {
                 DrawerContent(
                     ui = rememberDrawerUiState(),
                     onSelectSession = {},
-                    onOpenSettings = {},
+                    onOpenAccount = {},
                     onClose = {},
                     productionData = DrawerProductionData(
                         workspaces = emptyList(),
@@ -50,7 +50,7 @@ class UnimplementedFeaturesUiTest {
                 DrawerContent(
                     ui = rememberDrawerUiState(),
                     onSelectSession = {},
-                    onOpenSettings = {},
+                    onOpenAccount = {},
                     onOpenTerminal = { terminalOpened = true },
                     onClose = {},
                     productionData = DrawerProductionData(

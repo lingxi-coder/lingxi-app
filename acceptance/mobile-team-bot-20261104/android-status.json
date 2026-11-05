@@ -1,0 +1,58 @@
+{
+  "status": "automated_android_acceptance_recorded_live_account_acceptance_incomplete",
+  "testingPausedByUser": false,
+  "reason": "User explicitly released Android testing in this chat on 2026-11-04. Automated and signed-out acceptance completed; live-account matrix remains open.",
+  "sourceCommit": "194234165b8a89cd8dfc900ce594ce42f4d247c0",
+  "receipt": "acceptance/mobile-team-bot-20261104/resumed/README.md",
+  "machineReadableReceipt": "acceptance/mobile-team-bot-20261104/resumed/validation.json",
+  "portrait": {
+    "passed": 112,
+    "skipped": 0,
+    "failed": 0,
+    "timeout": 0
+  },
+  "landscape": {
+    "passed": 112,
+    "skipped": 0,
+    "failed": 0,
+    "timeout": 0
+  },
+  "regressions": {
+    "passed": 25,
+    "skipped": 0,
+    "failed": 0,
+    "timeout": 0
+  },
+  "reducedMotion": {
+    "passed": 5,
+    "skipped": 0,
+    "failed": 0,
+    "timeout": 0
+  },
+  "tablet": {
+    "passed": 7,
+    "skipped": 0,
+    "failed": 0,
+    "timeout": 0
+  },
+  "fullUnit": {
+    "tests": 1539,
+    "failures": 2,
+    "errors": 0,
+    "skipped": 0
+  },
+  "rotationRestored": {
+    "accelerometer_rotation": "1",
+    "user_rotation": "0"
+  },
+  "animationScalesRestored": {
+    "window_animation_scale": "1",
+    "transition_animation_scale": "1",
+    "animator_duration_scale": "1"
+  },
+  "debugTestProcessesStopped": true,
+  "uiAutomationRegistrationReleased": true,
+  "ownedTabletEmulatorStopped": true,
+  "appDataCleared": false,
+  "fullDeviceAcceptance": false
+}

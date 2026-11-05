@@ -1,0 +1,27 @@
+[
+  {
+    "iteration": 1,
+    "launch": "Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=lingxi://team/... pkg=com.lingxi.code.debug }\nStatus: ok\nLaunchState: COLD\nActivity: com.lingxi.code.debug/com.lingxi.code.MainActivity\nTotalTime: 697\nWaitTime: 699\nComplete\n",
+    "aliveAfterOneSecond": false
+  },
+  {
+    "iteration": 2,
+    "launch": "Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=lingxi://team/... pkg=com.lingxi.code.debug }\nStatus: ok\nLaunchState: COLD\nActivity: com.lingxi.code.debug/com.lingxi.code.MainActivity\nTotalTime: 680\nWaitTime: 681\nComplete\n",
+    "aliveAfterOneSecond": false
+  },
+  {
+    "iteration": 3,
+    "launch": "Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=lingxi://team/... pkg=com.lingxi.code.debug }\nStatus: ok\nLaunchState: COLD\nActivity: com.lingxi.code.debug/com.lingxi.code.MainActivity\nTotalTime: 683\nWaitTime: 684\nComplete\n",
+    "aliveAfterOneSecond": false
+  },
+  {
+    "iteration": 4,
+    "launch": "Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=lingxi://team/... pkg=com.lingxi.code.debug }\nStatus: ok\nLaunchState: COLD\nActivity: com.lingxi.code.debug/com.lingxi.code.MainActivity\nTotalTime: 696\nWaitTime: 697\nComplete\n",
+    "aliveAfterOneSecond": false
+  },
+  {
+    "iteration": 5,
+    "launch": "Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=lingxi://team/... pkg=com.lingxi.code.debug }\nStatus: ok\nLaunchState: COLD\nActivity: com.lingxi.code.debug/com.lingxi.code.MainActivity\nTotalTime: 696\nWaitTime: 697\nComplete\n",
+    "aliveAfterOneSecond": false
+  }
+]

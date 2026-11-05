@@ -1,0 +1,26 @@
+{
+  "rotation": {
+    "accelerometer_rotation": "1",
+    "user_rotation": "0"
+  },
+  "rotationRestored": true,
+  "animations": {
+    "window_animation_scale": "1",
+    "transition_animation_scale": "1",
+    "animator_duration_scale": "1"
+  },
+  "animationsRestored": true,
+  "fontScaleUnchanged": "1.0",
+  "temporaryNotificationGrant": {
+    "originalGranted": false,
+    "beforeRestore": "android.permission.POST_NOTIFICATIONS: granted=true, flags=[ USER_SET|USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED]",
+    "afterRestore": "android.permission.POST_NOTIFICATIONS: granted=false, flags=[ USER_SET|USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED]",
+    "grantStateRestored": true,
+    "originalPermissionFlagsNotCaptured": true
+  },
+  "debugTestProcessesStopped": true,
+  "uiAutomationRegistrationReleased": true,
+  "appDataCleared": false,
+  "credentialsChanged": false,
+  "otherPhysicalDeviceTargeted": false
+}

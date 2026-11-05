@@ -78,12 +78,12 @@ class TeamBotsTest {
 
     @Test fun inactiveOwnerCardPreservesRevisionAndCannotBeSelectedOrUnboundAgain() {
         val wire = JSONObject().put("key", key).put("ownerUid", "owner").put("name", "Bot").put("description", "Description")
-            .put("revision", 9).put("use", "all").put("permitted", true).put("online", true).put("enabled", false)
+            .put("revision", 9).put("use", "all").put("permitted", true).put("online", true).put("enabled", false).put("hostId", "abcdefghijklmnopqrstuv").put("botId", "abcdefghijklmnopqrstuv")
         val inactive = TeamBotCard.parse(wire)
         assertFalse(inactive.enabled)
         assertFalse(inactive.selectable)
         assertFalse(inactive.canUnbind("owner"))
-        assertEquals("Inactive · revision 9. Rebind on Desktop.", inactive.inactiveLabel)
+        assertEquals(9L, inactive.revision)
         assertTrue(card().canUnbind("owner"))
         assertFalse(card().canUnbind("other"))
         assertFalse(card().copy(permitted = false).selectable)
@@ -187,5 +187,27 @@ class TeamBotsTest {
             try { teamBotAnswerRetryBody(restored.copy(teamId = "other-team"), attempted, null, 2000); fail("Team changed") } catch (expected: TeamMessageFailure) { assertEquals("INVALID_SESSION", expected.code) }
             assertTrue(TeamCommandStorage(directory).update("other-human", "team0001", 4) { it }.answers.isEmpty())
         } finally { directory.deleteRecursively() }
+    }
+    @Test fun parsedCardsCarryTheBackendBotIdAndHostIdAndDrawFromTheBotId() {
+        val wire = JSONObject().put("key", key).put("ownerUid", "owner").put("name", "Bot").put("description", "").put("revision", 1).put("use", "listed")
+            .put("permitted", true).put("online", false).put("hostId", "host01").put("botId", "helper")
+        val parsed = TeamBotCard.parse(wire)
+        assertEquals("helper", parsed.botId); assertEquals("host01", parsed.hostId); assertEquals("helper", parsed.avatarId)
+        // Built in code without a card, the avatar falls back to the key's last segment.
+        assertEquals("abcdefghijklmnopqrstuv", card().avatarId)
+        // A card from the backend always has both fields: nothing is guessed when one is missing.
+        wire.remove("botId")
+        assertThrows(org.json.JSONException::class.java) { TeamBotCard.parse(wire) }
+    }
+
+    @Test fun ownerHostStatusIsParsedAndAResultPendingRunCannotBeSettledByHand() {
+        val wire = JSONObject().put("state", "recovery").put("ownerUid", "owner").put("botKey", key).put("origin", JSONObject().put("uid", "human").put("generation", 4))
+            .put("answered", false).put("hostStatus", "result_pending")
+        val parsed = TeamBotRun.parse(wire)
+        assertEquals("result_pending", parsed.hostStatus)
+        assertFalse(parsed.canRecover("owner", 100))
+        assertTrue(parsed.copy(hostStatus = "recovery_required").canRecover("owner", 100))
+        wire.remove("hostStatus")
+        assertNull(TeamBotRun.parse(wire).hostStatus)
     }
 }

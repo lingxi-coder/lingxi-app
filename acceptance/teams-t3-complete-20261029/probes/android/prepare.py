@@ -13,22 +13,25 @@ TEAMS = ROOT / "apps/android/native/app/src/main/java/com/lingxi/code/teams"
 STRINGS = ROOT / "apps/android/native/app/src/main/res/values-en/strings.xml"
 INVITATION_SUPPORT = [ROOT / "apps/android/native/app/src/main/java/com/lingxi/code" / relative for relative in (
     "navigation/DeepLink.kt", "navigation/DeepLinkInbox.kt", "push/PushRoute.kt")]
+TAB_SUPPORT = [ROOT / "apps/android/native/app/src/main/java/com/lingxi/code" / relative for relative in (
+    "tabs/AppTab.kt", "tabs/TabLogic.kt", "theme/AvatarIdentity.kt", "theme/AgentAvatar.kt", "theme/PersonAvatar.kt")]
+SHARED_PROBE = ROOT / "acceptance/mobile-team-bot-20261104/probes/android"
 
 def main():
     sources = sorted(TEAMS.glob("*.kt"))
     assert sources, "Actual Teams sources missing"
-    # Both production construction paths must keep their fixed HTTPS default.
-    for name in ("TeamsViewModel.kt", "TeamMessagingModel.kt"):
+    assert 'internal const val TEAMS_API_ROOT = "https://lingxios.net"' in (TEAMS / "TeamHttp.kt").read_text()
+    # API roots are immutable constructor dependencies; only this demo executable injects loopback.
+    for name in ("TeamsViewModel.kt", "TeamMessagingModel.kt", "TeamsWorkspace.kt"):
         source = (TEAMS / name).read_text()
-        assert 'private val apiRoot: String = "https://lingxios.net"' in source, name
-        assert not re.search(r"(?:getenv|System\.getProperty|BuildConfig|intent).*apiRoot", source), name
+        assert "apiRoot: String = TEAMS_API_ROOT" in source, name
     wanted = set()
     for path in sources:
-        wanted.update(re.findall(r"R\.string\.(teams_\w+)", path.read_text()))
+        wanted.update(re.findall(r"R\.string\.(\w+)", path.read_text()))
     resources = ET.Element("resources")
     names = set()
     for node in ET.parse(STRINGS).getroot():
-        if node.tag == "string" and node.attrib.get("name", "").startswith("teams_"):
+        if node.tag == "string" and node.attrib.get("name", "") in wanted:
             resources.append(node); names.add(node.attrib["name"])
     assert wanted <= names, f"Missing production Team strings: {wanted - names}"
     path = OUTPUT / "resources/values/strings.xml"
@@ -36,13 +39,18 @@ def main():
     ET.indent(resources)
     path.write_bytes(ET.tostring(resources, encoding="utf-8", xml_declaration=True))
     harness = sorted(path for path in PROBE.rglob("*") if path.is_file() and (path.suffix in {".kt", ".kts", ".py", ".md", ".properties"} or path.name == "AndroidManifest.xml"))
-    tracked = sources + INVITATION_SUPPORT + [STRINGS, ROOT / "apps/android/native/gradle/libs.versions.toml"] + harness
+    support = sorted(SHARED_PROBE.rglob("*.kt")) + TAB_SUPPORT
+    fixtures = [ROOT / "apps/android/native/app/src/test/java/com/lingxi/code/tabs/SharedVectors.kt",
+                ROOT / "packages/bridge-client/fixtures/mobile-team-bot-vectors.json"]
+    avatars = sorted((ROOT / "apps/android/native/app/src/main/res").glob("drawable*/agent_avatar_*"))
+    tracked = sources + INVITATION_SUPPORT + support + fixtures + avatars + [STRINGS, ROOT / "apps/android/native/gradle/libs.versions.toml"] + harness
     provenance = {
         "kind": "Android Teams Compose/Firebase feature harness, not the full signed product",
         "source_mode": "Gradle compiles all actual Teams Kotlin sources directly; no Kotlin source copies or patches",
         "unit_test_support": [str(path.relative_to(ROOT)) for path in INVITATION_SUPPORT],
+        "tab_support": [str(path.relative_to(ROOT)) for path in support],
         "resources": {"source": str(STRINGS.relative_to(ROOT)), "names": sorted(names), "generated": str(path.relative_to(ROOT))},
-        "production_endpoint_check": "Both private constructor roots default to https://lingxios.net",
+        "production_endpoint_check": "All three constructor roots default to https://lingxios.net",
         "sha256": {str(file.relative_to(ROOT)): hashlib.sha256(file.read_bytes()).hexdigest() for file in tracked},
     }
     (OUTPUT / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")

@@ -5,12 +5,10 @@ import com.lingxi.code.bindings.android.RemoteBotStatusFfi
 import com.lingxi.code.bindings.android.RemoteBotSummaryFfi
 import com.lingxi.code.bindings.android.RemoteBotThreadsStateFfi
 import com.lingxi.code.bindings.android.RemoteBotsStateFfi
-import com.lingxi.code.bindings.android.RemoteFailureKindFfi
 import com.lingxi.code.bindings.android.RemoteFfiException
 import com.lingxi.code.bindings.android.RemoteSessionErrorFfi
 import com.lingxi.code.bindings.android.RemoteSessionStatusFfi
 import com.lingxi.code.bindings.android.RemoteSessionSummaryFfi
-import com.lingxi.code.bindings.android.RemoteTransportFfi
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -31,9 +29,9 @@ class RemoteBotsTest {
     private fun page(bots: RemoteBotsState, chats: RemoteBotChatsState = RemoteBotChatsState()) =
         remoteBotPageUi("h", "b1", bots, chats)
 
-    // --- the host screen's section ---------------------------------------
+    // --- the Bots of a computer, as the tab lists them --------------------
 
-    @Test fun theHostScreenListsBotsOnlyWhenTheComputerHasSomeToShow() {
+    @Test fun aComputerListsBotsOnlyWhenItHasSomeToShow() {
         assertTrue(RemoteBotsState().listFor("h").isEmpty())
         assertTrue(RemoteBotsState("h", RemoteBotsStateFfi.Unknown).listFor("h").isEmpty())
         assertTrue(RemoteBotsState("h", RemoteBotsStateFfi.Unsupported).listFor("h").isEmpty())
@@ -70,25 +68,25 @@ class RemoteBotsTest {
         assertNull(held.summaryOf("other", "s2"))
     }
 
-    // --- the Bot page ----------------------------------------------------
+    // --- what an open Bot shows ------------------------------------------
 
-    @Test fun theBotPageWaitsWhileTheComputersBotsAreNotKnown() {
+    @Test fun anOpenBotWaitsWhileTheComputersBotsAreNotKnown() {
         assertEquals(RemoteBotPageUi.Loading, page(RemoteBotsState()))
         assertEquals(RemoteBotPageUi.Loading, page(RemoteBotsState("h", RemoteBotsStateFfi.Unknown)))
         // The held Bots are another computer's: nothing is known of this one's yet.
         assertEquals(RemoteBotPageUi.Loading, page(bots("other", bot("b1"))))
     }
 
-    @Test fun theBotPageSaysTheBotIsGoneWhenTheComputerDoesNotKnowBots() {
+    @Test fun anOpenBotIsGoneWhenTheComputerDoesNotKnowBots() {
         assertEquals(RemoteBotPageUi.Gone, page(RemoteBotsState("h", RemoteBotsStateFfi.Unsupported)))
     }
 
-    @Test fun theBotPageSaysTheBotIsGoneWhenItIsNotInTheList() {
+    @Test fun anOpenBotIsGoneWhenItIsNotInTheList() {
         assertEquals(RemoteBotPageUi.Gone, page(bots("h")))
         assertEquals(RemoteBotPageUi.Gone, page(bots("h", bot("b2"))))
     }
 
-    @Test fun theBotPageShowsTheBotWhileItsChatsLoad() {
+    @Test fun anOpenBotShowsItselfWhileItsChatsLoad() {
         val shown = page(bots("h", bot("b1"), bot("b2"))) as RemoteBotPageUi.Shown
         assertEquals("b1", shown.bot.botId)
         assertTrue(shown.chats.loading)
@@ -99,7 +97,7 @@ class RemoteBotsTest {
         assertTrue((page(bots("h", bot("b1")), chats("other", "b1", emptyList())) as RemoteBotPageUi.Shown).chats.loading)
     }
 
-    @Test fun theBotPageShowsNoChatsYetAndTheChatsNewestFirstAsTheyCome() {
+    @Test fun anOpenBotShowsNoChatsYetAndTheChatsNewestFirstAsTheyCome() {
         val none = page(bots("h", bot("b1")), chats("h", "b1", emptyList())) as RemoteBotPageUi.Shown
         assertTrue(none.chats.empty)
         assertFalse(none.chats.loading)
@@ -153,15 +151,5 @@ class RemoteBotsTest {
         assertEquals(R.string.remote_err_generic, botCreateErrorText(RemoteFfiException.Rpc("closed", "")))
         assertEquals(R.string.remote_err_generic, botCreateErrorText(RemoteFfiException.NotConnected()))
         assertEquals(R.string.remote_err_generic, botCreateErrorText(IllegalStateException("remote computer changed")))
-    }
-
-    @Test fun theBotPageSaysSoWhileTheComputerIsNotConnected() {
-        assertNull(botConnectionNote(RemoteConnectionUi.Ready(RemoteTransportFfi.WEBRTC)))
-        assertEquals(R.string.remote_reconnecting, botConnectionNote(RemoteConnectionUi.Idle))
-        assertEquals(R.string.remote_reconnecting, botConnectionNote(RemoteConnectionUi.Connecting(everReady = true)))
-        assertEquals(R.string.remote_reconnecting, botConnectionNote(RemoteConnectionUi.Reconnecting(null, null)))
-        assertEquals(R.string.remote_pairing_waiting, botConnectionNote(RemoteConnectionUi.Pairing("123456")))
-        val failed = RemoteConnectionUi.Failed(R.string.remote_fail_revoked, RemoteFailureKindFfi.REVOKED, canRetry = false, repair = true, forget = false)
-        assertEquals(R.string.remote_fail_revoked, botConnectionNote(failed))
     }
 }

@@ -93,7 +93,8 @@ data class DrawerAccount(val displayName: String, val email: String?)
  * The mobile drawer: search, two fixed entries (定时任务 · 项目), then ONE
  * recents list that is not split by mode — Chat / Code are only filter chips.
  * Running and awaiting-approval sessions carry a marker at the row's end. The
- * bottom row holds the account, the terminal and settings.
+ * bottom row holds the account and the terminal; settings is a tab of the
+ * shell (the drawer no longer carries a gear, Remote Control or Teams).
  *
  * Rendered as the `drawerContent` of a Material 3 `ModalNavigationDrawer` (the
  * gesture, scrim and slide are owned by the M3 component, so this is just the
@@ -109,7 +110,8 @@ data class DrawerAccount(val displayName: String, val email: String?)
 fun DrawerContent(
     ui: DrawerUiState,
     onSelectSession: (SessionRef) -> Unit,
-    onOpenSettings: () -> Unit,
+    /** The account row: opens Settings / Account and remembers that Back returns to Chats. */
+    onOpenAccount: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenTerminal: () -> Unit = {},
@@ -144,9 +146,6 @@ fun DrawerContent(
     apps: List<MyApp> = emptyList(),
     onOpenApps: () -> Unit = {},
     onOpenApp: (String) -> Unit = {},
-    /** Opens Remote Control, which follows the sessions of the user's computers. */
-    onOpenRemoteControl: () -> Unit = {},
-    onOpenTeams: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
 
@@ -266,14 +265,7 @@ fun DrawerContent(
                 tag = UiTags.DRAWER_ENTRY_PROJECTS,
                 onClick = onOpenProjects,
             )
-            EntryRow(
-                icon = LXIconName.Link,
-                label = stringResource(R.string.remote_title),
-                tag = UiTags.DRAWER_ENTRY_REMOTE,
-                onClick = onOpenRemoteControl,
-            )
             FilterChips(selected = ui.filter, onSelect = { ui.filter = it })
-            EntryRow(icon = LXIconName.Link, label = stringResource(R.string.teams_title), tag = "drawer.entry.teams", onClick = onOpenTeams)
         }
 
         // Scrolling body — fills the space above the bottom bar.
@@ -315,9 +307,8 @@ fun DrawerContent(
 
         BottomBar(
             account = account,
-            onOpenAccount = onOpenSettings,
+            onOpenAccount = onOpenAccount,
             onOpenTerminal = onOpenTerminal,
-            onOpenSettings = onOpenSettings,
         )
     }
 }
@@ -801,13 +792,12 @@ private fun ResultRow(icon: LXIconName, title: String, subtitle: String, onClick
 
 // MARK: - bottom bar --------------------------------------------------------
 
-/** Account (real Firebase profile), terminal and settings. */
+/** Account (real Firebase profile) and terminal. */
 @Composable
 private fun BottomBar(
     account: DrawerAccount?,
     onOpenAccount: () -> Unit,
     onOpenTerminal: () -> Unit,
-    onOpenSettings: () -> Unit,
 ) {
     val t = LingXiTheme.palette
     Row(
@@ -865,12 +855,6 @@ private fun BottomBar(
             description = stringResource(R.string.settings_linux_section_terminal),
             tag = UiTags.DRAWER_TERMINAL,
             onClick = onOpenTerminal,
-        )
-        BottomIconButton(
-            icon = LXIconName.Cog,
-            description = stringResource(R.string.settings_title_main),
-            tag = UiTags.DRAWER_SETTINGS,
-            onClick = onOpenSettings,
         )
     }
 }

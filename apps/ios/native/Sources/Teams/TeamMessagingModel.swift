@@ -7,21 +7,28 @@ private struct TeamBotList: Decodable { let bots: [TeamBotCard] }
 private struct TeamBotAck: Decodable {}
 private struct TeamBotStates: Decodable, Sendable { let states: [String: TeamBotState?] }
 private struct TeamMessageAck: Decodable, Sendable { let lastReadSeq: Int?; let conversationId: String? }
-private final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
 }
 
 @MainActor @Observable
 final class TeamMessagingModel {
-    private static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq"]
+    static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "botKey"]
     private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "triggerId", "origin", "question"]
     private(set) var cache: TeamMessageProjection?
     private(set) var offline = true
     private(set) var error = ""
     private(set) var revoked = false
     private(set) var bots: [TeamBotCard] = []
+    /// The Bot list has been fetched at least once for this team.
+    private(set) var botsLoaded = false
+    /// The last fetch of the Bot list failed, so Bot availability is unknown.
+    private(set) var botsUnverified = false
     private(set) var botStates: [String: TeamBotState] = [:]
     var selected = ""
+    /// Called once when access to this team is lost (revoked membership, rejected session): the owner of the
+    /// model re-reads the team list, which is the authority on what is left.
+    @ObservationIgnored var onRevoked: (() -> Void)?
     @ObservationIgnored private var lifecycle = 0
     @ObservationIgnored private var running = false
     @ObservationIgnored private var again = false
@@ -37,7 +44,17 @@ final class TeamMessagingModel {
     @ObservationIgnored private var directoryCached = true
     @ObservationIgnored private var messagesCached = true
     private var membershipReady = false
+    /// The first directory snapshot of this run has arrived.
+    private(set) var directoryReady = false
+    /// Conversations whose first `reads/{uid}` snapshot has not arrived yet. Their `lastReadSeq` is not known, so
+    /// nothing is unread, no "new messages" divider is placed and nothing is marked read until it is.
+    private(set) var readsPending: Set<String> = []
+    /// Bumped whenever the listeners are torn down or re-created, so a callback already queued by a removed
+    /// listener can tell it is stale.
+    @ObservationIgnored private var watchGeneration = 0
     private var botsDirty = true
+    /// The listeners were stopped by a failure; a good refresh must not hide the error until `reconnect()`.
+    @ObservationIgnored private var listenersFailed = false
     @ObservationIgnored private var authListener: AuthStateDidChangeListenerHandle?
     private var uid = ""
     private var teamId = ""
@@ -57,105 +74,158 @@ final class TeamMessagingModel {
 
     func start(uid: String, team: TeamSummary) {
         stop(); active = true; lifecycle += 1
-        self.uid = uid; teamId = team.id; generation = team.generation; revoked = false; offline = true
-        cache = nil; selected = ""; directoryCached = true; messagesCached = true; botsDirty = true; bots = []; botStates = [:]; botStateWindow = 100
+        self.uid = uid; teamId = team.id; generation = team.generation; revoked = false; offline = true; error = ""; listenersFailed = false
+        cache = nil; selected = ""; directoryCached = true; messagesCached = true; botsDirty = true; bots = []; botsLoaded = false; botsUnverified = false; botStates = [:]; botStateWindow = 100
+        directoryReady = false; readsPending = []
         let life = lifecycle
         authListener = auth.addStateDidChangeListener { [weak self] _, user in
             let current = user?.uid
             Task { @MainActor in guard let self, self.active, self.lifecycle == life else { return }; if current != uid { self.invalidate() } }
         }
         cache = TeamMessageProjection(version: 1, uid: uid, teamId: team.id, generation: team.generation)
-        let root = db.collection("teams").document(team.id)
-        memberListener = root.collection("members").document(uid).addSnapshotListener(includeMetadataChanges: true) { [weak self] snapshot, error in
+        watchMembers(life: life)
+        task = Task { [weak self] in
+            guard let self else { return }
+            do { try await self.reload(); self.refresh() } catch { self.error = "STORAGE_FAILED" }
+        }
+    }
+    /// The membership check: the viewer's `members` document must carry this team generation before the
+    /// directory is read, and a different one afterwards revokes the team.
+    private func watchMembers(life: Int) {
+        watchGeneration += 1
+        let watch = watchGeneration, uid = self.uid
+        memberListener = db.collection("teams").document(teamId).collection("members").document(uid).addSnapshotListener(includeMetadataChanges: true) { [weak self] snapshot, error in
             Task { @MainActor in
-                guard let self, self.active, self.lifecycle == life, self.auth.currentUser?.uid == self.uid else { return }
+                guard let self, self.active, self.lifecycle == life, self.watchGeneration == watch, self.auth.currentUser?.uid == self.uid else { return }
                 if let error { self.listenerFailed(error); return }
                 if (snapshot?.data()?["generation"] as? NSNumber)?.intValue == self.generation {
                     if !self.membershipReady { self.membershipReady = true; self.listenDirectory(life: life) }
                 } else if self.membershipReady || snapshot?.metadata.isFromCache == false { self.invalidate() }
             }
         }
-        task = Task { [weak self] in
-            guard let self else { return }
-            do { try await self.reload(); self.refresh() } catch { self.error = "STORAGE_FAILED" }
-        }
     }
     private func listenDirectory(life: Int) {
-        let uid = self.uid, root = db.collection("teams").document(teamId)
+        let uid = self.uid, root = db.collection("teams").document(teamId), watch = watchGeneration
         listener = root.collection("conversations").whereField("memberUids", arrayContains: uid)
             .addSnapshotListener(includeMetadataChanges: true) { [weak self] snapshot, error in
                 Task { @MainActor in
-                    guard let self, self.active, self.lifecycle == life, self.auth.currentUser?.uid == self.uid else { return }
+                    guard let self, self.active, self.lifecycle == life, self.watchGeneration == watch, self.auth.currentUser?.uid == self.uid else { return }
                     if let error { self.listenerFailed(error); return }
                     guard let snapshot else { return }
+                    let previous = Dictionary(uniqueKeysWithValues: (self.cache?.conversations ?? []).map { ($0.id, $0) })
+                    let conversations: [TeamMessageConversation]
                     do {
-                        let previous = Dictionary(uniqueKeysWithValues: (self.cache?.conversations ?? []).map { ($0.id, $0) })
-                        let conversations: [TeamMessageConversation] = try snapshot.documents.map { doc in
-                            var data = doc.data().filter { Self.conversationFields.contains($0.key) }
-                            data["id"] = doc.documentID; data["lastReadSeq"] = previous[doc.documentID]?.lastReadSeq ?? 0
-                            return try self.decode(data)
+                        conversations = try snapshot.documents.map { doc in
+                            let data = doc.data().filter { Self.conversationFields.contains($0.key) }
+                            return try TeamsPointerParser.parseConversation(id: doc.documentID, data: data, lastReadSeq: previous[doc.documentID]?.lastReadSeq ?? 0, millis: Self.milliseconds)
                         }
-                        self.cache?.conversations = conversations
-                        if self.messageListener == nil, !self.selected.isEmpty, conversations.contains(where: { $0.id == self.selected }) { self.select(self.selected) }
-                        let ids = Set(conversations.map(\.id))
-                        let retainedThreads = self.cache?.threads.filter { ids.contains($0.key) } ?? [:]
-                        self.cache?.threads = retainedThreads
-                        for id in Array(self.readListeners.keys) where !ids.contains(id) { self.readListeners.removeValue(forKey: id)?.remove() }
-                        for id in ids where self.readListeners[id] == nil {
-                            self.readListeners[id] = root.collection("conversations").document(id).collection("reads").document(uid).addSnapshotListener(includeMetadataChanges: true) { [weak self] mark, error in
-                                Task { @MainActor in
-                                    guard let self, self.active, self.lifecycle == life, self.auth.currentUser?.uid == self.uid else { return }
-                                    if let error { self.listenerFailed(error); return }
-                                    let data = mark?.data()
-                                    let seq = (data?["generation"] as? NSNumber)?.intValue == self.generation ? (data?["lastReadSeq"] as? NSNumber)?.intValue ?? 0 : 0
-                                    if let index = self.cache?.conversations.firstIndex(where: { $0.id == id }), self.cache?.conversations[index].lastReadSeq != seq { self.cache?.conversations[index].lastReadSeq = seq }
-                                }
+                    } catch {
+                        // A conversation that breaks the stored contract is never shown half-parsed: the team's
+                        // listeners stop with INVALID_DATA, as on Desktop.
+                        self.invalidData()
+                        return
+                    }
+                    self.cache?.conversations = conversations
+                    if self.messageListener == nil, !self.selected.isEmpty, conversations.contains(where: { $0.id == self.selected }) { self.select(self.selected) }
+                    let ids = Set(conversations.map(\.id))
+                    let retainedThreads = self.cache?.threads.filter { ids.contains($0.key) } ?? [:]
+                    self.cache?.threads = retainedThreads
+                    for id in Array(self.readListeners.keys) where !ids.contains(id) { self.readListeners.removeValue(forKey: id)?.remove() }
+                    self.readsPending.formIntersection(ids)
+                    for id in ids.sorted() where self.readListeners[id] == nil {
+                        self.readsPending.insert(id)
+                        self.readListeners[id] = root.collection("conversations").document(id).collection("reads").document(uid).addSnapshotListener(includeMetadataChanges: true) { [weak self] mark, error in
+                            Task { @MainActor in
+                                guard let self, self.active, self.lifecycle == life, self.watchGeneration == watch, self.auth.currentUser?.uid == self.uid else { return }
+                                self.readsPending.remove(id)
+                                if let error { self.listenerFailed(error); return }
+                                let data = mark?.data()
+                                let seq = (data?["generation"] as? NSNumber)?.intValue == self.generation ? (data?["lastReadSeq"] as? NSNumber)?.intValue ?? 0 : 0
+                                // A read mark only ever moves forward (Desktop: `Math.max`): an older cached snapshot after an
+                                // acknowledged `read` must not make messages unread again.
+                                if let index = self.cache?.conversations.firstIndex(where: { $0.id == id }), let current = self.cache?.conversations[index].lastReadSeq, seq > current { self.cache?.conversations[index].lastReadSeq = seq }
                             }
                         }
-                        self.missingStates = [:]
-                        self.directoryCached = snapshot.metadata.isFromCache; self.updateOffline()
-                        if !snapshot.metadata.isFromCache {
-                            if !self.selected.isEmpty, !ids.contains(self.selected), self.cache?.creation?.conversationId != self.selected { self.select("") }
-                            self.refresh()
-                        }
-                    } catch { self.error = "INVALID_MESSAGE_SNAPSHOT" }
+                    }
+                    self.missingStates = [:]
+                    self.directoryReady = true
+                    self.directoryCached = snapshot.metadata.isFromCache; self.updateOffline()
+                    if !snapshot.metadata.isFromCache {
+                        if !self.selected.isEmpty, !ids.contains(self.selected), self.cache?.creation?.conversationId != self.selected { self.select("") }
+                        self.refresh()
+                    }
                 }
             }
         signalListener = root.collection("signals").addSnapshotListener(includeMetadataChanges: true) { [weak self] snapshot, error in
             Task { @MainActor in
-                guard let self, self.active, self.lifecycle == life, self.auth.currentUser?.uid == self.uid else { return }
+                guard let self, self.active, self.lifecycle == life, self.watchGeneration == watch, self.auth.currentUser?.uid == self.uid else { return }
                 if let error { self.listenerFailed(error); return }
                 if snapshot?.metadata.isFromCache == false { self.botsDirty = true; self.missingStates = [:]; self.refresh() }
             }
         }
     }
+    /// Epoch milliseconds of a Firestore `Timestamp`; `nil` for anything else (the pointer parser's `millis`).
+    nonisolated static func milliseconds(_ value: Any) -> Int64? {
+        guard let stamp = value as? Timestamp else { return nil }
+        return stamp.seconds * 1000 + Int64(stamp.nanoseconds / 1_000_000)
+    }
     private func listenerFailed(_ error: Error) {
         let code = (error as NSError).code
         if code == FirestoreErrorCode.permissionDenied.rawValue || code == FirestoreErrorCode.unauthenticated.rawValue { invalidate() }
-        else { offline = true; self.error = "MESSAGE_LISTENER_FAILED" }
+        else { stopListening("MESSAGE_LISTENER_FAILED") }
+    }
+    /// A stored conversation document broke the contract (`TeamsPointerParser`): stop and say so.
+    private func invalidData() { stopListening(TeamsPointerParser.invalidDataCode) }
+    /// Every listener of this team stops (as Desktop's watcher does); the saved view stays and
+    /// `reconnect()` opens them again.
+    private func stopListening(_ code: String) {
+        removeListeners(); listenersFailed = true; offline = true; error = code
+    }
+    private func removeListeners() {
+        watchGeneration += 1
+        listener?.remove(); messageListener?.remove(); memberListener?.remove(); signalListener?.remove()
+        listener = nil; messageListener = nil; memberListener = nil; signalListener = nil
+        readListeners.values.forEach { $0.remove() }; readListeners = [:]; membershipReady = false
+    }
+    /// Opens the listeners again after they stopped (invalid data, a failed listener, a lost connection) and
+    /// retries what is pending.
+    func reconnect() {
+        guard active, !revoked else { return }
+        error = ""; listenersFailed = false; botsDirty = true
+        removeListeners()
+        directoryReady = false; readsPending = []
+        directoryCached = true; messagesCached = true; updateOffline()
+        watchMembers(life: lifecycle)
+        refresh()
     }
     private func updateOffline() {
         offline = directoryCached || (!selected.isEmpty && messagesCached)
     }
+    /// Message times reach the views as ISO-8601 with milliseconds (`TeamsStreamLogic.parseInstant` reads them back).
+    private static let isoFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
     private func decode<T: Decodable>(_ data: [String: Any]) throws -> T {
         var value = data
-        for key in ["createdAt", "editedAt"] { if let time = value[key] as? Timestamp { value[key] = ISO8601DateFormatter().string(from: time.dateValue()) } }
+        for key in ["createdAt", "editedAt"] { if let time = value[key] as? Timestamp { value[key] = Self.isoFormatter.string(from: time.dateValue()) } }
         guard JSONSerialization.isValidJSONObject(value) else { throw TeamMessageFailure(code: "INVALID_MESSAGE_SNAPSHOT") }
         return try JSONDecoder().decode(T.self, from: JSONSerialization.data(withJSONObject: value))
     }
     func stop() {
         active = false; lifecycle += 1; task?.cancel(); retry?.cancel(); deadline?.cancel(); deadline = nil; task = nil; retry = nil
-        listener?.remove(); messageListener?.remove(); memberListener?.remove(); signalListener?.remove()
-        listener = nil; messageListener = nil; memberListener = nil; signalListener = nil
-        readListeners.values.forEach { $0.remove() }; readListeners = [:]; membershipReady = false
+        removeListeners()
         if let authListener { auth.removeStateDidChangeListener(authListener) }; authListener = nil
         running = false; again = false; bots = []; botStates = [:]; terminalStates = [:]; missingStates = [:]
     }
     private func invalidate() {
+        guard !revoked else { return }
         revoked = true; selected = ""; error = "MEMBERSHIP_REQUIRED"
         cache = nil
         let owner = uid, team = teamId, epoch = generation
         stop()
+        onRevoked?()
         Task { _ = try? await TeamCommandFiles.shared.update(uid: owner, teamId: team, generation: epoch) { $0.conversations = []; $0.threads = [:]; $0.outbox = []; $0.creation = nil; $0.botOutbox = nil } }
     }
     private func commit(_ reduce: @Sendable (inout TeamMessageProjection) throws -> Void) async throws {
@@ -176,12 +246,12 @@ final class TeamMessagingModel {
         let retainedThreads = cache?.threads.filter { $0.key == id } ?? [:]
         selected = id; messagesCached = true; updateOffline(); cache?.threads = retainedThreads; botStates = [:]; botStateWindow = 100; messageListener?.remove(); messageListener = nil
         guard !id.isEmpty, cache?.conversations.contains(where: { $0.id == id }) == true else { refresh(); return }
-        let life = lifecycle
+        let life = lifecycle, watch = watchGeneration
         var firstSnapshot = true
         messageListener = db.collection("teams").document(teamId).collection("conversations").document(id).collection("messages").order(by: "seq")
             .addSnapshotListener(includeMetadataChanges: true) { [weak self] snapshot, error in
                 Task { @MainActor in
-                    guard let self, self.active, self.lifecycle == life, self.selected == id, self.auth.currentUser?.uid == self.uid else { return }
+                    guard let self, self.active, self.lifecycle == life, self.watchGeneration == watch, self.selected == id, self.auth.currentUser?.uid == self.uid else { return }
                     if let error { self.listenerFailed(error); return }
                     guard let snapshot else { return }
                     do {
@@ -278,15 +348,17 @@ final class TeamMessagingModel {
                 }
                 if botsDirty {
                     botsDirty = false
-                    do { let cards: TeamBotList = try await call(["action": "bots"], life: life); bots = cards.bots }
-                    catch { botsDirty = true; throw error }
+                    do { let cards: TeamBotList = try await call(["action": "bots"], life: life); bots = cards.bots; botsLoaded = true; botsUnverified = false }
+                    catch { botsDirty = true; botsUnverified = true; throw error }
                 }
                 let id = selected
                 if !id.isEmpty { try await observeStates(conversationId: id, life: life) }
-                error = ""; retryDelay = 1
+                if !listenersFailed { error = "" }
+                retryDelay = 1
             } catch {
                 guard active, life == lifecycle else { return }
-                again = false; offline = true; bots = []; botStates = [:]; self.error = (error as? TeamMessageFailure)?.code ?? "SERVICE_UNAVAILABLE"
+                // Without the card list Bot availability is unknown, not "unavailable".
+                again = false; offline = true; bots = []; botsUnverified = true; botStates = [:]; self.error = (error as? TeamMessageFailure)?.code ?? "SERVICE_UNAVAILABLE"
                 if ["MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED", "CONVERSATION_REQUIRED"].contains(self.error) { invalidate() }
             }
         }
@@ -394,14 +466,32 @@ final class TeamMessagingModel {
     func discardCreation() async throws { try await commit { value in
         if (value.creation?.attempted == true && value.creation?.error == nil) || (value.creation?.leaseUntil ?? 0) > Date().timeIntervalSince1970 * 1000 { throw TeamMessageFailure(code: "MESSAGE_IN_FLIGHT") }; value.creation = nil
     } }
+    /// Marks the open conversation read up to its newest loaded message (the header action).
     func markRead() async throws {
-        let id = selected, seq = cache?.threads[id]?.messages.map(\.seq).max() ?? 0
+        let id = selected
+        try await markRead(conversationId: id, lastReadSeq: cache?.threads[id]?.messages.map(\.seq).max() ?? 0)
+    }
+    /// Sends the `read` command for any conversation of the directory. Nothing happens offline or for a
+    /// watermark of 0. The listener of `reads/{uid}` and this acknowledgement both only ever raise `lastReadSeq`.
+    func markRead(conversationId id: String, lastReadSeq seq: Int) async throws {
+        guard active, !revoked, !offline, !id.isEmpty, seq > 0 else { return }
         let value: TeamMessageAck = try await call(["action": "read", "conversationId": id, "lastReadSeq": seq], life: lifecycle)
         if let index = cache?.conversations.firstIndex(where: { $0.id == id }) {
             let lastReadSeq = max(cache?.conversations[index].lastReadSeq ?? 0, value.lastReadSeq ?? 0)
             cache?.conversations[index].lastReadSeq = lastReadSeq
         }
     }
+    /// Unread messages of one conversation; 0 until its read mark is known (a mark that has not arrived yet must
+    /// not make the whole conversation look unread).
+    func unread(of conversation: TeamMessageConversation) -> Int {
+        directoryReady && !readsPending.contains(conversation.id) ? TeamsListLogic.unreadCount(conversation) : 0
+    }
+    /// Every listed conversation has delivered its read mark.
+    var readsReady: Bool { directoryReady && readsPending.isEmpty }
+    /// Sum of the unread messages of every conversation of this team.
+    var unreadTotal: Int { (cache?.conversations ?? []).reduce(0) { $0 + unread(of: $1) } }
+    /// The listeners deliver the saved copy (directory, or the open conversation) rather than the server's.
+    var fromCache: Bool { directoryCached || (!selected.isEmpty && messagesCached) }
     private func scheduleDeadline() {
         deadline?.cancel(); deadline = nil
         let now = Date().timeIntervalSince1970 * 1000

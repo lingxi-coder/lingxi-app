@@ -1,5 +1,5 @@
 {
-  "README.md": "30902f4bafee5bdcaa89540397af6ee2a59d4f0e160d9e7f3529bb79c5d318d8",
+  "README.md": "236d6364c11ae16342fccd9c99d1cbfcba87965cce184005afb2f5140f1f0cdb",
   "android-build.json": "8f40659bf71037384f9e53b7df0f8b60b4a1be9aaae72bb3b0d096f39d3f264a",
   "android-feature-ui.json": "b815fb64c5e11b1e50dc3dcca326dd46bb53727fb0d968681cc0d36998951051",
   "android-focused-ui.json": "66b34db1cafb118cb14a08d8936288cd1c82401684734aa9267d6787b4c7664d",
@@ -20,6 +20,8 @@
   "phone-question-answer-completed.png": "e8c3249220645eb86790af86aa677043fc8c56f7ccb55d3536c82bceb13276cc",
   "phone-recovery-completed.png": "44fd557e925bfd86c86764877c4eb745cbe1827fc803474d50ac0fd78fc7c6d3",
   "phone-recovery-form-retained.png": "3af32774e4685ce173c85f8e23e68656f720346724df2dcd13041d3ccfe58c79",
+  "phone-remote-initial-response.png": "c7c8e07937c14cc2263a6c6212b9597b586f483e7c5d3fb217f344eeb68e6270",
+  "phone-remote-question-pending.png": "282f113ef16ef2e28859c35a2c9500e383a4d00a9e2bfbad663a9476a706edb2",
   "recovery-build.json": "82d568b7285b8c725ce6294af7aec62a6d9c117a9beff5a4cb56ee3ebe5ef704",
   "recovery-installed.json": "ea2ddc39df279e6b6b5d9bbb3ada7916c3104ea31753297d0c40d876d868eb57",
   "translations.json": "a935d2d4a907cdb781f84f3ee2df2e530bdaa589910c434d3364f929c30b82bc",

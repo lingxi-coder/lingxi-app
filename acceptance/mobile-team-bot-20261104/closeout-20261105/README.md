@@ -112,11 +112,42 @@ The saved PNGs show terminal output, acknowledged question completion, the
 retained recovery form, and completed owner recovery. The attempted long-output
 stop test completed early under the old brief persona, so it is not a stop pass.
 
+## Restricted main-Mac Remote Control follow-up
+
+After explicit action-time consent, the primary Mac enabled Remote Control and
+approved only Samsung SM-S9310 after comparing the matching six-digit codes.
+The automatic enablement of all new conversations stayed off. Desktop showed
+Online, Android/Relayed, and the Samsung as its sole approved device. The phone
+showed Connected; flare-mini remained online as the second computer.
+
+Only the dedicated Mobile QA 20261105 Bot was enabled for remote access. Its
+permission mode remained Ask for approval, with no added folders or accepted
+peer Bots. Saving showed Saved; Samsung then listed this Bot and its QA chats.
+Samsung created a new remote QA chat, sent a real request, and received exactly
+`QA-20261105-REMOTE-OK`. A native Blue/Green question sheet also appeared.
+Cancelling that question produced an unsuccessful AskUserQuestion result as
+expected for dismissal; this was not a successful answered-question test.
+
+A Chinese 200-item response rendered on the phone. A subsequent continuation
+was still generating around items 201–204 when Samsung tapped Stop generating.
+The stop control disappeared and partial output initially remained. A later
+snapshot omitted assistant output, and Desktop's visible transcript lagged the
+last request. Stop was sent and the client returned idle, but durable history
+and reconnect consistency after stop are **not accepted**. Pairing-forget,
+second-host switching and remote push/deep-link journeys also remain unverified.
+
+Further mobile actions stopped because automatic approval review could not run
+after its usage limit was reached. The rejected Back action was not executed;
+no alternative input path was used to bypass review. The already delivered APK
+and source were unchanged during these checks. The phone was restored to
+portrait with its existing VPN before this follow-up, and no account or business
+data was reset.
+
 ## Remaining acceptance
 
-Main Mac Remote Control is off; action-time consent for pairing this different
-host is pending. Second-host remote pairing/forget/session and the complete
-remote push/deep-link journeys are not passed. Full manual TalkBack/VoiceOver,
+Main Mac pairing and the restricted QA remote chat passed as described above.
+Forget/re-pair, second-host switching, stop history/reconnect consistency and
+complete remote push/deep-link journeys are not passed. Full manual TalkBack/VoiceOver,
 real voice/provider setup, complete terminal/runtime journeys, long Bot-run and
 longer performance/release checks remain open. The original iOS results do not
 establish complete spec acceptance.

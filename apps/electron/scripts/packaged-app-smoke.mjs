@@ -1359,6 +1359,10 @@ async function assertColdSessionOpen(page, sessionId) {
 
 async function openPackagedProjectDraft(page, projectPath) {
   const label = `Edit ${projectPath.split('/').at(-1)}`;
+  await waitFor(() => evaluate(page, `(() => {
+    const button = Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === ${JSON.stringify(label)});
+    return Boolean(button && !button.disabled && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true');
+  })()`), { label: 'Code project draft action after renderer admission' });
   await evaluate(page, `(() => {
     const button = Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === ${JSON.stringify(label)});
     if (!button || button.disabled) throw new Error('The Code project must expose its draft action');

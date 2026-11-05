@@ -1,0 +1,1411 @@
+{
+  "totals": {
+    "tests": 1539,
+    "failures": 2,
+    "errors": 0,
+    "skipped": 0
+  },
+  "suites": [
+    {
+      "name": "com.lingxi.code.apps.AppPublicationReceiptsTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.apps.AppSourcePackageTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.apps.AppsModelsTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.apps.LocalAppAuthoringPromptTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.apps.MarketPlatformRoutingTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.apps.UnifiedAppModelsTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.bots.BotsLogicTest",
+      "tests": 84,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.bots.BotsSnapshotStoreTest",
+      "tests": 33,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.computeruse.ComputerUseAudioPolicyTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.computeruse.ComputerUseSettingsStoreCodecTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.connectivity.ConnectivityLogicTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.AgentRunToolRetentionTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.AskUserQuestionQueueTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.AskUserQuestionSummaryTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.AssistantMessageCollapsePolicyTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.ChatViewModelExternalTurnTest",
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.ChatViewModelReducerTest",
+      "tests": 113,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.ClientEventMapperTest",
+      "tests": 42,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.CompactionProgressTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.ComposerContextUsageTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.ComputerUseSetupStatusTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.ConversationBackgroundExecutionTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.ConversationNotificationRouteTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.ConversationSourceRecoveryTest",
+      "tests": 17,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.DiffRenderingTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.DisclosurePersistenceTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.DurableRecoveryAdversarialTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.DurableRecoveryRoutingTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.EngineReconnectGuardTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.EngineReplyStreamTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.ImagePreviewGeometryTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.LocalAppCardTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.MarkdownParserTest",
+      "tests": 29,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.MediaAudioSessionContextBindingsTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.MessageLinkNavigationTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.MessageOriginTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.ModelStateTest",
+      "tests": 28,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.NativeConversationParityFixtureTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.PermissionIngressTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.PermissionPromptMapperTest",
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.PlanDocumentTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.RemoteConversationSourceTest",
+      "tests": 26,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.RemoteModelSelectionTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.RetainedTurnEventDecoderTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.SessionBootstrapTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.SessionStateTest",
+      "tests": 24,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.SessionTitleSynchronizationTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.ShellToolCardStateTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.SideChatCommandTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.SideChatCreationFailureTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.SlashArgumentHintTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.SlashCommandCatalogTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.ToolCallStateTest",
+      "tests": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.TranscriptFollowTest",
+      "tests": 21,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.TranscriptSpacingTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.TranscriptToolGroupTest",
+      "tests": 17,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.UserMessageMetadataTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.VisualizationTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.conversation.WorkflowProgressTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.cron.CronAutomationTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.cron.CronBusyRetryTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.cron.CronCoroutinePolicyTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.cron.CronPageRouteTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.cron.CronRunHistoryPersistenceTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.cron.CronRunRetentionTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.cron.CronSchedulePolicyTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.cron.CronWorkNamesTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.device.DeviceReadPermissionControllerTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.drawer.DrawerProductionDataTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.drawer.DrawerSearchTest",
+      "tests": 14,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.drawer.DrawerUiStateTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.drawer.RecentSessionsTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.location.AndroidLocationAdapterTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.location.LocationResultOwnershipTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.model.MockDataTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.model.ProviderModelVisibilityTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.model.SessionCatalogTest",
+      "tests": 14,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.model.SessionModeRoutingTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.model.SettingsMockTest",
+      "tests": 14,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.navigation.DeepLinkInboxTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.navigation.DeepLinkTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.navigation.SharedDeepLinkFixtureTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.notify.NotificationPolicyTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.offload.AndroidSystemOffloadAudioTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.offload.NativeOffloadHostTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.plugins.PluginCatalogTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.plugins.PluginDetailsTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.project.ProjectPagesTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.project.ProjectRepositorySessionModeTest",
+      "tests": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.project.ProjectUiMapperTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.project.ScopeStateStoreTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.project.WorkspaceDirectoryRepositoryTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.project.WorkspaceFilesTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.push.PushMessagePolicyTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.remote.RemoteBotsTest",
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.remote.RemoteConnectionUiTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.remote.RemoteControlManagerTest",
+      "tests": 72,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.remote.RemoteFileCopyTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.remote.RemoteFileProblemTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.remote.RemoteImageShrinkTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.remote.RemoteKeyStoreTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.remote.RemoteRouteTest",
+      "tests": 19,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.runtimeintegration.AndroidHostEnvironmentTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.runtimeintegration.EngineEnvironmentOverridesTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.runtimeintegration.NativeEngineLaunchScenarioTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.secure.AndroidSecureStorageAtomicityTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.AudioConfigurationRepositoryTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.BundledRootfsIdentityTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.DeepLinkImportProposalTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.DesktopSettingsContractTest",
+      "tests": 19,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.LinuxRuntimeBridgeRootfsInstallerTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.LinuxRuntimeStateTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.McpDeepLinkResolutionTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.PermissionModeSelectionTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.PermissionModeSettingsJsonTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.PluginSecretRepositoryTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.PluginsPagesTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.ProviderAccountsTest",
+      "tests": 22,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.ProviderConnectionsTest",
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.ProviderImportEngineTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.ProviderImportTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.ProviderProfileMappingTest",
+      "tests": 15,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.ProviderSettingsSemanticsTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.PublicExtensionDirectoryTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.SettingsBackActionTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.SettingsGroupsTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.SettingsStoreLocalizationTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.SettingsVoiceEditTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.VoiceSettingsContractTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.settings.VoiceSpeedTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.shell.BashismDetectorTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.shell.OnDemandBashTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.shell.ShellStateTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.tabs.SettingsJumpStateTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.tabs.TabLogicTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.tabs.TabShellStateTest",
+      "tests": 17,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.teams.TeamBotsTest",
+      "tests": 14,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.teams.TeamInvitationTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.teams.TeamMessageProjectionTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.teams.TeamsComposeLogicTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.teams.TeamsListLogicTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.teams.TeamsPointerParserTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.teams.TeamsReadLogicTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.teams.TeamsStreamLogicTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.terminal.MobileLinuxTerminalGatewayTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.terminal.TerminalEmulatorTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.terminal.TerminalViewModelTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.theme.AccentsTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.theme.AgentAvatarTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.theme.AppLanguageTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.theme.AvatarIdentityTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.theme.DesignTokensTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.vision.CameraResultOwnershipTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.AndroidVoiceRuntimeVoiceKeyTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.AudioSetupGuidanceTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.FlowCloseCancellationTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.FlowVoiceControllerTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.VoiceCaptureLifecycleTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.AndroidAudioServiceCoreTest",
+      "tests": 50,
+      "failures": 2,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": [
+        {
+          "name": "failedInvalidationRestoresAdmissionAndCanRetryNativeStop",
+          "message": "java.lang.AssertionError: expected:<Status(recording=true, playing=false)> but was:<Failed(error=DeviceAudioError(kind=Cancelled, message=audio owner is ending))>"
+        },
+        {
+          "name": "failedPartialMediaOpenRetainsLeaseAndRetriesCleanupBeforeOpeningAgain",
+          "message": "com.lingxi.code.voice.audio.AudioOperationException: test capture startup failure"
+        }
+      ]
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.AndroidMediaAudioPortSessionTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.AndroidMediaDeviceModesTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.AndroidMediaPermissionCoordinatorTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.AndroidMediaStopGateTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.AndroidNativeMediaOpenReceiptTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.AndroidProviderAudioCapabilityTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.AndroidProviderAudioRequestTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.AndroidRealtimeAgentTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.AudioConfigurationFixtureTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.AudioOwnerDtoMapperTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.AudioResourceCoordinatorTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.CancellableResourceTransferTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.PcmWavTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.audio.ProviderAudioSessionBindingsTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    },
+    {
+      "name": "com.lingxi.code.voice.offline.VoiceModelDownloaderTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failedTests": []
+    }
+  ]
+}

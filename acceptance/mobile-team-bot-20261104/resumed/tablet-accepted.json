@@ -1,0 +1,72 @@
+{
+  "device": "emulator-5580",
+  "manufacturer": "Google",
+  "transport": "emulator-5580          device product:sdk_gphone16k_arm64 model:sdk_gphone16k_arm64 device:emu64a16k transport_id:12",
+  "dataCleared": false,
+  "processIsolation": true,
+  "testSourceSHA256": {
+    "com.lingxi.code.bots.BotsTabUiTest": "3d43d3bb59eddb534d05ab36e89f1a3801b40c910dbface5a55bc99c3ea6a570",
+    "com.lingxi.code.tabs.TabShellUiTest": "706bd7ac0b2a04f55f37140f7bd0557c64b280e7a587c77445b32dd7d3b6814c",
+    "com.lingxi.code.settings.SettingsTabUiTest": "aa951d4bb85403a76f22aa81bb6784707c7d3ec316f3904a2ab5126ac1a48a09",
+    "com.lingxi.code.teams.TeamsTabUiTest": "a01476528d5952e7494a1a1884ea00f2ac7dd5fbe842463318c903185430e100",
+    "com.lingxi.code.bots.BotsSignedOutRouteUiTest": "4865472ac570b0c3f1bc08f521509b84bbcc25462692c6230f2a6d476a54dce0",
+    "com.lingxi.code.navigation.MobileLinkIntentTest": "5e0a5114d2914c73105d353a917f3844a5aa6cf8362c27bdbc6ab35c0743cb28",
+    "com.lingxi.code.teams.MobileScrollAcceptanceTest": "17ea738667ccb808232f2c4c188a062867438342a0e8d96c9f56b5cf74795461",
+    "com.lingxi.code.conversation.NativeBindingUiTest": "2d8e7013164c4363f595639b1932e31cb357347d11bf75a586a782ff36fbda3a",
+    "com.lingxi.code.conversation.ConversationNotificationRouteInstrumentedTest": "a85c2dacd08293f10ec1a4e5d8d996b1c993c35548ac0cb7d305c67a3eba4386",
+    "com.lingxi.code.tabs.MobileAcceptanceUiTest": "5ec6cb44fe6f28175e50829c84eba481494f141568352acf52e695802a509d3d",
+    "com.lingxi.code.remote.RemoteBotsUiTest": "53723e7767fae6ce16afe044f2759e85c522bf12367713bd91018dae41fd408d",
+    "com.lingxi.code.theme.NativeStyleUiTest": "1949ffd76809d9e010659d3d9e66767489ab767149ca3a35a6891a850d50d77c"
+  },
+  "systemAnimationsDisabled": false,
+  "tests": [
+    {
+      "test": "com.lingxi.code.bots.BotsSignedOutRouteUiTest#phoneRetainsARemoteLinkBehindTheSignInGate",
+      "result": "passed",
+      "seconds": 4.91,
+      "log": "001-BotsSignedOutRouteUiTest-phoneRetainsARemoteLinkBehindTheSignInGate.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsSignedOutRouteUiTest#wideRetainsARemoteLinkWithoutCreatingASessionPane",
+      "result": "passed",
+      "seconds": 4.25,
+      "log": "002-BotsSignedOutRouteUiTest-wideRetainsARemoteLinkWithoutCreatingASessionPane.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsSignedOutRouteUiTest#aRetainedSessionAlsoGatesWhenItsParentStillShowsIt",
+      "result": "passed",
+      "seconds": 3.77,
+      "log": "003-BotsSignedOutRouteUiTest-aRetainedSessionAlsoGatesWhenItsParentStillShowsIt.log"
+    },
+    {
+      "test": "com.lingxi.code.bots.BotsSignedOutRouteUiTest#aDisposedBotsStackRestoresOnlyForTheSameAccount",
+      "result": "passed",
+      "seconds": 3.29,
+      "log": "004-BotsSignedOutRouteUiTest-aDisposedBotsStackRestoresOnlyForTheSameAccount.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#wide_backPopsTheVisibleTabBeforeReturningToChats",
+      "result": "passed",
+      "seconds": 4.48,
+      "log": "005-TabShellUiTest-wide_backPopsTheVisibleTabBeforeReturningToChats.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#crossingTheBreakpointKeepsChatsAndTheSelectedTab",
+      "result": "passed",
+      "seconds": 4.69,
+      "log": "006-TabShellUiTest-crossingTheBreakpointKeepsChatsAndTheSelectedTab.log"
+    },
+    {
+      "test": "com.lingxi.code.tabs.TabShellUiTest#hiddenChatsKeepsItsTopBarComposedWithoutMeasuringItEvenAfterItWasVisible",
+      "result": "passed",
+      "seconds": 4.36,
+      "log": "007-TabShellUiTest-hiddenChatsKeepsItsTopBarComposedWithoutMeasuringItEvenAfterItWasVisible.log"
+    }
+  ],
+  "counts": {
+    "passed": 7,
+    "skipped": 0,
+    "failed": 0,
+    "timeout": 0
+  }
+}

@@ -24,6 +24,16 @@ CLASSES = {
     "com.lingxi.code.settings.SettingsTabUiTest": "settings/SettingsTabUiTest.kt",
     "com.lingxi.code.teams.TeamsTabUiTest": "teams/TeamsTabUiTest.kt",
 }
+REGRESSION_CLASSES = {
+    "com.lingxi.code.bots.BotsSignedOutRouteUiTest": "bots/BotsSignedOutRouteUiTest.kt",
+    "com.lingxi.code.navigation.MobileLinkIntentTest": "navigation/MobileLinkIntentTest.kt",
+    "com.lingxi.code.teams.MobileScrollAcceptanceTest": "teams/MobileScrollAcceptanceTest.kt",
+    "com.lingxi.code.conversation.NativeBindingUiTest": "conversation/NativeBindingUiTest.kt",
+    "com.lingxi.code.conversation.ConversationNotificationRouteInstrumentedTest": "conversation/ConversationNotificationRouteInstrumentedTest.kt",
+    "com.lingxi.code.tabs.MobileAcceptanceUiTest": "tabs/MobileAcceptanceUiTest.kt",
+    "com.lingxi.code.remote.RemoteBotsUiTest": "remote/RemoteBotsUiTest.kt",
+    "com.lingxi.code.theme.NativeStyleUiTest": "theme/NativeStyleUiTest.kt",
+}
 PACKAGE = "com.lingxi.code.debug"
 RUNNER = PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"
 
@@ -32,11 +42,12 @@ def adb(*args, timeout=20):
     return subprocess.run(["adb", *args], text=True, capture_output=True, timeout=timeout)
 
 
-def usb_line(serial):
+def usb_line(serial, allow_emulator=False):
     result = adb("devices", "-l")
     result.check_returncode()
     line = next((line for line in result.stdout.splitlines() if line.split()[:2] == [serial, "device"]), "")
-    if not re.search(r"\busb:", line):
+    emulator = allow_emulator and re.fullmatch(r"emulator-\d+", serial) and line
+    if not emulator and not re.search(r"\busb:", line):
         raise RuntimeError("Device must remain attached over USB: " + serial)
     return line
 
@@ -75,6 +86,37 @@ def interrupted(signum, frame):
     raise KeyboardInterrupt()
 
 
+@contextmanager
+def animations(serial, disabled, output):
+    if not disabled:
+        yield
+        return
+    keys = ("window_animation_scale", "transition_animation_scale", "animator_duration_scale")
+    original = {}
+    for key in keys:
+        result = adb("-s", serial, "shell", "settings", "get", "global", key)
+        result.check_returncode()
+        original[key] = result.stdout.strip()
+    record = {"original": original, "requested": "0", "restored": False}
+    path = output / "animation-config.json"
+    path.write_text(json.dumps(record, indent=2) + "\n")
+    try:
+        for key in keys:
+            adb("-s", serial, "shell", "settings", "put", "global", key, "0").check_returncode()
+        yield
+    finally:
+        failures = []
+        for key, value in original.items():
+            command = "delete" if value == "null" else "put"
+            args = ["-s", serial, "shell", "settings", command, "global", key]
+            if command == "put": args.append(value)
+            if adb(*args).returncode: failures.append(key)
+        record["restored"] = not failures
+        record["restoreFailures"] = failures
+        path.write_text(json.dumps(record, indent=2) + "\n")
+        if failures: raise RuntimeError("Could not restore animation settings: " + ", ".join(failures))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", required=True)
@@ -82,14 +124,18 @@ def main():
     parser.add_argument("--test", action="append", help="One class#method from the feature suite; repeatable")
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--orientation", choices=["portrait", "landscape"])
+    parser.add_argument("--disable-animations", action="store_true", help="Temporarily disable system animations, then restore all original scales")
+    parser.add_argument("--allow-emulator", action="store_true", help="Also permit an emulator-NNNN serial; physical devices still require USB")
+    parser.add_argument("--capture-fixture", action="store_true", help="Save the fixture screen and geometry before test cleanup")
     args = parser.parse_args()
     if args.output.exists():
         parser.error("Use a new output directory to preserve prior evidence")
-    transport = usb_line(args.device)
+    transport = usb_line(args.device, args.allow_emulator)
     manufacturer = adb("-s", args.device, "shell", "getprop", "ro.product.manufacturer").stdout.strip()
     source = ROOT / "apps/android/native/app/src/androidTest/java/com/lingxi/code"
     cases = []
-    for name, relative in CLASSES.items():
+    all_classes = {**CLASSES, **REGRESSION_CLASSES} if args.test else CLASSES
+    for name, relative in all_classes.items():
         cases.extend(name + "#" + method for method in re.findall(r"@Test\s+fun\s+(\w+)", (source / relative).read_text()))
     if args.test:
         unknown = set(args.test) - set(cases)
@@ -100,18 +146,20 @@ def main():
     summary = {
         "device": args.device, "manufacturer": manufacturer, "transport": transport,
         "dataCleared": False, "processIsolation": True,
-        "testSourceSHA256": {name: digest(source / relative) for name, relative in CLASSES.items()},
+        "testSourceSHA256": {name: digest(source / relative) for name, relative in all_classes.items()},
+        "systemAnimationsDisabled": args.disable_animations,
         "tests": [],
     }
     signal.signal(signal.SIGTERM, interrupted)
-    with orientation(args.device, args.orientation, args.output):
+    with animations(args.device, args.disable_animations, args.output), orientation(args.device, args.orientation, args.output):
         for index, case in enumerate(cases, 1):
-            line = usb_line(args.device)
+            line = usb_line(args.device, args.allow_emulator)
             adb("-s", args.device, "shell", "am", "force-stop", PACKAGE).check_returncode()
             adb("-s", args.device, "shell", "am", "force-stop", PACKAGE + ".test").check_returncode()
             started = time.monotonic()
             try:
-                result = adb("-s", args.device, "shell", "am", "instrument", "-w", "-r", "-e", "class", case, RUNNER, timeout=args.timeout)
+                options = ["-e", "captureFixture", "true"] if args.capture_fixture else []
+                result = adb("-s", args.device, "shell", "am", "instrument", "-w", "-r", *options, "-e", "class", case, RUNNER, timeout=args.timeout)
                 output = result.stdout + result.stderr
                 ok = result.returncode == 0 and "OK (" in output and "FAILURES!!!" not in output
                 state = "passed" if ok else "failed"
@@ -121,8 +169,16 @@ def main():
                 output = "HOST TIMEOUT\n" + str(error.stdout or "") + str(error.stderr or "")
                 state = "timeout"
                 adb("-s", args.device, "shell", "am", "force-stop", PACKAGE)
+            if state in {"failed", "timeout"}:
+                focus = adb("-s", args.device, "shell", "dumpsys", "window")
+                focused_lines = [item for item in focus.stdout.splitlines() if "mCurrentFocus=" in item or "mFocusedApp=" in item]
+                output += "\nFAILURE WINDOW FOCUS\n" + "\n".join(focused_lines)
             log = "{:03d}-{}.log".format(index, case.rsplit(".", 1)[-1].replace("#", "-"))
             (args.output / log).write_text(line + "\n" + output)
+            if args.capture_fixture:
+                for suffix in ["json", "png"]:
+                    adb("-s", args.device, "pull", "/sdcard/Android/data/" + PACKAGE + "/files/mobile-port-acceptance/fixture-last." + suffix,
+                        str(args.output / (log.removesuffix(".log") + "." + suffix)))
             summary["tests"].append({"test": case, "result": state, "seconds": round(time.monotonic() - started, 2), "log": log})
             summary["counts"] = {key: sum(test["result"] == key for test in summary["tests"]) for key in ["passed", "skipped", "failed", "timeout"]}
             (args.output / "results.json").write_text(json.dumps(summary, indent=2) + "\n")

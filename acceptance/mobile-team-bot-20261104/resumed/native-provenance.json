@@ -1,0 +1,20 @@
+{
+  "originalLink": "/Users/luolingfeng/lingxi/lingxi-app/apps/android/native/app/src/play/jniLibs",
+  "sources": {
+    "arm64-v8a": {
+      "source": "/Users/luolingfeng/lingxi/.buildcache/ffi-bindings-20261103/prior-native/play-arm64-current/play-jni-arm64-v8a",
+      "sha256": "cc688121872084588a0088638bed0610a66aed90da1af5ac42d512aa4e8d0059"
+    },
+    "x86_64": {
+      "source": "/Users/luolingfeng/lingxi/.buildcache/ffi-bindings-20261103/prior-native/play-complete/play-jni-x86_64",
+      "sha256": "d1a4c0f8235623bc5f2ba538448a38ac95f9a0bf8f5f25808b929182a975c87d"
+    }
+  },
+  "bindings": {
+    "apps/android/native/app/src/main/java/com/lingxi/code/bindings/runtime/harness_runtime.kt": "f5ceaf9698b7b509508a187609acadd9253b5826ed8d861d2f030330f1e8947c",
+    "apps/android/native/app/src/main/java/com/lingxi/code/bindings/android/android_aar.kt": "4d697281e28ed2b59ab43dfb2c22cbea3a3721acb4520aee3d1af3e279b7dae8",
+    "apps/android/native/app/src/main/java/com/lingxi/code/bindings/client/client.kt": "9b1729f389504703979e3936be8f3f0c01a7484ce28215a499460ad80e9750e8"
+  },
+  "arm64FullAppStartup": "passed: native UniFFI initialization completed and MainActivity reached the drawer; no new fatal exception",
+  "notificationPrompt": "POST_NOTIFICATIONS allowed through the system prompt during startup smoke"
+}

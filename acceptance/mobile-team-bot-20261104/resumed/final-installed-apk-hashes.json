@@ -1,0 +1,16 @@
+{
+  "com.lingxi.code.debug": {
+    "localPath": "apps/android/native/app/build/outputs/apk/play/debug/app-play-debug.apk",
+    "bytes": 556807269,
+    "localSHA256": "b00930243b8844c554dfc22b58474a7d762f645a13853618ab184504474bb999",
+    "installedSHA256": "b00930243b8844c554dfc22b58474a7d762f645a13853618ab184504474bb999",
+    "matched": true
+  },
+  "com.lingxi.code.debug.test": {
+    "localPath": "apps/android/native/app/build/outputs/apk/androidTest/play/debug/app-play-debug-androidTest.apk",
+    "bytes": 6094561,
+    "localSHA256": "33cd930c557aff83be7090944eae8ea9dabae0bf52166cf073de2cd6ad669eda",
+    "installedSHA256": "33cd930c557aff83be7090944eae8ea9dabae0bf52166cf073de2cd6ad669eda",
+    "matched": true
+  }
+}

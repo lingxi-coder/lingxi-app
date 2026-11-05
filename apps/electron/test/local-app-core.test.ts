@@ -398,12 +398,31 @@ for (const takeoverFails of [false, true]) {
 test('standalone library client rejects pending work on EOF and requires explicit host recovery', { skip: process.platform === 'win32' }, async t => {
   const root = await fs.mkdtemp(join(tmpdir(), 'local-app-client-test-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = join(root, 'server.mjs'), executable = join(root, 'bridge');
-  await fs.writeFile(source, `import {createInterface} from 'node:readline';\ncreateInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line); if(r.request.op==='exit')process.exit(0);else process.stdout.write(JSON.stringify({id:r.id,ok:true,value:{op:r.request.op}})+'\\n');});`);
+  await fs.writeFile(source, `import {createInterface} from 'node:readline';\ncreateInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line); if(r.request.op==='exit')process.stderr.write('fixture failure\\n',()=>process.exit(17));else if(r.request.op==='signal')process.kill(process.pid,'SIGTERM');else process.stdout.write(JSON.stringify({id:r.id,ok:true,value:{op:r.request.op}})+'\\n');});`);
   await fs.writeFile(executable, `#!/bin/sh\nexec '${process.execPath}' '${source}' "$@"\n`, { mode: 0o700 });
-  const client = new LocalAppCoreClient(executable, root); t.after(() => client.dispose());
+  const reports: string[] = [];
+  const client = new LocalAppCoreClient(executable, root, message => reports.push(message)); t.after(() => client.dispose());
   assert.deepEqual(await client.request({ op: 'list' }), { op: 'list' });
-  await assert.rejects(client.request({ op: 'exit' }), /exited/);
+  await assert.rejects(client.request({ op: 'exit' }), (error: Error) => {
+    assert.match(error.message, /exited/);
+    assert.doesNotMatch(error.message, /fixture failure/);
+    return true;
+  });
+  assert.match(reports.join(''), /fixture failure/);
+  assert.match(reports.join(''), /code=17, signal=null/);
   assert.throws(() => client.request({ op: 'list' }), /restart/);
+  const signalReports: string[] = [];
+  const signaled = new LocalAppCoreClient(executable, root, message => signalReports.push(message)); t.after(() => signaled.dispose());
+  assert.deepEqual(await signaled.request({ op: 'list' }), { op: 'list' });
+  await assert.rejects(signaled.request({ op: 'signal' }), /exited/);
+  assert.match(signalReports.join(''), /code=null, signal=SIGTERM/);
+  const spawnReports: string[] = [];
+  const missing = new LocalAppCoreClient(join(root, 'missing-bridge'), root, message => spawnReports.push(message));
+  const disconnected = new Promise<Error>(resolve => missing.onDisconnected(resolve));
+  await assert.rejects(missing.request({ op: 'list' }));
+  await disconnected;
+  assert.match(spawnReports.join(''), /closed \(code=.*signal=null\): .*ENOENT/);
+  await missing.dispose();
   const recovered = new LocalAppCoreClient(executable, root); t.after(() => recovered.dispose());
   assert.deepEqual(await recovered.request({ op: 'list' }), { op: 'list' });
   await client.dispose(); assert.throws(() => client.request({ op: 'list' }), /closed/);

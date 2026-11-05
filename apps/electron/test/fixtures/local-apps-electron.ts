@@ -39,7 +39,7 @@ async function main() {
     const canonical = await fs.realpath(source.projectPath);
     return { sourceDirectory: canonical, projectRef: { kind: 'desktopPath' as const, path: canonical }, authoringSessionId: ref.sessionId };
   };
-  const createHost = () => new LocalAppHost({ configHome, appProjectsRoot: join(configHome, '.apps'), core: new LocalAppCoreClient(resolveServerBin(), configHome), currentConversationMode: () => 'code', preload: join(root, 'localApp.cjs'),
+  const createHost = () => new LocalAppHost({ configHome, appProjectsRoot: join(configHome, '.apps'), core: new LocalAppCoreClient(resolveServerBin(), configHome, message => process.stderr.write(`LocalApp Core: ${message}`)), currentConversationMode: () => 'code', preload: join(root, 'localApp.cjs'),
     nodeExecutable: process.execPath, mainWindow: () => library, edit: async () => undefined, resolveAuthoringBinding });
   let discovery: { port: number; token: string };
   let url: string;

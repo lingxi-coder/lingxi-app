@@ -24,8 +24,10 @@
 //! maps to a deny.
 
 use std::any::Any;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::ops::Range;
 use std::time::Instant;
+use unicode_width::UnicodeWidthChar;
 
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -87,6 +89,12 @@ enum Prompt {
 /// A permission request awaiting the user's decision.
 pub struct PermissionView {
     prompt: Prompt,
+    tool_input_details: Option<String>,
+    details_open: bool,
+    details_scroll: usize,
+    details_max_scroll: Cell<usize>,
+    details_page_height: Cell<usize>,
+    details_layout: RefCell<Option<(u16, Vec<Range<usize>>)>>,
     input_guard: PermissionInputGuard,
     rendered_in_frame: Cell<bool>,
     /// One-shot response sender, consumed by the first resolution.
@@ -103,6 +111,32 @@ pub struct PermissionView {
     /// [`crate::bottom_pane::ViewStack::dismiss_turn_prompts`] must not
     /// treat it as belonging to the turn being interrupted.
     background: bool,
+}
+
+// Store byte ranges into the immutable payload. Paging uses usize, so a long
+// Write input stays inspectable past ratatui's u16 Paragraph scroll limit.
+fn input_line_ranges(input: &str, width: u16) -> Vec<Range<usize>> {
+    let width = usize::from(width.max(1));
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut columns = 0;
+    for (at, ch) in input.char_indices() {
+        if ch == '\n' {
+            lines.push(start..at);
+            start = at + 1;
+            columns = 0;
+            continue;
+        }
+        let cells = UnicodeWidthChar::width(ch).unwrap_or(1);
+        if columns + cells > width && start < at {
+            lines.push(start..at);
+            start = at;
+            columns = 0;
+        }
+        columns += cells;
+    }
+    lines.push(start..input.len());
+    lines
 }
 
 impl PermissionView {
@@ -144,6 +178,7 @@ impl PermissionView {
             .worker
             .as_ref()
             .map_or_else(|| "The assistant".to_string(), |w| format!("@{}", w.name));
+        let mut tool_input_details = None;
         let prompt = match &exchange.request {
             PermissionRequest::ToolUseConfirm {
                 tool_name,
@@ -157,6 +192,7 @@ impl PermissionView {
                 let mut input = tool_input
                     .to_json_string()
                     .expect("permission tool input projection is valid JSON");
+                tool_input_details = Some(input.clone());
                 if input.chars().count() > 68 {
                     input = format!("{}…", input.chars().take(67).collect::<String>());
                 }
@@ -212,7 +248,10 @@ impl PermissionView {
                 Prompt::Select {
                     dialog: DialogView::new(
                         "Permission required",
-                        vec![format!("{who} wants to use {tool_name}:"), input],
+                        vec![
+                            format!("Ctrl+O details · {who} wants to use {tool_name}:"),
+                            input,
+                        ],
                         rows,
                     ),
                     fixed_height: Some(VIEWPORT_HEIGHT),
@@ -268,6 +307,12 @@ impl PermissionView {
         };
         Self {
             prompt,
+            tool_input_details,
+            details_open: false,
+            details_scroll: 0,
+            details_max_scroll: Cell::new(0),
+            details_page_height: Cell::new(1),
+            details_layout: RefCell::new(None),
             input_guard: PermissionInputGuard::default(),
             rendered_in_frame: Cell::new(false),
             resp_tx: Some(exchange.resp_tx),
@@ -337,6 +382,47 @@ impl Renderable for PermissionView {
         if area.width > 0 && area.height > 0 {
             self.rendered_in_frame.set(true);
         }
+        if self.details_open {
+            Clear.render(area, buf);
+            let block = Block::new().borders(Borders::ALL).title("Full tool input");
+            let inner = block.inner(area);
+            block.render(area, buf);
+            let body = Rect {
+                height: inner.height.saturating_sub(1),
+                ..inner
+            };
+            let input = self.tool_input_details.as_deref().unwrap_or_default();
+            let mut layout = self.details_layout.borrow_mut();
+            if layout
+                .as_ref()
+                .is_none_or(|(width, _)| *width != body.width)
+            {
+                *layout = Some((body.width, input_line_ranges(input, body.width)));
+            }
+            let ranges = &layout.as_ref().expect("input layout is populated").1;
+            let max_scroll = ranges.len().saturating_sub(usize::from(body.height));
+            self.details_max_scroll.set(max_scroll);
+            self.details_page_height
+                .set(usize::from(body.height).max(1));
+            let lines = ranges
+                .iter()
+                .skip(self.details_scroll.min(max_scroll))
+                .take(usize::from(body.height))
+                .map(|range| Line::from(&input[range.clone()]))
+                .collect::<Vec<_>>();
+            Paragraph::new(lines).render(body, buf);
+            if inner.height > 0 {
+                Paragraph::new("↑/↓ scroll · PgUp/PgDn · Home/End · Esc back").render(
+                    Rect {
+                        y: inner.y + inner.height - 1,
+                        height: 1,
+                        ..inner
+                    },
+                    buf,
+                );
+            }
+            return;
+        }
         match &self.prompt {
             Prompt::Select { dialog, .. } => dialog.render(area, buf),
             Prompt::TypedConfirm { typed } => {
@@ -355,6 +441,9 @@ impl Renderable for PermissionView {
     }
 
     fn desired_height(&self, width: u16) -> u16 {
+        if self.details_open {
+            return 20;
+        }
         match &self.prompt {
             Prompt::Select {
                 fixed_height: Some(rows),
@@ -366,6 +455,9 @@ impl Renderable for PermissionView {
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if self.details_open {
+            return None;
+        }
         match &self.prompt {
             Prompt::Select { dialog, .. } => dialog.cursor_pos(area),
             Prompt::TypedConfirm { .. } => None,
@@ -383,6 +475,32 @@ impl Renderable for PermissionView {
 impl BottomPaneView for PermissionView {
     fn handle_key(&mut self, key: KeyEvent) -> ViewOutcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && matches!(key.code, KeyCode::Char('o' | 'O')) && self.tool_input_details.is_some()
+        {
+            self.details_open = !self.details_open;
+            return ViewOutcome::Pending;
+        }
+        if self.details_open {
+            self.details_scroll = match key.code {
+                KeyCode::Esc => {
+                    self.details_open = false;
+                    self.details_scroll
+                }
+                KeyCode::Up => self.details_scroll.saturating_sub(1),
+                KeyCode::Down => self.details_scroll.saturating_add(1),
+                KeyCode::PageUp => self
+                    .details_scroll
+                    .saturating_sub(self.details_page_height.get()),
+                KeyCode::PageDown => self
+                    .details_scroll
+                    .saturating_add(self.details_page_height.get()),
+                KeyCode::Home => 0,
+                KeyCode::End => self.details_max_scroll.get(),
+                _ => self.details_scroll,
+            }
+            .min(self.details_max_scroll.get());
+            return ViewOutcome::Pending;
+        }
         let response = match &mut self.prompt {
             Prompt::Select {
                 dialog,
@@ -464,6 +582,67 @@ mod tests {
         let view = PermissionView::new(exchange);
         view.settle_input_for_test();
         view
+    }
+
+    #[test]
+    fn full_input_view_keeps_the_tail_and_cannot_approve_while_open() {
+        let command = format!("echo {} END_OF_OPERATION", "prefix ".repeat(100));
+        let (exchange, mut response) = exchange_for(PermissionRequest::ToolUseConfirm {
+            tool_name: "Bash".into(),
+            tool_input: permission_input(serde_json::json!({"command":command})),
+            default_decision: permission::gate::PromptDefault::DenyByDefault,
+            suppress_always_allow_rule: false,
+        });
+        let mut view = settled_view(exchange);
+        view.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buffer = Buffer::empty(area);
+        view.render(area, &mut buffer);
+        view.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        view.render(area, &mut buffer);
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("END_OF_OPERATION"));
+        for code in [KeyCode::Enter, KeyCode::Char('1'), KeyCode::Char('n')] {
+            assert!(matches!(
+                view.handle_key(KeyEvent::new(code, KeyModifiers::NONE)),
+                ViewOutcome::Pending
+            ));
+            assert!(matches!(
+                response.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+        }
+        view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!view.details_open);
+    }
+
+    #[test]
+    fn full_input_paging_reaches_beyond_u16_rows_without_changing_whitespace() {
+        let text = format!("{}TAIL", "  x\n".repeat(70_000));
+        let ranges = input_line_ranges(&text, 20);
+        assert!(ranges.len() > usize::from(u16::MAX));
+        assert_eq!(&text[ranges[0].clone()], "  x");
+        assert_eq!(&text[ranges.last().unwrap().clone()], "TAIL");
+        let (exchange, _response) = tool_exchange();
+        let mut view = settled_view(exchange);
+        view.tool_input_details = Some(text);
+        view.details_open = true;
+        let area = Rect::new(0, 0, 24, 10);
+        let mut buffer = Buffer::empty(area);
+        view.render(area, &mut buffer);
+        view.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert!(view.details_scroll > usize::from(u16::MAX));
+        view.render(area, &mut buffer);
+        assert!(buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .contains("TAIL"));
     }
 
     #[test]

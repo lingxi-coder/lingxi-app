@@ -56,8 +56,8 @@ class PermissionPromptMapperTest {
         )
         assertEquals(42uL, prompt.requestId)
         assertTrue(prompt.title.contains("Bash"))
-        // The salient JSON field is surfaced as the detail preview.
-        assertEquals("rm -rf build", prompt.detail)
+        // The full input remains inspectable before approving.
+        assertEquals("""{"command":"rm -rf build"}""", prompt.detail)
         assertNull(prompt.worker)
     }
 
@@ -94,7 +94,7 @@ class PermissionPromptMapperTest {
     }
 
     @Test
-    fun toolUseConfirm_prefersFilePath_whenNoCommand() {
+    fun toolUseConfirm_preservesContentAlongsideFilePath() {
         val prompt = permissionRequestToPrompt(
             request(
                 PermissionKindDto.ToolUseConfirm(
@@ -104,7 +104,7 @@ class PermissionPromptMapperTest {
                 ),
             ),
         )
-        assertEquals("/tmp/x.txt", prompt.detail)
+        assertEquals("""{"file_path":"/tmp/x.txt","content":"hi"}""", prompt.detail)
     }
 
     @Test
@@ -137,7 +137,7 @@ class PermissionPromptMapperTest {
     }
 
     @Test
-    fun toolUseConfirm_decodesEscapesInPreview() {
+    fun toolUseConfirm_preservesEscapedInput() {
         val prompt = permissionRequestToPrompt(
             request(
                 PermissionKindDto.ToolUseConfirm(
@@ -147,7 +147,7 @@ class PermissionPromptMapperTest {
                 ),
             ),
         )
-        assertEquals("echo \"hi\"\nls", prompt.detail)
+        assertEquals("""{"command":"echo \"hi\"\nls"}""", prompt.detail)
     }
 
     @Test
@@ -162,6 +162,15 @@ class PermissionPromptMapperTest {
                 ),
             ),
         )
+        assertEquals(raw, prompt.detail)
+    }
+
+    @Test
+    fun toolUseConfirm_preservesEveryExecutionFieldAndNestedInput() {
+        val raw = """{"file_path":"/tmp/report.txt","script":"echo script","command":"echo command","code":"echo code","metadata":{"path":"nested"}}"""
+        val prompt = permissionRequestToPrompt(request(PermissionKindDto.ToolUseConfirm(
+            toolName = "CustomTool", toolInputJson = raw, defaultAllow = false,
+        )))
         assertEquals(raw, prompt.detail)
     }
 

@@ -1158,18 +1158,21 @@ export class HostController {
       this.assertSender(event);
       let authoring: LocalAppNewSessionIntent | undefined;
       let recoveryId: string | undefined;
+      let botCreation = false;
       if (purpose !== undefined) {
         if (!purpose || typeof purpose !== 'object' || Array.isArray(purpose)) throw new Error('invalid new session purpose');
         const input = purpose as Record<string, unknown>;
-        if (input.kind === 'local-app' && Object.keys(input).every(key => key === 'kind' || key === 'intent')) {
+        if (input.kind === 'create-bot' && Object.keys(input).every(key => key === 'kind')) {
+          botCreation = true;
+        } else if (input.kind === 'local-app' && Object.keys(input).every(key => key === 'kind' || key === 'intent')) {
           authoring = validateNewAuthoringIntent(input.intent);
         } else if (input.kind === 'recover-local-app' && Object.keys(input).every(key => key === 'kind' || key === 'requestId') && isSessionId(input.requestId)) {
           recoveryId = input.requestId;
         } else throw new Error('invalid new session purpose');
       }
       const space = this.settings.conversationSpaces.snapshot().activeMode;
-      if (purpose !== undefined && this.currentConversationMode() !== 'code') throw new Error(nativeTr('local_app_development_requires_code'));
-      if (purpose !== undefined && !this.localAppSession) throw new Error('The Local App authoring host is unavailable');
+      if (purpose !== undefined && !botCreation && this.currentConversationMode() !== 'code') throw new Error(nativeTr('local_app_development_requires_code'));
+      if (purpose !== undefined && !botCreation && !this.localAppSession) throw new Error('The Local App authoring host is unavailable');
       // Reserve the per-App ordering at admission, not after a slow runtime boot.
       const localApp = authoring ? this.localAppSession!.begin(authoring) : undefined;
       const requestedAt = Date.now();
@@ -1196,6 +1199,7 @@ export class HostController {
           const runtimeStartedAt = Date.now();
           const current = () => generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === space;
           const ref = await this.bridge.newSession(project, model as string | undefined, { mode: space, projectId, activate: localApp ? () => false : current,
+            ...(botCreation ? { forceNew: true } : {}),
             ...(localApp ? { forceNew: true, durableDraftTitle: authoring!.name.trim() || 'Local App',
               onAllocated: async (allocated: SessionRef) => {
                 release = this.bridge.retainBackgroundSession(allocated);

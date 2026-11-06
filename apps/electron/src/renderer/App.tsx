@@ -306,7 +306,7 @@ export function App() {
     const nonce = ++localAppNavigation.current;
     setLocalAppDraft(undefined);
     const target = await prepareBotCreationChat(request, {
-      newSession: () => localAppBridge.current.newSession(),
+      newSession: purpose => localAppBridge.current.newSession(undefined, purpose),
       offerLinkDraft: draft => localAppBridge.current.offerLinkDraft(draft),
     }, () => localAppNavigation.current === nonce);
     if (localAppNavigation.current !== nonce) return;

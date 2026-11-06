@@ -22,6 +22,10 @@ export function createMarketGateway({ origin, secret, fetcher = fetch }) {
         ...(!['GET', 'HEAD'].includes(req.method) ? { body: req.rawBody } : {}),
       });
       for (const name of responseHeaders) if (response.headers.has(name)) res.set(name, response.headers.get(name));
+      const length = response.headers.get('content-length'), encoding = response.headers.get('content-encoding');
+      // Fetch can decode encoded bodies; their declared wire length no longer applies.
+      if ((encoding === null || encoding.toLowerCase() === 'identity') && length !== null
+        && /^\d+$/u.test(length) && Number.isSafeInteger(Number(length))) res.set('Content-Length', length);
       res.set('Cache-Control', 'no-store, no-transform');
       res.status(response.status);
       if (!response.body || req.method === 'HEAD') { await response.body?.cancel(); res.end(); return; }

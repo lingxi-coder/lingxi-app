@@ -20,6 +20,12 @@ struct BotMarketHandoff: Codable, Equatable {
     var requestID: String = UUID().uuidString
     var instanceID: String? = nil
     static func validID(_ value: String) -> Bool { value.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil }
+    static func validatedAPIRoot(_ value: String) -> URL? {
+        guard let parts = URLComponents(string: value), parts.scheme == "https", parts.host?.isEmpty == false,
+              parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
+              parts.percentEncodedPath == "/api/v3/" else { return nil }
+        return parts.url
+    }
     var desktopURL: URL? {
         guard Self.validID(listingID), versionID.map(Self.validID) ?? true, intentID.map(Self.validID) ?? true else { return nil }
         var parts = URLComponents(string: "https://lingxios.net/open/market/bot/\(listingID)")!
@@ -35,16 +41,14 @@ struct BotMarketHandoff: Codable, Equatable {
         guard let data = UserDefaults.standard.data(forKey: key()), let value = try? JSONDecoder().decode(Self.self, from: data), value.desktopURL != nil else { return nil }
         return value
     }
-    func resolve(marketURL: URL?, create: Bool) async throws -> Self {
+    func resolve(botAPIURL: URL?, create: Bool) async throws -> Self {
+        guard let botAPIURL, let endpoint = Self.validatedAPIRoot(botAPIURL.absoluteString) else { throw MarketFailure("MARKET_NOT_CONFIGURED") }
+        let api = try MarketAPI(baseURL: endpoint, followsRedirects: false)
         if intentID == nil && !create { return self }
         guard let user = Auth.auth().currentUser else { throw MarketFailure("SIGN_IN_REQUIRED", "Sign in to track this Desktop download.") }
         let owner = user.uid
         let token = try await user.getIDToken()
         guard Auth.auth().currentUser?.uid == owner else { throw MarketFailure("ACCOUNT_CHANGED") }
-        guard let marketURL, var parts = URLComponents(url: marketURL, resolvingAgainstBaseURL: false) else { throw MarketFailure("MARKET_NOT_CONFIGURED") }
-        parts.path = "/api/v3"; parts.query = nil; parts.fragment = nil
-        guard let endpoint = parts.url else { throw MarketFailure("MARKET_NOT_CONFIGURED") }
-        let api = try MarketAPI(baseURL: endpoint)
         var captured = Self.pending().flatMap { $0.requestID == requestID ? $0 : nil } ?? self
         let receipt: BotInstallReceipt
         if let intentID = captured.intentID {
@@ -77,13 +81,15 @@ struct BotMarketHandoffPage: View {
     let versionID: String?
     let intentID: String?
     let marketURL: URL?
+    let botAPIURL: URL?
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @State private var handoff: BotMarketHandoff
     @State private var error: String?
     @State private var busy = false
-    init(listingID: String, versionID: String?, intentID: String?, marketURL: URL?) {
+    init(listingID: String, versionID: String?, intentID: String?, marketURL: URL?, botAPIURL: URL?) {
         self.listingID = listingID; self.versionID = versionID; self.intentID = intentID; self.marketURL = marketURL
+        self.botAPIURL = botAPIURL
         let pending = BotMarketHandoff.pending().flatMap { value in value.listingID == listingID && (versionID == nil || value.versionID == versionID) && (intentID == nil || value.intentID == intentID) ? value : nil }
         _handoff = State(initialValue: pending ?? .init(listingID: listingID, versionID: versionID, intentID: intentID, stage: "awaiting_desktop"))
     }
@@ -118,7 +124,7 @@ struct BotMarketHandoffPage: View {
     private func refresh(create: Bool) async {
         guard !busy else { return }
         busy = true; defer { busy = false }
-        do { handoff = try await handoff.resolve(marketURL: marketURL, create: create); error = nil }
+        do { handoff = try await handoff.resolve(botAPIURL: botAPIURL, create: create); error = nil }
         catch { self.error = error.localizedDescription }
     }
 }

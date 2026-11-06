@@ -36,6 +36,10 @@ import org.json.JSONObject
 import java.net.URI
 import java.util.UUID
 
+internal fun requireBotMarketApiRoot(value: String): String = URI(value).also { root ->
+    require(root.scheme == "https" && root.host != null && root.rawUserInfo == null && root.rawQuery == null && root.rawFragment == null && root.rawPath == "/api/v3/") { "Invalid Bot market endpoint" }
+}.toString()
+
 /** Only public identities and an authenticated receipt. No credentials or resource bindings. */
 data class BotMarketHandoff(val listingId: String, val versionId: String? = null, val intentId: String? = null,
     val requestId: String = UUID.randomUUID().toString(), val status: String = "awaiting_desktop", val instanceId: String? = null) {
@@ -44,12 +48,11 @@ data class BotMarketHandoff(val listingId: String, val versionId: String? = null
     val marketUrl: String get() = URI(BuildConfig.LOCAL_APP_MARKET_API_ROOT).let { URI(it.scheme, null, it.host, it.port, "/bots/$listingId", "platform=macos", null).toString() }
     fun save(context: Context) { preferences(context).edit().putString(key(), JSONObject().put("listingId", listingId).put("versionId", versionId).put("intentId", intentId).put("requestId", requestId).put("status", status).put("instanceId", instanceId).toString()).apply() }
     suspend fun resolve(context: Context, create: Boolean): BotMarketHandoff {
+        val api = MarketClient(requireBotMarketApiRoot(BuildConfig.BOT_MARKET_API_ROOT))
         val user = FirebaseAuth.getInstance().currentUser ?: error("Sign in to track this Desktop download")
         val owner = user.uid
         val token = user.getIdToken(false).await().token ?: error("Sign in again")
         check(FirebaseAuth.getInstance().currentUser?.uid == owner) { "Account changed during handoff" }
-        val root = URI(BuildConfig.LOCAL_APP_MARKET_API_ROOT).let { URI(it.scheme, null, it.host, it.port, "/api/v3", null, null).toString() }
-        val api = MarketClient(root)
         var version = versionId ?: pending(context)?.takeIf { it.requestId == requestId }?.versionId
         if (intentId == null && !create) return this
         if (intentId == null && version == null) version = api.authenticatedRequest("/bots/$listingId", token).getJSONObject("data").getJSONObject("currentVersion").getString("id")

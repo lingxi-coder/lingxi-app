@@ -62,3 +62,26 @@ scenario('Task observer drops previously visible tasks after membership denial',
   fake.messages = async <T>(command: MessageCommand) => { if (command.action === 'listTasks') { if (denied) throw new Error('MEMBERSHIP_REQUIRED'); return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state: 'queued', createdAt: 1, deadline: Date.now() + 300000 }] } as T; } return { bots: fake.bots } as T; };
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount()); assert.match(page.text(), /Queued/); denied = true; await page.during(() => { fake.signal({ conversationId: 'test-chat' }); }); assert.doesNotMatch(page.text(), /Queued/); assert.match(page.text(), /Access changed/);
 });
+
+scenario('Publication keeps successive native selections and cancellation, including distinct same-name Skills', async context => {
+  const file = (token: string, name: string, hash: string, kind: 'file' | 'skill') => ({ token, name, kind, bytes: 12, sha256: hash.repeat(64), mediaType: 'text/plain' });
+  const notes = file('notes-token', 'notes.txt', 'a', 'file');
+  const firstSkill = file('skill-one', 'SKILL.md', 'b', 'skill');
+  const secondSkill = file('skill-two', 'SKILL.md', 'c', 'skill');
+  const selections = [[notes, firstSkill], [firstSkill, secondSkill], []];
+  const published: unknown[] = [];
+  const { workspace } = await open(context, {
+    localBots: async () => [{ instanceId: 'local-new', name: 'Travel', description: '' }],
+    selectSharedFiles: async () => selections.shift()!,
+    publishLocalBot: async input => { published.push(input); return { sharedBotId: input.sharedBotId, revision: 1 }; },
+  });
+  const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
+  await page.click(page.button('Load local Bots'));
+  await page.type(page.find(n => n.type === 'select')[0], 'local-new');
+  await page.type(page.find(n => n.type === 'textarea')[0], 'Read the notes and both Skills.');
+  for (let pick = 0; pick < 3; pick++) await page.click(page.button('Select read-only files / SKILL.md'));
+  await page.submit();
+  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1));
+  await page.click(page.button('Publish assistant'));
+  assert.deepEqual((published[0] as Record<string, unknown>).fileTokens, ['notes-token', 'skill-one', 'skill-two']);
+});

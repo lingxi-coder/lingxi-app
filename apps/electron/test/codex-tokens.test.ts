@@ -154,3 +154,27 @@ test('check refreshes ahead of expiry by the wall clock', async () => {
 test('an engine never receives the refresh token or the account email', () => {
   assert.deepEqual(codexAccessToken(fresh), { access_token: 'a1', expires_at: fresh.expires_at, account_id: 'acct', fedramp: false });
 });
+
+
+for (const lockHeld of [false, true]) test(`token shutdown drains admitted work (external lock: ${lockHeld}) and stops background admission`, async () => {
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const storage = store();
+  const originalSet = storage.set;
+  storage.set = async (id, value) => { entered(); await gate; return originalSet(id, value); };
+  const tokens = new CodexTokenManager({ store: storage });
+  const signingIn = tokens.signIn({ access_token: 'new', refresh_token: 'refresh', expires_at: 1, fedramp: false }, ACCOUNT, 1, lockHeld);
+  await started;
+  let stopped = false;
+  const stopping = tokens.dispose().then(() => { stopped = true; });
+  tokens.start(1);
+  tokens.check();
+  assert.equal(stopped, false);
+  assert.throws(() => tokens.current(ACCOUNT), /shutting down/);
+  release();
+  await signingIn;
+  await stopping;
+  assert.equal(storage.value.access_token, 'new');
+  await tokens.dispose();
+});

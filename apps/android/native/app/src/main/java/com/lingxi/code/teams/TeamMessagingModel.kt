@@ -199,7 +199,6 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         if (!active || mutable.value.revoked) return
         if (running) { again = true; return }
         running = true; val life = lifecycle
-        // Keep question/recovery forms mounted while polling. Failures and scope changes clear them below.
         job = scope.launch {
             try {
                 reload(life)
@@ -311,23 +310,21 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         launchOperation {
             try {
                 if (!active || mutable.value.revoked || mutable.value.selected.isEmpty() || (operation != "recall" && (text.isBlank() || text.toByteArray(Charsets.UTF_8).size > 8192))) throw TeamMessageFailure("INVALID_INPUT")
-                if (operation == "create") {
+                val targetsForSubmit = if (operation == "create") {
                     val conversation = mutable.value.cache?.conversations?.find { it.id == mutable.value.selected } ?: throw TeamMessageFailure("CONVERSATION_REQUIRED")
                     if (conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1) throw TeamMessageFailure("BOT_SELECTION_STALE")
-                    requireTeamBotSelections(if (conversation.kind == "bot_dm") conversation.sharedBotIds else targets, mutable.value.bots, conversation.participants)
-                }
+                    val selected = if (conversation.kind == "bot_dm") conversation.sharedBotIds else targets
+                    requireTeamBotSelections(selected, mutable.value.bots, conversation.participants)
+                    selected
+                } else emptyList()
                 val intent = JSONObject().put("action", "mutate").put("teamId", teamId).put("generation", generation).put("conversationId", mutable.value.selected).put("messageId", messageId ?: UUID.randomUUID().toString()).put("changeId", UUID.randomUUID().toString()).put("operation", operation).put("text", text)
                 replyTo?.let { intent.put("replyTo", it) }
-                commit(life) { val targetsForSubmit = if (operation == "create") {
-                        val conversation = it.conversations.first { c -> c.id == mutable.value.selected }
-                        if (conversation.kind == "bot_dm") conversation.sharedBotIds else targets
-                    } else emptyList()
-                    val command = if (targetsForSubmit.isNotEmpty()) {
-                        val payload = JSONObject().put("conversationId", intent.getString("conversationId")).put("messageId", intent.getString("messageId")).put("changeId", intent.getString("changeId")).put("text", text).put("targets", JSONArray(targetsForSubmit.distinct().sorted()))
-                        replyTo?.let { payload.put("replyTo", it) }
-                        executionCommand("submit", payload, intent.getString("changeId"))
-                    } else intent
-                    it.copy(outbox = it.outbox + command) }; onSuccess(); refresh()
+                val command = if (targetsForSubmit.isNotEmpty()) {
+                    val payload = JSONObject().put("conversationId", intent.getString("conversationId")).put("messageId", intent.getString("messageId")).put("changeId", intent.getString("changeId")).put("text", text).put("targets", JSONArray(targetsForSubmit.distinct().sorted()))
+                    replyTo?.let { payload.put("replyTo", it) }
+                    executionCommand("submit", payload, intent.getString("changeId"))
+                } else intent
+                commit(life) { it.copy(outbox = it.outbox + command) }; onSuccess(); refresh()
             } finally { if (life == lifecycle) mutable.update { it.copy(submitting = false) } }
         }
     }

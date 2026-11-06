@@ -1,4 +1,5 @@
 import java.io.File
+import java.net.URI
 import java.util.Properties
 import groovy.json.JsonSlurper
 import com.google.firebase.crashlytics.buildtools.gradle.CrashlyticsExtension
@@ -16,6 +17,10 @@ val productConfigText = providers.fileContents(
 ).asText
 val productConfig = JsonSlurper().parseText(productConfigText.get()) as Map<*, *>
 val localAppMarketApiRoot = productConfig["localAppMarketApiRoot"] as String
+val botMarketApiRoot = productConfig["botMarketApiRoot"] as String
+URI(botMarketApiRoot).also { root ->
+    require(root.scheme == "https" && root.host != null && root.rawUserInfo == null && root.rawQuery == null && root.rawFragment == null && root.rawPath == "/api/v3/") { "Invalid botMarketApiRoot" }
+}
 
 plugins {
     alias(libs.plugins.google.services)
@@ -68,6 +73,7 @@ android {
         versionName = "0.1.0"
         buildConfigField("String", "MOBILE_LINUX_SDK_VERSION", "\"$mobileLinuxSdkVersion\"")
         buildConfigField("String", "LOCAL_APP_MARKET_API_ROOT", groovy.json.JsonOutput.toJson(localAppMarketApiRoot))
+        buildConfigField("String", "BOT_MARKET_API_ROOT", groovy.json.JsonOutput.toJson(botMarketApiRoot))
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
@@ -389,6 +395,7 @@ dependencies {
 
     // Unit tests
     testImplementation(libs.junit)
+    testImplementation(libs.mockito.core)
     // Coroutine/Flow test harness — runTest + UnconfinedTestDispatcher drive the
     // engine reply-stream ordering tests (subscribe-before-submit, terminal
     // completion) on the plain JVM with virtual time.

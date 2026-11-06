@@ -1287,7 +1287,7 @@ export async function confirmPackagedLocalAppSourceTrust(page, expectedPath) {
 async function createPackagedLocalAppSourceSession(page, creatorSessionId, configHome) {
   const creator = await evaluate(page, 'window.lingxi.bootstrap().then(state => state.activeSession)');
   assert.equal(creator?.sessionId, creatorSessionId, 'the ordinary custom-provider chat must remain the creator chat');
-  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === 'Apps')?.click()`);
+  await showPackagedAppLibrary(page);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library-header button'))`), { label: 'open Apps before Local App creation' });
   await evaluate(page, `document.querySelector('.local-app-library-header button').click()`);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('[aria-label="Project name"]'))`), { label: 'native Local App source Project dialog' });
@@ -1354,21 +1354,105 @@ async function assertColdSessionOpen(page, sessionId) {
   assert(result.events.some(event => event.type === 'model_changed'), 'the saved model must be restored');
   assert.equal(typeof result.remoteStatus.enabled, 'boolean', 'the packaged Remote Control status IPC must remain available');
   assert(Array.isArray(result.remoteSessions.sessions), 'the packaged Remote Control sessions IPC must remain available');
+  // Opening a native session intentionally retains the Teams workspace. Select
+  // Home explicitly before checking the ordinary Code transcript on reload.
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.desktop-nav-rail button[aria-label="Home"]')) && !document.querySelector('.desktop-nav-rail button[aria-label="Home"]').disabled && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'cold-open renderer session admission before Home navigation' });
+  await evaluate(page, `document.querySelector('.desktop-nav-rail button[aria-label="Home"]').click()`);
+  try {
+    await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.settings.sidebar?.mode === 'home')`), { label: 'cold-open Home workspace persisted' });
+  } catch (error) {
+    log(`cold-open Home navigation state: ${JSON.stringify(await evaluate(page, `(async () => ({ body: document.body?.innerText, home: document.querySelector('.desktop-nav-rail button[aria-label="Home"]')?.outerHTML, rail: document.querySelector('.desktop-nav-rail')?.outerHTML, bootstrap: await window.lingxi.bootstrap() }))()`))}`);
+    throw error;
+  }
+  const beforeReload = (await page.send('Page.getFrameTree')).frameTree.frame;
   await page.send('Page.reload', { ignoreCache: true });
-  await waitFor(() => evaluate(page, `document.body.innerText.includes('Custom provider verified.')`), { label: 'cold-open saved transcript rendered' });
+  await waitFor(async () => {
+    const frame = (await page.send('Page.getFrameTree')).frameTree.frame;
+    return frame.url === beforeReload.url && frame.loaderId !== beforeReload.loaderId;
+  }, { label: 'cold-open renderer reload committed' });
+  await waitFor(() => evaluate(page, `document.readyState === 'complete' && Boolean(document.body)`), { label: 'cold-open renderer document ready' });
+  try {
+    await waitFor(() => evaluate(page, `document.body.innerText.includes('Custom provider verified.')`), { label: 'cold-open saved transcript rendered' });
+  } catch (error) {
+    log(`cold-open renderer state: ${JSON.stringify(await evaluate(page, `(async () => ({ url: location.href, ready: document.readyState, body: document.body?.innerText, bootstrap: await window.lingxi?.bootstrap() }))()`))}`);
+    throw error;
+  }
   assert.equal(await evaluate(page, `document.body.innerText.includes('This chat is being resumed')`), false,
     'the cold-open renderer must not show the original error');
   log('cold saved session: handshake-time metadata, transcript/model restore, renderer and Remote Control IPC passed');
 }
 
 async function openPackagedProjectDraft(page, projectPath) {
-  // App source projects now belong to the first-level Apps workspace. Exercise
-  // the ordinary New chat action to prove its draft is isolated from authoring.
+  // App source projects are deliberately hidden from Home. Keep this check of
+  // ordinary Code draft isolation on the same public new-session IPC as Home.
+  // Apps' explicit bound-session flow is covered separately by its UI fixtures.
   const active = await evaluate(page, 'window.lingxi.bootstrap().then(state => state.activeSession)');
   assert.equal(active?.projectPath, projectPath);
-  await evaluate(page, `Array.from(document.querySelectorAll('.desktop-nav-rail button')).find(button => button.getAttribute('aria-label') === 'Home')?.click()`);
-  await waitFor(() => evaluate(page, `Boolean(Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'New chat' && !button.disabled)) && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'ordinary New chat action after Apps navigation' });
-  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'New chat' && !button.disabled).click()`);
+  const opened = await evaluate(page, `window.lingxi.newSession(${JSON.stringify(projectPath)})`);
+  assert.equal(opened.activeSession?.projectPath, projectPath);
+  assert.notEqual(opened.activeSession?.sessionId, active.sessionId);
+  // This direct native IPC returns a new bootstrap to its caller. Reopen the
+  // renderer to consume that bootstrap through its ordinary startup path.
+  const before = (await page.send('Page.getFrameTree')).frameTree.frame;
+  await page.send('Page.reload', { ignoreCache: true });
+  await waitFor(async () => {
+    const frame = (await page.send('Page.getFrameTree')).frameTree.frame;
+    return frame.url === before.url && frame.loaderId !== before.loaderId;
+  }, { label: 'ordinary Code draft renderer reload' });
+  await waitFor(() => evaluate(page, `document.readyState === 'complete' && Boolean(document.querySelector('.desktop-nav-rail button[aria-label="Home"]')) && !document.querySelector('.desktop-nav-rail button[aria-label="Home"]').disabled && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'ordinary Code draft renderer admission' });
+  await evaluate(page, `document.querySelector('.desktop-nav-rail button[aria-label="Home"]').click()`);
+}
+
+async function showPackagedAppLibrary(page) {
+  await evaluate(page, `Array.from(document.querySelectorAll('.desktop-nav-rail button')).find(button => button.getAttribute('aria-label') === 'Apps')?.click()`);
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-apps-library-link'))`), { label: 'Apps workspace library action' });
+  await evaluate(page, `document.querySelector('.local-apps-library-link').click()`);
+}
+
+async function assertPackagedAppDraftWithoutReload(page, probe, created, sessionId) {
+  const marker = `APP_DRAFT_NO_RELOAD_${Date.now()}`;
+  const frame = (await page.send('Page.getFrameTree')).frameTree.frame;
+  const requestCount = probe.requests.length;
+  await evaluate(page, `document.querySelector('.desktop-nav-rail button[aria-label="Apps"]').click()`);
+  const title = await waitFor(() => evaluate(page, `(() => {
+    const group = Array.from(document.querySelectorAll('.local-apps-sidebar-group')).find(group => group.querySelector('.local-apps-sidebar-name')?.textContent === ${JSON.stringify(created.name)});
+    return group?.querySelector('.local-apps-sidebar-chats button[aria-current="page"]')?.getAttribute('title');
+  })()`), { label: 'authoring chat in Apps sidebar' });
+  const draft = await evaluate(page, `(() => {
+    const prompt = document.querySelector('[aria-label="Prompt"]');
+    if (!prompt?.isContentEditable) throw new Error('App draft must be editable');
+    window.__packagedDraftRendererMarker = ${JSON.stringify(marker)};
+    prompt.focus();
+    const range = document.createRange(); range.selectNodeContents(prompt); range.collapse(false);
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    document.execCommand('insertText', false, ${JSON.stringify(marker)});
+    return prompt.innerText;
+  })()`);
+  assert.ok(draft.includes(created.id) && draft.includes(marker));
+  const newChat = async () => {
+    await evaluate(page, `document.querySelector('.desktop-nav-rail button[aria-label="Home"]').click()`);
+    await waitFor(() => evaluate(page, `Boolean(document.querySelector('.sidebar-new-chat:not(:disabled)'))`), { label: 'Home new-chat action' });
+    await evaluate(page, `document.querySelector('.sidebar-new-chat').click()`);
+    await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => typeof state.activeSession?.sessionId === 'string' && state.activeSession.sessionId !== ${JSON.stringify(sessionId)} && Boolean(document.querySelector('[aria-label="Prompt"][contenteditable="true"]')) && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true' && !document.querySelector('[aria-label="Prompt"]').innerText.includes(${JSON.stringify(created.id)}) && !document.querySelector('[aria-label="Prompt"]').innerText.includes(${JSON.stringify(marker)}) && !document.querySelector('.local-app-chat-card'))`), { label: 'unrelated live chat excludes App draft and transcript' });
+  };
+  const returnToAuthor = async () => {
+    await evaluate(page, `document.querySelector('.desktop-nav-rail button[aria-label="Apps"]').click()`);
+    await waitFor(() => evaluate(page, `(() => {
+      const group = Array.from(document.querySelectorAll('.local-apps-sidebar-group')).find(group => group.querySelector('.local-apps-sidebar-name')?.textContent === ${JSON.stringify(created.name)});
+      const matches = Array.from(group?.querySelectorAll('.local-apps-sidebar-chats button') ?? []).filter(button => button.title === ${JSON.stringify(title)});
+      if (matches.length !== 1 || matches[0].disabled) return false; matches[0].click(); return true;
+    })()`), { label: 'return through original Apps chat without Modify' });
+    await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.sessionId === ${JSON.stringify(sessionId)} && document.querySelector('[aria-label="Prompt"]')?.innerText === ${JSON.stringify(draft)} && Boolean(document.querySelector('.local-app-chat-card')))`), { label: 'original live App draft restored byte for byte' });
+    assert.equal(await evaluate(page, `document.querySelector('[aria-label="Prompt"]').innerText.split(${JSON.stringify(marker)}).length - 1`), 1);
+  };
+  await newChat();
+  await returnToAuthor();
+  await newChat();
+  await returnToAuthor();
+  assert.equal((await page.send('Page.getFrameTree')).frameTree.frame.loaderId, frame.loaderId, 'App draft round trip must not reload');
+  assert.equal(await evaluate(page, 'window.__packagedDraftRendererMarker'), marker);
+  assert.equal(probe.requests.length, requestCount, 'draft navigation must not invoke a model');
+  log('packaged App draft: live UI round trip, exact restoration, unrelated-chat isolation and zero model calls passed');
 }
 
 async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, configHome) {
@@ -1417,7 +1501,7 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
   // Host bootstrap changes before the renderer completes session admission.
   // Navigation is intentionally blocked until that admission commits.
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('[aria-label="Prompt"][contenteditable="true"]')) && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'second chat renderer admission before Apps navigation' });
-  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === 'Apps')?.click()`);
+  await showPackagedAppLibrary(page);
   try {
     await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'packaged Apps library' });
   } catch (error) {
@@ -1436,11 +1520,12 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
     modify.click();
   })()`);
   await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId === '${sessionId}' && document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && Boolean(document.querySelector('.local-app-chat-card')))`), { label: 'Modify restores the dedicated authoring Code session, transcript and app draft' });
+  await assertPackagedAppDraftWithoutReload(page, probe, created, sessionId);
   // Open the current Code project draft and verify its composer is isolated.
   await openPackagedProjectDraft(page, sourceSession.projectPath);
   await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId !== '${sessionId}' && !document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && !document.querySelector('.local-app-chat-card'))`), { label: 'new unrelated source-project chat has its own transcript and draft' });
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('[aria-label="Prompt"][contenteditable="true"]')) && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'unrelated chat renderer admission before returning to Apps' });
-  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === 'Apps')?.click()`);
+  await showPackagedAppLibrary(page);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'return to application library' });
   const screenshot = await page.send('Page.captureScreenshot', { format: 'png' });
   const evidence = process.env.LINGXI_LOCAL_APP_EVIDENCE;

@@ -68,13 +68,14 @@ private struct MarketErrorEnvelope: Decodable { let error: Detail; struct Detail
 final class MarketAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     let baseURL: URL
     private let configuration: URLSessionConfiguration
+    private let followsRedirects: Bool
     private lazy var session: URLSession = {
         configuration.httpAdditionalHeaders = nil; configuration.httpCookieStorage = nil; configuration.urlCredentialStorage = nil
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
-    init(baseURL: URL, configuration: URLSessionConfiguration = .ephemeral) throws {
+    init(baseURL: URL, configuration: URLSessionConfiguration = .ephemeral, followsRedirects: Bool = true) throws {
         guard baseURL.scheme == "https", baseURL.host != nil, baseURL.user == nil, baseURL.password == nil else { throw MarketFailure("HTTPS_REQUIRED") }
-        self.baseURL = baseURL; self.configuration = configuration
+        self.baseURL = baseURL; self.configuration = configuration; self.followsRedirects = followsRedirects
     }
     var browseURL: URL? {
         guard var parts = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else { return nil }
@@ -82,6 +83,7 @@ final class MarketAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         return parts.url
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        guard followsRedirects else { completionHandler(nil); return }
         // Authenticated writes never forward credentials across an origin.
         let authenticated = task.originalRequest?.value(forHTTPHeaderField: "Authorization") != nil
         let sameOrigin = request.url?.host == baseURL.host && request.url?.port == baseURL.port

@@ -1,6 +1,6 @@
 import { providerById, type ProviderDefinition } from '../shared/providers.js';
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rm, stat } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readFile, rm, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ProviderAccountCommand, ProviderAccountMetadata, ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import { logicalProviderId, type ProviderAccountRouting } from '../shared/providerAccounts.js';
@@ -139,55 +139,93 @@ export function withFileRefreshIntents(store: CodexSessionStore, directory: () =
   };
 }
 
-/** Process-shared per-account lock; a crashed refresh also leaves its durable Broker intent. */
+interface AccountLockOwner { version: 2; pid: number; token: string }
+interface AccountLockClaim { owner: AccountLockOwner; dev: number; ino: number }
+const lockRecoveryRequired = () => new Error('Provider account lock needs recovery.');
+
+async function readAccountLock(path: string): Promise<AccountLockClaim | undefined> {
+  try {
+    const entry = await lstat(path);
+    if (!entry.isFile() || entry.size > 256 || (process.getuid && entry.uid !== process.getuid())
+      || (process.platform !== 'win32' && (entry.mode & 0o077) !== 0)) throw lockRecoveryRequired();
+    const file = await open(path, 'r');
+    try {
+      const actual = await file.stat();
+      if (entry.dev !== actual.dev || entry.ino !== actual.ino) return undefined;
+      const owner = JSON.parse(await file.readFile('utf8')) as AccountLockOwner;
+      if (Object.keys(owner).sort().join(',') !== 'pid,token,version' || owner.version !== 2
+        || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+        || typeof owner.token !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(owner.token)) throw lockRecoveryRequired();
+      return { owner, dev: entry.dev, ino: entry.ino };
+    } finally { await file.close(); }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw lockRecoveryRequired();
+  }
+}
+
+const sameAccountLock = (a: AccountLockClaim, b: AccountLockClaim): boolean =>
+  a.dev === b.dev && a.ino === b.ino && a.owner.pid === b.owner.pid && a.owner.token === b.owner.token;
+const accountLockOwnerDead = (pid: number): boolean => {
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+};
+async function publishAccountLock(candidate: string, path: string): Promise<boolean> {
+  try { await link(candidate, path); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false; throw error; }
+}
+async function releaseAccountLock(path: string, claim: AccountLockClaim): Promise<void> {
+  const current = await readAccountLock(path);
+  if (!current || !sameAccountLock(current, claim)) throw lockRecoveryRequired();
+  await unlink(path);
+}
+
+/**
+ * Ephemeral process exclusion, not a durable credential commit. Owner bytes are
+ * synced before atomic publication; directory names need only survive process
+ * exit, not power loss. Durable refresh/mutation intents remain separate.
+ */
 export async function withProviderAccountLock<T>(root: string, accountId: string, operation: () => Promise<T>): Promise<T> {
   if (!/^[a-z0-9._-]{1,64}$/.test(accountId)) throw new Error('invalid account lock');
   await mkdir(root, { recursive: true, mode: 0o700 });
-  const lock = join(root, accountId);
+  const lock = join(root, accountId), recovery = `${lock}.reclaim`;
+  const owner: AccountLockOwner = { version: 2, pid: process.pid, token: randomUUID() };
+  const candidate = join(root, `.${accountId}.${owner.token}.tmp`);
   const deadline = Date.now() + 90_000;
-  const recovery = `${lock}.reclaim`;
-  for (;;) {
-    if (await stat(recovery).catch(() => undefined)) {
-      if (Date.now() >= deadline) throw new Error('Provider account lock recovery is busy.');
-      await new Promise(resolve => setTimeout(resolve, 50));
-      continue;
-    }
-    try {
-      await mkdir(lock, { mode: 0o700 });
-      const owner = await open(join(lock, 'owner'), 'wx', 0o600);
-      try { await owner.writeFile(String(process.pid)); await owner.sync(); } finally { await owner.close(); }
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      let pid: number | undefined;
-      try { pid = Number(await readFile(join(lock, 'owner'), 'utf8')); } catch { /* Wait for owner publication. */ }
-      if (pid && Number.isSafeInteger(pid)) {
-        try { process.kill(pid, 0); }
-        catch (failure) {
-          if ((failure as NodeJS.ErrnoException).code === 'ESRCH') {
-            // Serialize stale-owner removal and re-read its identity. Two
-            // reclaimers must never remove a new owner's replacement lock.
-            let recovering = false;
-            try { await mkdir(recovery, { mode: 0o700 }); recovering = true; }
-            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-            if (recovering) {
-              try {
-                const currentOwner = Number(await readFile(join(lock, 'owner'), 'utf8').catch(() => ''));
-                if (currentOwner === pid) await rm(lock, { recursive: true, force: true });
-              } finally { await rm(recovery, { recursive: true, force: true }); }
-            }
-            continue;
-          }
-        }
+  let candidateCreated = false;
+  try {
+    const file = await open(candidate, 'wx', 0o600);
+    candidateCreated = true;
+    try { await file.writeFile(JSON.stringify(owner)); await file.sync(); } finally { await file.close(); }
+    const claim = await readAccountLock(candidate);
+    if (!claim) throw lockRecoveryRequired();
+    for (;;) {
+      const recovering = await readAccountLock(recovery);
+      if (recovering) {
+        // Reclaimers never delete another reclaimer's gate. A crashed reclaimer
+        // remains explicit recovery work rather than risking a successor owner.
+        if (accountLockOwnerDead(recovering.owner.pid)) throw lockRecoveryRequired();
+      } else if (await publishAccountLock(candidate, lock)) {
+        try { return await operation(); } finally { await releaseAccountLock(lock, claim); }
       } else {
-        const info = await stat(lock).catch(() => undefined);
-        if (info && Date.now() - info.mtimeMs > 10_000) throw new Error('Provider account refresh lock needs recovery.');
+        const observed = await readAccountLock(lock);
+        if (!observed) continue;
+        if (accountLockOwnerDead(observed.owner.pid) && await publishAccountLock(candidate, recovery)) {
+          try {
+            const current = await readAccountLock(lock);
+            if (current && sameAccountLock(current, observed) && accountLockOwnerDead(current.owner.pid)) await unlink(lock);
+          } finally { await releaseAccountLock(recovery, claim); }
+          continue;
+        }
       }
       if (Date.now() >= deadline) throw new Error('Provider account refresh is busy.');
       await new Promise(resolve => setTimeout(resolve, 50));
     }
+  } finally {
+    if (candidateCreated) await unlink(candidate).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    });
   }
-  try { return await operation(); } finally { await rm(lock, { recursive: true, force: true }); }
 }
 
 export class DesktopProviderAccounts {
@@ -202,6 +240,9 @@ export class DesktopProviderAccounts {
   }
   latestSnapshot?: ProviderAccountSnapshot;
   private queue: Promise<unknown> = Promise.resolve();
+  private closing = false;
+  private disposePromise?: Promise<void>;
+  private readonly pending = new Set<Promise<unknown>>();
   private readonly flows = new Map<string, { abort: AbortController; operationId?: number }>();
   constructor(private readonly options: {
     configuredApiBinding?: (providerId: string, bindingId: string) => boolean | Promise<boolean>;
@@ -217,6 +258,19 @@ export class DesktopProviderAccounts {
     probe: (account: ProviderAccountMetadata, credential: ProviderAccountCredential) => Promise<void>;
     onCredentialDiagnostic?: (event: { accountId: string; identityGeneration: number; stage: string; outcome: string; code?: string; healthReason?: string }) => void;
   }) {}
+  private track<T>(operation: Promise<T>): Promise<T> {
+    this.pending.add(operation);
+    void operation.then(() => this.pending.delete(operation), () => this.pending.delete(operation));
+    return operation;
+  }
+  dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.closing = true;
+    this.cancel();
+    this.options.tokens.stop();
+    this.disposePromise = Promise.allSettled([...this.pending]).then(() => this.options.tokens.dispose());
+    return this.disposePromise;
+  }
   async snapshot(): Promise<ProviderAccountSnapshot> {
     let snapshot = await this.options.registry({ action: 'list', expectedRevision: 0 });
     try {
@@ -249,8 +303,10 @@ export class DesktopProviderAccounts {
   }
   cancel(target?: string | number): void { for (const [id, flow] of this.flows) if (target === undefined || id === target || flow.operationId === target) flow.abort.abort(); }
   command(request: ProviderAccountCommand, credential?: string, signal?: AbortSignal): Promise<ProviderAccountSnapshot> {
+    if (this.closing) return Promise.reject(new Error('Provider accounts are shutting down.'));
     const submitted = request.action === 'add' ? { ...request, accountId: randomUUID() } : request;
     const result = this.queue.catch(() => undefined).then(async () => {
+      if (this.closing) throw new Error('Provider accounts are shutting down.');
       if (signal?.aborted) throw new Error('Account operation cancelled.');
       const run = () => this.execute(submitted, credential, Boolean(this.options.withAccountMutationLock), signal);
       let snapshot: ProviderAccountSnapshot;
@@ -263,7 +319,7 @@ export class DesktopProviderAccounts {
       return snapshot;
     });
     this.queue = result;
-    return result;
+    return this.track(result);
   }
   private async execute(request: ProviderAccountCommand, credential: string | undefined, lockHeld: boolean, signal?: AbortSignal): Promise<ProviderAccountSnapshot> {
     if (signal?.aborted) throw new Error('Account operation cancelled.');
@@ -298,6 +354,7 @@ export class DesktopProviderAccounts {
       let mutationStarted = false;
       try {
         if (authKind === 'oauth') {
+          if (this.closing) throw new Error('Provider accounts are shutting down.');
           if (providerId !== 'openai' || (account?.executionBindingId ?? request.executionBindingId) !== CODEX_PROVIDER_ID) throw new Error('OAuth is unavailable for this provider.');
           const abort = new AbortController();
           const cancel = () => abort.abort();
@@ -382,7 +439,11 @@ export class DesktopProviderAccounts {
     return this.snapshot();
   }
   /** Reload the canonical account while sharing the mutation/rotation lock. */
-  async renewForRuntime(accountId: string, identityGeneration: number, rejectedRevision: number): Promise<void> {
+  renewForRuntime(accountId: string, identityGeneration: number, rejectedRevision: number): Promise<void> {
+    if (this.closing) return Promise.reject(new Error('Provider accounts are shutting down.'));
+    return this.track(this.renewRuntime(accountId, identityGeneration, rejectedRevision));
+  }
+  private async renewRuntime(accountId: string, identityGeneration: number, rejectedRevision: number): Promise<void> {
     let stage: Exclude<ProviderAccountRenewFailure, 'authority_unavailable'> = 'snapshot_failed';
     try {
       const initial = await this.snapshot();
@@ -416,7 +477,11 @@ export class DesktopProviderAccounts {
     }
   }
 
-  async launch(): Promise<ProviderAccountLaunch> {
+  launch(): Promise<ProviderAccountLaunch> {
+    if (this.closing) return Promise.reject(new Error('Provider accounts are shutting down.'));
+    return this.track(this.loadForRuntime());
+  }
+  private async loadForRuntime(): Promise<ProviderAccountLaunch> {
     const providerAccounts = await this.snapshot();
     const providerAccountCredentials: Record<string, RuntimeProviderAccountCredential> = Object.create(null);
     for (const account of providerAccounts.accounts.filter(a => a.enabled)) {
@@ -473,9 +538,8 @@ export class DesktopProviderAccounts {
         }
         const rawCode = (error as NodeJS.ErrnoException | undefined)?.code;
         const lockFailures: Record<string, string> = {
-          'Provider account refresh lock needs recovery.': 'LOCK_OWNER_UNPUBLISHED',
+          'Provider account lock needs recovery.': 'LOCK_RECOVERY_REQUIRED',
           'Provider account refresh is busy.': 'LOCK_BUSY',
-          'Provider account lock recovery is busy.': 'LOCK_RECOVERY_BUSY',
           'invalid account lock': 'INVALID_ACCOUNT_LOCK',
           'session catalog timed out': 'PRODUCT_PATHS_TIMEOUT',
           'invalid product paths response': 'INVALID_PRODUCT_PATHS',

@@ -135,6 +135,7 @@ let nativeAudio: NativeAudioManager | null = null;
 let notifier: HostNotifier | null = null;
 let quitting = false;
 let shutdownDiagnostics: DiagnosticBuffer | undefined;
+let disposeProviderAccounts: (() => Promise<void>) | undefined;
 let localApps: LocalAppHost | null = null;
 let remoteControl: RemoteControlService | null = null;
 let remotePolicy: RemotePolicy | null = null;
@@ -511,6 +512,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     if (!providerAccounts) throw new Error('Provider account storage is unavailable.');
     await providerAccounts.renewForRuntime(accountId, identityGeneration, credentialRevision);
   };
+  disposeProviderAccounts = () => providerAccounts?.dispose() ?? codexTokens?.dispose() ?? Promise.resolve();
   codexTokens?.start();
   codexTokens?.subscribe(() => { void bridge?.refreshProviderAccounts().catch(() => {}); });
   app.on('browser-window-focus', () => bridge?.refreshProviderCatalog('foreground'));
@@ -1187,7 +1189,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   botTasks = null;
   const currentBotRouter = botRouter;
   botRouter = null;
+  // Close provider admission before draining runtimes: event callbacks can still
+  // finish while shutdown is in progress, but cannot acquire a new account lock.
+  const providerAccountsStopped = disposeProviderAccounts?.() ?? Promise.resolve();
   const shutdownPhases: Array<[string, () => Promise<void>]> = [
+    ['provider_accounts', () => providerAccountsStopped],
     ['bot_router', () => currentBotRouter?.dispose() ?? Promise.resolve()],
     ['browser', () => currentBrowser?.close() ?? Promise.resolve()],
     ['local_apps', () => currentLocalApps?.dispose() ?? Promise.resolve()],
@@ -1197,7 +1203,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     ['bridge', () => currentBridge?.dispose() ?? Promise.resolve()],
     ['remote', () => currentRemote?.dispose() ?? Promise.resolve()],
   ];
-  void Promise.all(shutdownPhases.map(async ([phase, dispose]) => {
+  void Promise.allSettled(shutdownPhases.map(async ([phase, dispose]) => {
     const started = Date.now();
     const record = (status: string): void => shutdownDiagnostics?.add('info', 'host', JSON.stringify({
       event: 'shutdown_phase', phase, status, durationMs: Date.now() - started,

@@ -4,6 +4,12 @@ import CryptoKit
 import ZIPFoundation
 import FirebaseAuth
 
+struct ProductMarketConfig: Decodable {
+    let localAppMarketApiRoot: String
+    let botMarketApiRoot: String
+    var botMarketURL: URL? { BotMarketHandoff.validatedAPIRoot(botMarketApiRoot) }
+}
+
 struct LocalAppMarketPublication: Identifiable, Sendable {
     var id: String { source.digest }
     let source: LocalAppSourceArchive
@@ -24,14 +30,14 @@ final class UnifiedAppMarket {
     @ObservationIgnored private var installTask: Task<UnifiedAppRecord, Error>?
     private let library: UnifiedLocalApps
     private let api: MarketAPI?
+    let botAPIURL: URL?
     init(library: UnifiedLocalApps, baseURL: URL? = nil) {
         self.library = library
-        struct ProductConfig: Decodable { let localAppMarketApiRoot: String }
-        let configured = Bundle.main.url(forResource: "product-config", withExtension: "json")
+        let config = Bundle.main.url(forResource: "product-config", withExtension: "json")
             .flatMap { try? Data(contentsOf: $0) }
-            .flatMap { try? JSONDecoder().decode(ProductConfig.self, from: $0) }
-            .flatMap { URL(string: $0.localAppMarketApiRoot) }
-        let endpoint = baseURL ?? configured
+            .flatMap { try? JSONDecoder().decode(ProductMarketConfig.self, from: $0) }
+        botAPIURL = config?.botMarketURL
+        let endpoint = baseURL ?? config.flatMap { URL(string: $0.localAppMarketApiRoot) }
         api = endpoint.flatMap { try? MarketAPI(baseURL: $0) }
     }
     private func requireAPI() throws -> MarketAPI {

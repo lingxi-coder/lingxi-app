@@ -69,3 +69,41 @@ test('Hosting gateway streams authenticated v3 private package ranges and preser
   assert.equal(res.headers['content-range'], 'bytes 10-12/100'); assert.equal(res.headers['accept-ranges'], 'bytes');
   assert.equal(res.headers['x-content-type-options'], 'nosniff'); assert.match(res.headers['content-disposition'], /attachment/u);
 });
+
+test('Hosting gateway sends identity content length before the upstream stream completes', { timeout: 2000 }, async () => {
+  let upstream, firstWrite;
+  const written = new Promise(resolve => { firstWrite = resolve; });
+  const body = new ReadableStream({ start(controller) { upstream = controller; controller.enqueue(new Uint8Array([1, 2])); } });
+  const gateway = createMarketGateway({ origin: 'https://market.example.run.app', secret: () => 'server-only',
+    fetcher: async () => new Response(body, { headers: { 'Content-Length': '4' } }) });
+  const res = result(), write = res._write.bind(res);
+  res._write = (chunk, encoding, done) => { write(chunk, encoding, done); firstWrite(); };
+  const pending = gateway({ originalUrl: '/api/v3/bots/example/package', method: 'GET', headers: {} }, res);
+  await written;
+  const lengthBeforeCompletion = res.headers['content-length'];
+  assert.equal(res.writableFinished, false);
+  upstream.enqueue(new Uint8Array([3, 4])); upstream.close();
+  await pending;
+  assert.equal(lengthBeforeCompletion, '4');
+  assert.deepEqual(res.body, Buffer.from([1, 2, 3, 4]));
+  assert.equal(res.headers['cache-control'], 'no-store, no-transform');
+});
+
+test('Hosting gateway copies only valid untransformed content lengths', async () => {
+  for (const [length, encoding, expected] of [
+    ['3', 'identity', '3'], ['3', 'IDENTITY', '3'], ['0', undefined, '0'],
+    ['3', 'gzip', undefined], ['3', 'br', undefined], ['3', 'identity, gzip', undefined],
+    ['-1', undefined, undefined], ['1.5', undefined, undefined], ['1e3', undefined, undefined],
+    ['3, 3', undefined, undefined], ['9007199254740992', undefined, undefined], [undefined, undefined, undefined],
+  ]) {
+    const headers = { ...(length === undefined ? {} : { 'Content-Length': length }), ...(encoding === undefined ? {} : { 'Content-Encoding': encoding }) };
+    const bytes = length === '0' ? new Uint8Array() : new Uint8Array([1, 2, 3]);
+    const gateway = createMarketGateway({ origin: 'https://market.example.run.app', secret: () => 'server-only',
+      fetcher: async () => new Response(bytes, { status: 206, headers }) });
+    const res = result();
+    await gateway({ originalUrl: '/api/v3/bots/example/package', method: 'GET', headers: { range: 'bytes=0-2' } }, res);
+    assert.equal(res.headers['content-length'], expected, JSON.stringify({ length, encoding }));
+    assert.equal(res.headers['content-encoding'], undefined);
+    assert.equal(res.code, 206); assert.deepEqual(res.body, Buffer.from(bytes));
+  }
+});

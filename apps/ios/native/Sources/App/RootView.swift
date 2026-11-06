@@ -2017,7 +2017,7 @@ struct RootView: View {
                 onRestore: queueLocalAppRestore, onRemix: queueInstalledLocalAppRemix, currentMode: { activeMode },
                 captureActionPresentation: { captureLocalAppActionPresentation(route: .localApp(id: appID)) })
         case .marketBot(let botID, let versionID, let intentID):
-            BotMarketHandoffPage(listingID: botID, versionID: versionID, intentID: intentID, marketURL: LocalApps.market.browseURL)
+            BotMarketHandoffPage(listingID: botID, versionID: versionID, intentID: intentID, marketURL: LocalApps.market.browseURL, botAPIURL: LocalApps.market.botAPIURL)
         case .marketApp(let appID):
             MarketInstallPage(library: LocalApps.library, market: LocalApps.market, appId: appID,
                 onOpenApp: { navigation.openLocalApp($0) }, currentMode: { activeMode },

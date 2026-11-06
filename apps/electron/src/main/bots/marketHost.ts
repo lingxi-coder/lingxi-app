@@ -7,7 +7,7 @@ import type {
   BotMarketResponse,
 } from '../../shared/botMarket.js';
 import {
-  localAppMarketApiRoot,
+  botMarketApiRoot,
   localAppMarketUrl,
 } from '../../shared/productConfig.js';
 import {
@@ -43,7 +43,7 @@ export class BotMarketHost {
   ) {
     this.api = new MarketApiClient(
       options.accountToken,
-      new URL('/api/v3/', localAppMarketApiRoot).href,
+      botMarketApiRoot,
     );
     this.installer = new BotMarketInstaller({
       store: options.store,

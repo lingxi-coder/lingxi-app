@@ -1,6 +1,6 @@
 import { buildCredentialEnvelope } from '../src/main/host-utils.ts';
 import { parseProviderAccountRouting } from '../src/shared/providerAccounts.ts';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -502,4 +502,50 @@ test('an unpublished rotated Broker grant reports storage unavailable and cannot
   await f.tokens.current(reference);
   assert.equal(exchanges, 1); assert.equal((await f.service.snapshot()).health[0].status, 'ready');
   assert.equal((await f.service.launch()).providerAccountCredentials[account.accountId].credential_revision, 2);
+});
+
+
+test('shutdown rejects new account work and waits for admitted credential loading to release its lock', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'provider-shutdown-'));
+  const f = fixture(root);
+  try {
+    const added = await f.service.command({ action: 'add', expectedRevision: 0, providerId: 'openai', executionBindingId: 'openai', authKind: 'api_key' }, 'private');
+    const account = added.accounts[0];
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    f.publish = async () => { entered(); await gate; };
+    const loading = f.service.launch();
+    await started;
+    let stopped = false;
+    const stopping = f.service.dispose().then(() => { stopped = true; });
+    await assert.rejects(f.service.launch(), /shutting down/);
+    await assert.rejects(f.service.renewForRuntime(account.accountId, account.identityGeneration, 0), /shutting down/);
+    await assert.rejects(f.service.command({ action: 'list', expectedRevision: 0 }), /shutting down/);
+    assert.equal(stopped, false);
+    release();
+    assert.ok((await loading).providerAccountCredentials[account.accountId]);
+    await stopping;
+    assert.deepEqual(await readdir(root), []);
+    await f.service.dispose();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('shutdown cancels interactive sign-in and rejects a queued mutation before it starts', async () => {
+  const f = fixture();
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  f.login = async signal => {
+    entered();
+    await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
+    return fresh;
+  };
+  const signingIn = f.service.command({ action: 'add', expectedRevision: 0, providerId: 'openai', executionBindingId: 'openai-chatgpt', authKind: 'oauth' });
+  const rejectedSignIn = assert.rejects(signingIn, /cancelled/);
+  await started;
+  const queued = f.service.command({ action: 'add', expectedRevision: 0, providerId: 'openai', executionBindingId: 'openai', authKind: 'api_key' }, 'never stored');
+  const rejectedQueue = assert.rejects(queued, /shutting down/);
+  await f.service.dispose();
+  await Promise.all([rejectedSignIn, rejectedQueue]);
+  assert.equal(f.storage.values.size, 0);
 });

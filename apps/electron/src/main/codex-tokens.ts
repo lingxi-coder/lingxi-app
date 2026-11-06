@@ -47,6 +47,9 @@ class AccountTokenAuthority {
   private pendingPersistence?: CodexOAuthSession;
   private readonly refreshOwner = randomUUID();
   private queue: Promise<unknown> = Promise.resolve();
+  private stopped = false;
+  private disposed = false;
+  private readonly pending = new Set<Promise<unknown>>();
   private lastRefreshAt = 0;
   private lastFailureAt = 0;
   private lastFailure = CODEX_SESSION_EXPIRED;
@@ -68,9 +71,12 @@ class AccountTokenAuthority {
   private now(): number { return (this.opts.now ?? Date.now)(); }
 
   private run<T>(operation: () => Promise<T>, lockHeld = false): Promise<T> {
-    if (lockHeld) return operation();
-    const next = this.queue.catch(() => undefined).then(() => this.opts.withLock ? this.opts.withLock(operation) : operation());
-    this.queue = next;
+    if (this.disposed) return Promise.reject(new Error('Provider tokens are shutting down.'));
+    const next = lockHeld ? Promise.resolve().then(operation)
+      : this.queue.catch(() => undefined).then(() => this.opts.withLock ? this.opts.withLock(operation) : operation());
+    if (!lockHeld) this.queue = next;
+    this.pending.add(next);
+    void next.then(() => this.pending.delete(next), () => this.pending.delete(next));
     return next;
   }
 
@@ -169,6 +175,7 @@ class AccountTokenAuthority {
 
   /** Refresh ahead of expiry. Safe to call often. */
   check(): void {
+    if (this.stopped) return;
     const session = this.session;
     if (!session?.refresh_token || !this.dueSoon(session)) return;
     if (this.now() - this.lastFailureAt < RETRY_AFTER_FAILURE_MS) return;
@@ -181,16 +188,22 @@ class AccountTokenAuthority {
    * `check` on resume.
    */
   start(intervalMs = 60_000): void {
-    if (this.timer) return;
+    if (this.timer || this.stopped) return;
     void this.current().catch((error: unknown) => this.reportFailure(error));
     this.timer = setInterval(() => this.check(), intervalMs);
     this.timer.unref?.();
   }
 
-  dispose(): void {
+  stop(): void {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+  }
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.stop();
     this.listeners.clear();
+    await Promise.allSettled([...this.pending]);
   }
 
   private reportFailure(error: unknown): void {
@@ -300,6 +313,8 @@ export function codexAccessToken(session: CodexOAuthSession): CodexOAuthSession 
 /** One independent refresh authority and queue per stable local account. */
 export class CodexTokenManager {
   private readonly accounts = new Map<string, AccountTokenAuthority>();
+  private stopped = false;
+  private disposed = false;
   private timer?: ReturnType<typeof setInterval>;
   private readonly listeners = new Set<(session: CodexOAuthSession | undefined, accountId: string) => void>();
   constructor(private readonly opts: {
@@ -310,6 +325,7 @@ export class CodexTokenManager {
     withAccountLock?: <T>(accountId: string, operation: () => Promise<T>) => Promise<T>;
   }) {}
   private authority(accountId: string): AccountTokenAuthority {
+    if (this.disposed) throw new Error('Provider tokens are shutting down.');
     let authority = this.accounts.get(accountId);
     if (!authority) {
       if (!/^acct\.[a-f0-9-]{36}$/.test(accountId)) throw new Error('invalid OAuth account reference');
@@ -318,6 +334,7 @@ export class CodexTokenManager {
         ...(this.opts.withAccountLock ? { withLock: <T>(operation: () => Promise<T>) => this.opts.withAccountLock!(accountId, operation) } : {}),
       });
       authority.subscribe(session => { for (const listener of this.listeners) listener(session, accountId); });
+      if (this.stopped) authority.stop();
       this.accounts.set(accountId, authority);
     }
     return authority;
@@ -332,15 +349,27 @@ export class CodexTokenManager {
   async hasPendingCommit(accountId: string): Promise<boolean> { return Boolean(await this.opts.store.resolve(`${accountId}.intent`)); }
   signOut(accountId: string, lockHeld = false): Promise<void> { return this.authority(accountId).signOut(lockHeld); }
   invalidate(accountId: string): void { this.accounts.get(accountId)?.invalidate(); }
-  check(): void { for (const authority of this.accounts.values()) authority.check(); }
+  check(): void { if (!this.stopped) for (const authority of this.accounts.values()) authority.check(); }
   start(intervalMs = 60_000): void {
-    if (this.timer) return;
+    if (this.timer || this.stopped) return;
     this.timer = setInterval(() => this.check(), intervalMs);
     this.timer.unref?.();
   }
   watch(accountId: string, intervalMs?: number): void {
+    if (this.stopped) return;
     const authority = this.authority(accountId);
     if (!this.timer) authority.start(intervalMs);
   }
-  dispose(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; for (const authority of this.accounts.values()) authority.dispose(); this.listeners.clear(); }
+  stop(): void {
+    this.stopped = true;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    for (const authority of this.accounts.values()) authority.stop();
+  }
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.stop();
+    this.listeners.clear();
+    await Promise.all([...this.accounts.values()].map(authority => authority.dispose()));
+  }
 }

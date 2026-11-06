@@ -60,7 +60,7 @@ export interface ProviderModelPickerVisibility {
 export type ModelPickerVisibilitySettings = Record<string, ProviderModelPickerVisibility>;
 
 /** What the desktop sidebar lists; the left rail's Home, Bots and Teams buttons switch it. */
-export type SidebarMode = 'home' | 'bots' | 'teams';
+export type SidebarMode = 'home' | 'bots' | 'teams' | 'apps';
 
 /** Preferences that govern how project chats are organized in the desktop sidebar. */
 export interface SidebarPreferences {

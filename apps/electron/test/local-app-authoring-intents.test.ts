@@ -62,6 +62,7 @@ test('session creation intent retains its exact confirmed source across restart 
   const projectPath = join(await fs.realpath(root), 'project'), sessionId = randomUUID();
   const ledger = new AuthoringSessionIntents(root);
   const saved = await ledger.create({ projectPath, sessionId }, { name: 'App', appId: `a${'1'.repeat(32)}`, setCurrent: true });
+  assert.deepEqual(await ledger.sessions(), [], 'unconfirmed authoring is not listed');
   await assert.rejects(ledger.ready(saved.requestId), /unavailable/);
   const source = { scope: 'repository' as const, transcriptPath: join(root, 'a', `${sessionId}.jsonl`) };
   await ledger.recordSource(saved.requestId, source); await ledger.ready(saved.requestId);
@@ -70,6 +71,9 @@ test('session creation intent retains its exact confirmed source across restart 
   await assert.rejects(reopened.recordSource(saved.requestId, { ...source, transcriptPath: join(root, 'b', `${sessionId}.jsonl`) }), /source changed/i);
   await reopened.complete({ projectPath, sessionId });
   assert.equal((await reopened.pending()).length, 0);
+  assert.equal((await reopened.sessions()).length, 1, 'completed authoring remains in the Apps workspace');
+  const listed = await reopened.sessions(); listed[0].source!.transcriptPath = '/changed';
+  assert.deepEqual((await reopened.sessions())[0].source, source, 'callers cannot modify the source ledger');
 });
 
 test('a corrupt session creation intent fails closed without overwriting its file', async t => {

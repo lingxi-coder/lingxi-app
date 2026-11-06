@@ -404,7 +404,7 @@ export function parseSidebarPreferences(value: unknown, projects: readonly strin
     }
   }
   // Like the organization and the sort, the mode is Home unless it is one of ours.
-  const mode = input['mode'] === 'bots' || input['mode'] === 'teams' ? input['mode'] : 'home';
+  const mode = input['mode'] === 'bots' || input['mode'] === 'teams' || input['mode'] === 'apps' ? input['mode'] : 'home';
   const preferences: SidebarPreferences = { organization, chatSort, manualSessionOrder, mode };
   // `expandedBots` and `teamsDrawerWidth` stay unset until the owner first sets them, and a value that is not one of ours leaves them unset.
   if (Array.isArray(input['expandedBots'])) {

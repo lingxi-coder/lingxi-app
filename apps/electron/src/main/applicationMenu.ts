@@ -23,10 +23,11 @@ export function applicationMenuTemplate(
       { label: nativeTr('native_open_link'), click: () => dispatch('open-link') },
     ] },
     { label: nativeTr('native_view'), submenu: [
-      // What the sidebar lists: the same choice as the rail's first three buttons. Bots stay in the menu where they cannot run, greyed out.
+      // What the sidebar lists: the same choice as the rail's workspace buttons. Bots stay in the menu where they cannot run, greyed out.
       { label: nativeTr('native_home'), accelerator: 'CommandOrControl+1', click: () => dispatch('home') },
       { label: nativeTr('native_bots'), accelerator: 'CommandOrControl+2', enabled: botsAvailability(platform).available, click: () => dispatch('bots') },
       { label: nativeTr('native_teams'), accelerator: 'CommandOrControl+3', click: () => dispatch('teams') },
+      { label: nativeTr('native_apps'), accelerator: 'CommandOrControl+4', click: () => dispatch('apps') },
       { type: 'separator' },
       // The window alone knows whether the sidebar is shown, so one item stands for both Show and Hide.
       { label: nativeTr('native_toggle_sidebar'), accelerator: platform === 'darwin' ? 'Control+Command+S' : 'Control+Alt+S', click: () => dispatch('toggle-sidebar') },

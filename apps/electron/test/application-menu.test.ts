@@ -14,6 +14,7 @@ test('macOS menu exposes Settings and Activity with native editing and window ro
   assert.equal(settings.accelerator, 'CommandOrControl+,');
   (settings.click as () => void)();
   const view = viewItems(template);
+  assert.equal(view.find(item => item.label === 'Apps')?.accelerator, 'CommandOrControl+4');
   (view.find(item => item.label === 'Activity')!.click as () => void)();
   assert.deepEqual(actions, ['settings', 'activity']);
   assert.ok(appItems.some(item => item.role === 'services'));

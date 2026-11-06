@@ -434,6 +434,7 @@ const api: LingxiApi = {
     pendingSourceCopies: () => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'pendingSourceCopies' }),
     resumeSourceCopy: requestId => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'resumeSourceCopy', requestId }),
     pendingAuthoringSessions: () => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'pendingAuthoringSessions' }),
+    authoringSessions: () => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'authoringSessions' }),
     resumeAuthoringSession: requestId => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'resumeAuthoringSession', requestId }),
     marketBrowse: () => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'marketBrowse' }),
     marketInstallLink: remoteId => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'marketInstallLink', remoteId }),

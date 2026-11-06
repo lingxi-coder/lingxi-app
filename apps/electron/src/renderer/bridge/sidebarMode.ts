@@ -1,9 +1,4 @@
-/**
- * What the sidebar lists, apart from the page the main area shows. The rail's
- * Home, Bots and Teams buttons pick the first; Apps, Scheduled and the changes
- * are pages and leave it alone, so the Bots stay in the sidebar while the Apps
- * are open.
- */
+/** The rail selects a first-level workspace; utility pages retain its sidebar. */
 
 import type { SidebarMode } from '../../shared/settings';
 
@@ -11,22 +6,23 @@ import type { SidebarMode } from '../../shared/settings';
 export type AppPage = 'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams';
 
 /**
- * Where the main area goes when a mode is picked. Home is the chat view and
- * Teams its own page. Bots is the Bots overview, except that a Bot's chat on
- * screen stays: the sidebar changes around it.
+ * Home shows the chat view; Apps and Teams have their own library pages.
+ * Apps and Bots retain a visible chat belonging to their workspace.
  */
-export function pageForMode(mode: SidebarMode, current: { page: AppPage; botChat: boolean }): AppPage {
+export function pageForMode(mode: SidebarMode, current: { page: AppPage; botChat: boolean; appChat?: boolean }): AppPage {
   if (mode === 'home') return 'chat';
   if (mode === 'teams') return 'teams';
+  if (mode === 'apps') return current.page === 'chat' && current.appChat ? 'chat' : 'apps';
   return current.page === 'chat' && current.botChat ? 'chat' : 'bots';
 }
 
 /**
  * The mode that goes with the page now on screen, for the few pages that name
- * one: the Teams page is the Teams mode, and the Bots page the Bots mode. Every
+ * one: the Apps, Teams and Bots pages select their corresponding workspaces. Every
  * other page keeps the mode as it is. Bots that cannot run here are not a mode.
  */
 export function reconcileSidebarMode(mode: SidebarMode, page: AppPage, botsAvailable: boolean): SidebarMode {
+  if (page === 'apps') return 'apps';
   if (page === 'teams') return 'teams';
   if (page === 'bots') return botsAvailable ? 'bots' : 'home';
   return mode === 'bots' && !botsAvailable ? 'home' : mode;
@@ -55,11 +51,11 @@ export class SidebarModeSync {
   private seen: SidebarMode = 'home';
 
   /**
-   * The first look at the saved mode. Answers `'bots'` or `'teams'` when the
+   * The first look at the saved mode. Answers a workspace when the
    * window should open on them, which it does only while it is still where it
    * opened: one that the owner or a link has already moved is left where it is.
    */
-  open({ saved, page, mode, botsAvailable }: { saved: SidebarMode; page: AppPage; mode: SidebarMode; botsAvailable: boolean }): 'bots' | 'teams' | undefined {
+  open({ saved, page, mode, botsAvailable }: { saved: SidebarMode; page: AppPage; mode: SidebarMode; botsAvailable: boolean }): Exclude<SidebarMode, 'home'> | undefined {
     if (this.settled) return undefined;
     this.settled = true;
     this.written = saved;
@@ -88,13 +84,14 @@ export class SidebarModeSync {
 }
 
 /**
- * The mode to move to when the chat on screen has just turned from a project's
- * into a Bot's or back, so that the sidebar lists it. Only the chat view
- * follows, and only between Home and Bots: Teams stays where the owner put it.
+ * Follow the settled chat's owner between ordinary projects, Apps and Bots.
+ * Teams stays where the owner put it.
  */
-export function modeForSettledChat(mode: SidebarMode, page: AppPage, botChat: boolean): SidebarMode {
+export function modeForSettledChat(mode: SidebarMode, page: AppPage, botChat: boolean, appChat = false): SidebarMode {
   if (page !== 'chat') return mode;
-  if (botChat && mode === 'home') return 'bots';
-  if (!botChat && mode === 'bots') return 'home';
+  if (appChat) return 'apps';
+  if (mode === 'teams') return mode;
+  if (botChat) return 'bots';
+  if (mode === 'bots' || mode === 'apps') return 'home';
   return mode;
 }

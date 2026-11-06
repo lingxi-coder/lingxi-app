@@ -1199,8 +1199,9 @@ export class HostController {
           const runtimeStartedAt = Date.now();
           const current = () => generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === space;
           const ref = await this.bridge.newSession(project, model as string | undefined, { mode: space, projectId, activate: localApp ? () => false : current,
-            ...(botCreation ? { forceNew: true } : {}),
-            ...(localApp ? { forceNew: true, durableDraftTitle: authoring!.name.trim() || 'Local App',
+            // Creation flows own their drafts, even when this project already has an empty chat.
+            ...((botCreation || localApp) ? { forceNew: true } : {}),
+            ...(localApp ? { durableDraftTitle: authoring!.name.trim() || 'Local App',
               onAllocated: async (allocated: SessionRef) => {
                 release = this.bridge.retainBackgroundSession(allocated);
                 await localApp.allocate(allocated);

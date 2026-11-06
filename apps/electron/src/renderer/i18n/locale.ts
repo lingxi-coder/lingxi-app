@@ -1,4 +1,5 @@
 import { providerAccountsCatalog } from './providerAccountsCatalog';
+import { localAppWorkspaceCatalog } from './localAppWorkspaceCatalog';
 import { botsCatalog } from './botsCatalog';
 import { chatCatalog } from './chatCatalog';
 import { computerCatalog } from './computerCatalog';
@@ -61,7 +62,7 @@ function startLocaleCatalog(locale: DesktopLocale): void {
   }).catch(() => { catalogRequests.delete(locale); });
   catalogRequests.set(locale, pending);
 }
-const extraCatalog = { ...providerAccountsCatalog, ...botsCatalog, ...chatCatalog, ...computerCatalog, ...desktopCatalog, ...extensionCatalog, ...flowCatalog, ...gitCatalog, ...imageCatalog, ...interactionCatalog, ...miscCatalog, ...navigationCatalog, ...runtimeCatalog, ...settingsCatalog, ...shellCatalog, ...uiCatalog, ...voiceSettingsCatalog, ...updateCatalog };
+const extraCatalog = { ...localAppWorkspaceCatalog, ...providerAccountsCatalog, ...botsCatalog, ...chatCatalog, ...computerCatalog, ...desktopCatalog, ...extensionCatalog, ...flowCatalog, ...gitCatalog, ...imageCatalog, ...interactionCatalog, ...miscCatalog, ...navigationCatalog, ...runtimeCatalog, ...settingsCatalog, ...shellCatalog, ...uiCatalog, ...voiceSettingsCatalog, ...updateCatalog };
 
 export function matchLocale(tag: string): DesktopLocale | null {
   const parts = tag.replace(/_/g, '-').toLowerCase().split('-');

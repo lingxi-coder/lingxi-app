@@ -1,0 +1,37 @@
+.bot-create-intro { display: flex; flex-direction: column; gap: 22px; max-width: 640px; padding: 28px; border: 1px solid var(--bots-border); border-radius: 20px; background: var(--bots-surface); }
+.bot-create-intro-icon, .bot-proposal-icon { display: grid; place-items: center; flex: none; width: 52px; height: 52px; border-radius: 15px; background: var(--bots-accent-bg, transparent); color: var(--bots-accent, var(--bot-proposal-accent)); }
+.bots-page .bot-create-intro-copy h2 { margin: 0 0 10px; font-size: clamp(22px, 2.5vw, 28px); font-weight: 620; letter-spacing: -.025em; line-height: 1.25; }
+.bot-create-intro-copy p { max-width: 45ch; font-size: 14px; line-height: 1.7; color: var(--bots-muted); }
+.bots-page .bot-create-intro textarea { background: var(--bots-background); padding: 14px; font-size: 14px; border-radius: 12px; }
+.bot-create-examples { display: flex; flex-wrap: wrap; gap: 8px; }
+.bots-page .bot-create-examples button { font-size: 12px; padding: 7px 11px; border-radius: 99px; }
+.bot-create-intro-footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.bot-create-mode { display: flex; align-self: flex-start; flex-wrap: wrap; gap: 4px; padding: 4px; border: 1px solid var(--bots-border); border-radius: 11px; }
+.bots-page .bot-create-mode button { border: 0; font-size: 13px; padding: 7px 12px; }
+.bots-page .bot-create-mode button[aria-pressed='true'] { background: var(--bots-surface-hover); color: var(--bots-text); box-shadow: 0 1px 3px rgb(0 0 0 / .07); }
+.bot-create-fields { display: flex; flex-direction: column; gap: 22px; }
+.bot-proposal { display: flex; flex-direction: column; gap: 16px; min-width: 0; padding: 22px; border: 1px solid var(--bot-proposal-border); border-radius: 18px; background: var(--bot-proposal-bg); color: var(--bot-proposal-text); max-width: 620px; }
+.bot-proposal header { display: flex; align-items: center; gap: 13px; }
+.bot-proposal header > div { min-width: 0; }
+.bot-proposal h3 { margin: 2px 0 0; font-size: 18px; line-height: 1.35; font-weight: 620; letter-spacing: -.015em; overflow-wrap: anywhere; }
+.bot-proposal p { margin: 0; font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+.bot-proposal-eyebrow { color: var(--bot-proposal-muted); font-size: 11px; letter-spacing: .02em; }
+.bot-proposal summary { cursor: pointer; font-size: 13px; font-weight: 560; }
+.bot-proposal .bot-proposal-persona { margin-top: 12px; white-space: pre-wrap; max-height: 320px; overflow: auto; font-size: 13px; }
+.bot-proposal footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding-top: 15px; border-top: 1px solid var(--bot-proposal-border); }
+.bot-proposal footer span { color: var(--bot-proposal-muted); font-size: 12px; line-height: 1.5; }
+.bot-proposal button { flex-shrink: 0; cursor: pointer; font: inherit; font-size: 13px; font-weight: 560; padding: 9px 14px; border-radius: 9px; border: 0; color: white; background: color-mix(in srgb, var(--bot-proposal-accent) 85%, #000); }
+.bot-proposal button:hover { filter: brightness(1.06); }
+.bot-proposal :focus-visible { outline: 2px solid var(--bot-proposal-accent); outline-offset: 3px; }
+.bot-proposal button:active, .bot-create-intro button:active { transform: scale(.98); }
+@media (max-width: 640px) {
+  .bot-create-intro { padding: 20px; }
+  .bot-create-intro-footer, .bot-proposal footer { align-items: stretch; flex-direction: column; gap: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bot-proposal button:active, .bot-create-intro button:active { transform: none; }
+}
+@media (prefers-contrast: more) {
+  .bot-proposal { border-color: var(--bot-proposal-text); }
+  .bot-create-intro, .bot-create-mode { border-color: var(--bots-text); }
+}

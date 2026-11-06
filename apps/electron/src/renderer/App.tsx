@@ -3,6 +3,8 @@ import { useI18n } from './i18n/useI18n';
 import { LocalApps, LocalAppsTopBar } from './components/LocalApps';
 import './components/LocalApps.css';
 import { Bots } from './components/Bots';
+import { BotProposalAction } from './components/BotProposalCard';
+import { prepareBotCreationChat, type BotCreationProposal } from './bridge/botCreation';
 import './components/Bots.css';
 import { useBots } from './bridge/useBots';
 import { useBotSessions } from './bridge/useBotSessions';
@@ -295,6 +297,30 @@ export function App() {
     if (sessionNavigationBlocked() || !botsAvailable) return;
     botsGuard.leave(() => {
       setBotsView({ kind: 'create' });
+      setSidebarMode('bots');
+      openPage('bots');
+    });
+  }, [botsAvailable, botsGuard, openPage, sessionNavigationBlocked, setBotsView, setSidebarMode]);
+  const openBotCreationChat = useCallback(async (request: string) => {
+    if (sessionNavigationBlocked() || !botsAvailable) throw new Error(tr('bots_assist_open_failed'));
+    const nonce = ++localAppNavigation.current;
+    setLocalAppDraft(undefined);
+    const target = await prepareBotCreationChat(request, {
+      newSession: () => localAppBridge.current.newSession(),
+      offerLinkDraft: draft => localAppBridge.current.offerLinkDraft(draft),
+    }, () => localAppNavigation.current === nonce);
+    if (localAppNavigation.current !== nonce) return;
+    if (!target) throw new Error(tr('bots_assist_open_failed'));
+    botsGuard.hold(false);
+    setBotsView({ kind: 'list' });
+    setSidebarMode('home');
+    setPage('chat');
+    setActivityView(false);
+  }, [botsAvailable, botsGuard, sessionNavigationBlocked, setBotsView, setSidebarMode]);
+  const reviewBotProposal = useCallback((proposal: BotCreationProposal) => {
+    if (sessionNavigationBlocked() || !botsAvailable) return;
+    botsGuard.leave(() => {
+      setBotsView({ kind: 'create', proposal, requestId: ++localAppNavigation.current });
       setSidebarMode('bots');
       openPage('bots');
     });
@@ -599,6 +625,7 @@ export function App() {
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} onDevelopmentBlocked={() => setLocalAppNavigationError(tr('local_app_development_requires_code'))} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}
+              onAssist={openBotCreationChat}
               onOpenChat={showChat}
               onNewRoutine={(scope) => openRoutine({ kind: 'new', scope })}
               onOpenRoutine={(scope, id) => openRoutine({ kind: 'job', id, scope })} />
@@ -612,7 +639,7 @@ export function App() {
           <div className="desktop-chat-layout" data-runtime-inspector-open={bridge.runtimeCenter.inspectorOpen ? 'true' : undefined}>
             <div className="desktop-message-list-view">
                 {/* The transcript keeps all remaining height; Todos live in Summary. */}
-                <Stage
+                <BotProposalAction.Provider value={botsAvailable ? reviewBotProposal : undefined}><Stage
                   messageTarget={!bridge.sessionLoading && (!messageRequest || bridge.conversation.sessionKey === messageRequest.sessionId) ? messageTarget : null}
                   onMessageLocated={onMessageLocated}
                   activityView={activityView}
@@ -635,7 +662,7 @@ export function App() {
                   modUiSessionId={settledSession?.sessionId ?? ''}
                   foldedItemIds={bridge.sessionLoading ? [] : bridge.conversation.foldedItemIds}
                   onVisualizationFollowup={bridge.offerVisualizationFollowup}
-                />
+                /></BotProposalAction.Provider>
                 <PermissionPrompt
                   request={bridge.pendingPermission}
                   onApprove={(requestId, response) => { void bridge.approve(requestId, response).catch(() => undefined); }}

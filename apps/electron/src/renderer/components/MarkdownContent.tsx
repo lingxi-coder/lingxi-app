@@ -13,6 +13,8 @@ import type { PluggableList } from 'unified';
 import { useT } from '../theme/ThemeContext';
 import { CodeBlock } from './CodeBlock';
 import { MermaidDiagram } from './MermaidDiagram';
+import { BOT_PROPOSAL_LANGUAGE, parseBotProposal } from '../bridge/botCreation';
+import { BotProposalCard } from './BotProposalCard';
 import {
   parseMarkdown,
   remarkDesktopMarkdown,
@@ -25,6 +27,8 @@ interface MarkdownContentProps {
   text: string;
   trustedHtml?: boolean;
   variant?: 'plan' | 'compact';
+  /** Only assistant narration can offer a Bot configuration for review. */
+  botProposals?: boolean;
 }
 
 type MarkdownComponentProps = {
@@ -45,6 +49,7 @@ const remarkPlugins: PluggableList = [remarkGfm, remarkDesktopMarkdown];
 const safePlugins: PluggableList = [[rehypeSanitize, sanitizeMarkdownHtml(false)]];
 const trustedPlugins: PluggableList = [rehypeRaw, [rehypeSanitize, sanitizeMarkdownHtml(true)]];
 const InsideMarkdownLink = createContext(false);
+const BotProposalsEnabled = createContext(false);
 
 // Keep renderer identities stable so streaming updates preserve mounted DOM and state.
 const components = {
@@ -61,6 +66,7 @@ const components = {
       <code {...props} className={`markdown-inline-code ${className ?? ''}`.trim()}>{children}</code>
     ),
     pre: function MarkdownPre({ children, node, className, ...props }: MarkdownComponentProps) {
+      const botProposals = useContext(BotProposalsEnabled);
       const codeNode = node?.children[0];
       if (node?.children.length !== 1 || codeNode?.type !== 'element'
         || codeNode.tagName !== 'code' || !codeNode.children.every((child) => child.type === 'text')) {
@@ -73,6 +79,11 @@ const components = {
       const source = codeNode.children.map((child) => child.type === 'text' ? child.value : '').join('');
       const closed = codeNode.properties.dataFenceClosed;
       const unclosed = closed === false || closed === 'false';
+
+      if (botProposals && rawLanguage === BOT_PROPOSAL_LANGUAGE && !unclosed) {
+        const proposal = parseBotProposal(source);
+        if (proposal) return <BotProposalCard proposal={proposal} />;
+      }
 
       return (
         <CodeBlock
@@ -164,7 +175,7 @@ const compactComponents: Components = {
   h6: ({ children }) => <h6 style={compactHeadingStyle}>{children}</h6>,
 };
 
-export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml = false, variant }: MarkdownContentProps) {
+export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml = false, variant, botProposals = false }: MarkdownContentProps) {
   const t = useT();
   const { locale } = useI18n();
   const instanceId = useId();
@@ -196,7 +207,7 @@ export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml
 
   return (
     <div className="markdown-content" style={variables}>
-      {content}
+      <BotProposalsEnabled.Provider value={botProposals}>{content}</BotProposalsEnabled.Provider>
     </div>
   );
 });

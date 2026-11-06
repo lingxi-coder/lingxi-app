@@ -27,3 +27,23 @@ Changed in this pass: `packages/teams/{BotDirectory.tsx,execution.ts,workspace.t
 Evidence: `/tmp/deslop_shared_ui_baseline.log`, `/tmp/deslop_retired_baseline.log`, `/tmp/deslop_sidebar_baseline.log`, `/tmp/deslop_shared_ui_deadcode.log`, `/tmp/deslop_shared_ui_final.log`, `/tmp/deslop_retired_final.log`, `/tmp/deslop_shared_ui_typecheck.log`, `/tmp/deslop_retired_typecheck.log`.
 
 Remaining risks: no new ones identified. Actual retired-data apply still requires review and stopped writers; package/device/model acceptance remains a separate integration gate.
+
+## A4 persistence follow-up (standard mode)
+
+Bounded plan was recorded before source edits in `.omx/plans/evidence/2026-11-05-m0-m1/web-a4/PERSISTENCE-FIX-PLAN.md`. Scope: `apps/web/src/pages/TeamsPage.tsx`, `apps/web/src/teams/invite-intent.ts`, `apps/web/test/teams-invite-intent.test.ts` and the new `teams-invite-persistence-ui.test.ts`, plus identical candidate copies. This follow-up explicitly supersedes the earlier exclusion of root-owned invitation work for these authorized lines only.
+
+Behavior lock: actual closed-tab browser RED and a failing rendered-page regression preceded the storage-port fix. GREEN: focused helper/page/view tests **11/11**, Web typecheck, real browser **13/13**. Existing signup/account flows and all concurrent changes were preserved.
+
+Smell review: no dead code, duplicate lifecycle branch or unnecessary abstraction was introduced. The existing lazy storage port is retained so denied browser storage is caught by the bounded helper; no compatibility reader, migration, test-only product hook or dependency was added. The helper comment now accurately describes closed-tab persistence. The shared tab fixture only models browser lifetime/storage and is reused by three regressions. No additional cleanup edit was justified after the minimal fix. No tests were removed.
+
+Scoped whitespace/static checks and canonical/candidate byte parity pass. No Web lint script exists. No broad Web/emulator/Desktop rerun was justified by the three-call storage-port change. Final dist rebuild and live delivery remain root-owned; fresh OAuth and successful-join ACK-loss acceptance remain uncovered.
+
+### Cross-tab review follow-up
+
+Plan added before edits to the same A4 persistence plan. Scope remains the same four Web source/test files and identical candidate copies. Behavior was locked by four intended RED unit/rendered-page failures plus real-browser RED lost-intent checks. Implementation keeps the original page intent in one stable ref and requires a matching code before storage cleanup; no new storage schema, compatibility path, event listener or API was added.
+
+Standard smell pass: retained the existing storage port/helper boundary; no duplicate clear path or speculative queue/abstraction. Removed a redundant pre-effect mocked sign-in call from the new test setup. The tests share the existing tab fixture and parameterize only the two distinct resolution outcomes. No tests/dependencies removed or added beyond the requested regressions.
+
+Final gates: focused tests **15/15**, Web typecheck, scoped diff check and four-file canonical/candidate parity pass. Actual final-source browser cross-tab checks **5/5**, including unchanged full saved record/deadline, fresh-tab restoration and no join requests; outsider remains nonmember. No additional broad Web build/test, emulator or Desktop acceptance was run. Successful production join preservation is deliberately covered at the rendered-page boundary only; no QA membership mutation was needed.
+
+Final integration follow-up: the full Web non-Emulator suite passed403/403 with zero skips using Python3.13; the prior system-Python3.9 tomllib environment failure is retained in `/tmp/teams-web-final-non-emulator-suite.log`. The three actual SDK Emulator cases retain their separate earlier passing evidence.

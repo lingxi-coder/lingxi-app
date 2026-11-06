@@ -3,7 +3,7 @@ import { inviteCode } from '../../../../packages/teams';
 const key = 'lingxi.teams.inviteIntent.1';
 const lifetime = 7 * 24 * 60 * 60 * 1000;
 type StoragePort = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
-/** A same-tab invitation survives registration, auth popups and refresh. The
+/** A pending invitation survives registration, closed tabs and refresh. The
  * backend still checks expiry/revocation and joining always needs confirmation. */
 export function readInviteIntent(url: string, storage: StoragePort, now = Date.now()): string {
   const incoming = inviteCode(url);
@@ -28,6 +28,10 @@ export function retainInviteIntent(code: string, storage: StoragePort, now = Dat
     return true;
   } catch { return false; }
 }
-export function clearInviteIntent(storage: StoragePort): void {
-  try { storage.removeItem(key); } catch { /* The visible intent is cleared by its owner. */ }
+export function clearInviteIntent(storage: StoragePort, expectedCode: string): void {
+  if (inviteCode(expectedCode) !== expectedCode) return;
+  try {
+    const current: unknown = JSON.parse(storage.getItem(key) ?? 'null');
+    if (current && typeof current === 'object' && 'code' in current && current.code === expectedCode) storage.removeItem(key);
+  } catch { /* The visible intent is cleared by its owner. */ }
 }

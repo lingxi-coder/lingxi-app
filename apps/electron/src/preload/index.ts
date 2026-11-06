@@ -1,3 +1,4 @@
+import { CH_DECISION, CH_DECISION_CHANGED, type DecisionApi } from '../shared/decision.js';
 import { DESKTOP_BRIDGE_GLOBAL } from '../shared/desktopBridge.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import type { ProviderAccountsApi } from '../shared/providerAccounts.js';
@@ -304,6 +305,7 @@ export interface LingxiApi {
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   previewWorkspaceFile(sessionId: string, path: string): Promise<WorkspaceFilePreview>;
+  decision: DecisionApi;
   providerAccounts: ProviderAccountsApi;
   providerSettings(patch?: Record<string, unknown>, expected?: Record<string, unknown>): Promise<import('../shared/providerAccounts.js').HostProviderSettings>;
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
@@ -394,6 +396,17 @@ function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelop
 }
 
 const api: LingxiApi = {
+  decision: {
+    snapshot: () => ipcRenderer.invoke(CH_DECISION, { action: 'get' }),
+    save: (revision, configuration, credential) => ipcRenderer.invoke(CH_DECISION, { action: 'save', revision, configuration, ...(credential === undefined ? {} : { credential }) }),
+    evaluate: (operationId, input) => ipcRenderer.invoke(CH_DECISION, { action: 'evaluate', operationId, input }),
+    cancel: operationId => ipcRenderer.invoke(CH_DECISION, { action: 'cancel', operationId }),
+    onChanged: listener => {
+      const handler = (_event: IpcRendererEvent, snapshot: Parameters<typeof listener>[0]) => listener(snapshot);
+      ipcRenderer.on(CH_DECISION_CHANGED, handler);
+      return () => ipcRenderer.removeListener(CH_DECISION_CHANGED, handler);
+    },
+  },
   computerSettings: {
     execute: command => ipcRenderer.invoke(CH_COMPUTER_SETTINGS, command),
     onChanged: listener => {

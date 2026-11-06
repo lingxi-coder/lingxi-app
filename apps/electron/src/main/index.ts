@@ -1,3 +1,6 @@
+import { systemDecisionCredentials } from './decisionCredentials.js';
+import { DecisionHost } from './decision.js';
+import { CH_DECISION_CHANGED } from '../shared/decision.js';
 import { providerById, providersFromCatalog } from '../shared/providers.js';
 import { DesktopProviderAccounts, providerAccountSessionStore, runtimeAccountCredential, withFileRefreshIntents, withProviderAccountLock } from './provider-accounts.js';
 import { loginCodex } from './codex-auth.js';
@@ -745,6 +748,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     credentialBroker,
     nativeAudio ?? undefined,
   );
+  host.attachDecision(new DecisionHost({
+    userData, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
+    broker: credentialBroker ?? systemDecisionCredentials(userData), accounts: () => providerAccounts?.launch() ?? Promise.resolve(undefined),
+    changed: snapshot => host?.sendToWindows(CH_DECISION_CHANGED, snapshot),
+  }));
   if (providerAccounts) host.attachProviderAccounts(providerAccounts);
   host.attachLocalAppAuthoring((appId, ref, version) => {
     if (!localApps) throw new Error('The Local App authoring host is unavailable');

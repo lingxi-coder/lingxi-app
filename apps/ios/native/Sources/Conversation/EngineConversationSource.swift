@@ -5656,7 +5656,7 @@ final class EngineConversationSource: ConversationSource {
 
         for block in dto.blocks {
             switch block {
-            case .text, .compactBoundary:
+            case .text, .compactBoundary, .page:
                 if let lowered = messageBlock(from: block) {
                     narrative.append(lowered)
                 }
@@ -5711,6 +5711,9 @@ final class EngineConversationSource: ConversationSource {
         case .visualization:
             // Widgets are their own rows, never part of a bubble.
             return nil
+        case .page:
+            // Private pages stay on their publishing computer.
+            return .text(String(localized: "private_page_unavailable"))
         case let .compactBoundary(messagesBefore, messagesAfter, summary):
             return .compactBoundary(
                 messagesBefore: Int(messagesBefore),

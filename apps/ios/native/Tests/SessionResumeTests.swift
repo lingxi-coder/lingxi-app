@@ -1540,6 +1540,24 @@ visionDelegationEnabled: true)
                            "a non-empty restored transcript is not the empty-state")
         }
 
+        func testSessionResumedDisclosesUnavailablePrivatePageAndKeepsNarrative() {
+            for reference in [nil, PageRefDto(id: "private-page-not-a-mobile-origin", revision: 1)] as [PageRefDto?] {
+                let source = makeSource()
+                let assistant = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
+                    .text(text: "Before".clientTextDto),
+                    .page(reference: reference),
+                    .text(text: "After".clientTextDto),
+                ])
+                source.expectSessionResumeForTesting(uuid())
+                source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [assistant]))
+
+                XCTAssertEqual(source.model.messages.map(\.text), [[
+                    "Before", String(localized: "private_page_unavailable"), "After",
+                ].joined(separator: "\n\n")])
+                XCTAssertFalse(source.model.messages[0].text.contains("private-page-not-a-mobile-origin"))
+            }
+        }
+
         /// An assistant message carrying multiple block kinds must SPLIT: the
         /// narrative blocks remain message rows in wire order, while reasoning
         /// and tools stay in the execution timeline. Nothing may silently vanish

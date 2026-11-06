@@ -1411,7 +1411,7 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
   await openPackagedProjectDraft(page, sourceSession.projectPath);
   const otherSession = await waitFor(async () => {
     const current = await evaluate(page, 'window.lingxi.bootstrap()');
-    return current.activeSession?.projectPath === sourceSession.projectPath
+    return current.activeSession?.projectId === null
       && current.activeSession?.sessionId !== sessionId && current.activeSession?.sessionId;
   }, { label: 'second chat for LocalApp modification' });
   assert.notEqual(otherSession, sessionId, 'the pre-Modify chat must differ from the saved authoring session');
@@ -1437,9 +1437,9 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
     modify.click();
   })()`);
   await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId === '${sessionId}' && document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && Boolean(document.querySelector('.local-app-chat-card')))`), { label: 'Modify restores the dedicated authoring Code session, transcript and app draft' });
-  // Open the current Code project draft and verify its composer is isolated.
+  // Open an ordinary Global Code draft and verify its composer is isolated from Apps.
   await openPackagedProjectDraft(page, sourceSession.projectPath);
-  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId !== '${sessionId}' && !document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && !document.querySelector('.local-app-chat-card'))`), { label: 'new unrelated source-project chat has its own transcript and draft' });
+  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectId === null && state.activeSession?.sessionId !== '${sessionId}' && !document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && !document.querySelector('.local-app-chat-card'))`), { label: 'ordinary Global chat has its own transcript and draft' });
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('[aria-label="Prompt"][contenteditable="true"]')) && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'unrelated chat renderer admission before returning to Apps' });
   await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === 'Apps')?.click()`);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'return to application library' });

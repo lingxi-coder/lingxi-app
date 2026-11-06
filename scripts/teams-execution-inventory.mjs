@@ -8,12 +8,13 @@ const scopes = [
   'apps/firebase/src', 'packages/teams', 'apps/electron/src/main/teams',
   'apps/electron/src/preload', 'apps/electron/src/renderer', 'apps/web/src/teams',
   'apps/ios/native/Sources/Teams', 'apps/android/native/app/src/main/java/com/lingxi/code/teams',
-  'infra/firebase',
+  'infra/firebase', 'apps/bridge-server/src',
 ];
 const retired = [
   'prepareBotTriggers', 'claimBot', 'startBot', 'finishBot', 'recoverBot', 'botQueue',
   'bindLocalBot', 'bindBot', 'unbindBot', 'heartbeatBot', 'botRuns', 'triggerIdentity',
   'legacyBotKey', 'legacyTriggerId', 'executionProtocol',
+  'team_guardian',
 ];
 const preserved = [
   'apps/firebase/src/teams.mjs', 'apps/firebase/src/team-messages.mjs',

@@ -337,7 +337,7 @@ export interface UseBridge {
   audioRetainFlow(sessionId: string, leaseId: string, retain: boolean): Promise<void>;
   audioFinishListen(flow?: NativeAudioFlowLease): Promise<void>;
   refresh(): Promise<void>;
-  newSession(projectPath?: string, purpose?: import('../../shared/localApps').LocalAppSessionPurpose): Promise<import("../../shared/settings").SessionRef | undefined>;
+  newSession(projectPath?: string, purpose?: import('../../shared/settings').NewSessionPurpose): Promise<import("../../shared/settings").SessionRef | undefined>;
   resumeSession(sessionId: string): Promise<void>;
   switchConversationSpace(mode: 'chat' | 'code'): Promise<boolean>;
   readonly handoffPending: boolean;

@@ -60,7 +60,7 @@ test('creating a setup chat targets a new conversation and offers a draft withou
   const drafts: unknown[] = [];
   let sessions = 0;
   assert.deepEqual(await prepareBotCreationChat('  帮我创建写作伙伴  ', {
-    newSession: async () => { sessions++; return target; },
+    newSession: async purpose => { assert.deepEqual(purpose, { kind: 'create-bot' }); sessions++; return target; },
     offerLinkDraft: draft => drafts.push(draft),
   }, () => true), target);
   assert.equal(sessions, 1);

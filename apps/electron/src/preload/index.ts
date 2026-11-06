@@ -319,7 +319,7 @@ export interface LingxiApi {
   exportDiagnostics(): Promise<string | null>;
   listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string; conversationSpaces: ConversationSpacesSnapshot }>;
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
-  newSession(projectPath: string | null, model?: string, purpose?: 'local-app'): Promise<BootstrapState>;
+  newSession(projectPath: string | null, model?: string, purpose?: import('../shared/settings.js').NewSessionPurpose): Promise<BootstrapState>;
   switchConversationSpace(mode: ConversationSpace): Promise<BootstrapState>;
   prepareSessionHandoff(sourceId: string, target: ConversationSpace, requestId: string, retry?: boolean): Promise<{ snapshot: BootstrapState; summary: string; requestId: string } | null>;
   cancelSessionHandoff(requestId: string): Promise<void>;

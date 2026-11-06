@@ -39,12 +39,12 @@ export function botCreationPrompt(request: string): string {
 
 /** Prepare a new chat without submitting into an existing conversation. */
 export async function prepareBotCreationChat(request: string, navigation: {
-  newSession(): Promise<SessionRef | undefined>;
+  newSession(purpose: { kind: 'create-bot' }): Promise<SessionRef | undefined>;
   offerLinkDraft(draft: { sessionId: string; text: string; requestId: string }): void;
 }, isCurrent: () => boolean): Promise<SessionRef | undefined> {
   const text = botCreationPrompt(request);
   if (!isCurrent()) return;
-  const session = await navigation.newSession();
+  const session = await navigation.newSession({ kind: 'create-bot' });
   if (!session || !isCurrent()) return;
   navigation.offerLinkDraft({ sessionId: session.sessionId, text, requestId: `create-bot:${session.sessionId}` });
   return session;

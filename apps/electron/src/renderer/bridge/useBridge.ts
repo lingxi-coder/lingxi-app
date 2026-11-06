@@ -2251,7 +2251,7 @@ export function useBridge(): UseBridge {
     ]);
   }, [command, refreshDiagnostics, requestTaskList]);
 
-  const newSession = useCallback(async (requestedProjectPath?: string, purpose?: import('../../shared/localApps').LocalAppSessionPurpose) => {
+  const newSession = useCallback(async (requestedProjectPath?: string, purpose?: import('../../shared/settings').NewSessionPurpose) => {
     if (sessionLoadingRef.current) return;
     if (!host || !bootstrap) return;
     const projectId = requestedProjectPath ?? null;

@@ -1,23 +1,23 @@
 {
   "schema_version": 1,
   "tag": "v0.1.0-rc.3",
-  "sdk_source_revision": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d",
+  "sdk_source_revision": "43382a20161e371a0a31526412164b3d35545ab5",
   "assets": {
     "android_native": {
-      "name": "mobile-linux-android-native-support-0.1.0-rc.3.zip",
-      "sha256": "01b7bcf4bde183f4c6347707e6ba90101c6389fc68e9ca517849cf049f518cc5"
+      "name": "mobile-linux-android-native-support-43382a20161e.zip",
+      "sha256": "25003d4463f56c3e9804a066dd652b525ae6e90e2ab51c1a342be15f0ab07065"
     },
     "android_maven": {
-      "name": "mobile-linux-native-maven-0.1.0-rc.3.zip",
-      "sha256": "977b84dfd6381cbfe0789fb44c11cf115bd47d4e1e096c50151b6c4e588794c3"
+      "name": "mobile-linux-native-maven-43382a20161e.zip",
+      "sha256": "aebaf8c1ead7fe12f158286ea86170e25c436d9d3d66d2b43115f8a6bbf031e9"
     },
     "ios_native": {
-      "name": "MobileLinuxNativeSupport-0.1.0-rc.3.xcframework.zip",
-      "sha256": "ad75d649565de57209827c9e8bf4f8bc7b8cc9371030f0b8b42d2ce634203264"
+      "name": "MobileLinuxNativeSupport-43382a20161e.xcframework.zip",
+      "sha256": "3c54724853520faee3d4c29d1929dfffc46115df72ca8147068b74543185bd72"
     },
     "ios_rootfs": {
-      "name": "mobile-linux-rootfs-ios-arm64-v3.24.2-user1.zip",
-      "sha256": "99e5efffebc4d0ffa1dc64d2448a02327945d4f53cf6b975f98f634c700be891"
+      "name": "mobile-linux-rootfs-ios-arm64-v3.24.2-user2-runtime-43382a20161e.zip",
+      "sha256": "62c45cb64f6942532e0ba7c54f9789e2faaebe6e650063e8cb0af9c793bd4289"
     }
   }
 }

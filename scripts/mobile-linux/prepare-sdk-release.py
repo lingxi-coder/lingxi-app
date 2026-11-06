@@ -83,6 +83,36 @@ def publish(source, destination):
             raise
 
 
+def validate_ios_rootfs(rootfs, sdk, source, source_archive):
+    """Validate the SDK's toolchain profile and its staged iOS image together."""
+    manifest = json.loads((rootfs / 'manifest.json').read_text())
+    receipt = json.loads((rootfs / 'archive-verification.json').read_text())
+    pins_path = sdk / 'docs/toolchains/runtime-pins.json'
+    pins = json.loads(pins_path.read_text())
+    evidence = sdk / 'docs/mobile-linux/releases' / pins['rootfs_version'] / 'arm64-v8a'
+    archive = json.loads((evidence / 'rootfs-manifest.json').read_text())['archive']
+    if (manifest.get('sdk_source') != source
+            or manifest.get('rootfs_version') != pins['rootfs_version']
+            or manifest.get('source_archive_sha256') != archive['sha256']
+            or manifest.get('source_manifest_sha256') != sha(sdk / 'native/ios/sources.json')
+            or manifest.get('rootfs_zip_sha256') != sha(rootfs / 'resources/alpine-rootfs.zip')
+            or receipt.get('schema_version') != 1
+            or receipt.get('profile') != 'toolchain'
+            or receipt.get('architecture') != 'aarch64'
+            or receipt.get('archive_sha256') != archive['sha256']
+            or receipt.get('source_pins_sha256') != sha(pins_path)
+            or source_archive.stat().st_size != archive['size_bytes']
+            or sha(source_archive) != archive['sha256']):
+        raise ValueError('iOS rootfs identity mismatch')
+    if (not (rootfs / 'resources/RootfsPatch.bundle').is_dir()
+            or not (rootfs / 'resources/libvdso.so.elf').is_file()):
+        raise ValueError('iOS rootfs native resources are missing')
+    subprocess.run([sys.executable, str(sdk / 'scripts/rootfs/verify-rootfs-profile.py'),
+                    '--archive', str(source_archive), '--arch', receipt['architecture'],
+                    '--profile', receipt['profile'], '--sha256', archive['sha256']], check=True)
+    return manifest
+
+
 def prepare(platform, cache):
     resolved = resolve_sdk()
     sdk = Path(resolved['root'])
@@ -98,6 +128,8 @@ def prepare(platform, cache):
     if cache.is_symlink():
         raise ValueError('symlinked release cache directory')
     native_check = module('product_native', ROOT / 'apps/android/native/scripts/mobile-linux-native.py')
+    rootfs_evidence = (ROOT / 'apps/android/native/app/build/mobileLinuxRootfs'
+                       if platform in ('android', 'all') else cache / 'rootfs')
     with tempfile.TemporaryDirectory(prefix='mobile-linux-release-') as temporary:
         staging = Path(temporary)
         def unpack(key):
@@ -121,25 +153,20 @@ def prepare(platform, cache):
                 destination = android / 'app/build/mobileLinuxNative' / variant
                 publish(native, destination / 'native-support')
                 (destination / 'sdk-source.json').write_text(json.dumps(source, indent=2) + '\n')
-            rootfs = android / 'app/build/mobileLinuxRootfs'
-            subprocess.run([sys.executable, str(ROOT / 'scripts/mobile-linux/fetch-sdk-rootfs.py'), '--output', str(rootfs)], check=True)
+            subprocess.run([sys.executable, str(ROOT / 'scripts/mobile-linux/fetch-sdk-rootfs.py'), '--output', str(rootfs_evidence)], check=True)
             runtime = subprocess.check_output([sys.executable, str(ROOT / 'scripts/lib/runtime_source.py'), '--root'], text=True).strip()
             stager = module('product_rootfs', ROOT / 'apps/android/native/scripts/stage-mobile-linux-assets.py')
             for variant in ('play', 'direct'):
-                stager.stage(rootfs, android / f'app/build/generated/mobileLinux/{variant}/assets/mobile-linux', sdk, Path(runtime), android / f'app/build/mobileLinuxNative/{variant}/native-support')
+                stager.stage(rootfs_evidence, android / f'app/build/generated/mobileLinux/{variant}/assets/mobile-linux', sdk, Path(runtime), android / f'app/build/mobileLinuxNative/{variant}/native-support')
         if platform in ('ios', 'all'):
             native = unpack('ios_native')
             identity.validate_ios_native(native, native / 'MobileLinuxNativeSupport.xcframework', resolved['revision'], source_root=sdk)
             subprocess.run([sys.executable, str(sdk / 'scripts/checks/verify-ios-native.py'), '--artifact-dir', str(native)], check=True)
             (native / 'sdk-source.json').write_text(json.dumps(source, indent=2) + '\n')
+            if platform == 'ios':
+                subprocess.run([sys.executable, str(ROOT / 'scripts/mobile-linux/fetch-sdk-rootfs.py'), '--output', str(rootfs_evidence)], check=True)
             rootfs = unpack('ios_rootfs')
-            manifest = json.loads((rootfs / 'manifest.json').read_text())
-            pins = json.loads((sdk / 'docs/toolchains/runtime-pins.json').read_text())
-            if (manifest.get('sdk_source') != source or manifest.get('rootfs_version') != pins['rootfs_version']
-                    or manifest.get('source_archive_sha256') != pins['alpine']['minirootfs']['aarch64']['sha256']
-                    or manifest.get('source_manifest_sha256') != sha(sdk / 'native/ios/sources.json')
-                    or manifest.get('rootfs_zip_sha256') != sha(rootfs / 'resources/alpine-rootfs.zip')):
-                raise ValueError('iOS rootfs identity mismatch')
+            manifest = validate_ios_rootfs(rootfs, sdk, source, rootfs_evidence / 'arm64-v8a/rootfs.tar.gz')
             ios = ROOT / 'apps/ios/native'
             destination = ios / 'build/linux-runtime/openminis'
             manifest['resources'] = {key: str(destination / 'resources' / name) for key, name in {

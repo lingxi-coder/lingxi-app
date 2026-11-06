@@ -446,7 +446,7 @@ export function SessionRow({ projectPath, session, active, pinned, opening, stat
   );
 }
 
-export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, teamsUnread = 0, sidebarMode = 'home', onSelectSidebarMode, modePanel, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, teamsUnread = 0, sidebarMode = 'home', localAppProjects = [], onSelectSidebarMode, modePanel, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar }: {
   bridge: UseBridge;
   activityView?: boolean;
   onToggleActivityView?(): void;
@@ -462,6 +462,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   teamsUnread?: number;
   /** What the sidebar lists, and which of the rail's Home, Bots and Teams is marked. Apps, Scheduled and the changes are pages: they do not change it. */
   sidebarMode?: SidebarMode;
+  localAppProjects?: readonly string[];
   onSelectSidebarMode?(mode: SidebarMode): void;
   /** The sidebar's content in the modes other than Home, given what the search box holds (trimmed, in lower case). */
   modePanel?(mode: Exclude<SidebarMode, 'home'>, search: string): ReactNode;
@@ -483,8 +484,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const scheduledWorkspace = bridge.bootstrap?.scheduledWorkspace;
   const globalWorkspace = spaces?.globalWorkspaces[currentSpace];
   const projects = useMemo(
-    () => (settings?.projects ?? []).filter((path) => path !== scheduledWorkspace && spaces?.projects[path]?.includes(currentSpace)),
-    [scheduledWorkspace, settings?.projects, spaces?.projects, currentSpace],
+    () => (settings?.projects ?? []).filter((path) => path !== scheduledWorkspace && !localAppProjects.includes(path) && spaces?.projects[path]?.includes(currentSpace)),
+    [scheduledWorkspace, settings?.projects, spaces?.projects, currentSpace, localAppProjects],
   );
   const visibleDrafts = (spaces?.drafts ?? []).filter((draft) => draft.mode === currentSpace
     && (draft.projectId === null || projects.includes(draft.projectId))
@@ -949,8 +950,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           <Icon name="users" size={21} stroke={1.7} />
           {teamsBadge && <span className="desktop-rail-count" data-kind="unread" aria-hidden="true">{teamsBadge}</span>}
         </button>
+        <button type="button" className="desktop-rail-button" data-active={sidebarMode === 'apps' || (!onSelectSidebarMode && apps) || undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={() => onSelectSidebarMode ? selectMode('apps') : onOpenApps?.()}><DesktopIcon name="apps" size={20}/></button>
         <span className="desktop-rail-divider" aria-hidden="true" />
-        <button type="button" className="desktop-rail-button" data-active={apps || undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={onOpenApps}><DesktopIcon name="apps" size={20}/></button>
         <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label={tr('desktop_chat_scheduled_tasks')} title={tr('desktop_chat_scheduled_tasks')} onClick={onOpenScheduled}><DesktopIcon name="clock" size={20} /></button>
         <GitChangesButton active={changes} />
         <button type="button" className="desktop-rail-button desktop-rail-settings" aria-label={tr('settings_title_main')} title={tr('settings_title_main')} onClick={onOpenSettings}><DesktopIcon name="cog" size={20} /></button>
@@ -1514,7 +1515,7 @@ export function SummaryContextActions({ bridge }: { bridge: UseBridge }) {
   </section>;
 }
 
-export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCenter, terminalOpen = false, terminalAvailable = false, onToggleTerminal, sideChatOpen = false, sideChatAvailable = false, onToggleSideChat }: {
+export function BetaTopBar({ bridge, bot, app, runtimeCenterOpen, onToggleRuntimeCenter, terminalOpen = false, terminalAvailable = false, onToggleTerminal, sideChatOpen = false, sideChatAvailable = false, onToggleSideChat }: {
   sideChatOpen?: boolean;
   sideChatAvailable?: boolean;
   onToggleSideChat?(): void;
@@ -1524,6 +1525,7 @@ export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCent
   bridge: UseBridge;
   /** Set while a chat of a Bot is on screen: the chat belongs to the Bot, not to a project folder. */
   bot?: { botId: string; name: string; onOpen(): void };
+  app?: { name: string; onOpen(): void };
   runtimeCenterOpen: boolean;
   onToggleRuntimeCenter(): void;
 }) {
@@ -1552,12 +1554,12 @@ export function BetaTopBar({ bridge, bot, runtimeCenterOpen, onToggleRuntimeCent
   } as CSSProperties;
   return (
     <header className="drag-region desktop-topbar" style={{ '--toolbar-material': t.sidebarBg, '--topbar-project-color': t.text2, '--topbar-project-surface': t.surfaceHover } as CSSProperties}>
-      <div className="desktop-topbar-project" title={bot?.name ?? projectPath}>
-        {bot ? <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('bots_chat_open_bot')} title={tr('bots_chat_open_bot')} onClick={bot.onOpen} style={topbarActionTokens}><AgentAvatar agentId={bot.botId} size={20} /></button> : <span className="desktop-topbar-project-icon" aria-hidden="true"><DesktopIcon name="folder" size={17} /></span>}
-        <span className="desktop-topbar-title" style={{ color: t.text }}>{bot?.name || sessionTitle || basename(projectPath)}</span>
+      <div className="desktop-topbar-project" title={bot?.name ?? app?.name ?? projectPath}>
+        {bot ? <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('bots_chat_open_bot')} title={tr('bots_chat_open_bot')} onClick={bot.onOpen} style={topbarActionTokens}><AgentAvatar agentId={bot.botId} size={20} /></button> : app ? <button type="button" className="no-drag desktop-topbar-action" aria-label={tr('apps_library')} title={tr('apps_library')} onClick={app.onOpen} style={topbarActionTokens}><DesktopIcon name="apps" size={19}/></button> : <span className="desktop-topbar-project-icon" aria-hidden="true"><DesktopIcon name="folder" size={17} /></span>}
+        <span className="desktop-topbar-title" style={{ color: t.text }}>{bot?.name || app?.name || sessionTitle || basename(projectPath)}</span>
       </div>
       {sourceLabel && owner?.handoff && <button type="button" className="no-drag desktop-topbar-action" title={sourceLabel} disabled={bridge.sessionLoading} onClick={() => { void bridge.openHandoffSource(owner.handoff!); }} style={{ ...topbarActionTokens, width: 'auto', maxWidth: 220, minWidth: 0, padding: '0 8px', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sourceLabel}</button>}
-      {!bot && owner && <button type="button" className="no-drag desktop-topbar-action"
+      {!bot && !app && owner && <button type="button" className="no-drag desktop-topbar-action"
         disabled={bridge.sessionLoading || (!bridge.connected && !bridge.handoffPending)}
         title={handoffLabel}
         onClick={() => { void (bridge.handoffPending ? bridge.cancelSessionHandoff() : bridge.prepareSessionHandoff()); }}

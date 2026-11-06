@@ -5,6 +5,7 @@ const rows: Record<string, readonly [string, string, string, string, string]> = 
   open_link: ['打开剪贴板中的链接', '開啟剪貼簿中的連結', 'Open Link from Clipboard', 'クリップボードのリンクを開く', '클립보드에서 링크 열기'],
   view: ['视图', '檢視', 'View', '表示', '보기'],
   activity: ['活动', '活動', 'Activity', 'アクティビティ', '활동'],
+  apps: ['应用', '應用', 'Apps', 'アプリ', '앱'],
   home: ['首页', '首頁', 'Home', 'ホーム', '홈'],
   bots: ['Bot', 'Bot', 'Bots', 'Bot', 'Bot'],
   teams: ['团队', '團隊', 'Teams', 'チーム', '팀'],

@@ -82,3 +82,61 @@
 .local-app-publish input, .local-app-publish textarea, .local-app-publish select { font: inherit; color: inherit; background: var(--apps-background); border: 1px solid var(--apps-border); border-radius: 7px; padding: 9px; min-width: 0; }
 .local-app-publish textarea { min-height: 70px; resize: vertical; }
 .local-app-publish footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+
+/* Apps is a workspace, with the same quiet hierarchy as Bots and Teams. */
+.local-apps-sidebar { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 10px; color: var(--apps-text); }
+.local-apps-sidebar button { font: inherit; color: inherit; cursor: pointer; }
+.local-apps-sidebar-header { display: flex; align-items: center; gap: 8px; padding: 0 6px 12px 8px; }
+.local-apps-sidebar-header h2 { flex: 1; margin: 0; font-size: 13px; font-weight: 600; }
+.local-apps-sidebar-header button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--apps-muted); }
+.local-apps-library-link { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; text-align: left; font-size: 13px !important; }
+.local-apps-library-link[aria-current=page], .local-apps-sidebar-chats button[aria-current=page] { color: var(--apps-accent); background: var(--apps-accent-bg); }
+.local-apps-sidebar-section { margin: 22px 8px 9px; color: var(--apps-muted); font-size: 11px; font-weight: 500; letter-spacing: .02em; }
+.local-apps-sidebar-group { margin: 2px 0 6px; }
+.local-apps-sidebar-app { position: relative; display: flex; align-items: center; border-radius: 8px; }
+.local-apps-sidebar-disclosure { display: flex; align-items: center; gap: 7px; width: 100%; min-width: 0; min-height: 38px; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; text-align: left; }
+.local-apps-sidebar-app:has(.local-apps-sidebar-actions) .local-apps-sidebar-disclosure { padding-right: 60px; }
+.local-apps-sidebar-avatar { display: grid; place-items: center; flex-shrink: 0; width: 23px; height: 23px; border: 1px solid var(--apps-border); border-radius: 6px; font-size: 12px; font-weight: 550; color: var(--apps-accent); }
+.local-apps-sidebar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.local-apps-draft-dot { width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: var(--apps-muted); }
+.local-apps-sidebar-actions { position: absolute; right: 3px; display: flex; gap: 2px; }
+.local-apps-sidebar-actions button { display: grid; place-items: center; width: 26px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--apps-muted); }
+.local-apps-sidebar-chats { display: grid; gap: 2px; padding: 2px 0 4px 26px; }
+.local-apps-sidebar-chats > button { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 34px; padding: 7px 9px; border: 0; border-radius: 7px; background: transparent; text-align: left; color: var(--apps-muted); font-size: 12px; }
+.local-apps-sidebar-chats > button svg { flex-shrink: 0; }
+.local-apps-sidebar-chats > button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.local-apps-sidebar-note, .local-apps-sidebar-empty { margin: 10px 8px; color: var(--apps-muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.local-apps-sidebar-empty { padding-top: 10px; }
+.local-apps-sidebar-empty button, .local-apps-sidebar-note button { min-height: 32px; padding: 5px 10px; border: 1px solid var(--apps-border); border-radius: 8px; color: var(--apps-text); background: transparent; font-size: 12px; }
+.local-apps-sidebar button:hover { background: var(--apps-hover); }
+.local-apps-sidebar button:active { background: var(--apps-accent-bg); }
+.local-apps-sidebar button:focus-visible, .local-app-library button:focus-visible, .local-app-hosting summary:focus-visible { outline: 2px solid var(--apps-accent); outline-offset: 2px; }
+.local-apps-sidebar button:disabled { opacity: .5; cursor: wait; }
+.local-app-library { min-width: 0; box-sizing: border-box; padding: 32px clamp(24px,4vw,64px); }
+.local-app-library-header { gap: 24px; align-items: center; margin-bottom: 14px; }
+.local-app-library-header h1 { font-size: clamp(24px,2.1vw,30px); font-weight: 600; letter-spacing: -.035em; line-height: 1.2; }
+.local-app-library-header p { margin-top: 9px; font-size: 13px; line-height: 1.6; }
+.local-app-library .local-app-create-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0; min-height: 36px; padding: 8px 13px; border-color: transparent; background: var(--apps-text); color: var(--apps-background); font-size: 12px; font-weight: 550; }
+.local-app-library .local-app-create-primary:hover { opacity: .85; }
+.local-app-library .local-app-create-primary:active { opacity: .7; }
+.local-app-create-hint { margin: 0 0 26px; max-width: 620px; color: var(--apps-muted); font-size: 12px; line-height: 1.6; }
+.local-app-search { margin: 0 0 22px; max-width: 480px; }
+.local-app-search input { box-sizing: border-box; min-height: 38px; border-radius: 10px; font-size: 13px; }
+.local-app-grid { grid-template-columns: repeat(auto-fill,minmax(min(100%,248px),1fr)); gap: 16px; }
+.local-app-tile { border-radius: 14px; padding: 20px; }
+.local-app-empty { min-height: min(42vh,360px); padding: 24px; border: 1px dashed var(--apps-border); border-radius: 16px; }
+.local-app-empty p { max-width: 460px; font-size: 13px; }
+.local-app-empty button { font-size: 12px; min-height: 34px; }
+.local-app-hosting { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--apps-border); color: var(--apps-muted); font-size: 12px; line-height: 1.6; }
+.local-app-hosting summary { cursor: pointer; width: fit-content; }
+.local-app-hosting p { max-width: 680px; margin: 10px 0 0; }
+@media (max-width: 760px) {
+  .local-app-library { padding: 24px; }
+  .local-app-library-header { align-items: flex-start; flex-wrap: wrap; gap: 12px; }
+  .local-app-library-header h1 { font-size: 25px; }
+  .local-app-create-hint { margin-bottom: 18px; }
+}
+@media (prefers-contrast: more) {
+  .local-apps-sidebar [aria-current=page] { outline: 1px solid currentColor; outline-offset: -1px; }
+  .local-app-tile, .local-app-empty { border-color: var(--apps-text); }
+}

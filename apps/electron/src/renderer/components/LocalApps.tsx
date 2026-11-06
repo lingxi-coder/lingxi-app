@@ -73,9 +73,8 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop 
   };
   const filtered = apps.filter(app => `${app.name} ${app.summary}`.toLocaleLowerCase(locale).includes(query.toLocaleLowerCase(locale)));
   return <section className="local-app-library" aria-label={tr('apps_title')} style={{ '--apps-background': t.stageBg, '--apps-text': t.text, '--apps-muted': t.text3, '--apps-surface': t.surface, '--apps-border': t.border, '--apps-accent': t.accent, '--apps-error': t.danger } as CSSProperties}>
-    <header className="local-app-library-header"><div><h1>{tr('apps_title')}</h1><p>{tr('desktop_apps_tagline')}</p></div><button onClick={onCreate}>{tr('desktop_apps_create_chat')}</button></header>
-    <p className="local-app-update">{tr('desktop_apps_deployment_hint')}</p>
-    {!remoteConfigured && <p className="local-app-update">{tr('desktop_apps_remote_unconfigured')}</p>}
+    <header className="local-app-library-header"><div><h1>{tr('apps_library')}</h1><p>{tr('desktop_apps_tagline')}</p></div><button className="local-app-create-primary" onClick={onCreate}><span aria-hidden="true">＋</span>{tr('apps_create')}</button></header>
+    <p className="local-app-create-hint">{tr('apps_create_hint')}</p>
     {error && <div className="local-app-error" role="alert">{error}<button onClick={() => { setError(''); void refresh(); }}>{tr('common_retry')}</button></div>}
     {pendingPublications.length > 0 && <aside className="local-app-update" aria-label={tr('local_app_publication_pending')}>
       <strong>{tr('local_app_publication_pending')}</strong>
@@ -128,6 +127,7 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop 
       </article>)}
     </div>}
     {apps.length > 0 && !filtered.length && <p className="local-app-no-results">{tr('desktop_apps_no_results', query)}</p>}
+    <details className="local-app-hosting"><summary>{tr('apps_hosting')}</summary><p>{tr('desktop_apps_deployment_hint')}</p>{!remoteConfigured && <p>{tr('desktop_apps_remote_unconfigured')}</p>}</details>
     {selected && <aside className="local-app-logs" aria-label={tr('desktop_apps_logs')}><header><strong>{apps.find(a => a.id === selected)?.name ?? tr('desktop_app')} · {tr('desktop_logs')}</strong><button onClick={() => setSelected(null)} aria-label={tr('desktop_close_logs')}>×</button></header>
       <h3>Versions</h3><p>Switching code keeps application data. Data format changes require a verified migration.</p>
       {versions.map(version => { const app = apps.find(a => a.id === selected); return <div key={version.revision} className="local-app-actions"><span>v{version.revision} · {new Date(version.createdAtMs).toLocaleString(locale)}{app?.currentRevision === version.revision ? ' · Current' : ''}</span><button disabled={busy === selected || !app || app.currentRevision === undefined || app.currentRevision === version.revision} onClick={() => app?.currentRevision !== undefined && void act(selected, () => appsApi().useVersion(selected, version.revision, app.currentRevision!))}>Use version</button></div>; })}

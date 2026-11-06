@@ -1286,7 +1286,7 @@ export class LocalAppHost {
     if (this.unavailable) throw this.unavailable;
     if (!input || typeof input !== 'object') throw new Error('Invalid Local App request');
     const action = String(input.action);
-    if (origin.kind !== 'native' && (action === 'pendingAuthoringSessions' || action === 'resumeAuthoringSession')) {
+    if (origin.kind !== 'native' && (action === 'pendingAuthoringSessions' || action === 'resumeAuthoringSession' || action === 'authoringSessions')) {
       throw new Error('Local App session recovery is available only in Desktop');
     }
     if (origin.kind === 'native' && DEVELOPMENT_ACTIONS.has(action) && origin.mode !== 'code') {
@@ -1379,6 +1379,13 @@ export class LocalAppHost {
     }
     if (action === 'pendingAuthoringSessions') {
       return (await this.authoringSessionIntents.pending()).map(({ requestId, appId, name }) => ({ requestId, appId, name }));
+    }
+    if (action === 'authoringSessions') {
+      const sessions = await this.authoringSessionIntents.sessions();
+      const owners = new Map(await Promise.all([...new Set(sessions.map(row => row.projectPath))].map(async path =>
+        [path, (await this.store.findAuthoringSource(path))?.ownerAppId] as const)));
+      return sessions.map(({ name, appId, projectPath, sessionId, source }) =>
+        ({ name, appId: appId ?? owners.get(projectPath), projectPath, sessionId, source }));
     }
     if (action === 'resumeAuthoringSession') {
       if (typeof input.requestId !== 'string' || !UUID_PATTERN.test(input.requestId)) throw new Error('Invalid Local App session intent');

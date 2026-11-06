@@ -84,6 +84,24 @@ test('Create without a saved workspace asks for one and makes a real Code sessio
   assert.deepEqual(target, { projectPath: '/selected/app', sessionId: 'new-session' });
 });
 
+test('a Local App project can start multiple development sessions without creating another project or app', async () => {
+  const requests: unknown[] = [];
+  const currentApp = { ...app, authoringAction: 'createSession' as const, authoringSetCurrent: true };
+  const nav = navigation({
+    openSession: async () => { throw new Error('New session must not reuse the saved chat'); },
+    newSession: async (path, intent) => {
+      requests.push({ path, intent });
+      return { projectPath: path, sessionId: `development-${requests.length}` };
+    },
+  });
+  const first = await localAppChatTarget(currentApp, nav, () => true);
+  const second = await localAppChatTarget(currentApp, nav, () => true);
+  assert.notEqual(first?.sessionId, second?.sessionId);
+  assert.deepEqual(requests, [1, 2].map(() => ({ path: source.projectPath,
+    intent: { name: app.name, setCurrent: true, appId: app.id } })));
+  assert.match(localAppAuthoringPrompt(currentApp), new RegExp(`LocalApp id: ${app.id}`));
+});
+
 test('authoring startup errors retain the selected project and retry guidance without exposing host errors', async () => {
   const projectPath = '/fixture/workspace/directory/App';
   for (const [message, diagnostic] of [

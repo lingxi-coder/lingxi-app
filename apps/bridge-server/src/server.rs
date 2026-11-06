@@ -712,6 +712,8 @@ pub struct BridgeConnection {
     computer_access_broker: Option<Arc<ComputerAccessBroker>>,
     /// Connection-scoped broker for `AskUserQuestion` UI exchanges.
     ask_user_question_broker: Option<Arc<AskUserQuestionBroker>>,
+    /// Response half for foreground Decision calls and host configuration availability.
+    decision_responder: Option<crate::decision_bridge::DecisionResponder>,
     /// The response side of the connection's [`crate::audio_bridge::AudioBridge`]
     /// (the desktop service's response half). `None` when no audio
     /// bridge was wired at boot — `AudioResponse` is then silently dropped,
@@ -2918,6 +2920,7 @@ impl BridgeConnection {
             gate: None,
             computer_access_broker: None,
             ask_user_question_broker: None,
+            decision_responder: None,
             audio_responder: None,
             media_device_responder: None,
             media_connection_responder: None,
@@ -3419,6 +3422,13 @@ impl BridgeConnection {
             out: self.out.clone(),
             handshaken: self.handshaken.clone(),
         })
+    }
+
+    /// Bind foreground Decision completions and live configuration availability.
+    #[must_use]
+    pub fn bind_decision(mut self, responder: crate::decision_bridge::DecisionResponder) -> Self {
+        self.decision_responder = Some(responder);
+        self
     }
 
     /// Attach the response side of the connection's audio bridge, so an inbound
@@ -4194,6 +4204,19 @@ impl BridgeConnection {
             }
             ClientCommand::DenyComputerAccess { request_id } => {
                 self.deny_computer_access(request_id).await;
+            }
+            ClientCommand::DecisionConfigurationChanged { configured } => {
+                if let Some(responder) = &self.decision_responder {
+                    responder.configure(configured);
+                }
+            }
+            ClientCommand::DecisionResponse {
+                request_id,
+                result_json,
+            } => {
+                if let Some(responder) = &self.decision_responder {
+                    responder.resolve(&request_id, &result_json);
+                }
             }
             ClientCommand::AudioResponse { identity, result } => {
                 self.resolve_audio(identity, result).await;
@@ -5355,6 +5378,8 @@ impl FramePump for BridgeConnection {
                 | ClientCommand::DenyPermission { .. }
                 | ClientCommand::ApproveComputerAccess { .. }
                 | ClientCommand::DenyComputerAccess { .. }
+                | ClientCommand::DecisionConfigurationChanged { .. }
+                | ClientCommand::DecisionResponse { .. }
                 | ClientCommand::AudioResponse { .. }
                 | ClientCommand::RealtimeAudioInput { .. }
                 | ClientCommand::StopRealtimeAudio
@@ -5893,6 +5918,10 @@ impl BridgeConnection {
                     "bridge-server: drained parked AskUserQuestion requests on close"
                 );
             }
+        }
+
+        if let Some(responder) = &self.decision_responder {
+            responder.drain();
         }
 
         // Publication is now complete and the broker's pending map is empty.

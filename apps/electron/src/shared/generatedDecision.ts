@@ -11,5 +11,6 @@ export type DecisionAnswer =
   | { type: 'choice'; option: string; probabilities: Record<string, number> | null; confidence: number | null }
   | { type: 'score'; value: number; probabilities: Array<number> | null; confidence: number | null };
 export interface DecisionRequest { model: DecisionModelRef; state_revision: number; state: unknown; images?: Array<DecisionImage>; questions: Record<string, DecisionQuestion> }
+export interface DecisionInput { state: unknown; images?: Array<DecisionImage>; questions: Record<string, DecisionQuestion> }
 export interface DecisionUsage { input_tokens: number | null; output_tokens: number | null }
 export interface DecisionResponse { state_revision: number; answers: Record<string, DecisionAnswer>; usage: DecisionUsage; actual_model: string | null; elapsed_ms: number }

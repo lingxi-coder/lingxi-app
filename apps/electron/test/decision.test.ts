@@ -12,7 +12,7 @@ function fixture(execute?: (value: unknown, signal: AbortSignal) => Promise<Deci
  const directory = mkdtempSync(join(tmpdir(), 'lingxi-decision-')); const secrets = new Map<string,string>(); const changes: DecisionSnapshot[] = []; let envelope: unknown;
  const broker = { delete: async (id: string) => { secrets.delete(id); }, preview: async (id: string) => ({ providerId:id,configured:secrets.has(id) }), set: async (id: string,key:string) => { assert.match(id, /^[a-z0-9][a-z0-9._-]{0,63}$/); secrets.set(id,key); return { providerId:id,configured:true }; }, resolve:async(id:string)=>secrets.get(id) };
  const options = {userData:directory,isPackaged:false,resourcesPath:directory,broker,accounts:async()=>undefined,changed:(value:DecisionSnapshot)=>changes.push(value),execute:execute ?? (async (value:unknown)=>{envelope=value;return result;})};
- return { holdCredential: () => { broker.resolve = async () => new Promise<string | undefined>(() => undefined); }, host:new DecisionHost(options),reopen:()=>new DecisionHost(options),directory,secrets,changes,envelope:()=>envelope,clean:()=>rmSync(directory,{recursive:true,force:true})};
+ return { broker, holdCredential: () => { broker.resolve = async () => new Promise<string | undefined>(() => undefined); }, host:new DecisionHost(options),reopen:()=>new DecisionHost(options),directory,secrets,changes,envelope:()=>envelope,clean:()=>rmSync(directory,{recursive:true,force:true})};
 }
 test('global settings survive restart and reject stale saves; secrets stay private',async()=>{
  const f=fixture();try {
@@ -61,4 +61,31 @@ test('cancellation also terminates a stalled credential lookup before any dispat
   await f.host.command(1,{action:'cancel',operationId:'lookup'});
   await assert.rejects(pending,/cancelled/); assert.equal(f.envelope(),undefined);
  } finally { f.clean(); }
+});
+
+test('tool cancellation reaches the global service and discards a late backend result', async () => {
+ let release!:(value:DecisionResult)=>void; let observed:AbortSignal|undefined;
+ const f=fixture(async(_value,signal)=>{observed=signal;return new Promise(resolve=>{release=resolve;});});
+ try {
+  assert.equal(await f.host.isConfigured(),false);
+  await f.host.command(1,{action:'save',revision:'initial',configuration});
+  assert.equal(await f.host.isConfigured(),true);
+  const controller=new AbortController();const pending=f.host.evaluateTool(input,controller.signal,30_000);
+  controller.abort();await assert.rejects(pending,/cancelled/);assert.equal(observed?.aborted,true);
+  release(result);
+ } finally {f.clean();}
+});
+
+
+test('disabling revokes discovery immediately even while credential cleanup is pending', async () => {
+ const f=fixture(); let release!:()=>void;
+ try {
+  const saved=await f.host.command(1,{action:'save',revision:'initial',configuration,credential:'secret'}) as DecisionSnapshot;
+  const cleanup=new Promise<void>(resolve=>{release=resolve;});const remove=f.broker.delete;
+  f.broker.delete=async id=>{await cleanup;await remove(id);};
+  let notified=false;f.host.onConfigurationChanged(()=>{notified=true;});
+  const pending=f.host.command(1,{action:'save',revision:saved.revision,configuration:null});
+  assert.equal(notified,true);assert.equal(await f.host.isConfigured(),false);
+  release();await pending;
+ } finally { release?.();f.clean(); }
 });

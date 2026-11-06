@@ -12,7 +12,8 @@ type Stored = { revision: string; configuration: DecisionConfiguration | null; c
 export class DecisionHost {
   private readonly path: string;
   private busy = false;
-  private readonly operations = new Map<string, { owner: number; abort: AbortController }>();
+  private readonly configurationListeners = new Set<() => void>();
+  private readonly operations = new Map<string, { owner: number | string; abort: AbortController }>();
   constructor(private readonly options: { userData: string; isPackaged: boolean; resourcesPath: string; broker?: DecisionCredentials;
     accounts(): Promise<ProviderAccountLaunch | undefined>; changed(snapshot: DecisionSnapshot): void;
     execute?: (envelope: unknown, signal: AbortSignal) => Promise<DecisionResult> }) {
@@ -31,6 +32,20 @@ export class DecisionHost {
     const value = this.read();
     const credentialConfigured = value.credentialRef ? (await this.options.broker?.preview(value.credentialRef))?.configured === true : false;
     return { revision: value.revision, configuration: value.configuration, credentialConfigured };
+  }
+  async isConfigured(): Promise<boolean> {
+    const current = this.read();
+    const config = current.configuration;
+    // Discovery observes saved configuration, never a broker/network health probe.
+    // Execution resolves the actual credential and reports any unavailable key.
+    return !!config && (config.source === 'custom' || !!config.accountId || !!current.credentialRef);
+  }
+  onConfigurationChanged(listener: () => void): () => void {
+    this.configurationListeners.add(listener);
+    return () => this.configurationListeners.delete(listener);
+  }
+  evaluateTool(input: DecisionInput, signal: AbortSignal, timeoutMs: number): Promise<DecisionResult> {
+    return this.evaluate('tool', randomUUID(), input, signal, timeoutMs);
   }
   async command(owner: number, raw: unknown, assertCurrent: () => void = () => undefined): Promise<DecisionSnapshot | DecisionResult | void> {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid Decision command');
@@ -75,6 +90,7 @@ export class DecisionHost {
       writeFileSync(temporary, JSON.stringify(next), { mode: 0o600, flag: 'wx' });
       renameSync(temporary, this.path);
       committed = true;
+      for (const listener of this.configurationListeners) listener();
       if (current.credentialRef && current.credentialRef !== next.credentialRef) await this.options.broker?.delete(current.credentialRef).catch(() => undefined);
       const snapshot = await this.snapshot();
       this.options.changed(snapshot);
@@ -84,14 +100,18 @@ export class DecisionHost {
       this.busy = false;
     }
   }
-  private async evaluate(owner: number, operationId: string, input: DecisionInput): Promise<DecisionResult> {
+  private async evaluate(owner: number | string, operationId: string, input: DecisionInput, signal?: AbortSignal, timeoutMs = 30_000): Promise<DecisionResult> {
+    if (signal?.aborted) throw new Error('Decision operation cancelled');
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) throw new Error('Invalid Decision timeout');
     if (typeof operationId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(operationId) || this.operations.has(operationId)) throw new Error('Invalid Decision operation ID');
     if (this.operations.size >= 8) throw new Error('Decision service is busy');
     if (!input || typeof input !== 'object' || !input.questions || typeof input.questions !== 'object' || Array.isArray(input.questions)) throw new Error('Invalid Decision input');
     const current = this.read(); const config = current.configuration;
     if (!config) throw new Error('Choose and save a Decision service first');
     const abort = new AbortController(); this.operations.set(operationId, { owner, abort });
-    const timer = setTimeout(() => abort.abort(), 30_000);
+    const cancel = () => abort.abort();
+    signal?.addEventListener('abort', cancel, { once: true });
+    const timer = setTimeout(cancel, timeoutMs);
     let onAbort!: () => void;
     const cancelled = new Promise<never>((_resolve, reject) => {
       onAbort = () => reject(new Error('Decision operation cancelled or timed out'));
@@ -118,7 +138,7 @@ export class DecisionHost {
       return result;
     };
     try { return await Promise.race([perform(), cancelled]); }
-    finally { clearTimeout(timer); abort.signal.removeEventListener('abort', onAbort); this.operations.delete(operationId); }
+    finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); abort.signal.removeEventListener('abort', onAbort); this.operations.delete(operationId); }
   }
   private run(envelope: unknown, signal: AbortSignal): Promise<DecisionResult> {
     const input = JSON.stringify(envelope);
@@ -142,5 +162,5 @@ export class DecisionHost {
     });
   }
   cancelOwner(owner: number): void { for (const op of this.operations.values()) if (op.owner === owner) op.abort.abort(); }
-  dispose(): void { for (const op of this.operations.values()) op.abort.abort(); }
+  dispose(): void { this.configurationListeners.clear(); for (const op of this.operations.values()) op.abort.abort(); }
 }

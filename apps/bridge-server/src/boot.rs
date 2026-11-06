@@ -2265,6 +2265,9 @@ pub async fn assemble_with_account_credentials(
     // authenticated Bridge connection. The shared MediaService owns routing,
     // owner-bound sessions and storage; its low-level audio backend and media
     // device callback both reach the same Electron-native coordinator.
+    let (decision_service, decision_responder) =
+        crate::decision_bridge::new_decision_bridge(connection.audio_sink());
+    cfg.decision_service = Some(decision_service);
     let (audio_bridge, audio_responder) = new_audio_bridge(connection.audio_sink());
     let (media_device_callback, media_device_responder) =
         new_media_device_callback(connection.audio_sink());
@@ -2742,6 +2745,7 @@ pub async fn assemble_with_account_credentials(
         // `cfg.audio` above — this is what makes an inbound `AudioResponse` on
         // this connection resolve a call the engine parked on this connection,
         // and a disconnect drain them.
+        .bind_decision(decision_responder)
         .bind_audio(audio_responder)
         .bind_media_device(media_device_responder)
         .bind_media_connection(media_connection_responder)

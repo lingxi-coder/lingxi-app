@@ -13,7 +13,7 @@ export interface DecisionConfiguration {
 export interface DecisionSnapshot { revision: string; configuration: DecisionConfiguration | null; credentialConfigured: boolean }
 export type { DecisionQuestion } from './generatedDecision.js';
 export type DecisionResult = import('./generatedDecision.js').DecisionResponse;
-export interface DecisionInput { images?: import('./generatedDecision.js').DecisionImage[]; state: unknown; questions: Record<string, import('./generatedDecision.js').DecisionQuestion> }
+export type DecisionInput = import('./generatedDecision.js').DecisionInput;
 export type DecisionCommand = { action: 'get' } | { action: 'save'; revision: string; configuration: DecisionConfiguration | null; credential?: string } | { action: 'evaluate'; operationId: string; input: DecisionInput } | { action: 'cancel'; operationId: string };
 export interface DecisionApi {
   snapshot(): Promise<DecisionSnapshot>;

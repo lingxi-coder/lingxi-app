@@ -1,3 +1,4 @@
+import { DecisionToolBridge } from './decisionToolBridge.js';
 import { providerAccountRenewFailureCode } from './provider-accounts.js';
 import { SideChatRecovery } from './sideChatRecovery.js';
 import { parseProviderAccountRouting } from '../shared/providerAccounts.js';
@@ -240,6 +241,11 @@ export class SessionRuntime {
   private archiving = false;
   private changingWorkspace = false;
   private audioOperations = 0;
+  private decisionToolBridge?: DecisionToolBridge;
+  private disposeDecisionBridge(): void {
+    this.decisionToolBridge?.dispose();
+    this.decisionToolBridge = undefined;
+  }
   private metadataOperations = 0;
   private metadataAdmissionBlocked = false;
   private readonly metadataDrainWaiters = new Set<() => void>();
@@ -1731,6 +1737,7 @@ export class SessionRuntime {
     const client = this.client;
     this.nativeMediaClient = undefined;
     this.invalidateNativeMediaBinding();
+    this.disposeDecisionBridge();
     this.client = null;
     if (client) this.closeDetachedClient(client);
     const previousGeneration = this.generation++;
@@ -1796,6 +1803,7 @@ export class SessionRuntime {
     } catch (error) {
       if (recoveredGeneration === this.generation) {
         const failedClient = this.client as BridgeClient | null;
+        this.disposeDecisionBridge();
         this.client = null;
         if (failedClient) this.closeDetachedClient(failedClient);
       }
@@ -2180,6 +2188,7 @@ export class SessionRuntime {
     };
     const handshakeStartedAt = Date.now();
     const hello = await client.connect();
+    await this.decisionToolBridge?.refreshConfiguration();
     assertCurrentConnection();
     if (this.disposing) return;
     if (this.telemetryRevoked || this.opts.getTelemetryConfig?.().enabled === false) {
@@ -2439,12 +2448,21 @@ export class SessionRuntime {
   private wireClient(client: BridgeClient, generation: number): void {
     if (generation === this.generation && !this.disposed) {
       this.client = client;
+      this.decisionToolBridge?.dispose();
+      this.decisionToolBridge = this.opts.decisionService ? new DecisionToolBridge(this.opts.decisionService, command => {
+        if (generation !== this.generation || client !== this.client || this.disposed) throw new Error('Decision connection ended');
+        client.sendCommand(command);
+      }) : undefined;
       this.nativeMediaClient = client;
     }
     // Restored usage is explicitly marked by the engine and may be separated
     // from SessionResumed by other connection events. Live deltas still need a turn.
     client.on('event', async (event: ClientEvent) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
+      if (event.type === 'decision_request' || event.type === 'decision_cancel') {
+        this.decisionToolBridge?.handle(event);
+        return;
+      }
       // Attachment binding metadata is host-private and is not a renderer event.
       if (event.type === 'audio_session_context') {
         this.installAudioSessionContext(client, generation, event);
@@ -2910,6 +2928,7 @@ export class SessionRuntime {
       }
     });
     client.on('close', (code, reason) => {
+      if (generation === this.generation && client === this.client) this.decisionToolBridge?.dispose();
       if (generation !== this.generation || client !== this.client || this.disposed) return;
       this.permissionScopeChecks.clear();
       this.nativeMediaClient = undefined;
@@ -4086,6 +4105,7 @@ export class SessionRuntime {
     this.activeTurnId = undefined;
     this.cancellingTurn = false;
     const client = this.client;
+    this.disposeDecisionBridge();
     this.client = null;
     const closeClient = (): void => {
       try { client?.close(); } catch { /* a half-open channel can already be closed */ }

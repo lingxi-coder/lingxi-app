@@ -576,6 +576,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     delegation: (sessionKey) => botTasks?.doing(sessionKey),
   });
   notifier.setPreferences(settings.getPublic().notifications);
+  const decisionHost = new DecisionHost({
+    userData, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
+    broker: credentialBroker ?? systemDecisionCredentials(userData), accounts: () => providerAccounts?.launch() ?? Promise.resolve(undefined),
+    changed: snapshot => host?.sendToWindows(CH_DECISION_CHANGED, snapshot),
+  });
   bridge = new SessionRuntimeManager({
     getTelemetryConfig: () => settings.getTelemetryConfig(),
     // A Bot's working directory is not a project: it has its own configuration home and grants.
@@ -609,6 +614,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     providerIds: PROVIDER_IDS,
     diagnostics,
     audioService: nativeAudio ?? undefined,
+    decisionService: decisionHost,
     getMediaAudioConfigurationJson: () => JSON.stringify(
       settings.getPublic().voice ?? audioConfigurationDefaults(),
     ),
@@ -748,11 +754,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     credentialBroker,
     nativeAudio ?? undefined,
   );
-  host.attachDecision(new DecisionHost({
-    userData, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
-    broker: credentialBroker ?? systemDecisionCredentials(userData), accounts: () => providerAccounts?.launch() ?? Promise.resolve(undefined),
-    changed: snapshot => host?.sendToWindows(CH_DECISION_CHANGED, snapshot),
-  }));
+  host.attachDecision(decisionHost);
   if (providerAccounts) host.attachProviderAccounts(providerAccounts);
   host.attachLocalAppAuthoring((appId, ref, version) => {
     if (!localApps) throw new Error('The Local App authoring host is unavailable');

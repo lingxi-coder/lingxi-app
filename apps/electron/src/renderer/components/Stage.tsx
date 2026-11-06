@@ -134,7 +134,7 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
             )}
           </div>
         ) : (
-          <MarkdownContent text={user ? promptWithMentionLinks(item.text) : item.text} />
+          <MarkdownContent text={user ? promptWithMentionLinks(item.text) : item.text} botProposals={!user && item.role === 'assistant'} />
         )}
       </div>
       {collapsible && (

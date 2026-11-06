@@ -40,6 +40,9 @@ export interface SessionRef {
   mode?: ConversationSpace;
 }
 
+/** Explicit workflows that must not reuse the current unsent chat. */
+export type NewSessionPurpose = import('./localApps.js').LocalAppSessionPurpose | { kind: 'create-bot' };
+
 /** A session the user pinned, as persisted (the pin time is assigned by the main process). */
 export interface PinnedSessionRecord extends SessionRef {
   title: string;

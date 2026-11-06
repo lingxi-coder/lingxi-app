@@ -2,11 +2,12 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { BotsApi } from '../../shared/bots';
 import { BotLeaveGuard } from './botLeaveGuard';
 import { BotsController, type BotsState } from './botsStore';
+import type { BotCreationProposal } from './botCreation';
 
 /** What the Bots page shows. The tab inside a Bot is the page's own business. */
 export type BotsView =
   | { kind: 'list' }
-  | { kind: 'create' }
+  | { kind: 'create'; proposal?: BotCreationProposal; requestId?: number }
   /** `deleteRequest` counts the times the sidebar has asked for the Bot to be deleted: the page asks whether to, each time. */
   | { kind: 'detail'; botId: string; deleteRequest?: number };
 

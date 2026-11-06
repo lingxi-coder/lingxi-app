@@ -1,4 +1,7 @@
+import { botCreationCatalog } from './botCreationCatalog';
+
 export const botsCatalog: Record<string, Record<string, string>> = {
+  ...botCreationCatalog,
   "bots_title": {
     "zh-Hans": "Bot",
     "zh-Hant": "Bot",

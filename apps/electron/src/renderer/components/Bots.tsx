@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import type { BotUi, BotsApi } from '../../shared/bots';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
@@ -11,12 +11,15 @@ import type { UseBots } from '../bridge/useBots';
 import type { UseBridge } from '../bridge/bridgeTypes';
 import { AgentAvatar } from './AgentAvatar';
 import { BotDetail, BotStateChip } from './BotDetail';
-import { BotFoldersField, BotGeneralFields, BotPermissionField, BotPersonaField, type ModelChoices } from './BotFields';
+import { BotConfirm, BotFoldersField, BotGeneralFields, BotPermissionField, BotPersonaField, useObservable, type ModelChoices } from './BotFields';
+import { BotCreateIntro } from './BotCreateIntro';
+import { BotLeaveGuard } from '../bridge/botLeaveGuard';
+import { draftFromProposal, type BotCreationProposal } from '../bridge/botCreation';
 import { BotsBackground } from './BotsBackground';
 import { Icon } from './Icon';
 
 /** The Bots page: the list, the form that makes a Bot, and one Bot with its settings. */
-export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onOpenRoutine }: {
+export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onOpenRoutine, onAssist }: {
   visible: boolean;
   bots: UseBots;
   api: BotsApi;
@@ -27,6 +30,7 @@ export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onO
   onNewRoutine(scopeId: string): void;
   /** Show a task of a Bot's scope on the Scheduled page. */
   onOpenRoutine(scopeId: string, jobId: string): void;
+  onAssist?(request: string): Promise<void>;
 }) {
   const t = useT();
   useI18n();
@@ -53,7 +57,8 @@ export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onO
 
   return <section className="bots-page" aria-label={tr('bots_title')} style={style}>
     {view.kind === 'create'
-      ? <BotCreate api={api} models={models} pickFolder={bridge.pickBotFolder} onCancel={() => setView({ kind: 'list' })}
+      ? <BotCreate key={view.requestId ?? 'new'} api={api} models={models} pickFolder={bridge.pickBotFolder} onCancel={() => setView({ kind: 'list' })}
+        initialProposal={view.proposal} guard={bots.guard} onAssist={onAssist}
         onCreated={(bot) => { controller.put(bot); setView({ kind: 'detail', botId: bot.botId }); }} />
       : view.kind === 'detail'
         ? <BotDetail key={view.botId} botId={view.botId} listed={state.bots.find((bot) => bot.botId === view.botId)} api={api} bots={controller} guard={bots.guard}
@@ -124,14 +129,27 @@ export function shownProblems(problems: BotDraftProblems, attempted: boolean): B
   return shown;
 }
 
-export function BotCreate({ api, models, pickFolder, onCancel, onCreated }: {
+export function BotCreate({ api, models, pickFolder, onCancel, onCreated, initialProposal, guard: providedGuard, onAssist }: {
   api: Pick<BotsApi, 'create'>;
   models: ModelChoices;
   pickFolder(): Promise<{ path: string } | null>;
   onCancel(): void;
   onCreated(bot: BotUi): void;
+  initialProposal?: BotCreationProposal;
+  guard?: BotLeaveGuard;
+  onAssist?(request: string): Promise<void>;
 }) {
-  const [draft, setDraft] = useState<BotDraft>(emptyBotDraft);
+  const [draft, setDraft] = useState<BotDraft>(() => initialProposal ? draftFromProposal(initialProposal) : emptyBotDraft());
+  const [mode, setMode] = useState<'assist' | 'manual'>(() => onAssist && !initialProposal ? 'assist' : 'manual');
+  const [request, setRequest] = useState('');
+  const [opening, setOpening] = useState(false);
+  const [localGuard] = useState(() => new BotLeaveGuard(() => {}));
+  const guard = providedGuard ?? localGuard;
+  const leaving = useObservable(guard);
+  const dirty = Boolean(request || draft.name || draft.description || draft.persona || draft.model || draft.workspaces.length || draft.permissionMode !== 'default');
+  useEffect(() => { guard.hold(dirty); }, [guard, dirty]);
+  useEffect(() => () => guard.hold(false), [guard]);
+  const saving = useRef(false);
   const [attempted, setAttempted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -139,20 +157,32 @@ export function BotCreate({ api, models, pickFolder, onCancel, onCreated }: {
   const change = (next: Partial<BotDraft>) => { setDraft((current) => ({ ...current, ...next })); setError(''); };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (busy) return;
+    if (saving.current) return;
     setAttempted(true);
     if (hasBotDraftProblems(problems)) return;
+    saving.current = true;
     setBusy(true);
     setError('');
     const created = await createBot(api, draft);
+    saving.current = false;
     setBusy(false);
-    if (created.ok) onCreated(created.bot);
+    if (created.ok) { guard.hold(false); onCreated(created.bot); }
     else setError(created.message);
   };
   const shown = shownProblems(problems, attempted);
-  return <form className="bots-detail" aria-busy={busy || undefined} noValidate onSubmit={(event) => void submit(event)}>
-    <button type="button" className="bots-back" data-variant="quiet" disabled={busy} onClick={onCancel}>← {tr('bots_back')}</button>
-    <header className="bots-header"><div><h1>{tr('bots_new')}</h1></div></header>
+  return <div className="bots-detail">
+    <button type="button" className="bots-back" data-variant="quiet" disabled={busy || opening} onClick={() => guard.leave(onCancel)}>← {tr('bots_back')}</button>
+    <header className="bots-header"><div><h1>{tr(initialProposal ? 'bots_assist_review_title' : 'bots_new')}</h1>
+      {initialProposal ? <p>{tr('bots_assist_review_hint')}</p> : null}</div></header>
+    {onAssist && !initialProposal ? <div className="bot-create-mode" role="group" aria-label={tr('bots_assist_method')}>
+      <button type="button" aria-pressed={mode === 'assist'} disabled={busy || opening} onClick={() => setMode('assist')}>{tr('bots_assist_mode')}</button>
+      <button type="button" aria-pressed={mode === 'manual'} disabled={busy || opening} onClick={() => setMode('manual')}>{tr('bots_assist_manual')}</button>
+    </div> : null}
+    {mode === 'assist' && onAssist ? <BotCreateIntro request={request} onChange={setRequest} onContinue={async text => {
+      setOpening(true);
+      try { await onAssist(text); }
+      finally { setOpening(false); }
+    }} /> : <form className="bot-create-fields" aria-busy={busy || undefined} noValidate onSubmit={(event) => void submit(event)}>
     <BotGeneralFields draft={draft} problems={shown} models={models} disabled={busy} onChange={change} />
     <BotPersonaField draft={draft} problems={shown} disabled={busy} onChange={change} />
     <BotPermissionField draft={draft} disabled={busy} onChange={change} />
@@ -161,5 +191,8 @@ export function BotCreate({ api, models, pickFolder, onCancel, onCreated }: {
       <div className="bots-save-status">{error ? <p role="alert" className="bots-problem">{tr('bots_create_failed', error)}</p> : null}</div>
       <button type="submit" data-variant="primary" disabled={busy}>{busy ? tr('bots_creating') : tr('bots_create')}</button>
     </footer>
-  </form>;
+    </form>}
+    {leaving.asking ? <BotConfirm title={tr('bots_discard_title')} icon="info" danger={false} confirmLabel={tr('bots_discard_confirm')}
+      onCancel={() => guard.cancel()} onConfirm={() => guard.confirm()}><p>{tr('bots_discard_body')}</p></BotConfirm> : null}
+  </div>;
 }

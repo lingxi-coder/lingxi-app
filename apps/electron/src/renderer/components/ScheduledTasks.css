@@ -1,3 +1,9 @@
+.scheduled-topbar-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
 .scheduled-tasks {
   display: flex;
   position: relative;
@@ -560,3 +566,6 @@
 .scheduled-filter-controls[hidden] {
   display:  none;
 }
+
+.scheduled-navigation { background: transparent; }
+.scheduled-navigation .scheduled-master { flex: 1 1 0; width: 100%; border: 0; background: transparent; }

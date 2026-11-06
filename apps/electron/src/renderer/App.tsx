@@ -59,7 +59,7 @@ import { ComputerAccessPrompt } from './components/ComputerAccessPrompt';
 import { AskUserQuestionPrompt } from './components/AskUserQuestionPrompt';
 import { PermissionPrompt } from './components/PermissionPrompt';
 import { SettingsScreen } from './components/settings/SettingsScreen';
-import { ScheduledTasks } from './components/ScheduledTasks';
+import { ScheduledTasks, ScheduledTasksTopBar } from './components/ScheduledTasks';
 import { Stage } from './components/Stage';
 import { ModUiAbovePrompt, ModUiParentSite, ModUiSurfaceClientIdProvider } from './components/modUiAbovePrompt';
 import { askUserQuestionWithResponseProps, nativeAskUserQuestionProps } from './components/nativeUiSiteProps';
@@ -96,6 +96,7 @@ export function App() {
   const messageCompletion = useRef<((found: boolean) => void) | null>(null);
   const [terminalLinkScope, setTerminalLinkScope] = useState<TerminalScope | null>(null);
   const [scheduledTarget, setScheduledTarget] = useState<ScheduledLinkRequest | undefined>();
+  const [pageSidebar, setPageSidebar] = useState<HTMLDivElement | null>(null);
   const [activityView, setActivityView] = useState(false);
   const [localAppDraft, setLocalAppDraft] = useState<LocalAppDraft>();
   const [localAppInstallStatus, setLocalAppInstallStatus] = useState('');
@@ -607,6 +608,7 @@ export function App() {
         <SettingsBackground active={bridge.projectCreationOpen || settingsRoute !== null || (sessionPicker !== null && !sessionPickerSuspended)}>
           <BetaSidebar
             bridge={bridge}
+            pageSidebarRef={setPageSidebar}
             activityView={activityView}
             onToggleActivityView={toggleActivityView}
             apps={page === 'apps'}
@@ -639,8 +641,9 @@ export function App() {
             onOpenChat={() => openPage('chat')}
             onOpenSettings={() => openSettings()}
             topbar={<>
+              {page === 'scheduled' && <ScheduledTasksTopBar />}
               {page === 'apps' && <LocalAppsTopBar onOpenMarket={() => { void window.lingxi?.localApps?.marketBrowse().catch(error => setLocalAppNavigationError(error instanceof Error ? error.message : String(error))); }} />}
-              <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
+              <div style={{ display: page === 'chat' && sidebarMode === 'home' ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
                   app={appChat ? { name: appWorkspace.activeGroup?.name ?? bridge.activeSession!.projectPath.split(/[\\/]+/).at(-1) ?? '', onOpen: showAppLibrary } : undefined}
@@ -675,7 +678,7 @@ export function App() {
           </div>}
           <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
           {/* The run's chat is already open when this is called, as a Bot's chat is while it still reads as loading; the window must not wait for that to show it. */}
-          <ScheduledTasks initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); setActivityView(false); }} />
+          <ScheduledTasks sidebarTarget={pageSidebar} initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); setActivityView(false); }} />
           </div>
           {page === 'changes' && <GitChangesPage />}
           <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>

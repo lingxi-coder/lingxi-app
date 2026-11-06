@@ -2810,3 +2810,5 @@ textarea, input, select { font-family: inherit; }
 @media (prefers-contrast: more) {
   .tool-row-status { background: transparent; outline: 1px solid currentColor; }
 }
+
+.desktop-page-sidebar { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }

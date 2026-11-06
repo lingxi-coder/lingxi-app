@@ -32,7 +32,7 @@ try {
   await wait(`document.querySelector('${rail('Bots')}')`);
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button')).map(button => button.getAttribute('aria-label'))`),
     ['Home', 'Bots', 'Teams', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
-  assert.equal(await run(`document.querySelector('.desktop-rail-divider').previousElementSibling.getAttribute('aria-label')`), 'Teams');
+  assert.equal(await run(`document.querySelector('.desktop-rail-divider').previousElementSibling.getAttribute('aria-label')`), 'Apps');
   assert.deepEqual(await marked(), ['Home']);
   assert.equal(await run(`Boolean(document.querySelector('.sidebar-new-chat'))`), true, 'Home lists the projects and has its own New chat');
   assert.equal(await run(`Array.from(document.querySelectorAll('.desktop-sidebar .sidebar-primary-action')).some(button => /^(Teams|Bots)$/.test(button.textContent.trim()))`), false, 'and does not repeat the rail');
@@ -70,11 +70,18 @@ try {
   assert.equal(await run(`Boolean(document.querySelector('.beta-rich-prompt'))`), true);
   result.chatOpens = true;
 
-  // The Bots mode survives a page: Apps marks itself and Bots keeps its mark, and the sidebar still lists the Bots.
+  // Each workspace has its own sidebar; Cron replaces it with the task list.
   await click(rail('Apps'));
   await wait(`document.querySelector('${rail('Apps')}[data-active]')`);
-  assert.deepEqual(await marked(), ['Bots', 'Apps']);
-  assert.equal(await shown(sidebar), true);
+  assert.deepEqual(await marked(), ['Apps']);
+  assert.equal(await shown(sidebar), false);
+  assert.equal(await shown('.local-apps-sidebar'), true);
+  await click(rail('Scheduled tasks'));
+  await wait(`document.querySelector('.desktop-sidebar .scheduled-master')`);
+  assert.deepEqual(await marked(), ['Scheduled tasks']);
+  assert.equal(await shown(sidebar), false);
+  assert.equal(await run(`Boolean(document.querySelector('.desktop-main .scheduled-master'))`), false);
+  assert.equal(await run(`Boolean(document.querySelector('[data-conversation-space], .desktop-sidebar-brand .sidebar-header-icon'))`), false);
   result.pageKeepsMode = true;
 
   // The View menu: Home, Bots (which stays on a Bot's chat), the Bot's own page from the chat's title, and the sidebar's visibility.

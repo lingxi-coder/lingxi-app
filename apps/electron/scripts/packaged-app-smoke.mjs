@@ -1362,6 +1362,7 @@ async function assertColdSessionOpen(page, sessionId) {
 }
 
 async function openPackagedProjectDraft(page, projectPath) {
+  await evaluate(page, `document.querySelector('.desktop-nav-rail [aria-label="Home"]')?.click()`);
   // App source projects now belong to the first-level Apps workspace. Exercise
   // the ordinary New chat action to prove its draft is isolated from authoring.
   const active = await evaluate(page, 'window.lingxi.bootstrap().then(state => state.activeSession)');

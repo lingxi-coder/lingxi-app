@@ -25,12 +25,12 @@ struct TeamConversationContext {
 
     func card(forKey key: String?) -> TeamBotCard? {
         guard let key else { return nil }
-        return bots.first { $0.key == key }
+        return bots.first { $0.sharedBotId == key }
     }
 
     /// The id a Bot's face is drawn from: its `botId`, else the last segment of its key.
-    func avatarID(forBotKey key: String) -> String {
-        card(forKey: key)?.avatarId ?? AvatarIdentity.teamBotAvatarId(key)
+    func avatarID(forSharedBotId key: String) -> String {
+        card(forKey: key)?.avatarId ?? key
     }
 
     /// Who wrote a message, as an avatar identity.
@@ -38,16 +38,16 @@ struct TeamConversationContext {
         if message.author.kind == "user" {
             return TeamIdentity(kind: .user, id: message.author.uid, name: userName(message.author.uid), isSelf: message.author.uid == uid)
         }
-        let card = card(forKey: message.author.botKey)
-        let name = card?.name ?? ""
-        return TeamIdentity(kind: .bot, id: card?.botId ?? message.author.botKey ?? message.author.uid, name: name.isEmpty ? strings.bot : name, isSelf: false)
+        let card = card(forKey: message.author.sharedBotId)
+        let name = message.author.displayName ?? card?.name ?? ""
+        return TeamIdentity(kind: .bot, id: card?.sharedBotId ?? message.author.sharedBotId ?? message.author.uid, name: name.isEmpty ? strings.bot : name, isSelf: false)
     }
 
     func isMine(_ message: TeamMessage) -> Bool { message.author.kind == "user" && message.author.uid == uid }
 
     /// Whether a Bot can be reached now: `teams_bot_disabled`, `remote_online` or `teams_bot_offline_queued`.
     func presenceKey(_ card: TeamBotCard) -> String {
-        !card.enabled ? "teams_bot_disabled" : card.online ? "remote_online" : "teams_bot_offline_queued"
+        card.state != "published" ? "teams_bot_disabled" : card.ready ? "remote_online" : "teams_bot_offline_queued"
     }
 
     /// The second line of the header (Desktop `conversationSubtitle`): a Bot DM says whether the Bot is reachable
@@ -55,8 +55,8 @@ struct TeamConversationContext {
     var subtitle: String? {
         switch conversation.kind {
         case "bot_dm":
-            guard let card = card(forKey: conversation.effectiveBotKey) else { return nil }
-            return String(localized: String.LocalizationValue(presenceKey(card))) + " · " + String(localized: "teams_bot_owner \(userName(card.ownerUid))")
+            guard let card = card(forKey: conversation.effectiveSharedBotId) else { return nil }
+            return String(localized: String.LocalizationValue(presenceKey(card))) + " · " + String(localized: "teams_bot_owner \(userName(card.maintainer.uid))")
         case "dm":
             return strings.directMessage
         default:
@@ -132,7 +132,6 @@ struct TeamMessageCell: View {
     let context: TeamConversationContext
     let quote: TeamMessageQuote?
     /// The triggers whose run card sits under this message (the newest message of each trigger).
-    let runTriggers: [String]
     let onReply: ((TeamMessage) -> Void)?
     let onEdit: ((TeamMessage) -> Void)?
     let onRecall: ((TeamMessage) -> Void)?
@@ -187,7 +186,7 @@ struct TeamMessageCell: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 5).padding(.vertical, 1)
                     .background(Color(uiColor: .tertiarySystemFill), in: Capsule())
-                Text("teams_bot_owner \(context.userName(message.author.uid))").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                if let card = context.card(forKey: message.author.sharedBotId) { Text("teams_bot_owner \(context.userName(card.maintainer.uid))").font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
             }
             let clock = TeamsStreamLogic.formatClock(atMs: message.createdAtMs, locale: locale)
             if !clock.isEmpty { Text(clock).font(.caption).foregroundStyle(.secondary) }
@@ -214,22 +213,20 @@ struct TeamMessageCell: View {
 
     @ViewBuilder
     private var cards: some View {
-        let hasQuestion = message.question != nil && !recalled
-        if hasQuestion || !runTriggers.isEmpty {
-            TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                let now = timeline.date.timeIntervalSince1970 * 1000
-                VStack(alignment: .leading, spacing: 8) {
-                    if hasQuestion { TeamBotQuestionCard(message: message, context: context, now: now) }
-                    ForEach(runTriggers, id: \.self) { trigger in
-                        if let state = context.model.botStates[trigger] {
-                            TeamBotRunCard(state: state, triggerID: trigger, conversationID: context.conversation.id, context: context, now: now)
-                        }
-                    }
-                }
-                .padding(.top, 4)
+        let ids = message.taskId.map { [$0] } ?? message.taskIds ?? []
+        ForEach(ids, id: \.self) { taskId in
+            if let task = context.model.tasks.first(where: { $0.taskId == taskId }) {
+                TeamTaskCard(task: task, botName: context.bots.first { $0.sharedBotId == task.sharedBotId }?.name ?? context.strings.bot)
+                    .padding(.top, 4)
+            } else {
+                Button("teams_task_view") { Task { try? await context.model.refreshTask(taskId) } }
             }
         }
+        if ids.isEmpty, let artifactId = message.artifactId {
+            Button("teams_artifact_open") { Task { try? await context.model.openArtifact(artifactId) } }
+        }
     }
+
 }
 
 /// The message actions for VoiceOver and Switch Control (the context menu is gesture-only).

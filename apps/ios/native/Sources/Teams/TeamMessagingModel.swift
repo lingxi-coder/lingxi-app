@@ -5,7 +5,7 @@ import Observation
 
 private struct TeamBotList: Decodable { let bots: [TeamBotCard] }
 private struct TeamBotAck: Decodable {}
-private struct TeamBotStates: Decodable, Sendable { let states: [String: TeamBotState?] }
+private struct TeamTaskList: Decodable, Sendable { let tasks: [TeamTask]; let next: String? }
 private struct TeamMessageAck: Decodable, Sendable { let lastReadSeq: Int?; let conversationId: String? }
 final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
@@ -13,8 +13,8 @@ final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchec
 
 @MainActor @Observable
 final class TeamMessagingModel {
-    static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "botKey"]
-    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "triggerId", "origin", "question"]
+    static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "sharedBotId"]
+    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "targets", "taskId", "taskIds", "artifactId"]
     private(set) var cache: TeamMessageProjection?
     private(set) var offline = true
     private(set) var error = ""
@@ -24,7 +24,8 @@ final class TeamMessagingModel {
     private(set) var botsLoaded = false
     /// The last fetch of the Bot list failed, so Bot availability is unknown.
     private(set) var botsUnverified = false
-    private(set) var botStates: [String: TeamBotState] = [:]
+    private(set) var tasks: [TeamTask] = []
+    private(set) var artifact: TeamArtifact?
     var selected = ""
     /// Called once when access to this team is lost (revoked membership, rejected session): the owner of the
     /// model re-reads the team list, which is the authority on what is left.
@@ -60,9 +61,7 @@ final class TeamMessagingModel {
     private var teamId = ""
     private var generation = 0
     private var active = false
-    private var botStateWindow = 100
-    private var terminalStates: [String: TeamBotState] = [:]
-    private var missingStates: [String: String] = [:]
+    private var artifactNeedsValidation = false
     private let auth: Auth
     private let db: Firestore
     private let apiRoot: URL
@@ -75,7 +74,7 @@ final class TeamMessagingModel {
     func start(uid: String, team: TeamSummary) {
         stop(); active = true; lifecycle += 1
         self.uid = uid; teamId = team.id; generation = team.generation; revoked = false; offline = true; error = ""; listenersFailed = false
-        cache = nil; selected = ""; directoryCached = true; messagesCached = true; botsDirty = true; bots = []; botsLoaded = false; botsUnverified = false; botStates = [:]; botStateWindow = 100
+        cache = nil; selected = ""; directoryCached = true; messagesCached = true; botsDirty = true; bots = []; botsLoaded = false; botsUnverified = false; tasks = []; artifact = nil
         directoryReady = false; readsPending = []
         let life = lifecycle
         authListener = auth.addStateDidChangeListener { [weak self] _, user in
@@ -147,7 +146,6 @@ final class TeamMessagingModel {
                             }
                         }
                     }
-                    self.missingStates = [:]
                     self.directoryReady = true
                     self.directoryCached = snapshot.metadata.isFromCache; self.updateOffline()
                     if !snapshot.metadata.isFromCache {
@@ -160,7 +158,7 @@ final class TeamMessagingModel {
             Task { @MainActor in
                 guard let self, self.active, self.lifecycle == life, self.watchGeneration == watch, self.auth.currentUser?.uid == self.uid else { return }
                 if let error { self.listenerFailed(error); return }
-                if snapshot?.metadata.isFromCache == false { self.botsDirty = true; self.missingStates = [:]; self.refresh() }
+                if snapshot?.metadata.isFromCache == false { self.artifactNeedsValidation = true; self.botsDirty = true; self.refresh() }
             }
         }
     }
@@ -217,7 +215,7 @@ final class TeamMessagingModel {
         active = false; lifecycle += 1; task?.cancel(); retry?.cancel(); deadline?.cancel(); deadline = nil; task = nil; retry = nil
         removeListeners()
         if let authListener { auth.removeStateDidChangeListener(authListener) }; authListener = nil
-        running = false; again = false; bots = []; botStates = [:]; terminalStates = [:]; missingStates = [:]
+        running = false; again = false; bots = []; tasks = []; artifact = nil
     }
     private func invalidate() {
         guard !revoked else { return }
@@ -226,7 +224,7 @@ final class TeamMessagingModel {
         let owner = uid, team = teamId, epoch = generation
         stop()
         onRevoked?()
-        Task { _ = try? await TeamCommandFiles.shared.update(uid: owner, teamId: team, generation: epoch) { $0.conversations = []; $0.threads = [:]; $0.outbox = []; $0.creation = nil; $0.botOutbox = nil } }
+        Task { _ = try? await TeamCommandFiles.shared.update(uid: owner, teamId: team, generation: epoch) { $0.conversations = []; $0.threads = [:]; $0.outbox = []; $0.creation = nil; $0.commands = nil } }
     }
     private func commit(_ reduce: @Sendable (inout TeamMessageProjection) throws -> Void) async throws {
         let life = lifecycle
@@ -244,7 +242,7 @@ final class TeamMessagingModel {
     }
     func select(_ id: String) {
         let retainedThreads = cache?.threads.filter { $0.key == id } ?? [:]
-        selected = id; messagesCached = true; updateOffline(); cache?.threads = retainedThreads; botStates = [:]; botStateWindow = 100; messageListener?.remove(); messageListener = nil
+        selected = id; messagesCached = true; updateOffline(); cache?.threads = retainedThreads; tasks = []; artifact = nil; messageListener?.remove(); messageListener = nil
         guard !id.isEmpty, cache?.conversations.contains(where: { $0.id == id }) == true else { refresh(); return }
         let life = lifecycle, watch = watchGeneration
         var firstSnapshot = true
@@ -268,18 +266,14 @@ final class TeamMessagingModel {
                             }
                             self.cache?.threads[id] = TeamMessageProjection.Thread(messages: messages.values.sorted { $0.seq < $1.seq })
                         }
-                        self.missingStates = [:]
-                        self.messagesCached = snapshot.metadata.isFromCache; self.updateOffline()
+                            self.messagesCached = snapshot.metadata.isFromCache; self.updateOffline()
                         if !snapshot.metadata.isFromCache { self.error = ""; self.refresh() }
                     } catch { self.error = "INVALID_MESSAGE_SNAPSHOT" }
                 }
             }
         refresh()
     }
-    func showBotHistory(limit: Int) {
-        botStateWindow = max(100, limit)
-        refresh()
-    }
+    func refreshTasks() { refresh() }
     func refresh() {
         guard active, !revoked else { return }
         if running { again = true; return }
@@ -293,8 +287,7 @@ final class TeamMessagingModel {
                 if cache?.creation != nil { try await commit { value in if value.creation?.error == nil, (value.creation?.leaseUntil ?? 0) <= Date().timeIntervalSince1970 * 1000 { value.creation?.leaseUntil = creationLease; value.creation?.attempted = true } } }
                 if let creation = cache?.creation, creation.leaseUntil == creationLease {
                     do {
-                        let body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(creation)) as! [String: Any]
-                        let _: TeamMessageAck = try await call(body.filter { $0.key != "error" && $0.key != "leaseUntil" && $0.key != "attempted" }, life: life)
+                        let _: TeamMessageAck = try await call(creation.body, life: life)
                         try await commit { $0.creation = nil }
                         if selected.isEmpty { select(creation.conversationId) }
                     } catch {
@@ -314,98 +307,83 @@ final class TeamMessagingModel {
                     }
                     guard let intent = cache?.outbox.first(where: { $0.id == intentID && $0.leaseUntil == lease }) else { continue }
                     do {
-                        let body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(intent)) as! [String: Any]
-                        let _: TeamMessageAck = try await call(body.filter { $0.key != "error" && $0.key != "leaseUntil" && $0.key != "attempted" }, life: life)
+                        let _: TeamMessageAck = try await call(intent.body, life: life)
                         try await commit { $0.outbox.removeAll { $0.id == intent.id } }
                     } catch {
                         let code = (error as? TeamMessageFailure)?.code ?? "SERVICE_UNAVAILABLE"
-                        let permanent = ["MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "BOT_USE_REQUIRED", "BOT_PARTICIPANT_REQUIRED", "INVALID_BOT_TARGET", "INVALID_INPUT"].contains(code)
+                        let permanent = ["MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "BOT_PARTICIPANT_REQUIRED", "INVALID_BOT_TARGET", "INVALID_INPUT"].contains(code)
                         try await commit { value in if let index = value.outbox.firstIndex(where: { $0.id == intent.id }) { value.outbox[index].leaseUntil = nil; if permanent { value.outbox[index].error = code } } }
                         if !permanent { throw error }
                     }
                 }
-                for pending in cache?.botOutbox ?? [] where pending.error == nil {
+                for pending in cache?.commands ?? [] where pending.error == nil {
                     let intentID = pending.id, lease = Date().timeIntervalSince1970 * 1000 + 30000
                     try await commit { value in
-                        if let index = value.botOutbox?.firstIndex(where: { $0.id == intentID }), value.botOutbox?[index].error == nil, (value.botOutbox?[index].leaseUntil ?? 0) <= Date().timeIntervalSince1970 * 1000 {
-                            value.botOutbox?[index].leaseUntil = lease; value.botOutbox?[index].attempted = true
+                        if let index = value.commands?.firstIndex(where: { $0.id == intentID }), (value.commands?[index].leaseUntil ?? 0) <= Date().timeIntervalSince1970 * 1000 {
+                            value.commands?[index].leaseUntil = lease; value.commands?[index].attempted = true
                         }
                     }
-                    guard let intent = cache?.botOutbox?.first(where: { $0.id == intentID && $0.leaseUntil == lease }) else { continue }
+                    guard let intent = cache?.commands?.first(where: { $0.id == intentID && $0.leaseUntil == lease }) else { continue }
                     do {
-                        let _: TeamBotAck = try await call(intent.body, life: life)
-                        try await commit { $0.acknowledgeBotIntent(intentID) }
+                        let _: TeamBotAck = try await execute(intent.action, payload: intent.payload, commandId: intent.commandId, life: life)
+                        try await commit { $0.commands?.removeAll { $0.id == intentID } }
+                        botsDirty = true
                     } catch {
                         let code = (error as? TeamMessageFailure)?.code ?? "SERVICE_UNAVAILABLE"
-                        let permanent = TeamBotIntent.isPermanentFailure(code)
-                        try await commit { value in
-                            if let index = value.botOutbox?.firstIndex(where: { $0.id == intentID }) {
-                                value.botOutbox?[index].recordFailure(code)
-                            }
-                        }
+                        let permanent = ["INVALID_INPUT", "COMMAND_ID_CONFLICT", "BOT_REVISION_CONFLICT", "MAINTAINER_REQUIRED"].contains(code)
+                        try await commit { value in if let index = value.commands?.firstIndex(where: { $0.id == intentID }) {
+                            value.commands?[index].leaseUntil = nil; if permanent { value.commands?[index].error = code }
+                        } }
                         if !permanent { throw error }
                     }
                 }
                 if botsDirty {
                     botsDirty = false
-                    do { let cards: TeamBotList = try await call(["action": "bots"], life: life); bots = cards.bots; botsLoaded = true; botsUnverified = false }
+                    do { let cards: TeamBotList = try await execute("listSharedBots", payload: [:], life: life); bots = cards.bots; botsLoaded = true; botsUnverified = false }
                     catch { botsDirty = true; botsUnverified = true; throw error }
                 }
+                if artifactNeedsValidation {
+                    artifactNeedsValidation = false
+                    if let current = artifact {
+                        do { let _: TeamArtifact = try await execute("readArtifact", payload: ["artifactId": current.artifactId], life: life) }
+                        catch is CancellationError { throw CancellationError() }
+                        catch { artifact = nil }
+                    }
+                }
                 let id = selected
-                if !id.isEmpty { try await observeStates(conversationId: id, life: life) }
-                if !listenersFailed { error = "" }
+                try await observeTasks(conversationId: cache?.conversations.contains(where: { $0.id == id }) == true ? id : nil, life: life)
+                if !listenersFailed { error = cache?.commands?.first(where: { $0.error != nil })?.error ?? "" }
                 retryDelay = 1
             } catch {
                 guard active, life == lifecycle else { return }
                 // Without the card list Bot availability is unknown, not "unavailable".
-                again = false; offline = true; bots = []; botsUnverified = true; botStates = [:]; self.error = (error as? TeamMessageFailure)?.code ?? "SERVICE_UNAVAILABLE"
+                again = false; offline = true; bots = []; botsUnverified = true; tasks = []; artifact = nil; self.error = (error as? TeamMessageFailure)?.code ?? "SERVICE_UNAVAILABLE"
                 if ["MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED", "CONVERSATION_REQUIRED"].contains(self.error) { invalidate() }
             }
         }
     }
-    private func observeStates(conversationId id: String, life: Int) async throws {
-        guard let conversation = cache?.conversations.first(where: { $0.id == id }) else { return }
-        var fingerprints: [String: String] = [:]
-        for message in (cache?.threads[id]?.messages ?? []).suffix(botStateWindow) {
-            for trigger in message.botTriggers(in: conversation) { fingerprints[trigger] = "\(message.id)/\(message.changeSeq)/\(conversation.participants.joined(separator: ","))" }
-        }
-        var states: [String: TeamBotState] = [:], missing: [String] = []
-        for trigger in fingerprints.keys {
-            let key = "\(id)/\(trigger)"
-            if let known = terminalStates[key] { states[trigger] = known }
-            else if missingStates[key] != fingerprints[trigger] { missing.append(trigger) }
-        }
-        let batches = stride(from: 0, to: missing.count, by: 30).map { Array(missing[$0..<min($0 + 30, missing.count)]) }
-        let result = try await withThrowingTaskGroup(of: TeamBotStates.self) { group in
-            var index = 0
-            func enqueue() {
-                let batch = batches[index]; index += 1
-                group.addTask { @MainActor [self] in try await call(["action": "botStates", "conversationId": id, "triggerIds": batch], life: life) }
-            }
-            while index < min(4, batches.count) { enqueue() }
-            var result: [TeamBotStates] = []
-            while let value = try await group.next() { result.append(value); if index < batches.count { enqueue() } }
-            return result
-        }
-        guard active, life == lifecycle, auth.currentUser?.uid == uid else { throw CancellationError() }
-        let terminal: Set<String> = ["completed", "failed", "missed", "cancelled", "recovered", "revoked"]
-        for batch in result {
-            for (trigger, state) in batch.states {
-                let key = "\(id)/\(trigger)"
-                if let state {
-                    states[trigger] = state
-                    if terminal.contains(state.state) { terminalStates[key] = state }
-                } else { missingStates[key] = fingerprints[trigger] }
-            }
-        }
-        while terminalStates.count > 512, let key = terminalStates.keys.first { terminalStates.removeValue(forKey: key) }
-        while missingStates.count > 512, let key = missingStates.keys.first { missingStates.removeValue(forKey: key) }
-        if selected == id { botStates = states }
+    private func observeTasks(conversationId: String?, life: Int) async throws {
+        let payload: [String: Any] = conversationId.map { ["conversationId": $0] } ?? [:]
+        let selection = selected
+        let result: TeamTaskList = try await execute("listTasks", payload: payload, life: life)
+        if selected == selection { tasks = result.tasks }
     }
-    func create(kind: String, title: String, uids: [String], botKeys: [String] = [], id: String) async throws {
+    func refreshTask(_ taskId: String) async throws {
+        let selection = selected
+        let result: TeamTask = try await execute("getTask", payload: ["taskId": taskId], life: lifecycle)
+        guard selected == selection else { return }
+        if let index = tasks.firstIndex(where: { $0.taskId == taskId }) { tasks[index] = result } else { tasks.append(result) }
+    }
+    func openArtifact(_ artifactId: String) async throws {
+        let selection = selected
+        let result: TeamArtifact = try await execute("readArtifact", payload: ["artifactId": artifactId], life: lifecycle)
+        if selected == selection { artifact = result }
+    }
+    func closeArtifact() { artifact = nil }
+    func create(kind: String, title: String, uids: [String], sharedBotIds: [String] = [], id: String) async throws {
         guard active, !revoked else { return }
-        guard TeamBotSelection.unavailable(Set(botKeys), cards: bots).isEmpty else { throw TeamMessageFailure(code: "BOT_USE_REQUIRED") }
-        let intent = TeamMessageCreation(teamId: teamId, generation: generation, conversationId: id, kind: kind, title: title, participantUids: Array(Set([uid] + uids)).sorted(), botKeys: botKeys.isEmpty ? nil : botKeys.sorted())
+        guard TeamBotSelection.unavailable(Set(sharedBotIds), cards: bots).isEmpty else { throw TeamMessageFailure(code: "BOT_USE_REQUIRED") }
+        let intent = TeamMessageCreation(teamId: teamId, generation: generation, conversationId: id, kind: kind, title: title, participantUids: Array(Set([uid] + uids)).sorted(), sharedBotIds: sharedBotIds.isEmpty ? nil : sharedBotIds.sorted())
         try await commit { value in guard value.creation == nil else { throw TeamMessageFailure(code: "CREATION_PENDING") }; value.creation = intent }
         select(id)
     }
@@ -414,50 +392,24 @@ final class TeamMessagingModel {
         if operation == "create" {
             guard let conversation = cache?.conversations.first(where: { $0.id == selected }), TeamBotSelection.canSend(in: conversation, selected: Set(targets), cards: bots) else { throw TeamMessageFailure(code: "BOT_USE_REQUIRED") }
         }
-        let intent = TeamMessageIntent(teamId: teamId, generation: generation, conversationId: selected, messageId: messageId ?? UUID().uuidString, changeId: UUID().uuidString, operation: operation, text: text, replyTo: replyTo, targets: operation == "create" && !targets.isEmpty ? targets.sorted() : nil)
+        let conversation = cache?.conversations.first { $0.id == selected }
+        let resolvedTargets = operation == "create" ? conversation.map { Array(TeamBotSelection.targets(in: $0, selected: Set(targets))).sorted() } : nil
+        let intent = TeamMessageIntent(teamId: teamId, generation: generation, conversationId: selected, messageId: messageId ?? UUID().uuidString, changeId: UUID().uuidString, operation: operation, text: text, replyTo: replyTo, targets: resolvedTargets ?? nil)
         try await commit { $0.outbox.append(intent) }; refresh()
     }
-    func answer(_ message: TeamMessage, answers: [String: String]) async throws {
-        guard active, !revoked, !offline, cache?.threads[selected]?.messages.contains(where: { $0.id == message.id }) == true, let trigger = message.triggerId, let question = message.question,
-              botStates[trigger]?.canAnswer(message, uid: uid, generation: generation, now: Date().timeIntervalSince1970 * 1000) == true,
-              TeamBotIntent.validAnswers(answers, for: question) else { throw TeamMessageFailure(code: "QUESTION_RECIPIENT_REQUIRED") }
-        let intent = TeamBotIntent(action: "botAnswer", conversationId: selected, triggerId: trigger, questionId: question.id, answerId: UUID().uuidString, answers: answers, botKey: nil, text: nil)
-        try await saveBotIntent(intent)
-    }
-    func recover(trigger: String, text: String) async throws {
-        guard active, !revoked, !offline, let state = botStates[trigger], state.canRecover(uid: uid, now: Date().timeIntervalSince1970 * 1000),
-              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf8.count <= 8192 else { throw TeamMessageFailure(code: "RECOVERY_NOT_REQUIRED") }
-        let intent = TeamBotIntent(action: "recoverBot", conversationId: selected, triggerId: trigger, questionId: nil, answerId: UUID().uuidString, answers: nil, botKey: state.botKey, text: text)
-        try await saveBotIntent(intent)
-    }
-    private func saveBotIntent(_ intent: TeamBotIntent) async throws {
-        try await commit { value in
-            guard !(value.botOutbox ?? []).contains(where: { $0.conversationId == intent.conversationId && $0.triggerId == intent.triggerId && $0.action == intent.action && (intent.action != "botAnswer" || $0.questionId == intent.questionId) }) else { throw TeamMessageFailure(code: "MESSAGE_IN_FLIGHT") }
-            if value.botOutbox == nil { value.botOutbox = [] }
-            value.botOutbox?.append(intent)
-        }
+    func pause(_ bot: TeamBotCard) async throws {
+        guard active, !revoked, bot.maintainer == TeamMemberRef(uid: uid, generation: generation), bot.state == "published" else { throw TeamMessageFailure(code: "MAINTAINER_REQUIRED") }
+        let intent = TeamExecutionIntent(commandId: UUID().uuidString, action: "pauseSharedBot", sharedBotId: bot.sharedBotId, expectedRevision: bot.revision)
+        try await commit { if $0.commands == nil { $0.commands = [] }; $0.commands?.append(intent) }
         refresh()
     }
-    func discardBotIntent(_ id: String) async throws {
+    func discardCommand(_ commandId: String) async throws {
         try await commit { value in
-            if (value.botOutbox ?? []).contains(where: { $0.id == id && !$0.canDiscard(now: Date().timeIntervalSince1970 * 1000) }) { throw TeamMessageFailure(code: "MESSAGE_IN_FLIGHT") }
-            value.botOutbox?.removeAll { $0.id == id }
+            guard let intent = value.commands?.first(where: { $0.id == commandId }), intent.error != nil,
+                  (intent.leaseUntil ?? 0) <= Date().timeIntervalSince1970 * 1000 else { throw TeamMessageFailure(code: "MESSAGE_IN_FLIGHT") }
+            value.commands?.removeAll { $0.id == commandId }
         }
         refresh()
-    }
-    func unbind(_ bot: TeamBotCard) async throws {
-        guard bot.ownerUid == uid, bot.enabled, !offline else { throw TeamMessageFailure(code: "BOT_OWNER_REQUIRED") }
-        let _: TeamBotAck = try await call(["action": "unbindBot", "botKey": bot.key, "expectedRevision": bot.revision], life: lifecycle)
-        bots.removeAll { $0.key == bot.key }; botsDirty = true; refresh()
-    }
-    func canAnswer(_ message: TeamMessage, now: Double) -> Bool {
-        guard !offline, let trigger = message.triggerId else { return false }
-        return botStates[trigger]?.canAnswer(message, uid: uid, generation: generation, now: now) == true
-            && cache?.hasPendingAnswer(for: message) != true
-    }
-    func canRecover(_ trigger: String, now: Double) -> Bool {
-        !offline && botStates[trigger]?.canRecover(uid: uid, now: now) == true
-            && !(cache?.botOutbox ?? []).contains { $0.triggerId == trigger && $0.action == "recoverBot" }
     }
     func discard(_ id: String) async throws { try await commit { value in
         if value.outbox.contains(where: { $0.id == id && (($0.attempted == true && $0.error == nil) || ($0.leaseUntil ?? 0) > Date().timeIntervalSince1970 * 1000) }) { throw TeamMessageFailure(code: "MESSAGE_IN_FLIGHT") }
@@ -495,7 +447,7 @@ final class TeamMessagingModel {
     private func scheduleDeadline() {
         deadline?.cancel(); deadline = nil
         let now = Date().timeIntervalSince1970 * 1000
-        let expirations = bots.filter { $0.online }.compactMap(\.onlineUntil) + botStates.values.filter { ["claimed", "running"].contains($0.state) }.compactMap(\.leaseUntil)
+        let expirations = bots.filter { $0.ready }.map(\.onlineUntil) + tasks.filter { !$0.terminal }.map(\.deadline)
         guard active, let next = expirations.filter({ $0 > now }).min() else { return }
         deadline = Task { [weak self] in do { try await Task.sleep(for: .seconds((next - now) / 1000)); self?.botsDirty = true; self?.refresh() } catch {} }
     }
@@ -503,18 +455,23 @@ final class TeamMessagingModel {
         retry?.cancel(); retry = nil
         guard active, let cache else { return }
         var leases = cache.outbox.filter { $0.error == nil }.map { $0.leaseUntil ?? 0 }
-        leases.append(contentsOf: (cache.botOutbox ?? []).filter { $0.error == nil }.map { $0.leaseUntil ?? 0 })
+        leases.append(contentsOf: (cache.commands ?? []).filter { $0.error == nil }.map { $0.leaseUntil ?? 0 })
         if let creation = cache.creation, creation.error == nil { leases.append(creation.leaseUntil ?? 0) }
+        if tasks.contains(where: { !$0.terminal }) { leases.append(Date().timeIntervalSince1970 * 1000 + 3000) }
         guard let earliest = leases.min() else { return }
         let delay = max(retryDelay, (earliest - Date().timeIntervalSince1970 * 1000) / 1000)
         retryDelay = min(30, retryDelay * 2)
         retry = Task { [weak self] in do { try await Task.sleep(for: .seconds(delay)); self?.refresh() } catch {} }
+    }
+    private func execute<T: Decodable>(_ action: String, payload: [String: Any], commandId: String = UUID().uuidString, life: Int) async throws -> T {
+        try await call(["schemaVersion": 1, "commandId": commandId, "action": action, "payload": payload], life: life)
     }
     private func call<T: Decodable>(_ body: [String: Any], life: Int) async throws -> T {
         guard active, life == lifecycle, let user = auth.currentUser, user.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
         let token = try await user.getIDToken()
         guard active, life == lifecycle, auth.currentUser?.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
         var body = body; body["teamId"] = teamId; body["generation"] = generation
+        if body["schemaVersion"] != nil { try TeamExecutionContract.validate(body) }
         var request = URLRequest(url: apiRoot)
         request.httpMethod = "POST"; request.timeoutInterval = 20; request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")

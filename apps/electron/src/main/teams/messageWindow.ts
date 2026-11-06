@@ -3,9 +3,11 @@ import { join } from 'node:path';
 import { app, BrowserWindow, MessageChannelMain, type Event, type MessagePortMain } from 'electron';
 import type { MessageScope, MessageSnapshot } from '../../../../../packages/teams/messages.js';
 import type { TeamsFirestoreOptions } from './firestore.js';
+import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source.js';
 
 export interface TeamsMessageSession {
   watch(id: string, scope: MessageScope, conversationId: string, next: (snapshot: MessageSnapshot) => void): () => void;
+  read(request: ChatReadRequest): Promise<ChatReadResult>;
   close(clearAuthentication?: boolean): Promise<void>;
 }
 
@@ -33,6 +35,12 @@ export async function openTeamsMessageSession(options: Omit<TeamsFirestoreOption
   let closed = false;
   let closing: Promise<void> | undefined;
   const listeners = new Map<string, (snapshot: MessageSnapshot) => void>();
+  const reads = new Map<string, { resolve(value: ChatReadResult): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
+  let readSequence = 0;
+  function rejectReads(): void {
+    for (const value of reads.values()) { clearTimeout(value.timer); value.reject(new Error('INVALID_SESSION')); }
+    reads.clear();
+  }
   let ready: (() => void) | undefined;
   let rejectReady: ((error: Error) => void) | undefined;
   function fail(): void {
@@ -45,6 +53,7 @@ export async function openTeamsMessageSession(options: Omit<TeamsFirestoreOption
     return closing ??= (async () => {
       if (closed) return;
       listeners.clear();
+      rejectReads();
       if (port && !window.isDestroyed()) {
         await new Promise<void>(resolve => {
           const timeout = setTimeout(resolve, 2000);
@@ -70,6 +79,15 @@ export async function openTeamsMessageSession(options: Omit<TeamsFirestoreOption
       if (closed || !message || typeof message !== 'object') return;
       if (message.type === 'ready') ready?.();
       else if (message.type === 'error') fail();
+      else if (message.type === 'read-result' && typeof message.id === 'string') {
+        const pending = reads.get(message.id);
+        if (pending) {
+          reads.delete(message.id); clearTimeout(pending.timer);
+          if (typeof message.error === 'string') pending.reject(new Error(message.error));
+          else if (message.uid === options.uid && message.result && Array.isArray(message.result.messages)) pending.resolve(message.result as ChatReadResult);
+          else pending.reject(new Error('INVALID_DATA'));
+        }
+      }
       else if (message.type === 'snapshot' && typeof message.id === 'string' && message.snapshot?.uid === options.uid) listeners.get(message.id)?.(message.snapshot as MessageSnapshot);
     });
     port.on('close', fail); port.start();
@@ -78,6 +96,15 @@ export async function openTeamsMessageSession(options: Omit<TeamsFirestoreOption
     const timeout = setTimeout(() => rejectReady?.(new Error('MESSAGE_LISTENER_FAILED')), 20000);
     try { await initialized; } finally { clearTimeout(timeout); ready = undefined; rejectReady = undefined; }
     return {
+      read(request) {
+        if (closed || closing) return Promise.reject(new Error('INVALID_SESSION'));
+        const id = `read-${++readSequence}`;
+        return new Promise<ChatReadResult>((resolve, reject) => {
+          const timer = setTimeout(() => { reads.delete(id); reject(new Error('MESSAGE_READ_TIMEOUT')); }, 30000);
+          reads.set(id, { resolve, reject, timer });
+          port!.postMessage({ type: 'read', id, request });
+        });
+      },
       watch(id, scope, conversationId, next) {
         if (closed) throw new Error('INVALID_SESSION');
         const receive = (snapshot: MessageSnapshot) => next(snapshot.kind === 'error' ? { ...snapshot, ...scope } : snapshot);

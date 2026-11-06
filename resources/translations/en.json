@@ -2943,8 +2943,8 @@
   "teams_bot_unbind_title_fmt": "Unbind %1$s?",
   "teams_bot_unbind_detail": "New Bot requests will stop. Existing conversation history remains.",
   "teams_bots_share_hint": "Open Teams in LingXi Desktop to share a local Bot or change its permissions.",
-  "teams_bot_owner %@": "Owner: %@",
-  "teams_bot_owner_fmt": "Owner: %1$s",
+  "teams_bot_owner %@": "Maintainer: %@",
+  "teams_bot_owner_fmt": "Maintainer: %1$s",
   "teams_invite_none": "No invitations yet.",
   "teams_invite_share": "Share this invitation",
   "teams_link_copied": "Link copied",
@@ -2972,5 +2972,15 @@
   "teams_error_bot_access_changed": "Bot access changed. Sync and check the selected Bots before sending again.",
   "teams_error_answer_rejected": "This answer cannot be accepted. Check the question and original requester.",
   "teams_conversation_details": "Conversation details",
-  "teams_choose_conversation": "Choose a conversation"
+  "teams_choose_conversation": "Choose a conversation",
+  "teams_assistants": "Assistants",
+  "teams_recent_tasks": "Recent tasks and results",
+  "teams_artifact_open": "Open document",
+  "teams_artifact_title": "Document",
+  "teams_bot_pause": "Pause sharing",
+  "teams_task_expired": "Request expired",
+  "teams_task_interrupted": "Request interrupted; send a new request",
+  "teams_task_authorization_required": "Maintainer action required",
+  "teams_error_request_quota": "Request limit reached. Try later or contact the maintainer.",
+  "teams_task_view": "View task status"
 }

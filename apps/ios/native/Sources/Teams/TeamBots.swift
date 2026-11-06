@@ -1,123 +1,114 @@
 import Foundation
 
+struct TeamMemberRef: Codable, Equatable, Sendable { let uid: String; let generation: Int }
+struct TeamUsePolicy: Codable, Equatable, Sendable { let mode: String; var members: [TeamMemberRef]? }
+struct TeamRequestQuotas: Codable, Equatable, Sendable { let team: Int; let member: Int; let bot: Int }
 struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
-    let key: String
-    let ownerUid: String
-    /// The computer the Bot runs on, and the Bot's id on it (the key is `bot:<owner>:<host>:<botId>`).
-    let hostId: String
-    let botId: String
+    let sharedBotId: String
     let name: String
     let description: String
+    let maintainer: TeamMemberRef
     let revision: Int
-    let use: String
-    let enabled: Bool
-    let permitted: Bool
-    let online: Bool
-    var onlineUntil: Double? = nil
-    var id: String { key }
-    var selectable: Bool { enabled && permitted }
-    /// The id the Bot's avatar is drawn from on every surface (spec §7.1): `botId`, else the last segment of the key.
-    var avatarId: String { botId.isEmpty ? AvatarIdentity.teamBotAvatarId(key) : botId }
-}
-struct TeamBotOrigin: Codable, Sendable, Equatable { let uid: String; let generation: Int }
-struct TeamBotQuestion: Codable, Equatable, Sendable { let id: String; let questions: [String] }
-struct TeamBotState: Decodable, Equatable, Sendable {
     let state: String
-    let ownerUid: String
-    let botKey: String
-    let origin: TeamBotOrigin
-    let leaseUntil: Double?
-    let questionId: String?
-    let answered: Bool
-    /// What the owner's Desktop reports about the run (the owner alone receives it): `retrying`,
-    /// `result_pending`, `recovery_required`, `model_unavailable`, `runtime_unavailable`, `storage_error`.
-    var hostStatus: String? = nil
-
-    func canAnswer(_ message: TeamMessage, uid: String, generation: Int, now: Double) -> Bool {
-        message.author.kind == "bot" && message.kind == "question" && message.recalled != true
-            && message.author.botKey == botKey && message.author.uid == ownerUid
-            && message.origin == origin && origin == TeamBotOrigin(uid: uid, generation: generation)
-            && message.question?.id == questionId && questionId != nil && !answered
-            && state == "running" && (leaseUntil ?? 0) > now
-    }
-    func needsRecovery(now: Double) -> Bool {
-        state == "recovery" || (["claimed", "running"].contains(state) && (leaseUntil ?? .infinity) <= now)
-    }
-    /// Desktop `canRecoverBot`: only the owner, and not while Desktop still holds the exact result to deliver.
-    func canRecover(uid: String, now: Double) -> Bool {
-        ownerUid == uid && hostStatus != "result_pending" && needsRecovery(now: now)
-    }
+    let permitted: Bool
+    let ready: Bool
+    let onlineUntil: Double
+    let usePolicy: TeamUsePolicy
+    let quotas: TeamRequestQuotas
+    let instanceId: String?
+    var id: String { sharedBotId }
+    var selectable: Bool { state == "published" && permitted }
+    var avatarId: String { sharedBotId }
 }
-
-/// The exact answer or settlement is saved before transport. A lost response,
-/// page exit or process restart must resend the same ID and body.
-struct TeamBotIntent: Codable, Equatable, Identifiable, Sendable {
-    let action: String
+struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
+    let taskId: String
     let conversationId: String
-    let triggerId: String
-    let questionId: String?
-    let answerId: String
-    let answers: [String: String]?
-    let botKey: String?
-    let text: String?
-    var attempted: Bool? = nil
-    var leaseUntil: Double? = nil
-    var error: String? = nil
-    var id: String { answerId }
-    var body: [String: Any] {
-        var body: [String: Any] = ["action": action, "conversationId": conversationId, "triggerId": triggerId]
-        if action == "botAnswer" {
-            body["questionId"] = questionId; body["answerId"] = answerId; body["answers"] = answers
-        } else {
-            body["botKey"] = botKey; body["text"] = text
-        }
-        return body
-    }
-    static func isPermanentFailure(_ code: String) -> Bool {
-        ["QUESTION_RECIPIENT_REQUIRED", "ANSWER_CONFLICT", "INVALID_ANSWER", "BOT_USE_REQUIRED", "BOT_PARTICIPANT_REQUIRED", "INVALID_BOT_TARGET", "BOT_OWNER_REQUIRED", "BOT_REVISION_CONFLICT", "BOT_RESULT_CONFLICT", "RECOVERY_NOT_REQUIRED", "TRIGGER_REQUIRED", "BOT_RUN_BLOCKED", "INVALID_INPUT"].contains(code)
-    }
-    mutating func recordFailure(_ code: String) {
-        leaseUntil = nil
-        if Self.isPermanentFailure(code) { error = code }
-    }
-    func canDiscard(now: Double) -> Bool {
-        !(attempted == true && error == nil) && (leaseUntil ?? 0) <= now
-    }
-    static func validAnswers(_ answers: [String: String], for question: TeamBotQuestion) -> Bool {
-        !question.questions.isEmpty && question.questions.count <= 4
-            && Set(question.questions).count == question.questions.count
-            && Set(answers.keys) == Set(question.questions)
-            && answers.values.allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf16.count <= 2000 }
-    }
+    let sharedBotId: String
+    let requester: TeamMemberRef
+    let state: String
+    let createdAt: Double
+    let deadline: Double
+    let replyId: String?
+    let artifactId: String?
+    var id: String { taskId }
+    var terminal: Bool { state != "queued" && state != "running" }
 }
-
-extension TeamMessage {
-    /// Human text/mentions are presentation only; a missing trusted trigger is
-    /// handled as absent state. The server alone authorizes execution.
-    func botTriggers(in conversation: TeamMessageConversation) -> [String] {
-        if author.kind == "bot" { return triggerId.map { [$0] } ?? [] }
-        guard author.kind == "user" else { return [] }
-        let keys = conversation.kind == "bot_dm" ? conversation.participants.filter { $0.hasPrefix("bot:") } : (mentions ?? [])
-        return keys.filter { conversation.participants.contains($0) }.map { key in
-            TeamBotTrigger.identity(messageId: id, botKey: key)
-        }
-    }
+struct TeamArtifact: Decodable, Equatable, Identifiable, Sendable {
+    struct Document: Decodable, Equatable, Sendable { let title: String; let body: String }
+    let artifactId: String
+    let revision: Int
+    let digest: String
+    let document: Document
+    var id: String { artifactId }
 }
-
-/// Draft validation uses the full current usable set. An omitted card is not
-/// an available Bot: other owners' revoked cards are intentionally absent.
+/// IDs are raw SharedBot IDs in commands and explicit shared_bot principals in Chat participants.
 enum TeamBotSelection {
     static func unavailable(_ selected: Set<String>, cards: [TeamBotCard], participants: [String]? = nil) -> Set<String> {
-        var usable = Set(cards.filter(\.selectable).map(\.key))
-        if let participants { usable.formIntersection(participants) }
+        var usable = Set(cards.filter(\.selectable).map(\.sharedBotId))
+        if let participants { usable.formIntersection(participants.compactMap { $0.hasPrefix("shared_bot:") ? String($0.dropFirst(11)) : nil }) }
         return selected.subtracting(usable)
     }
     static func targets(in conversation: TeamMessageConversation, selected: Set<String>) -> Set<String> {
-        conversation.kind == "bot_dm" ? Set(conversation.participants.filter { $0.hasPrefix("bot:") }) : selected
+        conversation.kind == "bot_dm" ? Set(conversation.participants.compactMap { $0.hasPrefix("shared_bot:") ? String($0.dropFirst(11)) : nil }) : selected
     }
     static func canSend(in conversation: TeamMessageConversation, selected: Set<String>, cards: [TeamBotCard]) -> Bool {
         let targets = targets(in: conversation, selected: selected)
-        return (conversation.kind != "bot_dm" || targets.count == 1)
-            && unavailable(targets, cards: cards, participants: conversation.participants).isEmpty
+        return (conversation.kind != "bot_dm" || targets.count == 1) && unavailable(targets, cards: cards, participants: conversation.participants).isEmpty
+    }
+}
+
+/// Member commands are validated independently of storage/execution versions.
+/// Unknown fields and retired actions cannot enter the transport through a journal replay.
+enum TeamExecutionContract {
+    static func validate(_ value: [String: Any]) throws {
+        func fail() throws -> Never { throw TeamMessageFailure(code: "INVALID_INPUT") }
+        guard Set(value.keys) == ["schemaVersion", "commandId", "teamId", "generation", "action", "payload"],
+              integer(value["schemaVersion"], minimum: 1) == 1,
+              integer(value["generation"], minimum: 1) != nil,
+              identifier(value["commandId"]), identifier(value["teamId"]),
+              let action = value["action"] as? String, let payload = value["payload"] as? [String: Any] else { try fail() }
+        func shape(_ required: Set<String>, _ optional: Set<String> = []) throws {
+            guard required.isSubset(of: Set(payload.keys)), Set(payload.keys).isSubset(of: required.union(optional)) else { try fail() }
+        }
+        func id(_ key: String) throws { guard identifier(payload[key]) else { try fail() } }
+        func ids(_ key: String, minimum: Int = 1, maximum: Int = 8) throws {
+            guard let values = payload[key] as? [String], values.count >= minimum, values.count <= maximum,
+                  Set(values).count == values.count, values.allSatisfy({ identifier($0) }) else { try fail() }
+        }
+        switch action {
+        case "listSharedBots": try shape([])
+        case "getTask": try shape(["taskId"]); try id("taskId")
+        case "readArtifact": try shape(["artifactId"]); try id("artifactId")
+        case "listTasks":
+            try shape([], ["conversationId", "after"])
+            for key in payload.keys { try id(key) }
+        case "pauseSharedBot":
+            try shape(["sharedBotId", "expectedRevision"]); try id("sharedBotId")
+            guard integer(payload["expectedRevision"], minimum: 1) != nil else { try fail() }
+        case "setConversationPolicy":
+            try shape(["conversationId", "expectedRevision", "targets"]); try id("conversationId"); try ids("targets", minimum: 0)
+            guard integer(payload["expectedRevision"], minimum: 0) != nil else { try fail() }
+        case "submit":
+            try shape(["conversationId", "messageId", "changeId", "text", "targets"], ["replyTo"])
+            for key in ["conversationId", "messageId", "changeId"] { try id(key) }; try ids("targets")
+            if payload["replyTo"] != nil { try id("replyTo") }
+            guard let text = payload["text"] as? String, !text.isEmpty, text.utf8.count <= 8192 else { try fail() }
+        case "createConversation":
+            try shape(["conversationId", "kind", "title", "participantUids", "sharedBotIds"]); try id("conversationId"); try ids("sharedBotIds")
+            guard let kind = payload["kind"] as? String, ["bot_dm", "group", "channel"].contains(kind),
+                  let title = payload["title"] as? String, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, title.trimmingCharacters(in: .whitespacesAndNewlines).utf16.count <= 120,
+                  let uids = payload["participantUids"] as? [String], !uids.isEmpty, uids.count <= 200, Set(uids).count == uids.count,
+                  uids.allSatisfy({ $0.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil }) else { try fail() }
+        default: try fail()
+        }
+    }
+    private static func identifier(_ value: Any?) -> Bool {
+        guard let value = value as? String else { return false }
+        return value.range(of: "^[A-Za-z0-9_-]{8,64}$", options: .regularExpression) != nil
+    }
+    private static func integer(_ value: Any?, minimum: Double) -> Double? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let value = number.doubleValue
+        return value.isFinite && value.rounded(.towardZero) == value && value >= minimum && value <= 9_007_199_254_740_991 ? value : nil
     }
 }

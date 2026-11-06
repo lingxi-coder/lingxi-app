@@ -259,13 +259,13 @@ struct NewConversationSheet: View {
             if kind != "dm" && !usableBots.isEmpty {
                 Section {
                     ForEach(usableBots) { bot in
-                        let chosen = botParties.contains(bot.key)
-                        Button { toggleBot(bot.key) } label: {
+                        let chosen = botParties.contains(bot.sharedBotId)
+                        Button { toggleBot(bot.sharedBotId) } label: {
                             HStack(spacing: 12) {
                                 AgentAvatar(agentID: bot.avatarId, size: 28)
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(bot.name).foregroundStyle(.primary)
-                                    Text("teams_bot_owner \(owner(bot.ownerUid))").font(.caption).foregroundStyle(.secondary)
+                                    Text("teams_bot_owner \(owner(bot.maintainer.uid))").font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer()
                                 Image(systemName: chosen ? "checkmark.circle.fill" : "circle").foregroundStyle(chosen ? Color.accentColor : Color.secondary)
@@ -351,16 +351,16 @@ struct NewConversationSheet: View {
     }
 
     private func botRow(_ bot: TeamBotCard) -> some View {
-        let existing = TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: uid, botKey: bot.key)
+        let existing = TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: uid, sharedBotId: bot.sharedBotId)
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
                 AgentAvatar(agentID: bot.avatarId, size: 32)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(bot.name).font(.body.weight(.semibold))
                     HStack(spacing: 6) {
-                        Text(LocalizedStringKey(bot.online ? "remote_online" : "teams_bot_offline_queued"))
+                        Text(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued"))
                         Text("·")
-                        Text("teams_bot_owner \(owner(bot.ownerUid))")
+                        Text("teams_bot_owner \(owner(bot.maintainer.uid))")
                     }
                     .font(.caption).foregroundStyle(.secondary)
                 }
@@ -379,7 +379,7 @@ struct NewConversationSheet: View {
             .disabled(workspace.messageBusy || offline)
         }
         .padding(.vertical, 4)
-        .accessibilityIdentifier("teams.new.bot.\(bot.key)")
+        .accessibilityIdentifier("teams.new.bot.\(bot.sharedBotId)")
     }
 
     private func openBot(_ bot: TeamBotCard, fresh: Bool) async {

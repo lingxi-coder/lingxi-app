@@ -4,14 +4,11 @@ import test, { type TestContext } from 'node:test';
 import { createElement, useSyncExternalStore, type ReactElement } from 'react';
 import type { TeamsSnapshot, TeamsWorkspace } from '../../../../packages/teams/workspace';
 
-// Tests that drive the Teams components' event handlers and effects go through react-test-renderer, which is a
-// devDependency of this package. Where it is not installed they are skipped rather than failing to load.
+// The locked renderer is required so interaction coverage cannot silently skip.
 const require = createRequire(import.meta.url);
-let renderer: { create(element: ReactElement, options?: unknown): any; act(work: () => Promise<void> | void): Promise<void> } | undefined;
-try { renderer = require('react-test-renderer'); } catch { renderer = undefined; }
-export const scenario = (name: string, run: (context: TestContext) => Promise<void>) => test(name, renderer ? {} : { skip: 'react-test-renderer is not installed' }, run);
-/** The test renderer itself, for a test that mounts something other than a view of one workspace. */
-export const reactTestRenderer = () => renderer!;
+const renderer: { create(element: ReactElement, options?: unknown): any; act(work: () => Promise<void> | void): Promise<void> } = require('react-test-renderer');
+export const scenario = (name: string, run: (context: TestContext) => Promise<void>) => test(name, run);
+export const reactTestRenderer = () => renderer;
 
 // ── A just-enough browser: refs, the document, and HTMLElement ──
 

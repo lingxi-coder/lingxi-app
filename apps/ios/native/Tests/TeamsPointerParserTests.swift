@@ -50,7 +50,7 @@ final class TeamsPointerParserTests: XCTestCase {
             XCTAssertEqual(result, TeamLastMessage(
                 id: try XCTUnwrap(ok["id"] as? String), seq: try XCTUnwrap(ok["seq"] as? Int), atMs: (ok["atMs"] as? NSNumber)?.int64Value,
                 authorKind: try XCTUnwrap(ok["authorKind"] as? String), authorUid: try XCTUnwrap(ok["authorUid"] as? String),
-                authorBotKey: ok["authorBotKey"] as? String, preview: try XCTUnwrap(ok["preview"] as? String),
+                authorSharedBotId: ok["authorSharedBotId"] as? String, preview: try XCTUnwrap(ok["preview"] as? String),
                 recalled: try XCTUnwrap(ok["recalled"] as? Bool)), name)
         }
     }
@@ -96,8 +96,8 @@ final class TeamsPointerParserTests: XCTestCase {
     // MARK: the directory document
 
     private func document(_ changes: [String: Any?] = [:]) -> [String: Any] {
-        var base: [String: Any] = ["kind": "bot_dm", "title": "Helper", "participants": ["user:u1", "bot:t1:h:helper"], "lastSeq": 5, "lastChangeSeq": 7,
-                                   "botKey": "bot:t1:h:helper", "lastMessage": pointer()]
+        var base: [String: Any] = ["kind": "bot_dm", "title": "Helper", "participants": ["user:u1", "shared_bot:sharedbot_helper"], "lastSeq": 5, "lastChangeSeq": 7,
+                                   "sharedBotId": "sharedbot_helper", "lastMessage": pointer()]
         for (key, value) in changes { if let value { base[key] = value } else { base.removeValue(forKey: key) } }
         return base
     }
@@ -105,21 +105,21 @@ final class TeamsPointerParserTests: XCTestCase {
     func testAWholeDocumentBecomesTheAppConversation() throws {
         let value = try TeamsPointerParser.parseConversation(id: "c1", data: document(), lastReadSeq: 2, millis: millis)
         XCTAssertEqual(value, TeamMessageConversation(
-            id: "c1", kind: "bot_dm", title: "Helper", participants: ["user:u1", "bot:t1:h:helper"], lastSeq: 5, lastChangeSeq: 7, lastReadSeq: 2,
-            botKey: "bot:t1:h:helper", lastMessage: TeamLastMessage(id: "m1", seq: 3, atMs: 1_793_613_600_000, authorKind: "user", authorUid: "u2", authorBotKey: nil, preview: "hi", recalled: false)))
+            id: "c1", kind: "bot_dm", title: "Helper", participants: ["user:u1", "shared_bot:sharedbot_helper"], lastSeq: 5, lastChangeSeq: 7, lastReadSeq: 2,
+            sharedBotId: "sharedbot_helper", lastMessage: TeamLastMessage(id: "m1", seq: 3, atMs: 1_793_613_600_000, authorKind: "user", authorUid: "u2", authorSharedBotId: nil, preview: "hi", recalled: false)))
         XCTAssertEqual(value.unread, 3)
     }
 
     func testANullPointerIsAConversationWithoutMessages() throws {
-        let value = try TeamsPointerParser.parseConversation(id: "c1", data: document(["lastMessage": NSNull(), "botKey": nil, "lastSeq": 0]), lastReadSeq: 0, millis: millis)
+        let value = try TeamsPointerParser.parseConversation(id: "c1", data: document(["lastMessage": NSNull(), "sharedBotId": nil, "lastSeq": 0]), lastReadSeq: 0, millis: millis)
         XCTAssertNil(value.lastMessage)
-        XCTAssertNil(value.botKey)
-        XCTAssertEqual(value.effectiveBotKey, "bot:t1:h:helper", "falls back to the first bot: participant")
+        XCTAssertNil(value.sharedBotId)
+        XCTAssertEqual(value.effectiveSharedBotId, "sharedbot_helper", "falls back to the first bot: participant")
     }
 
     func testAnEmptyBotKeyIsNoBotKey() throws {
-        XCTAssertNil(try TeamsPointerParser.parseConversation(id: "c", data: document(["botKey": ""]), lastReadSeq: 0, millis: millis).botKey)
-        XCTAssertNil(try TeamsPointerParser.parseConversation(id: "c", data: document(["botKey": NSNull()]), lastReadSeq: 0, millis: millis).botKey)
+        XCTAssertNil(try TeamsPointerParser.parseConversation(id: "c", data: document(["sharedBotId": ""]), lastReadSeq: 0, millis: millis).sharedBotId)
+        XCTAssertNil(try TeamsPointerParser.parseConversation(id: "c", data: document(["sharedBotId": NSNull()]), lastReadSeq: 0, millis: millis).sharedBotId)
     }
 
     func testAnyBrokenFieldIsInvalidData() {
@@ -131,7 +131,7 @@ final class TeamsPointerParserTests: XCTestCase {
             ["participants": nil], ["participants": ["user:u1", 4]], ["participants": "user:u1"],
             ["lastSeq": nil], ["lastSeq": 1.5], ["lastSeq": "5"],
             ["lastChangeSeq": nil], ["lastChangeSeq": true],
-            ["botKey": 7],
+            ["sharedBotId": 7],
         ]
         for changes in broken {
             XCTAssertThrowsError(try TeamsPointerParser.parseConversation(id: "c", data: document(changes), lastReadSeq: 0, millis: millis), "\(changes)") { error in

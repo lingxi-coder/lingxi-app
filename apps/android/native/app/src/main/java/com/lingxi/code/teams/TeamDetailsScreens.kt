@@ -219,10 +219,10 @@ private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(messaging
                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        else -> items(messaging.bots, key = { "bot-${it.key}" }) { bot ->
+        else -> items(messaging.bots, key = { "bot-${it.sharedBotId}" }) { bot ->
             TeamBotCardView(
-                bot, detail?.members?.firstOrNull { it.uid == bot.ownerUid }?.displayName ?: bot.ownerUid, uid, !messaging.offline,
-                onMessage = { onMessageBot(bot.key) }, onUnbind = { workspace.messagingModel.unbind(bot) },
+                bot, detail?.members?.firstOrNull { it.uid == bot.maintainer.uid }?.displayName ?: bot.maintainer.uid, uid, messaging.cache?.generation ?: 0, !messaging.offline,
+                onMessage = { onMessageBot(bot.sharedBotId) }, onPause = { workspace.messagingModel.pause(bot) },
             )
         }
     }
@@ -241,9 +241,9 @@ internal fun ConversationDetailsSheet(
                 Column(Modifier.weight(1f)) {
                     Text(person.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     if (person.isBot) {
-                        val card = bots.firstOrNull { it.avatarId == person.id || it.key == person.id }
+                        val card = bots.firstOrNull { it.avatarId == person.id || it.sharedBotId == person.id }
                         if (card != null) {
-                            val owner = members.firstOrNull { it.uid == card.ownerUid }?.displayName ?: card.ownerUid
+                            val owner = members.firstOrNull { it.uid == card.maintainer.uid }?.displayName ?: card.maintainer.uid
                             Text(stringResource(R.string.teams_bot_owner_fmt, owner), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }

@@ -447,7 +447,7 @@ final class TeamsWorkspace {
         if draft.isEmpty { drafts.removeValue(forKey: draftKey(conversationID)) } else { drafts[draftKey(conversationID)] = draft }
     }
 
-    private func draftKey(_ conversationID: String) -> String { "\(selectedTeamID):\(conversationID)" }
+    private func draftKey(_ conversationID: String) -> String { "\(uid ?? ""):\(selectedTeamID):\(team?.generation ?? 0):\(conversationID)" }
 
     // MARK: Messaging actions
 
@@ -474,8 +474,8 @@ final class TeamsWorkspace {
         let id = UUID().uuidString
         let done = await run {
             guard let model = self.messaging else { throw TeamMessageFailure(code: "INVALID_SESSION") }
-            if botParties.contains(where: { key in !model.bots.contains { $0.key == key && $0.selectable } }) { throw TeamMessageFailure(code: "BOT_USE_REQUIRED") }
-            try await model.create(kind: kind, title: JSText.trim(title), uids: parties, botKeys: botParties, id: id)
+            if botParties.contains(where: { key in !model.bots.contains { $0.sharedBotId == key && $0.selectable } }) { throw TeamMessageFailure(code: "BOT_USE_REQUIRED") }
+            try await model.create(kind: kind, title: JSText.trim(title), uids: parties, sharedBotIds: botParties, id: id)
         }
         return done ? id : nil
     }
@@ -487,12 +487,12 @@ final class TeamsWorkspace {
         let done = await run {
             guard let model = self.messaging, let uid = self.uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
             guard bot.selectable else { throw TeamMessageFailure(code: "BOT_USE_REQUIRED") }
-            if !fresh, let existing = TeamsListLogic.findBotDm(model.cache?.conversations ?? [], uid: uid, botKey: bot.key) {
+            if !fresh, let existing = TeamsListLogic.findBotDm(model.cache?.conversations ?? [], uid: uid, sharedBotId: bot.sharedBotId) {
                 opened = existing.id
                 return
             }
             let id = UUID().uuidString
-            try await model.create(kind: "bot_dm", title: bot.name, uids: [], botKeys: [bot.key], id: id)
+            try await model.create(kind: "bot_dm", title: bot.name, uids: [], sharedBotIds: [bot.sharedBotId], id: id)
             opened = id
         }
         return done ? opened : nil

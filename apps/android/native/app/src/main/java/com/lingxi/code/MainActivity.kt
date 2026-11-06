@@ -301,15 +301,17 @@ class MainActivity : ComponentActivity() {
             var requestedFeatureLink by remember { mutableStateOf<com.lingxi.code.navigation.DeepLink?>(null) }
             var deepLinkBlocked by remember { mutableStateOf(false) }
             var pendingImportRaw by rememberSaveable { mutableStateOf<String?>(null) }
+            var botMarketHandoffRaw by rememberSaveable { mutableStateOf<String?>(null) }
+            val botMarketHandoff = com.lingxi.code.navigation.DeepLink.parse(botMarketHandoffRaw)
             val pendingImport = com.lingxi.code.navigation.DeepLink.parse(pendingImportRaw)
-            LaunchedEffect(canonicalLinks, terminalOpen, requestedFeatureLink, pendingImport, prefs.setupDone, activeConversationSource, activeConversationBusy, activityLifecycle, deepLinkBlocked) {
+            LaunchedEffect(canonicalLinks, terminalOpen, requestedFeatureLink, pendingImport, botMarketHandoffRaw, prefs.setupDone, activeConversationSource, activeConversationBusy, activityLifecycle, deepLinkBlocked) {
                 val raw = linkInbox.next(com.lingxi.code.navigation.DeepLinkReadiness(
                     foreground = activityLifecycle.isAtLeast(Lifecycle.State.RESUMED),
                     onboardingComplete = prefs.setupDone,
                     sourceBound = activeConversationSource != null,
                     engineBusy = activeConversationBusy,
                     // Settings is a tab now, not a blocking surface (an unsaved edit is still guarded by its own page).
-                    blockingSurfaceOpen = terminalOpen || requestedFeatureLink != null || pendingImport != null || deepLinkBlocked,
+                    blockingSurfaceOpen = terminalOpen || requestedFeatureLink != null || pendingImport != null || botMarketHandoff != null || deepLinkBlocked,
                 ))
                 val link = com.lingxi.code.navigation.DeepLink.parse(raw)
                 if (link != null) {
@@ -321,6 +323,7 @@ class MainActivity : ComponentActivity() {
                     // own handler then runs inside that tab.
                     val landingTab = TabLogic.tabForLink(link.route).tab
                     when {
+                        link.route.startsWith("market/bot/") -> { botMarketHandoffRaw = raw; com.lingxi.code.apps.BotMarketHandoff(parts[2], link.params["versionId"], link.params["intentId"]).save(applicationContext) }
                         link.route in setOf("team/join", "team/inbox") -> tabState.requestTeams(link.params["code"])
                         parts.first() == "remote" -> com.lingxi.code.remote.RemoteRoute.fromLink(link)
                             ?.let { tabState.requestBots(it.hostId, it.sessionId) } ?: run { handled = false }
@@ -439,7 +442,7 @@ class MainActivity : ComponentActivity() {
                     MainTabShell(
                         state = tabState,
                         // Full-screen overlays drawn above the shell cover its bar (and rail).
-                        overlayOpen = !prefs.setupDone || terminalOpen || pendingImport != null,
+                        overlayOpen = !prefs.setupDone || terminalOpen || pendingImport != null || botMarketHandoff != null,
                         chats = {
                             RootScreen(
                                 isDark = darkTheme,
@@ -556,6 +559,12 @@ class MainActivity : ComponentActivity() {
                         },
                     )
 
+                    botMarketHandoff?.let { handoff ->
+                        androidx.activity.compose.BackHandler { botMarketHandoffRaw = null }
+                        androidx.compose.material3.Surface(modifier = Modifier.fillMaxSize()) {
+                            com.lingxi.code.apps.BotMarketHandoffPage(handoff.route.split('/')[2], handoff.params["versionId"], handoff.params["intentId"], onBack = { botMarketHandoffRaw = null })
+                        }
+                    }
                     // The import preview of a lingxi://import link: above whichever tab is showing.
                     DeepLinkImportOverlay(
                         link = pendingImport,

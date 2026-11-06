@@ -2009,12 +2009,15 @@ struct RootView: View {
                 currentMode: { activeMode },
                 captureImportPresentation: { captureLocalAppActionPresentation(route: .apps) },
                 onCreate: { name, prompt in try await queueLocalAppCreation(name: name, prompt: prompt) },
-                onRecoverCreation: { resumeLocalAppCreation($0) })
+                onRecoverCreation: { resumeLocalAppCreation($0) },
+                onResumeBotHandoff: { navigation.openMarketBot($0.listingID, versionID: $0.versionID, intentID: $0.intentID) })
         case .localApp(let appID):
             LocalAppDetailPage(library: LocalApps.library, market: LocalApps.market, appId: appID,
                 onOpenApp: { navigation.runApp($0) }, onDevelop: continueLocalAppDevelopment,
                 onRestore: queueLocalAppRestore, onRemix: queueInstalledLocalAppRemix, currentMode: { activeMode },
                 captureActionPresentation: { captureLocalAppActionPresentation(route: .localApp(id: appID)) })
+        case .marketBot(let botID, let versionID, let intentID):
+            BotMarketHandoffPage(listingID: botID, versionID: versionID, intentID: intentID, marketURL: LocalApps.market.browseURL)
         case .marketApp(let appID):
             MarketInstallPage(library: LocalApps.library, market: LocalApps.market, appId: appID,
                 onOpenApp: { navigation.openLocalApp($0) }, currentMode: { activeMode },
@@ -3618,7 +3621,7 @@ struct RootView: View {
     private func applyAppAction(_ action: LingxiAppAction, approvedDraftChange: Bool = false) -> Bool {
         // The Bots and Teams tabs preserve the local source and draft. They also work
         // when the local engine has not booted or is waiting for an answer.
-        if case let .canonical(target) = action, ["remote", "team"].contains(target.parts.first ?? "") {
+        if case let .canonical(target) = action, (["remote", "team"].contains(target.parts.first ?? "") || target.route.hasPrefix("market/bot/")) {
             guard app.setupDone else { return false }
             return applyCanonicalLink(target)
         }
@@ -3814,7 +3817,9 @@ struct RootView: View {
                     _ = missingLinkedResource("installed app")
                 }
             }
-        case "market": navigation.openMarketApp(id)
+        case "market":
+            if id == "bot", parts.count == 3 { navigation.openMarketBot(parts[2], versionID: target.params["versionId"], intentID: target.params["intentId"]) }
+            else { navigation.openMarketApp(id) }
         case "import":
             guard target.payloadJSON != nil else { externalLinkError = String(localized: "deep_link_import_no_configuration"); return true }
             externalImport = target

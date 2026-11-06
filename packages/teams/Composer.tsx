@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactElement } from 'react';
-import { teamBotUsable, type TeamBotCard } from './bots.js';
+import { sharedBotUsable, type SharedBotCard } from './execution.js';
 import { byteLength, canSendText, mentionAt, mentionCandidates, MESSAGE_BYTES, sendsOnEnter, snippet, withoutMention } from './compose.js';
 import type { TeamConversation, TeamMessage } from './messages.js';
 import { Avatar, Icon, useIsoLayoutEffect, type RenderAvatar } from './ui';
@@ -13,13 +13,13 @@ export const MAX_TARGETS = 8;
  * who is not a participant only observes. A Bot dm needs its Bot to be usable: until the Bot list
  * is known (or when it could not be fetched) sending waits rather than guessing.
  */
-export function composerLock(input: { uid: string; conversation: Pick<TeamConversation, 'kind' | 'participants'>; bots: readonly TeamBotCard[]; botsLoaded: boolean; botsUnverified: boolean }, zh: boolean): string {
+export function composerLock(input: { uid: string; conversation: Pick<TeamConversation, 'kind' | 'participants'>; bots: readonly SharedBotCard[]; botsLoaded: boolean; botsUnverified: boolean }, zh: boolean): string {
   const t = (en: string, cn: string) => zh ? cn : en;
   const { conversation } = input;
   if (conversation.participants.length && !conversation.participants.includes(`user:${input.uid}`)) {
     return t('You can read this conversation because you own its Bot, but only participants can send messages.', '你因拥有其中的 Bot 而可阅读此会话，但只有参与者可以发送消息。');
   }
-  if (conversation.kind === 'bot_dm' && !input.bots.some(bot => teamBotUsable(bot) && conversation.participants.includes(bot.key))) {
+  if (conversation.kind === 'bot_dm' && !input.bots.some(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`))) {
     if (input.botsUnverified) return t('Bot availability could not be verified. Reconnect to check.', '未能确认 Bot 可用状态，请联网后重试。');
     if (!input.botsLoaded) return t('Checking whether this Bot is available…', '正在确认此 Bot 是否可用…');
     return t('This Bot is not available to you right now.', '此 Bot 目前对你不可用。');
@@ -69,9 +69,9 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
   const candidates = mention && mention.start !== dismissed && targets.length < MAX_TARGETS ? mentionCandidates(snapshot.bots, conversation, targets, mention.query) : [];
   const open = candidates.length > 0;
   const choice = Math.min(active, Math.max(0, candidates.length - 1));
-  const askable = asks && snapshot.bots.some(bot => teamBotUsable(bot) && conversation.participants.includes(bot.key));
+  const askable = asks && snapshot.bots.some(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`));
   const bytes = byteLength(text);
-  const botName = (key: string) => snapshot.bots.find(bot => bot.key === key)?.name ?? 'Bot';
+  const botName = (key: string) => snapshot.bots.find(bot => bot.sharedBotId === key)?.name ?? 'Bot';
 
   // An edit borrows the box: the draft is set aside and comes back when the edit ends.
   useEffect(() => {
@@ -99,10 +99,10 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
     setText(value); setCaret(event.target.selectionStart); setActive(0); setDismissed(-1);
     if (!editing) workspace.setDraft(conversation.id, value);
   };
-  const pick = (bot: TeamBotCard) => {
+  const pick = (bot: SharedBotCard) => {
     if (!mention) return;
     const next = withoutMention(text, mention.start, caret);
-    setTargets(old => [...old, bot.key]);
+    setTargets(old => [...old, bot.sharedBotId]);
     setText(next); caretTo.current = mention.start;
     workspace.setDraft(conversation.id, next);
     input.current?.focus();
@@ -123,7 +123,7 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
     const ok = await workspace.run(async () => {
       const model = snapshot.messaging;
       if (!model) return;
-      if (!changing && targets.some(key => !snapshot.bots.some(bot => bot.key === key && teamBotUsable(bot)))) throw new Error('BOT_USE_REQUIRED');
+      if (!changing && targets.some(key => !snapshot.bots.some(bot => bot.sharedBotId === key && sharedBotUsable(bot)))) throw new Error('BOT_USE_REQUIRED');
       await model.queue(changing ? 'edit' : 'create', body, changing?.id, answering?.id, changing ? [] : targets);
     });
     if (!ok) return;
@@ -158,10 +158,10 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
     </ul> : null}
     <div className="tw-compose-box">
       {open ? <ul id={listId} role="listbox" className="tw-mentions" aria-label={t('Bots you can ask', '可请求的 Bot')}>
-        {candidates.map((bot, index) => <li key={bot.key} id={`${listId}-${index}`} role="option" aria-selected={index === choice} className="tw-mention"
+        {candidates.map((bot, index) => <li key={bot.sharedBotId} id={`${listId}-${index}`} role="option" aria-selected={index === choice} className="tw-mention"
           onMouseDown={event => { event.preventDefault(); pick(bot); }}>
-          <Avatar identity={{ kind: 'bot', id: bot.botId || bot.key, name: bot.name }} size={20} render={renderAvatar} />
-          <b>{bot.name}</b><small>{bot.online ? t('Online', '在线') : t('Offline · queued', '离线 · 将排队')}</small>
+          <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={20} render={renderAvatar} />
+          <b>{bot.name}</b><small>{bot.ready ? t('Online', '在线') : t('Host unavailable', '宿主不可用')}</small>
         </li>)}
       </ul> : null}
       <textarea ref={input} rows={1} value={text} onChange={change} onSelect={event => setCaret(event.currentTarget.selectionStart)} onKeyDown={keys}

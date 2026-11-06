@@ -25,10 +25,10 @@ final class TeamsTests: XCTestCase {
             (["INVALID_DATA", "INVALID_MESSAGE_SNAPSHOT"], "teams_error_invalid_data"),
             (["MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED"], "teams_stale_error"),
             (["BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "BOT_SELECTION_STALE"], "teams_error_bot_access_changed"),
-            (["QUESTION_RECIPIENT_REQUIRED", "ANSWER_CONFLICT", "INVALID_ANSWER"], "teams_error_answer_rejected"),
+            (["REQUEST_QUOTA_EXCEEDED"], "teams_error_request_quota"),
             (["MESSAGE_LISTENER_FAILED"], "teams_error_sync_failed"),
             (["MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT",
-              "RECOVERY_NOT_REQUIRED", "BOT_RESULT_CONFLICT", "BOT_REVISION_CONFLICT", "BOT_OWNER_REQUIRED", "MESSAGE_IN_FLIGHT", "REPLY_REQUIRED"], "teams_message_failed"),
+              "BOT_REVISION_CONFLICT", "MAINTAINER_REQUIRED", "MESSAGE_IN_FLIGHT", "REPLY_REQUIRED"], "teams_message_failed"),
             (["INVITE_UNAVAILABLE"], "teams_invite_error"),
             (["STORAGE_FAILED", "MESSAGE_STORAGE_FULL"], "teams_messages_storage_error"),
             (["SERVICE_UNAVAILABLE", "UNKNOWN", "SOMETHING_NEW", ""], "teams_error"),
@@ -52,23 +52,14 @@ final class TeamsTests: XCTestCase {
 
     // MARK: Words
 
-    func testRunAndHostLabelsCoverEveryStateAndExistInBothLanguages() throws {
+    func testTaskLabelsCoverOnlyExecutionTwoStatesAndExistInBothLanguages() throws {
         let states: [String: String] = [
-            "queued": "cron_status_queued", "pending": "cron_status_queued", "claimed": "teams_run_preparing", "running": "teams_run_processing",
-            "recovery": "teams_run_recovery", "recovered": "teams_run_recovered", "completed": "chat_status_completed", "failed": "chat_status_failed",
-            "missed": "teams_run_missed", "cancelled": "chat_status_cancelled", "revoked": "teams_run_revoked",
+            "queued": "cron_status_queued", "running": "teams_run_processing", "completed": "chat_status_completed", "failed": "chat_status_failed",
+            "expired": "teams_task_expired", "interrupted": "teams_task_interrupted", "authorization_required": "teams_task_authorization_required", "revoked": "teams_run_revoked",
         ]
         for (state, key) in states { XCTAssertEqual(TeamsBotText.stateKey(state), key, state) }
-        XCTAssertEqual(TeamsBotText.stateKey("a state from the future"), "chat_status_unknown", "An unknown state reads as unknown, never as a raw code")
-        let hosts: [String: String] = [
-            "retrying": "teams_run_host_retrying", "result_pending": "teams_run_host_result_pending", "recovery_required": "teams_run_host_recovery_required",
-            "model_unavailable": "teams_run_host_model_unavailable", "runtime_unavailable": "teams_run_host_runtime_unavailable", "storage_error": "teams_run_host_storage_error",
-        ]
-        for (status, key) in hosts { XCTAssertEqual(TeamsBotText.hostKey(status), key, status) }
-        XCTAssertNil(TeamsBotText.hostKey(nil))
-        XCTAssertNil(TeamsBotText.hostKey("something else"))
-        // `allKeys` is exactly what the two tables can answer, and every one of them is translated.
-        XCTAssertEqual(Set(TeamsBotText.allKeys), Set(states.values).union(hosts.values).union(["chat_status_unknown"]))
+        for retired in ["pending", "claimed", "recovery", "recovered", "missed", "cancelled"] { XCTAssertEqual(TeamsBotText.stateKey(retired), "chat_status_unknown") }
+        XCTAssertEqual(Set(TeamsBotText.allKeys), Set(states.values).union(["chat_status_unknown"]))
         let catalogue = try Catalogue.load()
         for key in TeamsBotText.allKeys {
             XCTAssertFalse((catalogue.value(key, "en") ?? "").isEmpty, "\(key) has no English text")

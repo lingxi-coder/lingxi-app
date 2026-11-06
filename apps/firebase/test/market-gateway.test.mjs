@@ -1,9 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Writable } from 'node:stream';
 import { createMarketGateway } from '../src/market-gateway.mjs';
-const result = () => ({ headers: {}, code: 0, body: null,
-  set(k, v) { this.headers[k.toLowerCase()] = v; return this; },
-  status(n) { this.code = n; return this; }, send(value) { this.body = value; return this; } });
+const result = () => {
+  const chunks = [];
+  const response = new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); },
+    final(done) { if (response.body === null) response.body = Buffer.concat(chunks); done(); } });
+  return Object.assign(response, { headers: {}, code: 0, body: null,
+    set(k, v) { this.headers[k.toLowerCase()] = v; return this; },
+    status(n) { this.code = n; return this; }, send(value) { this.body = value; this.end(); return this; } });
+};
 test('Hosting gateway preserves Firebase identity and strong revision tags without forwarding cookies or caller proxy keys', async () => {
   const body = Buffer.from('{"visibility":"public"}'); let call;
   const gateway = createMarketGateway({ origin: 'https://market.example.run.app', secret: () => 'server-only', fetcher: async (...args) => { call = args; return new Response('{"data":{}}', { headers: { ETag: '"app-1-r2"', 'Set-Cookie': 'ignored=1' } }); } });
@@ -41,10 +47,25 @@ test('Hosting gateway forwards v2 source release distribution and capabilities w
   res = result();
   await gateway({ originalUrl: '/api/v2/capabilities', method: 'GET', headers: {} }, res);
   assert.equal(calls[1][0].href, 'https://market.example.run.app/api/v2/capabilities');
-  for (const path of ['/api/v1/apps', '/api/v20/apps', '/api/v3/apps', '/api/v2', '/internal/v2/apps']) {
+  for (const path of ['/api/v1/apps', '/api/v20/apps', '/api/v2', '/internal/v2/apps']) {
     res = result();
     await gateway({ originalUrl: path, method: 'GET', headers: {} }, res);
     assert.equal(res.code, 404);
   }
   assert.equal(calls.length, 2);
+});
+
+test('Hosting gateway streams authenticated v3 private package ranges and preserves disposition/security headers', async () => {
+  let call;
+  const gateway = createMarketGateway({ origin: 'https://market.example.run.app', secret: () => 'server-only', fetcher: async (...args) => {
+    call = args;
+    return new Response(new Uint8Array([1, 2, 3]), { status: 206, headers: { 'Content-Range': 'bytes 10-12/100',
+      'Accept-Ranges': 'bytes', 'Content-Disposition': 'attachment; filename="assistant.zip"', 'X-Content-Type-Options': 'nosniff' } });
+  } });
+  const res = result();
+  await gateway({ originalUrl: '/api/v3/bots/example/package', method: 'GET', headers: { authorization: 'Bearer fixture', range: 'bytes=10-12' } }, res);
+  assert.equal(call[1].headers.get('range'), 'bytes=10-12'); assert.equal(call[1].headers.get('authorization'), 'Bearer fixture');
+  assert.equal(res.code, 206); assert.deepEqual(res.body, Buffer.from([1, 2, 3]));
+  assert.equal(res.headers['content-range'], 'bytes 10-12/100'); assert.equal(res.headers['accept-ranges'], 'bytes');
+  assert.equal(res.headers['x-content-type-options'], 'nosniff'); assert.match(res.headers['content-disposition'], /attachment/u);
 });

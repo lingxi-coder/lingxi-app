@@ -29,6 +29,7 @@ export interface TeamSidebarProps {
   /** An invitation opened from a link. The join dialog opens with it filled in, but never joins by itself. */
   initialInvite?: string;
   onInviteHandled?(): void;
+  onInviteResolved?(): void;
   /** BCP 47 tag for times; defaults to `zh-CN` or `en-US` from `zh`. */
   locale?: string;
   /** The current time, for the "Yesterday" and weekday labels. Defaults to now. */
@@ -71,7 +72,7 @@ type DialogState = { kind: 'createTeam' } | { kind: 'joinTeam'; code: string } |
  * Channels, Direct messages and Bot DMs. It owns only transient UI state (menus, dialogs, the
  * focused row); everything else comes from the workspace.
  */
-export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSettings, onConversationSelected, onOpenDetails, initialInvite, onInviteHandled, locale, now, query }: TeamSidebarProps): ReactElement {
+export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSettings, onConversationSelected, onOpenDetails, initialInvite, onInviteHandled, onInviteResolved, locale, now, query }: TeamSidebarProps): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
   const tag = locale ?? (zh ? 'zh-CN' : 'en-US');
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -89,8 +90,8 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
   const groups = useMemo(() => groupConversations(snapshot.conversations, snapshot.uid), [snapshot.conversations, snapshot.uid]);
   const selectedId = snapshot.selectedConversationId, uid = snapshot.uid;
   const nowMs = now === undefined ? Date.now() : typeof now === 'number' ? now : now.getTime();
-  const authorName = (author: { kind: 'user' | 'bot'; uid: string; botKey?: string }) => author.kind === 'bot'
-    ? snapshot.bots.find(bot => bot.key === author.botKey)?.name || 'Bot'
+  const authorName = (author: import('./messages').MessageAuthor) => author.kind === 'shared_bot'
+    ? snapshot.bots.find(bot => bot.sharedBotId === author.sharedBotId)?.name || 'Bot'
     : snapshot.directory.find(member => member.uid === author.uid)?.displayName || (author.uid === uid ? t('You', '你') : t('Member', '成员'));
   const needle = (query ?? '').trim().toLocaleLowerCase(), searching = needle !== '';
   const matches = (conversation: TeamConversation): boolean => {
@@ -152,6 +153,7 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
           onClose={restore => { setSwitcherOpen(false); if (restore) switcherRef.current?.focus(); }} /> : null}
       </div>
     </header>
+    {team ? <button type="button" className="tw-home" aria-current={!selectedId ? 'page' : undefined} onClick={() => select('')}>{t('Assistants and recent work', '助手与最近成果')}</button> : null}
     {status ? <div className="tw-conn" role="status" data-kind={status.kind} title={status.detail}>
       <span className="tw-dot" aria-hidden="true" />
       <span className="tw-conn-text"><span className="tw-conn-label">{status.label}</span>{status.kind !== 'ok' ? <span className="tw-conn-detail">{status.detail}</span> : null}</span>
@@ -191,7 +193,7 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
       </div>}
 
     {dialog?.kind === 'createTeam' ? <CreateTeamDialog workspace={workspace} snapshot={snapshot} zh={zh} onClose={() => setDialog(null)} /> : null}
-    {dialog?.kind === 'joinTeam' ? <JoinTeamDialog workspace={workspace} snapshot={snapshot} zh={zh} initialCode={dialog.code} onClose={() => setDialog(null)} /> : null}
+    {dialog?.kind === 'joinTeam' ? <JoinTeamDialog workspace={workspace} snapshot={snapshot} zh={zh} initialCode={dialog.code} onClose={() => { setDialog(null); onInviteResolved?.(); }} /> : null}
     {dialog?.kind === 'channel' ? <NewConversationDialog workspace={workspace} snapshot={snapshot} zh={zh} mode="channel" renderAvatar={renderAvatar} onClose={() => setDialog(null)} /> : null}
     {dialog?.kind === 'direct' ? <NewConversationDialog workspace={workspace} snapshot={snapshot} zh={zh} mode="direct" renderAvatar={renderAvatar} onClose={() => setDialog(null)} /> : null}
     {dialog?.kind === 'botDm' ? <NewBotDmDialog workspace={workspace} snapshot={snapshot} zh={zh} renderAvatar={renderAvatar} onClose={() => setDialog(null)} /> : null}
@@ -205,7 +207,7 @@ function TeamMark({ id, name }: { id: string; name: string }): ReactElement {
 
 function ConversationRow({ conversation, snapshot, zh, renderAvatar, selected, tabStop, locale, now, authorName, menuOpen, onMenu, onFocusRow, onSelect, onMarkRead, onOpenDetails }: {
   conversation: TeamConversation; snapshot: TeamsSnapshot; zh: boolean; renderAvatar?: RenderAvatar; selected: boolean; tabStop: boolean; locale: string; now: number;
-  authorName(author: { kind: 'user' | 'bot'; uid: string; botKey?: string }): string; menuOpen: boolean;
+  authorName(author: import('./messages').MessageAuthor): string; menuOpen: boolean;
   onMenu(id: string): void; onFocusRow(id: string): void; onSelect(id: string): void; onMarkRead(id: string): void; onOpenDetails?(id: string): void;
 }): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;

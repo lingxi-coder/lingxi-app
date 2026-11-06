@@ -83,6 +83,10 @@ internal fun TeamsListScreen(
     onMarkRead: (TeamMessageConversation) -> Unit,
     onReconnect: () -> Unit,
     onDiscardCreation: () -> Unit,
+    onMessageBot: (String) -> Unit = {},
+    onArtifact: (String) -> Unit = {},
+    onRefreshTask: (String) -> Unit = {},
+    onDiscardCommand: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val team = teams.teams.firstOrNull { it.id == teams.selectedId }
@@ -148,12 +152,30 @@ internal fun TeamsListScreen(
                     if (messaging.error.isNotEmpty()) TeamsMessageState(stringResource(teamsErrorRes(messaging.error)), action = { TextButton(onClick = onReconnect) { Text(stringResource(R.string.common_retry)) } })
                     else Box(Modifier.fillMaxSize().testTag(TeamsTags.LOADING), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(28.dp)) }
                 }
-                conversations.isEmpty() && messaging.cache?.creation == null -> TeamsMessageState(
+                conversations.isEmpty() && messaging.cache?.creation == null && bots.isEmpty() && messaging.tasks.isEmpty() -> TeamsMessageState(
                     stringResource(R.string.teams_no_conversations), Modifier.testTag(TeamsTags.NO_CONVERSATIONS), body = stringResource(R.string.teams_no_conversations_hint),
                     action = { TextButton(onClick = { onNew("newMessage") }) { Text(stringResource(R.string.teams_conversation_new)) } },
                 )
                 visible.isEmpty() && query.isNotBlank() -> TeamsMessageState(stringResource(R.string.teams_no_matches), Modifier.testTag(TeamsTags.NO_MATCHES))
                 else -> LazyColumn(Modifier.fillMaxSize(), state = listState) {
+                    if (query.isBlank() && bots.any { it.selectable }) {
+                        item(key = "assistants") { Text(stringResource(R.string.teams_assistants), Modifier.padding(16.dp), style = MaterialTheme.typography.titleSmall) }
+                        items(bots.filter { it.selectable }, key = { "assistant-${it.sharedBotId}" }) { bot ->
+                            TextButton(onClick = { onMessageBot(bot.sharedBotId) }, modifier = Modifier.fillMaxWidth().testTag("teams.assistant.${bot.sharedBotId}")) {
+                                Text(bot.name + " · " + botAvailabilityText(bot))
+                            }
+                        }
+                    }
+                    if (query.isBlank() && messaging.tasks.isNotEmpty()) {
+                        item(key = "tasks") { Text(stringResource(R.string.teams_recent_tasks), Modifier.padding(16.dp), style = MaterialTheme.typography.titleSmall) }
+                        items(messaging.tasks, key = { "task-${it.taskId}" }) { task -> TeamTaskCard(task, bots.firstOrNull { it.sharedBotId == task.sharedBotId }?.name ?: strings.bot, onArtifact, onRefreshTask) }
+                    }
+                    items(messaging.cache?.commands.orEmpty().filter { it.has("error") }, key = { "command-${it.getString("commandId")}" }) { command ->
+                        Column(Modifier.padding(16.dp)) {
+                            Text(stringResource(teamsErrorRes(command.getString("error"))), style = MaterialTheme.typography.bodySmall)
+                            TextButton(onClick = { onDiscardCommand(command.getString("commandId")) }) { Text(stringResource(R.string.teams_message_discard)) }
+                        }
+                    }
                     messaging.cache?.creation?.let { creation ->
                         item(key = "creation") { PendingCreationRow(creation, now, onDiscardCreation) }
                     }
@@ -170,7 +192,7 @@ internal fun TeamsListScreen(
                             val unread = unreadOf(conversation)
                             val last = conversation.lastMessage
                             val preview = TeamsListLogic.conversationPreview(conversation, uid, strings) { message ->
-                                if (message.authorKind == "bot") bots.firstOrNull { it.key == message.authorBotKey }?.name ?: strings.bot
+                                if (message.authorKind == "shared_bot") bots.firstOrNull { it.sharedBotId == message.authorSharedBotId }?.name ?: strings.bot
                                 else members.firstOrNull { it.uid == message.authorUid }?.displayName?.takeIf { it.isNotEmpty() } ?: strings.member
                             }
                             ConversationRow(
@@ -258,7 +280,7 @@ private fun PendingCreationRow(creation: org.json.JSONObject, now: Long, onDisca
         else -> stringResource(R.string.teams_message_pending)
     }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        Text(creation.optString("title"), style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text((creation.optJSONObject("payload") ?: creation).optString("title"), style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(status, style = MaterialTheme.typography.bodySmall, color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
         TextButton(onClick = onDiscard, enabled = !(attempted && !failed) && creation.optLong("leaseUntil") <= now) { Text(stringResource(R.string.teams_message_discard)) }
         HorizontalDivider()

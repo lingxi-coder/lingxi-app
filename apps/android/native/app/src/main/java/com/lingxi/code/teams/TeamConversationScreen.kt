@@ -80,9 +80,9 @@ private sealed interface StreamItem {
     data object Earlier : StreamItem { override val key = "earlier" }
     data class Day(val row: StreamRow.Date) : StreamItem { override val key get() = row.key }
     data object NewMessages : StreamItem { override val key = "unread" }
-    data class Msg(val message: TeamMessage, val grouped: Boolean, val triggers: List<String>) : StreamItem { override val key get() = "message:${message.id}" }
+    data class Msg(val message: TeamMessage, val grouped: Boolean) : StreamItem { override val key get() = "message:${message.id}" }
     data class Local(val intent: JSONObject, val kind: String) : StreamItem {
-        override val key get() = "$kind:" + (intent.optString("changeId").ifEmpty { intent.optString("answerId").ifEmpty { intent.optString("settlementId") } })
+        override val key get() = "$kind:" + (intent.optJSONObject("payload") ?: intent).getString("changeId")
     }
 }
 
@@ -102,7 +102,7 @@ internal fun TeamConversationScreen(
     }
     val cache = messaging.cache
     val conversation = cache?.conversations?.firstOrNull { it.id == conversationId }
-    val creation = cache?.creation?.takeIf { it.optString("conversationId") == conversationId }
+    val creation = cache?.creation?.takeIf { (it.optJSONObject("payload") ?: it).optString("conversationId") == conversationId }
     val members = teams.detail?.members.orEmpty()
     val strings = rememberTeamsListStrings()
     val bots = messaging.bots
@@ -168,7 +168,7 @@ internal fun TeamConversationScreen(
 @Composable
 private fun conversationSubtitle(conversation: TeamMessageConversation, bots: List<TeamBotCard>): String? = when (conversation.kind) {
     "channel", "group" -> conversation.participants.count { it.startsWith("user:") }.takeIf { it > 0 }?.let { stringResource(R.string.teams_members_count_fmt, it) }
-    "bot_dm" -> bots.firstOrNull { it.key == conversation.botKey }?.let { botAvailabilityText(it) }
+    "bot_dm" -> bots.firstOrNull { it.sharedBotId == conversation.sharedBotId }?.let { botAvailabilityText(it) }
     else -> null
 }
 
@@ -214,27 +214,16 @@ private fun ConversationBody(
     val start = TeamsStreamLogic.visibleStart(streamMessages, startId, effectiveAnchor, uid)
     val rows = remember(streamMessages, start, effectiveAnchor, uid, minute) { TeamsStreamLogic.buildStreamRows(streamMessages.drop(start), effectiveAnchor, uid, minute, zone) }
     val byId = remember(messages) { messages.associateBy { it.id } }
-    // One run card per Bot trigger, on the newest message that belongs to it.
-    val triggersByMessage = remember(messages, start, conversation.kind, conversation.botKeys) {
-        val latest = LinkedHashMap<String, String>()
-        for (message in messages.drop(start)) for (trigger in teamBotTriggers(message, conversation)) latest[trigger] = message.id
-        latest.entries.groupBy({ it.value }, { it.key })
-    }
-    val outbox = cache?.outbox.orEmpty().filter { it.optString("conversationId") == conversationId }
-    val shownQuestions = remember(messages) { messages.mapNotNull { it.question?.id }.toSet() }
-    val shownTriggers = triggersByMessage.values.flatten().toSet()
-    val leftovers = cache?.answers.orEmpty().filter { it.optString("conversationId") == conversationId && it.optString("questionId") !in shownQuestions } +
-        cache?.settlements.orEmpty().filter { it.optJSONObject("body")?.optString("conversationId") == conversationId && it.optJSONObject("body")?.optString("triggerId") !in shownTriggers }
-    val stream: List<StreamItem> = remember(rows, byId, triggersByMessage, outbox, leftovers, start) {
+    val outbox = cache?.outbox.orEmpty().filter { (it.optJSONObject("payload") ?: it).optString("conversationId") == conversationId }
+    val stream: List<StreamItem> = remember(rows, byId, outbox, start) {
         buildList {
             add(if (start > 0) StreamItem.Earlier else StreamItem.Notice)
             for (row in rows) when (row) {
                 is StreamRow.Date -> add(StreamItem.Day(row))
                 StreamRow.Unread -> add(StreamItem.NewMessages)
-                is StreamRow.Message -> byId[row.message.id]?.let { add(StreamItem.Msg(it, row.grouped, triggersByMessage[it.id].orEmpty())) }
+                is StreamRow.Message -> byId[row.message.id]?.let { add(StreamItem.Msg(it, row.grouped)) }
             }
             outbox.forEach { add(StreamItem.Local(it, "pending")) }
-            leftovers.forEach { add(StreamItem.Local(it, if (it.has("answerId")) "answer" else "settlement")) }
         }
     }
 
@@ -283,7 +272,7 @@ private fun ConversationBody(
     val editing = editingId?.let { byId[it] }
     fun setDraft(next: ComposerDraft) { draft = next; workspace.setDraft(conversationId, next) }
     fun personName(id: String) = members.firstOrNull { it.uid == id }?.displayName?.takeIf { it.isNotEmpty() } ?: if (id == uid) strings.you else strings.member
-    fun authorOf(message: TeamMessage): String = if (message.authorKind == "bot") bots.firstOrNull { it.key == message.botKey }?.name ?: strings.bot else personName(message.authorUid)
+    fun authorOf(message: TeamMessage): String = if (message.authorKind == "shared_bot") message.authorDisplayName ?: bots.firstOrNull { it.sharedBotId == message.sharedBotId }?.name ?: strings.bot else personName(message.authorUid)
     val copyText = rememberCopyToClipboard("LingXi team message")
 
     Column(modifier) {
@@ -294,25 +283,17 @@ private fun ConversationBody(
                 items(stream, key = { it.key }) { item ->
                     when (item) {
                         StreamItem.Notice -> Text(stringResource(R.string.teams_disclosure), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        StreamItem.Earlier -> TextButton(onClick = { startId = messages.getOrNull(maxOf(0, start - TeamsStreamLogic.WINDOW_SIZE))?.id; workspace.messagingModel.showBotHistory(messages.size - maxOf(0, start - TeamsStreamLogic.WINDOW_SIZE)) }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.teams_messages_earlier)) }
+                        StreamItem.Earlier -> TextButton(onClick = { startId = messages.getOrNull(maxOf(0, start - TeamsStreamLogic.WINDOW_SIZE))?.id; workspace.messagingModel.refreshTasks() }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.teams_messages_earlier)) }
                         is StreamItem.Day -> Text(dayLabelText(item.row.kind, item.row.atMs), Modifier.fillMaxWidth().padding(vertical = 8.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                         StreamItem.NewMessages -> NewMessagesDivider()
                         is StreamItem.Msg -> MessageCell(
                             item, uid, conversation, bots, members, strings, messaging, tick, byId, ::authorOf,
                             onReply = { setDraft(draft.copy(replyToId = it.id)); editingId = null },
                             onEdit = { editingId = it.id; setDraft(draft.copy(replyToId = null)) },
-                            onRecall = onRecall, onCopy = { copyText(it.text) },
-                            onAnswer = { message, answers -> workspace.messagingModel.answer(message, answers) },
-                            onDiscardAnswer = { workspace.messagingModel.discardAnswer(it) },
-                            onRecover = { trigger, text -> workspace.messagingModel.recover(trigger, text) },
-                            onDiscardSettlement = { workspace.messagingModel.discardSettlement(it) },
+                            onRecall = onRecall, onCopy = { copyText(it.text) }, onArtifact = { workspace.messagingModel.openArtifact(it) }, onRefreshTask = { workspace.messagingModel.refreshTask(it) },
                         )
                         is StreamItem.Local -> LocalCommandRow(item, tick, onDiscard = {
-                            when (item.kind) {
-                                "pending" -> workspace.messagingModel.discard(item.intent.getString("changeId"))
-                                "answer" -> workspace.messagingModel.discardAnswer(item.intent.getString("answerId"))
-                                else -> workspace.messagingModel.discardSettlement(item.intent.getString("settlementId"))
-                            }
+                            workspace.messagingModel.discard((item.intent.optJSONObject("payload") ?: item.intent).getString("changeId"))
                         })
                     }
                 }
@@ -371,7 +352,7 @@ private fun MessageCell(
     item: StreamItem.Msg, uid: String, conversation: TeamMessageConversation, bots: List<TeamBotCard>, members: List<TeamMember>, strings: TeamsListStrings,
     messaging: TeamMessagingState, tick: androidx.compose.runtime.State<Long>, byId: Map<String, TeamMessage>, authorOf: (TeamMessage) -> String,
     onReply: (TeamMessage) -> Unit, onEdit: (TeamMessage) -> Unit, onRecall: (TeamMessage) -> Unit, onCopy: (TeamMessage) -> Unit,
-    onAnswer: (TeamMessage, Map<String, String>) -> Unit, onDiscardAnswer: (String) -> Unit, onRecover: (String, String) -> Unit, onDiscardSettlement: (String) -> Unit,
+    onArtifact: (String) -> Unit, onRefreshTask: (String) -> Unit,
 ) {
     val message = item.message
     var menu by remember { mutableStateOf(false) }
@@ -382,7 +363,7 @@ private fun MessageCell(
     val recall = stringResource(R.string.teams_message_recall)
     val copy = stringResource(R.string.chat_message_copy)
     val editable = canAct && own && message.kind == "text"
-    val card = bots.firstOrNull { it.key == message.botKey }
+    val card = bots.firstOrNull { it.sharedBotId == message.sharedBotId }
     Box {
         Row(
             Modifier.fillMaxWidth()
@@ -398,7 +379,7 @@ private fun MessageCell(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             if (item.grouped) Spacer(Modifier.size(32.dp))
-            else if (message.authorKind == "bot") BotAvatar(card?.avatarId ?: message.botKey?.let { com.lingxi.code.theme.AvatarIdentity.teamBotAvatarId(it) } ?: "bot", 32.dp)
+            else if (message.authorKind == "shared_bot") BotAvatar(card?.avatarId ?: message.sharedBotId ?: "shared_bot", 32.dp)
             else PersonAvatar(message.authorUid, authorOf(message), 32.dp)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 if (!item.grouped) Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -418,22 +399,14 @@ private fun MessageCell(
                 if (message.recalled) Text(stringResource(R.string.teams_message_recalled), style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 else Text(message.text, style = MaterialTheme.typography.bodyLarge)
                 if (message.editedAt != null && !message.recalled) Text(stringResource(R.string.teams_message_edited), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (message.question != null && !message.recalled) {
-                    val now = tick.value
-                    TeamBotQuestionCard(
-                        message, messaging.botRuns[message.triggerId], uid, messaging.cache?.generation ?: 0, now, messaging.offline,
-                        messaging.cache?.answers?.firstOrNull { it.optString("conversationId") == conversation.id && it.optString("questionId") == message.question.id },
-                        onAnswer = { onAnswer(message, it) }, onDiscard = onDiscardAnswer,
-                    )
+                val taskIds = message.taskId?.let { listOf(it) } ?: message.taskIds
+                taskIds.forEach { taskId ->
+                    val task = messaging.tasks.firstOrNull { it.taskId == taskId }
+                    if (task != null) TeamTaskCard(task, bots.firstOrNull { it.sharedBotId == task.sharedBotId }?.name ?: strings.bot, onArtifact, onRefreshTask)
+                    else TextButton(onClick = { onRefreshTask(taskId) }) { Text(stringResource(R.string.teams_task_view)) }
                 }
-                item.triggers.forEach { trigger ->
-                    val run = messaging.botRuns[trigger] ?: return@forEach
-                    TeamBotRunCard(
-                        botName = bots.firstOrNull { it.key == run.botKey }?.name ?: strings.bot, run = run, trigger = trigger, uid = uid, now = tick.value, online = !messaging.offline,
-                        settlement = messaging.cache?.settlements?.firstOrNull { it.optJSONObject("body")?.let { body -> body.optString("conversationId") == conversation.id && body.optString("triggerId") == trigger } == true },
-                        onRecover = { onRecover(trigger, it) }, onDiscardSettlement = onDiscardSettlement,
-                    )
-                }
+                if (taskIds.isEmpty()) message.artifactId?.let { id -> TextButton(onClick = { onArtifact(id) }) { Text(stringResource(R.string.teams_artifact_open)) } }
+
             }
         }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -453,19 +426,14 @@ private fun LocalCommandRow(item: StreamItem.Local, tick: androidx.compose.runti
     val intent = item.intent
     val failed = intent.has("error")
     val attempted = intent.optBoolean("attempted")
-    val body = if (item.kind == "pending") { if (intent.getString("operation") == "recall") stringResource(R.string.teams_message_recall) else intent.getString("text") } else null
+    val payload = intent.optJSONObject("payload") ?: intent
+    val body = if (payload.optString("operation") == "recall") stringResource(R.string.teams_message_recall) else payload.getString("text")
     val status = when {
-        failed -> stringResource(when (item.kind) { "answer" -> R.string.teams_question_rejected; "settlement" -> R.string.teams_recover_rejected; else -> teamsErrorRes(intent.getString("error")) })
-        item.kind == "answer" -> stringResource(R.string.teams_question_pending)
-        item.kind == "settlement" -> stringResource(R.string.teams_recover_saved)
+        failed -> stringResource(teamsErrorRes(intent.getString("error")))
         attempted -> stringResource(R.string.teams_message_confirming)
         else -> stringResource(R.string.teams_message_pending)
     }
-    val canDiscard = when (item.kind) {
-        "pending" -> !(attempted && !failed) && intent.optLong("leaseUntil") <= tick.value
-        "answer" -> failed
-        else -> canDiscardTeamBotIntent(intent, tick.value)
-    }
+    val canDiscard = !(attempted && !failed) && intent.optLong("leaseUntil") <= tick.value
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).clip(MaterialTheme.shapes.medium).background(MaterialTheme.colorScheme.surfaceVariant).padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         if (body != null) Text(body, style = MaterialTheme.typography.bodyMedium)
         Text(status, style = MaterialTheme.typography.labelSmall, color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)

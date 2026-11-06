@@ -39,7 +39,7 @@ struct TeamDetailsPage: View {
     @State private var ttl = 86400
     @State private var inviteRole = "member"
     @State private var confirmation: Confirmation?
-    @State private var unbinding: TeamBotCard?
+    @State private var pausing: TeamBotCard?
     @State private var copied = false
 
     var body: some View {
@@ -59,7 +59,7 @@ struct TeamDetailsPage: View {
         }
         .hidesTabBarWhenPushed(in: .teams)
         // A change of account or membership invalidates what the person was about to confirm.
-        .onChange(of: workspace.authority) { _, _ in confirmation = nil; unbinding = nil }
+        .onChange(of: workspace.authority) { _, _ in confirmation = nil; pausing = nil }
         .onChange(of: workspace.invitationLink) { _, _ in copied = false }
         // Leaving, deleting or losing the team leaves nothing to show.
         .onChange(of: workspace.team == nil) { _, gone in if gone { onClose() } }
@@ -119,15 +119,15 @@ struct TeamDetailsPage: View {
             Text(verbatim: pending.subject)
         }
         .confirmationDialog(
-            Text("teams_bot_unbind_title \(unbinding?.name ?? "")"),
-            isPresented: Binding(get: { unbinding != nil }, set: { if !$0 { unbinding = nil } }),
-            titleVisibility: .visible, presenting: unbinding
+            Text("teams_bot_pause"),
+            isPresented: Binding(get: { pausing != nil }, set: { if !$0 { pausing = nil } }),
+            titleVisibility: .visible, presenting: pausing
         ) { bot in
-            Button("teams_bot_unbind", role: .destructive) { unbind(bot) }
+            Button("teams_bot_pause", role: .destructive) { pause(bot) }
                 .disabled(workspace.messaging?.offline ?? true)
             Button("teams_cancel", role: .cancel) {}
         } message: { _ in
-            Text("teams_bot_unbind_detail")
+            Text("teams_bot_pause")
         }
     }
 
@@ -321,14 +321,14 @@ struct TeamDetailsPage: View {
         }
         Section {
             ForEach(bots) { bot in
-                let existing = workspace.uid.flatMap { TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: $0, botKey: bot.key) }
+                let existing = workspace.uid.flatMap { TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: $0, sharedBotId: bot.sharedBotId) }
                 TeamBotCardView(
-                    bot: bot, ownerName: userName(bot.ownerUid), isOwner: bot.ownerUid == workspace.uid,
+                    bot: bot, ownerName: userName(bot.maintainer.uid), isOwner: bot.maintainer == TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation),
                     busy: workspace.messageBusy || (offline && existing == nil),
                     onMessage: {
                         Task { if let id = await workspace.openBotDM(bot) { onOpenConversation(id) } }
                     },
-                    onUnbind: { unbinding = bot })
+                    onPause: { pausing = bot })
             }
             if bots.isEmpty && status == nil {
                 Text("teams_bots_none").font(.footnote).foregroundStyle(.secondary)
@@ -352,8 +352,8 @@ struct TeamDetailsPage: View {
         return id == workspace.uid ? strings.you : strings.member
     }
 
-    private func unbind(_ bot: TeamBotCard) {
-        Task { await workspace.run { try await workspace.messaging?.unbind(bot) } }
+    private func pause(_ bot: TeamBotCard) {
+        Task { await workspace.run { try await workspace.messaging?.pause(bot) } }
     }
 
     // MARK: Leave and delete

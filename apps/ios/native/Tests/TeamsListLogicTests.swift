@@ -18,10 +18,7 @@ final class TeamsListLogicTests: XCTestCase {
 
     private func bots() throws -> [TeamBotCard] {
         try MobileVectors.rows("bots").map {
-            TeamBotCard(key: try XCTUnwrap($0["key"] as? String), ownerUid: try XCTUnwrap($0["ownerUid"] as? String),
-                        hostId: try XCTUnwrap($0["hostId"] as? String), botId: try XCTUnwrap($0["botId"] as? String),
-                        name: try XCTUnwrap($0["name"] as? String), description: "", revision: 1, use: "all",
-                        enabled: $0["enabled"] as? Bool ?? true, permitted: try XCTUnwrap($0["permitted"] as? Bool), online: $0["online"] as? Bool ?? false)
+            try JSONDecoder().decode(TeamBotCard.self, from: JSONSerialization.data(withJSONObject: $0))
         }
     }
 
@@ -37,12 +34,12 @@ final class TeamsListLogicTests: XCTestCase {
         var pointer: TeamLastMessage?
         if row.keys.contains("at") {
             let atMs = (row["at"] as? String).map(Self.instant)
-            pointer = TeamLastMessage(id: "m" + id, seq: row["lastSeq"] as? Int ?? 0, atMs: atMs, authorKind: "user", authorUid: "u2", authorBotKey: nil, preview: "hi", recalled: false)
+            pointer = TeamLastMessage(id: "m" + id, seq: row["lastSeq"] as? Int ?? 0, atMs: atMs, authorKind: "user", authorUid: "u2", authorSharedBotId: nil, preview: "hi", recalled: false)
         }
         return TeamMessageConversation(
             id: id, kind: try XCTUnwrap(row["kind"] as? String), title: row["title"] as? String ?? "",
             participants: row["participants"] as? [String] ?? [], lastSeq: row["lastSeq"] as? Int ?? 0, lastChangeSeq: 0,
-            lastReadSeq: row["lastReadSeq"] as? Int ?? 0, botKey: row["botKey"] as? String, lastMessage: pointer)
+            lastReadSeq: row["lastReadSeq"] as? Int ?? 0, sharedBotId: row["sharedBotId"] as? String, lastMessage: pointer)
     }
 
     private func fixture() throws -> [String: TeamMessageConversation] {
@@ -149,7 +146,7 @@ final class TeamsListLogicTests: XCTestCase {
         let all = try fixture()
         let finds = try XCTUnwrap(MobileVectors.section("finds") as? [String: Any])
         let botDm = try XCTUnwrap(finds["botDm"] as? String), dm = try XCTUnwrap(finds["dm"] as? String)
-        XCTAssertEqual(TeamsListLogic.findBotDm([try XCTUnwrap(all["bd2"]), try XCTUnwrap(all["bd1"])], uid: uid, botKey: "bot:t1:h:helper")?.id, botDm)
+        XCTAssertEqual(TeamsListLogic.findBotDm([try XCTUnwrap(all["bd2"]), try XCTUnwrap(all["bd1"])], uid: uid, sharedBotId: "sharedbot_helper")?.id, botDm)
         XCTAssertEqual(TeamsListLogic.findDm([try XCTUnwrap(all["dm1"]), try XCTUnwrap(all["grp"])], uid: uid, peerUid: "u2")?.id, dm)
         XCTAssertNil(TeamsListLogic.findDm([try XCTUnwrap(all["dm1"])], uid: uid, peerUid: "u3"))
         XCTAssertTrue(finds.keys.contains("dmMissing"), "the vector states the missing case")
@@ -167,13 +164,13 @@ final class TeamsListLogicTests: XCTestCase {
                 pointer = TeamLastMessage(
                     id: try XCTUnwrap(last["id"] as? String), seq: try XCTUnwrap(last["seq"] as? Int),
                     atMs: (last["at"] as? String).map(Self.instant), authorKind: try XCTUnwrap(author["kind"] as? String),
-                    authorUid: try XCTUnwrap(author["uid"] as? String), authorBotKey: author["botKey"] as? String,
+                    authorUid: author["uid"] as? String ?? "", authorSharedBotId: author["sharedBotId"] as? String,
                     preview: try XCTUnwrap(last["preview"] as? String), recalled: last["recalled"] as? Bool ?? false)
             }
             let value = TeamMessageConversation(id: "x", kind: try XCTUnwrap(row["kind"] as? String), title: "", participants: ["user:u1", "user:u2"],
                                                 lastSeq: 1, lastChangeSeq: 1, lastReadSeq: 0, lastMessage: pointer)
             let text = TeamsListLogic.conversationPreview(value, uid: uid, strings: strings(zh: row["zh"] as? Bool ?? false)) { last in
-                last.authorKind == "bot" ? (names["bot"] ?? "") : (names[last.authorUid] ?? last.authorUid)
+                last.authorKind == "shared_bot" ? (names["bot"] ?? "") : (names[last.authorUid] ?? last.authorUid)
             }
             XCTAssertEqual(text, row["expect"] as? String, row["name"] as? String ?? "")
         }
@@ -192,7 +189,7 @@ final class TeamsListLogicTests: XCTestCase {
     func testTiesFallToLastSeqThenNumericTitleThenId() {
         func channel(_ id: String, _ title: String, seq: Int = 1, at: Int64? = nil) -> TeamMessageConversation {
             TeamMessageConversation(id: id, kind: "channel", title: title, participants: [], lastSeq: seq, lastChangeSeq: 0, lastReadSeq: 0,
-                                    lastMessage: at.map { TeamLastMessage(id: "m", seq: seq, atMs: $0, authorKind: "user", authorUid: "u2", authorBotKey: nil, preview: "", recalled: false) })
+                                    lastMessage: at.map { TeamLastMessage(id: "m", seq: seq, atMs: $0, authorKind: "user", authorUid: "u2", authorSharedBotId: nil, preview: "", recalled: false) })
         }
         XCTAssertLessThan(TeamsListLogic.compareConversations(channel("a", "x", at: 2), channel("b", "x", at: 1)), 0, "newer first")
         XCTAssertGreaterThan(TeamsListLogic.compareConversations(channel("a", "x"), channel("b", "x", at: 1)), 0, "a row with a time comes first")
@@ -206,23 +203,23 @@ final class TeamsListLogicTests: XCTestCase {
     func testAnEmptyParticipantListIsTheViewersOwnForTheBotDmOrder() {
         func botDm(_ id: String, _ participants: [String], at: Int64) -> TeamMessageConversation {
             TeamMessageConversation(id: id, kind: "bot_dm", title: "", participants: participants, lastSeq: 1, lastChangeSeq: 0, lastReadSeq: 0,
-                                    lastMessage: TeamLastMessage(id: "m", seq: 1, atMs: at, authorKind: "user", authorUid: "u2", authorBotKey: nil, preview: "", recalled: false))
+                                    lastMessage: TeamLastMessage(id: "m", seq: 1, atMs: at, authorKind: "user", authorUid: "u2", authorSharedBotId: nil, preview: "", recalled: false))
         }
-        let result = TeamsListLogic.groupConversations([botDm("other", ["user:u9", "bot:k"], at: 9), botDm("mine", ["user:u1", "bot:k"], at: 1), botDm("unlisted", [], at: 5)], uid: uid)
+        let result = TeamsListLogic.groupConversations([botDm("other", ["user:u9", "sharedbot_k"], at: 9), botDm("mine", ["user:u1", "sharedbot_k"], at: 1), botDm("unlisted", [], at: 5)], uid: uid)
         XCTAssertEqual(result.botDirect.map(\.id), ["unlisted", "mine", "other"])
     }
 
     func testBotLabelsFallBackAndTheEffectiveBotKeyIsTheFirstBotParticipant() throws {
         let bots = try bots(), members = try members()
-        // No botKey field: the first "bot:" participant is the Bot (Desktop `botKeyOf`).
-        let dm = TeamMessageConversation(id: "x", kind: "bot_dm", title: "Stored", participants: ["user:u1", "bot:t1:h:helper"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
-        XCTAssertEqual(dm.effectiveBotKey, "bot:t1:h:helper")
+        // No sharedBotId field: the first "bot:" participant is the Bot (Desktop `sharedBotIdOf`).
+        let dm = TeamMessageConversation(id: "x", kind: "bot_dm", title: "Stored", participants: ["user:u1", "shared_bot:sharedbot_helper"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
+        XCTAssertEqual(dm.effectiveSharedBotId, "sharedbot_helper")
         XCTAssertEqual(TeamsListLogic.conversationLabel(dm, members: members, uid: uid, bots: bots, strings: .en), "Helper")
         // No card and no title: the word "Bot".
-        let bare = TeamMessageConversation(id: "x", kind: "bot_dm", title: " ", participants: ["user:u1", "bot:zz"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
+        let bare = TeamMessageConversation(id: "x", kind: "bot_dm", title: " ", participants: ["user:u1", "shared_bot:sharedbot_zz"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
         XCTAssertEqual(TeamsListLogic.conversationLabel(bare, members: members, uid: uid, bots: bots, strings: .en), "Bot")
         // The owner reading two people's DM names all of them, with the Chinese separator in Chinese.
-        let reading = TeamMessageConversation(id: "x", kind: "bot_dm", title: "", participants: ["user:u2", "user:u3", "bot:t1:h:helper"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
+        let reading = TeamMessageConversation(id: "x", kind: "bot_dm", title: "", participants: ["user:u2", "user:u3", "shared_bot:sharedbot_helper"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
         XCTAssertEqual(TeamsListLogic.conversationLabel(reading, members: members, uid: uid, bots: bots, strings: .zh), "Helper · Ann、Bob")
     }
 
@@ -239,15 +236,15 @@ final class TeamsListLogicTests: XCTestCase {
     }
 
     func testParticipantsBeforeTheCardLoadsUseTheKeyAndTheWordBot() throws {
-        let dm = TeamMessageConversation(id: "x", kind: "bot_dm", title: "", participants: ["user:u1", "bot:t1:h:ghost"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
+        let dm = TeamMessageConversation(id: "x", kind: "bot_dm", title: "", participants: ["user:u1", "shared_bot:sharedbot_ghost"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
         let result = TeamsListLogic.conversationParticipants(dm, members: try members(), bots: [], uid: uid, strings: .en)
-        XCTAssertEqual(result.map(\.id), ["bot:t1:h:ghost", "u1"])
+        XCTAssertEqual(result.map(\.id), ["sharedbot_ghost", "u1"])
         XCTAssertEqual(result.map(\.name), ["Bot", "Me"])
         XCTAssertEqual(result.map(\.isSelf), [false, true])
     }
 
     func testThePreviewNamesTheAuthorOnlyInGroupsAndChannelsWithACallback() {
-        let pointer = TeamLastMessage(id: "m", seq: 1, atMs: 1, authorKind: "user", authorUid: "u2", authorBotKey: nil, preview: "hello", recalled: false)
+        let pointer = TeamLastMessage(id: "m", seq: 1, atMs: 1, authorKind: "user", authorUid: "u2", authorSharedBotId: nil, preview: "hello", recalled: false)
         func preview(kind: String, author: ((TeamLastMessage) -> String)?) -> String {
             let value = TeamMessageConversation(id: "x", kind: kind, title: "", participants: [], lastSeq: 1, lastChangeSeq: 0, lastReadSeq: 0, lastMessage: pointer)
             return TeamsListLogic.conversationPreview(value, uid: uid, strings: .en, author: author)

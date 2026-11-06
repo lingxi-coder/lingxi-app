@@ -65,6 +65,13 @@ fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String)
                 Icon(Icons.Outlined.Storefront, contentDescription = stringResource(R.string.local_app_v2_market))
             }
         })
+        BotMarketHandoff.pending(context)?.let { pending ->
+            TextButton(onClick = {
+                context.startActivity(android.content.Intent(context, com.lingxi.code.MainActivity::class.java)
+                    .setAction(android.content.Intent.ACTION_VIEW).setData(android.net.Uri.parse(pending.desktopUrl))
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP))
+            }, modifier = Modifier.padding(horizontal = 16.dp)) { Text("Resume Desktop Bot download") }
+        }
         TextButton(onClick = onRemoteApps, modifier = Modifier.padding(horizontal = 16.dp)) { Text(stringResource(R.string.remote_apps_browse)) }
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             TextButton(onClick = { authoringAction { creating = true } }) { Text(stringResource(R.string.local_app_v2_create)) }

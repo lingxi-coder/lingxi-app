@@ -2,7 +2,8 @@ import { EventEmitter } from 'node:events';
 import type { FirebaseOptions } from 'firebase/app';
 import { TeamsApiError, teamsTransport, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../../packages/teams';
 import type { MessageSignal, MessageSnapshot, MessageCommand } from '../../../../../packages/teams/messages';
-import type { BindLocalTeamBotInput, LocalTeamBot } from '../../../../../packages/teams/bots';
+import type { LocalPublishableBot, PublishLocalBotInput, SelectedSharedFile } from '../../../../../packages/teams/execution';
+import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source';
 import type { TeamsFirestoreSession, TeamsFirestoreOptions } from './firestore.js';
 
 interface Account {
@@ -13,11 +14,11 @@ interface Account {
 }
 export interface TeamAccountContext { uid: string; epoch: number }
 export interface LocalTeamHost {
-  localBots(uid: string): Promise<LocalTeamBot[]>;
-  bindLocalBot(uid: string, input: BindLocalTeamBotInput): Promise<{ botKey: string; revision: number }>;
+  localBots(uid: string): Promise<LocalPublishableBot[]>;
+  selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]>;
+  publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }>;
   invalidate(): void;
-  stopBinding(teamId: string, botKey: string): void;
-  runStatus?(uid: string, teamId: string, conversationId: string, triggerId: string): string | undefined;
+  stopBinding(teamId: string, sharedBotId: string): void;
   close(): void;
 }
 /** Main owns the credential and SDK; IPC carries only typed membership data. */
@@ -184,17 +185,14 @@ export class TeamsService {
   async messages<T>(command: MessageCommand, expectedUid: string): Promise<T> {
     if (this.account.snapshot().user?.uid !== expectedUid) throw new Error('INVALID_SESSION');
     if (!command || !/^[A-Za-z0-9_-]{8,64}$/u.test(command.teamId) || !Number.isSafeInteger(command.generation) || command.generation < 1) throw new Error('INVALID_INPUT');
-    // Runtime checks are required: IPC values do not acquire TypeScript's union.
-    if (!['create', 'read', 'mutate', 'bots', 'unbindBot', 'botState', 'botStates', 'botAnswer', 'recoverBot'].includes(command.action)) throw new Error('INVALID_INPUT');
-    if (command.action === 'unbindBot') this.host?.stopBinding(command.teamId, command.botKey);
+    if ('schemaVersion' in command) {
+      if (command.schemaVersion !== 1 || !['listSharedBots', 'createConversation', 'submit', 'pauseSharedBot', 'getTask', 'listTasks', 'readArtifact', 'setConversationPolicy'].includes(command.action)) throw new Error('INVALID_INPUT');
+      if (command.action === 'pauseSharedBot') this.host?.stopBinding(command.teamId, command.payload.sharedBotId);
+    } else if (!['create', 'read', 'mutate'].includes(command.action)) throw new Error('INVALID_INPUT');
     await this.connect(expectedUid);
     const result = await this.checked<T>(expectedUid, '/messages', command);
-    if (command.action === 'botState' && result && typeof result === 'object'
-      && (result as Record<string, unknown>).ownerUid === expectedUid) {
-      const hostStatus = this.host?.runStatus?.(expectedUid, command.teamId, command.conversationId, command.triggerId);
-      if (hostStatus) return { ...result, hostStatus };
-    }
-    if (command.action === 'unbindBot' || command.action === 'recoverBot') this.host?.invalidate();
+    if (command.action === 'pauseSharedBot') this.host?.invalidate();
+    if (['create','mutate','createConversation','submit','pauseSharedBot','setConversationPolicy'].includes(command.action)) this.events.emit('messages');
     return result;
   }
   async watchMessages(leaseId: string, uid: string, scope: { teamId: string; generation: number }, conversationId: string): Promise<void> {
@@ -228,10 +226,10 @@ export class TeamsService {
     this.events.on('snapshot', callback); return () => { this.events.off('snapshot', callback); };
   }
   attachHost(host: LocalTeamHost): void { if (this.host) throw new Error('TEAM_HOST_ALREADY_ATTACHED'); this.host = host; }
-  notifyHostChanged(): void { this.events.emit('messages'); }
-  localBots(uid: string): Promise<LocalTeamBot[]> { this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.localBots(uid); }
-  bindLocalBot(uid: string, input: BindLocalTeamBotInput): Promise<{ botKey: string; revision: number }> {
-    this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.bindLocalBot(uid, input);
+  localBots(uid: string): Promise<LocalPublishableBot[]> { this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.localBots(uid); }
+  selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]> { this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.selectSharedFiles(uid, instanceId); }
+  publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }> {
+    this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.publishLocalBot(uid, input);
   }
   /** Main-only capabilities; no IPC branch exposes these methods or commands. */
   hostContext(): TeamAccountContext | undefined { this.syncAccount(); return this.uid && this.account.snapshot().user?.uid === this.uid ? { uid: this.uid, epoch: this.epoch } : undefined; }
@@ -239,38 +237,29 @@ export class TeamsService {
     this.syncAccount();
     if (!this.uid || context.uid !== this.uid || context.epoch !== this.epoch || this.account.snapshot().user?.uid !== context.uid) throw new Error('INVALID_SESSION');
   }
-  async hostToken(context: TeamAccountContext): Promise<string> {
-    this.assertHostContext(context);
-    const token = await this.account.getIdToken();
-    this.assertHostContext(context);
-    if (!token || token.length > 32 * 1024) throw new Error('INVALID_SESSION');
-    return token;
-  }
   async hostMessages<T>(context: TeamAccountContext, command: Record<string, unknown>): Promise<T> {
     this.assertHostContext(context);
-    if (!['bots', 'bindBot', 'unbindBot', 'heartbeatBot', 'botQueue', 'botConversations'].includes(command.action as string)) throw new Error('INVALID_INPUT');
-    const session = await this.connect(context.uid);
-    this.assertHostContext(context);
-    const { collection, query, where, onSnapshot } = this.sdk!;
-    // SDK signals wake discovery; transactional HTTP queues arbitrate execution.
-    // Bot cards include owner-only disabled revisions and are intentionally HTTP
-    // only. Rules deny raw Bot SDK reads; do not attach an always-denied watch.
-    if (command.action === 'botConversations' && typeof command.teamId === 'string') {
-      const key = `host:${command.action}:${command.teamId}:${command.generation}`;
+    if (command.schemaVersion !== 1 || !['listSharedBots', 'publishSharedBot', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks', 'prepareTask', 'validateTask', 'startTask', 'completeTask'].includes(command.action as string)) throw new Error('INVALID_INPUT');
+    const session = await this.connect(context.uid); this.assertHostContext(context);
+    const { collection, onSnapshot } = this.sdk!;
+    if (command.action === 'listHostTasks' && typeof command.teamId === 'string') {
+      const key = `host:signals:${command.teamId}:${command.generation}`;
       if (!this.stops.has(key) && !this.failed.has(key)) {
-        const emit = () => { if (context.epoch === this.epoch) this.events.emit('messages'); };
-        const fail = () => { if (context.epoch === this.epoch && !this.failed.has(key)) {
-          for (const source of [key, `${key}:signals`]) { this.stops.get(source)?.(); this.stops.delete(source); }
-          this.failed.set(key, command.generation as number);
+        this.stops.set(key, (this.watchSnapshot ?? onSnapshot)(collection(session.db, 'teams', command.teamId, 'signals'), { includeMetadataChanges: true }, snapshot => {
+          if (context.epoch === this.epoch && !snapshot.metadata.fromCache) this.events.emit('messages');
+        }, () => {
+          if (context.epoch !== this.epoch) return;
+          this.stops.get(key)?.(); this.stops.delete(key); this.failed.set(key, command.generation as number);
           this.events.emit('change', { invalidated: true });
-        } };
-        const source = query(collection(session.db, 'teams', command.teamId, 'conversations'), where('memberUids', 'array-contains', context.uid));
-        this.stops.set(key, (this.watchSnapshot ?? onSnapshot)(source, { includeMetadataChanges: true }, snapshot => { if (!snapshot.metadata.fromCache) emit(); }, fail));
-        this.stops.set(`${key}:signals`, (this.watchSnapshot ?? onSnapshot)(collection(session.db, 'teams', command.teamId, 'signals'), { includeMetadataChanges: true }, snapshot => { if (!snapshot.metadata.fromCache) emit(); }, fail));
+        }));
       }
     }
-    const result = await this.checked<T>(context.uid, '/messages', command);
-    this.assertHostContext(context); return result;
+    const result = await this.checked<T>(context.uid, '/messages', command); this.assertHostContext(context); return result;
+  }
+  /** UI and every Bot read through the same UID/project message service and SDK cache. */
+  async hostReadChat(context: TeamAccountContext, request: ChatReadRequest): Promise<ChatReadResult> {
+    this.assertHostContext(context); const session = await this.connectMessages(context.uid); this.assertHostContext(context);
+    const result = await session.read(request); this.assertHostContext(context); return result;
   }
   execute(command: TeamCommand, expectedUid: string): Promise<TeamResult> { return this.checked(expectedUid, '', command); }
   close(): void { this.stopAccount(); this.host?.close(); this.host = undefined; this.reset(false); this.events.removeAllListeners(); }

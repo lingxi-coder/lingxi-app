@@ -18,7 +18,7 @@ interface PublicationReceipt {
   schema: 1; createKey: string; createBody: Omit<MarketPublication, 'notes'> & { instructions: string };
   appId?: string; releases: Record<string, PublicationRelease>;
 }
-async function durableWrite(path: string, bytes: string | Buffer): Promise<void> {
+export async function durableWrite(path: string, bytes: string | Buffer): Promise<void> {
   await fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
@@ -36,10 +36,9 @@ export function desktopTargets(): LocalAppTarget[] {
   const architecture = process.arch === 'arm64' ? 'aarch64' : process.arch === 'x64' ? 'x86_64' : process.arch === 'ia32' ? 'x86' : process.arch;
   return ['web', 'native'].map(environment => ({ platform, environment: environment as 'web' | 'native', architecture, runtimeVersion: '0.1.0', channels: ['desktop'], capabilities: ['process', 'files', 'clipboard', 'notifications', 'camera', 'microphone', 'background', 'agent', 'network'] }));
 }
-export class LocalAppMarketClient {
-  private static readonly publications = new Map<string, Promise<unknown>>();
+export class MarketApiClient {
   readonly base: URL;
-  constructor(private readonly store: CoreLocalAppStore, private readonly token: () => Promise<string>, base = localAppMarketApiRoot, private readonly fetcher: typeof fetch = fetch, private readonly accountId?: () => string | undefined) {
+  constructor(readonly token: () => Promise<string>, base = localAppMarketApiRoot, readonly fetcher: typeof fetch = fetch) {
     this.base = new URL(base.replace(/\/$/, '') + '/');
     if (this.base.protocol !== 'https:' && !['127.0.0.1', 'localhost'].includes(this.base.hostname)) throw new Error('Market requires HTTPS');
   }
@@ -55,6 +54,10 @@ export class LocalAppMarketClient {
     if (!response.ok) throw Object.assign(new Error(result.error?.message ?? `Market request failed (${response.status})`), { code: result.error?.code });
     return result.data as T;
   }
+}
+export class LocalAppMarketClient extends MarketApiClient {
+  private static readonly publications = new Map<string, Promise<unknown>>();
+  constructor(private readonly store: CoreLocalAppStore, token: () => Promise<string>, base = localAppMarketApiRoot, fetcher: typeof fetch = fetch, private readonly accountId?: () => string | undefined) { super(token, base, fetcher); }
   async install(remoteId: string, existing?: DesktopLocalApp): Promise<DesktopLocalApp> {
     if (existing && existing.marketOrigin?.appId !== remoteId) throw new Error('Update does not belong to this local installation');
     const candidates: Distribution[] = [];
@@ -114,7 +117,18 @@ export class LocalAppMarketClient {
     }, this.base.href, this.fetcher, this.accountId);
     await writer.token();
     const scope = sha256(Buffer.from(`${this.base.href}:${owner ?? 'default'}`));
-    const directory = join(this.store.directory(prepared.row.id), 'publications', scope);
+    return publishMarketPackage({ writer, directory: join(this.store.directory(prepared.row.id), 'publications', scope), digest: prepared.release.digest,
+      metadata, collection: 'apps', archive: () => packSource(prepared.directory, prepared.files) });
+  }
+}
+
+/** Shared immutable package journal. Persist command bodies/keys and bytes before any remote mutation. */
+export async function publishMarketPackage(options: {
+  writer: MarketApiClient; directory: string; digest: string; metadata: MarketPublication;
+  collection: 'apps' | 'bots'; archive(): Promise<Buffer>;
+}): Promise<{ appId: string; versionId: string; status: string }> {
+    const writer = options.writer;
+    const directory = options.directory;
     const receiptPath = join(directory, 'receipt.json');
     let receipt: PublicationReceipt;
     try {
@@ -122,10 +136,10 @@ export class LocalAppMarketClient {
       if (receipt.schema !== 1 || !receipt.createKey || !receipt.createBody || !receipt.releases || typeof receipt.releases !== 'object') throw new Error('Invalid publication receipt; preserve it for recovery');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      receipt = { schema: 1, createKey: randomUUID(), createBody: { name: metadata.name, summary: metadata.summary, description: metadata.description, category: metadata.category, instructions: '' }, releases: {} };
+      receipt = { schema: 1, createKey: randomUUID(), createBody: { name: options.metadata.name, summary: options.metadata.summary, description: options.metadata.description, category: options.metadata.category, instructions: '' }, releases: {} };
     }
     const save = () => durableWrite(receiptPath, JSON.stringify(receipt));
-    const digest = prepared.release.digest;
+    const digest = options.digest;
     if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error('Invalid local release digest');
     const archive = join(directory, digest, 'source.zip');
     let release = receipt.releases[digest];
@@ -136,17 +150,17 @@ export class LocalAppMarketClient {
       if (sha256(bytes) !== release.archiveHash || bytes.length !== release.sizeBytes) throw new Error('Prepared public archive changed; preserve it for recovery');
     } else {
       // No mutation can precede this receipt. An orphan archive is safe to replace.
-      bytes = await packSource(prepared.directory, prepared.files);
+      bytes = await options.archive();
       await durableWrite(archive, bytes);
       release = { archiveHash: sha256(bytes), sizeBytes: bytes.length, createKey: randomUUID(), uploadKey: randomUUID(), publishKey: randomUUID(),
-        versionBody: { format: 'zip', filename: 'source.zip', sizeBytes: bytes.length, sha256: sha256(bytes), notes: metadata.notes } };
+        versionBody: { format: 'zip', filename: 'source.zip', sizeBytes: bytes.length, sha256: sha256(bytes), notes: options.metadata.notes } };
       receipt.releases[digest] = release;
     }
     // Persist fixed bodies and keys before contacting the server, including retries.
     await save();
     const validId = (value: string) => { if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new Error('Invalid market identity'); return value; };
     if (!receipt.appId) {
-      const app = await writer.request<{ id: string }>('apps', receipt.createBody, true, 'POST', { 'Idempotency-Key': receipt.createKey });
+      const app = await writer.request<{ id: string }>(options.collection, receipt.createBody, true, 'POST', { 'Idempotency-Key': receipt.createKey });
       receipt.appId = validId(app.id); await save();
     }
     const appId = validId(receipt.appId);
@@ -161,16 +175,15 @@ export class LocalAppMarketClient {
       }
     }
     if (!release.version) {
-      release.version = await writer.request<{ id: string; upload: { path: string } }>(`apps/${encodeURIComponent(appId)}/versions`, release.versionBody, true, 'POST', { 'Idempotency-Key': release.createKey });
+      release.version = await writer.request<{ id: string; upload: { path: string } }>(`${options.collection}/${encodeURIComponent(appId)}/versions`, release.versionBody, true, 'POST', { 'Idempotency-Key': release.createKey });
       validId(release.version.id); await save();
     }
     const version = release.version; validId(version.id);
-    const upload = new URL(version.upload.path, this.base);
-    if (upload.origin !== this.base.origin || upload.search || upload.hash || upload.pathname !== this.base.pathname + `versions/${encodeURIComponent(version.id)}/artifact`) throw new Error('Invalid source upload route');
-    const response = await this.fetcher(upload, { method: 'PUT', headers: { Authorization: `Bearer ${await writer.token()}`, 'Content-Type': 'application/octet-stream', 'Idempotency-Key': release.uploadKey }, body: bytes as unknown as BodyInit, redirect: 'error', signal: AbortSignal.timeout(60_000) });
+    const upload = new URL(version.upload.path, writer.base);
+    if (upload.origin !== writer.base.origin || upload.search || upload.hash || upload.pathname !== writer.base.pathname + `versions/${encodeURIComponent(version.id)}/artifact`) throw new Error('Invalid source upload route');
+    const response = await writer.fetcher(upload, { method: 'PUT', headers: { Authorization: `Bearer ${await writer.token()}`, 'Content-Type': 'application/octet-stream', 'Idempotency-Key': release.uploadKey }, body: bytes as unknown as BodyInit, redirect: 'error', signal: AbortSignal.timeout(60_000) });
     if (!response.ok) throw new Error(`Source upload failed (${response.status})`);
     const result = await writer.request<{ status: string }>(`versions/${encodeURIComponent(version.id)}/publish`, {}, true, 'POST', { 'Idempotency-Key': release.publishKey });
     release.status = result.status; await save();
     return { appId, versionId: version.id, status: result.status };
-  }
 }

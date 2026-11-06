@@ -504,6 +504,11 @@ export function App() {
           setTerminalLinkScope(scope);
           if (typeof delivery.target.payload?.command === 'string') linkSurfacePending.current = true;
           await terminal.openLink(scope, id!, typeof delivery.target.payload?.command === 'string' ? delivery.target.payload.command : undefined);
+        } else if (kind === 'market' && id === 'bot') {
+          const botApi = window.lingxi?.bots;
+          if (!botApi) throw new Error('Bot host is unavailable');
+          const result = await botApi.market({ action: 'install', listingId: detailId!, ...(params.versionId ? {versionId:params.versionId} : {}), ...(params.intentId ? {intentId:params.intentId} : {}) });
+          if (result && 'botId' in result && 'revision' in result) { bots.controller.put(result); bots.setView({kind:'detail',botId:result.botId}); setPage('bots'); }
         } else if (kind === 'market') {
           setPage('apps');
           setLocalAppNavigationError('');

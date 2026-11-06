@@ -2763,7 +2763,7 @@
     <string name="teams_bot_unbind_title_fmt">解除 %1$s 的绑定？</string>
     <string name="teams_bot_unbind_detail">将停止新的 Bot 请求，现有会话历史保留。</string>
     <string name="teams_bots_share_hint">在灵犀 Desktop 的团队页面共享本机 Bot 或修改使用权限。</string>
-    <string name="teams_bot_owner_fmt">所有者：%1$s</string>
+    <string name="teams_bot_owner_fmt">维护者：%1$s</string>
     <string name="teams_invite_none">还没有邀请。</string>
     <string name="teams_invite_share">分享邀请</string>
     <string name="teams_link_copied">链接已复制</string>
@@ -2792,4 +2792,14 @@
     <string name="teams_error_answer_rejected">此答案无法接收，请检查问题与原始请求人身份。</string>
     <string name="teams_conversation_details">会话详情</string>
     <string name="teams_choose_conversation">选择会话</string>
+    <string name="teams_assistants">助手</string>
+    <string name="teams_recent_tasks">最近任务与成果</string>
+    <string name="teams_artifact_open">打开文档</string>
+    <string name="teams_artifact_title">文档</string>
+    <string name="teams_bot_pause">暂停共享</string>
+    <string name="teams_task_expired">请求已过期</string>
+    <string name="teams_task_interrupted">请求中断，请重新发送</string>
+    <string name="teams_task_authorization_required">维护者需要处理授权</string>
+    <string name="teams_error_request_quota">请求次数已达上限，请稍后再试或联系维护者。</string>
+    <string name="teams_task_view">查看任务状态</string>
 </resources>

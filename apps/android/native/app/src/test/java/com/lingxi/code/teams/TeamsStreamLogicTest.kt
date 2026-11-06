@@ -17,7 +17,7 @@ class TeamsStreamLogicTest {
     private val stream get() = TeamsVectors.root.getJSONObject("stream")
 
     private fun message(json: JSONObject) = StreamMessage(
-        json.getString("id"), json.getLong("seq"), json.getString("authorKind"), json.getString("authorUid"), json.stringOrNull("authorBotKey"),
+        json.getString("id"), json.getLong("seq"), json.getString("authorKind"), json.getString("authorUid"), json.stringOrNull("authorSharedBotId"),
         if (json.isNull("createdAtMs")) null else json.getLong("createdAtMs"), json.getBoolean("recalled"),
     )
     private fun messages(array: JSONArray) = array.objects().map(::message)
@@ -135,10 +135,10 @@ class TeamsStreamLogicTest {
     }
 
     @Test fun aStreamMessageTakesTheBotKeyOnlyFromBotAuthors() {
-        val bot = TeamMessage("m", 1, "u5", "bot", "hi", 1, "c", false, null, null, botKey = "bot:k", createdAt = "2026-11-02T08:00:00Z")
+        val bot = TeamMessage("m", 1, "u5", "shared_bot", "hi", 1, "c", false, null, null, sharedBotId = "sharedbot_k", createdAt = "2026-11-02T08:00:00Z")
         val user = bot.copy(authorKind = "user", authorUid = "u2")
-        assertEquals("bot:k", StreamMessage.of(bot).authorBotKey)
-        assertNull(StreamMessage.of(user).authorBotKey)
+        assertEquals("sharedbot_k", StreamMessage.of(bot).authorSharedBotId)
+        assertNull(StreamMessage.of(user).authorSharedBotId)
         assertEquals(1793606400000L, StreamMessage.of(bot).createdAtMs)
     }
 }

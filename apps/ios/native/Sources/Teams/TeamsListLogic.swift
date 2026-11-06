@@ -37,7 +37,7 @@ struct TeamsListStrings: Equatable, Sendable {
 
 /// A person or a Bot, in the shape avatars take.
 struct TeamIdentity: Equatable, Sendable {
-    enum Kind: String, Sendable { case user, bot }
+    enum Kind: String, Sendable { case user; case bot = "shared_bot" }
     let kind: Kind
     /// The uid of a person; the `botId` of a Bot whose card is known, else its key.
     let id: String
@@ -100,7 +100,7 @@ enum TeamsListLogic {
         let people = userIds(conversation)
         if conversation.kind == "channel" { return title.isEmpty ? strings.channel : title }
         if conversation.kind == "bot_dm" {
-            let card = cardFor(conversation.effectiveBotKey, bots)
+            let card = cardFor(conversation.effectiveSharedBotId, bots)
             let bot = [card?.name ?? "", title, strings.bot].first { !$0.isEmpty } ?? strings.bot
             let others = people.filter { $0 != uid }
             if people.contains(uid) || others.isEmpty { return bot }
@@ -119,16 +119,16 @@ enum TeamsListLogic {
         let people = userIds(conversation).map {
             TeamIdentity(kind: .user, id: $0, name: memberName($0, members, uid, strings), isSelf: $0 == uid)
         }
-        let robots = conversation.participants.filter { $0.hasPrefix("bot:") }.map { key -> TeamIdentity in
-            let card = cardFor(key, bots)
-            return TeamIdentity(kind: .bot, id: card?.botId ?? key, name: [card?.name ?? "", strings.bot].first { !$0.isEmpty } ?? strings.bot, isSelf: false)
+        let robots = conversation.participants.filter { $0.hasPrefix("shared_bot:") }.map { key -> TeamIdentity in
+            let card = cardFor(String(key.dropFirst(11)), bots)
+            return TeamIdentity(kind: .bot, id: card?.sharedBotId ?? String(key.dropFirst(11)), name: [card?.name ?? "", strings.bot].first { !$0.isEmpty } ?? strings.bot, isSelf: false)
         }
         return people.filter { !$0.isSelf } + robots + people.filter(\.isSelf)
     }
 
     /// The viewer's own Bot DM with a Bot, if there is one. (A Bot's owner also sees other people's.)
-    static func findBotDm(_ conversations: [TeamMessageConversation], uid: String, botKey: String) -> TeamMessageConversation? {
-        conversations.first { $0.kind == "bot_dm" && $0.participants.contains(botKey) && $0.participants.contains("user:\(uid)") }
+    static func findBotDm(_ conversations: [TeamMessageConversation], uid: String, sharedBotId: String) -> TeamMessageConversation? {
+        conversations.first { $0.kind == "bot_dm" && $0.participants.contains("shared_bot:\(sharedBotId)") && $0.participants.contains("user:\(uid)") }
     }
 
     /// The viewer's existing two-person DM with someone.
@@ -192,7 +192,7 @@ enum TeamsListLogic {
     }
 
     private static func cardFor(_ key: String?, _ bots: [TeamBotCard]) -> TeamBotCard? {
-        key.flatMap { key in bots.first { $0.key == key } }
+        key.flatMap { key in bots.first { $0.sharedBotId == key } }
     }
 
     /// A person's display name, falling back to "You" / "Member" for people the directory does not list.

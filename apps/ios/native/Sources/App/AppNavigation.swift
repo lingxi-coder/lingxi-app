@@ -45,6 +45,7 @@ enum AppRoute: Hashable {
     case apps
     case localApp(id: String)
     case marketApp(id: String)
+    case marketBot(id: String, versionID: String?, intentID: String?)
 }
 
 extension AppRoute {
@@ -77,6 +78,8 @@ extension AppRoute: Identifiable {
             return "local-app:\(id)"
         case .marketApp(let id):
             return "market-app:\(id)"
+        case .marketBot(let id, let versionID, let intentID):
+            return "market-bot:\(id):\(versionID ?? "latest"):\(intentID ?? "none")"
         case .project(let id):
             return "project:\(id)"
         }
@@ -339,6 +342,8 @@ final class AppNavigationModel {
         pushPage(.marketApp(id: appID))
     }
 
+    func openMarketBot(_ botID: String, versionID: String?, intentID: String?) { pushPage(.marketBot(id: botID, versionID: versionID, intentID: intentID)) }
+
     /// Runs an installed app full screen over everything else.
     func runApp(_ appID: String) {
         closeSidebar()
@@ -377,7 +382,7 @@ private extension AppRoute {
         case (.cron, .cron), (.cron, .cronRun), (.cronRun, .cron), (.cronRun, .cronRun),
              (.cronNew, .cronNew), (.cronNew, .cron), (.cron, .cronNew),
              (.projects, .projects), (.project, .project),
-             (.apps, .apps), (.localApp, .localApp), (.marketApp, .marketApp):
+             (.apps, .apps), (.localApp, .localApp), (.marketApp, .marketApp), (.marketBot, .marketBot):
             true
         default:
             false

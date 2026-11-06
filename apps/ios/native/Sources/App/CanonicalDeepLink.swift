@@ -49,7 +49,7 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
         }) else { return nil }
         let parts = segments.compactMap { $0 }
         let simple: Set<String> = ["session", "project", "settings", "provider", "terminal", "apps", "market"]
-        let valid = parts == ["new"] || parts == ["team", "join"] || parts == ["team", "inbox"] || (parts.count == 2 && simple.contains(parts[0]))
+        let valid = (parts.count == 3 && parts[0] == "market" && parts[1] == "bot") || parts == ["new"] || parts == ["team", "join"] || parts == ["team", "inbox"] || (parts.count == 2 && simple.contains(parts[0]))
             || (parts.count == 3 && parts[0] == "extensions" && ["mcp", "skill", "plugin"].contains(parts[1]))
             || (parts.count == 3 && parts[0] == "cron" && ["job", "run"].contains(parts[1]))
             || (parts.count == 3 && parts[0] == "runtime" && ["agent", "task", "plan", "review", "activity"].contains(parts[1]))
@@ -57,7 +57,7 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
         guard valid || (parts.count == 3 && parts[0] == "remote") else { return nil }
         var params: [String: String] = [:]
         for item in components.queryItems ?? [] {
-            guard ["workspace", "message", "mode", "scope", "review", "runId", "revision", "code"].contains(item.name), params[item.name] == nil,
+            guard ["workspace", "message", "mode", "scope", "review", "runId", "revision", "code", "versionId", "intentId"].contains(item.name), params[item.name] == nil,
                   let value = item.value, !value.isEmpty, value.count <= 512,
                   !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { return nil }
             params[item.name] = value
@@ -85,6 +85,9 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
         if parts == ["team", "join"] {
             guard params.count == 1, let code = params["code"], code.range(of: "^[A-Za-z0-9_-]{32}$", options: .regularExpression) != nil else { return nil }
         } else if params["code"] != nil { return nil }
+        if let intentID = params["intentId"] { guard parts.count == 3, parts[0] == "market", parts[1] == "bot", intentID.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil else { return nil } }
+        if let versionID = params["versionId"] { guard parts.count == 3, parts[0] == "market", parts[1] == "bot", versionID.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil else { return nil } }
+        if parts.count == 3, parts[0] == "market", parts[1] == "bot" { guard parts[2].range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil, params.keys.allSatisfy({ $0 == "versionId" || $0 == "intentId" }) else { return nil } }
         var payloadJSON: String?
         if let fragment = components.percentEncodedFragment, !fragment.isEmpty {
             guard ["new", "terminal", "import"].contains(parts[0]),

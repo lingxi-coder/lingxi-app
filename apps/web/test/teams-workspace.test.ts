@@ -40,10 +40,10 @@ test('groupConversations: rows without a time follow, by lastSeq then title', ()
 });
 
 test('groupConversations: Bot DMs the viewer only reads as the Bot owner follow their own', () => {
-  const key = botCard().key;
+  const key = botCard().sharedBotId;
   const rows = [
-    conversation('others', { kind: 'bot_dm', participants: ['user:bob', key], lastMessage: last(9) }),
-    conversation('mine', { kind: 'bot_dm', participants: ['user:alice', key], lastMessage: last(1) }),
+    conversation('others', { kind: 'bot_dm', participants: ['user:bob', `shared_bot:${key}`], lastMessage: last(9) }),
+    conversation('mine', { kind: 'bot_dm', participants: ['user:alice', `shared_bot:${key}`], lastMessage: last(1) }),
   ];
   assert.deepEqual(groupConversations(rows, uid).botDirect.map(value => value.id), ['mine', 'others']);
 });
@@ -69,28 +69,28 @@ test('conversationLabel: channels are titles; dm and group fall back to the othe
 
 test('conversationLabel: a Bot DM is the Bot\'s name, with the person for the Bot owner reading someone else\'s', () => {
   const card = botCard({ name: 'Scribe' }), people = members('alice', 'bob');
-  const own = conversation('b', { kind: 'bot_dm', title: 'Stored title', botKey: card.key, participants: ['user:alice', card.key] });
+  const own = conversation('b', { kind: 'bot_dm', title: 'Stored title', participants: ['user:alice', `shared_bot:${card.sharedBotId}`] });
   assert.equal(conversationLabel(own, people, uid, { bots: [card] }), 'Scribe');
   assert.equal(conversationLabel(own, people, uid), 'Stored title', 'no card: the stored title');
   assert.equal(conversationLabel({ ...own, title: '' }, people, uid), 'Bot');
-  const others = conversation('b2', { kind: 'bot_dm', title: 'Scribe', botKey: card.key, participants: ['user:bob', card.key] });
+  const others = conversation('b2', { kind: 'bot_dm', title: 'Scribe', participants: ['user:bob', `shared_bot:${card.sharedBotId}`] });
   assert.equal(conversationLabel(others, people, uid, { bots: [card] }), 'Scribe · Bob');
-  assert.equal(conversationLabel({ ...others, botKey: undefined }, people, uid, { bots: [card] }), 'Scribe · Bob', 'the Bot is found in the participants too');
+  assert.equal(conversationLabel({ ...others, }, people, uid, { bots: [card] }), 'Scribe · Bob', 'the Bot is found in the participants too');
 });
 
 test('conversationParticipants lists other people, then Bots, then the viewer, with the local Bot id for avatars', () => {
   const card = botCard({ name: 'Scribe' }), people = members('alice', 'bob');
-  const list = conversationParticipants(conversation('g', { kind: 'group', participants: ['user:alice', card.key, 'user:bob', 'bot:other:h:b'] }), people, [card], uid);
+  const list = conversationParticipants(conversation('g', { kind: 'group', participants: ['user:alice', `shared_bot:${card.sharedBotId}`, 'user:bob', 'shared_bot:other-assistant'] }), people, [card], uid);
   assert.deepEqual(list.map(value => [value.kind, value.id, value.name, value.self]), [
-    ['user', 'bob', 'Bob', false], ['bot', card.botId, 'Scribe', false], ['bot', 'bot:other:h:b', 'Bot', false], ['user', 'alice', 'Alice', true],
+    ['user', 'bob', 'Bob', false], ['bot', card.sharedBotId, 'Scribe', false], ['bot', 'other-assistant', 'Bot', false], ['user', 'alice', 'Alice', true],
   ]);
 });
 
 test('findBotDm finds only the viewer\'s own DM with that Bot', () => {
-  const key = botCard().key;
-  const rows = [conversation('theirs', { kind: 'bot_dm', participants: ['user:bob', key] }), conversation('mine', { kind: 'bot_dm', participants: ['user:alice', key] }), conversation('group', { kind: 'group', participants: ['user:alice', key] })];
+  const key = botCard().sharedBotId;
+  const rows = [conversation('theirs', { kind: 'bot_dm', participants: ['user:bob', `shared_bot:${key}`] }), conversation('mine', { kind: 'bot_dm', participants: ['user:alice', `shared_bot:${key}`] }), conversation('group', { kind: 'group', participants: ['user:alice', `shared_bot:${key}`] })];
   assert.equal(findBotDm(rows, uid, key)?.id, 'mine');
-  assert.equal(findBotDm(rows, uid, 'bot:x:y:z'), undefined);
+  assert.equal(findBotDm(rows, uid, 'absent-shared-id'), undefined);
 });
 
 test('conversationPreview follows the lastMessage rules', () => {
@@ -382,10 +382,10 @@ test('online refetches teams and conversations; focus only the conversations unl
 test('Bot cards load with the team, reload on a Bot signal, and an unverifiable list is reported', async context => {
   const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
   await until(() => snapshot().bots.length === 1, 'the Bot list');
-  assert.deepEqual(fake.commands.find(value => value.action === 'bots'), { action: 'bots', teamId: 'team-aaaa', generation: 1 });
-  const loaded = () => fake.commands.filter(value => value.action === 'bots').length, before = loaded();
+  const listed = fake.commands.find(value => value.action === 'listSharedBots')!; assert.equal(listed.action, 'listSharedBots'); assert.equal('schemaVersion' in listed && listed.schemaVersion, 1);
+  const loaded = () => fake.commands.filter(value => value.action === 'listSharedBots').length, before = loaded();
   fake.signal({ conversationId: 'chan-a' }); await settle(); assert.equal(loaded(), before, 'a conversation signal does not reload Bots');
-  fake.bots = [botCard(), botCard({ key: 'bot:owner:x:y', name: 'Second' })];
+  fake.bots = [botCard(), botCard({ sharedBotId: 'owner:x:y', name: 'Second' })];
   fake.signal({ bots: true }); await until(() => snapshot().bots.length === 2, 'two Bots');
   fake.messages = async () => { throw new Error('SERVICE_UNAVAILABLE'); };
   fake.signal(); await until(() => snapshot().botsUnverified, 'the warning');
@@ -395,16 +395,17 @@ test('Bot cards load with the team, reload on a Bot signal, and an unverifiable 
 });
 
 test('createConversation puts the viewer first, trims the title and requires usable Bots', async context => {
-  const { fake, workspace, snapshot } = workspaceFixture(value => { value.bots = [botCard(), botCard({ key: 'bot:owner:x:y', name: 'Off', permitted: false })]; });
+  const { fake, workspace, snapshot } = workspaceFixture(value => { value.bots = [botCard(), botCard({ sharedBotId: 'owner:x:y', name: 'Off', permitted: false })]; });
   context.after(() => workspace.close());
   await until(() => snapshot().bots.length === 2 && snapshot().offline === false, 'load');
-  assert.equal(await workspace.createConversation('group', '  Crew  ', ['bob'], ['bot:owner:x:y']), false);
+  assert.equal(await workspace.createConversation('group', '  Crew  ', ['bob'], ['owner:x:y']), false);
   assert.equal(snapshot().actionError, 'BOT_USE_REQUIRED'); assert.equal(fake.commands.some(value => value.action === 'create'), false);
-  assert.equal(await workspace.createConversation('group', '  Crew  ', ['bob'], [botCard().key]), true);
+  assert.equal(await workspace.createConversation('group', '  Crew  ', ['bob'], [botCard().sharedBotId]), true);
   assert.equal(snapshot().actionError, '');
-  const sent = await until(() => fake.commands.some(value => value.action === 'create'), 'the create command').then(() => fake.commands.find(value => value.action === 'create')!);
-  assert.deepEqual({ ...sent, conversationId: '' }, { action: 'create', teamId: 'team-aaaa', generation: 1, conversationId: '', kind: 'group', title: 'Crew', participantUids: ['alice', 'bob'], botKeys: [botCard().key] });
-  assert.equal(snapshot().messaging!.selected, sent.conversationId, 'the new conversation is selected');
+  const sent = await until(() => fake.commands.some(value => value.action === 'createConversation'), 'the create command').then(() => fake.commands.find(value => value.action === 'createConversation')!);
+  assert.equal(sent.action, 'createConversation'); if (sent.action !== 'createConversation') return;
+  assert.deepEqual({ ...sent.payload, conversationId: '' }, { conversationId: '', kind: 'group', title: 'Crew', participantUids: ['alice', 'bob'], sharedBotIds: [botCard().sharedBotId] });
+  assert.equal(snapshot().messaging!.selected, sent.payload.conversationId, 'the new conversation is selected');
 });
 
 test('run keeps one messaging action at a time and records a failure as a code', async context => {
@@ -423,19 +424,19 @@ test('run keeps one messaging action at a time and records a failure as a code',
 test('openBotDm opens the viewer\'s existing DM and only creates one when there is none or a fresh one is asked for', async context => {
   const card = botCard();
   const { fake, workspace, snapshot } = workspaceFixture(value => {
-    value.bots = [card]; value.conversations.set('team-aaaa', [conversation('bot-chat', { kind: 'bot_dm', botKey: card.key, participants: ['user:alice', card.key] }), conversation('their-chat', { kind: 'bot_dm', botKey: card.key, participants: ['user:bob', card.key] })]);
+    value.bots = [card]; value.conversations.set('team-aaaa', [conversation('bot-chat', { kind: 'bot_dm', participants: ['user:alice', `shared_bot:${card.sharedBotId}`] }), conversation('their-chat', { kind: 'bot_dm', participants: ['user:bob', `shared_bot:${card.sharedBotId}`] })]);
   });
   context.after(() => workspace.close());
   await until(() => snapshot().conversations.length === 2 && snapshot().bots.length === 1, 'load');
   assert.equal(await workspace.openBotDm(card), true);
   assert.equal(snapshot().selectedConversationId, 'bot-chat');
-  assert.equal(fake.commands.some(value => value.action === 'create'), false);
+  assert.equal(fake.commands.some(value => value.action === 'createConversation'), false);
   assert.equal(await workspace.openBotDm(card, true), true);
-  await until(() => fake.commands.some(value => value.action === 'create'), 'a fresh DM');
-  const created = fake.commands.find(value => value.action === 'create')!;
-  assert.equal(created.action === 'create' && created.kind, 'bot_dm'); assert.deepEqual(created.action === 'create' && created.participantUids, ['alice']);
+  await until(() => fake.commands.some(value => value.action === 'createConversation'), 'a fresh DM');
+  const created = fake.commands.find(value => value.action === 'createConversation')!;
+  assert.equal(created.action === 'createConversation' && created.payload.kind, 'bot_dm'); assert.deepEqual(created.action === 'createConversation' && created.payload.participantUids, ['alice']);
   assert.equal(await workspace.openBotDm({ ...card, permitted: false }), false); assert.equal(snapshot().actionError, 'BOT_USE_REQUIRED');
-  await assert.rejects(workspace.startBotDm({ ...card, enabled: false }), /BOT_USE_REQUIRED/);
+  await assert.rejects(workspace.startBotDm({ ...card, state: 'paused' }), /BOT_USE_REQUIRED/);
 });
 
 test('markRead: the open conversation goes through the controller, any other with the same read command up to lastSeq', async context => {

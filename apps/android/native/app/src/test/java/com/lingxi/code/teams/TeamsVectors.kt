@@ -18,10 +18,7 @@ internal object TeamsVectors {
 
     fun members(): List<TeamMember> = root.getJSONArray("members").objects().map { TeamMember(it.getString("uid"), it.getString("displayName"), "member", 1) }
 
-    fun card(json: JSONObject) = TeamBotCard(
-        json.getString("key"), json.optString("ownerUid", "owner"), json.getString("name"), "", 1, "all", json.getBoolean("permitted"), json.optBoolean("online", true),
-        json.optBoolean("enabled", true), 0, json.stringOrNull("botId"), json.stringOrNull("hostId"),
-    )
+    fun card(json: JSONObject) = TeamBotCard.parse(json)
     fun bots(): List<TeamBotCard> = root.getJSONArray("bots").objects().map(::card)
 
     fun strings(zh: Boolean): TeamsListStrings = root.getJSONObject("strings").getJSONObject(if (zh) "zh" else "en").let {
@@ -35,11 +32,11 @@ internal object TeamsVectors {
     fun conversation(json: JSONObject): TeamMessageConversation {
         val participants = json.optJSONArray("participants")?.let { array -> (0 until array.length()).map { array.getString(it) } } ?: emptyList()
         val lastSeq = json.optLong("lastSeq", 0)
-        val botKey = json.stringOrNull("botKey")
+        val sharedBotId = json.stringOrNull("sharedBotId")
         val pointer = if (json.has("at")) TeamLastMessage("m" + json.getString("id"), lastSeq, parseInstant(json.stringOrNull("at")), "user", "u2", null, "hi") else null
         return TeamMessageConversation(
             json.getString("id"), json.getString("kind"), json.getString("title"), participants, lastSeq, lastSeq, json.optLong("lastReadSeq", 0),
-            if (botKey != null) listOf(botKey) else participants.filter { it.startsWith("bot:") }, pointer,
+            if (sharedBotId != null) listOf(sharedBotId) else participants.filter { it.startsWith("bot:") }, pointer,
         )
     }
     fun conversations(): List<TeamMessageConversation> = root.getJSONArray("conversations").objects().map(::conversation)

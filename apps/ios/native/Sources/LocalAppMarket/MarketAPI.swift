@@ -107,6 +107,11 @@ final class MarketAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func publish(_ path: String, body: [String: LocalAppJSON], bearer: String, idempotencyKey: String? = nil) async throws -> LocalAppJSON {
         let r: MarketEnvelope<LocalAppJSON> = try await request(path, body: body, bearer: bearer, idempotencyKey: idempotencyKey); return r.data
     }
+    func authenticatedValue<T: Decodable>(_ path: String, bearer: String, body: [String: LocalAppJSON]? = nil, idempotencyKey: String? = nil) async throws -> T {
+        guard !path.hasPrefix("/"), !path.contains(".."), !path.contains("#"), !path.contains(":") else { throw MarketFailure("INVALID_ROUTE") }
+        let envelope: MarketEnvelope<T> = try await request(path, body: body, bearer: bearer, idempotencyKey: idempotencyKey)
+        return envelope.data
+    }
     func ownedVersion(_ id: String, bearer: String) async throws -> LocalAppJSON {
         let value: MarketEnvelope<LocalAppJSON> = try await request("versions/\(try identifier(id))", bearer: bearer)
         return value.data

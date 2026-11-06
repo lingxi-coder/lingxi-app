@@ -4,7 +4,7 @@ import test from 'node:test';
 import { createElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MESSAGE_BYTES, byteLength, canSendText, mentionAt, mentionCandidates, sendsOnEnter, snippet, withoutMention } from '../../../packages/teams/compose';
-import type { TeamBotCard } from '../../../packages/teams/bots';
+import type { SharedBotCard } from '../../../packages/teams/execution';
 import type { TeamMember } from '../../../packages/teams';
 import { visibleStart, UNREAD_CONTEXT, WINDOW_MAX, WINDOW_SIZE } from '../../../packages/teams/stream';
 import type { MenuItem } from '../../../packages/teams/ui';
@@ -95,11 +95,11 @@ test('composer helpers: Enter sends unless an input method is composing, @ compl
   assert.deepEqual(mentionAt('a @b c', 4), { start: 2, query: 'b' }, 'only the text before the caret counts');
   assert.equal(withoutMention('hi @fi there', 3, 6), 'hi there', 'the double space it leaves is closed');
   assert.equal(withoutMention('@fi', 0, 3), ''); assert.equal(withoutMention('hi @fi', 3, 6), 'hi ');
-  const a = botCard({ key: 'bot:a', name: 'Alpha' }), b = botCard({ key: 'bot:b', name: 'Beta', online: false }), c = botCard({ key: 'bot:c', name: 'Gamma', permitted: false }), d = botCard({ key: 'bot:d', name: 'Delta', enabled: false });
-  const group = { kind: 'group' as const, participants: ['user:alice', 'bot:a', 'bot:b', 'bot:c', 'bot:d'] };
-  const names = (list: TeamBotCard[]) => list.map(bot => bot.name);
+  const a = botCard({ sharedBotId: 'a', name: 'Alpha' }), b = botCard({ sharedBotId: 'b', name: 'Beta', ready: false }), c = botCard({ sharedBotId: 'c', name: 'Gamma', permitted: false }), d = botCard({ sharedBotId: 'd', name: 'Delta', state: 'paused' });
+  const group = { kind: 'group' as const, participants: ['user:alice', 'shared_bot:a', 'shared_bot:b', 'shared_bot:c', 'shared_bot:d'] };
+  const names = (list: SharedBotCard[]) => list.map(bot => bot.name);
   assert.deepEqual(names(mentionCandidates([a, b, c, d], group, [], '')), ['Alpha', 'Beta'], 'usable Bots in the conversation');
-  assert.deepEqual(names(mentionCandidates([a, b], group, ['bot:a'], '')), ['Beta'], 'chosen ones are not offered twice');
+  assert.deepEqual(names(mentionCandidates([a, b], group, ['a'], '')), ['Beta'], 'chosen ones are not offered twice');
   assert.deepEqual(names(mentionCandidates([a, b], group, [], 'BE')), ['Beta'], 'case-insensitive');
   assert.deepEqual(mentionCandidates([a], { kind: 'group', participants: ['user:alice'] }, [], ''), [], 'a Bot outside the conversation');
   assert.deepEqual(mentionCandidates([a], { ...group, kind: 'dm' }, [], ''), [], 'a dm has no explicit targets');
@@ -112,17 +112,17 @@ test('composer helpers: Enter sends unless an input method is composing, @ compl
 });
 
 test('composerLock: observers only read, and a Bot dm waits for a usable Bot', () => {
-  const bot = botCard({ key: 'bot:a' });
+  const bot = botCard({ sharedBotId: 'a' });
   const base = { uid: 'alice', bots: [bot], botsLoaded: true, botsUnverified: false };
   const dm = { kind: 'dm' as const, participants: ['user:alice', 'user:bob'] };
-  const botDm = { kind: 'bot_dm' as const, participants: ['user:alice', 'bot:a'] };
+  const botDm = { kind: 'bot_dm' as const, participants: ['user:alice', 'shared_bot:a'] };
   assert.equal(composerLock({ ...base, conversation: dm }, false), '');
   assert.equal(composerLock({ ...base, conversation: { kind: 'channel', participants: [] } }, false), '', 'a conversation without a participant list is open');
-  assert.match(composerLock({ ...base, conversation: { kind: 'bot_dm', participants: ['user:bob', 'bot:a'] } }, false), /only participants can send/);
-  assert.match(composerLock({ ...base, conversation: { kind: 'bot_dm', participants: ['user:bob', 'bot:a'] } }, true), /只有参与者可以发送/);
+  assert.match(composerLock({ ...base, conversation: { kind: 'bot_dm', participants: ['user:bob', 'shared_bot:a'] } }, false), /only participants can send/);
+  assert.match(composerLock({ ...base, conversation: { kind: 'bot_dm', participants: ['user:bob', 'shared_bot:a'] } }, true), /只有参与者可以发送/);
   assert.equal(composerLock({ ...base, conversation: botDm }, false), '');
-  assert.match(composerLock({ ...base, bots: [botCard({ key: 'bot:a', permitted: false })], conversation: botDm }, false), /not available to you/);
-  assert.match(composerLock({ ...base, bots: [botCard({ key: 'bot:a', enabled: false })], conversation: botDm }, false), /not available to you/);
+  assert.match(composerLock({ ...base, bots: [botCard({ sharedBotId: 'a', permitted: false })], conversation: botDm }, false), /not available to you/);
+  assert.match(composerLock({ ...base, bots: [botCard({ sharedBotId: 'a', state: 'paused' })], conversation: botDm }, false), /not available to you/);
   assert.match(composerLock({ ...base, bots: [], botsLoaded: false, conversation: botDm }, false), /Checking whether this Bot is available/);
   assert.match(composerLock({ ...base, bots: [], botsUnverified: true, conversation: botDm }, false), /could not be verified/);
   assert.match(composerLock({ ...base, bots: [], botsLoaded: true, botsUnverified: true, conversation: botDm }, true), /未能确认/);
@@ -228,10 +228,10 @@ async function open(setup: (fake: FakeTeams) => void = () => {}) {
   fake.teams = [team('team-aaaa', { name: 'Acme', role: 'owner' }), team('team-bbbb', { name: 'Beta', generation: 2 })];
   fake.bots = [bot];
   fake.conversations.set('team-aaaa', [
-    conversation('chan-general', { title: 'general', participants: ['user:alice', 'user:bob', bot.key], lastSeq: 7, lastReadSeq: 3, lastMessage: { id: 'message-7', seq: 7, at: at(40), preview: 'Ship it', author: { kind: 'user', uid: 'bob' } } }),
+    conversation('chan-general', { title: 'general', participants: ['user:alice', 'user:bob', `shared_bot:${bot.sharedBotId}`], lastSeq: 7, lastReadSeq: 3, lastMessage: { id: 'message-7', seq: 7, at: at(40), preview: 'Ship it', author: { kind: 'user', uid: 'bob' } } }),
     conversation('dm-bob', { kind: 'dm', title: 'Alice, Bob', lastSeq: 1, lastReadSeq: 1, lastMessage: { id: 'dm-1', seq: 1, at: at(10), preview: 'Lunch?', author: { kind: 'user', uid: 'alice' } } }),
-    conversation('bot-chat', { kind: 'bot_dm', title: 'Fixture Bot', participants: ['user:alice', bot.key], botKey: bot.key, lastSeq: 2, lastReadSeq: 2 }),
-    conversation('group-1', { kind: 'group', title: 'Alice, Bob, Owner', participants: ['user:alice', 'user:bob', 'user:owner', bot.key] }),
+    conversation('bot-chat', { kind: 'bot_dm', title: 'Fixture Bot', participants: ['user:alice', `shared_bot:${bot.sharedBotId}`], lastSeq: 2, lastReadSeq: 2 }),
+    conversation('group-1', { kind: 'group', title: 'Alice, Bob, Owner', participants: ['user:alice', 'user:bob', 'user:owner', `shared_bot:${bot.sharedBotId}`] }),
   ]);
   fake.conversations.set('team-bbbb', [conversation('chan-b', { lastSeq: 4, lastReadSeq: 1 })]);
   fake.threads.set('chan-general', [
@@ -389,7 +389,7 @@ test('sidebar: while a query is set every match is listed, with no "Show more"',
 
 test('conversation view: header, stream with day and unread dividers, grouped runs, quotes, recalls and escaping', async context => {
   const { workspace, snapshot } = await open(); context.after(() => workspace.close());
-  assert.match(html(view(workspace, snapshot())), /Choose a conversation/);
+  assert.match(html(view(workspace, snapshot())), /Team assistants/);
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 7, 'the thread');
   const markup = html(view(workspace, snapshot(), { detailsOpen: false, onToggleDetails() {} }));
   const header = /<header class="tw-conv-head">[^]*?<\/header>/.exec(markup)?.[0] ?? '';
@@ -419,7 +419,7 @@ test('conversation view: header, stream with day and unread dividers, grouped ru
 
 test('conversation view: someone else\'s Bot dm is read-only; a Bot dm needs its Bot; a dm and a group differ in what they ask', async context => {
   const { fake, workspace, snapshot } = await open(fake => {
-    fake.conversations.get('team-aaaa')!.push(conversation('others-bot-chat', { kind: 'bot_dm', title: 'Fixture Bot', participants: ['user:bob', botCard().key], botKey: botCard().key, lastSeq: 1, lastReadSeq: 1 }));
+    fake.conversations.get('team-aaaa')!.push(conversation('others-bot-chat', { kind: 'bot_dm', title: 'Fixture Bot', participants: ['user:bob', `shared_bot:${botCard().sharedBotId}`], lastSeq: 1, lastReadSeq: 1 }));
     fake.threads.set('others-bot-chat', [message(1, { text: 'Hi bot' })]);
   });
   context.after(() => workspace.close());
@@ -470,7 +470,7 @@ test('conversation view: no team, no conversations, a pending creation', async c
   assert.match(html(view(none.workspace, none.snapshot())), /Create or join a team/);
   const { fake, workspace, snapshot } = await open(fake => { fake.conversations.set('team-aaaa', []); });
   context.after(() => workspace.close());
-  assert.match(html(view(workspace, snapshot())), /No conversations yet/);
+  assert.match(html(view(workspace, snapshot())), /Team assistants/);
   fake.messages = async () => { throw new Error('SERVICE_UNAVAILABLE'); };
   await workspace.createConversation('channel', 'planning', ['bob']); await until(() => !!snapshot().creation, 'the pending creation');
   const markup = html(view(workspace, snapshot()));
@@ -479,12 +479,12 @@ test('conversation view: no team, no conversations, a pending creation', async c
 
 test('conversation subtitle names who is in a conversation or whether its Bot is reachable', () => {
   const members3 = members('alice', 'bob', 'owner');
-  const snap = (bots: TeamBotCard[]) => ({ bots, directory: members3, uid });
-  const bot = botCard({ key: 'bot:a', ownerUid: 'bob' });
-  const botDm = conversation('b', { kind: 'bot_dm', participants: ['user:alice', 'bot:a'] });
+  const snap = (bots: SharedBotCard[]) => ({ bots, directory: members3, uid });
+  const bot = botCard({ sharedBotId: 'a', maintainer: { uid: 'bob', generation: 1 } });
+  const botDm = conversation('b', { kind: 'bot_dm', participants: ['user:alice', 'shared_bot:a'] });
   assert.equal(conversationSubtitle(botDm, snap([bot]), false), 'Online · Owner: Bob');
-  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, online: false }]), false), 'Offline · requests are queued · Owner: Bob');
-  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, enabled: false }]), true), '已停用 · 所有者: Bob');
+  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, ready: false }]), false), 'Host unavailable · Owner: Bob');
+  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, state: 'paused' }]), true), '已停用 · 所有者: Bob');
   assert.equal(conversationSubtitle(botDm, snap([]), false), '', 'nothing to say about a Bot that is not listed');
   assert.equal(conversationSubtitle(conversation('d', { kind: 'dm' }), snap([]), false), 'Direct message');
   assert.equal(conversationSubtitle(conversation('g', { kind: 'group', participants: ['user:alice', 'user:bob', 'user:owner'] }), snap([]), true), '3 位成员');
@@ -518,7 +518,7 @@ test('drawer: leave or delete first, then tabs by role, with a resizable separat
   const shared = html(drawer(workspace, snapshot(), { tab: 'invites' }));
   assert.match(shared, new RegExp(`value="https://lingxios.net/open/team/join\\?code=${'A'.repeat(32)}"`)); assert.match(shared, /Copy<\/button>/);
   const bots = html(drawer(workspace, snapshot(), { tab: 'bots' }));
-  assert.match(bots, /Fixture Bot/); assert.match(bots, /Message Bot/); assert.match(bots, /class="tw-embed"/);
+  assert.match(bots, /Fixture Bot/); assert.match(bots, /Message assistant/); assert.match(bots, /class="tw-embed"/);
   assert.match(html(drawer(workspace, snapshot(), { width: 9999 })), /style="width:480px"/); assert.match(html(drawer(workspace, snapshot(), { defaultWidth: 300 })), /style="width:300px"/);
   assert.match(html(drawer(workspace, snapshot(), { zh: true })), /删除团队/);
 });

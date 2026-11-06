@@ -13,6 +13,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import type { BotMarketOrigin } from '../../shared/botMarket.js';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
@@ -38,12 +39,6 @@ const CONTROL = /[\u0000-\u001f\u007f]/;
 
 export type BotWorkspaceMode = 'read' | 'write';
 
-/** Host-owned Team bindings. These never grant access to the ordinary Bot home. */
-export interface BotTeamBinding {
-  ownerUid: string; teamId: string; generation: number; botKey: string; revision: number;
-  snapshot: string; use: 'all' | 'listed'; uids: string[];
-}
-
 export interface BotWorkspace {
   /** The real path of an existing directory. */
   path: string;
@@ -67,7 +62,7 @@ export interface BotRecord {
   accept_from?: string[];
   /** Whether the owner's approved devices may reach this Bot's chats through Remote Control. Absent: they may not. */
   remote?: boolean;
-  teams?: BotTeamBinding[];
+  marketOrigin?: BotMarketOrigin;
   workspaces: BotWorkspace[];
   /** Only the owner exists in this version. */
   audiences: Array<{ id: 'owner'; kind: 'owner' }>;
@@ -217,7 +212,7 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
   try { parsed = JSON.parse(text); } catch { throw new Error('bot.json is not valid JSON'); }
   const input = plainObject(parsed, 'bot.json');
   if (input['v'] !== BOT_RECORD_VERSION) throw new Error('bot.json has an unsupported version');
-  exactKeys(input, ['v', 'bot_id', 'name', 'description', 'created_at', 'updated_at', 'revision', 'workspaces', 'audiences'], ['model', 'permission_mode', 'accept_from', 'remote', 'teams'], 'bot.json');
+  exactKeys(input, ['v', 'bot_id', 'name', 'description', 'created_at', 'updated_at', 'revision', 'workspaces', 'audiences'], ['model', 'permission_mode', 'accept_from', 'remote', 'marketOrigin'], 'bot.json');
   if (input['bot_id'] !== expectedId || !isBotId(input['bot_id'])) throw new Error('bot.json belongs to a different Bot');
   const name = botName(input['name']);
   if (name !== input['name']) throw new Error('invalid name');
@@ -247,30 +242,20 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
     ...(input['permission_mode'] !== undefined ? { permission_mode: botPermissionMode(input['permission_mode']) } : {}),
     ...(acceptFrom.length > 0 ? { accept_from: acceptFrom } : {}),
     ...(remote ? { remote } : {}),
-    ...(input['teams'] !== undefined ? { teams: parseTeamBindings(input['teams']) } : {}),
+    ...(input['marketOrigin'] !== undefined ? { marketOrigin: parseMarketOrigin(input['marketOrigin']) } : {}),
     workspaces,
     audiences: [{ id: 'owner', kind: 'owner' }],
   };
 }
 
-function parseTeamBindings(value: unknown): BotTeamBinding[] {
-  if (!Array.isArray(value) || value.length > 100) throw new Error('invalid Team bindings');
-  const entries = value.map(raw => {
-    const entry = plainObject(raw, 'Team binding');
-    exactKeys(entry, ['ownerUid', 'teamId', 'generation', 'botKey', 'revision', 'snapshot', 'use', 'uids'], [], 'Team binding');
-    if (typeof entry.ownerUid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(entry.ownerUid)
-      || typeof entry.teamId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/u.test(entry.teamId)
-      || typeof entry.botKey !== 'string' || !/^bot:[A-Za-z0-9_-]{1,128}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{22}$/u.test(entry.botKey)
-      || !Number.isSafeInteger(entry.generation) || (entry.generation as number) < 1
-      || !Number.isSafeInteger(entry.revision) || (entry.revision as number) < 1
-      || typeof entry.snapshot !== 'string' || !/^[a-f0-9]{64}$/u.test(entry.snapshot)
-      || !['all', 'listed'].includes(entry.use as string) || !Array.isArray(entry.uids) || entry.uids.length > 200
-      || !entry.uids.every(uid => typeof uid === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(uid))
-      || new Set(entry.uids).size !== entry.uids.length) throw new Error('invalid Team binding');
-    return entry as unknown as BotTeamBinding;
-  });
-  if (new Set(entries.map(entry => JSON.stringify([entry.ownerUid, entry.teamId]))).size !== entries.length) throw new Error('duplicate Team binding');
-  return entries;
+function parseMarketOrigin(value: unknown): BotMarketOrigin {
+  const origin = plainObject(value, 'market origin');
+  exactKeys(origin, ['market','accountId','listingId','releaseId','digest','installIntent'], [], 'market origin');
+  for (const key of ['accountId','listingId','releaseId']) if (typeof origin[key] !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(origin[key] as string)) throw new Error('invalid market origin');
+  if (typeof origin.digest !== 'string' || !/^[a-f0-9]{64}$/.test(origin.digest) || typeof origin.installIntent !== 'string' || !/^[a-f0-9]{64}$/.test(origin.installIntent) || typeof origin.market !== 'string') throw new Error('invalid market origin');
+  const url = new URL(origin.market);
+  if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !['localhost','127.0.0.1'].includes(url.hostname))) throw new Error('invalid market origin');
+  return origin as unknown as BotMarketOrigin;
 }
 
 function serialize(record: BotRecord): string {
@@ -316,15 +301,6 @@ export class BotStore {
   }
 
   get root(): string { return this.locations.root; }
-
-  /** Trusted main only: renderer Bot patches cannot manufacture Team bindings. */
-  setTeamBindings(botId: string, bindings: BotTeamBinding[]): void {
-    const record = this.get(botId);
-    const teams = parseTeamBindings(bindings);
-    const text = serialize({ ...record, teams, revision: record.revision + 1, updated_at: this.now() });
-    if (Buffer.byteLength(text) > MAX_RECORD_BYTES) throw new Error('TEAM_BINDING_LIMIT');
-    writeFileAtomic(this.recordPath(botId), text);
-  }
 
   botDir(botId: string): string { return join(this.root, this.checkedId(botId)); }
   recordPath(botId: string): string { return join(this.botDir(botId), 'bot.json'); }
@@ -448,6 +424,14 @@ export class BotStore {
    * Make a Bot. `prepare` runs once the folders exist and before the record is
    * written (the Bot's settings are made there); if it throws, nothing is left.
    */
+  /** Atomic market materialization: the record is committed after all public content. */
+  createFromMarket(input: BotCreateInput, origin: BotMarketOrigin, prepare: (record: BotRecord) => void): BotRecord {
+    const checked = parseMarketOrigin(origin);
+    const existing = this.list().find(bot => bot.marketOrigin?.installIntent === checked.installIntent && bot.marketOrigin.accountId === checked.accountId && bot.marketOrigin.market === checked.market);
+    if (existing) return existing;
+    return this.create(input, record => { record.marketOrigin = checked; prepare(record); });
+  }
+
   create(input: BotCreateInput, prepare?: (record: BotRecord) => void): BotRecord {
     const name = botName(input.name);
     const description = input.description === undefined ? '' : botDescription(input.description);

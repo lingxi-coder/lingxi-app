@@ -48,7 +48,7 @@ class TeamsPointerParserTest {
             assertEquals(name, if (want.isNull("atMs")) null else want.getLong("atMs"), got.atMs)
             assertEquals(name, want.getString("authorKind"), got.authorKind)
             assertEquals(name, want.getString("authorUid"), got.authorUid)
-            assertEquals(name, if (want.isNull("authorBotKey")) null else want.getString("authorBotKey"), got.authorBotKey)
+            assertEquals(name, if (want.isNull("authorSharedBotId")) null else want.getString("authorSharedBotId"), got.authorSharedBotId)
             assertEquals(name, want.getString("preview"), got.preview)
             assertEquals(name, want.getBoolean("recalled"), got.recalled)
         }
@@ -69,11 +69,11 @@ class TeamsPointerParserTest {
     }
 
     @Test fun aWholeConversationDocumentIsParsedStrictlyAndKeepsItsBotKeys() {
-        val pointer = mapOf("id" to "m", "seq" to 4L, "at" to FakeTimestamp(5), "preview" to "hi", "author" to mapOf("kind" to "bot", "uid" to "u", "botKey" to "bot:o:h:b"))
-        val data = mapOf("kind" to "bot_dm", "title" to "Helper", "participants" to listOf("user:u1", "bot:o:h:b"), "lastSeq" to 4L, "lastChangeSeq" to 4L, "lastMessage" to pointer)
+        val pointer = mapOf("id" to "m", "seq" to 4L, "at" to FakeTimestamp(5), "preview" to "hi", "author" to mapOf("kind" to "shared_bot", "uid" to "u", "sharedBotId" to "sharedbot_b"))
+        val data = mapOf("kind" to "bot_dm", "title" to "Helper", "participants" to listOf("user:u1", "shared_bot:sharedbot_b"), "lastSeq" to 4L, "lastChangeSeq" to 4L, "lastMessage" to pointer)
         val parsed = TeamMessageConversation.fromDocument("c1", data, 2, millis)
-        assertEquals(listOf("bot:o:h:b"), parsed.botKeys); assertEquals("bot:o:h:b", parsed.botKey)
-        assertEquals(2L, parsed.lastReadSeq); assertEquals(5L, parsed.lastMessage!!.atMs); assertEquals("bot", parsed.lastMessage.authorKind)
+        assertEquals(listOf("sharedbot_b"), parsed.sharedBotIds); assertEquals("sharedbot_b", parsed.sharedBotId)
+        assertEquals(2L, parsed.lastReadSeq); assertEquals(5L, parsed.lastMessage!!.atMs); assertEquals("shared_bot", parsed.lastMessage.authorKind)
         for (broken in listOf(data - "lastMessage", data - "kind", data - "title", data - "participants", data - "lastSeq", data - "lastChangeSeq", data + ("participants" to listOf(1)), data + ("lastSeq" to "4"))) {
             val failure = runCatching { TeamMessageConversation.fromDocument("c1", broken, 0, millis) }.exceptionOrNull()
             assertEquals(broken.toString(), "INVALID_DATA", (failure as? TeamMessageFailure)?.code)

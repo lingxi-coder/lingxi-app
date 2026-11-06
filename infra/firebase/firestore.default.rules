@@ -7,7 +7,6 @@ service cloud.firestore {
   match /databases/{database}/documents {
     function teamPath(tid) { return /databases/$(database)/documents/teams/$(tid); }
     function memberPath(tid, uid) { return /databases/$(database)/documents/teams/$(tid)/members/$(uid); }
-    function botPath(tid, key) { return /databases/$(database)/documents/teams/$(tid)/bots/$(key); }
     function convPath(tid, cid) { return /databases/$(database)/documents/teams/$(tid)/conversations/$(cid); }
     function msgPath(tid, cid, mid) { return /databases/$(database)/documents/teams/$(tid)/conversations/$(cid)/messages/$(mid); }
     function changePath(tid, cid, id) { return /databases/$(database)/documents/teams/$(tid)/conversations/$(cid)/changes/$(id); }
@@ -20,26 +19,15 @@ service cloud.firestore {
     function inConversation(tid, cid) {
       return isMember(tid) && request.auth.uid in get(convPath(tid, cid)).data.memberUids;
     }
-    function mayUseBot(tid, key) {
-      let b = get(botPath(tid, key)).data;
-      return b.enabled == true && b.ownerGeneration == get(memberPath(tid, b.ownerUid)).data.generation
-        && (b.ownerUid == request.auth.uid || b.use == 'all'
-        || (b.use == 'listed' && request.auth.uid in b.get('uids', [])));
-    }
     function maySpeak(tid, cid) {
       let c = get(convPath(tid, cid)).data;
-      return inConversation(tid, cid) && (c.kind != 'bot_dm' || mayUseBot(tid, c.botKey));
+      return inConversation(tid, cid) && ('user:' + request.auth.uid) in c.participants;
     }
     function validText(text) { return text is string && text.size() > 0 && text.toUtf8().size() <= 8192; }
     function validId(id) { return id is string && id.matches('^[A-Za-z0-9_-]{8,64}$'); }
     function isAuthor(tid, cid, a) {
-      return a.uid == request.auth.uid && (
-        (a.kind == 'user' && a.keys().hasOnly(['kind', 'uid']))
-        || (a.kind == 'bot' && a.keys().hasOnly(['kind', 'uid', 'botKey']) && a.botKey is string
-          && a.botKey in get(convPath(tid, cid)).data.participants
-          && get(botPath(tid, a.botKey)).data.ownerUid == request.auth.uid
-          && get(botPath(tid, a.botKey)).data.enabled == true
-          && get(botPath(tid, a.botKey)).data.ownerGeneration == get(memberPath(tid, request.auth.uid)).data.generation));
+      return a.kind == 'user' && a.uid == request.auth.uid && a.keys().hasOnly(['kind', 'uid', 'displayName'])
+        && (!('displayName' in a) || a.displayName == get(memberPath(tid, request.auth.uid)).data.displayName);
     }
 
     // Cross-check the immutable receipt and both sides of the conversation cursor.
@@ -55,13 +43,14 @@ service cloud.firestore {
     function isNewMessage(tid, cid, mid) {
       let m = request.resource.data;
       return m.keys().hasOnly(['seq', 'author', 'kind', 'text', 'mentions', 'replyTo', 'createdAt', 'changeSeq', 'changeId'])
+        && get(convPath(tid, cid)).data.kind != 'bot_dm'
         && m.keys().hasAll(['seq', 'author', 'kind', 'text', 'createdAt', 'changeSeq', 'changeId'])
         && validId(mid) && !mid.matches('^bot_.*$') && m.seq is int && m.seq == get(convPath(tid, cid)).data.lastSeq + 1
         && getAfter(convPath(tid, cid)).data.lastSeq == m.seq
         && getAfter(convPath(tid, cid)).data.lastMessage.id == mid
         && m.createdAt == request.time && m.kind in ['text', 'status', 'question', 'task_ref', 'app_ref']
         && validText(m.text)
-        // Mentions are display metadata, not executable Bot requests (T3 uses authenticated triggers).
+        // Only authenticated submit can admit an execution; mentions are metadata.
         && (!('mentions' in m) || (m.mentions is list && m.mentions.size() <= 32))
         && (!('replyTo' in m) || m.replyTo is string)
         && isAuthor(tid, cid, m.author) && hasChange(tid, cid, mid, m, 'create');
@@ -89,7 +78,7 @@ service cloud.firestore {
       return last.keys().hasOnly(['id', 'seq', 'at', 'author', 'preview'])
         && last.keys().hasAll(['id', 'seq', 'at', 'author', 'preview'])
         && last.id == change.messageId && last.seq == after.lastSeq && last.at == request.time
-        && last.author.keys().hasOnly(['kind', 'uid', 'botKey'])
+        && last.author.keys().hasOnly(['kind', 'uid', 'displayName'])
         && last.author == getAfter(msgPath(tid, cid, change.messageId)).data.author
         && validPreview(last.preview);
     }
@@ -154,14 +143,9 @@ service cloud.firestore {
       }
       // Trusted writes contain only a timestamp and an opaque card identity.
       match /signals/{key} { allow get, list: if isMember(tid); }
-      match /bots/{key} {
-        // The authenticated API filters inactive/tombstoned cards for their
-        // owner. Direct reads would bypass that visibility boundary. Rules'
-        // internal get/getAfter checks still validate message Bot ACLs.
-        allow get, list: if false;
-        // Binding revisions and owner generations are trusted API writes. In
-        // particular, an SDK write cannot resurrect an old binding/trigger.
-      }
+      // SharedBot configuration, deployments, grants, permits, tasks, receipts,
+      // quotas and artifacts are private server-owned records. No SDK rule
+      // grants access; authenticated endpoints return authorized projections.
       match /conversations/{cid} {
         // Create/participant mutation go through teamsApi, which derives memberUids
         // from authenticated participants and includes every Bot's owner.

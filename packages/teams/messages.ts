@@ -1,22 +1,25 @@
-import { canRecoverBot, isQuestionRecipient, type TeamBotAnswer, type TeamBotCommand, type TeamBotRecovery, type TeamBotState } from './bots.js';
+import { isMemberExecutionCommand } from './execution-validation.js';
+import { executionCommand, type MemberExecutionCommand } from './execution.js';
+export type MessageAuthor = { kind: 'user'; uid: string; displayName?: string } | { kind: 'shared_bot'; sharedBotId: string; displayName: string };
+export const authorIdentity = (a: MessageAuthor) => a.kind === 'user' ? `user:${a.uid}` : `shared_bot:${a.sharedBotId}`;
 export interface TeamConversation {
   id: string; kind: 'dm' | 'group' | 'channel' | 'bot_dm'; title: string; participants: string[];
-  lastSeq: number; lastChangeSeq: number; lastReadSeq: number; botKey?: string;
+  lastSeq: number; lastChangeSeq: number; lastReadSeq: number;
   /** Newest message for conversation lists. Absent until the conversation has a message; then always the full pointer. */
-  lastMessage?: { id: string; seq: number; at: string | null; author: { kind: 'user' | 'bot'; uid: string; botKey?: string }; preview: string; recalled?: true };
+  lastMessage?: { id: string; seq: number; at: string | null; author: MessageAuthor; preview: string; recalled?: true };
 }
 export interface TeamMessage {
-  id: string; seq: number; author: { kind: 'user' | 'bot'; uid: string; botKey?: string };
+  id: string; seq: number; author: MessageAuthor;
   kind: string; text: string; replyTo?: string; createdAt: string | null; editedAt?: string | null;
   recalled?: boolean; changeSeq: number; changeId: string;
-  triggerId?: string; origin?: { uid: string; generation: number }; question?: { id: string; questions: string[] };
+  taskId?: string; taskIds?: string[]; artifactId?: string;
   mentions?: string[];
 }
 export interface MessageScope { teamId: string; generation: number }
 export type MessageMutation = MessageScope & { action: 'mutate'; conversationId: string; messageId: string; changeId: string;
-  operation: 'create' | 'edit' | 'recall'; text: string; replyTo?: string; targets?: string[] };
-export type MessageCommand = MessageMutation | TeamBotCommand
-  | MessageScope & { action: 'create'; conversationId: string; kind: TeamConversation['kind']; title: string; participantUids: string[]; botKeys?: string[] }
+  operation: 'create' | 'edit' | 'recall'; text: string; replyTo?: string };
+export type MessageCommand = MessageMutation | MemberExecutionCommand
+  | MessageScope & { action: 'create'; conversationId: string; kind: TeamConversation['kind']; title: string; participantUids: string[];  }
   | MessageScope & { action: 'read'; conversationId: string; lastReadSeq: number };
 export interface MessageSignal { bots?: boolean; conversationId?: string }
 export interface MessageApi {
@@ -32,14 +35,16 @@ export type MessageSnapshot = MessageScope & { uid: string; fromCache: boolean }
   | { kind: 'error'; error: string }
 );
 interface CommandMetadata { error?: string; leaseUntil?: number; attempted?: boolean; retryDelay?: number }
+type CreationCommand = Extract<MessageCommand, { action: 'create' | 'createConversation' }>;
+type OutboxCommand = MessageMutation | Extract<MemberExecutionCommand, { action: 'submit' }>;
+export interface PendingCommand<C> extends CommandMetadata { command: C }
 export interface PendingCommands {
-  version: 1; uid: string; teamId: string; generation: number;
-  creation?: Extract<MessageCommand, { action: 'create' }> & CommandMetadata;
-  outbox: (MessageMutation & CommandMetadata)[];
-  answerReceipts?: string[];
-  answerOutbox?: (TeamBotAnswer & { question: NonNullable<TeamMessage['question']>; origin: NonNullable<TeamMessage['origin']> } & CommandMetadata)[];
-  recoveryReceipts?: string[];
-  recoveryOutbox?: (TeamBotRecovery & CommandMetadata)[];
+  version: 2; uid: string; teamId: string; generation: number;
+  creation?: PendingCommand<CreationCommand>;
+  outbox: PendingCommand<OutboxCommand>[];
+}
+export function pendingPayload<C extends MessageCommand>(value: PendingCommand<C>): C extends { payload: infer P } ? P : C {
+  return ('payload' in value.command ? value.command.payload : value.command) as C extends { payload: infer P } ? P : C;
 }
 /** The projection is ephemeral. Firestore owns all durable message/read caches. */
 export interface MessageProjection extends PendingCommands {
@@ -52,19 +57,19 @@ export interface CommandStorage {
   update(key: string, reduce: (old: PendingCommands | undefined) => PendingCommands): Promise<PendingCommands>;
 }
 export function pendingCommands(value: PendingCommands): PendingCommands {
-  const { version, uid, teamId, generation, creation, outbox, answerReceipts, answerOutbox, recoveryReceipts, recoveryOutbox } = value;
-  return { version, uid, teamId, generation, creation, outbox, answerReceipts, answerOutbox, recoveryReceipts, recoveryOutbox };
+  const { version, uid, teamId, generation, creation, outbox } = value;
+  return { version, uid, teamId, generation, creation, outbox };
 }
 export const projectionKey = (uid: string, scope: MessageScope) => JSON.stringify([uid, scope.teamId, scope.generation]);
-export const emptyProjection = (uid: string, scope: MessageScope): MessageProjection => ({ version: 1, uid, ...scope, conversations: [], threads: {}, outbox: [] });
+export const emptyProjection = (uid: string, scope: MessageScope): MessageProjection => ({ version: 2, uid, ...scope, conversations: [], threads: {}, outbox: [] });
 const sameLastMessage = (a: TeamConversation['lastMessage'], b: TeamConversation['lastMessage']) => a === b || (!!a && !!b && a.id === b.id && a.seq === b.seq && a.at === b.at
-  && a.preview === b.preview && a.recalled === b.recalled && a.author.kind === b.author.kind && a.author.uid === b.author.uid && a.author.botKey === b.author.botKey);
+  && a.preview === b.preview && a.recalled === b.recalled && authorIdentity(a.author) === authorIdentity(b.author));
 export function mergeConversation(old: TeamConversation | undefined, value: TeamConversation): TeamConversation {
   // Like the cursors, never step back to an older message; the same seq is newer when its edit/recall changed the preview.
   const lastMessage = old?.lastMessage && (!value.lastMessage || old.lastMessage.seq > value.lastMessage.seq) ? old.lastMessage : value.lastMessage;
   const merged = { ...value, lastSeq: Math.max(old?.lastSeq ?? 0, value.lastSeq), lastChangeSeq: Math.max(old?.lastChangeSeq ?? 0, value.lastChangeSeq), lastReadSeq: Math.max(old?.lastReadSeq ?? 0, value.lastReadSeq),
     ...(lastMessage ? { lastMessage } : {}) };
-  if (old && old.kind === merged.kind && old.title === merged.title && old.botKey === merged.botKey
+  if (old && old.kind === merged.kind && old.title === merged.title
     && old.lastSeq === merged.lastSeq && old.lastChangeSeq === merged.lastChangeSeq && old.lastReadSeq === merged.lastReadSeq
     && sameLastMessage(old.lastMessage, merged.lastMessage)
     && old.participants.length === merged.participants.length && old.participants.every((value, index) => value === merged.participants[index])) return old;
@@ -97,10 +102,7 @@ function failedCommand<T extends CommandMetadata>(intent: T, error: unknown, per
   return { ...intent, leaseUntil: Date.now() + retryDelay, retryDelay };
 }
 const isRevokedAccessError = (error: unknown) => error instanceof Error && ['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED', 'CONVERSATION_REQUIRED'].includes(error.message);
-const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'QUESTION_RECIPIENT_REQUIRED', 'INVALID_ANSWER', 'ANSWER_CONFLICT'].includes(error.message);
-const isPermanentRecoveryError = (error: unknown) => isPermanentMessageError(error) || error instanceof Error && ['RECOVERY_NOT_REQUIRED', 'BOT_RESULT_CONFLICT', 'BOT_OWNER_REQUIRED', 'TRIGGER_REQUIRED'].includes(error.message);
-export const recoveryKey = (conversationId: string, triggerId: string) => JSON.stringify([conversationId, triggerId]);
-
+const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'HOST_UNAVAILABLE', 'REQUEST_QUOTA_EXCEEDED', 'CONVERSATION_POLICY_REQUIRED', 'INPUT_GRANT_REQUIRED', 'BOT_RETIRED', 'COMMAND_ID_CONFLICT'].includes(error.message);
 /** Persist command identities before transport; Firestore owns message history. */
 export class TeamMessaging {
   state: MessageProjection;
@@ -131,8 +133,22 @@ export class TeamMessaging {
     if (!this.closed) { this.state = { ...this.state, ...value }; this.emit(); }
   }
   private validPending(value: PendingCommands | undefined): PendingCommands {
-    if (value?.version === 1 && value.uid === this.uid && value.teamId === this.scope.teamId && value.generation === this.scope.generation) return pendingCommands(value);
-    return pendingCommands(emptyProjection(this.uid, this.scope));
+    if (!value || value.version !== 2 || value.uid !== this.uid || value.teamId !== this.scope.teamId || value.generation !== this.scope.generation)
+      return pendingCommands(emptyProjection(this.uid, this.scope));
+    if (!Array.isArray(value.outbox) || !value.outbox.every(item => this.validCommand(item, 'outbox'))
+      || value.creation && !this.validCommand(value.creation, 'creation')) throw new Error('STORAGE_INVALID_DATA');
+    return pendingCommands(value);
+  }
+  private validCommand(value: PendingCommand<MessageCommand>, kind: 'outbox' | 'creation'): boolean {
+    if (!value || !value.command) return false;
+    const command = value.command;
+    if (command.teamId !== this.scope.teamId || command.generation !== this.scope.generation) return false;
+    if ('schemaVersion' in command) return isMemberExecutionCommand(command)
+      && (kind === 'creation' ? command.action === 'createConversation' : command.action === 'submit');
+    // Human-message commands retain the existing transport; no execution targets are accepted here.
+    const fields = kind === 'creation' ? ['action', 'teamId', 'generation', 'conversationId', 'kind', 'title', 'participantUids']
+      : ['action', 'teamId', 'generation', 'conversationId', 'messageId', 'changeId', 'operation', 'text', 'replyTo'];
+    return command.action === (kind === 'creation' ? 'create' : 'mutate') && Object.keys(command).every(key => fields.includes(key));
   }
   private async reload(): Promise<void> {
     const value = await this.storage.load(this.key);
@@ -156,7 +172,7 @@ export class TeamMessaging {
       this.state = mergeDirectory(this.state, snapshot.conversations, true);
       const allowed = new Set(snapshot.conversations.map(value => value.id));
       this.state = { ...this.state, threads: Object.fromEntries(Object.entries(this.state.threads).filter(([id]) => allowed.has(id))) };
-      if (!snapshot.fromCache && this.selected && !allowed.has(this.selected) && this.state.creation?.conversationId !== this.selected) { this.selected = ''; this.watch(); }
+      if (!snapshot.fromCache && this.selected && !allowed.has(this.selected) && (this.state.creation ? pendingPayload(this.state.creation).conversationId : undefined) !== this.selected) { this.selected = ''; this.watch(); }
       this.directoryCached = snapshot.fromCache;
     } else if (snapshot.kind === 'messages') {
       if (snapshot.conversationId !== this.selected) return;
@@ -173,7 +189,7 @@ export class TeamMessaging {
   private scheduleRetry(): void {
     clearTimeout(this.retry); this.retry = undefined;
     if (this.closed) return;
-    const pending = [this.state.creation, ...this.state.outbox, ...(this.state.answerOutbox ?? []), ...(this.state.recoveryOutbox ?? [])].filter(value => value && !value.error);
+    const pending = [this.state.creation, ...this.state.outbox].filter(value => value && !value.error);
     if (!pending.length) { this.retryDelay = 1000; return; }
     const lease = Math.min(...pending.map(value => Math.max(0, (value!.leaseUntil ?? 0) - Date.now())));
     this.retry = setTimeout(() => { this.retry = undefined; void this.refresh(); }, Math.max(lease, this.retryDelay));
@@ -191,76 +207,32 @@ export class TeamMessaging {
   }
   reconnect(): void { if (this.closed) return; this.error = ''; this.watch(); this.emit(); void this.refresh(); }
   select(id: string) { this.selected = id; this.messagesCached = true; this.offline = this.directoryCached || !!id; this.state = { ...this.state, threads: this.state.threads[id] ? { [id]: this.state.threads[id]! } : {} }; this.watch(); this.error = ''; this.emit(); void this.refresh(); }
-  async create(kind: TeamConversation['kind'], title: string, participantUids: string[], botKeys: string[] = []) {
+  async create(kind: TeamConversation['kind'], title: string, participantUids: string[], sharedBotIds: string[] = []) {
     if (this.closed) throw new Error('INVALID_SESSION');
-    if (botKeys.length > 8 || new Set(botKeys).size !== botKeys.length || (kind === 'dm' && botKeys.length)
-      || (kind === 'bot_dm' && (botKeys.length !== 1 || participantUids.length !== 1))) throw new Error('INVALID_BOT_TARGET');
-    const command: Extract<MessageCommand, { action: 'create' }> = { action: 'create', ...this.scope, conversationId: crypto.randomUUID(), kind, title, participantUids: [...participantUids], ...(botKeys.length ? { botKeys: [...botKeys] } : {}) };
-    await this.commit(old => { if (old.creation) throw new Error('CREATION_PENDING'); return { ...old, creation: command }; });
-    this.select(command.conversationId); await this.refresh();
+    if (sharedBotIds.length > 8 || new Set(sharedBotIds).size !== sharedBotIds.length || (kind === 'dm' && sharedBotIds.length)
+      || (kind === 'bot_dm' && (sharedBotIds.length !== 1 || participantUids.length !== 1))) throw new Error('INVALID_BOT_TARGET');
+    const conversationId = crypto.randomUUID();
+    const command: CreationCommand = sharedBotIds.length && kind !== 'dm'
+      ? executionCommand(this.scope, 'createConversation', { conversationId, kind, title, participantUids: [...participantUids], sharedBotIds: [...sharedBotIds] })
+      : { action: 'create', ...this.scope, conversationId, kind, title, participantUids: [...participantUids] };
+    await this.commit(old => { if (old.creation) throw new Error('CREATION_PENDING'); return { ...old, creation: { command } }; });
+    this.select(conversationId); await this.refresh();
   }
   async queue(operation: MessageMutation['operation'], text: string, messageId: string = crypto.randomUUID(), replyTo?: string, targets: string[] = []) {
     if (this.closed || !this.selected || (operation !== 'recall' && (!text.trim() || new TextEncoder().encode(text).length > 8192))) throw new Error('INVALID_INPUT');
     if (operation !== 'create' && targets.length) throw new Error('INVALID_BOT_TARGET');
     if (targets.length > 8 || new Set(targets).size !== targets.length) throw new Error('INVALID_BOT_TARGET');
-    const intent: MessageMutation = { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId: crypto.randomUUID(), operation, text, ...(replyTo ? { replyTo } : {}), ...(targets.length ? { targets: [...targets] } : {}) };
-    await this.commit(old => ({ ...old, outbox: [...old.outbox, intent] }));
+    const conversation = this.state.conversations.find(value => value.id === this.selected);
+    const selectedTargets = targets.length ? targets : operation === 'create' && conversation?.kind === 'bot_dm'
+      ? conversation.participants.filter(value => value.startsWith('shared_bot:')).map(value => value.slice(11)) : [];
+    const changeId = crypto.randomUUID();
+    const command: OutboxCommand = operation === 'create' && selectedTargets.length
+      ? executionCommand(this.scope, 'submit', { conversationId: this.selected, messageId, changeId, text, targets: [...selectedTargets], ...(replyTo ? { replyTo } : {}) })
+      : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...(replyTo ? { replyTo } : {}) };
+    await this.commit(old => ({ ...old, outbox: [...old.outbox, { command }] }));
     void this.refresh();
   }
-  async answer(message: TeamMessage, answers: Record<string, string>) {
-    if (this.closed || !this.selected || !isQuestionRecipient(message, this.uid, this.scope.generation)) throw new Error('QUESTION_RECIPIENT_REQUIRED');
-    const questions = message.question!;
-    if (Object.keys(answers).length !== questions.questions.length || questions.questions.some(q => !answers[q]?.trim() || answers[q]!.length > 2000)) throw new Error('INVALID_ANSWER');
-    const intent = { action: 'botAnswer' as const, ...this.scope, conversationId: this.selected, triggerId: message.triggerId!, questionId: questions.id,
-      answerId: crypto.randomUUID(), answers: { ...answers }, question: structuredClone(questions), origin: { ...message.origin! } };
-    await this.commit(old => {
-      if (old.answerReceipts?.includes(JSON.stringify([intent.conversationId, intent.questionId]))) throw new Error('ANSWER_CONFLICT');
-      if (old.answerOutbox?.some(value => value.conversationId === intent.conversationId && value.questionId === intent.questionId)) throw new Error('ANSWER_PENDING');
-      return { ...old, answerOutbox: [...(old.answerOutbox ?? []), intent] };
-    });
-    void this.refresh();
-  }
-  async discardAnswer(answerId: string) {
-    await this.commit(old => {
-      if (old.answerOutbox?.some(item => item.answerId === answerId && ((item.attempted && !item.error) || (item.leaseUntil ?? 0) > Date.now()))) throw new Error('MESSAGE_IN_FLIGHT');
-      return { ...old, answerOutbox: old.answerOutbox?.filter(item => item.answerId !== answerId) };
-    });
-  }
-  async recover(conversationId: string, triggerId: string, text: string) {
-    if (this.closed || !text.trim() || new TextEncoder().encode(text).length > 8192) throw new Error('INVALID_INPUT');
-    await this.reload();
-    const key = recoveryKey(conversationId, triggerId);
-    const pending = this.state.recoveryOutbox?.find(item => recoveryKey(item.conversationId, item.triggerId) === key);
-    if (pending) {
-      if (pending.text !== text) throw new Error('BOT_RESULT_CONFLICT');
-      void this.refresh(); return;
-    }
-    if (this.state.recoveryReceipts?.includes(key)) throw new Error('RECOVERY_NOT_REQUIRED');
-    // A new manual settlement needs a fresh owner/lease check. An existing durable
-    // intent is retried unchanged even after its first response was lost.
-    let current: TeamBotState;
-    try { current = await this.api.messages<TeamBotState>({ action: 'botState', ...this.scope, conversationId, triggerId }); }
-    catch (error) { await this.deny(error); throw error; }
-    if (this.closed) throw new Error('INVALID_SESSION');
-    if (!canRecoverBot(current, this.uid)) throw new Error('RECOVERY_NOT_REQUIRED');
-    const intent: TeamBotRecovery = { action: 'recoverBot', ...this.scope, conversationId, triggerId, botKey: current.botKey, text };
-    await this.commit(old => {
-      if (old.recoveryReceipts?.includes(key)) throw new Error('RECOVERY_NOT_REQUIRED');
-      const existing = old.recoveryOutbox?.find(item => recoveryKey(item.conversationId, item.triggerId) === key);
-      if (existing) { if (existing.text !== text) throw new Error('BOT_RESULT_CONFLICT'); return old; }
-      return { ...old, recoveryOutbox: [...(old.recoveryOutbox ?? []), intent] };
-    });
-    void this.refresh();
-  }
-  async discardRejectedRecovery(conversationId: string, triggerId: string) {
-    const key = recoveryKey(conversationId, triggerId);
-    await this.commit(old => {
-      const item = old.recoveryOutbox?.find(value => recoveryKey(value.conversationId, value.triggerId) === key);
-      if (item && (!item.error || (item.leaseUntil ?? 0) > Date.now())) throw new Error('MESSAGE_IN_FLIGHT');
-      return { ...old, recoveryOutbox: old.recoveryOutbox?.filter(value => recoveryKey(value.conversationId, value.triggerId) !== key) };
-    });
-  }
-  async discard(changeId: string) { await this.commit(old => { if (old.outbox.some(item => item.changeId === changeId && ((item.attempted && !item.error) || (item.leaseUntil ?? 0) > Date.now()))) throw new Error('MESSAGE_IN_FLIGHT'); return { ...old, outbox: old.outbox.filter(item => item.changeId !== changeId) }; }); }
+  async discard(changeId: string) { await this.commit(old => { if (old.outbox.some(item => pendingPayload(item).changeId === changeId && ((item.attempted && !item.error) || (item.leaseUntil ?? 0) > Date.now()))) throw new Error('MESSAGE_IN_FLIGHT'); return { ...old, outbox: old.outbox.filter(item => pendingPayload(item).changeId !== changeId) }; }); }
   async discardCreation() { await this.commit(old => { if ((old.creation?.attempted && !old.creation.error) || (old.creation?.leaseUntil ?? 0) > Date.now()) throw new Error('MESSAGE_IN_FLIGHT'); return { ...old, creation: undefined }; }); }
   async markRead() {
     const id = this.selected, thread = this.state.threads[id];
@@ -295,12 +267,12 @@ export class TeamMessaging {
         creation = { ...old.creation, leaseUntil: Date.now() + 30000, attempted: true }; return { ...old, creation };
       });
       if (creation) {
-        const { error: _error, leaseUntil: _leaseUntil, attempted: _attempted, retryDelay: _retryDelay, ...command } = creation;
+        const command = creation.command;
         try {
           await this.api.messages(command);
           if (this.closed) return;
           await this.commit(old => ({ ...old, creation: undefined }));
-          if (!this.selected) this.selected = command.conversationId;
+          if (!this.selected) this.selected = ('payload' in command ? command.payload.conversationId : command.conversationId);
         } catch (error) {
           if (isRevokedAccessError(error)) throw error;
           const isPermanent = isPermanentMessageError(error) || error instanceof Error && ['CONVERSATION_REJECTED', 'PARTICIPANT_REQUIRED'].includes(error.message);
@@ -312,68 +284,19 @@ export class TeamMessaging {
       await this.reload();
       const blockedConversations = new Set<string>();
       for (const pending of this.state.outbox) {
-        if (pending.error || this.closed || blockedConversations.has(pending.conversationId)) continue;
+        if (pending.error || this.closed || blockedConversations.has(pendingPayload(pending).conversationId)) continue;
         let intent: MessageProjection['outbox'][number] | undefined;
-        await this.commit(old => ({ ...old, outbox: old.outbox.map(item => { if (item.changeId !== pending.changeId || item.error || (item.leaseUntil ?? 0) > Date.now()) return item; intent = { ...item, leaseUntil: Date.now() + 30000, attempted: true }; return intent; }) }));
-        if (!intent || this.closed) { blockedConversations.add(pending.conversationId); continue; }
-        const changeId = intent.changeId;
+        await this.commit(old => ({ ...old, outbox: old.outbox.map(item => { if (pendingPayload(item).changeId !== pendingPayload(pending).changeId || item.error || (item.leaseUntil ?? 0) > Date.now()) return item; intent = { ...item, leaseUntil: Date.now() + 30000, attempted: true }; return intent; }) }));
+        if (!intent || this.closed) { blockedConversations.add(pendingPayload(pending).conversationId); continue; }
+        const changeId = pendingPayload(intent).changeId;
         try {
-          const { error: _error, leaseUntil: _leaseUntil, attempted: _attempted, retryDelay: _retryDelay, ...command } = intent;
+          const command = intent.command;
           await this.api.messages(command);
           if (this.closed) return;
-          await this.commit(old => ({ ...old, outbox: old.outbox.filter(item => item.changeId !== changeId) }));
+          await this.commit(old => ({ ...old, outbox: old.outbox.filter(item => pendingPayload(item).changeId !== changeId) }));
         } catch (error) {
-          await this.commit(old => ({ ...old, outbox: old.outbox.map(item => item.changeId === changeId ? failedCommand(item, error, isPermanentMessageError(error)) : item) }));
+          await this.commit(old => ({ ...old, outbox: old.outbox.map(item => pendingPayload(item).changeId === changeId ? failedCommand(item, error, isPermanentMessageError(error)) : item) }));
           if (!isPermanentMessageError(error)) throw error;
-        }
-      }
-      for (const pending of this.state.answerOutbox ?? []) {
-        if (pending.error || this.closed) continue;
-        let intent: NonNullable<MessageProjection['answerOutbox']>[number] | undefined;
-        await this.commit(old => ({ ...old, answerOutbox: old.answerOutbox?.map(item => {
-          if (item.answerId !== pending.answerId || item.error || (item.leaseUntil ?? 0) > Date.now()) return item;
-          intent = { ...item, leaseUntil: Date.now() + 30000, attempted: true }; return intent;
-        }) }));
-        if (!intent || this.closed) continue;
-        const answerId = intent.answerId;
-        try {
-          if (pending.attempted) {
-            // Observe this exact historical question, without replacing the active
-            // question in the UI. answered=true is not an ACK: another device may
-            // have answered differently, so the immutable command still goes to
-            // the backend for its answerId/digest receipt check.
-            await this.api.messages<TeamBotState>({ action: 'botState', ...this.scope, conversationId: intent.conversationId,
-              triggerId: intent.triggerId, questionId: intent.questionId });
-            if (this.closed) return;
-          }
-          const { error: _error, leaseUntil: _leaseUntil, attempted: _attempted, retryDelay: _retryDelay, question: _question, origin: _origin, ...command } = intent;
-          await this.api.messages(command);
-          if (this.closed) return;
-          await this.commit(old => ({ ...old, answerOutbox: old.answerOutbox?.filter(item => item.answerId !== answerId), answerReceipts: [...new Set([...(old.answerReceipts ?? []), JSON.stringify([intent!.conversationId, intent!.questionId])])] }));
-        } catch (error) {
-          await this.commit(old => ({ ...old, answerOutbox: old.answerOutbox?.map(item => item.answerId === answerId ? failedCommand(item, error, isPermanentMessageError(error)) : item) }));
-          if (!isPermanentMessageError(error)) throw error;
-        }
-      }
-      for (const pending of this.state.recoveryOutbox ?? []) {
-        if (pending.error || this.closed) continue;
-        const key = recoveryKey(pending.conversationId, pending.triggerId);
-        let intent: NonNullable<MessageProjection['recoveryOutbox']>[number] | undefined;
-        await this.commit(old => ({ ...old, recoveryOutbox: old.recoveryOutbox?.map(item => {
-          if (recoveryKey(item.conversationId, item.triggerId) !== key || item.error || (item.leaseUntil ?? 0) > Date.now()) return item;
-          intent = { ...item, leaseUntil: Date.now() + 30000, attempted: true }; return intent;
-        }) }));
-        if (!intent || this.closed) continue;
-        try {
-          const { error: _error, leaseUntil: _leaseUntil, attempted: _attempted, retryDelay: _retryDelay, ...command } = intent;
-          await this.api.messages(command);
-          if (this.closed) return;
-          await this.commit(old => ({ ...old, recoveryOutbox: old.recoveryOutbox?.filter(item => recoveryKey(item.conversationId, item.triggerId) !== key),
-            recoveryReceipts: [...new Set([...(old.recoveryReceipts ?? []), key])] }));
-        } catch (error) {
-          await this.commit(old => ({ ...old, recoveryOutbox: old.recoveryOutbox?.map(item => recoveryKey(item.conversationId, item.triggerId) === key
-            ? failedCommand(item, error, isPermanentRecoveryError(error)) : item) }));
-          if (!isPermanentRecoveryError(error)) throw error;
         }
       }
     } catch (error) {

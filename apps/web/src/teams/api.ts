@@ -1,3 +1,4 @@
+import { botMarketLink } from './market-link';
 import * as firestore from 'firebase/firestore';
 import { collection, onSnapshot, type Firestore } from 'firebase/firestore';
 import { teamsTransport, type TeamsApi, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../packages/teams';
@@ -27,6 +28,10 @@ export function webTeamsApi(user: User, db: Firestore, currentUid: () => string 
     return result;
   };
   return {
+    async openBotMarket() {
+      if (closed || currentUid() !== user.uid) throw new Error('INVALID_SESSION');
+      window.open(botMarketLink(), '_blank', 'noopener,noreferrer');
+    },
     async list() { watch('index', ['users', user.uid, 'teams']); return checked<{ teams: TeamSummary[] }>(); },
     async detail(teamId: string) {
       if (!/^[A-Za-z0-9_-]{8,64}$/u.test(teamId)) throw new Error('INVALID_INPUT');

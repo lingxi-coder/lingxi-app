@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Timestamp } from 'firebase/firestore';
-import { firestoreLastMessage, watchFirestoreMessages } from '../../../packages/teams/firestore.js';
+import { firestoreMessage, firestoreLastMessage, watchFirestoreMessages } from '../../../packages/teams/firestore.js';
 import { emptyProjection, mergeConversation, mergeDirectory, type MessageSnapshot, type TeamConversation } from '../../../packages/teams/messages.js';
 
 type Last = NonNullable<TeamConversation['lastMessage']>;
@@ -33,7 +33,7 @@ test('conversation merge: the higher seq wins and an edit or recall at the same 
 test('conversation merge: an identical pointer keeps the row identity, any visible difference does not', () => {
   const old = withLast(last(2));
   assert.equal(mergeConversation(old, withLast(last(2))), old); // a fresh but equal object from the next snapshot
-  for (const change of [{ preview: 'Other' }, { recalled: true as const }, { at: '2026-11-02T10:00:01.000Z' }, { id: 'message-9' }, { author: { kind: 'bot' as const, uid: 'owner', botKey: 'bot:owner:h:b' } },
+  for (const change of [{ preview: 'Other' }, { recalled: true as const }, { at: '2026-11-02T10:00:01.000Z' }, { id: 'message-9' }, { author: { kind: 'shared_bot' as const, displayName: 'Helper', sharedBotId: 'assistant-fixture' } },
     { author: { kind: 'user' as const, uid: 'carol' } }]) {
     const next = mergeConversation(old, withLast(last(2, change)));
     assert.notEqual(next, old, JSON.stringify(change));
@@ -53,8 +53,8 @@ test('directory merge: unchanged snapshots reuse the projection and a preview ch
 });
 
 test('Firestore pointer: timestamps become ISO strings and every field of the full shape is kept', () => {
-  const value = { id: 'message-5', seq: 5, at: Timestamp.fromDate(new Date(at)), preview: 'Hello there', author: { kind: 'bot', uid: 'owner', botKey: 'bot:owner:h:b' } };
-  assert.deepEqual(firestoreLastMessage(value), { id: 'message-5', seq: 5, at, preview: 'Hello there', author: { kind: 'bot', uid: 'owner', botKey: 'bot:owner:h:b' } });
+  const value = { id: 'message-5', seq: 5, at: Timestamp.fromDate(new Date(at)), preview: 'Hello there', author: { kind: 'shared_bot', displayName: 'Helper', sharedBotId: 'assistant-fixture' } };
+  assert.deepEqual(firestoreLastMessage(value), { id: 'message-5', seq: 5, at, preview: 'Hello there', author: { kind: 'shared_bot', displayName: 'Helper', sharedBotId: 'assistant-fixture' } });
   assert.deepEqual(firestoreLastMessage({ ...value, author: { kind: 'user', uid: 'bob' }, preview: '', recalled: true }),
     { id: 'message-5', seq: 5, at, preview: '', recalled: true, author: { kind: 'user', uid: 'bob' } });
   assert.equal(firestoreLastMessage({ ...value, at: null })!.at, null, 'a write made on this device that the server has not stamped yet');
@@ -71,7 +71,7 @@ test('Firestore pointer: null is a conversation with no message yet, and anythin
     withoutAuthor, withoutPreview, withoutTime,
     { ...whole, id: '' }, { ...whole, id: 7 }, { ...whole, seq: '2' }, { ...whole, seq: 2.5 }, { ...whole, seq: Number.NaN }, { ...whole, at: '2026-11-02' },
     { ...whole, preview: 7 }, { ...whole, preview: null }, { ...whole, recalled: false }, { ...whole, recalled: 'yes' },
-    ...[null, 'bob', [], {}, { kind: 'user' }, { kind: 'user', uid: '' }, { kind: 'user', uid: 5 }, { uid: 'bob' }, { kind: 'robot', uid: 'bob' }, { kind: 'bot', uid: 'owner' }, { kind: 'bot', uid: 'owner', botKey: '' }]
+    ...[null, 'bob', [], {}, { kind: 'user' }, { kind: 'user', uid: '' }, { kind: 'user', uid: 5 }, { uid: 'bob' }, { kind: 'robot', uid: 'bob' }, { kind: 'shared_bot', uid: 'owner' }, { kind: 'shared_bot', displayName: 'Helper', sharedBotId: '' }]
       .map(author => ({ ...whole, author })),
   ]) assert.throws(() => firestoreLastMessage(value), { message: 'INVALID_DATA' }, JSON.stringify(value));
 });
@@ -101,13 +101,13 @@ test('directory snapshots carry each conversation lastMessage through the Firest
   const { received, directory, document, stop } = watch();
   directory([
     document('with-preview', { lastMessage: { id: 'message-2', seq: 2, at: Timestamp.fromDate(new Date(at)), preview: 'Hello', author: { kind: 'user', uid: 'bob' } } }),
-    document('recalled', { lastMessage: { id: 'message-3', seq: 3, at: Timestamp.fromDate(new Date(at)), preview: '', recalled: true, author: { kind: 'bot', uid: 'owner', botKey: 'bot:owner:h:b' } } }),
+    document('recalled', { lastMessage: { id: 'message-3', seq: 3, at: Timestamp.fromDate(new Date(at)), preview: '', recalled: true, author: { kind: 'shared_bot', displayName: 'Helper', sharedBotId: 'assistant-fixture' } } }),
     document('empty', {}),
   ]);
   stop();
   const rows = new Map(received.find((value): value is Extract<MessageSnapshot, { kind: 'directory' }> => value.kind === 'directory')!.conversations.map(value => [value.id, value]));
   assert.deepEqual(rows.get('with-preview')!.lastMessage, { id: 'message-2', seq: 2, at, preview: 'Hello', author: { kind: 'user', uid: 'bob' } });
-  assert.deepEqual(rows.get('recalled')!.lastMessage, { id: 'message-3', seq: 3, at, preview: '', recalled: true, author: { kind: 'bot', uid: 'owner', botKey: 'bot:owner:h:b' } });
+  assert.deepEqual(rows.get('recalled')!.lastMessage, { id: 'message-3', seq: 3, at, preview: '', recalled: true, author: { kind: 'shared_bot', displayName: 'Helper', sharedBotId: 'assistant-fixture' } });
   assert.ok(!('lastMessage' in rows.get('empty')!));
   assert.ok(!received.some(value => value.kind === 'error'));
 });
@@ -125,3 +125,5 @@ test('a conversation whose pointer breaks the contract stops the listeners with 
     assert.equal(received.filter(value => value.kind === 'error').length, 1, 'and nothing arrives afterwards');
   }
 });
+
+test('SDK message reader rejects retired Bot author format', () => { assert.throws(() => firestoreMessage('old-message', { seq: 1, author: { kind: 'bot', uid: 'owner', botKey: 'retired' } }), /INVALID_DATA/); });

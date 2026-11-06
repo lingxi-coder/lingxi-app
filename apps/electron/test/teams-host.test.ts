@@ -1,690 +1,189 @@
-import type { ProviderAccountSnapshot } from '../src/shared/providerAccounts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { chmodSync, linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, symlinkSync, linkSync, chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
-import { initializeApp, deleteApp } from 'firebase/app';
-import { getFirestore, terminate } from 'firebase/firestore';
 import { TeamsService, type TeamAccountContext } from '../src/main/teams/service';
-import { AccountService } from '../src/main/account';
-import { TeamOwnerApprovalBroker } from '../src/main/remoteControl/teamApprovals';
 import { TeamConnector, type TeamHostApi } from '../src/main/teams/connector';
-import { TeamPrivateStore, digest, type TeamModelRoute } from '../src/main/teams/privateStore';
-import { LocalAppAgentExecutor } from '../src/main/local-apps/agentExecutor';
-import { resolveTeamBinaries, runTeamHost, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult } from '../src/main/teams/process';
-import { BotContent } from '../src/main/bots/content';
+import { TeamPrivateStore, digest, type TeamModelRoute, type TeamPersonaSnapshot } from '../src/main/teams/privateStore';
+import { runTeamHost, type TeamHostProcessOptions, type TeamHostResult } from '../src/main/teams/process';
 import { botFixture } from './bot-helpers';
-import type { TeamBotCard } from '../../../packages/teams/bots';
-
-function accountEnvelope(key = 'synthetic-model') {
- const id = '11111111-1111-4111-8111-111111111111';
- return { providerAccountHome: '/mock/host', providerAccounts: { storeScope: 'mock', configRevision: 1, health: [], accounts: [{ accountId: id, providerId: 'anthropic', executionBindingId: 'anthropic', displayName: 'Mock', authKind: 'api_key' as const, credentialRef: { storeScope: 'mock', secretRef: `acct.${id}` }, enabled: true, userPriority: 0, configRevision: 1, identityGeneration: 1 }] }, providerAccountCredentials: { [id]: { identity_generation: 1, credential_revision: 1, kind: { kind: 'api_key' as const, key } } } };
+import type { PublishLocalBotInput } from '../../../packages/teams/execution';
+const teamId='team00001',sharedBotId='sharedbot001',conversationId='chat00001';
+const tick=()=>new Promise<void>(resolve=>setImmediate(resolve));
+const cursor={scope:null,sessionRevision:0,lastMessageSeq:0,lastChangeSeq:0,bootstrapFromSeq:0};
+function route():TeamModelRoute{return {model_provider:'anthropic',model_protocol:'anthropic_messages',model_id:'synthetic',model_endpoint:'https://api.anthropic.com',credential_id:'anthropic',model_profile:{profile_name:'anthropic'}};}
+function accounts(){return {providerAccountHome:'/synthetic',providerAccounts:{storeScope:'fixture',configRevision:1,accounts:[],health:[]},providerAccountCredentials:{}};}
+function snapshot():TeamPersonaSnapshot{const text='Only the published role';return {...route(),instructions:text,provider_account_profiles:[route().model_profile],documents:[{resourceId:'resource001',revision:1,kind:'persona',name:'Role',text,digest:digest(text)}]};}
+function fakeService(){
+ const events=new EventEmitter();let context:TeamAccountContext|undefined={uid:'owner',epoch:0};const commands:any[]=[],tasks:any[]=[],reads:any[]=[],cards:any[]=[];let deployment:any,inputs:any[]=[];let deny=false;const publicationReceipts=new Map<string,any>();
+ const service:TeamHostApi={hostContext:()=>context,assertHostContext:c=>{if(!context||c.uid!==context.uid||c.epoch!==context.epoch)throw Error('INVALID_SESSION');},list:async()=>({teams:[{id:teamId,name:'Team',memberCount:1,role:'owner',generation:1}]}),onChanged:cb=>{events.on('change',cb);return()=>events.off('change',cb);},onMessagesChanged:cb=>{events.on('messages',cb);return()=>events.off('messages',cb);},
+ hostMessages:async<T>(c,command)=>{service.assertHostContext(c);commands.push(command);const p=command.payload as any;let result:any={};
+ if(command.action==='publishSharedBot'){if(publicationReceipts.has(command.commandId as string))return publicationReceipts.get(command.commandId as string) as T;deployment=p.deployment;inputs=p.inputs.map((v:any)=>({...v,grantId:digest(JSON.stringify([p.sharedBotId,p.expectedRevision+1,v.resourceId]))}));const previous=cards.findIndex(card=>card.sharedBotId===p.sharedBotId);if(previous>=0)cards.splice(previous,1);cards.push({sharedBotId:p.sharedBotId,state:'published',revision:p.expectedRevision+1,maintainer:{uid:'owner',generation:1}});result={sharedBotId:p.sharedBotId,revision:p.expectedRevision+1,grantIds:inputs.map(v=>v.grantId)};publicationReceipts.set(command.commandId as string,result);}
+ else if(command.action==='listSharedBots')result={bots:cards};
+ else if(command.action==='activateDeployment'){assert.equal(p.expectedAccountEpoch,deployment.accountEpoch);deployment.accountEpoch=p.newAccountEpoch;}
+ else if(command.action==='listHostTasks')result={tasks:tasks.filter(t=>t.state==='queued')};
+ else if(command.action==='prepareTask'||command.action==='validateTask'||command.action==='startTask'){if(deny)throw Error('TASK_REVOKED');const task=tasks.find(t=>t.taskId===p.taskId);result={task:{...task},messageId:task.messageId,messageSeq:task.messageSeq,inputs,deployment};if(command.action==='startTask'){task.state='running';result={...result,task:{...task},execute:true,permitId:'permit00001'};}}
+ else if(command.action==='completeTask'){const task=tasks.find(t=>t.taskId===p.taskId);if(task)task.state='completed';}
+ return result as T;},
+ hostReadChat:async(_c,request)=>{reads.push(request);if(request.mode==='changes')return {messages:[],lastSeq:1000,lastChangeSeq:1000,hasMore:false};const through=request.mode==='recent'?request.throughSeq:request.mode==='range'?request.toSeqInclusive:1;const from=request.mode==='recent'?Math.max(0,through-200):request.mode==='range'?request.fromSeqExclusive:0;
+ return {messages:Array.from({length:through-from},(_,i)=>({messageId:`message${String(from+i+1).padStart(6,'0')}`,seq:from+i+1,changeSeq:from+i+1,changeId:`change${String(from+i+1).padStart(6,'0')}`,author:{kind:'user' as const,uid:i%2?'human2':'human1',displayName:'Same name'},createdAt:1700000000000+i,text:`original ${i}`})),lastSeq:1000,lastChangeSeq:1000,hasMore:from>0};},};
+ return {service,commands,tasks,reads,wake:()=>events.emit('messages'),switch:()=>{context={uid:'other',epoch:1};events.emit('change',{invalidated:true});},deny:()=>{deny=true;}};
 }
-const tick = () => new Promise<void>(resolve => setImmediate(resolve));
-const threadId = 'thread001', teamId = 'team00001';
-function syntheticRoute(overrides: Partial<TeamModelRoute> = {}): TeamModelRoute {
-  return { model_provider: 'anthropic', model_protocol: 'anthropic_messages', model_id: 'claude-synthetic',
-    model_endpoint: 'https://api.anthropic.com', credential_id: 'anthropic',
-    model_profile: { profile_name: 'anthropic', fixture: 'one frozen native SDK profile' }, ...overrides };
+function fixture(t:any,run?:TeamHostProcessOptions extends never?never:(o:TeamHostProcessOptions)=>Promise<TeamHostResult>){
+ const f=botFixture(t),privateStore=new TeamPrivateStore(f.userData),mock=fakeService(),bot=f.store.create({name:'Personal',persona:'PRIVATE_ROLE_NOT_SHARED',model:'anthropic/synthetic'});let selected:string[]=[];
+ const connector=new TeamConnector({service:mock.service,store:f.store,privateStore,binaries:()=>({host:'/mock/host',worker:'/mock/worker'}),defaultModel:()=>undefined,modelRoute:async()=>({route:route(),profiles:[route().model_profile],assertCurrent:async()=>{}}),modelAccounts:async()=>accounts(),chooseFiles:async()=>selected,validateModel:async()=>{},platform:'darwin',retryMs:60000,run:run??(async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:{status:'completed',cursor,text:'Done',finishedAt:Date.now()})});
+ t.after(()=>connector.close());const input:PublishLocalBotInput={teamId,generation:1,publicationId:'publication001',sharedBotId,instanceId:bot.bot_id,expectedRevision:0,usePolicy:{mode:'all'},fileTokens:[],quotas:{team:100,bot:100,member:10},role:'Explicit published role'};
+ return {...f,privateStore,mock,bot,connector,input,select:(paths:string[])=>{selected=paths;}};
 }
+async function settle(check:()=>boolean){for(let i=0;i<150;i++){if(check())return;await new Promise(r=>setTimeout(r,5));}assert.ok(check(),'condition settled');}
 
-test('actual main discovery never SDK-reads Bot cards and failed conversation/signal watches remain fenced until reauthentication', async t => {
-  const f = botFixture(t), privateStore = new TeamPrivateStore(f.userData);
-  const bot = f.store.create({ name: 'HTTP-only Bot', model: 'anthropic/claude-synthetic' });
-  const botKey = `bot:owner:${privateStore.hostId}:${bot.bot_id}`;
-  const snapshot = await privateStore.saveSnapshot('owner', { instructions: 'Frozen', ...syntheticRoute(), provider_account_profiles: [syntheticRoute().model_profile] });
-  f.store.setTeamBindings(bot.bot_id, [{ ownerUid: 'owner', teamId, generation: 1, botKey, revision: 1, snapshot, use: 'all', uids: [] }]);
-  const app = initializeApp({ projectId: 'demo-teams-fallback', apiKey: 'synthetic', appId: 'synthetic' }, `teams-fallback-${Date.now()}`), db = getFirestore(app);
-  let watchCalls = 0, heartbeatCalls = 0, requests = 0;
-  const service = new TeamsService({ snapshot: () => ({ user: { uid: 'owner' } }), getIdToken: async () => 'synthetic', onChanged: () => () => {} }, {},
-    'https://lingxios.net', undefined, ((...args: unknown[]) => {
-      watchCalls++;
-      const fail = args.at(-1) as (error: unknown) => void;
-      setImmediate(() => fail({ code: 'permission-denied' })); return () => {};
-    }) as never);
-  // A cached authenticated SDK session is the test seam; the actual service,
-  // transport, discovery, private store and fallback lifecycle remain in use.
-  (service as unknown as { session: unknown }).session = { db, close: async () => {}, watchChanges: () => () => {} };
-  t.mock.method(globalThis, 'fetch', async (_url: unknown, init?: RequestInit) => {
-    requests++;
-    if (init?.method === 'GET') return Response.json({ teams: [{ id: teamId, generation: 1, name: 'Demo', memberCount: 1, role: 'owner' }] });
-    const command = JSON.parse(String(init?.body));
-    if (command.action === 'bots') return Response.json({ bots: [{ key: botKey, ownerUid: 'owner', hostId: privateStore.hostId, botId: bot.bot_id,
-      revision: 1, use: 'all', uids: [], enabled: true, permitted: true, online: true }] });
-    if (command.action === 'botConversations') return Response.json({ conversations: [], next: null });
-    if (command.action === 'heartbeatBot') { heartbeatCalls++; return Response.json({ ok: true }); }
-    throw new Error('unexpected transport action');
-  });
-  await service.hostMessages(service.hostContext()!, { action: 'bots', teamId, generation: 1 });
-  assert.equal(watchCalls, 0, 'raw Bot SDK reads are denied by policy and must never be attempted');
-  const connector = new TeamConnector({ service, store: f.store, privateStore, content: new BotContent(f.store), platform: 'darwin', retryMs: 60_000,
-    binaries: () => ({ host: '/unused', worker: '/unused' }), defaultModel: () => 'anthropic/claude-synthetic',
-    modelRoute: async () => { throw new Error('unused'); }, modelAccounts: async () => accountEnvelope(), permission: async () => false,
-    run: async () => { throw new Error('no queued work'); } });
-  service.attachHost(connector);
-  t.after(async () => { service.close(); await terminate(db); await deleteApp(app); });
-  await connector.idle(); await tick(); await connector.idle(); await tick();
-  assert.equal(watchCalls, 2, 'conversation and sanitized signal watches are each created once for this account/membership');
-  assert.equal(heartbeatCalls, 1); assert.ok(requests < 12, 'listener failure must not cause immediate infinite discovery');
+test('execution storage never reads retired host or writes personal definitions',async t=>{
+ const f=fixture(t);mkdirSync(join(f.userData,'team-bot-host'));writeFileSync(join(f.userData,'team-bot-host','sentinel'),'old');const before=readFileSync(f.store.recordPath(f.bot.bot_id),'utf8');
+ await f.connector.publishLocalBot('owner',f.input);assert.equal(readFileSync(f.store.recordPath(f.bot.bot_id),'utf8'),before);assert.equal(readFileSync(join(f.userData,'team-bot-host','sentinel'),'utf8'),'old');
+ const b=(await f.privateStore.bindings('owner'))[0]!;assert.notEqual(b.sharedBotId,b.instanceId);assert.notEqual(b.deploymentId,f.privateStore.hostId);assert.equal(b.accountEpoch,1);const s=await f.privateStore.snapshot('owner',b.snapshot);assert.equal(s.instructions,f.input.role);assert.ok(!JSON.stringify(s).includes('PRIVATE_ROLE_NOT_SHARED'));
+});
+test('native selection freezes text and exact Skill grants; renderer paths cannot authorize files',async t=>{
+ const f=fixture(t),path=join(f.root,'SKILL.md');writeFileSync(path,'Published skill text');f.select([path]);const [selected]=await f.connector.selectSharedFiles('owner',f.bot.bot_id);assert.equal(selected!.kind,'skill');assert.equal((selected as any).path,undefined);writeFileSync(path,'Changed after selection');
+ await f.connector.publishLocalBot('owner',{...f.input,fileTokens:[selected!.token]});const binding=(await f.privateStore.bindings('owner'))[0]!;const s=await f.privateStore.snapshot('owner',binding.snapshot);assert.equal(s.documents[1]!.text,'Published skill text');assert.equal(s.documents[1]!.kind,'skill');
+ await assert.rejects(f.connector.publishLocalBot('owner',{...f.input,publicationId:'publication002',sharedBotId:'sharedbot002',fileTokens:[path]}),/INVALID_SHARED_FILE_TOKEN/);
+});
+test('chooser rejects symlinks, hardlinks and tokens after account switch',async t=>{
+ const f=fixture(t),path=join(f.root,'public.txt');writeFileSync(path,'Shared');const link=join(f.root,'linked.txt');symlinkSync(path,link);f.select([link]);await assert.rejects(f.connector.selectSharedFiles('owner',f.bot.bot_id));
+ const hard=join(f.root,'hard.txt');linkSync(path,hard);f.select([hard]);await assert.rejects(f.connector.selectSharedFiles('owner',f.bot.bot_id),/INVALID_SHARED_FILE/);
+ const fresh=join(f.root,'fresh.txt');writeFileSync(fresh,'Fresh');f.select([fresh]);const [selection]=await f.connector.selectSharedFiles('owner',f.bot.bot_id);f.mock.switch();await assert.rejects(f.connector.publishLocalBot('other',{...f.input,fileTokens:[selection!.token]}),/INVALID_SHARED_FILE_TOKEN/);
+});
+test('snapshots reject content tampering and store modes reject public directories',async t=>{
+ const f=fixture(t),value=snapshot(),key=await f.privateStore.saveSnapshot('owner',value),paths=await f.privateStore.owner('owner');writeFileSync(join(paths.snapshots,key),'{}');await assert.rejects(f.privateStore.snapshot('owner',key),/INVALID_TEAM_SNAPSHOT/);
+ chmodSync(paths.bindings,0o755);await assert.rejects(f.privateStore.bindings('owner'),/UNSAFE_TEAM_STORAGE/);
+});
+test('large input is a verified private transport reference, not a JSONL frame',async t=>{
+ const f=fixture(t),value={messages:Array.from({length:450},(_,i)=>({seq:i+1,text:'x'.repeat(1000)}))},ref=await f.privateStore.dataRef('owner',value);assert.ok(ref.bytes>256*1024);assert.ok(ref.path.startsWith((await f.privateStore.owner('owner')).runtime));assert.equal(digest(readFileSync(ref.path,'utf8')),ref.sha256);await f.privateStore.releaseDataRef('owner',ref);assert.equal(existsSync(ref.path),false);
+});
+test('delivery outbox is immutable and account-private',async t=>{
+ const f=fixture(t),delivery={schemaVersion:1 as const,teamId,generation:1,taskId:'task00001',commandId:'delivery001',payload:{text:'One result'}};await f.privateStore.saveDelivery('owner',delivery);await f.privateStore.saveDelivery('owner',delivery);await assert.rejects(f.privateStore.saveDelivery('owner',{...delivery,payload:{text:'changed'}}),/UNSAFE_TEAM_STORAGE/);assert.deepEqual(await f.privateStore.deliveries('other'),[]);
+});
+test('all Bots read the service data session, including current ACL and account fence',async()=>{
+ let uid='owner',epoch=0;const service=new TeamsService({snapshot:()=>({user:{uid}}),sessionEpoch:()=>epoch,getIdToken:async()=>'',onChanged:()=>()=>{}},{});const request={teamId,generation:1,conversationId,mode:'before' as const,beforeSeq:20};let reads=0;
+ (service as any).dataSession={read:async(value:unknown)=>{assert.equal(value,request);reads++;return {messages:[],lastSeq:20,lastChangeSeq:20,hasMore:false};},close:async()=>{}};
+ await service.hostReadChat(service.hostContext()!,request);assert.equal(reads,1);const old=service.hostContext()!;uid='other';epoch++;await assert.rejects(service.hostReadChat(old,request),/INVALID_SESSION/);service.close();
+});
+test('public message boundary rejects retired execution and private host commands',async()=>{
+ const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'',onChanged:()=>()=>{}},{});
+ for(const action of ['bindBot','claimBot','startBot','finishBot','botQueue','prepareTask','startTask','heartbeatDeployment'])await assert.rejects(service.messages({teamId,generation:1,action} as any,'owner'),/INVALID_INPUT/);service.close();
+});
+test('scheduler is bounded at four and serializes the same Bot Chat',async t=>{
+ const runs:TeamHostProcessOptions[]=[];const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};runs.push(o);return new Promise<TeamHostResult>((_resolve,reject)=>o.signal.addEventListener('abort',()=>reject(Error('abort')),{once:true}));});
+ await f.connector.publishLocalBot('owner',f.input);for(let i=0;i<7;i++)f.mock.tasks.push({taskId:`task0000${i}`,conversationId:i<2?'samechat01':`chat0000${i}`,sharedBotId,requester:{uid:'member',generation:1},state:'queued',messageId:'message000001',messageSeq:1,createdAt:Date.now(),deadline:Date.now()+300000});f.mock.wake();await settle(()=>runs.length===4);assert.equal(new Set(runs.map(r=>r.bootstrap.scope.conversationId)).size,4);assert.equal(runs.filter(r=>r.bootstrap.scope.conversationId==='samechat01').length,1);f.mock.switch();await settle(()=>runs.every(r=>r.signal.aborted));
+});
+test('bootstrap includes latest 200 messages with separate author and original time',async t=>{
+ let batch:any;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};batch=JSON.parse(readFileSync(o.bootstrap.inputBatchRef!.path,'utf8'));return {status:'completed',cursor,text:'Done',finishedAt:Date.now()};});await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push({taskId:'task00001',conversationId,sharedBotId,requester:{uid:'human2',generation:1},state:'queued',messageId:'message000450',messageSeq:450,createdAt:Date.now(),deadline:Date.now()+300000});f.mock.wake();await settle(()=>Boolean(batch));assert.equal(batch.messages.length,200);assert.equal(batch.fromSeqExclusive,250);assert.equal(batch.messages[0].seq,251);assert.notEqual(batch.messages[0].author.uid,batch.messages[1].author.uid);assert.equal(batch.messages[0].createdAt,1700000000000);assert.deepEqual(batch.changes,[]);
+ await settle(()=>f.mock.tasks[0].state==='completed');assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);
+});
+test('subsequent input delivers the complete 450 message interval without truncation',async t=>{
+ let batch:any;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor:{...cursor,scope:o.bootstrap.scope,sessionRevision:1,lastMessageSeq:200,lastChangeSeq:200}};batch=JSON.parse(readFileSync(o.bootstrap.inputBatchRef!.path,'utf8'));return {status:'completed',cursor,text:'Done',finishedAt:Date.now()};});await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push({taskId:'task00001',conversationId,sharedBotId,requester:{uid:'human2',generation:1},state:'queued',messageId:'message000650',messageSeq:650,createdAt:Date.now(),deadline:Date.now()+300000});f.mock.wake();await settle(()=>Boolean(batch));assert.equal(batch.messages.length,450);assert.equal(batch.fromSeqExclusive,200);assert.equal(batch.toSeqInclusive,650);assert.equal(batch.bootstrap,false);assert.ok(f.mock.reads.some(r=>r.mode==='changes'&&r.afterChangeSeq===200));
+});
+function processFixture(version=3){const child=new EventEmitter() as ChildProcessWithoutNullStreams;Object.assign(child,{stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),exitCode:null,kill:()=>{}});let spawnOptions:any;child.stdin.once('data',()=>{setImmediate(()=>{child.stdout.emit('data',Buffer.from(JSON.stringify({version,type:'result',status:'inspected',cursor})+'\n'));child.emit('close',0);});});return {child,spawn:(_exe:any,_args:any,options:any)=>{spawnOptions=options;return child;},options:()=>spawnOptions};}
+test('private major3 process rejects retired frames and clears inherited environment',async()=>{
+ for(const version of [1,3]){const f=processFixture(version);const run=runTeamHost({executable:'/mock',home:'/private-home',tmp:'/private-tmp',bootstrap:{version:3,type:'inspect_scope',storageRoot:'/private-root',workerExecutable:'/worker',scope:{teamId,sharedBotId,conversationId,sessionEpoch:1}},signal:new AbortController().signal,assertCurrent:()=>{},spawnProcess:f.spawn});if(version===1)await assert.rejects(run,/TEAM_HOST_PROTOCOL/);else assert.equal((await run).status,'inspected');assert.equal(f.options().env.HOME,'/private-home');assert.equal(f.options().env.OPENAI_API_KEY,undefined);assert.equal(f.options().env.LINGXI_CONFIG_DIR,'/private-home');}
 });
 
-test('Team credential delivery rejects a delayed token after logout and same-UID login', async () => {
-  let uid: string | undefined = 'owner', changed!: () => void, release!: (value: string) => void;
-  const service = new TeamsService({ snapshot: () => ({ user: uid ? { uid } : null }),
-    getIdToken: () => new Promise(resolve => { release = resolve; }), onChanged: callback => { changed = callback; return () => {}; } }, {});
-  const context = service.hostContext()!;
-  const pending = service.hostToken(context);
-  uid = undefined; changed(); uid = 'owner'; changed(); release('synthetic-token');
-  await assert.rejects(pending, /INVALID_SESSION/u);
-  await assert.rejects(service.hostToken(context), /INVALID_SESSION/u);
-  service.close();
+test('lost publication ACK retries the same intent without another model probe',async t=>{
+ const f=fixture(t);let probes=0;(f.connector as any).options.validateModel=async()=>{probes++;};const original=f.mock.service.hostMessages.bind(f.mock.service);let lose=true;
+ f.mock.service.hostMessages=async(c,command)=>{const result=await original(c,command);if(command.action==='publishSharedBot'&&lose){lose=false;throw Error('SERVICE_UNAVAILABLE');}return result;};
+ await assert.rejects(f.connector.publishLocalBot('owner',f.input),/SERVICE_UNAVAILABLE/);const retry=await f.connector.publishLocalBot('owner',f.input);assert.equal(retry.sharedBotId,sharedBotId);assert.equal(probes,1);
+ const publishes=f.mock.commands.filter(c=>c.action==='publishSharedBot');assert.equal(publishes.length,2);assert.deepEqual(publishes[0],publishes[1]);await assert.rejects(f.connector.publishLocalBot('owner',{...f.input,role:'changed'}),/COMMAND_ID_CONFLICT/);
+});
+test('publication refuses model failure before enabling deployment',async t=>{
+ const f=fixture(t);(f.connector as any).options.validateModel=async()=>{throw Error('TEAM_MODEL_UNAVAILABLE');};await assert.rejects(f.connector.publishLocalBot('owner',f.input),/TEAM_MODEL_UNAVAILABLE/);assert.equal(f.mock.commands.filter(c=>c.action==='publishSharedBot').length,0);assert.deepEqual(await f.privateStore.bindings('owner'),[]);
+});
+test('identical read results use independent transport lifetimes',async t=>{
+ const f=fixture(t),a=await f.privateStore.dataRef('owner',{same:'source'}),b=await f.privateStore.dataRef('owner',{same:'source'});assert.equal(a.sha256,b.sha256);assert.notEqual(a.path,b.path);await f.privateStore.releaseDataRef('owner',a);assert.ok(existsSync(b.path));await f.privateStore.releaseDataRef('owner',b);
 });
 
-test('direct same-UID reauthentication revokes late host credentials and owner approvals', async t => {
-  const config = { projectId: 'demo-teams-account', apiKey: 'synthetic-key', appId: 'synthetic-app', authDomain: 'demo.invalid' };
-  let saved = JSON.stringify({ projectId: config.projectId, refreshToken: 'original-refresh', user: { uid: 'owner' } });
-  let oldRefresh!: (response: Response) => void;
-  const account = new AccountService(config, { persistent: false, read: async () => saved,
-    write: async value => { saved = value; }, remove: async () => { saved = ''; } }, async () => {}, (async input => {
-    const url = String(input);
-    if (url.includes('securetoken')) return new Promise<Response>(resolve => { oldRefresh = resolve; });
-    if (url.includes('lookup')) return Response.json({ users: [{ localId: 'owner' }] });
-    return Response.json({ localId: 'owner', idToken: 'replacement-token', refreshToken: 'replacement-refresh', expiresIn: '3600' });
-  }) as typeof fetch);
-  await account.execute({ type: 'status' });
-  const service = new TeamsService(account, {}), broker = new TeamOwnerApprovalBroker({ botRemoteEnabled: () => true });
-  t.after(() => { broker.close(); service.close(); account.dispose(); });
-  const context = service.hostContext()!, originalEpoch = account.sessionEpoch(), cancellation = new AbortController();
-  let invalidations = 0;
-  service.attachHost({ localBots: async () => [], bindLocalBot: async () => { throw new Error('unused'); },
-    invalidate: () => { invalidations++; cancellation.abort(); }, stopBinding: () => {}, close: () => {} });
-  const credential = service.hostToken(context);
-  const refused = assert.rejects(credential);
-  const target = { ownerUid: 'owner', ownerGeneration: 1, hostId: 'h'.repeat(22), botId: 'b'.repeat(22), botRevision: 1,
-    teamId, conversationId: threadId, botKey: `bot:owner:${'h'.repeat(22)}:${'b'.repeat(22)}`, triggerId: 'trigger01' };
-  let allow!: (value: boolean) => void;
-  const approval = broker.request({ target, accountEpoch: context.epoch, toolName: 'Bash', input: { command: 'pwd' },
-    assertCurrent: () => service.assertHostContext(context), showLocal: () => new Promise(resolve => { allow = resolve; }) }, cancellation.signal);
-  await tick();
-  const authenticated = await account.execute({ type: 'signIn', email: 'owner@example.invalid', password: 'synthetic-password' });
-  assert.equal(authenticated.user?.uid, 'owner');
-  assert.ok(account.sessionEpoch() > originalEpoch);
-  assert.equal(invalidations, 1, 'same-UID accepted authentication must revoke immediately');
-  assert.notEqual(service.hostContext()!.epoch, context.epoch);
-  assert.throws(() => service.assertHostContext(context), /INVALID_SESSION/u);
-  allow(true); assert.equal(await approval, false);
-  oldRefresh(Response.json({ id_token: 'old-late-token', refresh_token: 'old-late-refresh', user_id: 'owner', expires_in: '3600' }));
-  await refused;
-  assert.equal(await account.getIdToken(), 'replacement-token', 'old refresh must not overwrite the replacement session');
+test('rejected republication preserves the active binding and running worker',async t=>{
+ const runs:TeamHostProcessOptions[]=[];const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};runs.push(o);return new Promise<TeamHostResult>((_resolve,reject)=>o.signal.addEventListener('abort',()=>reject(Error('abort')),{once:true}));});
+ await f.connector.publishLocalBot('owner',f.input);const prior=(await f.privateStore.bindings('owner'))[0]!;
+ f.mock.tasks.push({taskId:'task00001',conversationId,sharedBotId,requester:{uid:'member',generation:1},state:'queued',messageId:'message000001',messageSeq:1,createdAt:Date.now(),deadline:Date.now()+300000});f.mock.wake();await settle(()=>runs.length===1);
+ const original=f.mock.service.hostMessages.bind(f.mock.service);f.mock.service.hostMessages=async(c,command)=>{if(command.action==='publishSharedBot'&&(command.payload as any).expectedRevision===1)throw Error('BOT_REVISION_CONFLICT');return original(c,command);};
+ await assert.rejects(f.connector.publishLocalBot('owner',{...f.input,publicationId:'publication002',expectedRevision:1,role:'New role rejected'}),/BOT_REVISION_CONFLICT/);
+ assert.deepEqual((await f.privateStore.bindings('owner'))[0],prior);assert.equal(runs[0]!.signal.aborted,false);f.connector.close();
+});
+test('host pagination continues past an empty stale page to a live task',async t=>{
+ let runs=0;const f=fixture(t,async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:{status:'completed',cursor,text:`Done ${++runs}`,finishedAt:Date.now()});
+ await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages.bind(f.mock.service);
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='listHostTasks'&&!(command.payload as any).after)return {tasks:[],nextCursor:'page00001'} as any;return original(c,command);};
+ f.mock.tasks.push({taskId:'task00001',conversationId,sharedBotId,requester:{uid:'member',generation:1},state:'queued',messageId:'message000001',messageSeq:1,createdAt:Date.now(),deadline:Date.now()+300000});f.mock.wake();await settle(()=>runs===1);assert.ok(f.mock.commands.some(c=>c.action==='listHostTasks'&&c.payload.after==='page00001'));
+});
+test('a fresh source watermark uses a new start command after a denied permit',async t=>{
+ let runs=0,starts=0,watermark=1000;const commands:any[]=[];const f=fixture(t,async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:{status:'completed',cursor,text:`Done ${++runs}`,finishedAt:Date.now()});(f.connector as any).options.retryMs=10;
+ await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages.bind(f.mock.service),read=f.mock.service.hostReadChat.bind(f.mock.service);
+ f.mock.service.hostReadChat=async(c,q)=>({...await read(c,q),lastChangeSeq:watermark});
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='startTask'){commands.push(command);if(++starts===1){watermark=1001;return {execute:false,taskId:'task00001'} as any;}}return original(c,command);};
+ f.mock.tasks.push({taskId:'task00001',conversationId,sharedBotId,requester:{uid:'member',generation:1},state:'queued',messageId:'message000001',messageSeq:1,createdAt:Date.now(),deadline:Date.now()+300000});f.mock.wake();await settle(()=>runs===1);
+ assert.equal(commands.length,2);assert.notEqual(commands[0].commandId,commands[1].commandId);assert.deepEqual(commands.map(c=>c.payload.expectedLastChangeSeq),[1000,1001]);
+});
+test('history broker rejects future before, range and byId messages',async t=>{
+ let checked=false;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};
+ await assert.rejects(o.readChat!({kind:'before',before_seq:3,limit:1}),/HISTORY_BOUND_EXCEEDED/);
+ await assert.rejects(o.readChat!({kind:'range',from_seq_exclusive:0,to_seq_inclusive:2}),/HISTORY_BOUND_EXCEEDED/);
+ await assert.rejects(o.readChat!({kind:'by_id',message_id:'future0001'}),/HISTORY_BOUND_EXCEEDED/);checked=true;
+ return {status:'completed',cursor,text:'Bounded',finishedAt:Date.now()};});await f.connector.publishLocalBot('owner',f.input);
+ const read=f.mock.service.hostReadChat.bind(f.mock.service);f.mock.service.hostReadChat=async(c,q)=>{const result=await read(c,q);return q.mode==='byId'?{...result,messages:result.messages.map(m=>({...m,seq:999}))}:result;};
+ f.mock.tasks.push({taskId:'task00001',conversationId,sharedBotId,requester:{uid:'member',generation:1},state:'queued',messageId:'message000001',messageSeq:1,createdAt:Date.now(),deadline:Date.now()+300000});f.mock.wake();await settle(()=>checked);
+ assert.equal(f.mock.reads.filter(q=>q.mode==='before'||q.mode==='range').length,0);
 });
 
-test('ordinary Firebase token rotation retains the account and Team host epochs', async t => {
-  const account = new AccountService({ projectId: 'demo-teams-account', apiKey: 'key', appId: 'app', authDomain: 'demo.invalid' },
-    { persistent: false, read: async () => JSON.stringify({ projectId: 'demo-teams-account', refreshToken: 'refresh', user: { uid: 'owner' } }),
-      write: async () => {}, remove: async () => {} }, async () => {}, (async () => Response.json({ id_token: 'rotated', refresh_token: 'rotated-refresh', user_id: 'owner', expires_in: '3600' })) as typeof fetch);
-  await account.execute({ type: 'status' }); const service = new TeamsService(account, {});
-  t.after(() => { service.close(); account.dispose(); });
-  const context = service.hostContext()!, epoch = account.sessionEpoch();
-  await account.getIdToken(true); await account.getIdToken(true);
-  assert.equal(account.sessionEpoch(), epoch); assert.deepEqual(service.hostContext(), context);
+test('old publication receipts never replace a newer publication binding',async t=>{
+ const f=fixture(t);await f.connector.publishLocalBot('owner',f.input);
+ await f.connector.publishLocalBot('owner',{...f.input,publicationId:'publication002',expectedRevision:1,role:'Second published role'});
+ const current=(await f.privateStore.bindings('owner'))[0]!;assert.equal(current.revision,2);
+ const receipt=await f.connector.publishLocalBot('owner',f.input);assert.equal(receipt.revision,1);assert.deepEqual((await f.privateStore.bindings('owner'))[0],current);
+ await assert.rejects(f.privateStore.saveBinding('owner',{...current,revision:1}),/STALE_PUBLICATION_BINDING/);
+});
+test('replaying the same publication preserves the advanced host account fence',async t=>{
+ const f=fixture(t);await f.connector.publishLocalBot('owner',f.input);f.connector.invalidate();
+ await settle(()=>f.mock.commands.some(c=>c.action==='activateDeployment'));await f.connector.idle();const current=(await f.privateStore.bindings('owner'))[0]!;assert.ok(current.accountEpoch>1);
+ await f.connector.publishLocalBot('owner',f.input);assert.deepEqual((await f.privateStore.bindings('owner'))[0],current);
+ await assert.rejects(f.privateStore.saveBinding('owner',{...current,accountEpoch:1}),/STALE_PUBLICATION_BINDING/);
+});
+test('a denied start followed by account activation uses the full new start payload identity',async t=>{
+ let runs=0,starts=0;const commands:any[]=[];const f=fixture(t,async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:{status:'completed',cursor,text:`Done ${++runs}`,finishedAt:Date.now()});(f.connector as any).options.retryMs=10;
+ await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages.bind(f.mock.service);
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='startTask'){commands.push(command);if(++starts===1){queueMicrotask(()=>f.connector.invalidate());return {execute:false,taskId:'task00001'} as any;}}return original(c,command);};
+ f.mock.tasks.push({taskId:'task00001',conversationId,sharedBotId,requester:{uid:'member',generation:1},state:'queued',messageId:'message000001',messageSeq:1,createdAt:Date.now(),deadline:Date.now()+300000});f.mock.wake();await settle(()=>runs===1);
+ assert.equal(commands.length,2);assert.equal(commands[0].payload.expectedLastChangeSeq,commands[1].payload.expectedLastChangeSeq);assert.ok(commands[1].payload.accountEpoch>commands[0].payload.accountEpoch);assert.notEqual(commands[0].commandId,commands[1].commandId);
 });
 
-test('forged renderer host commands fail before SDK/auth transport', async () => {
-  let tokenCalls = 0;
-  const service = new TeamsService({ snapshot: () => ({ user: { uid: 'owner' } }), getIdToken: async () => { tokenCalls++; return 'synthetic'; }, onChanged: () => () => {} }, {});
-  for (const action of ['bindBot', 'claimBot', 'startBot', 'finishBot', 'botQueue', 'heartbeatBot', 'botQuestion', 'botPoll']) {
-    await assert.rejects(service.messages({ action, teamId, generation: 1 } as never, 'owner'), /INVALID_INPUT/u);
-  }
-  assert.equal(tokenCalls, 0); service.close();
+test('restart reconciles an acknowledged publication candidate without a second model probe',async t=>{
+ const f=fixture(t);let probes=0;(f.connector as any).options.validateModel=async()=>{probes++;};const original=f.mock.service.hostMessages.bind(f.mock.service);let fail=true;
+ f.mock.service.hostMessages=async(c,command)=>{const result=await original(c,command);if(command.action==='publishSharedBot'&&fail){fail=false;f.connector.close();throw Error('SERVICE_UNAVAILABLE');}return result;};
+ await assert.rejects(f.connector.publishLocalBot('owner',f.input),/SERVICE_UNAVAILABLE/);assert.deepEqual(await f.privateStore.bindings('owner'),[]);
+ const restarted=new TeamConnector({...((f.connector as any).options)});t.after(()=>restarted.close());await restarted.idle();
+ const binding=(await f.privateStore.bindings('owner'))[0]!;assert.equal(binding.publicationId,f.input.publicationId);assert.equal(binding.revision,1);assert.ok(binding.accountEpoch>1);assert.equal(probes,1);
+});
+test('lost delivery ACK survives host restart and account activation without a new model call',async t=>{
+ let modelCalls=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};modelCalls++;return {status:'completed',cursor,text:'Exact durable reply',finishedAt:Date.now(),usage:{status:'partial',inputTokens:17,outputTokens:5}};});
+ await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages.bind(f.mock.service);let lose=true;
+ f.mock.service.hostMessages=async(c,command)=>{const result=await original(c,command);if(command.action==='completeTask'&&lose){lose=false;f.connector.close();throw Error('SERVICE_UNAVAILABLE');}return result;};
+ f.mock.tasks.push({taskId:'task00001',conversationId,sharedBotId,requester:{uid:'member',generation:1},state:'queued',messageId:'message000001',messageSeq:1,createdAt:Date.now(),deadline:Date.now()+300000});f.mock.wake();await settle(()=>!lose);assert.equal((await f.privateStore.deliveries('owner')).length,1);
+ const restarted=new TeamConnector({...((f.connector as any).options)});t.after(()=>restarted.close());await restarted.idle();assert.deepEqual(await f.privateStore.deliveries('owner'),[]);assert.equal(modelCalls,1);
+ const delivered=f.mock.commands.filter(c=>c.action==='completeTask');assert.equal(delivered.length,2);const [first,second]=delivered;assert.ok(second.payload.accountEpoch>first.payload.accountEpoch);assert.notEqual(first.commandId,second.commandId);assert.deepEqual({...second.payload,accountEpoch:first.payload.accountEpoch},first.payload);assert.deepEqual(second.payload.usage,{status:'partial',inputTokens:17,outputTokens:5});
 });
 
-function hostFixture(t: { after(fn: () => void): void }, options: { lostBind?: boolean; model?: string; route?: TeamModelRoute; credential?: () => Promise<string | undefined>; run?: (input: TeamHostProcessOptions) => Promise<TeamHostResult> } = {}) {
-  const f = botFixture(t), content = new BotContent(f.store), privateStore = new TeamPrivateStore(f.userData);
-  const bot = f.store.create({ name: 'Team Bot', persona: 'Immutable persona', model: options.model ?? 'anthropic/claude-synthetic' });
-  let route = options.route ?? syntheticRoute(), routeCurrent = true; const credentialIds: string[] = [];
-  let context = { uid: 'owner', epoch: 1 }, cards: TeamBotCard[] = [], cursor = 0;
-  let queue = [{ id: 'trigger01', seq: 1 }, { id: 'trigger02', seq: 2 }], lostBind = options.lostBind;
-  const events = new EventEmitter(), calls: Array<Record<string, unknown>> = [], runs: TeamHostProcessOptions[] = [];
-  let credentialCalls = 0;
-  const service: TeamHostApi = {
-    hostContext: () => context,
-    assertHostContext: value => { if (value.uid !== context.uid || value.epoch !== context.epoch) throw new Error('INVALID_SESSION'); },
-    hostToken: async value => { service.assertHostContext(value); return 'synthetic-firebase'; },
-    list: async () => ({ teams: [{ id: teamId, name: 'Synthetic', role: 'owner', generation: 1, memberCount: 2 }] }),
-    onChanged: callback => { events.on('change', callback); return () => { events.off('change', callback); }; },
-    onMessagesChanged: callback => { events.on('messages', callback); return () => { events.off('messages', callback); }; },
-    async hostMessages<T>(value: TeamAccountContext, command: Record<string, unknown>): Promise<T> {
-      service.assertHostContext(value); calls.push(command);
-      if (command.action === 'bindBot') {
-        cards = [{ key: `bot:owner:${privateStore.hostId}:${bot.bot_id}`, ownerUid: 'owner', hostId: privateStore.hostId,
-          botId: bot.bot_id, revision: Number(command.expectedRevision) + 1, name: 'Team Bot', description: '', use: command.use as 'all', uids: command.uids as string[], permitted: true, online: true }];
-        if (lostBind) { lostBind = false; throw new Error('SERVICE_UNAVAILABLE'); }
-        return { botKey: cards[0]!.key, revision: cards[0]!.revision } as T;
-      }
-      if (command.action === 'bots') return { bots: cards } as T;
-      if (command.action === 'heartbeatBot') return { ok: true } as T;
-      if (command.action === 'botConversations') return { conversations: [{ id: threadId, participants: cards.map(card => card.key) }], next: null } as T;
-      if (command.action === 'botQueue') return { cursor, triggers: queue, hasMore: false } as T;
-      throw new Error('unexpected command');
-    },
-  };
-  const make = () => new TeamConnector({ service, store: f.store, content, privateStore, platform: 'darwin', retryMs: 60_000,
-    binaries: () => ({ host: '/fixed/host', worker: '/fixed/worker' }), defaultModel: () => 'wrong-default',
-    modelRoute: async selected => {
-      if (selected !== `${route.model_provider}/${route.model_id}` && selected !== route.model_id) throw new Error('TEAM_MODEL_UNSUPPORTED');
-      return { route, profiles: [route.model_profile], assertCurrent: async () => { if (!routeCurrent) throw new Error('TEAM_MODEL_UNAVAILABLE'); } };
-    },
-    modelAccounts: async id => { credentialCalls++; credentialIds.push(id); const key = options.credential ? await options.credential() : 'synthetic-model'; return key ? accountEnvelope(key) : undefined; }, permission: async () => false,
-    run: async input => {
-      const saved = JSON.parse(readFileSync(join(privateStore.root, digest('owner'), 'pending', digest(JSON.stringify(input.bootstrap.target))), 'utf8'));
-      assert.equal(saved.target.triggerId, input.bootstrap.target.triggerId, 'durable discovery must precede launching');
-      runs.push(input);
-      if (options.run) return options.run(input);
-      return new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
-    } });
-  const connector = make(); t.after(() => connector.close());
-  const bind = () => connector.bindLocalBot('owner', { teamId, generation: 1, botId: bot.bot_id, use: 'all', uids: [], expectedRevision: 0 });
-  return { ...f, bot, content, privateStore, service, events, calls, runs, connector, bind, make, credentialIds,
-    changeRoute: (value: TeamModelRoute) => { route = value; }, invalidateRoute: () => { routeCurrent = false; },
-    revoke: () => { cards = []; events.emit('change', {}); },
-    switchAccount: () => { context = { uid: 'replacement', epoch: 2 }; connector.invalidate(); },
-    settle: () => { cursor = queue[0]!.seq; queue = queue.slice(1); }, credentialCalls: () => credentialCalls,
-  };
-}
-
-test('lost bind response discovers saved immutable instructions and stable identity after restart', async t => {
-  const f = hostFixture(t, { lostBind: true });
-  await assert.rejects(f.bind(), /SERVICE_UNAVAILABLE/u);
-  await f.connector.idle(); await tick();
-  assert.equal(f.runs.length, 1);
-  assert.equal(f.runs[0]!.bootstrap.snapshot!.instructions, 'Immutable persona');
-  const first = f.runs[0]!.bootstrap;
-  f.connector.close(); await tick();
-  await f.content.setPersona(f.bot.bot_id, 'New ordinary persona');
-  const restarted = f.make(); t.after(() => restarted.close());
-  await restarted.idle(); await tick();
-  assert.equal(f.runs.length, 2);
-  assert.deepEqual(f.runs[1]!.bootstrap.target, first.target);
-  assert.equal(f.runs[1]!.bootstrap.journal_root, first.journal_root);
-  assert.equal(f.runs[1]!.bootstrap.mode, 'retry_result');
-  assert.equal(f.runs[1]!.bootstrap.snapshot, undefined, 'restart observes saved work without a model credential or fresh execution');
-  assert.equal((await f.privateStore.snapshot('owner', f.store.get(f.bot.bot_id).teams![0]!.snapshot)).instructions, 'Immutable persona');
-  assert.notEqual(first.runtime_root, f.store.homeDir(f.bot.bot_id));
-  assert.equal(new TeamPrivateStore(f.userData).hostId, f.privateStore.hostId);
+test('future appends between range and change reads preserve the captured task watermark',async t=>{
+ let batch:any;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor:{...cursor,scope:o.bootstrap.scope,sessionRevision:1,lastMessageSeq:200,lastChangeSeq:200}};
+ batch=JSON.parse(readFileSync(o.bootstrap.inputBatchRef!.path,'utf8'));return {status:'completed',cursor,text:'Done',finishedAt:Date.now()};});await f.connector.publishLocalBot('owner',f.input);
+ const read=f.mock.service.hostReadChat.bind(f.mock.service);f.mock.service.hostReadChat=async(c,q)=>{const result=await read(c,q);return q.mode==='changes'?{...result,lastChangeSeq:1001}:result;};
+ f.mock.tasks.push({taskId:'task00001',conversationId,sharedBotId,requester:{uid:'member',generation:1},state:'queued',messageId:'message000201',messageSeq:201,createdAt:Date.now(),deadline:Date.now()+300000});f.mock.wake();await settle(()=>Boolean(batch));
+ assert.equal(batch.lastChangeSeq,1000);assert.equal(batch.toSeqInclusive,201);assert.deepEqual(batch.messages.map((m:any)=>m.seq),[201]);assert.deepEqual(batch.changes,[]);
+ assert.equal(f.mock.commands.find(c=>c.action==='startTask')?.payload.expectedLastChangeSeq,1000);
 });
-
-test('a committed finish with lost ACK is durably retried after restart before the advanced queue head', async t => {
-  let invocation = 0;
-  const f = hostFixture(t, { run: async input => {
-    invocation++;
-    if (invocation === 1) { f.settle(); throw new TeamHostFailure('RESULT_PENDING'); }
-    if (input.bootstrap.mode === 'retry_result') return { status: 'settled', state: 'completed' };
-    return new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
-  } });
-  await f.bind(); await f.connector.idle(); await tick();
-  assert.equal((await f.privateStore.pending('owner'))[0]!.target.triggerId, 'trigger01');
-  f.connector.close(); const credentialCount = f.credentialCalls();
-  const restarted = f.make(); t.after(() => restarted.close());
-  await restarted.idle(); await tick(); await restarted.idle(); await tick();
-  assert.deepEqual(f.runs.map(run => [run.bootstrap.mode, run.bootstrap.target.triggerId]), [
-    ['run', 'trigger01'], ['retry_result', 'trigger01'], ['run', 'trigger02'],
-  ]);
-  assert.equal(f.runs[1]!.bootstrap.snapshot, undefined);
-  assert.equal(f.credentialCalls() - credentialCount, 1, 'only the newer fresh head may resolve a model credential');
-  assert.deepEqual((await f.privateStore.pending('owner')).map(value => value.target.triggerId), ['trigger02']);
-});
-
-test('an HTTP await cannot revive a pending entry that an active host settled meanwhile', async t => {
-  let finish!: (result: TeamHostResult) => void, invocations = 0;
-  const f = hostFixture(t, { run: input => {
-    if (++invocations === 1) return new Promise(resolve => { finish = resolve; });
-    return new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
-  } });
-  await f.bind(); await f.connector.idle(); await tick();
-  const indexed = (await f.privateStore.pending('owner'))[0]!;
-  await assert.rejects(() => f.privateStore.hasPending('owner', { ...indexed, snapshot: 'f'.repeat(64) }), /UNSAFE_TEAM_STORAGE/u);
-  let entered!: () => void, resume!: () => void, pause = true;
-  const waiting = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { resume = resolve; });
-  const actualList = f.service.list.bind(f.service);
-  f.service.list = async uid => {
-    const value = await actualList(uid);
-    if (pause) { pause = false; entered(); await gate; }
-    return value;
-  };
-  f.events.emit('messages'); await waiting;
-  f.settle(); finish({ status: 'settled', state: 'completed' }); await tick();
-  assert.equal((await f.privateStore.pending('owner')).length, 0);
-  assert.equal(await f.privateStore.hasPending('owner', indexed), false);
-  resume(); await f.connector.idle(); await tick();
-  assert.deepEqual(f.runs.map(run => [run.bootstrap.mode, run.bootstrap.target.triggerId]), [['run', 'trigger01'], ['run', 'trigger02']]);
-  assert.equal(f.connector.runStatus('owner', teamId, threadId, 'trigger01'), undefined, 'acknowledged work must not acquire a misleading retrying status');
-});
-
-test('prelaunch index recovery needs an unstarted proof before a fresh queue execution', async t => {
-  const f = hostFixture(t, { run: async input => input.bootstrap.mode === 'retry_result'
-    ? { status: 'unstarted' } : new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true })) });
-  await f.bind(); await f.connector.idle(); await tick();
-  f.connector.close(); // Model/worker mock did not create any Rust start marker.
-  const restarted = f.make(); t.after(() => restarted.close());
-  await restarted.idle(); await tick(); await restarted.idle(); await tick();
-  assert.deepEqual(f.runs.map(run => [run.bootstrap.mode, run.bootstrap.target.triggerId]), [
-    ['run', 'trigger01'], ['retry_result', 'trigger01'], ['run', 'trigger01'],
-  ]);
-  assert.equal(f.runs[1]!.bootstrap.snapshot, undefined);
-});
-
-test('remote owner recovery can settle a blocked pending index without restarting Desktop', async t => {
-  let recovered = false;
-  const f = hostFixture(t, { run: async input => {
-    if (input.bootstrap.target.triggerId === 'trigger02') return new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
-    return recovered ? { status: 'settled', state: 'recovered' } : { status: 'recovery_required' };
-  } });
-  await f.bind(); await f.connector.idle(); await tick();
-  recovered = true; f.settle(); f.events.emit('messages');
-  await f.connector.idle(); await tick(); await f.connector.idle(); await tick();
-  assert.deepEqual(f.runs.map(run => [run.bootstrap.mode, run.bootstrap.target.triggerId]), [
-    ['run', 'trigger01'], ['retry_result', 'trigger01'], ['run', 'trigger02'],
-  ]);
-  assert.deepEqual((await f.privateStore.pending('owner')).map(value => value.target.triggerId), ['trigger02']);
-});
-
-test('nonadvancing observations wait for polling or external hints instead of their own status echo', async t => {
-  for (const outcome of ['recovery_required', 'busy', 'RESULT_PENDING', 'SERVICE_UNAVAILABLE'] as const) {
-    let acknowledged = false, notifications = 0;
-    const f = hostFixture(t, { run: async input => {
-      if (input.bootstrap.target.triggerId === 'trigger02') return new Promise((_resolve, reject) => input.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
-      if (acknowledged) return { status: 'settled', state: 'recovered' };
-      if (outcome === 'RESULT_PENDING' || outcome === 'SERVICE_UNAVAILABLE') throw new TeamHostFailure(outcome);
-      return { status: outcome };
-    } });
-    // Actual TeamsService synchronously emits its UI message hint here. This
-    // must not be mistaken for a new server queue or remote recovery event.
-    f.service.notifyHostChanged = () => { notifications++; f.events.emit('messages'); };
-    await f.bind(); await f.connector.idle();
-    for (let tickIndex = 0; tickIndex < 8; tickIndex++) { await tick(); await f.connector.idle(); }
-    assert.equal(f.runs.length, 1, `${outcome}: no completion/status feedback launch before the 60-second poll`);
-    const firstNotifications = notifications;
-    f.events.emit('messages'); await f.connector.idle();
-    for (let tickIndex = 0; tickIndex < 8; tickIndex++) { await tick(); await f.connector.idle(); }
-    assert.equal(f.runs.length, 2, `${outcome}: one external hint permits one observation, not a hot retry loop`);
-    assert.equal(f.runs[1]!.bootstrap.mode, 'retry_result');
-    assert.equal(notifications, firstNotifications, 'unchanged status must not emit another local hint');
-    acknowledged = true; f.settle(); f.events.emit('messages');
-    await f.connector.idle(); await tick(); await f.connector.idle(); await tick();
-    assert.deepEqual(f.runs.map(run => [run.bootstrap.mode, run.bootstrap.target.triggerId]), [
-      ['run', 'trigger01'], ['retry_result', 'trigger01'], ['retry_result', 'trigger01'], ['run', 'trigger02'],
-    ], `${outcome}: remote settlement must still immediately advance to the next fresh head`);
-    f.connector.close();
-  }
-});
-
-test('journal BUSY exceptions preserve known saved-result and recovery diagnostics without a feedback retry', async t => {
-  for (const initial of ['result_pending', 'recovery_required'] as const) {
-    let attempts = 0, notifications = 0;
-    const f = hostFixture(t, { run: async () => {
-      if (++attempts > 1) throw new TeamHostFailure('BUSY');
-      if (initial === 'result_pending') throw new TeamHostFailure('RESULT_PENDING');
-      return { status: 'recovery_required' };
-    } });
-    f.service.notifyHostChanged = () => { notifications++; f.events.emit('messages'); };
-    await f.bind(); await f.connector.idle(); await tick();
-    assert.equal(f.connector.runStatus('owner', teamId, threadId, 'trigger01'), initial);
-    const priorNotifications = notifications;
-    f.events.emit('messages'); await f.connector.idle(); await tick();
-    for (let tickIndex = 0; tickIndex < 8; tickIndex++) { await tick(); await f.connector.idle(); }
-    assert.equal(f.runs.length, 2, 'journal contention must wait for another external hint or poll');
-    assert.equal(f.runs[1]!.bootstrap.mode, 'retry_result');
-    assert.equal(f.connector.runStatus('owner', teamId, threadId, 'trigger01'), initial, 'BUSY must not re-enable manual recovery by hiding a pending exact result');
-    assert.equal(notifications, priorNotifications, 'BUSY must not emit a changed diagnostic or self-wake');
-    f.connector.close();
-  }
-});
-
-test('overlapping discovery cannot skip authoritative head or launch concurrent thread workers', async t => {
-  let release!: (result: TeamHostResult) => void;
-  const f = hostFixture(t, { run: () => new Promise(resolve => { release = resolve; }) });
-  await f.bind(); await f.connector.idle(); await tick();
-  for (let i = 0; i < 10; i++) f.events.emit('messages');
-  await f.connector.idle();
-  assert.equal(f.runs.length, 1);
-  assert.equal(f.runs[0]!.bootstrap.target.triggerId, 'trigger01');
-  f.settle(); release({ status: 'settled', state: 'completed' }); await tick(); await f.connector.idle(); await tick();
-  assert.equal(f.runs.length, 2);
-  assert.equal(f.runs[1]!.bootstrap.target.triggerId, 'trigger02');
-  assert.ok(f.calls.filter(call => call.action === 'botQueue').every(call => call.after === 0));
-});
-
-test('ambiguous host recovery blocks the head; account or remote binding revocation cancels live work', async t => {
-  const f = hostFixture(t, { run: async () => ({ status: 'recovery_required' }) });
-  await f.bind(); await f.connector.idle(); await tick();
-  f.events.emit('messages'); await f.connector.idle(); await tick();
-  assert.equal(f.runs.filter(run => run.bootstrap.mode === 'run').length, 1, 'no fresh replay of an ambiguous head');
-  assert.ok(f.runs.filter(run => run.bootstrap.mode === 'retry_result').every(run => run.bootstrap.snapshot === undefined));
-  f.connector.close();
-  const g = hostFixture(t); await g.bind(); await g.connector.idle(); await tick();
-  assert.equal(g.runs.length, 1); g.revoke(); await g.connector.idle();
-  assert.equal(g.runs[0]!.signal.aborted, true);
-  const h = hostFixture(t); await h.bind(); await h.connector.idle(); await tick(); h.switchAccount();
-  assert.equal(h.runs[0]!.signal.aborted, true);
-});
-
-test('unsupported selected model fails explicitly without binding or fallback', async t => {
-  const f = hostFixture(t);
-  f.store.update(f.bot.bot_id, 1, { model: 'openai/other-model' });
-  await assert.rejects(f.bind(), /TEAM_MODEL_UNSUPPORTED/u);
-  assert.equal(f.calls.some(call => call.action === 'bindBot'), false);
-});
-
-test('OpenAI Responses freezes the selected native profile and resolves only its static credential slot', async t => {
-  const route = syntheticRoute({ model_provider: 'openai', model_protocol: 'open_ai_responses', model_id: 'gpt-6-luna',
-    model_endpoint: 'https://api.openai.com/v1', credential_id: 'openai-selected',
-    model_profile: { profile_name: 'openai', inference: { reasoning: 'native metadata' }, fixture: 'Responses, not Chat' } });
-  const f = hostFixture(t, { model: 'openai/gpt-6-luna', route });
-  await f.bind(); await f.connector.idle(); await tick();
-  const snapshot = f.runs[0]!.bootstrap.snapshot!;
-  assert.equal(snapshot.model_provider, 'openai'); assert.equal(snapshot.model_protocol, 'open_ai_responses');
-  assert.equal(snapshot.model_id, 'gpt-6-luna'); assert.equal(snapshot.model_endpoint, 'https://api.openai.com/v1');
-  assert.deepEqual(snapshot.model_profile, route.model_profile);
-  assert.deepEqual(f.credentialIds, ['openai-selected', 'openai-selected']);
-  assert.equal('credential_id' in snapshot, false, 'worker gets the selected key, not owner credential lookup capabilities');
-  const binding = f.store.get(f.bot.bot_id).teams![0]!;
-  const saved = await f.privateStore.snapshot('owner', binding.snapshot);
-  assert.equal(saved.credential_id, 'openai-selected'); assert.equal('model_api_key' in saved, false);
-  f.changeRoute({ ...route, model_protocol: 'open_ai_chat', model_endpoint: 'https://other.example/v1', credential_id: 'sibling' });
-  f.connector.close(); const restarted = f.make(); t.after(() => restarted.close()); await restarted.idle(); await tick();
-  assert.equal(f.runs[1]!.bootstrap.mode, 'retry_result'); assert.equal(f.runs[1]!.bootstrap.snapshot, undefined);
-  assert.deepEqual(f.credentialIds, ['openai-selected', 'openai-selected'], 'result recovery must never resolve an updated or sibling route');
-  assert.deepEqual(await f.privateStore.snapshot('owner', binding.snapshot), saved);
-});
-
-test('configured connection and provider-local model identities survive without prefix inference', async t => {
-  const route = syntheticRoute({ model_provider: 'vendor:cn#primary', model_id: 'vendor/model-v2', credential_id: 'selected-cn-key',
-    model_endpoint: 'https://models.example/v2' });
-  const f = hostFixture(t, { model: 'vendor:cn#primary/vendor/model-v2', route });
-  await f.bind(); await f.connector.idle(); await tick();
-  assert.equal(f.runs[0]!.bootstrap.snapshot!.model_provider, 'vendor:cn#primary');
-  assert.equal(f.runs[0]!.bootstrap.snapshot!.model_id, 'vendor/model-v2');
-  assert.deepEqual(f.credentialIds, ['selected-cn-key', 'selected-cn-key']);
-});
-
-test('native connection profile identity preserves uppercase connection IDs', async t => {
-  const route = syntheticRoute({ model_provider: 'vendor:CN#0', credential_id: 'selected-cn-key' });
-  const f = hostFixture(t, { model: 'vendor:CN#0/claude-synthetic', route });
-  await f.bind(); await f.connector.idle(); await tick();
-  assert.equal(f.runs[0]!.bootstrap.snapshot!.model_provider, 'vendor:CN#0');
-  assert.equal((await f.privateStore.snapshot('owner', f.store.get(f.bot.bot_id).teams![0]!.snapshot)).model_provider, 'vendor:CN#0');
-  assert.deepEqual(f.credentialIds, ['selected-cn-key', 'selected-cn-key']);
-});
-
-test('route configuration changes while awaiting the selected credential reject binding', async t => {
-  let credential!: (value: string) => void, requested!: () => void;
-  const waiting = new Promise<void>(resolve => { requested = resolve; });
-  const f = hostFixture(t, { credential: () => new Promise(resolve => { credential = resolve; requested(); }) });
-  const binding = f.bind(); await waiting; f.invalidateRoute(); credential('selected-static');
-  await assert.rejects(binding, /TEAM_MODEL_UNAVAILABLE/u);
-  assert.equal(f.calls.some(call => call.action === 'bindBot'), false); assert.equal(f.store.get(f.bot.bot_id).teams?.length ?? 0, 0);
-});
-
-test('unsafe route endpoints fail closed before credential resolution', async t => {
-  for (const endpoint of ['http://api.openai.com/v1', 'http://localhost:1234/v1', 'http://2130706433/v1', 'https://user:secret@models.example', 'https://models.example/?key=secret', 'https://models.example/#secret', 'https://models.example/?', 'https://models.example/#']) {
-    const f = hostFixture(t, { route: syntheticRoute({ model_endpoint: endpoint }) });
-    await assert.rejects(f.bind(), /INVALID_TEAM_SNAPSHOT/u); assert.deepEqual(f.credentialIds, []);
-    assert.equal(f.calls.some(call => call.action === 'bindBot'), false);
-  }
-});
-
-function routeCatalogFixture(t: { after(fn: () => void): void }, rows: unknown[], configured: string[], gate?: () => Promise<void>, snapshot?: ProviderAccountSnapshot) {
-  const f = botFixture(t), requested: string[][] = [];
-  let metadataReads = 0;
-  const executor = new LocalAppAgentExecutor({ configHome: f.defaultConfigHome, root: join(f.root, 'agent'), serverBin: '/fixture/native-catalog',
-    environment: { HOME: f.home, PATH: '/usr/bin:/bin' }, credentials: async () => { throw new Error('metadata never reads keys'); },
-    catalogCredentials: async () => { if (++metadataReads > 1) { requested.push([]); await gate?.(); } return snapshot ? { providerAccounts: snapshot, providerAccountCredentials: {}, providerAccountHome: f.home } : {}; },
-    permission: async () => false, question: async () => null,
-    spawnProcess: (() => {
-      const child = fakeProcess();
-      child.stdin.once('data', () => child.stdout.write(`${JSON.stringify({ type: 'catalog', protocolVersion: 1,
-        models: rows.map((row: any) => ({ ...row, canSelect: configured.includes(row.team_route?.credential_id) })), builtins: [], mcpTools: [], mcpConfigs: [], providerProfiles: { sibling: { secret: 'PRIVATE_ROUTER_DATA' } } })}\n`));
-      child.stdin.once('finish', () => { Object.assign(child, { exitCode: 0 }); child.emit('close', 0); });
-      return child;
-    }) as never });
-  return { ...f, executor, requested };
-}
-const catalogRow = (provider: string, model: string, route?: TeamModelRoute) => ({ provider_id: provider, request_model: model,
-  display_model: model, canSelect: true, capabilities: { tools: true }, ...(route ? { team_route: route } : {}) });
-
-test('native selected route projection freezes authorized profiles and stays out of public catalogs', async t => {
-  const route = syntheticRoute({ model_provider: 'openai-responses', model_protocol: 'open_ai_responses', model_id: 'gpt-6-luna',
-    model_endpoint: 'https://api.openai.com/v1', credential_id: 'openai-selected' });
-  const f = routeCatalogFixture(t, [catalogRow('openai', 'GPT 6 Luna', route), catalogRow('sibling', 'GPT 6 Luna', syntheticRoute({ credential_id: 'sibling-key' }))], ['openai-selected']);
-  const selection = await f.executor.teamModelRoute('openai/GPT 6 Luna');
-  assert.deepEqual(selection.route, route, 'native default-protocol resolution can select a different exact effective profile/wire model');
-  assert.deepEqual(f.requested, [[]]);
-  const publicCatalog = JSON.stringify(await f.executor.catalog());
-  assert.ok(!publicCatalog.includes('model_profile') && !publicCatalog.includes('credential_id') && !publicCatalog.includes('PRIVATE_ROUTER_DATA'));
-  writeFileSync(join(f.defaultConfigHome, 'settings.json'), '{"changedRoute":true}');
-  await assert.rejects(selection.assertCurrent(), /TEAM_MODEL_UNAVAILABLE/u);
-});
-
-test('ambiguous, unsupported and unconfigured native routes never choose a fallback credential', async t => {
-  const route = syntheticRoute();
-  const ambiguous = routeCatalogFixture(t, [catalogRow('first', 'same', route), catalogRow('second', 'same', route)], ['anthropic']);
-  await assert.rejects(ambiguous.executor.teamModelRoute('same'), /TEAM_MODEL_UNAVAILABLE/u); assert.deepEqual(ambiguous.requested, []);
-  const unsupported = routeCatalogFixture(t, [catalogRow('cloud', 'model')], ['sibling-key']);
-  await assert.rejects(unsupported.executor.teamModelRoute('cloud/model'), /TEAM_MODEL_UNSUPPORTED/u); assert.deepEqual(unsupported.requested, []);
-  const unavailable = routeCatalogFixture(t, [catalogRow('anthropic', 'claude-synthetic', route)], ['sibling-key']);
-  await assert.rejects(unavailable.executor.teamModelRoute('anthropic/claude-synthetic'), /TEAM_MODEL_UNAVAILABLE/u);
-  assert.deepEqual(unavailable.requested, []);
-});
-
-test('native route projection rejects configuration changes during credential metadata await', async t => {
-  let release!: () => void, requested!: () => void;
-  const waiting = new Promise<void>(resolve => { requested = resolve; });
-  const f = routeCatalogFixture(t, [catalogRow('anthropic', 'claude-synthetic', syntheticRoute())], ['anthropic'], () => new Promise(resolve => { release = resolve; requested(); }));
-  const selection = f.executor.teamModelRoute('anthropic/claude-synthetic');
-  await waiting;
-  writeFileSync(join(f.defaultConfigHome, 'settings.json'), '{"selectedConnection":"changed"}'); release();
-  await assert.rejects(selection, /TEAM_MODEL_UNAVAILABLE/u);
-});
-
-test('a stale bind revision cannot replace the immutable snapshot of an existing binding', async t => {
-  const f = hostFixture(t); await f.bind(); await f.connector.idle();
-  const oldSnapshot = f.store.get(f.bot.bot_id).teams![0]!.snapshot;
-  await f.content.setPersona(f.bot.bot_id, 'Different snapshot');
-  await assert.rejects(f.bind(), /BOT_REVISION_CONFLICT/u);
-  assert.equal(f.store.get(f.bot.bot_id).teams![0]!.snapshot, oldSnapshot);
-});
-
-test('snapshot copies only regular bounded persona and SKILL text, refusing links/hardlinks', async t => {
-  const f = hostFixture(t), home = f.store.homeDir(f.bot.bot_id), skills = join(home, 'skills');
-  mkdirSync(join(skills, 'synthetic')); writeFileSync(join(skills, 'synthetic', 'SKILL.md'), 'Only this skill text');
-  writeFileSync(join(skills, 'synthetic', 'secret-data'), 'not copied');
-  const text = await f.content.teamInstructions(f.bot.bot_id);
-  assert.ok(text.includes('Only this skill text')); assert.ok(!text.includes('not copied'));
-  const file = join(skills, 'synthetic', 'SKILL.md'); rmSync(file); symlinkSync(join(home, 'LINGXI.md'), file);
-  await assert.rejects(f.content.teamInstructions(f.bot.bot_id));
-  rmSync(file); linkSync(join(home, 'LINGXI.md'), file); await assert.rejects(f.content.teamInstructions(f.bot.bot_id));
-  const roots = await f.privateStore.owner('owner'); chmodSync(roots.journal, 0o755);
-  await assert.rejects(() => f.privateStore.owner('owner'), /UNSAFE_TEAM_STORAGE/u);
-});
-
-function fakeProcess(): ChildProcessWithoutNullStreams & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough } {
-  const child = new EventEmitter() as ChildProcessWithoutNullStreams & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough };
-  Object.assign(child, { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null,
-    kill: () => { Object.assign(child, { exitCode: 0 }); child.emit('close', 0); return true; } });
-  return child;
-}
-test('JSONL pipe binds delayed tokens to epoch and clears ambient environment', async t => {
-  const f = hostFixture(t); await f.bind(); await f.connector.idle(); await tick(); f.connector.close();
-  const template = f.runs[0]!, child = fakeProcess(); let current = true, release!: (value: string) => void, stdin = '';
-  child.stdin.on('data', chunk => { stdin += chunk.toString(); });
-  const pending = runTeamHost({ ...template, signal: new AbortController().signal,
-    assertCurrent: () => { if (!current) throw new Error('INVALID_SESSION'); }, token: () => new Promise(resolve => { release = resolve; }),
-    spawnProcess: (executable, args, options) => {
-      assert.deepEqual(args, []); assert.equal(executable, '/fixed/host');
-      assert.deepEqual(Object.keys(options!.env!).sort(), ['CFFIXED_USER_HOME', 'HOME', 'LANG', 'LC_ALL', 'LINGXI_CONFIG_DIR', 'PATH', 'TMPDIR', '__CF_USER_TEXT_ENCODING'].sort());
-      return child;
-    } });
-  child.stdout.write('{"version":1,"type":"credential","id":"credential-1"}\n'); await tick();
-  current = false; release('must-never-cross-pipe');
-  await assert.rejects(pending); assert.ok(!stdin.includes('must-never-cross-pipe'));
-});
-
-test('unexpected/duplicate stdout frames and incomplete EOF refuse success', async t => {
-  const f = hostFixture(t); await f.bind(); await f.connector.idle(); await tick(); f.connector.close();
-  for (const output of [
-    '{"version":1,"type":"result","status":"unstarted"}\n',
-    '{"version":1,"type":"result","status":"settled","extra":true}\n',
-    '{"version":1,"type":"result","status":"settled"}\n{"version":1,"type":"result","status":"settled"}\n',
-    '{"version":1,"type":"result","status":"settled"}',
-  ]) {
-    const child = fakeProcess();
-    const pending = runTeamHost({ ...f.runs[0]!, signal: new AbortController().signal, assertCurrent: () => {}, spawnProcess: () => child });
-    child.stdout.write(output); Object.assign(child, { exitCode: 0 }); child.emit('close', 0);
-    await assert.rejects(pending);
-  }
-});
-
-test('credential refresh proceeds while a tool approval waits, and a stale approval cannot cross the pipe', async t => {
-  const f = hostFixture(t); await f.bind(); await f.connector.idle(); await tick(); f.connector.close();
-  const child = fakeProcess(); let stdin = '', current = true, answer!: (allow: boolean) => void;
-  child.stdin.on('data', chunk => { stdin += chunk.toString(); });
-  const pending = runTeamHost({ ...f.runs[0]!, signal: new AbortController().signal, spawnProcess: () => child,
-    token: async () => 'synthetic-refresh', assertCurrent: () => { if (!current) throw new Error('INVALID_SESSION'); },
-    permission: () => new Promise(resolve => { answer = resolve; }) });
-  child.stdout.write('{"version":1,"type":"permission","id":"permission-1","tool_name":"Bash","input":{"command":"pwd"}}\n');
-  await tick();
-  child.stdout.write('{"version":1,"type":"credential","id":"credential-2"}\n'); await tick();
-  assert.ok(stdin.includes('synthetic-refresh'), 'authorization polling must not wait for the owner dialog');
-  current = false; answer(true); await assert.rejects(pending);
-  assert.ok(!stdin.includes('"allow":true'));
-});
-
-test('a full question wait can refresh over 600 credentials while an approval overlaps, without a lifetime ID cap', async t => {
-  const f = hostFixture(t); await f.bind(); await f.connector.idle(); await tick(); f.connector.close();
-  for (const replay of [undefined, 'credential-350', 'permission-1']) {
-    const child = fakeProcess(); let stdin = '', answer!: (value: boolean) => void;
-    child.stdin.on('data', chunk => { stdin += chunk.toString(); });
-    const pending = runTeamHost({ ...f.runs[0]!, signal: new AbortController().signal, spawnProcess: () => child,
-      token: async () => 'synthetic-rotation', assertCurrent: () => {}, permission: () => new Promise(resolve => { answer = resolve; }) });
-    const rejected = replay ? assert.rejects(pending, /TEAM_HOST_PROTOCOL/u) : undefined;
-    child.stdout.write('{"version":1,"type":"permission","id":"permission-1","tool_name":"Bash","input":{"command":"pwd"}}\n');
-    await tick();
-    for (let sequence = 2; sequence <= 702; sequence++) {
-      child.stdout.write(`${JSON.stringify({ version: 1, type: 'credential', id: `credential-${sequence}` })}\n`);
-      await tick();
-    }
-    assert.equal(stdin.split('\n').filter(line => line.includes('"type":"credential"')).length, 701);
-    if (replay) {
-      child.stdout.write(`${JSON.stringify(replay.startsWith('permission')
-        ? { version: 1, type: 'permission', id: replay, tool_name: 'Bash', input: {} }
-        : { version: 1, type: 'credential', id: replay })}\n`);
-      await rejected; answer(false);
-    } else {
-      answer(false); await tick();
-      child.stdout.write('{"version":1,"type":"result","status":"settled","state":"completed"}\n');
-      Object.assign(child, { exitCode: 0 }); child.emit('close', 0);
-      assert.equal((await pending).status, 'settled');
-    }
-  }
-});
-
-test('packaged binary resolution ignores all development overrides', t => {
-  const f = botFixture(t); mkdirSync(join(f.root, 'bin'));
-  for (const name of ['host', 'worker']) writeFileSync(join(f.root, 'bin', `harness-team-${name}`), 'fixture', { mode: 0o700 });
-  const environment = { LINGXI_TEAM_RUNTIME_VALIDATION: '1', LINGXI_TEAM_HOST_BIN: '/malicious/host', LINGXI_TEAM_WORKER_BIN: '/malicious/worker' };
-  assert.deepEqual(resolveTeamBinaries({ isPackaged: true, resourcesPath: f.root, environment }), {
-    host: join(f.root, 'bin', 'harness-team-host'), worker: join(f.root, 'bin', 'harness-team-worker'),
-  });
-  assert.throws(() => resolveTeamBinaries({ isPackaged: false, environment: {} }), /TEAM_RUNTIME_UNAVAILABLE/u);
-});
-
-test('aggregate host slots stay bounded while cancelled processes drain', async t => {
-  const releases: (() => void)[] = []; let active = 0, highest = 0;
-  const f = hostFixture(t, { run: () => new Promise(resolve => { active++; highest = Math.max(highest, active); let done = false; releases.push(() => { if (!done) { done = true; active--; resolve({ status: 'settled' }); } }); }) });
-  t.after(() => { f.connector.close(); releases.forEach(release => release()); });
-  const original = f.service.hostMessages.bind(f.service);
-  f.service.hostMessages = async (context, command) => command.action === 'botConversations'
-    ? { conversations: Array.from({ length: 10 }, (_, index) => ({ id: `thread-${index}`, participants: [f.store.get(f.bot.bot_id).teams![0]!.botKey], lastChangeSeq: 1 })), next: null } as never
-    : original(context, command);
-  await f.bind(); await f.connector.idle(); assert.equal(f.runs.length, 4); assert.equal(highest, 4);
-  f.connector.invalidate(); await f.connector.idle(); assert.equal(f.runs.length, 4, 'abort does not free an occupied process slot');
-  releases[0]!(); await tick(); await f.connector.idle(); assert.equal(f.runs.length, 5); assert.equal(highest, 4);
-});
-
-test('unchanged empty Bot queues are skipped until their conversation changes', async t => {
-  const f = hostFixture(t); let probes = 0, changed = false;
-  const original = f.service.hostMessages.bind(f.service);
-  f.service.hostMessages = async (context, command) => {
-    if (command.action === 'botConversations') return { conversations: Array.from({ length: 3 }, (_, index) => ({ id: `thread-${index}`, participants: [f.store.get(f.bot.bot_id).teams![0]!.botKey], lastChangeSeq: changed && index === 0 ? 2 : 1 })), next: null } as never;
-    if (command.action === 'botQueue') { probes++; return { cursor: 0, triggers: [], hasMore: false } as never; }
-    return original(context, command);
-  };
-  await f.bind(); await f.connector.idle(); assert.equal(probes, 3);
-  f.events.emit('messages'); await f.connector.idle(); assert.equal(probes, 3);
-  changed = true; f.events.emit('messages'); await f.connector.idle(); assert.equal(probes, 4);
-});
-
-test('one inaccessible conversation does not abort a healthy host', async t => {
-  const f = hostFixture(t), original = f.service.hostMessages.bind(f.service);
-  f.service.hostMessages = async (context, command) => {
-    if (command.action === 'botConversations') return { conversations: ['bad-chat01', 'good-chat01'].map(id => ({ id, participants: [f.store.get(f.bot.bot_id).teams![0]!.botKey], lastChangeSeq: 1 })), next: null } as never;
-    if (command.action === 'botQueue' && command.conversationId === 'bad-chat01') throw new Error('CONVERSATION_REQUIRED');
-    return original(context, command);
-  };
-  await f.bind(); await f.connector.idle(); assert.equal(f.runs.length, 1); assert.equal(f.runs[0]!.bootstrap.target.conversationId, 'good-chat01');
-  f.events.emit('messages'); await f.connector.idle(); assert.equal(f.runs[0]!.signal.aborted, false);
-});
-
-test('durable recovery observations back off without resolving another model credential', async t => {
-  let now = Date.now(); t.mock.method(Date, 'now', () => now);
-  const f = hostFixture(t, { run: async () => ({ status: 'recovery_required' }) });
-  await f.bind(); await f.connector.idle(); assert.equal(f.runs.length, 1); const credentials = f.credentialCalls();
-  f.events.emit('change', {}); await f.connector.idle(); assert.equal(f.runs.length, 1);
-  now += 10001; f.events.emit('change', {}); await f.connector.idle(); assert.equal(f.runs.length, 2);
-  assert.equal(f.credentialCalls(), credentials); assert.equal(f.runs[1]!.bootstrap.mode, 'retry_result');
-});
-
-
-for (const rejectedRevision of [0, 3]) {
-test(`named provider refresh revision ${rejectedRevision} uses a correlated Team pipe and account-only envelope`, async t => {
-  const f = hostFixture(t); await f.bind(); await f.connector.idle(); await tick(); f.connector.close();
-  const child = fakeProcess(), sent: Array<Record<string, any>> = [];
-  child.stdin.on('data', chunk => { for (const line of chunk.toString().trim().split('\n')) sent.push(JSON.parse(line)); });
-  const id = '11111111-1111-4111-8111-111111111111';
-  const calls: unknown[] = [];
-  const pending = runTeamHost({ ...f.runs[0]!, signal: new AbortController().signal, assertCurrent: () => {}, spawnProcess: () => child,
-    accountCredentials: async request => { calls.push(request); return { providerAccountHome: '/canonical/host',
-      providerAccounts: { storeScope: 'broker', configRevision: 1, accounts: [], health: [] }, providerAccountCredentials: {} }; } });
-  child.stdout.write(JSON.stringify({ version: 1, type: 'provider_account_refresh', id: 'provider_account_refresh-1', account_id: id, identity_generation: 2, credential_revision: rejectedRevision }) + '\n');
-  await tick();
-  assert.deepEqual(calls, [{ accountId: id, identityGeneration: 2, credentialRevision: rejectedRevision }]);
-  const reply = sent.find(frame => frame.type === 'provider_accounts_updated');
-  assert.equal(reply?.id, 'provider_account_refresh-1');
-  assert.equal(reply?.credentials.provider_account_home, '/canonical/host');
-  assert.deepEqual(Object.keys(reply!.credentials).sort(), ['provider_account_credentials', 'provider_account_home', 'provider_account_profiles', 'provider_accounts']);
-  child.stdout.write(JSON.stringify({ version: 1, type: 'result', status: 'settled' }) + '\n');
-  child.emit('close', 0);
-  assert.equal((await pending).status, 'settled');
-});
-
-}
-
-
-test('Team frozen account profiles include same-provider exact wire models and exclude sibling model aliases', async t => {
-  const route = (profile: string, wire: string) => syntheticRoute({ model_provider: profile, model_protocol: 'open_ai_responses', model_id: wire,
-    credential_id: profile, model_profile: { profile_name: profile, models: [{ request_model: wire }] } });
-  const api = route('openai', 'wire-gpt'), subscription = route('openai-chatgpt', 'wire-gpt');
-  const aliasMismatch = route('openai-alias', 'different-wire'), unrelated = route('other-provider', 'wire-gpt');
-  const snapshot: ProviderAccountSnapshot = { storeScope: 'mock', configRevision: 1, health: [], accounts: [api, subscription, aliasMismatch, unrelated].map((value, index) => ({
-    accountId: `account-${index}`, providerId: index === 3 ? 'other' : 'openai', executionBindingId: value.model_provider,
-    displayName: value.model_provider, authKind: index === 1 ? 'oauth' : 'api_key', enabled: true, userPriority: index,
-    configRevision: 1, identityGeneration: 1, credentialRef: { storeScope: 'mock', secretRef: `acct.${index}` },
-  })) };
-  const f = routeCatalogFixture(t, [catalogRow('openai', 'friendly-name', api), catalogRow('openai-chatgpt', 'wire-gpt', subscription),
-    catalogRow('openai-alias', 'friendly-name', aliasMismatch), catalogRow('other-provider', 'wire-gpt', unrelated)], ['openai'], undefined, snapshot);
-  const selection = await f.executor.teamModelRoute('openai/friendly-name');
-  assert.deepEqual(selection.profiles, [api.model_profile, subscription.model_profile]);
+test('an older source edited between range and change reads rejects before the start permit',async t=>{
+ let modelCalls=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor:{...cursor,scope:o.bootstrap.scope,sessionRevision:1,lastMessageSeq:200,lastChangeSeq:200}};modelCalls++;return {status:'completed',cursor,text:'Unexpected',finishedAt:Date.now()};});await f.connector.publishLocalBot('owner',f.input);
+ const read=f.mock.service.hostReadChat.bind(f.mock.service);f.mock.service.hostReadChat=async(c,q)=>{const result=await read(c,q);return q.mode==='changes'?{...result,lastChangeSeq:1001,messages:[{messageId:'message000002',seq:2,changeSeq:1001,changeId:'changed0001',author:{kind:'user' as const,uid:'member',displayName:'Member'},createdAt:1700000000002,editedAt:Date.now(),text:'New edit'}]}:result;};
+ f.mock.tasks.push({taskId:'task00001',conversationId,sharedBotId,requester:{uid:'member',generation:1},state:'queued',messageId:'message000201',messageSeq:201,createdAt:Date.now(),deadline:Date.now()+300000});f.mock.wake();await settle(()=>f.mock.reads.some(r=>r.mode==='changes')&&(f.connector as any).active.size===0);
+ assert.equal(modelCalls,0);assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,0);assert.deepEqual(await f.privateStore.executions('owner'),[]);
 });

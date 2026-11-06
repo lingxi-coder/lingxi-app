@@ -25,9 +25,7 @@ final class TeamsComposeLogicTests: XCTestCase {
 
     private func cards() throws -> [TeamBotCard] {
         try vectors("botCards", as: [[String: Any]].self).map {
-            TeamBotCard(key: try XCTUnwrap($0["key"] as? String), ownerUid: "o", hostId: "h", botId: "b", name: try XCTUnwrap($0["name"] as? String),
-                        description: "", revision: 1, use: "all", enabled: try XCTUnwrap($0["enabled"] as? Bool),
-                        permitted: try XCTUnwrap($0["permitted"] as? Bool), online: false)
+            try JSONDecoder().decode(TeamBotCard.self, from: JSONSerialization.data(withJSONObject: $0))
         }
     }
 
@@ -122,7 +120,7 @@ final class TeamsComposeLogicTests: XCTestCase {
                                                        lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
             let chosen = try XCTUnwrap(row["chosen"] as? [String])
             let result = TeamsComposeLogic.mentionCandidates(bots: cards, conversation: conversation, chosenKeys: chosen, query: try XCTUnwrap(row["query"] as? String))
-            XCTAssertEqual(result.map(\.key), row["expect"] as? [String], "\(row)")
+            XCTAssertEqual(result.map(\.sharedBotId), row["expect"] as? [String], "\(row)")
         }
     }
 
@@ -135,15 +133,15 @@ final class TeamsComposeLogicTests: XCTestCase {
             let known = try XCTUnwrap(row["bots"] as? [String])
             let result = TeamsComposeLogic.composerLock(
                 uid: try XCTUnwrap(row["uid"] as? String), kind: try XCTUnwrap(row["kind"] as? String), participants: try XCTUnwrap(row["participants"] as? [String]),
-                bots: cards.filter { known.contains($0.key) }, botsLoaded: try XCTUnwrap(row["botsLoaded"] as? Bool), botsUnverified: try XCTUnwrap(row["botsUnverified"] as? Bool))
+                bots: cards.filter { known.contains($0.sharedBotId) }, botsLoaded: try XCTUnwrap(row["botsLoaded"] as? Bool), botsUnverified: try XCTUnwrap(row["botsUnverified"] as? Bool))
             XCTAssertEqual(result, names[try XCTUnwrap(row["expect"] as? String)], "\(row)")
         }
     }
 
     func testSearchIgnoresCaseAndSurroundingSpaceInTheBotName() throws {
         let cards = try cards()
-        let group = TeamMessageConversation(id: "x", kind: "group", title: "", participants: ["user:u1", "bot:a", "bot:d"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
-        XCTAssertEqual(TeamsComposeLogic.mentionCandidates(bots: cards, conversation: group, chosenKeys: [String](), query: "  DEL ").map(\.key), ["bot:d"])
-        XCTAssertEqual(TeamsComposeLogic.mentionCandidates(bots: cards, conversation: group, chosenKeys: Set(["bot:a", "bot:d"]), query: "").map(\.key), [])
+        let group = TeamMessageConversation(id: "x", kind: "group", title: "", participants: ["user:u1", "shared_bot:sharedbot_a", "shared_bot:sharedbot_d"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
+        XCTAssertEqual(TeamsComposeLogic.mentionCandidates(bots: cards, conversation: group, chosenKeys: [String](), query: "  DEL ").map(\.sharedBotId), ["sharedbot_d"])
+        XCTAssertEqual(TeamsComposeLogic.mentionCandidates(bots: cards, conversation: group, chosenKeys: Set(["sharedbot_a", "sharedbot_d"]), query: "").map(\.sharedBotId), [])
     }
 }

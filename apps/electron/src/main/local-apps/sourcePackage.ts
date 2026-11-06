@@ -15,10 +15,10 @@ export function packagePath(path: string): void {
   if (!path || path !== path.normalize('NFC') || /[\\%?#:\x00-\x1f]/.test(path) || path.startsWith('/') || path.split('/').some(p => !p || p === '.' || p === '..')) throw new Error('Unsafe package path');
 }
 /** Decode a bounded ZIP only after matching every entry to the immutable inventory. */
-export async function unpackSource(bytes: Buffer, inventory: SourceFile[], destination: string): Promise<void> {
+export async function unpackSource(bytes: Buffer, inventory: SourceFile[], destination: string, manifestPath = 'lingxi-app.json'): Promise<void> {
   if (!bytes.length || bytes.length > MAX_ARCHIVE || inventory.length > 2000) throw new Error('Package exceeds limits');
   const files = new Map(inventory.map(file => [file.path, file]));
-  if (files.size !== inventory.length || !files.has('lingxi-app.json')) throw new Error('Invalid package inventory');
+  if (files.size !== inventory.length || !files.has(manifestPath)) throw new Error('Invalid package inventory');
   let eocd = -1;
   for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) if (bytes.readUInt32LE(i) === 0x06054b50 && i + 22 + bytes.readUInt16LE(i + 20) === bytes.length) { eocd = i; break; }
   if (eocd < 0 || bytes.readUInt16LE(eocd + 4) || bytes.readUInt16LE(eocd + 6) || bytes.readUInt16LE(eocd + 8) !== bytes.readUInt16LE(eocd + 10)) throw new Error('Unsupported ZIP');

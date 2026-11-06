@@ -47,6 +47,41 @@ struct TeamsListView: View {
                     .listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear)
                     .id(Self.topID)
                     .accessibilityHidden(true)
+                if !bots.isEmpty {
+                    Section("teams_assistants") {
+                        ForEach(bots.filter(\.selectable)) { bot in
+                            Button {
+                                let id = UUID().uuidString
+                                Task {
+                                    let done = await workspace.run { try await model?.create(kind: "bot_dm", title: bot.name, uids: [], sharedBotIds: [bot.sharedBotId], id: id) }
+                                    if done { onOpen(id) }
+                                }
+                            } label: {
+                                HStack {
+                                    AgentAvatar(agentID: bot.sharedBotId, size: 32)
+                                    VStack(alignment: .leading) {
+                                        Text(bot.name).font(.body.weight(.semibold))
+                                        Text(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued")).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .accessibilityIdentifier("teams.assistant.\(bot.sharedBotId)")
+                        }
+                    }
+                }
+                if let model, !model.tasks.isEmpty {
+                    Section("teams_recent_tasks") {
+                        ForEach(model.tasks) { task in
+                            TeamTaskCard(task: task, botName: bots.first { $0.sharedBotId == task.sharedBotId }?.name ?? strings.bot)
+                        }
+                    }
+                }
+                ForEach((model?.cache?.commands ?? []).filter { $0.error != nil }) { command in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(LocalizedStringKey(TeamsErrors.key(command.error ?? "INVALID_INPUT"))).font(.caption).foregroundStyle(.secondary)
+                        Button("teams_message_discard") { Task { await workspace.run { try await model?.discardCommand(command.id) } } }
+                    }
+                }
                 if let creation = model?.cache?.creation { creationRow(creation) }
                 if !ready && all.isEmpty && (model?.error.isEmpty ?? true) {
                     HStack { Spacer(); ProgressView(); Spacer() }
@@ -73,6 +108,9 @@ struct TeamsListView: View {
             .onChange(of: scrollToTop) { _, _ in
                 withAnimation { proxy.scrollTo(Self.topID, anchor: .top) }
             }
+        }
+        .sheet(item: Binding(get: { workspace.messaging?.artifact }, set: { if $0 == nil { workspace.messaging?.closeArtifact() } })) { artifact in
+            TeamArtifactViewer(artifact: artifact) { workspace.messaging?.closeArtifact() }
         }
         .navigationTitle("teams_title")
         .navigationBarTitleDisplayMode(.large)
@@ -196,8 +234,8 @@ struct TeamsListView: View {
         let unread = context.unread(conversation)
         let strings = context.strings
         let preview = TeamsListLogic.conversationPreview(conversation, uid: uid, strings: strings) { last in
-            if last.authorKind == "bot" {
-                let name = context.bots.first { $0.key == last.authorBotKey }?.name ?? ""
+            if last.authorKind == "shared_bot" {
+                let name = context.bots.first { $0.sharedBotId == last.authorSharedBotId }?.name ?? ""
                 return name.isEmpty ? strings.bot : name
             }
             let name = context.members.first { $0.uid == last.authorUid }?.displayName ?? ""

@@ -2938,8 +2938,8 @@
   "teams_bot_unbind_title_fmt": "%1$s のバインドを解除しますか？",
   "teams_bot_unbind_detail": "新しい Bot リクエストは停止します。既存の会話履歴は残ります。",
   "teams_bots_share_hint": "ローカルの Bot を共有したり権限を変更したりするには、LingXi Desktop のチームを開いてください。",
-  "teams_bot_owner %@": "所有者: %@",
-  "teams_bot_owner_fmt": "所有者: %1$s",
+  "teams_bot_owner %@": "Maintainer: %@",
+  "teams_bot_owner_fmt": "Maintainer: %1$s",
   "teams_invite_none": "招待はまだありません。",
   "teams_invite_share": "招待を共有",
   "teams_link_copied": "リンクをコピーしました",
@@ -2967,5 +2967,15 @@
   "teams_error_bot_access_changed": "Bot のアクセス権が変更されました。同期して選択した Bot を確認してから再送信してください。",
   "teams_error_answer_rejected": "この回答は受け付けられません。質問と元の依頼者を確認してください。",
   "teams_conversation_details": "会話の詳細",
-  "teams_choose_conversation": "会話を選択"
+  "teams_choose_conversation": "会話を選択",
+  "teams_assistants": "Assistants",
+  "teams_recent_tasks": "Recent tasks and results",
+  "teams_artifact_open": "Open document",
+  "teams_artifact_title": "Document",
+  "teams_bot_pause": "Pause sharing",
+  "teams_task_expired": "Request expired",
+  "teams_task_interrupted": "Request interrupted; send a new request",
+  "teams_task_authorization_required": "Maintainer action required",
+  "teams_error_request_quota": "Request limit reached. Try later or contact the maintainer.",
+  "teams_task_view": "View task status"
 }

@@ -10,14 +10,14 @@ enum TeamsErrors {
             "teams_error_invalid_data"
         case "MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED":
             "teams_stale_error"
-        case "BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "BOT_SELECTION_STALE":
+        case "BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "BOT_SELECTION_STALE", "CONVERSATION_POLICY_REQUIRED", "ARTIFACT_READ_REQUIRED", "GRANT_READ_REQUIRED", "INPUT_GRANT_REQUIRED":
             "teams_error_bot_access_changed"
-        case "QUESTION_RECIPIENT_REQUIRED", "ANSWER_CONFLICT", "INVALID_ANSWER":
-            "teams_error_answer_rejected"
+        case "REQUEST_QUOTA_EXCEEDED":
+            "teams_error_request_quota"
         case "MESSAGE_LISTENER_FAILED":
             "teams_error_sync_failed"
         case "MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT",
-             "RECOVERY_NOT_REQUIRED", "BOT_RESULT_CONFLICT", "BOT_REVISION_CONFLICT", "BOT_OWNER_REQUIRED", "MESSAGE_IN_FLIGHT", "REPLY_REQUIRED":
+             "BOT_REVISION_CONFLICT", "MAINTAINER_REQUIRED", "MESSAGE_IN_FLIGHT", "REPLY_REQUIRED":
             "teams_message_failed"
         case "INVITE_UNAVAILABLE":
             "teams_invite_error"

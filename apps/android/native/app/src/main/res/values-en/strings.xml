@@ -2763,7 +2763,7 @@
     <string name="teams_bot_unbind_title_fmt">Unbind %1$s?</string>
     <string name="teams_bot_unbind_detail">New Bot requests will stop. Existing conversation history remains.</string>
     <string name="teams_bots_share_hint">Open Teams in LingXi Desktop to share a local Bot or change its permissions.</string>
-    <string name="teams_bot_owner_fmt">Owner: %1$s</string>
+    <string name="teams_bot_owner_fmt">Maintainer: %1$s</string>
     <string name="teams_invite_none">No invitations yet.</string>
     <string name="teams_invite_share">Share this invitation</string>
     <string name="teams_link_copied">Link copied</string>
@@ -2792,4 +2792,14 @@
     <string name="teams_error_answer_rejected">This answer cannot be accepted. Check the question and original requester.</string>
     <string name="teams_conversation_details">Conversation details</string>
     <string name="teams_choose_conversation">Choose a conversation</string>
+    <string name="teams_assistants">Assistants</string>
+    <string name="teams_recent_tasks">Recent tasks and results</string>
+    <string name="teams_artifact_open">Open document</string>
+    <string name="teams_artifact_title">Document</string>
+    <string name="teams_bot_pause">Pause sharing</string>
+    <string name="teams_task_expired">Request expired</string>
+    <string name="teams_task_interrupted">Request interrupted; send a new request</string>
+    <string name="teams_task_authorization_required">Maintainer action required</string>
+    <string name="teams_error_request_quota">Request limit reached. Try later or contact the maintainer.</string>
+    <string name="teams_task_view">View task status</string>
 </resources>

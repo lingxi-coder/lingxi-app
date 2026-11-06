@@ -2938,8 +2938,8 @@
   "teams_bot_unbind_title_fmt": "%1$s 연결을 해제할까요?",
   "teams_bot_unbind_detail": "새로운 Bot 요청이 중지됩니다. 기존 대화 기록은 유지됩니다.",
   "teams_bots_share_hint": "로컬 Bot을 공유하거나 권한을 바꾸려면 LingXi Desktop의 팀 페이지를 여세요.",
-  "teams_bot_owner %@": "소유자: %@",
-  "teams_bot_owner_fmt": "소유자: %1$s",
+  "teams_bot_owner %@": "Maintainer: %@",
+  "teams_bot_owner_fmt": "Maintainer: %1$s",
   "teams_invite_none": "아직 초대가 없습니다.",
   "teams_invite_share": "초대 공유",
   "teams_link_copied": "링크를 복사했습니다",
@@ -2967,5 +2967,15 @@
   "teams_error_bot_access_changed": "Bot 권한이 변경되었습니다. 동기화하고 선택한 Bot을 확인한 후 다시 보내세요.",
   "teams_error_answer_rejected": "이 답변을 받을 수 없습니다. 질문과 원래 요청자를 확인하세요.",
   "teams_conversation_details": "대화 상세 정보",
-  "teams_choose_conversation": "대화 선택"
+  "teams_choose_conversation": "대화 선택",
+  "teams_assistants": "Assistants",
+  "teams_recent_tasks": "Recent tasks and results",
+  "teams_artifact_open": "Open document",
+  "teams_artifact_title": "Document",
+  "teams_bot_pause": "Pause sharing",
+  "teams_task_expired": "Request expired",
+  "teams_task_interrupted": "Request interrupted; send a new request",
+  "teams_task_authorization_required": "Maintainer action required",
+  "teams_error_request_quota": "Request limit reached. Try later or contact the maintainer.",
+  "teams_task_view": "View task status"
 }

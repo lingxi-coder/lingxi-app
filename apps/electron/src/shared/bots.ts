@@ -7,6 +7,7 @@
  */
 
 import type { PermissionModeId, SessionRowDto } from '@lingxi/bridge-client';
+import type { BotMarketOrigin, BotMarketRequest, BotMarketResponse } from './botMarket.js';
 
 /**
  * What a rejected update says when the Bot changed since the window read it. The
@@ -102,6 +103,7 @@ export interface BotWorkspaceUi {
 }
 
 export interface BotUi {
+  marketOrigin?: BotMarketOrigin;
   botId: string;
   name: string;
   description: string;
@@ -235,6 +237,7 @@ export interface BotPromptSentUi {
 }
 
 export interface BotsApi {
+  market(request: BotMarketRequest): Promise<BotMarketResponse>;
   /** Never rejects for a computer that cannot run Bots: that is the answer. */
   availability(): Promise<BotsAvailability>;
   list(): Promise<BotUi[]>;

@@ -20,7 +20,7 @@ export function messageErrorText(code: string, zh: boolean): string {
   if (['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED'].includes(code)) {
     return t('Access changed. Return to members and refresh before continuing.', '访问权限已变化，请返回成员页并刷新。');
   }
-  if (/STORAGE|Quota|disk/iu.test(code)) {
+  if (/STORAGE|disk/iu.test(code)) {
     return t('Local message storage is unavailable. Check free space and try again.', '本地消息存储不可用，请检查空间后重试。');
   }
   switch (code) {
@@ -28,10 +28,6 @@ export function messageErrorText(code: string, zh: boolean): string {
     case 'BOT_PARTICIPANT_REQUIRED':
     case 'INVALID_BOT_TARGET':
       return t('Bot access changed. Sync and check the selected Bots before sending again.', 'Bot 权限已变化，请同步并检查所选 Bot 后重试。');
-    case 'QUESTION_RECIPIENT_REQUIRED':
-    case 'ANSWER_CONFLICT':
-    case 'INVALID_ANSWER':
-      return t('This answer cannot be accepted. Check the question and original requester.', '此答案无法接收，请检查问题与原始请求人身份。');
     case 'TEAM_MODEL_UNSUPPORTED':
       return t('This model configuration cannot be used for Team Bots. Check the provider settings on Desktop or choose another model.', '当前模型配置不能用于团队 Bot，请检查 Desktop 的供应商配置或选择其他模型。');
     case 'TEAM_MODEL_UNAVAILABLE':
@@ -40,14 +36,21 @@ export function messageErrorText(code: string, zh: boolean): string {
       return t('The isolated Teams runtime is unavailable on this Desktop. Install a Desktop build that includes it.', '此 Desktop 缺少团队隔离运行时，请安装包含此运行时的 Desktop 版本。');
     case 'TEAM_HOST_MACOS_REQUIRED':
       return t('Sharing a Team Bot currently requires macOS Desktop.', '共享团队 Bot 当前需要 macOS Desktop。');
+    case 'HOST_UNAVAILABLE':
     case 'TEAM_HOST_UNAVAILABLE':
-      return t('The Desktop Bot host is unavailable. Check the Desktop service and try again.', 'Desktop Bot 主机不可用，请检查 Desktop 服务后重试。');
+      return t('The assistant’s host is unavailable. Ask its maintainer to reconnect Desktop.', '助手宿主不可用，请联系维护者重新连接 Desktop。');
     case 'INVALID_DATA':
       return t('Some of this team’s data is in an unsupported format and cannot be shown.', '此团队的部分数据格式不受支持，无法显示。');
-    case 'RECOVERY_NOT_REQUIRED':
-      return t('The run is not eligible for a new settlement. Refresh and review its current status.', '此运行当前无法创建新的处理结果，请刷新并检查状态。');
-    case 'BOT_RESULT_CONFLICT':
-      return t('A different settlement is already saved for this request. Retry the saved result unchanged.', '此请求已保存不同的处理结果，请重试原始结果。');
+    case 'REQUEST_QUOTA_EXCEEDED':
+      return t('The daily request quota is exhausted. Ask the maintainer to review quotas or try after the UTC day resets.', '每日请求额度已用尽，请联系维护者检查额度或在 UTC 日期切换后重试。');
+    case 'ARTIFACT_READ_REQUIRED':
+      return t('You no longer have access to this document. Ask the maintainer to review its audience.', '你已无权访问此文档，请联系维护者检查受众。');
+    case 'PUBLICATION_CONFIRMATION_REQUIRED':
+      return t('Review and confirm the publication before continuing.', '请检查并确认发布内容后继续。');
+    case 'PUBLISHED_INPUT_REQUIRED':
+    case 'INPUT_GRANT_REQUIRED':
+    case 'INPUT_AUDIENCE_NARROWER':
+      return t('The selected resources cannot be shared with this audience. Choose authorized resources or a narrower audience.', '选定资料无法向此受众共享，请选择有权共享的资料或缩小受众。');
     case 'BOT_REVISION_CONFLICT':
       return t('Bot settings changed. Refresh before saving again.', 'Bot 设置已变化，请刷新后重试。');
     case 'MESSAGE_RECALLED':

@@ -1,3 +1,4 @@
+import { BotMarketHost } from './bots/marketHost.js';
 import { providerById, providersFromCatalog } from '../shared/providers.js';
 import { DesktopProviderAccounts, providerAccountSessionStore, runtimeAccountCredential, withFileRefreshIntents, withProviderAccountLock } from './provider-accounts.js';
 import { loginCodex } from './codex-auth.js';
@@ -61,7 +62,6 @@ import { TaskChangeAnnouncer } from './bots/taskChanges.js';
 import { BotTasks } from './bots/taskService.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
 import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
-import { TeamOwnerApprovalBroker, TeamApprovalsGateway } from './remoteControl/teamApprovals.js';
 import { createRemoteLocalAppsDelegate } from './remoteControl/localAppsBindings.js';
 import { LocalAppRtc } from './local-apps/remoteRtc.js';
 import { PeerHost } from './remoteControl/peerHost.js';
@@ -145,8 +145,6 @@ let remoteUi: RemoteControlUi | null = null;
 let bots: BotService | null = null;
 let stopTeams: (() => void) | undefined;
 let teamConnector: TeamConnector | undefined;
-let teamApprovalBroker: TeamOwnerApprovalBroker | undefined;
-let teamApprovalGateway: TeamApprovalsGateway | undefined;
 /** The endpoint through which Bots hand tasks to each other; made with the Bots. */
 let botRouter: BotRouter | null = null;
 let botTasks: BotTasks | null = null;
@@ -776,8 +774,6 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
   host.attachAccount(account);
   const teamsService = new TeamsService(account, firebaseConfig);
-  const teamRemoteEnabled = (botId: string): boolean => { try { return bots?.get(botId).remote === true; } catch { return false; } };
-  teamApprovalBroker = new TeamOwnerApprovalBroker({ botRemoteEnabled: teamRemoteEnabled });
   stopTeams = installTeamsIpc(teamsService, () => [...mainWindows]);
   // Off unless the user (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns it on.
   const remoteDiagnostics = (level: 'info' | 'warn' | 'error', message: string): void => {
@@ -831,20 +827,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     generation: viewer => `${remoteAccessGeneration}:${remoteOwnerGenerations.get(remoteOwnerKey({ accountUid: viewer.account_uid!, deviceId: viewer.device_id, hostId: viewer.host_id })) ?? 0}`,
     approvedDevice: deviceId => remoteControl?.listDevices().some(device => device.device_id === deviceId) ?? false,
   }));
-  teamApprovalGateway = new TeamApprovalsGateway(appsGateway, teamApprovalBroker, {
-    ownerContext: () => teamsService.hostContext(),
-    hostId: () => remoteControl?.status().host_id,
-    active: () => remoteControl?.status().state === 'online' && policy.allows(),
-    approvedViewer: viewer => remoteControl?.status().connections.some(connection => connection.conn_id === viewer.conn_id
-      && connection.device_id === viewer.device_id && connection.approved === true) === true
-      && remoteControl.listDevices().some(device => device.device_id === viewer.device_id),
-    generation: viewer => `${remoteAccessGeneration}:${remoteOwnerGenerations.get(remoteOwnerKey({ accountUid: viewer.account_uid!, deviceId: viewer.device_id, hostId: viewer.host_id })) ?? 0}`,
-    remoteEnabled: target => teamRemoteEnabled(target.botId),
-  });
   remoteControl = createRemoteControl({
     account,
     settings,
-    gateway: teamApprovalGateway,
+    gateway: appsGateway,
     deviceRevoked: owner => { const key = remoteOwnerKey(owner); remoteOwnerGenerations.set(key, (remoteOwnerGenerations.get(key) ?? 0) + 1); localApps?.remoteRevokeOwner(owner); },
     accessStopped: revokeRemoteAppAccess,
     policyAllows: () => policy.allows(),
@@ -963,7 +949,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         warn: botWarn,
       });
       scheduled?.attachBots(bots);
-      host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore), tasks, loginItem }));
+      host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore), tasks, loginItem,
+        market: new BotMarketHost({store:botStore,service:bots,accountToken:()=>account.getIdToken(),accountId:()=>account.snapshot().user?.uid??undefined,changed:()=>remotePolicy?.notifySessionsChanged()}) }));
     } catch (error) {
       diagnostics.add('warn', 'host', `bots unavailable: ${sanitizeDiagnostic(error)}`);
     }
@@ -992,7 +979,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     if (teamBotStore && process.platform === 'darwin') {
       try {
         teamConnector = new TeamConnector({
-          service: teamsService, store: teamBotStore, content: new BotContent(teamBotStore), privateStore: new TeamPrivateStore(userData),
+          service: teamsService, store: teamBotStore, privateStore: new TeamPrivateStore(userData),
           binaries: () => resolveTeamBinaries({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }),
           defaultModel: () => settings.getPublic().model,
           modelRoute: selected => agentExecutor.teamModelRoute(selected),
@@ -1003,21 +990,25 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
             if (!managed.length) return undefined;
             const providerId = managed[0]!.providerId;
             const bindings = new Set(profiles.map(profile => profile['profile_name']));
-            const candidates = accounts.providerAccounts.accounts.filter(account => account.providerId === providerId && bindings.has(account.executionBindingId));
+            const candidates = accounts.providerAccounts.accounts.filter(account => account.providerId === providerId && account.enabled && bindings.has(account.executionBindingId));
+            const usable = candidates.some(candidate => {
+              const credential = accounts.providerAccountCredentials[candidate.accountId];
+              if (!credential || credential.identity_generation !== candidate.identityGeneration) return false;
+              const health = accounts.providerAccounts.health.find(value => value.accountId === candidate.accountId && value.identityGeneration === candidate.identityGeneration);
+              return !health || health.status === 'ready' || health.status === 'cooling_down' && (health.cooldownUntilMs ?? Infinity) <= Date.now();
+            });
+            if (!usable) return undefined;
             const ids = new Set(candidates.map(account => account.accountId));
             return { ...accounts, providerAccountCredentials: Object.fromEntries(Object.entries(accounts.providerAccountCredentials).filter(([id]) => ids.has(id))) };
           },
           renewModelAccount: renewProviderAccount,
-          permission: async (input, signal) => teamApprovalBroker!.request({ ...input, showLocal: async localSignal => {
-            localSignal.throwIfAborted();
-            const options = { type: 'question' as const, signal: localSignal, title: 'Team Bot permission',
-              message: 'Allow this Team Bot to run one sandboxed command?',
-              detail: `Team: ${input.target.teamId}\nBot: ${input.target.botId}\nConversation: ${input.target.conversationId}\n\n${JSON.stringify(input.input, null, 2).slice(0, 16000)}`,
-              buttons: ['Deny', 'Allow once'], defaultId: 0, cancelId: 0 };
+          chooseFiles: async () => {
             const parent = [...mainWindows].find(window => !window.isDestroyed());
-            const result = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
-            return !localSignal.aborted && result.response === 1;
-          } }, signal),
+            const options = { title: 'Choose files to share with Team members', properties: ['openFile', 'multiSelections'] as Array<'openFile' | 'multiSelections'>,
+              filters: [{ name: 'Text and Skill documents', extensions: ['md', 'txt', 'csv', 'json'] }] };
+            const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+            return result.canceled ? [] : result.filePaths;
+          },
         });
         teamsService.attachHost(teamConnector);
       } catch { diagnostics.add('warn', 'host', 'Team Bot host is unavailable'); }
@@ -1165,8 +1156,6 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   event.preventDefault();
   quitting = true;
   stopTeams?.(); stopTeams = undefined;
-  teamApprovalGateway?.close(); teamApprovalGateway = undefined;
-  teamApprovalBroker?.close(); teamApprovalBroker = undefined;
   desktopUpdates?.dispose();
   desktopUpdates = null;
   host?.dispose();

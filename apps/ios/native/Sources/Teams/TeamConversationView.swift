@@ -209,10 +209,6 @@ struct TeamConversationView: View {
         let start = TeamsStreamLogic.visibleStart(streamMessages, startId: startID, lastReadSeq: anchor, uid: context.uid)
         let rows = TeamsStreamLogic.buildStreamRows(Array(streamMessages[start...]), lastReadSeq: anchor, uid: context.uid, nowMs: nowMs, zone: .current)
         let byID = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        var latestByTrigger: [String: String] = [:]
-        for message in messages[start...] {
-            for trigger in message.botTriggers(in: conversation) { latestByTrigger[trigger] = message.id }
-        }
         let thread = context.model.cache?.threads[conversation.id]
         let newest = messages.last?.seq ?? 0
         let unseen = messages.filter { $0.seq > seenSeq && !context.isMine($0) }.count
@@ -247,7 +243,6 @@ struct TeamConversationView: View {
                         if let message = byID[item.id] {
                             TeamMessageCell(
                                 message: message, grouped: grouped, context: context, quote: quote(of: message, byID: byID, context: context),
-                                runTriggers: message.botTriggers(in: conversation).filter { latestByTrigger[$0] == message.id && context.model.botStates[$0] != nil },
                                 onReply: locked ? nil : { startReply($0) },
                                 onEdit: context.isMine(message) && context.participant ? { beginEdit($0) } : nil,
                                 onRecall: context.isMine(message) && context.participant ? { recalling = $0 } : nil)
@@ -340,7 +335,7 @@ struct TeamConversationView: View {
         let keep = rows.first { if case .message = $0 { true } else { false } }?.key
         let newStart = max(0, start - TeamsStreamLogic.windowSize)
         startID = messages[newStart].id
-        workspace.messaging?.showBotHistory(limit: messages.count - newStart)
+        workspace.messaging?.refreshTasks()
         if let keep {
             Task {
                 await Task.yield()
@@ -393,7 +388,7 @@ struct TeamConversationView: View {
         let sent = await workspace.run {
             let model = context.model
             // A Bot the viewer picked may have been revoked since: the draft is never sent with a stale target.
-            if changing == nil, targets.contains(where: { key in !model.bots.contains { $0.key == key && $0.selectable } }) {
+            if changing == nil, targets.contains(where: { key in !model.bots.contains { $0.sharedBotId == key && $0.selectable } }) {
                 throw TeamMessageFailure(code: "BOT_USE_REQUIRED")
             }
             try await model.queue(operation: changing == nil ? "create" : "edit", text: body, messageId: changing?.id, replyTo: reply, targets: changing == nil ? targets : [])

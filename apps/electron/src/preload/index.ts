@@ -1,3 +1,4 @@
+import { CH_BOTS_MARKET } from '../shared/botMarket.js';
 import { DESKTOP_BRIDGE_GLOBAL } from '../shared/desktopBridge.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import type { ProviderAccountsApi } from '../shared/providerAccounts.js';
@@ -474,8 +475,10 @@ const api: LingxiApi = {
     },
   },
   teams: {
+    openBotMarket: () => ipcRenderer.invoke(CH_BOTS_MARKET, {action: 'browse'}),
     localBots: uid => teamsRequest({ type: 'localBots', uid }),
-    bindLocalBot: (uid, input) => teamsRequest({ type: 'bindLocalBot', uid, input }),
+    publishLocalBot: (uid, input) => teamsRequest({ type: 'publishLocalBot', uid, input }),
+    selectSharedFiles: (uid, instanceId) => teamsRequest({ type: 'selectSharedFiles', uid, instanceId }),
     list: uid => teamsRequest({ type: 'list', uid }),
     detail: (uid, teamId) => teamsRequest({ type: 'detail', uid, teamId }),
     messages: (uid, command) => teamsRequest({ type: 'messages', uid, command }),
@@ -510,6 +513,7 @@ const api: LingxiApi = {
     onPromptEcho: callback => subscribe(CH_REMOTE_PROMPT_ECHO, callback),
   } satisfies RemoteControlApi,
   bots: {
+    market: request => ipcRenderer.invoke(CH_BOTS_MARKET, request),
     availability: () => ipcRenderer.invoke(CH_BOTS_AVAILABILITY),
     list: () => ipcRenderer.invoke(CH_BOTS_LIST),
     get: botId => ipcRenderer.invoke(CH_BOTS_GET, botId),

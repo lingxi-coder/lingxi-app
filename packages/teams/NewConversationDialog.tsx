@@ -1,5 +1,5 @@
 import { useState, type ReactElement } from 'react';
-import { teamBotUsable, type TeamBotCard } from './bots.js';
+import { sharedBotUsable, type SharedBotCard } from './execution.js';
 import { messageErrorText } from './errors.js';
 import { Avatar, Dialog, type RenderAvatar } from './ui';
 import { defaultConversationTitle, findBotDm, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
@@ -20,7 +20,7 @@ export function NewConversationDialog({ workspace, snapshot, zh, mode, renderAva
   const kind = mode === 'channel' ? 'channel' : direct;
   const [title, setTitle] = useState(''), [parties, setParties] = useState<string[]>([]), [botParties, setBotParties] = useState<string[]>([]), [tried, setTried] = useState(false);
   const people = snapshot.directory.filter(member => member.uid !== snapshot.uid);
-  const bots = snapshot.bots.filter(teamBotUsable);
+  const bots = snapshot.bots.filter(sharedBotUsable);
   const owner = (id: string) => snapshot.directory.find(member => member.uid === id)?.displayName ?? id;
   const named = kind === 'channel' || (kind === 'group' && parties.length === 0);
   const valid = kind === 'dm' ? parties.length === 1 : parties.length + botParties.length > 0 && (!named || title.trim() !== '');
@@ -54,11 +54,11 @@ export function NewConversationDialog({ workspace, snapshot, zh, mode, renderAva
       </fieldset>
       {kind !== 'dm' && bots.length ? <fieldset className="tw-fieldset">
         <legend>{t('Participating Bots', '参与的 Bot')}</legend>
-        {bots.map(bot => <label key={bot.key} className="tw-check">
-          <input type="checkbox" checked={botParties.includes(bot.key)} disabled={!botParties.includes(bot.key) && botParties.length >= MAX_BOTS}
-            onChange={event => setBotParties(event.target.checked ? [...botParties, bot.key] : botParties.filter(key => key !== bot.key))} />
-          <Avatar identity={{ kind: 'bot', id: bot.botId || bot.key, name: bot.name }} size={20} render={renderAvatar} />
-          {bot.name} · {owner(bot.ownerUid)}
+        {bots.map(bot => <label key={bot.sharedBotId} className="tw-check">
+          <input type="checkbox" checked={botParties.includes(bot.sharedBotId)} disabled={!botParties.includes(bot.sharedBotId) && botParties.length >= MAX_BOTS}
+            onChange={event => setBotParties(event.target.checked ? [...botParties, bot.sharedBotId] : botParties.filter(key => key !== bot.sharedBotId))} />
+          <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={20} render={renderAvatar} />
+          {bot.name} · {owner(bot.maintainer.uid)}
         </label>)}
       </fieldset> : null}
       {botParties.length ? <p className="tw-hint">{t('A Bot’s owner can read every conversation that includes their Bot.', 'Bot 的所有者可阅读包含其 Bot 的所有会话。')}</p> : null}
@@ -78,21 +78,21 @@ export function NewConversationDialog({ workspace, snapshot, zh, mode, renderAva
 export function NewBotDmDialog({ workspace, snapshot, zh, renderAvatar, onClose }: DialogProps): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
   const [tried, setTried] = useState(false);
-  const usable = snapshot.bots.filter(teamBotUsable);
+  const usable = snapshot.bots.filter(sharedBotUsable);
   const owner = (id: string) => snapshot.directory.find(member => member.uid === id)?.displayName ?? id;
-  const open = async (bot: TeamBotCard, fresh: boolean) => { setTried(true); if (await workspace.openBotDm(bot, fresh)) onClose(); };
+  const open = async (bot: SharedBotCard, fresh: boolean) => { setTried(true); if (await workspace.openBotDm(bot, fresh)) onClose(); };
   return <Dialog title={t('Message a Bot', '与 Bot 对话')} onClose={onClose}>
     <div className="tw-form">
       <p className="tw-hint">{t('Bots run on their owner’s Desktop. The owner can read every conversation containing their Bot.', 'Bot 在所有者的 Desktop 上运行。所有者可阅读包含其 Bot 的所有会话。')}</p>
       {snapshot.botsUnverified ? <p role="status" className="tw-hint">{t('Bot availability could not be verified.', '未能确认 Bot 可用状态。')}</p> : null}
       <ul className="tw-picker" aria-label={t('Bots you can message', '可对话的 Bot')}>
         {usable.map(bot => {
-          const existing = findBotDm(snapshot.conversations, snapshot.uid, bot.key);
-          return <li key={bot.key}>
-            <Avatar identity={{ kind: 'bot', id: bot.botId || bot.key, name: bot.name }} size={28} render={renderAvatar} />
+          const existing = findBotDm(snapshot.conversations, snapshot.uid, bot.sharedBotId);
+          return <li key={bot.sharedBotId}>
+            <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={28} render={renderAvatar} />
             <div className="tw-picker-text">
               <b>{bot.name}</b>
-              <small>{bot.online ? t('Online', '在线') : t('Offline · queued', '离线 · 将排队')} · {t('Owner', '所有者')}: {owner(bot.ownerUid)}</small>
+              <small>{bot.ready ? t('Online', '在线') : t('Host unavailable', '宿主不可用')} · {t('Owner', '所有者')}: {owner(bot.maintainer.uid)}</small>
             </div>
             <div className="tw-picker-actions">
               <button type="button" className="tw-primary" disabled={snapshot.messageBusy} onClick={() => void open(bot, false)}>{existing ? t('Open chat', '打开会话') : t('Start chat', '开始对话')}</button>

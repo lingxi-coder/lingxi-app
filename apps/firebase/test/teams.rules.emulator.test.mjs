@@ -7,20 +7,27 @@ import { initializeApp, deleteApp } from 'firebase-admin/app';
 import { getFirestore as adminFirestore } from 'firebase-admin/firestore';
 import { collection, deleteDoc, deleteField, doc, getDoc, getDocs, orderBy, query,
   runTransaction, serverTimestamp, setDoc, updateDoc, where, writeBatch } from 'firebase/firestore';
-import { createTeamConversation } from '../src/team-conversations.mjs';
+import { createTeamConversation, prepareSharedConversation } from '../src/team-conversations.mjs';
 import { TeamMessagesStore } from '../src/team-messages.mjs';
 import { messagePreview } from '../src/team-message-preview.mjs';
 
 const projectId = 'demo-lingxi-teams-t0';
 const emulator = process.env.FIRESTORE_EMULATOR_HOST;
 const options = { skip: !emulator, timeout: 30_000 };
-const botKey = `bot:owner:${'h'.repeat(22)}:${'b'.repeat(22)}`;
-const bot = { ownerUid: 'owner', ownerGeneration: 1, hostId: 'h'.repeat(22), botId: 'b'.repeat(22), name: 'Fixture Bot', revision: 1, enabled: true, use: 'listed', uids: ['alice'] };
+const sharedBotId = 'shared_bot01', principal = `shared_bot:${sharedBotId}`;
+const bot = { name: 'Fixture Bot', identity: { schemaVersion: 1, sharedBotId, teamId: 'team-test',
+  maintainer: { uid: 'owner', generation: 1 }, activeDeploymentId: 'deployment01', revision: 1, state: 'published',
+  usePolicy: { mode: 'listed', members: [{ uid: 'alice', generation: 1 }] } } };
 let environment, adminApp, admin;
 const user = uid => environment.authenticatedContext(uid).firestore();
 const ref = (db, suffix) => doc(db, `teams/team-test/${suffix}`);
 const conversation = (id = 'ordinary') => ({ teamId: 'team-test', conversationId: id, callerUid: 'alice', callerGeneration: 1, kind: 'dm', title: 'Fixture', participants: ['user:alice', 'user:bob'] });
 const create = (input = conversation()) => createTeamConversation(admin, input);
+const createBotChat = (callerUid = 'alice', conversationId = 'bot-chat') => admin.runTransaction(async tx => {
+  const value = await prepareSharedConversation(tx, admin.doc('teams/team-test'), { uid: callerUid, generation: 1 },
+    { conversationId, kind: 'bot_dm', title: 'Bot', participantUids: [callerUid], sharedBotIds: [sharedBotId] });
+  value.write(); return value.record;
+});
 
 before(async () => {
   if (!emulator) return;
@@ -37,7 +44,7 @@ beforeEach(async () => {
   const batch = admin.batch();
   batch.set(admin.doc('teams/team-test'), { name: 'Synthetic team', state: 'active' });
   for (const uid of ['alice', 'bob', 'owner', 'hidden']) batch.set(admin.doc(`teams/team-test/members/${uid}`), { role: 'member', generation: 1 });
-  batch.set(admin.doc(`teams/team-test/bots/${botKey}`), bot);
+  batch.set(admin.doc(`teams/team-test/sharedBots/${sharedBotId}`), bot);
   await batch.commit();
 });
 after(async () => {
@@ -62,7 +69,7 @@ function mutation(writer, db, current, { operation = 'create', mid = 'message01'
     if (operation === 'create') writer.set(target, { seq, author, kind: 'text', text, createdAt: serverTimestamp(), changeSeq, changeId });
     else writer.update(target, { text: operation === 'recall' ? '' : text, editedAt: serverTimestamp(), changeSeq, changeId, ...(operation === 'recall' ? { recalled: true } : {}) });
   }
-  if (parts.includes('change')) writer.set(ref(db, `${parent}/changes/${changeId}`), { seq: changeSeq, messageId: mid, operation, actorUid: author.uid, generation, at: serverTimestamp(), textDigest });
+  if (parts.includes('change')) writer.set(ref(db, `${parent}/changes/${changeId}`), { seq: changeSeq, messageId: mid, operation, actorUid: author.kind === 'shared_bot' ? 'owner' : author.uid, generation, at: serverTimestamp(), textDigest });
 }
 async function send(db, args = {}, parts) {
   const current = (await getDoc(ref(db, `conversations/${args.cid ?? 'ordinary'}`))).data();
@@ -77,15 +84,16 @@ test('teams: only default opts into Team rules', () => {
   assert.equal(config.firestore.find(db => db.database === '(default)').indexes, 'infra/firebase/firestore.teams.indexes.json');
   assert.equal(config.firestore.find(db => db.database === 'model-catalog').indexes, 'infra/firebase/firestore.indexes.json');
   const indexes = JSON.parse(readFileSync(new URL('../../../infra/firebase/firestore.teams.indexes.json', import.meta.url), 'utf8'));
-  assert.ok(indexes.indexes.some(index => index.collectionGroup === 'triggers' && index.queryScope === 'COLLECTION'
-    && JSON.stringify(index.fields) === JSON.stringify([{ fieldPath: 'botKey', order: 'ASCENDING' }, { fieldPath: 'seq', order: 'ASCENDING' }])));
+  assert.ok(indexes.indexes.some(index => index.collectionGroup === 'tasks' && index.queryScope === 'COLLECTION'
+    && index.fields.some(field => field.fieldPath === 'deploymentId')));
+  assert.ok(!indexes.indexes.some(index => index.collectionGroup === 'triggers'));
   for (const database of ['model-catalog', 'push-notifications']) assert.equal(config.firestore.find(db => db.database === database).rules, 'infra/firebase/firestore.rules');
 });
 test('teams: clients cannot create a conversation or inject a hidden reader', options, async () => {
   const alice = user('alice');
   for (const data of [
     { kind: 'dm', participants: ['user:alice', 'user:bob'], memberUids: ['alice', 'bob', 'hidden'] },
-    { kind: 'bot_dm', participants: ['user:alice', botKey], memberUids: ['alice'] },
+    { kind: 'bot_dm', participants: ['user:alice', principal], memberUids: ['alice'] },
   ]) await assertFails(setDoc(ref(alice, 'conversations/injected'), { ...data, title: '', lastSeq: 0, lastMessage: null, lastChangeSeq: 0, lastChange: null }));
   await create();
   await assertFails(updateDoc(ref(alice, 'conversations/ordinary'), { memberUids: ['alice', 'bob', 'hidden'] }));
@@ -94,11 +102,11 @@ test('teams: clients cannot create a conversation or inject a hidden reader', op
 test('teams: trusted creation derives exact ACL, includes Bot owner and checks allowlist', options, async () => {
   const dm = await create();
   assert.deepEqual(dm.memberUids, ['alice', 'bob']);
-  const botDm = await create({ ...conversation('bot-chat'), kind: 'bot_dm', participants: ['user:alice', botKey] });
+  const botDm = await createBotChat();
   assert.deepEqual(botDm.memberUids, ['alice', 'owner']);
-  assert.equal(botDm.botKey, botKey);
+  assert.equal(botDm.sharedBotId, sharedBotId);
   await assertSucceeds(getDoc(ref(user('owner'), 'conversations/bot-chat')));
-  await assert.rejects(create({ ...conversation('bad-chat'), callerUid: 'bob', kind: 'bot_dm', participants: ['user:bob', botKey] }), { status: 403 });
+  await assert.rejects(createBotChat('bob', 'bad-chat'), { status: 403 });
   await assert.rejects(create({ ...conversation(), memberUids: ['hidden'] }), { status: 400 });
   await assert.rejects(create({ ...conversation('invalid1'), participants: ['user:alice', 'user:alice'] }), { status: 400 });
   await assert.rejects(create({ ...conversation('invalid2'), participants: ['user:alice', 'user:missing'] }), { status: 403 });
@@ -145,18 +153,17 @@ test('teams: no orphan cursor, message or change receipt, skipped seq or duplica
 });
 test('teams: Bot authorship cannot be forged or used outside the conversation', options, async () => {
   await create();
-  await assertFails(send(user('alice'), { author: { kind: 'bot', uid: 'alice', botKey } }));
-  await create({ ...conversation('bot-chat'), kind: 'bot_dm', participants: ['user:alice', botKey] });
-  await assertSucceeds(send(user('owner'), { cid: 'bot-chat', author: { kind: 'bot', uid: 'owner', botKey } }));
+  await assertFails(send(user('alice'), { author: { kind: 'shared_bot', sharedBotId, displayName: 'Forged' } }));
+  await createBotChat();
+  await assertFails(send(user('owner'), { cid: 'bot-chat', author: { kind: 'shared_bot', sharedBotId, displayName: 'Forged' } }));
 });
-test('teams: changing Bot allowlist denies existing private-thread writes immediately', options, async () => {
-  await create({ ...conversation('bot-chat'), kind: 'bot_dm', participants: ['user:alice', botKey] });
+test('teams: Bot DM execution and policy writes require the authenticated transaction endpoint', options, async () => {
+  await createBotChat();
   const alice = user('alice');
-  await assertSucceeds(send(alice, { cid: 'bot-chat' }));
-  await assertFails(updateDoc(ref(user('owner'), `bots/${botKey}`), { uids: [] }));
-  await admin.doc(`teams/team-test/bots/${botKey}`).update({ uids: [], revision: 2 });
+  await assertFails(send(alice, { cid: 'bot-chat' }));
+  await assertFails(updateDoc(ref(user('owner'), `sharedBots/${sharedBotId}`), { 'identity.usePolicy': { mode: 'all' } }));
   await assertFails(send(alice, { cid: 'bot-chat', mid: 'message02', changeId: 'change002' }));
-  await assertSucceeds(send(user('owner'), { cid: 'bot-chat', mid: 'message02', changeId: 'change002', author: { kind: 'bot', uid: 'owner', botKey } }));
+  await assertFails(send(user('owner'), { cid: 'bot-chat', mid: 'message02', changeId: 'change002', author: { kind: 'user', uid: 'owner' } }));
 });
 test('teams: offline catch-up includes edits and permanent recalls without adding unread', options, async () => {
   await create();
@@ -202,7 +209,8 @@ test('teams: text limit is UTF-8 bytes and read watermarks never move backwards'
 });
 test('teams: unimplemented App, task, invite and epoch writes remain denied', options, async () => {
   const alice = user('alice');
-  for (const path of ['appGrants/example_alice', 'appOpens/example01', 'tasks/example01', 'invites/example01', 'membershipEpochs/alice']) {
+  for (const path of ['appGrants/example_alice', 'appOpens/example01', 'tasks/example01', 'invites/example01', 'membershipEpochs/alice',
+    'sharedBots/example01', 'deployments/example01', 'executionReceipts/example01', 'requestQuotas/example01', 'chatExecutionLocks/example01', 'artifacts/example01']) {
     await assertFails(setDoc(ref(alice, path), { uid: 'alice' }));
     await assertFails(getDoc(ref(alice, path)));
   }
@@ -239,22 +247,20 @@ test('teams: lastMessage mirrors the created message with its author and a bound
   const alice = user('alice');
   for (const last of [
     { preview: undefined }, { author: undefined }, { preview: 'x'.repeat(121) }, { preview: 7 }, { preview: null },
-    { author: { kind: 'user', uid: 'bob' } }, { author: { kind: 'bot', uid: 'alice', botKey } }, { author: { kind: 'user', uid: 'alice', botKey } },
+    { author: { kind: 'user', uid: 'bob' } }, { author: { kind: 'shared_bot', sharedBotId, displayName: 'Bot' } }, { author: { kind: 'user', uid: 'alice', sharedBotId } },
     { author: 'alice' }, { recalled: true }, { unexpected: 'field' },
   ]) await assertFails(send(alice, { last }));
   await assertSucceeds(send(alice, { text: 'Line one\n\n   line two' }));
   const stored = await lastOf(alice);
   assert.equal(stored.preview, 'Line one line two'); assert.deepEqual(stored.author, { kind: 'user', uid: 'alice' }); assert.ok(!('recalled' in stored));
 });
-test('teams: a Bot-authored lastMessage must carry the same Bot identity as its message', options, async () => {
-  await create({ ...conversation('bot-chat'), kind: 'bot_dm', participants: ['user:alice', botKey] });
-  const owner = user('owner'), author = { kind: 'bot', uid: 'owner', botKey };
-  await assertFails(send(owner, { cid: 'bot-chat', author, last: { author: { kind: 'bot', uid: 'owner' } } })); // identity dropped
-  await assertFails(send(owner, { cid: 'bot-chat', author, last: { author: { kind: 'user', uid: 'owner' } } })); // posing as the person
-  await assertFails(send(owner, { cid: 'bot-chat', author, last: { author: { kind: 'bot', uid: 'owner', botKey: `bot:owner:${'x'.repeat(22)}:${'b'.repeat(22)}` } } }));
-  await assertSucceeds(send(owner, { cid: 'bot-chat', author, text: 'Bot says hello' }));
-  const stored = await lastOf(owner, 'bot-chat');
-  assert.deepEqual(stored.author, author); assert.equal(stored.preview, 'Bot says hello');
+test('teams: a client cannot publish Bot text through the newest-message pointer', options, async () => {
+  await createBotChat();
+  const owner = user('owner'), author = { kind: 'shared_bot', sharedBotId, displayName: 'Bot' };
+  for (const claimed of [author, { kind: 'user', uid: 'owner' }, { ...author, sharedBotId: 'different_bot' }]) {
+    await assertFails(send(owner, { cid: 'bot-chat', author, last: { author: claimed } }));
+  }
+  assert.equal(await lastOf(owner, 'bot-chat'), null);
 });
 test('teams: the preview limit is 120 code points, matching the backend cut', options, async () => {
   await create();

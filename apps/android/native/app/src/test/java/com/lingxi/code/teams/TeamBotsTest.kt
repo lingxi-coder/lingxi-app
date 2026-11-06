@@ -4,210 +4,58 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
+import java.io.File
 import java.nio.file.Files
 
 class TeamBotsTest {
-    private val key = "bot:owner:abcdefghijklmnopqrstuv:abcdefghijklmnopqrstuv"
-    private fun card() = TeamBotCard(key, "owner", "Bot", "Description", 8, "all", true, true)
-    private fun message() = TeamMessage("question-message", 2, "owner", "bot", "Please answer", 2, "question-change", false, "source-message", null,
-        "question", key, "trigger001", "human", 4, TeamBotQuestion("question01", listOf("Which option?", "Why?")))
-    private fun run() = TeamBotRun("running", "owner", key, "human", 4, 1000, "question01", false)
-    private fun intent(cache: TeamMessageCache = TeamMessageCache("human", "team0001", 4)) =
-        teamBotAnswerIntent(cache, "chat0001", message(), run(), mapOf("Which option?" to "A", "Why?" to "Clear"), "answer001", 100)
-
-    @Test fun originalHumanGenerationAndLiveQuestionAreRequired() {
-        assertTrue(run().canAnswer(message(), "human", 4, 100))
-        assertFalse(run().canAnswer(message(), "owner", 4, 100))
-        assertFalse(run().canAnswer(message(), "human", 5, 100))
-        assertFalse(run().copy(originUid = "another").canAnswer(message(), "human", 4, 100))
-        assertFalse(run().copy(questionId = "new-question").canAnswer(message(), "human", 4, 100))
-        assertFalse(run().copy(answered = true).canAnswer(message(), "human", 4, 100))
-        assertFalse(run().canAnswer(message(), "human", 4, 1000))
-        listOf("completed", "revoked", "recovery", "failed", "queued").forEach { state -> assertFalse(run().copy(state = state).canAnswer(message(), "human", 4, 100)) }
+    private fun command() = JSONObject("""{"schemaVersion":1,"commandId":"command_0001","teamId":"team_0001","generation":7,"action":"submit","payload":{"conversationId":"chat_0001","messageId":"message_0001","changeId":"change_0001","text":"Hello","targets":["sharedbot_01"]}}""")
+    @Test fun sharedCommandVectors() {
+        val root = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "packages/teams/contracts/execution-vectors.json").isFile }
+        JSONObject(File(root, "packages/teams/contracts/execution-vectors.json").readText()).getJSONArray("commands").objects().forEach { row ->
+            val result = runCatching { TeamExecutionContract.validate(row.getJSONObject("input")) }
+            assertEquals(row.getString("name"), row.getBoolean("valid"), result.isSuccess)
+        }
     }
-
-    @Test fun durableAnswerAndTargetsSurviveRestartWithoutHistoryOrCrossGenerationLeak() {
-        val directory = Files.createTempDirectory("team-bot-answer-").toFile()
+    @Test fun durableCommandsSurviveRestartAndStayInTheirAccountTeamGeneration() {
+        val directory = Files.createTempDirectory("team-execution-").toFile()
         try {
-            val answer = intent()
-            val conversation = TeamMessageConversation("chat0001", "bot_dm", "Bot", listOf("user:human", key), 2, 2, 0, listOf(key))
-            TeamCommandStorage(directory).update("human", "team0001", 4) { it.copy(conversations = listOf(conversation), threads = mapOf("chat0001" to TeamMessageThread(listOf(message()))), answers = listOf(answer), outbox = listOf(JSONObject().put("targets", JSONArray(listOf(key))))) }
-            val restored = TeamCommandStorage(directory).update("human", "team0001", 4) { it }
-            assertEquals(answer.toString(), restored.answers.single().toString())
-            assertEquals("answer001", restored.answers.single().getString("answerId"))
-            assertTrue(restored.threads.isEmpty())
-            assertTrue(restored.conversations.isEmpty())
-            assertEquals(key, restored.outbox.single().getJSONArray("targets").getString(0))
-            assertTrue(TeamCommandStorage(directory).update("human", "team0001", 5) { it }.answers.isEmpty())
-            assertTrue(TeamCommandStorage(directory).update("other", "team0001", 4) { it }.answers.isEmpty())
+            val intent = command()
+            TeamCommandStorage(directory).update("member", "team_0001", 7) { it.copy(outbox = listOf(intent)) }
+            val restored = TeamCommandStorage(directory).load("member", "team_0001", 7)
+            assertEquals(intent.toString(), restored.outbox.single().toString())
+            TeamExecutionContract.validate(restored.outbox.single())
+            assertTrue(TeamCommandStorage(directory).load("other", "team_0001", 7).outbox.isEmpty())
+            assertTrue(TeamCommandStorage(directory).load("member", "team_0002", 7).outbox.isEmpty())
+            assertTrue(TeamCommandStorage(directory).load("member", "team_0001", 8).outbox.isEmpty())
         } finally { directory.deleteRecursively() }
     }
-
-    @Test fun answerRetriesPermitOnlyCurrentUnexpiredRunOrExactAcceptedReceipt() {
-        val pending = intent()
-        assertTrue(run().canRetryAnswer(pending, "human", 4, 100))
-        assertFalse(run().canRetryAnswer(pending, "human", 4, 1000))
-        assertFalse(run().copy(state = "completed").canRetryAnswer(pending, "human", 4, 100))
-        assertTrue(run().copy(state = "completed", answered = true).canRetryAnswer(pending, "human", 4, 2000))
-        assertFalse(run().copy(answered = true).canRetryAnswer(pending, "other", 4, 100))
-        assertFalse(run().copy(answered = true).canRetryAnswer(pending, "human", 5, 100))
-        try { intent(TeamMessageCache("human", "team0001", 4, answers = listOf(pending))); fail("Duplicate question intent") } catch (expected: TeamMessageFailure) { assertEquals("ANSWER_PENDING", expected.code) }
+    @Test fun retiredBotAuthorsAreRejectedAndSharedBotAuthorsNeedNoOwnerUid() {
+        val v = JSONObject("""{"id":"message_0001","seq":1,"author":{"kind":"bot","uid":"owner","botKey":"bot:o:h:x"},"kind":"text","text":"Hello","changeSeq":1,"changeId":"change_0001"}""")
+        assertTrue(runCatching { TeamMessage.parse(v) }.isFailure)
+        v.put("author", JSONObject().put("kind", "shared_bot").put("sharedBotId", "sharedbot_01"))
+        assertEquals("sharedbot_01", TeamMessage.parse(v).sharedBotId)
+        assertEquals("", TeamMessage.parse(v).authorUid)
     }
-
-    @Test fun textMentionsNeverBecomeExecutionTargets() {
-        val human = message().copy(authorKind = "user", text = "@Bot please execute", triggerId = null, question = null, targets = emptyList())
-        val group = TeamMessageConversation("chat0001", "group", "Group", listOf("user:human", key), 0, 0, 0, listOf(key))
-        assertTrue(teamBotTriggers(human, group).isEmpty())
-        val explicit = human.copy(targets = listOf(key))
-        assertEquals(teamBotTriggers(explicit, group), teamBotTriggers(human, group.copy(kind = "bot_dm")))
-        assertEquals(64, teamBotTriggers(explicit, group).single().length)
-        assertTrue(teamBotTriggers(explicit.copy(authorKind = "bot"), group).isEmpty())
-        val wire = JSONObject().put("id", human.id).put("seq", human.seq).put("author", JSONObject().put("uid", human.authorUid).put("kind", human.authorKind)).put("text", human.text).put("changeSeq", human.changeSeq).put("changeId", human.changeId).put("mentions", JSONArray(listOf(key, "user:other")))
-        assertEquals(listOf(key), TeamMessage.parse(wire).targets)
-    }
-
-    @Test fun onlyOwnerCanSettleExpiredOrRecoveryRun() {
-        assertFalse(run().canRecover("owner", 100))
-        assertTrue(run().canRecover("owner", 1000))
-        assertTrue(run().copy(state = "claimed").canRecover("owner", 1000))
-        assertFalse(run().copy(state = "claimed").canRecover("owner", 999))
-        assertTrue(run().copy(state = "recovery").canRecover("owner", 100))
-        assertFalse(run().copy(state = "recovery").canRecover("human", 100))
-        assertFalse(run().copy(state = "completed").canRecover("owner", 1000))
-    }
-
-    @Test fun inactiveOwnerCardPreservesRevisionAndCannotBeSelectedOrUnboundAgain() {
-        val wire = JSONObject().put("key", key).put("ownerUid", "owner").put("name", "Bot").put("description", "Description")
-            .put("revision", 9).put("use", "all").put("permitted", true).put("online", true).put("enabled", false).put("hostId", "abcdefghijklmnopqrstuv").put("botId", "abcdefghijklmnopqrstuv")
-        val inactive = TeamBotCard.parse(wire)
-        assertFalse(inactive.enabled)
-        assertFalse(inactive.selectable)
-        assertFalse(inactive.canUnbind("owner"))
-        assertEquals(9L, inactive.revision)
-        assertTrue(card().canUnbind("owner"))
-        assertFalse(card().canUnbind("other"))
-        assertFalse(card().copy(permitted = false).selectable)
-        wire.remove("enabled")
-        assertTrue(TeamBotCard.parse(wire).selectable)
-    }
-
-    @Test fun staleBotDraftBlocksWithoutSilentlyRemovingIntendedTargets() {
-        val valid = card().copy(key = "$key-valid")
-        val unavailable = card().copy(enabled = false)
-        val draft = setOf(key, valid.key)
-        val stale = staleTeamBotSelections(draft, listOf(unavailable, valid), draft)
-        assertEquals(setOf(key), stale)
-        assertEquals(setOf(key, valid.key), draft)
-        try { requireTeamBotSelections(draft, listOf(unavailable, valid), draft); fail("Silent downgrade") } catch (expected: TeamMessageFailure) { assertEquals("BOT_SELECTION_STALE", expected.code) }
-        // This is the explicit clear action: it preserves every still-valid selection.
-        val explicitlyCleared = draft - stale
-        assertEquals(setOf(valid.key), explicitlyCleared)
-        requireTeamBotSelections(explicitlyCleared, listOf(unavailable, valid), draft)
-        assertEquals(setOf(valid.key), staleTeamBotSelections(explicitlyCleared, listOf(valid.copy(permitted = false)), draft))
-        assertEquals(setOf(valid.key), staleTeamBotSelections(explicitlyCleared, listOf(valid), emptySet()))
-        assertEquals(setOf(valid.key), staleTeamBotSelections(explicitlyCleared, emptyList(), draft))
-    }
-
-    @Test fun creationParticipantDraftAndBotDmRequireSelectableBots() {
-        val active = card()
-        requireTeamBotSelections(setOf(key), listOf(active))
-        requireTeamBotSelections(setOf(key), listOf(active), setOf(key))
-        assertEquals(setOf(key), staleTeamBotSelections(setOf(key), listOf(active.copy(enabled = false))))
-        assertEquals(setOf(key), staleTeamBotSelections(setOf(key), listOf(active.copy(permitted = false))))
-        assertEquals(setOf(key), staleTeamBotSelections(setOf(key), emptyList(), setOf(key)))
-        requireTeamBotSelections(emptySet(), emptyList())
-        assertTrue(staleTeamBotSelections(setOf(key), listOf(active), setOf(key)).isEmpty())
-    }
-
-    @Test fun expandedHistoryObservesOldQuestionAndRecoveryBeyondLastHundredMessages() {
-        val oldQuestion = message().copy(id = "old-question", seq = 1, triggerId = "old-run")
-        val oldRecovery = message().copy(id = "old-interrupted", seq = 2, triggerId = "old-recovery", question = null)
-        val newer = (3L..202L).map { seq -> message().copy(id = "message-$seq", seq = seq, triggerId = null, question = null) }
-        val messages = listOf(oldQuestion, oldRecovery) + newer
-        assertTrue(visibleTeamBotTriggers(messages, null, 100).isEmpty())
-        assertTrue(visibleTeamBotTriggers(messages, null, 200).isEmpty())
-        assertEquals(listOf("old-run", "old-recovery"), visibleTeamBotTriggers(messages, null, 300))
-        assertTrue(run().canAnswer(oldQuestion, "human", 4, 100))
-        assertTrue(run().copy(state = "recovery").canRecover("owner", 100))
-    }
-
-    @Test fun historicalAnswerReceiptConfirmsAWhileActiveQuestionBRemainsUntouched() {
-        val pendingA = intent()
-        val activeB = run().copy(questionId = "question02")
-        val activeStates = mapOf("trigger001" to activeB)
-        assertFalse(activeB.canRetryAnswer(pendingA, "human", 4, 100))
-        val observation = teamBotStateQuery("chat0001", "trigger001", pendingA.getString("questionId"))
-        assertEquals("question01", observation.getString("questionId"))
-        val historicalA = run().copy(answered = true)
-        assertTrue(historicalA.canRetryAnswer(pendingA, "human", 4, 100))
-        assertEquals("question02", activeStates.getValue("trigger001").questionId)
-        assertFalse(activeStates.getValue("trigger001").answered)
-        assertFalse(teamBotStateQuery("chat0001", "trigger001").has("questionId"))
-    }
-
-    @Test fun settlementExactWireBodyAndIdentitySurviveAckLossRestartAndGenerationIsolation() {
-        val directory = Files.createTempDirectory("team-bot-settlement-").toFile()
+    @Test fun retiredBotCommandCleanupPreservesHumanCommandsAndUnrelatedData() {
+        val directory = Files.createTempDirectory("team-retired-bot-cleanup-").toFile()
         try {
-            val cache = TeamMessageCache("owner", "team0001", 4)
-            val pending = teamBotSettlementIntent(cache, "chat0001", "trigger001", run().copy(state = "recovery"), "Checked the interrupted effects.", "settlement001", 100)
-            val exactBody = pending.getJSONObject("body").toString()
-            assertFalse(pending.getJSONObject("body").has("settlementId"))
-            assertEquals("recoverBot", pending.getJSONObject("body").getString("action"))
-            TeamCommandStorage(directory).update("owner", "team0001", 4) { it.copy(settlements = listOf(JSONObject(pending.toString()).put("attempted", true).put("leaseUntil", 1000))) }
-            val restored = TeamCommandStorage(directory).update("owner", "team0001", 4) { it }
-            val retry = restored.settlements.single()
-            assertEquals("settlement001", retry.getString("settlementId"))
-            assertEquals(exactBody, retry.getJSONObject("body").toString())
-            assertTrue(restored.answers.isEmpty())
-            assertFalse(canDiscardTeamBotIntent(retry, 1001))
-            assertTrue(canDiscardTeamBotIntent(pending, 100))
-            assertFalse(canDiscardTeamBotIntent(JSONObject(retry.toString()).put("error", "BOT_RESULT_CONFLICT"), 999))
-            assertTrue(canDiscardTeamBotIntent(JSONObject(retry.toString()).put("error", "BOT_RESULT_CONFLICT"), 1001))
-            try { teamBotSettlementIntent(restored, "chat0001", "trigger001", run().copy(state = "recovery"), "Different text", "replacement", 100); fail("Duplicate settlement") } catch (expected: TeamMessageFailure) { assertEquals("MESSAGE_IN_FLIGHT", expected.code) }
-            assertTrue(TeamCommandStorage(directory).update("owner", "team0001", 5) { it }.settlements.isEmpty())
-            assertTrue(TeamCommandStorage(directory).update("another", "team0001", 4) { it }.settlements.isEmpty())
+            val human = JSONObject().put("changeId", "change_0001").put("text", "Human draft")
+            val storage = TeamCommandStorage(directory)
+            storage.update("member", "team_0001", 7) { it.copy(outbox = listOf(human)) }
+            val file = directory.listFiles()!!.single()
+            file.writeText(JSONObject(file.readText()).put("answers", JSONArray().put(JSONObject().put("action", "botAnswer"))).put("settlements", JSONArray()).put("businessSentinel", "human history is preserved").toString())
+            val restored = storage.load("member", "team_0001", 7)
+            assertEquals(human.toString(), restored.outbox.single().toString())
+            storage.update("member", "team_0001", 7) { it.copy(outbox = emptyList()) }
+            val cleaned = JSONObject(file.readText())
+            assertFalse(cleaned.has("answers")); assertFalse(cleaned.has("settlements")); assertEquals("human history is preserved", cleaned.getString("businessSentinel"))
         } finally { directory.deleteRecursively() }
     }
-
-    @Test fun attemptedAnswerRetriesExactReceiptAfterRevocationWithoutMutableStateAuthority() {
-        val directory = Files.createTempDirectory("team-answer-revoked-receipt-").toFile()
-        try {
-            val original = intent()
-            val attempted = JSONObject(original.toString()).put("attempted", true)
-            TeamCommandStorage(directory).update("human", "team0001", 4) { it.copy(answers = listOf(attempted)) }
-            val restored = TeamCommandStorage(directory).update("human", "team0001", 4) { it }
-            // ACK was lost, then the owner unbound/rebound or the source was
-            // recalled. Public status deliberately hides the old question.
-            val revoked = run().copy(state = "revoked", questionId = null, answered = false)
-            assertFalse(revoked.canRetryAnswer(attempted, "human", 4, 2000))
-            assertEquals(original.toString(), teamBotAnswerRetryBody(restored, restored.answers.single(), revoked, 2000).toString())
-            assertEquals(original.toString(), teamBotAnswerRetryBody(restored, restored.answers.single(), null, 2000).toString())
-            try { teamBotAnswerRetryBody(restored, original, revoked, 2000); fail("A new answer cannot use revoked state") } catch (expected: TeamMessageFailure) { assertEquals("QUESTION_RECIPIENT_REQUIRED", expected.code) }
-            try { teamBotAnswerRetryBody(restored.copy(generation = 5), attempted, null, 2000); fail("Generation changed") } catch (expected: TeamMessageFailure) { assertEquals("INVALID_SESSION", expected.code) }
-            try { teamBotAnswerRetryBody(restored.copy(teamId = "other-team"), attempted, null, 2000); fail("Team changed") } catch (expected: TeamMessageFailure) { assertEquals("INVALID_SESSION", expected.code) }
-            assertTrue(TeamCommandStorage(directory).update("other-human", "team0001", 4) { it }.answers.isEmpty())
-        } finally { directory.deleteRecursively() }
-    }
-    @Test fun parsedCardsCarryTheBackendBotIdAndHostIdAndDrawFromTheBotId() {
-        val wire = JSONObject().put("key", key).put("ownerUid", "owner").put("name", "Bot").put("description", "").put("revision", 1).put("use", "listed")
-            .put("permitted", true).put("online", false).put("hostId", "host01").put("botId", "helper")
-        val parsed = TeamBotCard.parse(wire)
-        assertEquals("helper", parsed.botId); assertEquals("host01", parsed.hostId); assertEquals("helper", parsed.avatarId)
-        // Built in code without a card, the avatar falls back to the key's last segment.
-        assertEquals("abcdefghijklmnopqrstuv", card().avatarId)
-        // A card from the backend always has both fields: nothing is guessed when one is missing.
-        wire.remove("botId")
-        assertThrows(org.json.JSONException::class.java) { TeamBotCard.parse(wire) }
-    }
-
-    @Test fun ownerHostStatusIsParsedAndAResultPendingRunCannotBeSettledByHand() {
-        val wire = JSONObject().put("state", "recovery").put("ownerUid", "owner").put("botKey", key).put("origin", JSONObject().put("uid", "human").put("generation", 4))
-            .put("answered", false).put("hostStatus", "result_pending")
-        val parsed = TeamBotRun.parse(wire)
-        assertEquals("result_pending", parsed.hostStatus)
-        assertFalse(parsed.canRecover("owner", 100))
-        assertTrue(parsed.copy(hostStatus = "recovery_required").canRecover("owner", 100))
-        wire.remove("hostStatus")
-        assertNull(TeamBotRun.parse(wire).hostStatus)
+    @Test fun offlineBotQueuesWithoutAnyMemberModelConfiguration() {
+        val card = TeamBotCard.parse(JSONObject("""{"sharedBotId":"sharedbot_01","name":"Helper","description":"","maintainer":{"uid":"owner","generation":1},"revision":1,"state":"published","permitted":true,"ready":false,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":100,"member":10,"bot":50}}"""))
+        assertTrue(card.selectable)
+        requireTeamBotSelections(listOf(card.sharedBotId), listOf(card), listOf("shared_bot:${card.sharedBotId}"))
+        assertEquals(setOf(card.sharedBotId), staleTeamBotSelections(listOf(card.sharedBotId), listOf(card), listOf(card.sharedBotId)))
+        assertFalse(card.canPause("owner", 2))
     }
 }

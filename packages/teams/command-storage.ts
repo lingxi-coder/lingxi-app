@@ -10,10 +10,11 @@ export function indexedDbCommandStorage(): CommandStorage {
   let opening: Promise<IDBDatabase> | undefined;
   const open = () => opening ??= new Promise((resolve, reject) => {
     let abandoned = false;
-    const request = indexedDB.open('lingxi-team-messages', 2);
+    const request = indexedDB.open('lingxi-team-messages', 3);
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains('projections')) db.createObjectStore('projections');
+      if (db.objectStoreNames.contains('projections')) db.deleteObjectStore('projections');
+      db.createObjectStore('commands-v2');
     };
     request.onsuccess = () => { if (abandoned) { request.result.close(); return; } request.result.onversionchange = () => { request.result.close(); opening = undefined; }; resolve(request.result); };
     request.onerror = () => { opening = undefined; reject(request.error); };
@@ -29,16 +30,16 @@ export function indexedDbCommandStorage(): CommandStorage {
   }, async load(key) {
     const db = await open();
     return new Promise<PendingCommands | undefined>((resolve, reject) => {
-      const transaction = db.transaction('projections', 'readonly');
-      const request = transaction.objectStore('projections').get(key);
+      const transaction = db.transaction('commands-v2', 'readonly');
+      const request = transaction.objectStore('commands-v2').get(key);
       transaction.oncomplete = () => resolve(request.result as PendingCommands | undefined);
       transaction.onabort = transaction.onerror = () => reject(transaction.error ?? new Error('STORAGE_FAILED'));
     });
   }, async update(key, reduce) {
     const db = await open();
     return new Promise<PendingCommands>((resolve, reject) => {
-      const transaction = db.transaction('projections', 'readwrite');
-      const records = transaction.objectStore('projections');
+      const transaction = db.transaction('commands-v2', 'readwrite');
+      const records = transaction.objectStore('commands-v2');
       let result: PendingCommands;
       let changed = false;
       const request = records.get(key);

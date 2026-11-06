@@ -36,9 +36,13 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
         case 'localBots':
           value = await service.localBots(command.uid);
           break;
-        case 'bindLocalBot':
+        case 'publishLocalBot':
           if (!command.input || typeof command.input !== 'object') throw new Error('INVALID_INPUT');
-          value = await service.bindLocalBot(command.uid, command.input as Parameters<TeamsService['bindLocalBot']>[1]);
+          value = await service.publishLocalBot(command.uid, command.input as Parameters<TeamsService['publishLocalBot']>[1]);
+          break;
+        case 'selectSharedFiles':
+          if (typeof command.instanceId !== 'string') throw new Error('INVALID_INPUT');
+          value = await service.selectSharedFiles(command.uid, command.instanceId);
           break;
         case 'detail':
           if (typeof command.teamId !== 'string') throw new Error('INVALID_INPUT');

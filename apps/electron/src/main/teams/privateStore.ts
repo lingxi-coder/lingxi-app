@@ -1,14 +1,21 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
-import { lstat, mkdir, open, readdir, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
+import type { TeamHostResult, BotChatScope } from './process.js';
 import { dirname, join } from 'node:path';
-import type { TeamBotTarget } from './process';
 
 export interface TeamModelRoute {
   model_provider: string; model_protocol: string; model_id: string; model_endpoint: string;
   credential_id: string; model_profile: Record<string, unknown>;
 }
-export interface TeamPersonaSnapshot extends TeamModelRoute { instructions: string; provider_account_profiles: Record<string, unknown>[] }
+export interface PublishedDocument { resourceId: string; revision: number; kind: 'persona' | 'file' | 'skill'; name: string; text: string; digest: string }
+export interface TeamPersonaSnapshot extends TeamModelRoute { instructions: string; provider_account_profiles: Record<string, unknown>[]; documents: PublishedDocument[] }
+export interface SharedBotBinding { schemaVersion: 1; ownerUid: string; teamId: string; generation: number; sharedBotId: string; deploymentId: string; instanceId: string; revision: number; snapshot: string; accountEpoch: number; publicationId: string; grantIds: string[]; sessionEpoch: number }
+export interface TeamDataRef { path: string; sha256: string; bytes: number }
+export interface SavedPublication { schemaVersion: 1; requestDigest: string; binding: SharedBotBinding; payload: Record<string, unknown> }
+export interface SavedExecution { schemaVersion: 1; scope: BotChatScope; teamId: string; generation: number; taskId: string; commandId: string; payload: Record<string, unknown> }
+export interface SavedDelivery { schemaVersion: 1; teamId: string; generation: number; taskId: string; commandId: string; payload: Record<string, unknown> }
+
 export interface TeamModelSelection { route: TeamModelRoute; profiles: Record<string, unknown>[]; assertCurrent(): Promise<void> }
 
 /** Native catalog descriptors contain one resolved static route, never owner routing. */
@@ -30,7 +37,6 @@ export function validateTeamModelRoute(value: unknown): asserts value is TeamMod
   if (endpoint.username || endpoint.password || route.model_endpoint.includes('?') || route.model_endpoint.includes('#')
     || (endpoint.protocol !== 'https:' && !loopbackHttp)) throw new Error('INVALID_TEAM_SNAPSHOT');
 }
-export interface PendingTeamTarget { version: 1; target: TeamBotTarget; snapshot: string; sequence: number }
 export const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 
 function privateDirectory(path: string): string {
@@ -88,112 +94,160 @@ async function create(path: string, value: string): Promise<void> {
   try { await file.writeFile(value); await file.sync(); } finally { await file.close(); }
   await syncDirectory(dirname(path));
 }
-function pendingText(value: PendingTeamTarget, uid: string): string {
-  const target = value?.target;
-  if (!value || Object.keys(value).sort().join(',') !== 'sequence,snapshot,target,version' || value.version !== 1
-    || !target || Object.keys(target).sort().join(',') !== 'botId,botKey,botRevision,conversationId,hostId,ownerGeneration,ownerUid,teamId,triggerId'
-    || target.ownerUid !== uid || !/^[A-Za-z0-9_-]{1,128}$/u.test(uid)
-    || !/^[A-Za-z0-9_-]{22}$/u.test(target.botId) || !/^[A-Za-z0-9_-]{22}$/u.test(target.hostId)
-    || ![target.teamId, target.conversationId, target.triggerId].every(id => typeof id === 'string' && /^[A-Za-z0-9_-]{8,64}$/u.test(id))
-    || target.botKey !== `bot:${uid}:${target.hostId}:${target.botId}`
-    || ![target.ownerGeneration, target.botRevision, value.sequence].every(number => Number.isSafeInteger(number) && number > 0)
-    || typeof value.snapshot !== 'string' || !/^[a-f0-9]{64}$/u.test(value.snapshot)) throw new Error('UNSAFE_TEAM_STORAGE');
+function bindingText(value: SharedBotBinding, uid: string): string {
+  const ids = [value.teamId, value.sharedBotId, value.deploymentId, value.instanceId, value.publicationId];
+  if (!value || Object.keys(value).sort().join(',') !== 'accountEpoch,deploymentId,generation,grantIds,instanceId,ownerUid,publicationId,revision,schemaVersion,sessionEpoch,sharedBotId,snapshot,teamId'
+    || value.schemaVersion !== 1 || value.ownerUid !== uid || !/^[A-Za-z0-9_-]{1,128}$/u.test(uid)
+    || ids.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/u.test(id))
+    || [value.generation, value.revision, value.accountEpoch, value.sessionEpoch].some(n => !Number.isSafeInteger(n) || n < 1)
+    || !/^[a-f0-9]{64}$/u.test(value.snapshot) || !Array.isArray(value.grantIds) || value.grantIds.length > 50
+    || value.grantIds.some(id => !/^[A-Za-z0-9_-]{8,64}$/u.test(id))) throw new Error('UNSAFE_TEAM_STORAGE');
   return JSON.stringify(value);
 }
 
-/** Stable, account-specific roots beside Bots, never inside an ordinary Bot home. */
+/** Execution 2 storage is independent of personal definitions and retired host data. */
 export class TeamPrivateStore {
   readonly root: string;
   readonly hostId: string;
   private operation: Promise<unknown> = Promise.resolve();
   private serial<T>(run: () => Promise<T>): Promise<T> {
-    const result = this.operation.then(run);
-    this.operation = result.catch(() => undefined);
-    return result;
+    const result = this.operation.then(run); this.operation = result.catch(() => undefined); return result;
   }
   constructor(userData: string) {
-    const actual = realpathSync.native(userData);
-    this.root = privateDirectory(join(actual, 'team-bot-host'));
-    const hostPath = join(this.root, 'host-id');
-    try { createPrivate(hostPath, randomBytes(16).toString('base64url')); }
+    this.root = privateDirectory(join(realpathSync.native(userData), 'shared-bot-host-v2'));
+    const path = join(this.root, 'host-id');
+    try { createPrivate(path, randomBytes(16).toString('base64url')); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    this.hostId = readPrivate(hostPath, 22);
+    this.hostId = readPrivate(path, 22);
     if (!/^[A-Za-z0-9_-]{22}$/u.test(this.hostId)) throw new Error('UNSAFE_TEAM_STORAGE');
   }
-  async owner(uid: string): Promise<{ journal: string; runtime: string; snapshots: string; pending: string; home: string; tmp: string }> {
+  async owner(uid: string): Promise<{ root: string; runtime: string; snapshots: string; bindings: string; transport: string; publications: string; executions: string; outbox: string; home: string; tmp: string }> {
     if (!/^[A-Za-z0-9_-]{1,128}$/u.test(uid)) throw new Error('BOT_ACCOUNT_UNSUPPORTED');
-    await directory(this.root);
-    const root = await directory(join(this.root, digest(uid)));
-    return { journal: await directory(join(root, 'journal')), runtime: await directory(join(root, 'runtime')),
-      snapshots: await directory(join(root, 'snapshots')), pending: await directory(join(root, 'pending')),
-      home: await directory(join(root, 'host-home')), tmp: await directory(join(root, 'host-tmp')) };
+    await directory(this.root); const root = await directory(join(this.root, digest(uid)));
+    return { root, runtime: await directory(join(root, 'runtime')), snapshots: await directory(join(root, 'snapshots')),
+      bindings: await directory(join(root, 'bindings')), transport: await directory(join(await directory(join(root, 'runtime')), 'transport')),
+      publications: await directory(join(root, 'publications')), executions: await directory(join(root, 'executions')), outbox: await directory(join(root, 'outbox')), home: await directory(join(root, 'host-home')), tmp: await directory(join(root, 'host-tmp')) };
   }
-  /** Durable discovery precedes spawning. No credential, attempt or mutable model state. */
-  savePending(uid: string, value: PendingTeamTarget): Promise<void> { return this.serial(async () => {
-    const text = pendingText(value, uid), path = join((await this.owner(uid)).pending, digest(JSON.stringify(value.target)));
-    try { await create(path, text); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    if (await read(path, 4096) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
+  async publication(uid: string, publicationId: string): Promise<SavedPublication | undefined> {
+    if (!/^[A-Za-z0-9_-]{8,64}$/u.test(publicationId)) throw new Error('INVALID_INPUT');
+    try { const value = JSON.parse(await read(join((await this.owner(uid)).publications,publicationId),128*1024)) as SavedPublication;
+      if (value.schemaVersion !== 1 || !/^[a-f0-9]{64}$/u.test(value.requestDigest) || value.binding.publicationId !== publicationId) throw new Error('UNSAFE_TEAM_STORAGE'); bindingText(value.binding,uid); return value;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+  }
+  async publications(uid: string): Promise<SavedPublication[]> {
+    const root=(await this.owner(uid)).publications, values:SavedPublication[]=[];
+    for (const name of await readdir(root)) { const value=await this.publication(uid,name); if(value)values.push(value); }
+    return values;
+  }
+  async savePublication(uid: string, value: SavedPublication): Promise<void> {
+    bindingText(value.binding,uid); const text = JSON.stringify(value),path=join((await this.owner(uid)).publications,value.binding.publicationId);
+    if (Buffer.byteLength(text)>128*1024) throw new Error('PUBLICATION_TOO_LARGE');
+    try { await create(path,text); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    if (await read(path,128*1024)!==text) throw new Error('UNSAFE_TEAM_STORAGE');
+  }
+  saveBinding(uid: string, value: SharedBotBinding): Promise<void> { return this.serial(async () => {
+    const text = bindingText(value, uid), root = (await this.owner(uid)).bindings, path = join(root, digest(JSON.stringify([value.teamId, value.sharedBotId])));
+    try {
+      const previous=JSON.parse(await read(path,64*1024)) as SharedBotBinding; bindingText(previous,uid);
+      if (previous.revision>value.revision || previous.revision===value.revision && (previous.accountEpoch>value.accountEpoch
+        || JSON.stringify({...previous,accountEpoch:value.accountEpoch})!==text)) throw new Error('STALE_PUBLICATION_BINDING');
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    const temporary = join(root, `.write-${randomBytes(16).toString('hex')}`);
+    await create(temporary, text); await rename(temporary, path); await syncDirectory(root);
   }); }
-  pending(uid: string): Promise<PendingTeamTarget[]> { return this.serial(async () => {
-    const root = (await this.owner(uid)).pending, names = await readdir(root);
+  bindings(uid: string): Promise<SharedBotBinding[]> { return this.serial(async () => {
+    const root = (await this.owner(uid)).bindings, names = (await readdir(root)).filter(n => !n.startsWith('.write-'));
     if (names.length > 1000) throw new Error('UNSAFE_TEAM_STORAGE');
-    const values: PendingTeamTarget[] = [];
+    const values: SharedBotBinding[] = [];
     for (const name of names) {
       if (!/^[a-f0-9]{64}$/u.test(name)) throw new Error('UNSAFE_TEAM_STORAGE');
-      let text: string;
-      try { text = await read(join(root, name), 4096); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
-      const value = JSON.parse(text) as PendingTeamTarget;
-      if (pendingText(value, uid) !== text || digest(JSON.stringify(value.target)) !== name) throw new Error('UNSAFE_TEAM_STORAGE');
+      const text = await read(join(root, name), 64 * 1024), value = JSON.parse(text) as SharedBotBinding;
+      if (bindingText(value, uid) !== text || digest(JSON.stringify([value.teamId, value.sharedBotId])) !== name) throw new Error('UNSAFE_TEAM_STORAGE');
       values.push(value);
     }
-    return values.sort((left, right) => left.sequence - right.sequence);
-  }); }
-  /** A concurrent settlement may have removed a previously listed entry. */
-  hasPending(uid: string, value: PendingTeamTarget): Promise<boolean> { return this.serial(async () => {
-    const text = pendingText(value, uid), path = join((await this.owner(uid)).pending, digest(JSON.stringify(value.target)));
-    try {
-      if (await read(path, 4096) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-      throw error;
-    }
-  }); }
-  /** Called only after an authenticated host settlement ACK or unstarted proof. */
-  settlePending(uid: string, value: PendingTeamTarget): Promise<void> { return this.serial(async () => {
-    const text = pendingText(value, uid), root = (await this.owner(uid)).pending, path = join(root, digest(JSON.stringify(value.target)));
-    if (await read(path, 4096) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
-    await unlink(path);
-    await syncDirectory(root);
+    return values;
   }); }
   saveSnapshot(uid: string, value: TeamPersonaSnapshot): Promise<string> { return this.serial(async () => {
-    this.validateSnapshot(value);
-    const text = JSON.stringify(value);
-    if (Buffer.byteLength(text) > 192 * 1024) throw new Error('INVALID_TEAM_SNAPSHOT');
+    this.validateSnapshot(value); const text = JSON.stringify(value);
+    if (Buffer.byteLength(text) > 4 * 1024 * 1024) throw new Error('INVALID_TEAM_SNAPSHOT');
     const key = digest(text), path = join((await this.owner(uid)).snapshots, key);
-    try { await create(path, text); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    if (await read(path, 192 * 1024) !== text) throw new Error('INVALID_TEAM_SNAPSHOT');
-    return key;
+    try { await create(path, text); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    if (await read(path, 4 * 1024 * 1024) !== text) throw new Error('INVALID_TEAM_SNAPSHOT'); return key;
   }); }
   snapshot(uid: string, key: string): Promise<TeamPersonaSnapshot> { return this.serial(async () => {
     if (!/^[a-f0-9]{64}$/u.test(key)) throw new Error('INVALID_TEAM_SNAPSHOT');
-    const text = await read(join((await this.owner(uid)).snapshots, key), 192 * 1024);
+    const text = await read(join((await this.owner(uid)).snapshots, key), 4 * 1024 * 1024);
     if (digest(text) !== key) throw new Error('INVALID_TEAM_SNAPSHOT');
-    const value = JSON.parse(text) as TeamPersonaSnapshot;
-    this.validateSnapshot(value);
-    return value;
+    const value = JSON.parse(text) as TeamPersonaSnapshot; this.validateSnapshot(value); return value;
   }); }
+  /** Immutable, digest checked transport spool. Runtime journal remains the input authority. */
+  async dataRef(uid: string, value: unknown): Promise<TeamDataRef> {
+    const text = JSON.stringify(value), sha256 = digest(text), bytes = Buffer.byteLength(text);
+    if (bytes > 64 * 1024 * 1024) throw new Error('TEAM_INPUT_CAPACITY');
+    const path = join((await this.owner(uid)).transport, `${sha256}-${randomBytes(16).toString('hex')}`);
+    try { await create(path, text); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    if (await read(path, bytes) !== text) throw new Error('UNSAFE_TEAM_STORAGE'); return { path, sha256, bytes };
+  }
+  async releaseDataRef(uid: string, reference: TeamDataRef): Promise<void> {
+    const root = (await this.owner(uid)).transport;
+    if (dirname(reference.path) !== root || !new RegExp(`^${reference.sha256}-[a-f0-9]{32}$`, 'u').test(reference.path.slice(root.length+1)) || !/^[a-f0-9]{64}$/u.test(reference.sha256)) throw new Error('UNSAFE_TEAM_STORAGE');
+    await unlink(reference.path).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  }
+  saveExecution(uid: string, value: SavedExecution): Promise<void> { return this.serial(async () => {
+    if (!/^[A-Za-z0-9_-]{8,64}$/u.test(value.taskId)) throw new Error('UNSAFE_TEAM_STORAGE');
+    const path = join((await this.owner(uid)).executions, value.taskId), text = JSON.stringify(value);
+    try { await create(path, text); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    if (await read(path, 64 * 1024) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
+  }); }
+  async executions(uid: string): Promise<SavedExecution[]> {
+    const root = (await this.owner(uid)).executions, values: SavedExecution[] = [];
+    for (const name of await readdir(root)) {
+      if (!/^[A-Za-z0-9_-]{8,64}$/u.test(name)) throw new Error('UNSAFE_TEAM_STORAGE');
+      const value = JSON.parse(await read(join(root,name),64*1024)) as SavedExecution;
+      if (value.schemaVersion !== 1 || value.taskId !== name) throw new Error('UNSAFE_TEAM_STORAGE'); values.push(value);
+    }
+    return values;
+  }
+  async savedResult(uid: string, taskId: string): Promise<TeamHostResult | undefined> {
+    if (!/^[A-Za-z0-9_-]{8,64}$/u.test(taskId)) throw new Error('UNSAFE_TEAM_STORAGE');
+    const root = (await this.owner(uid)).runtime;
+    try {
+      const results=join(root,'results'); const info=await lstat(results);
+      if (!info.isDirectory() || (info.mode&0o077)!==0 || process.getuid && info.uid!==process.getuid()) throw new Error('UNSAFE_TEAM_STORAGE');
+      const result = JSON.parse(await read(join(results,`${taskId}.json`),512*1024));
+      if (!result || result.version !== 3 || result.type !== 'result' || !['completed','failed'].includes(result.status)
+        || typeof result.text !== 'string' || Buffer.byteLength(result.text)>8192 || !Number.isSafeInteger(result.finishedAt) || !result.usage || !['missing','partial','complete'].includes(result.usage.status)) throw new Error('UNSAFE_TEAM_STORAGE');
+      return result as TeamHostResult;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+  }
+  saveDelivery(uid: string, value: SavedDelivery): Promise<void> { return this.serial(async () => {
+    const path = join((await this.owner(uid)).outbox, value.taskId), text = JSON.stringify(value);
+    if (!/^[A-Za-z0-9_-]{8,64}$/u.test(value.taskId) || text.length > 512 * 1024) throw new Error('UNSAFE_TEAM_STORAGE');
+    try { await create(path, text); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    if (await read(path, 512 * 1024) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
+  }); }
+  deliveries(uid: string): Promise<SavedDelivery[]> { return this.serial(async () => {
+    const root = (await this.owner(uid)).outbox, values: SavedDelivery[] = [];
+    for (const name of await readdir(root)) {
+      if (!/^[A-Za-z0-9_-]{8,64}$/u.test(name)) throw new Error('UNSAFE_TEAM_STORAGE');
+      const value = JSON.parse(await read(join(root, name), 512 * 1024)) as SavedDelivery;
+      if (value.schemaVersion !== 1 || value.taskId !== name || !/^[A-Za-z0-9_-]{8,64}$/u.test(value.teamId)) throw new Error('UNSAFE_TEAM_STORAGE'); values.push(value);
+    }
+    return values;
+  }); }
+  async delivered(uid: string, taskId: string): Promise<void> {
+    if (!/^[A-Za-z0-9_-]{8,64}$/u.test(taskId)) throw new Error('UNSAFE_TEAM_STORAGE');
+    const paths = await this.owner(uid), root = paths.outbox; await unlink(join(root, taskId)).catch(error => { if (error.code !== 'ENOENT') throw error; }); await syncDirectory(root);
+    await unlink(join(paths.executions, taskId)).catch(error => { if (error.code !== 'ENOENT') throw error; }); await syncDirectory(paths.executions);
+  }
   private validateSnapshot(value: TeamPersonaSnapshot): void {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_TEAM_SNAPSHOT');
-    const { instructions, provider_account_profiles: profiles, ...route } = value;
-    validateTeamModelRoute(route);
-    if (!Array.isArray(profiles) || !profiles.length || profiles.length > 64
-      || profiles.some(profile => !profile || typeof profile !== 'object' || Array.isArray(profile))
-      || !profiles.some(profile => JSON.stringify(profile) === JSON.stringify(route.model_profile))) throw new Error('INVALID_TEAM_SNAPSHOT');
-    if (typeof instructions !== 'string' || !instructions.trim() || instructions.includes('\0')
-      || Buffer.byteLength(instructions) > 64 * 1024) throw new Error('INVALID_TEAM_SNAPSHOT');
+    const { instructions, documents, provider_account_profiles: profiles, ...route } = value; validateTeamModelRoute(route);
+    if (!Array.isArray(profiles) || !profiles.length || profiles.length > 64 || profiles.some(p => !p || typeof p !== 'object' || Array.isArray(p))
+      || !profiles.some(p => JSON.stringify(p) === JSON.stringify(route.model_profile)) || typeof instructions !== 'string' || !instructions.trim()
+      || instructions.includes('\0') || Buffer.byteLength(instructions) > 64 * 1024 || !Array.isArray(documents) || documents.length < 1 || documents.length > 50
+      || documents.some(d => !/^[A-Za-z0-9_-]{8,64}$/u.test(d.resourceId) || !Number.isSafeInteger(d.revision) || d.revision < 1
+        || !['persona','file','skill'].includes(d.kind) || typeof d.text !== 'string' || d.text.includes('\0') || digest(d.text) !== d.digest
+        || typeof d.name !== 'string' || !d.name || d.name.length > 255)) throw new Error('INVALID_TEAM_SNAPSHOT');
   }
 }

@@ -67,7 +67,7 @@ class TeamsComposeLogicTest {
         assertEquals(5, cases.size)
         cases.forEach { case ->
             val got = TeamsComposeLogic.mentionCandidates(cards, conversation(case.getString("kind"), TeamsVectors.strings(case.getJSONArray("participants"))), TeamsVectors.strings(case.getJSONArray("chosen")), case.getString("query"))
-            assertEquals("${case.getString("kind")} / ${case.getString("query")}", TeamsVectors.strings(case.getJSONArray("expect")), got.map { it.key })
+            assertEquals("${case.getString("kind")} / ${case.getString("query")}", TeamsVectors.strings(case.getJSONArray("expect")), got.map { it.sharedBotId })
         }
     }
 
@@ -76,15 +76,15 @@ class TeamsComposeLogicTest {
         assertEquals(9, cases.size)
         cases.forEach { case ->
             val keys = TeamsVectors.strings(case.getJSONArray("bots"))
-            val bots = cards.filter { it.key in keys }
+            val bots = cards.filter { it.sharedBotId in keys }
             val got = TeamsComposeLogic.composerLock(case.getString("uid"), case.getString("kind"), TeamsVectors.strings(case.getJSONArray("participants")), bots, case.getBoolean("botsLoaded"), case.getBoolean("botsUnverified"))
             assertEquals("${case.getString("kind")} ${case.getJSONArray("participants")} ${case.getJSONArray("bots")}", case.getString("expect"), lockName(got))
         }
     }
 
     @Test fun aBotDmWithAUsableBotNeedsNoCheckAndAMemberlessViewerStillReadsOnly() {
-        val usable = cards.filter { it.key == "bot:a" }
-        assertEquals(ComposerLock.None, TeamsComposeLogic.composerLock("u1", "bot_dm", listOf("user:u1", "bot:a"), usable, botsLoaded = false, botsUnverified = true))
+        val usable = cards.filter { it.sharedBotId == "sharedbot_a" }
+        assertEquals(ComposerLock.None, TeamsComposeLogic.composerLock("u1", "bot_dm", listOf("user:u1", "shared_bot:sharedbot_a"), usable, botsLoaded = false, botsUnverified = true))
         assertEquals(ComposerLock.OwnerReading, TeamsComposeLogic.composerLock("u1", "group", listOf("user:u2", "user:u3"), usable, true, false))
         assertFalse(TeamsComposeLogic.canSendText("　\n"))
         assertTrue(TeamsComposeLogic.canSendText(" a "))

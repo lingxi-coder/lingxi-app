@@ -194,8 +194,9 @@ internal class TeamsWorkspace(
         scope.launch { prefs.setCollapsed(uid, teamId, next) }
     }
 
-    fun draft(conversationId: String): ComposerDraft = drafts[conversationId] ?: ComposerDraft()
-    fun setDraft(conversationId: String, draft: ComposerDraft) { if (draft == ComposerDraft()) drafts.remove(conversationId) else drafts[conversationId] = draft }
+    private fun draftKey(conversationId: String) = "${currentUid}:${teamsModel.state.value.selectedId}:${startedTeam?.generation ?: 0}:$conversationId"
+    fun draft(conversationId: String): ComposerDraft = drafts[draftKey(conversationId)] ?: ComposerDraft()
+    fun setDraft(conversationId: String, draft: ComposerDraft) { if (draft == ComposerDraft()) drafts.remove(draftKey(conversationId)) else drafts[draftKey(conversationId)] = draft }
 
     companion object {
         const val MAX_WATCHED_TEAMS = 20

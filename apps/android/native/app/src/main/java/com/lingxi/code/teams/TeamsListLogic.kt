@@ -22,7 +22,7 @@ internal data class TeamsListStrings(
 
 /** A person or a Bot as an avatar and a name; [id] is the uid of a person, the `botId` (else the key) of a Bot. */
 internal data class TeamIdentity(val kind: String, val id: String, val name: String, val self: Boolean) {
-    val isBot get() = kind == "bot"
+    val isBot get() = kind == "shared_bot"
 }
 
 internal data class TeamConversationGroups(val channels: List<TeamMessageConversation>, val direct: List<TeamMessageConversation>, val botDirect: List<TeamMessageConversation>)
@@ -59,7 +59,7 @@ internal object TeamsListLogic {
         val people = userIds(conversation)
         if (conversation.kind == "channel") return title.ifEmpty { strings.channel }
         if (conversation.kind == "bot_dm") {
-            val bot = cardFor(conversation.botKey, bots)?.name?.takeIf { it.isNotEmpty() } ?: title.ifEmpty { strings.bot }
+            val bot = cardFor(conversation.sharedBotId, bots)?.name?.takeIf { it.isNotEmpty() } ?: title.ifEmpty { strings.bot }
             val others = people.filter { it != uid }
             return if (uid in people || others.isEmpty()) bot else bot + " · " + others.joinToString(strings.listSeparator) { memberName(it, members, uid, strings) }
         }
@@ -72,15 +72,15 @@ internal object TeamsListLogic {
     /** Other people (participant order), then Bots, then the viewer. A Bot is identified by its `botId` once its card is known. */
     fun conversationParticipants(conversation: TeamMessageConversation, members: List<TeamMember>, bots: List<TeamBotCard>, uid: String, strings: TeamsListStrings): List<TeamIdentity> {
         val people = userIds(conversation).map { TeamIdentity("user", it, memberName(it, members, uid, strings), it == uid) }
-        val robots = conversation.participants.filter { it.startsWith("bot:") }.map { key ->
-            val card = cardFor(key, bots)
-            TeamIdentity("bot", card?.botId ?: key, card?.name?.takeIf { it.isNotEmpty() } ?: strings.bot, false)
+        val robots = conversation.participants.filter { it.startsWith("shared_bot:") }.map { key ->
+            val card = cardFor(key.removePrefix("shared_bot:"), bots)
+            TeamIdentity("shared_bot", card?.sharedBotId ?: key.removePrefix("shared_bot:"), card?.name?.takeIf { it.isNotEmpty() } ?: strings.bot, false)
         }
         return people.filter { !it.self } + robots + people.filter { it.self }
     }
 
-    fun findBotDm(conversations: List<TeamMessageConversation>, uid: String, botKey: String): TeamMessageConversation? =
-        conversations.firstOrNull { it.kind == "bot_dm" && botKey in it.participants && "user:$uid" in it.participants }
+    fun findBotDm(conversations: List<TeamMessageConversation>, uid: String, sharedBotId: String): TeamMessageConversation? =
+        conversations.firstOrNull { it.kind == "bot_dm" && "shared_bot:$sharedBotId" in it.participants && "user:$uid" in it.participants }
 
     fun findDm(conversations: List<TeamMessageConversation>, uid: String, peerUid: String): TeamMessageConversation? =
         conversations.firstOrNull { it.kind == "dm" && it.participants.size == 2 && "user:$uid" in it.participants && "user:$peerUid" in it.participants }
@@ -118,7 +118,7 @@ internal object TeamsListLogic {
     }
 
     private fun userIds(conversation: TeamMessageConversation) = conversation.participants.filter { it.startsWith("user:") }.map { it.substring(5) }
-    private fun cardFor(key: String?, bots: List<TeamBotCard>) = if (key == null) null else bots.firstOrNull { it.key == key }
+    private fun cardFor(key: String?, bots: List<TeamBotCard>) = if (key == null) null else bots.firstOrNull { it.sharedBotId == key }
     private fun memberName(id: String, members: List<TeamMember>, uid: String, strings: TeamsListStrings): String =
         members.firstOrNull { it.uid == id }?.displayName?.takeIf { it.isNotEmpty() } ?: if (id == uid) strings.you else strings.member
 

@@ -30,11 +30,16 @@ open class MarketClient(val apiRoot: String) {
         }
         throw MarketException("TOO_MANY_REDIRECTS")
     }
-    protected open suspend fun request(path: String, body: JSONObject? = null): JSONObject = withContext(Dispatchers.IO) {
-        val c = if(body == null) connection(apiRoot.trimEnd('/') + path) else (URL(apiRoot.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
+    protected open suspend fun request(path: String, body: JSONObject? = null): JSONObject = requestWithHeaders(path, body)
+    suspend fun authenticatedRequest(path: String, bearer: String, body: JSONObject? = null, idempotencyKey: String? = null): JSONObject = requestWithHeaders(path, body, bearer, idempotencyKey)
+    private suspend fun requestWithHeaders(path: String, body: JSONObject?, bearer: String? = null, idempotencyKey: String? = null): JSONObject = withContext(Dispatchers.IO) {
+        require(path.startsWith("/") && !path.startsWith("//") && !path.contains("..") && !path.contains('#'))
+        val c = if(body == null && bearer == null) connection(apiRoot.trimEnd('/') + path) else (URL(apiRoot.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = false; connectTimeout = 15000; readTimeout = 30000
-            requestMethod = "POST"; doOutput = true; setRequestProperty("Content-Type", "application/json")
-            outputStream.use { it.write(body.toString().toByteArray()) }
+            requestMethod = if (body == null) "GET" else "POST"
+            if (bearer != null) { useCaches = false; setRequestProperty("Authorization", "Bearer $bearer") }
+            if (idempotencyKey != null) setRequestProperty("Idempotency-Key", idempotencyKey)
+            if (body != null) { doOutput = true; setRequestProperty("Content-Type", "application/json"); outputStream.use { it.write(body.toString().toByteArray()) } }
         }
         try {
             val ok = c.responseCode in 200..299

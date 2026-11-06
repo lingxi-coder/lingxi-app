@@ -75,11 +75,11 @@ internal fun TeamComposer(
     val askable = conversation.kind == "group" || conversation.kind == "channel"
     val mention = if (askable && editing == null) TeamsComposeLogic.mentionAt(field.text, field.selection.end) else null
     val candidates = if (mention != null && draft.targets.size < TeamsComposeLogic.MAX_TARGETS) TeamsComposeLogic.mentionCandidates(bots, conversation, draft.targets, mention.query) else emptyList()
-    val staleTargets = if (editing == null && askable) staleTeamBotSelections(draft.targets, bots, conversation.botKeys) else emptySet()
-    val staleBotDm = conversation.kind == "bot_dm" && conversation.botKeys.size != 1
+    val staleTargets = if (editing == null && askable) staleTeamBotSelections(draft.targets, bots, conversation.sharedBotIds) else emptySet()
+    val staleBotDm = conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1
     val tooLong = TeamsComposeLogic.byteLength(field.text) > TeamsComposeLogic.MESSAGE_BYTES
     val canSend = TeamsComposeLogic.canSendText(field.text) && !messaging.submitting && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
-    val hasAskableBots = askable && bots.any { it.selectable && it.key in conversation.participants }
+    val hasAskableBots = askable && bots.any { it.selectable && "shared_bot:${it.sharedBotId}" in conversation.participants }
     fun update(value: TextFieldValue, targets: Set<String> = draft.targets) {
         field = value
         // While editing, the field holds the edited message; the unsent draft keeps what was typed before.
@@ -96,7 +96,7 @@ internal fun TeamComposer(
                         Modifier.fillMaxWidth().clickable {
                             val at = requireNotNull(mention)
                             val cleaned = TeamsComposeLogic.withoutMention(field.text, at.start, field.selection.end)
-                            update(TextFieldValue(cleaned, TextRange(at.start.coerceAtMost(cleaned.length))), draft.targets + bot.key)
+                            update(TextFieldValue(cleaned, TextRange(at.start.coerceAtMost(cleaned.length))), draft.targets + bot.sharedBotId)
                         }.padding(vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
@@ -124,7 +124,7 @@ internal fun TeamComposer(
             Text(stringResource(R.string.teams_composer_bots_asked), Modifier.padding(start = 16.dp, top = 6.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             FlowRow(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 draft.targets.sorted().forEach { key ->
-                    val bot = bots.firstOrNull { it.key == key }
+                    val bot = bots.firstOrNull { it.sharedBotId == key }
                     val name = bot?.name ?: "Bot"
                     val remove = stringResource(R.string.teams_composer_remove_bot_fmt, name)
                     InputChip(

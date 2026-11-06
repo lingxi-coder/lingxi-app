@@ -1,5 +1,5 @@
 import type { TeamCommand, TeamDetail, TeamMember, TeamResult, TeamSummary, TeamsApi } from '../../../../packages/teams';
-import type { TeamBotCard } from '../../../../packages/teams/bots';
+import type { SharedBotCard } from '../../../../packages/teams/execution';
 import { pendingCommands, type CommandStorage, type MessageCommand, type MessageScope, type MessageSignal, type MessageSnapshot, type PendingCommands, type TeamConversation, type TeamMessage } from '../../../../packages/teams/messages';
 
 export const uid = 'alice';
@@ -20,9 +20,9 @@ export const conversation = (id: string, more: Partial<TeamConversation> = {}): 
 export const message = (seq: number, more: Partial<TeamMessage> = {}): TeamMessage => ({
   id: `message-${seq}`, seq, author: { kind: 'user', uid: 'bob' }, kind: 'text', text: `Body ${seq}`, createdAt: '2026-11-02T10:00:00.000Z', changeSeq: seq, changeId: `change-${seq}`, ...more,
 });
-export const botCard = (more: Partial<TeamBotCard> = {}): TeamBotCard => ({
-  key: `bot:owner:${'h'.repeat(22)}:${'b'.repeat(22)}`, ownerUid: 'owner', hostId: 'h'.repeat(22), botId: 'b'.repeat(22), name: 'Fixture Bot', description: 'Helper',
-  revision: 1, use: 'all', uids: [], permitted: true, online: true, ...more,
+export const botCard = (more: Partial<SharedBotCard> = {}): SharedBotCard => ({
+  sharedBotId: 'assistant-fixture', maintainer: { uid: 'owner', generation: 1 }, instanceId: 'local-fixture', name: 'Fixture Bot', description: 'Helper',
+  revision: 1, state: 'published', usePolicy: { mode: 'all' }, quotas: { team: 100, member: 20, bot: 100 }, permitted: true, ready: true, onlineUntil: Date.now() + 90000, ...more,
 });
 
 type SnapshotBody = MessageSnapshot extends infer Value ? Value extends MessageSnapshot ? Omit<Value, keyof MessageScope | 'uid' | 'fromCache'> & { fromCache?: boolean } : never : never;
@@ -36,7 +36,7 @@ export class FakeTeams {
   details = new Map<string, TeamDetail>();
   conversations = new Map<string, TeamConversation[]>();
   threads = new Map<string, TeamMessage[]>();
-  bots: TeamBotCard[] = [];
+  bots: SharedBotCard[] = [];
   changed = new Set<(event: { invalidated?: boolean }) => void>();
   signals = new Set<(signal?: MessageSignal) => void>();
   watches: Watch[] = [];
@@ -56,8 +56,8 @@ export class FakeTeams {
   execute: (command: TeamCommand) => Promise<TeamResult> = async command => { this.teamCommands.push(command); return {}; };
   messages: <T>(command: MessageCommand) => Promise<T> = async <T>(command: MessageCommand) => {
     this.commands.push(structuredClone(command));
-    if (command.action === 'bots') return { bots: structuredClone(this.bots) } as T;
-    if (command.action === 'botStates') return { states: Object.fromEntries(command.triggerIds.map(id => [id, null])) } as T;
+    if (command.action === 'listSharedBots') return { bots: structuredClone(this.bots) } as T;
+    if (command.action === 'listTasks') return { tasks: [] } as T;
     if (command.action === 'read') return { lastReadSeq: command.lastReadSeq } as T;
     return {} as T;
   };

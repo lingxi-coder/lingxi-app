@@ -1,54 +1,55 @@
-import { useState, type ReactElement } from 'react';
-import { teamBotUsable, type LocalTeamBot, type TeamBotCard } from './bots.js';
+import { useState } from 'react';
+import { executionCommand, sharedBotUsable, type LocalPublishableBot, type RequestQuotas, type SelectedSharedFile, type SharedBotCard, type UsePolicy, type PublishLocalBotInput } from './execution.js';
 import type { TeamDetail, TeamsApi, TeamSummary } from './index.js';
+import { Dialog } from './ui';
 
-/**
- * The team's Bots: who may use each, a button to message it, unbinding, and (on a Desktop) sharing a local Bot or
- * changing its audience. Rendered inside the details drawer's Bots tab, so it keeps the markup the `.tw-embed` rules style.
- */
+/** Shared member directory and native publication wizard. Files are picked by the trusted host. */
 export function BotDirectory({ api, uid, team, members, bots, zh, busy, status, attempt, onOpen, onChanged }: {
-  api: TeamsApi; uid: string; team: TeamSummary; members: TeamDetail['members']; bots: TeamBotCard[]; zh: boolean; busy: boolean; status: string;
-  attempt(action: () => Promise<unknown>): Promise<void>; onOpen(bot: TeamBotCard): Promise<void>; onChanged(): Promise<void>;
-}): ReactElement {
+  api: TeamsApi; uid: string; team: TeamSummary; members: TeamDetail['members']; bots: SharedBotCard[]; zh: boolean; busy: boolean; status: string;
+  attempt(action: () => Promise<unknown>): Promise<void>; onOpen(bot: SharedBotCard): Promise<void>; onChanged(): Promise<void>;
+}) {
   const t = (en: string, cn: string) => zh ? cn : en;
-  const [local, setLocal] = useState<LocalTeamBot[]>([]), [loaded, setLoaded] = useState(false);
-  const [botId, setBotId] = useState(''), [use, setUse] = useState<'all' | 'listed'>('listed'), [uids, setUids] = useState<string[]>([]);
-  const [removing, setRemoving] = useState<TeamBotCard>();
-  const [draftRevision, setDraftRevision] = useState(0);
+  const [local, setLocal] = useState<LocalPublishableBot[]>(), [instanceId, setInstanceId] = useState('');
+  const [role, setRole] = useState(''), [files, setFiles] = useState<SelectedSharedFile[]>([]);
+  const [resourceBindings, setResourceBindings] = useState<Record<string, string>>({});
+  const [mode, setMode] = useState<'all' | 'listed'>('listed'), [uids, setUids] = useState<string[]>([]);
+  const [quotas, setQuotas] = useState<RequestQuotas>({ team: 100, member: 20, bot: 100 });
+  const [review, setReview] = useState<PublishLocalBotInput>(), [confirmed, setConfirmed] = useState(false), [pausing, setPausing] = useState<SharedBotCard>();
+  const [draft, setDraft] = useState<{ sharedBotId: string; revision: number }>();
+  const existing = bots.find(bot => bot.maintainer.uid === uid && bot.instanceId === instanceId);
+  const selected = local?.find(bot => bot.instanceId === instanceId);
+  const audience: UsePolicy = mode === 'all' ? { mode: 'all' } : { mode: 'listed', members: members.filter(member => member.uid !== uid && uids.includes(member.uid)).map(({ uid: memberUid, generation }) => ({ uid: memberUid, generation })) };
+  const requiredResources = selected?.requiredResources ?? [];
+  const missingBindings = requiredResources.some(id => !files.some(file => file.token === resourceBindings[id]));
+  const bindingInput = requiredResources.length ? { resourceBindings } : {};
   const owner = (id: string) => members.find(member => member.uid === id)?.displayName ?? id;
-  const existing = bots.find(bot => bot.ownerUid === uid && bot.botId === botId);
-  let bindingLabel: string;
-  if (existing?.enabled === false) bindingLabel = t('Rebind Bot', '重新绑定 Bot');
-  else if (existing) bindingLabel = t('Save permissions', '保存权限');
-  else bindingLabel = t('Bind Bot', '绑定 Bot');
-  return <section className="team-bots" aria-label={t('Team Bots', '团队 Bot')}><h3>{t('Team Bots', '团队 Bot')}</h3>
-    <p className="teams-hint">{t('Bots run on their owner’s Desktop. The owner can read every conversation containing their Bot. Team members cannot approve its tools.', 'Bot 在所有者的 Desktop 上运行。所有者可阅读包含其 Bot 的所有会话。团队成员无法批准其工具操作。')}</p>
+  const changed = draft && draft.revision !== (existing?.revision ?? 0);
+  const native = api.localBots && api.selectSharedFiles && api.publishLocalBot;
+  const reviewCurrent = !!review && JSON.stringify({ role, fileTokens: files.map(file => file.token), usePolicy: audience, quotas, ...bindingInput }) === JSON.stringify({ role: review.role, fileTokens: review.fileTokens, usePolicy: review.usePolicy, quotas: review.quotas, ...(review.resourceBindings ? { resourceBindings: review.resourceBindings } : {}) });
+  const publish = async () => {
+    if (!review || !draft || !confirmed || !selected || changed || !reviewCurrent || missingBindings) throw new Error('PUBLICATION_CONFIRMATION_REQUIRED');
+    await api.publishLocalBot!(review);
+    setReview(undefined); setConfirmed(false); setInstanceId(''); setRole(''); setFiles([]); setResourceBindings({}); setDraft(undefined); await onChanged();
+  };
+  return <section className="team-bots" aria-label={t('Team assistants', '团队助手')}><h3>{t('Team assistants', '团队助手')}</h3>
+    <p className="teams-hint">{t('Members use the published role and selected read-only resources. The maintainer can read conversations containing their assistant.', '成员使用已发布的角色和选定的只读资料。维护者可阅读包含其助手的会话。')}</p>
     {status ? <p role="status">{status}</p> : null}
-    <ul className="team-bot-grid">{bots.map(bot => {
-      let presenceLabel: string;
-      let audienceLabel: string;
-      let messageLabel: string;
-      if (bot.enabled === false) {
-        presenceLabel = t('Disabled', '已停用');
-        audienceLabel = t('Not shared. Rebind on Desktop to enable new requests.', '尚未共享。在 Desktop 重新绑定后可接收新请求。');
-        messageLabel = t('Disabled', '已停用');
-      } else {
-        presenceLabel = bot.online ? t('Online', '在线') : t('Offline', '离线');
-        audienceLabel = bot.use === 'all' ? t('All team members may use', '全体团队成员可用') : t('Only owner and listed members may use', '仅所有者与指定成员可用');
-        messageLabel = bot.permitted ? t('Message Bot', '与 Bot 对话') : t('Not permitted', '无使用权限');
-      }
-      return <li key={bot.key} className="teams-card">
-        <header><b>{bot.name}</b><span className="team-bot-presence" data-online={bot.enabled !== false && bot.online}>{presenceLabel}</span></header>
-        <p>{bot.description}</p><small>{t('Owner', '所有者')}: {owner(bot.ownerUid)}</small>
-        <p className="teams-hint">{audienceLabel}{bot.use === 'listed' && bot.uids.length ? ` · ${bot.uids.map(owner).join(', ')}` : ''}</p>
-        <div className="teams-row-actions">
-          <button disabled={busy || !teamBotUsable(bot)} onClick={() => void attempt(() => onOpen(bot))}>{messageLabel}</button>
-          {bot.ownerUid === uid && bot.enabled !== false ? <button disabled={busy} className="teams-danger" onClick={() => setRemoving(bot)}>{t('Unbind', '解除绑定')}</button> : null}
-        </div>
-      </li>;
-    })}</ul>
-    {!bots.length && !status ? <p>{t('No Bots are shared with this team yet.', '此团队尚未共享 Bot。')}</p> : null}
-    {api.localBots && api.bindLocalBot ? <details><summary>{t('Share a Desktop Bot / change permissions', '共享 Desktop Bot / 修改权限')}</summary><button disabled={busy} onClick={() => void attempt(async () => { const result = await api.localBots!(); setLocal(result); setLoaded(true); })}>{t('Load local Bots', '加载本机 Bot')}</button>{loaded ? <form onSubmit={event => { event.preventDefault(); void attempt(async () => { await api.bindLocalBot!({ teamId: team.id, generation: team.generation, botId, use, uids: use === 'listed' ? uids : [], expectedRevision: draftRevision }); setBotId(''); setDraftRevision(0); setUids([]); await onChanged(); }); }}><label>{t('Local Bot', '本机 Bot')}<select required value={botId} onChange={event => { const id = event.target.value, card = bots.find(bot => bot.ownerUid === uid && bot.botId === id); setBotId(id); setDraftRevision(card?.revision ?? 0); setUse(card?.use ?? 'listed'); setUids([...(card?.uids ?? [])]); }}><option value="">{t('Choose a Bot', '选择 Bot')}</option>{local.map(bot => <option key={bot.botId} value={bot.botId}>{bot.name}{bot.model ? ` · ${bot.model}` : ''}</option>)}</select></label>{!local.length ? <p>{t('Create a Bot on this Desktop first.', '请先在此 Desktop 创建 Bot。')}</p> : null}{botId && draftRevision !== (existing?.revision ?? 0) ? <div role="status"><p>{t('Permissions changed in another window. Reload the current audience before editing again.', '其他窗口已更改权限，请重新加载当前使用范围后再编辑。')}</p><button type="button" disabled={busy} onClick={() => { setDraftRevision(existing?.revision ?? 0); setUse(existing?.use ?? 'listed'); setUids([...(existing?.uids ?? [])]); }}>{t('Reload current permissions', '重新加载当前权限')}</button></div> : null}<label>{t('Who may use this Bot?', '谁可使用此 Bot？')}<select value={use} onChange={event => setUse(event.target.value as typeof use)}><option value="listed">{t('Owner and selected members', '所有者与指定成员')}</option><option value="all">{t('All team members', '全体团队成员')}</option></select></label>{use === 'listed' ? <fieldset><legend>{t('Allowed members', '允许的成员')}</legend>{members.filter(member => member.uid !== uid).map(member => <label key={member.uid} className="team-party"><input type="checkbox" checked={uids.includes(member.uid)} onChange={event => setUids(event.target.checked ? [...uids, member.uid] : uids.filter(id => id !== member.uid))} />{member.displayName}</label>)}</fieldset> : null}<button disabled={busy || !botId}>{bindingLabel}</button></form> : null}</details> : <p className="teams-hint">{t('Open Teams in LingXi Desktop to share a local Bot or change its permissions.', '在灵犀 Desktop 的团队页面共享本机 Bot 或修改使用权限。')}</p>}
-    {removing ? <div className="teams-modal"><section role="alertdialog" aria-modal="true" aria-label={t('Unbind Bot?', '解除 Bot 绑定？')}><h2>{t(`Unbind ${removing.name}?`, `解除 ${removing.name} 的绑定？`)}</h2><p>{t('New Bot requests will stop. Existing conversation history remains.', '将停止新的 Bot 请求，现有会话历史保留。')}</p><div><button autoFocus disabled={busy} onClick={() => setRemoving(undefined)}>{t('Cancel', '取消')}</button><button disabled={busy} className="teams-danger" onClick={() => void attempt(async () => { await api.messages({ action: 'unbindBot', teamId: team.id, generation: team.generation, botKey: removing.key, expectedRevision: removing.revision }); setRemoving(undefined); await onChanged(); })}>{t('Unbind', '解除绑定')}</button></div></section></div> : null}
+    <ul className="team-bot-grid">{bots.map(bot => <li key={bot.sharedBotId} className="teams-card"><header><b>{bot.name}</b><span className="team-bot-presence" data-online={bot.ready}>{bot.state !== 'published' ? t('Paused', '已暂停') : bot.ready ? t('Ready', '已就绪') : t('Host unavailable', '宿主不可用')}</span></header><p>{bot.description}</p><small>{t('Maintainer', '维护者')}: {owner(bot.maintainer.uid)}</small>
+      <p className="teams-hint">{bot.usePolicy.mode === 'all' ? t('All current and future members', '所有当前和未来成员') : t('Maintainer and selected memberships', '维护者与指定成员身份')}</p><p className="teams-hint">{t('Daily requests: team / member / assistant', '每日请求：团队 / 成员 / 助手')} {bot.quotas.team} / {bot.quotas.member} / {bot.quotas.bot}</p>
+      <div className="teams-row-actions"><button disabled={busy || !sharedBotUsable(bot)} onClick={() => void attempt(() => onOpen(bot))}>{bot.permitted ? t('Message assistant', '与助手对话') : t('Not permitted', '无使用权限')}</button>{bot.maintainer.uid === uid && bot.state === 'published' ? <button disabled={busy} onClick={() => setPausing(bot)}>{t('Pause', '暂停')}</button> : null}</div></li>)}</ul>
+    {!bots.length && !status ? <p>{t('No assistants are published yet.', '尚未发布助手。')}</p> : null}
+    {api.openBotMarket ? <button type="button" disabled={busy} onClick={() => void attempt(() => api.openBotMarket!())}>{t('Find Bots in the market', '在市场发现 Bot')}</button> : null}
+    {native ? <details><summary>{t('Publish a Desktop assistant', '发布 Desktop 助手')}</summary><button disabled={busy} onClick={() => void attempt(async () => setLocal(await api.localBots!()))}>{t('Load local Bots', '加载本机 Bot')}</button>{local ? <form className="tw-form" onSubmit={event => { event.preventDefault(); setConfirmed(false); if (draft) setReview({ teamId: team.id, generation: team.generation, publicationId: crypto.randomUUID(), sharedBotId: draft.sharedBotId, instanceId, expectedRevision: draft.revision, role, fileTokens: files.map(file => file.token), usePolicy: audience, quotas, ...bindingInput }); }}>
+      <label>{t('Local Bot and model', '本机 Bot 与模型')}<select required value={instanceId} onChange={event => { const id = event.target.value, bot = bots.find(value => value.maintainer.uid === uid && value.instanceId === id); setInstanceId(id); setFiles([]); setResourceBindings({}); setRole(''); setMode(bot?.usePolicy.mode ?? 'listed'); setUids(bot?.usePolicy.mode === 'listed' ? bot.usePolicy.members.map(member => member.uid) : []); setQuotas(bot?.quotas ?? { team: 100, member: 20, bot: 100 }); setDraft({ sharedBotId: bot?.sharedBotId ?? crypto.randomUUID(), revision: bot?.revision ?? 0 }); }}><option value="">{t('Choose a Bot', '选择 Bot')}</option>{local.map(bot => <option key={bot.instanceId} value={bot.instanceId}>{bot.name}{bot.model ? ` · ${bot.model}` : ''}</option>)}</select></label>
+      <label>{t('Published role', '发布的角色')}<textarea required maxLength={12000} value={role} onChange={event => setRole(event.target.value)} /></label><p className="teams-hint">{t('Only this explicit role is shared. Private memory and conversations are excluded. Only plain-text Skills are supported in this release.', '仅共享此处明确填写的角色；不共享私人记忆和会话。当前仅支持纯文本 Skill。')}</p>
+      <button type="button" disabled={busy || !instanceId} onClick={() => void attempt(async () => setFiles(await api.selectSharedFiles!(instanceId)))}>{t('Select read-only files / SKILL.md', '选择只读文件 / SKILL.md')}</button><ul>{files.map(file => <li key={file.token}>{file.name} · {file.kind} · {file.bytes} bytes<button type="button" onClick={() => setFiles(old => old.filter(value => value.token !== file.token))}>{t('Remove', '移除')}</button></li>)}</ul>
+      {requiredResources.length ? <fieldset><legend>{t('Bind required package resources to your selected files', '将包内所需资料绑定到你选定的文件')}</legend><p className="teams-hint">{t('Imported packages use your own authorized resources. Author resources and grants are excluded.', '导入包使用你自己有权共享的资料，不继承作者的资料和授权。')}</p>{requiredResources.map(id => <label key={id}>{id}<select required value={resourceBindings[id] ?? ''} onChange={event => setResourceBindings(old => ({ ...old, [id]: event.target.value }))}><option value="">{t('Choose an authorized resource', '选择有权共享的资料')}</option>{files.map(file => <option key={file.token} value={file.token}>{file.name}</option>)}</select></label>)}</fieldset> : null}
+      <label>{t('Who may use the assistant and receive derived results?', '谁可以使用助手并接收派生结果？')}<select value={mode} onChange={event => setMode(event.target.value as typeof mode)}><option value="listed">{t('Maintainer and selected members', '维护者与指定成员')}</option><option value="all">{t('All current and future members', '所有当前和未来成员')}</option></select></label>{mode === 'listed' ? <fieldset><legend>{t('Allowed memberships', '允许的成员身份')}</legend>{members.filter(member => member.uid !== uid).map(member => <label key={`${member.uid}:${member.generation}`} className="team-party"><input type="checkbox" checked={uids.includes(member.uid)} onChange={event => setUids(old => event.target.checked ? [...old, member.uid] : old.filter(value => value !== member.uid))} />{member.displayName}</label>)}</fieldset> : null}
+      <fieldset><legend>{t('UTC daily request quotas', 'UTC 每日请求额度')}</legend>{(['team', 'member', 'bot'] as const).map(key => <label key={key}>{({ team: t('Team', '团队'), member: t('Member', '成员'), bot: t('Assistant', '助手') })[key]}<input type="number" min={1} max={10000} required value={quotas[key]} onChange={event => setQuotas(old => ({ ...old, [key]: Number(event.target.value) }))} /></label>)}</fieldset>
+      <p className="teams-hint">{t('This Desktop hosts execution and pays its configured model costs. Each request has a five-minute deadline. Tool writes and waiting/resume are unavailable.', '此 Desktop 承载执行并承担所配置模型的费用。每次请求期限五分钟；当前不支持工具写入和等待后续跑。')}</p>
+      {changed ? <p role="alert">{t('Publication changed elsewhere. Choose the Bot again before publishing.', '发布已在其他位置更改，请重新选择 Bot。')}</p> : null}<button disabled={busy || !instanceId || !role.trim() || !!changed || missingBindings}>{t('Review publication', '检查发布内容')}</button>
+    </form> : null}</details> : <p className="teams-hint">{t('Open LingXi Desktop to publish a local assistant.', '在灵犀 Desktop 发布本机助手。')}</p>}
+    {review && selected ? <Dialog title={t('Confirm publication', '确认发布')} onClose={() => setReview(undefined)}><div className="tw-form"><h3>{selected.name}</h3><p>{t('Host: this Desktop', '宿主：此 Desktop')} · {selected.model ?? t('Configured model', '已配置模型')}</p><blockquote>{review.role}</blockquote><ul>{files.map(file => <li key={file.token}>{file.name} · {file.kind} · {file.sha256}</li>)}</ul><p>{mode === 'all' ? t('Audience: every current and future team member.', '受众：团队所有当前和未来成员。') : `${t('Audience', '受众')}: ${[owner(uid), ...uids.map(owner)].join(', ')}`}</p>{requiredResources.length ? <ul>{requiredResources.map(id => <li key={id}>{id}: {files.find(file => file.token === resourceBindings[id])?.name}</li>)}</ul> : null}<p>{t('Daily quotas (team / member / assistant)', '每日额度（团队 / 成员 / 助手）')}: {quotas.team} / {quotas.member} / {quotas.bot}</p><label className="team-party"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />{t('I have permission to share the role, selected resources and their derived results with this audience, and confirm model costs and quotas.', '我有权向以上受众共享角色、选定资料及其派生结果，并确认模型费用和额度。')}</label>{!reviewCurrent ? <p role="alert">{t('Publication inputs or memberships changed. Review again before publishing.', '发布输入或成员身份已变化，请重新检查后发布。')}</p> : null}<button disabled={busy || !confirmed || !!changed || !reviewCurrent || missingBindings} onClick={() => void attempt(publish)}>{t('Publish assistant', '发布助手')}</button></div></Dialog> : null}
+    {pausing ? <Dialog title={t(`Pause ${pausing.name}?`, `暂停 ${pausing.name}？`)} role="alertdialog" onClose={() => setPausing(undefined)}><p>{t('New requests stop. Conversation history remains available.', '停止新请求，保留会话历史。')}</p><button disabled={busy} onClick={() => void attempt(async () => { await api.messages(executionCommand({ teamId: team.id, generation: team.generation }, 'pauseSharedBot', { sharedBotId: pausing.sharedBotId, expectedRevision: pausing.revision })); setPausing(undefined); await onChanged(); })}>{t('Pause assistant', '暂停助手')}</button></Dialog> : null}
   </section>;
 }

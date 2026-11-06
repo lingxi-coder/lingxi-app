@@ -22,7 +22,7 @@ async function open(context: TestContext) {
   fake.teams = [team('team-aaaa', { name: 'Acme', role: 'owner' }), team('team-bbbb', { name: 'Beta', generation: 2 })];
   fake.bots = [bot];
   fake.conversations.set('team-aaaa', [
-    conversation('chan-general', { title: 'general', participants: ['user:alice', 'user:bob', bot.key], lastSeq: 3, lastReadSeq: 1, lastMessage: { id: 'message-3', seq: 3, at: at(3), preview: 'Three', author: { kind: 'user', uid: 'bob' } } }),
+    conversation('chan-general', { title: 'general', participants: ['user:alice', 'user:bob', `shared_bot:${bot.sharedBotId}`], lastSeq: 3, lastReadSeq: 1, lastMessage: { id: 'message-3', seq: 3, at: at(3), preview: 'Three', author: { kind: 'user', uid: 'bob' } } }),
     conversation('dm-bob', { kind: 'dm', title: 'Alice, Bob', lastSeq: 0, lastReadSeq: 0 }),
   ]);
   fake.conversations.set('team-bbbb', [conversation('chan-b', { lastSeq: 2, lastReadSeq: 0 })]);
@@ -58,7 +58,7 @@ scenario('composer: Enter sends and clears, Shift+Enter and an input method\'s E
   assert.equal(await page.key(box(), 'Enter'), true);
   await until(() => mutations(fake).length === 1, 'the send');
   const sent = mutations(fake)[0]!;
-  assert.deepEqual([sent.operation, sent.conversationId, sent.text, sent.targets, sent.replyTo], ['create', 'chan-general', 'Hello team', undefined, undefined]);
+  assert.deepEqual([sent.operation, sent.conversationId, sent.text, 'targets' in sent, sent.replyTo], ['create', 'chan-general', 'Hello team', false, undefined]);
   assert.equal(box().props.value, '', 'the box is cleared once the message is queued'); assert.equal(workspace.draft('chan-general'), '');
   assert.equal(await page.key(box(), 'Enter'), true, 'Enter on an empty box is swallowed, not sent'); assert.equal(mutations(fake).length, 1);
   await page.type(box(), 'x'.repeat(8193));
@@ -80,11 +80,11 @@ scenario('composer: @ offers the Bots of the conversation, only a chosen Bot is 
   assert.equal(await page.key(box(), 'Enter'), true); assert.equal(mutations(fake).length, 0, 'Enter picks the Bot instead of sending');
   assert.equal(box().props.value, 'hey ', 'the @ query is replaced by a chip'); assert.deepEqual(page.byClass('tw-target').map(textOf), ['@Fixture Bot']);
   await page.type(box(), 'hey please look');
-  await page.key(box(), 'Enter'); await until(() => mutations(fake).length === 1, 'the send');
-  assert.deepEqual(mutations(fake)[0]!.targets, [bot.key]); assert.equal(mutations(fake)[0]!.text, 'hey please look');
+  await page.key(box(), 'Enter'); await until(() => commandsOf(fake, 'submit').length === 1, 'the send');
+  const submitted = commandsOf(fake, 'submit')[0]!; assert.equal(submitted.action, 'submit'); if (submitted.action !== 'submit') return; assert.deepEqual(submitted.payload.targets, [bot.sharedBotId]); assert.equal(submitted.payload.text, 'hey please look');
   assert.equal(page.byClass('tw-target').length, 0, 'targets are per message');
-  await page.type(box(), 'just @Fixture Bot typed'); await page.key(box(), 'Enter'); await until(() => mutations(fake).length === 2, 'a second send');
-  assert.equal(mutations(fake)[1]!.targets, undefined, 'typing a name never asks a Bot');
+  await page.type(box(), 'just @Fixture Bot typed'); await page.key(box(), 'Enter'); await until(() => mutations(fake).length === 1, 'a second send');
+  assert.equal('targets' in mutations(fake)[0]!, false, 'typing a name never asks a Bot');
 });
 
 scenario('replying, editing and recalling go through the same queue as sending', async context => {

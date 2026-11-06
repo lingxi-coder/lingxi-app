@@ -8,8 +8,8 @@ export type DeepLinkTarget = {
 export class DeepLinkError extends Error {
   constructor(public readonly code: 'invalid' | 'unsupported', message: string) { super(message); }
 }
-const routes = /^(session\/[^/]+|project\/[^/]+|new|settings\/[^/]+|provider\/[^/]+|extensions\/(mcp|skill|plugin)\/[^/]+|cron\/(job|run)\/[^/]+|terminal\/[^/]+|apps\/[^/]+|market\/[^/]+|runtime\/(agent|task|plan|review|activity)\/[^/]+|import\/(mcp|plugin|skill|provider)|remote\/[^/]+\/[^/]+|team\/(join|inbox))$/u;
-const parameters = new Set(['workspace', 'message', 'mode', 'scope', 'code']);
+const routes = /^(session\/[^/]+|project\/[^/]+|new|settings\/[^/]+|provider\/[^/]+|extensions\/(mcp|skill|plugin)\/[^/]+|cron\/(job|run)\/[^/]+|terminal\/[^/]+|apps\/[^/]+|market\/(bot\/)?[^/]+|runtime\/(agent|task|plan|review|activity)\/[^/]+|import\/(mcp|plugin|skill|provider)|remote\/[^/]+\/[^/]+|team\/(join|inbox))$/u;
+const parameters = new Set(['workspace', 'message', 'mode', 'scope', 'code', 'versionId', 'intentId']);
 function validatePayload(value: unknown, depth = 0): void {
   if (depth > 16) throw new DeepLinkError('invalid', 'Payload is too deeply nested');
   if (Array.isArray(value)) { value.forEach(v => validatePayload(v, depth + 1)); return; }
@@ -55,6 +55,9 @@ export function parseDeepLink(raw: string): DeepLinkTarget {
   if (params.message) params.message = params.message.toLowerCase();
   if (route === 'team/inbox' && Object.keys(params).length) throw new DeepLinkError('invalid', 'Unexpected team inbox parameter');
   if (route === 'team/join' ? Object.keys(params).length !== 1 || !/^[A-Za-z0-9_-]{32}$/u.test(params.code ?? '') : params.code !== undefined) throw new DeepLinkError('invalid', 'Invalid team invitation');
+  if (params.intentId && (!route.startsWith('market/bot/') || !/^[A-Za-z0-9_-]{1,128}$/.test(params.intentId))) throw new DeepLinkError('invalid', 'Invalid Bot handoff identity');
+  if (params.versionId && (!route.startsWith('market/bot/') || !/^[A-Za-z0-9_-]{1,128}$/.test(params.versionId))) throw new DeepLinkError('invalid', 'Invalid Bot release identity');
+  if (route.startsWith('market/bot/') && (!/^[A-Za-z0-9_-]{1,128}$/.test(route.split('/')[2]!) || Object.keys(params).some(key => key !== 'versionId' && key !== 'intentId'))) throw new DeepLinkError('invalid', 'Invalid Bot market link');
   const result: DeepLinkTarget = { route, params };
   if (url.hash) {
     if (!(route === 'new' || route.startsWith('import/') || route.startsWith('terminal/'))) throw new DeepLinkError('invalid', 'Unexpected payload');

@@ -1,3 +1,4 @@
+import { CH_BOTS_MARKET } from '../src/shared/botMarket.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
@@ -21,6 +22,7 @@ import {
 import { botFixture, noLoginItem, noTasks, SESSION } from './bot-helpers.js';
 
 const ALL_CHANNELS = [
+  CH_BOTS_MARKET,
   CH_BOTS_AVAILABILITY, CH_BOTS_LIST, CH_BOTS_GET, CH_BOTS_CREATE, CH_BOTS_UPDATE, CH_BOTS_DELETE, CH_BOTS_SESSION_OPEN, CH_BOTS_SESSIONS_LIST,
   CH_BOTS_PERSONA_GET, CH_BOTS_PERSONA_SET, CH_BOTS_MEMORY_LIST, CH_BOTS_MEMORY_READ, CH_BOTS_MEMORY_WRITE, CH_BOTS_MEMORY_DELETE,
   CH_BOTS_SKILLS_LIST, CH_BOTS_SKILL_DELETE, CH_BOTS_SKILL_IMPORT, CH_BOTS_SKILLS_IMPORTABLE, CH_BOTS_TASKS_LIST, CH_BOTS_TASK_CANCEL,

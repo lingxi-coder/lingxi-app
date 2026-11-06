@@ -39,7 +39,7 @@ internal object TeamsComposeLogic {
     fun mentionCandidates(bots: List<TeamBotCard>, conversation: TeamMessageConversation, chosenKeys: Collection<String>, query: String): List<TeamBotCard> {
         if (conversation.kind != "group" && conversation.kind != "channel") return emptyList()
         val needle = query.trim().lowercase()
-        return bots.filter { it.selectable && it.key in conversation.participants && it.key !in chosenKeys && (needle.isEmpty() || it.name.lowercase().contains(needle)) }
+        return bots.filter { it.selectable && "shared_bot:${it.sharedBotId}" in conversation.participants && it.sharedBotId !in chosenKeys && (needle.isEmpty() || it.name.lowercase().contains(needle)) }
     }
 
     /** One line of a message for a quote or a reply bar: whitespace runs collapsed, cut at [length] code points plus an ellipsis. */
@@ -51,7 +51,7 @@ internal object TeamsComposeLogic {
 
     fun composerLock(uid: String, kind: String, participants: List<String>, bots: List<TeamBotCard>, botsLoaded: Boolean, botsUnverified: Boolean): ComposerLock {
         if (participants.isNotEmpty() && "user:$uid" !in participants) return ComposerLock.OwnerReading
-        if (kind == "bot_dm" && participants.none { key -> key.startsWith("bot:") && bots.any { it.key == key && it.selectable } }) {
+        if (kind == "bot_dm" && participants.none { key -> key.startsWith("shared_bot:") && bots.any { it.sharedBotId == key.removePrefix("shared_bot:") && it.selectable } }) {
             return when {
                 botsUnverified -> ComposerLock.BotUnverified
                 !botsLoaded -> ComposerLock.BotChecking

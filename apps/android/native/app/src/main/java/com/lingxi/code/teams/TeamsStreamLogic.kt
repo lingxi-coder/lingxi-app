@@ -8,9 +8,9 @@ import java.time.format.FormatStyle
 import java.util.Locale
 
 /** What the stream needs to know about a message (SPEC-mobile-team-bot-ui section 8.2). */
-internal data class StreamMessage(val id: String, val seq: Long, val authorKind: String, val authorUid: String, val authorBotKey: String?, val createdAtMs: Long?, val recalled: Boolean) {
+internal data class StreamMessage(val id: String, val seq: Long, val authorKind: String, val authorUid: String, val authorSharedBotId: String?, val createdAtMs: Long?, val recalled: Boolean) {
     companion object {
-        fun of(message: TeamMessage) = StreamMessage(message.id, message.seq, message.authorKind, message.authorUid, message.botKey.takeIf { message.authorKind == "bot" }, message.createdAtMs, message.recalled)
+        fun of(message: TeamMessage) = StreamMessage(message.id, message.seq, message.authorKind, message.authorUid, message.sharedBotId.takeIf { message.authorKind == "shared_bot" }, message.createdAtMs, message.recalled)
     }
 }
 
@@ -104,5 +104,5 @@ internal object TeamsStreamLogic {
         if (atMs == null) "" else DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withLocale(locale).withZone(zone).format(Instant.ofEpochMilli(atMs))
 
     private fun dayOf(ms: Long, zone: ZoneId): LocalDate = Instant.ofEpochMilli(ms).atZone(zone).toLocalDate()
-    private fun sameAuthor(a: StreamMessage, b: StreamMessage) = a.authorKind == b.authorKind && a.authorUid == b.authorUid && (a.authorBotKey ?: "") == (b.authorBotKey ?: "")
+    private fun sameAuthor(a: StreamMessage, b: StreamMessage) = a.authorKind == b.authorKind && a.authorUid == b.authorUid && (a.authorSharedBotId ?: "") == (b.authorSharedBotId ?: "")
 }

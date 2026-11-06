@@ -45,6 +45,7 @@ struct AppsPage: View {
     let captureImportPresentation: () -> LocalAppActionPresentation
     let onCreate: (String, String) async throws -> Void
     let onRecoverCreation: (LocalAppSourceCreateIntent) -> Void
+    var onResumeBotHandoff: ((BotMarketHandoff) -> Void)? = nil
     @State private var query = ""
     @State private var creating = false
     @State private var importing = false
@@ -55,6 +56,9 @@ struct AppsPage: View {
     private var filtered: [UnifiedAppRecord] { library.records.filter { query.isEmpty || $0.name.localizedStandardContains(query) } }
     var body: some View {
         List {
+            if let pending = BotMarketHandoff.pending(), let onResumeBotHandoff {
+                Section("Bot download") { Button("Resume Desktop Bot download") { onResumeBotHandoff(pending) } }
+            }
             if let message = error ?? library.error { Text(message).foregroundStyle(.red).textSelection(.enabled) }
             if let message = projectStore.pendingLocalAppError { Text(message).foregroundStyle(.red).textSelection(.enabled) }
             if !projectStore.pendingLocalAppCreations.isEmpty {

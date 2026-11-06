@@ -5,6 +5,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class DeepLinkInboxTest {
+    @Test fun `Bot handoff opens without a model or local engine but retains foreground and editing gates`() {
+        val inbox = DeepLinkInbox(SavedStateHandle())
+        val raw = "lingxi://market/bot/travel-helper?versionId=release1"
+        assertTrue(inbox.enqueue(raw))
+        val independent = DeepLinkReadiness(true, true, false, true, false)
+        assertEquals(raw, inbox.next(independent))
+        assertNull(inbox.next(independent.copy(foreground = false)))
+        assertNull(inbox.next(independent.copy(blockingSurfaceOpen = true)))
+    }
+
     @Test fun `rotation never redelivers consumed intent but a new process restore intent and explicit warm repeat are handled`() {
         val saved = SavedStateHandle()
         val first = DeepLinkInbox(saved)

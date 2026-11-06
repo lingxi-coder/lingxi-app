@@ -13,19 +13,19 @@ struct StreamMessage: Equatable, Sendable {
     /// `user` or `bot`.
     let authorKind: String
     let authorUid: String
-    let authorBotKey: String?
+    let authorSharedBotId: String?
     /// `nil` = no usable time (a write the server has not stamped yet, or an unparsable one).
     let createdAtMs: Int64?
     let recalled: Bool
 
-    init(id: String, seq: Int, authorKind: String, authorUid: String, authorBotKey: String? = nil, createdAtMs: Int64? = nil, recalled: Bool = false) {
+    init(id: String, seq: Int, authorKind: String, authorUid: String, authorSharedBotId: String? = nil, createdAtMs: Int64? = nil, recalled: Bool = false) {
         self.id = id; self.seq = seq; self.authorKind = authorKind; self.authorUid = authorUid
-        self.authorBotKey = authorBotKey; self.createdAtMs = createdAtMs; self.recalled = recalled
+        self.authorSharedBotId = authorSharedBotId; self.createdAtMs = createdAtMs; self.recalled = recalled
     }
 
     init(_ message: TeamMessage) {
         self.init(id: message.id, seq: message.seq, authorKind: message.author.kind, authorUid: message.author.uid,
-                  authorBotKey: message.author.kind == "bot" ? message.author.botKey : nil,
+                  authorSharedBotId: message.author.kind == "shared_bot" ? message.author.sharedBotId : nil,
                   createdAtMs: message.createdAtMs, recalled: message.recalled == true)
     }
 }
@@ -243,6 +243,6 @@ enum TeamsStreamLogic {
     }
 
     private static func sameAuthor(_ a: StreamMessage, _ b: StreamMessage) -> Bool {
-        a.authorKind == b.authorKind && a.authorUid == b.authorUid && (a.authorBotKey ?? "") == (b.authorBotKey ?? "")
+        a.authorKind == b.authorKind && a.authorUid == b.authorUid && (a.authorSharedBotId ?? "") == (b.authorSharedBotId ?? "")
     }
 }

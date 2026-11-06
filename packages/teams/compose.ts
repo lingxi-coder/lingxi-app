@@ -1,4 +1,4 @@
-import { teamBotUsable, type TeamBotCard } from './bots.js';
+import { sharedBotUsable, type SharedBotCard } from './execution.js';
 import type { TeamConversation } from './messages.js';
 
 /** The server's limit for one message body, in UTF-8 bytes. */
@@ -36,10 +36,10 @@ export function withoutMention(text: string, start: number, caret: number): stri
  * matching what was typed. Only groups and channels take explicit targets; a Bot DM asks its Bot
  * automatically and a person-to-person DM has none.
  */
-export function mentionCandidates(bots: readonly TeamBotCard[], conversation: Pick<TeamConversation, 'kind' | 'participants'>, chosen: readonly string[], query: string): TeamBotCard[] {
+export function mentionCandidates(bots: readonly SharedBotCard[], conversation: Pick<TeamConversation, 'kind' | 'participants'>, chosen: readonly string[], query: string): SharedBotCard[] {
   if (conversation.kind !== 'group' && conversation.kind !== 'channel') return [];
   const needle = query.trim().toLowerCase();
-  return bots.filter(bot => teamBotUsable(bot) && conversation.participants.includes(bot.key) && !chosen.includes(bot.key) && (!needle || bot.name.toLowerCase().includes(needle)));
+  return bots.filter(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`) && !chosen.includes(bot.sharedBotId) && (!needle || bot.name.toLowerCase().includes(needle)));
 }
 
 /** One line of a message for a quote or a reply bar: whitespace collapsed, cut at `length` characters. */

@@ -8,7 +8,10 @@ import { useAccountState } from './useAccountState';
 /** The renderer's `TeamsApi` over the preload bridge, for one account. */
 export function desktopTeamsApi(desktop: DesktopTeamsApi, uid: string): TeamsApi {
   return {
-    localBots: () => desktop.localBots(uid), bindLocalBot: input => desktop.bindLocalBot(uid, input),
+    localBots: () => desktop.localBots(uid),
+    selectSharedFiles: instanceId => desktop.selectSharedFiles(uid, instanceId),
+    publishLocalBot: input => desktop.publishLocalBot(uid, input),
+    openBotMarket: () => desktop.openBotMarket(uid),
     list: () => desktop.list(uid), detail: teamId => desktop.detail(uid, teamId), execute: command => desktop.execute(uid, command),
     watchMessages: (scope, conversationId, next) => desktop.watchMessages(uid, scope, conversationId, next),
     messages: command => desktop.messages(uid, command), onMessagesChanged: callback => desktop.onMessagesChanged(callback),

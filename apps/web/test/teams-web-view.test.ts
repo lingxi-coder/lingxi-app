@@ -32,7 +32,7 @@ const layout = (workspace: TeamsWorkspace, more: Record<string, unknown> = {}) =
 scenario('layout: sidebar and conversation side by side, with the details only when asked for, from the header or the team menu', async context => {
   const { workspace } = await open(context);
   const page = await mount(workspace, layout(workspace)); context.after(() => page.unmount());
-  assert.equal(page.oneByClass('teams-web-body').props['data-pane'], 'list');
+  assert.equal(page.oneByClass('teams-web-body').props['data-pane'], 'conversation');
   assert.equal(page.byClass('tw-sidebar').length, 1); assert.equal(page.find(node => node.type === 'aside').length, 0, 'the details start closed');
   await page.click(page.oneByClass('tw-switcher'));
   await page.click(page.find(node => node.props.role === 'menuitem' && textOf(node) === 'Team members & settings')[0]);
@@ -56,7 +56,9 @@ scenario('layout: on a phone the sidebar and the conversation take turns, and th
   const { workspace, snapshot } = await open(context);
   const page = await mount(workspace, layout(workspace)); context.after(() => page.unmount());
   const body = () => page.oneByClass('teams-web-body');
-  assert.equal(body().props['data-pane'], 'list', 'a visitor starts at the list');
+  assert.equal(body().props['data-pane'], 'conversation', 'a member starts at the assistant home');
+  assert.match(page.text(), /Team assistants/);
+  await page.click(page.oneByClass('teams-web-back')); assert.equal(body().props['data-pane'], 'list');
   await page.click(page.find(node => node.props['data-row'] === 'chan-general')[0]);
   assert.equal(snapshot().selectedConversationId, 'chan-general'); assert.equal(body().props['data-pane'], 'conversation');
   await page.click(page.oneByClass('teams-web-back')); assert.equal(body().props['data-pane'], 'list');

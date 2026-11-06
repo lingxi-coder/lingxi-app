@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { createTeamConversation } from './team-conversations.mjs';
-import { botActions, TeamBotsStore, prepareBotTriggers, botPermits, triggerIdentity } from './team-bots.mjs';
+import { SharedBotsStore } from './shared-bots.mjs';
 import { messagePreview } from './team-message-preview.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
@@ -10,16 +10,15 @@ const cursor = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const scope = { teamId: id, generation: cursor.refine(value => value > 0) };
 const thread = { ...scope, conversationId: id };
 const text = z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 8192);
-const botKey = z.string().regex(/^bot:[A-Za-z0-9_-]{1,128}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{22}$/u);
 export const messageCommand = z.discriminatedUnion('action', [
   z.object({ action: z.literal('list'), ...scope, after: id.optional() }).strict(),
-  z.object({ action: z.literal('create'), ...thread, kind: z.enum(['dm', 'group', 'channel', 'bot_dm']),
-    title: z.string().trim().min(1).max(120), participantUids: z.array(uid).min(1).max(200), botKeys: z.array(botKey).max(8).optional() }).strict(),
+  z.object({ action: z.literal('create'), ...thread, kind: z.enum(['dm', 'group', 'channel']),
+    title: z.string().trim().min(1).max(120), participantUids: z.array(uid).min(1).max(200) }).strict(),
   z.object({ action: z.literal('sync'), ...thread, after: cursor }).strict(),
   z.object({ action: z.literal('mutate'), ...thread, messageId: id, changeId: id,
-    operation: z.enum(['create', 'edit', 'recall']), text: z.string(), replyTo: id.optional(), targets: z.array(botKey).max(8).optional() }).strict()
+    operation: z.enum(['create', 'edit', 'recall']), text: z.string(), replyTo: id.optional() }).strict()
     .refine(value => value.operation === 'recall' ? value.text === '' : text.safeParse(value.text).success)
-    .refine(value => value.operation === 'create' || (value.replyTo === undefined && value.targets === undefined)),
+    .refine(value => value.operation === 'create' || value.replyTo === undefined),
   z.object({ action: z.literal('read'), ...thread, lastReadSeq: cursor }).strict(),
 ]);
 export class TeamMessageError extends Error {
@@ -44,14 +43,14 @@ function conversation(snapshot, read, generation) {
 export class TeamMessagesStore {
   constructor(db, clock = Date.now) { this.db = db; this.clock = clock; }
   async execute(user, raw) {
-    if (botActions.has(raw?.action)) return new TeamBotsStore(this.db, this.clock).execute(user, raw);
+    if (raw?.schemaVersion !== undefined) return new SharedBotsStore(this.db, this.clock).execute(user, raw);
     const input = messageCommand.parse(raw);
     if (input.action === 'mutate' && (input.messageId.startsWith('bot_') || input.changeId.startsWith('bot_'))) fail(400, 'INVALID_INPUT');
     if (input.action === 'create') {
       if (!input.participantUids.includes(user.uid)) fail(403, 'CONVERSATION_REQUIRED');
       const value = await createTeamConversation(this.db, { teamId: input.teamId, conversationId: input.conversationId,
         callerUid: user.uid, callerGeneration: input.generation, kind: input.kind, title: input.title,
-        participants: [...input.participantUids.map(uid => `user:${uid}`), ...(input.botKeys ?? [])] });
+        participants: input.participantUids.map(uid => `user:${uid}`) });
       return { conversationId: input.conversationId, lastSeq: value.lastSeq };
     }
     return this.db.runTransaction(async tx => {
@@ -92,42 +91,33 @@ export class TeamMessagesStore {
           messages: snapshots.map(message), hasMore: (page.docs.at(-1)?.data().seq ?? input.after) < c.lastChangeSeq };
       }
       if (!c.participants.includes(`user:${user.uid}`)) fail(403, 'CONVERSATION_REQUIRED');
-      if (c.kind === 'bot_dm') {
-        const card = (await tx.get(teamRef.collection('bots').doc(c.botKey))).data();
-        if (!botPermits(card, user.uid)) fail(403, 'BOT_USE_REQUIRED');
-      }
+      if (c.kind === 'bot_dm' && input.operation === 'create') fail(400, 'SUBMIT_REQUIRED');
       const msgRef = ref.collection('messages').doc(input.messageId), changeRef = ref.collection('changes').doc(input.changeId);
       const [existing, receipt] = await tx.getAll(msgRef, changeRef);
       const m = existing.data(), old = receipt.data(), textDigest = digest(input.text);
-      const targets = [...(c.kind === 'bot_dm' ? [c.botKey] : input.targets ?? [])].sort();
-      const executionIntent = targets.length ? { targets, triggerIds: targets.map(value => triggerIdentity(input.messageId, value)).sort() } : null;
       if (old) {
         if (old.messageId !== input.messageId || old.operation !== input.operation || old.actorUid !== user.uid
           || old.generation !== input.generation || old.textDigest !== textDigest
           || (input.operation === 'create' && (m?.author.kind !== 'user' || m.author.uid !== user.uid || m.kind !== 'text'
-            || (m.replyTo ?? null) !== (input.replyTo ?? null)
-            || JSON.stringify(m.mentions ?? []) !== JSON.stringify([...(input.targets ?? [])].sort())
-            || JSON.stringify(old.executionIntent ?? null) !== JSON.stringify(executionIntent)))) fail(409, 'MESSAGE_ID_CONFLICT');
+            || (m.replyTo ?? null) !== (input.replyTo ?? null)))) fail(409, 'MESSAGE_ID_CONFLICT');
         return { messageId: input.messageId, changeId: input.changeId, changeSeq: old.seq };
       }
       if (input.operation === 'create' && existing.exists) fail(409, 'MESSAGE_ID_CONFLICT');
       if (input.operation !== 'create' && (!m || m.author.kind !== 'user' || m.author.uid !== user.uid)) fail(403, 'MESSAGE_AUTHOR_REQUIRED');
       if (m?.recalled) fail(409, 'MESSAGE_RECALLED');
       if (input.replyTo && !(await tx.get(ref.collection('messages').doc(input.replyTo))).exists) fail(400, 'REPLY_REQUIRED');
-      const enqueue = input.operation === 'create' ? await prepareBotTriggers(tx, teamRef, ref, c, user, input.generation, input) : undefined;
       const changeSeq = c.lastChangeSeq + 1, seq = input.operation === 'create' ? c.lastSeq + 1 : m.seq;
       if (!Number.isSafeInteger(changeSeq) || !Number.isSafeInteger(seq)) fail(409, 'CURSOR_LIMIT');
       const now = new Date(this.clock());
       const change = { seq: changeSeq, messageId: input.messageId, operation: input.operation,
-        actorUid: user.uid, generation: input.generation, textDigest, at: now,
-        ...(input.operation === 'create' && enqueue.evidence ? { executionIntent: enqueue.evidence } : {}) };
+        actorUid: user.uid, generation: input.generation, textDigest, at: now };
       const update = { lastChangeSeq: changeSeq, lastChange: { id: input.changeId, seq: changeSeq } };
       if (input.operation === 'create') {
         const author = { kind: 'user', uid: user.uid };
         // The conversation list reads this pointer instead of the message; the author mirrors the message doc.
         Object.assign(update, { lastSeq: seq, lastMessage: { id: input.messageId, seq, at: now, author, preview: messagePreview(input.text) } });
         tx.create(msgRef, { seq, author, kind: 'text', text: input.text,
-          mentions: [...(input.targets ?? [])].sort(), ...(input.replyTo ? { replyTo: input.replyTo } : {}), createdAt: now, changeSeq, changeId: input.changeId });
+          ...(input.replyTo ? { replyTo: input.replyTo } : {}), createdAt: now, changeSeq, changeId: input.changeId });
       } else {
         tx.update(msgRef, { text: input.text, editedAt: now, changeSeq, changeId: input.changeId,
           ...(input.operation === 'recall' ? { recalled: true } : {}) });
@@ -138,7 +128,6 @@ export class TeamMessagesStore {
         }
       }
       tx.update(ref, update); tx.create(changeRef, change);
-      enqueue?.write(seq, now);
       return { messageId: input.messageId, changeId: input.changeId, changeSeq };
     });
   }

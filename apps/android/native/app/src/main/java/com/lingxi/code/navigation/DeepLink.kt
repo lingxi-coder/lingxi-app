@@ -23,11 +23,11 @@ data class DeepLink(val route: String, val params: Map<String, String>, val payl
                 require(decoded.isNotEmpty() && decoded != "." && decoded != ".." && decoded.none { it == '/' || it == '\\' || it < ' ' || it == '\u007f' })
                 decoded
             }
-            require(Regex("^(session/[^/]+|project/[^/]+|new|settings/[^/]+|provider/[^/]+|extensions/(mcp|skill|plugin)/[^/]+|cron/(job|run)/[^/]+|terminal/[^/]+|apps/[^/]+|market/[^/]+|runtime/(agent|task|plan|review|activity)/[^/]+|import/(mcp|plugin|skill|provider)|remote/[^/]+/[^/]+|team/(join|inbox))$").matches(route))
+            require(Regex("^(session/[^/]+|project/[^/]+|new|settings/[^/]+|provider/[^/]+|extensions/(mcp|skill|plugin)/[^/]+|cron/(job|run)/[^/]+|terminal/[^/]+|apps/[^/]+|market/(bot/)?[^/]+|runtime/(agent|task|plan|review|activity)/[^/]+|import/(mcp|plugin|skill|provider)|remote/[^/]+/[^/]+|team/(join|inbox))$").matches(route))
             val params = pairs(uri.rawQuery).mapValues { (key, value) ->
                 if (key == "message") value.lowercase(java.util.Locale.ROOT) else value
             }
-            require(params.all { (k, v) -> k in setOf("workspace", "message", "mode", "scope", "review", "runId", "revision", "code", "turn", "generation") && v.isNotEmpty() && v.length <= 512 && v.none { it < ' ' || it == '\u007f' } })
+            require(params.all { (k, v) -> k in setOf("workspace", "message", "mode", "scope", "review", "runId", "revision", "code", "turn", "generation", "versionId", "intentId") && v.isNotEmpty() && v.length <= 512 && v.none { it < ' ' || it == '\u007f' } })
             if (route == "team/inbox") require(params.isEmpty())
             if (route == "team/join") require(params.keys == setOf("code") && Regex("^[A-Za-z0-9_-]{32}$").matches(params.getValue("code")))
             else require("code" !in params)
@@ -41,6 +41,9 @@ data class DeepLink(val route: String, val params: Map<String, String>, val payl
             require(params["generation"] == null || (route.startsWith("session/") &&
                 runCatching { java.util.UUID.fromString(params.getValue("generation")).toString() == params.getValue("generation") }.getOrDefault(false)))
             require(params["message"] == null || (route.startsWith("session/") && Regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$").matches(params.getValue("message"))))
+            require(params["intentId"] == null || (route.startsWith("market/bot/") && Regex("^[A-Za-z0-9_-]{1,128}$").matches(params.getValue("intentId"))))
+            require(params["versionId"] == null || (route.startsWith("market/bot/") && Regex("^[A-Za-z0-9_-]{1,128}$").matches(params.getValue("versionId"))))
+            if (route.startsWith("market/bot/")) require(Regex("^[A-Za-z0-9_-]{1,128}$").matches(route.substringAfter("market/bot/")) && params.keys.all { it == "versionId" || it == "intentId" })
             val payload = if (uri.rawFragment != null) {
                 require(route == "new" || route.startsWith("terminal/") || route.startsWith("import/"))
                 val fragment = pairs(uri.rawFragment)

@@ -51,21 +51,21 @@ enum TeamsPointerParser {
         }
         let kind: String
         let authorUid: String
-        var botKey: String?
+        var sharedBotId: String?
         switch author["kind"] as? String {
         case "user"?:
             kind = "user"
             guard let uid = nonEmptyString(author["uid"]) else { throw invalid() }
             authorUid = uid
-        case "bot"?:
-            kind = "bot"
-            guard let uid = nonEmptyString(author["uid"]), let key = nonEmptyString(author["botKey"]) else { throw invalid() }
-            authorUid = uid
-            botKey = key
+        case "shared_bot"?:
+            kind = "shared_bot"
+            guard let key = nonEmptyString(author["sharedBotId"]) else { throw invalid() }
+            authorUid = ""
+            sharedBotId = key
         default:
             throw invalid()
         }
-        return TeamLastMessage(id: id, seq: seq, atMs: atMs, authorKind: kind, authorUid: authorUid, authorBotKey: botKey, preview: preview, recalled: recalled)
+        return TeamLastMessage(id: id, seq: seq, atMs: atMs, authorKind: kind, authorUid: authorUid, authorSharedBotId: sharedBotId, preview: preview, recalled: recalled)
     }
 
     /// A document of the `conversations` query (the directory) as the app model. `data` is the document's
@@ -76,15 +76,15 @@ enum TeamsPointerParser {
         guard let kind = data["kind"] as? String, let title = data["title"] as? String,
               let participants = data["participants"] as? [String],
               let lastSeq = safeInteger(data["lastSeq"]), let lastChangeSeq = safeInteger(data["lastChangeSeq"]) else { throw invalid() }
-        var botKey: String?
-        switch data["botKey"] {
+        var sharedBotId: String?
+        switch data["sharedBotId"] {
         case nil, is NSNull: break
-        case let key as String: botKey = key.isEmpty ? nil : key
+        case let key as String: sharedBotId = key.isEmpty ? nil : key
         default: throw invalid()
         }
         let last = try parseLastMessage(present: data.keys.contains("lastMessage"), value: data["lastMessage"], millis: millis)
         return TeamMessageConversation(id: id, kind: kind, title: title, participants: participants, lastSeq: lastSeq, lastChangeSeq: lastChangeSeq,
-                                       lastReadSeq: lastReadSeq, botKey: botKey, lastMessage: last)
+                                       lastReadSeq: lastReadSeq, sharedBotId: sharedBotId, lastMessage: last)
     }
 
     /// An integer in the JavaScript safe range. A Firestore double with an integral value is accepted; a

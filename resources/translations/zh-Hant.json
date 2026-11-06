@@ -2938,8 +2938,8 @@
   "teams_bot_unbind_title_fmt": "解除 %1$s 的綁定？",
   "teams_bot_unbind_detail": "將停止新的 Bot 請求，現有會話歷史保留。",
   "teams_bots_share_hint": "在靈犀 Desktop 的團隊頁面共享本機 Bot 或修改使用權限。",
-  "teams_bot_owner %@": "擁有者：%@",
-  "teams_bot_owner_fmt": "擁有者：%1$s",
+  "teams_bot_owner %@": "维护者：%@",
+  "teams_bot_owner_fmt": "维护者：%1$s",
   "teams_invite_none": "還沒有邀請。",
   "teams_invite_share": "分享邀請",
   "teams_link_copied": "連結已複製",
@@ -2967,5 +2967,15 @@
   "teams_error_bot_access_changed": "Bot 權限已變更，請同步並檢查所選 Bot 後重試。",
   "teams_error_answer_rejected": "此答案無法接收，請檢查問題與原始請求人身分。",
   "teams_conversation_details": "會話詳情",
-  "teams_choose_conversation": "選擇會話"
+  "teams_choose_conversation": "選擇會話",
+  "teams_assistants": "助手",
+  "teams_recent_tasks": "最近任务与成果",
+  "teams_artifact_open": "打开文档",
+  "teams_artifact_title": "文档",
+  "teams_bot_pause": "暂停共享",
+  "teams_task_expired": "请求已过期",
+  "teams_task_interrupted": "请求中断，请重新发送",
+  "teams_task_authorization_required": "维护者需要处理授权",
+  "teams_error_request_quota": "请求次数已达上限，请稍后再试或联系维护者。",
+  "teams_task_view": "查看任务状态"
 }

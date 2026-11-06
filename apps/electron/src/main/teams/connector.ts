@@ -1,397 +1,334 @@
+import { randomBytes, randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
+import { open, lstat } from 'node:fs/promises';
+import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { providerAccountEnvelope, type ProviderAccountLaunch } from '../provider-accounts.js';
-import type { BindLocalTeamBotInput, LocalTeamBot, TeamBotCard } from '../../../../../packages/teams/bots.js';
+import type { LocalPublishableBot, PublishLocalBotInput, SelectedSharedFile, SharedBotCard, TeamTaskView } from '../../../../../packages/teams/execution.js';
 import type { TeamSummary } from '../../../../../packages/teams/index.js';
-import type { TeamConversation } from '../../../../../packages/teams/messages.js';
-import type { BotContent } from '../bots/content.js';
-import type { BotStore, BotTeamBinding } from '../bots/store.js';
-import { type PendingTeamTarget, TeamPrivateStore, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot } from './privateStore.js';
-import { runTeamHost, TeamHostFailure, type TeamBotTarget, type TeamHostProcessOptions, type TeamHostResult } from './process.js';
+import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source.js';
+import type { BotStore } from '../bots/store.js';
+import { validateBotManifest } from '../bots/package.js';
+import { TeamPrivateStore, digest, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution } from './privateStore.js';
+import { runTeamHost, type TeamHostProcessOptions, type TeamHostResult, type BotChatScope } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
 
 export interface TeamHostApi {
   hostContext(): TeamAccountContext | undefined;
   assertHostContext(context: TeamAccountContext): void;
-  hostToken(context: TeamAccountContext): Promise<string>;
   hostMessages<T>(context: TeamAccountContext, command: Record<string, unknown>): Promise<T>;
+  hostReadChat(context: TeamAccountContext, request: ChatReadRequest): Promise<ChatReadResult>;
   list(uid: string): Promise<{ teams: TeamSummary[] }>;
   onChanged(callback: (event: { invalidated?: boolean }) => void): () => void;
   onMessagesChanged(callback: () => void): () => void;
-  notifyHostChanged?(): void;
 }
 export interface TeamConnectorOptions {
-  service: TeamHostApi; store: BotStore; content: Pick<BotContent, 'teamInstructions'>; privateStore: TeamPrivateStore;
+  service: TeamHostApi; store: BotStore; privateStore: TeamPrivateStore;
   binaries(): { host: string; worker: string };
   defaultModel(): string | undefined;
-  /** Resolve exactly one selectable native catalog route, including its frozen account execution profiles. */
   modelRoute(selected: string): Promise<TeamModelSelection>;
-  /** Canonical account metadata with grants limited to the frozen execution profiles. */
-  modelAccounts: (credentialId: string, executionBindingId: string, profiles: readonly Record<string, unknown>[]) => Promise<ProviderAccountLaunch | undefined>;
-  renewModelAccount?: (accountId: string, identityGeneration: number, credentialRevision: number) => Promise<void>;
-  permission(input: Parameters<TeamHostProcessOptions['permission']>[0] & { accountEpoch: number; assertCurrent(): void }, signal: AbortSignal): Promise<boolean>;
-  platform?: NodeJS.Platform;
-  run?: (options: TeamHostProcessOptions) => Promise<TeamHostResult>;
-  retryMs?: number;
-  now?: () => number;
-  maxConcurrent?: number;
+  modelAccounts(credentialId: string, executionBindingId: string, profiles: readonly Record<string, unknown>[]): Promise<ProviderAccountLaunch | undefined>;
+  renewModelAccount?(accountId: string, identityGeneration: number, credentialRevision: number): Promise<void>;
+  /** Only the native chooser supplies paths; renderer requests carry opaque one-use tokens. */
+  chooseFiles(): Promise<string[]>;
+  validateModel?(context: TeamAccountContext, snapshot: TeamPersonaSnapshot, selection: TeamModelSelection): Promise<void>;
+  platform?: NodeJS.Platform; run?: (options: TeamHostProcessOptions) => Promise<TeamHostResult>;
+  retryMs?: number; now?: () => number; maxConcurrent?: number;
 }
-interface QueuePage { cursor: number; triggers: Array<{ id: string; seq: number }>; hasMore: boolean }
-interface Active { signature: string; controller: AbortController; promise: Promise<void>; ready: Promise<void>; settling?: boolean }
-function scopeKey(teamId: string, botKey: string): string {
-  return JSON.stringify([teamId, botKey]);
-}
-
-/** Discovery is a hint. The transactional server queue and Rust journal own execution. */
+interface Selected { context: TeamAccountContext; instanceId: string; expires: number; document: PublishedDocument }
+interface HostTask extends TeamTaskView { messageId: string; messageSeq: number }
+interface TaskContext { task: HostTask; messageId: string; messageSeq: number; inputs: Array<{ grantId: string; resourceId: string; digest: string }>; deployment: { deploymentId: string; definitionDigest: string; accountEpoch: number } }
+const id = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{8,64}$/u.test(value);
+const scopeKey = (b: SharedBotBinding) => JSON.stringify([b.teamId, b.sharedBotId]);
+const serialKey = (b: SharedBotBinding, task: HostTask) => JSON.stringify([b.teamId, b.sharedBotId, task.conversationId]);
+const activation = (b: SharedBotBinding, c: TeamAccountContext) => JSON.stringify([c.epoch,b.deploymentId,b.accountEpoch]);
+const newId = () => randomBytes(16).toString('base64url');
+/** Source reads, selected account credentials and backend permits stay in trusted main. */
 export class TeamConnector implements LocalTeamHost {
-  private closed = false;
-  private pending = false;
-  private refresh?: Promise<void>;
-  private readonly active = new Map<string, Active>();
-  private readonly blocked = new Map<string, string>();
-  private readonly slots = new Set<Active>();
-  private readonly scans = new Map<string, string>();
-  private readonly emptyQueues = new Map<string, string>();
-  private readonly observations = new Map<string, { triggerId: string; delay: number; until: number }>();
-  private readonly scheduled = new Map<string, number>();
-  private admissions = 0;
-  private readonly heartbeats = new Map<string, number>();
-  private readonly statuses = new Map<string, string>();
-  private readonly bindingOperations = new Set<string>();
-  private readonly stops: Array<() => void>;
-  private timer?: ReturnType<typeof setTimeout>;
-  private failedDiscovery = false;
-  private revision = 0;
-  private notifyingStatus = false;
+  private closed = false; private pending = false; private refresh?: Promise<void>; private timer?: ReturnType<typeof setTimeout>;
+  private readonly active = new Map<string, { taskId: string; controller: AbortController; promise: Promise<void> }>();
+  private readonly selections = new Map<string, Selected>(); private readonly publishing = new Set<string>();
+  private readonly activated = new Map<string, string>(); private readonly heartbeats = new Map<string, number>();
+  private readonly deferred = new Map<string, number>(); private readonly scheduled = new Map<string, number>(); private readonly stops: Array<() => void>;
+  private revision = 0; private probes = 0;
   constructor(private readonly options: TeamConnectorOptions) {
-    this.stops = [options.service.onChanged(event => {
-      if (event.invalidated) this.cancelAll();
-      this.wake();
-    }), options.service.onMessagesChanged(() => { if (!this.notifyingStatus) { this.observations.clear(); this.wake(); } })];
-    this.wake();
+    this.stops = [options.service.onChanged(event => { if (event.invalidated) this.invalidate(); else this.wake(); }), options.service.onMessagesChanged(() => this.wake())]; this.wake();
   }
-  private available(): void { if ((this.options.platform ?? process.platform) !== 'darwin') throw new Error('TEAM_HOST_MACOS_REQUIRED'); }
-  async localBots(uid: string): Promise<LocalTeamBot[]> {
-    this.available(); const context = this.context(uid); this.options.service.assertHostContext(context);
-    return this.options.store.list().map(bot => ({ botId: bot.bot_id, name: bot.name, description: bot.description, ...(bot.model ? { model: bot.model } : {}) }));
+  private now() { return (this.options.now ?? Date.now)(); }
+  private available() { if ((this.options.platform ?? process.platform) !== 'darwin') throw new Error('TEAM_HOST_MACOS_REQUIRED'); }
+  private context(uid: string) { const c = this.options.service.hostContext(); if (!c || c.uid !== uid || this.closed) throw new Error('INVALID_SESSION'); return c; }
+  private assert(c: TeamAccountContext) { if (this.closed) throw new Error('INVALID_SESSION'); this.options.service.assertHostContext(c); }
+  private command<T>(c: TeamAccountContext, binding: Pick<SharedBotBinding, 'teamId' | 'generation'>, action: string, payload: Record<string, unknown>, commandId = newId()) {
+    this.assert(c); return this.options.service.hostMessages<T>(c, { schemaVersion: 1, commandId, teamId: binding.teamId, generation: binding.generation, action, payload });
   }
-  private context(uid: string): TeamAccountContext {
-    const context = this.options.service.hostContext();
-    if (!context || context.uid !== uid || this.closed) throw new Error('INVALID_SESSION');
-    return context;
+  private hostFields(b: SharedBotBinding) { return { deploymentId: b.deploymentId, hostId: this.options.privateStore.hostId, accountEpoch: b.accountEpoch }; }
+  async localBots(uid: string): Promise<LocalPublishableBot[]> {
+    this.available(); const context = this.context(uid); this.assert(context);
+    const bots = await Promise.all(this.options.store.list().map(async b => ({ instanceId: b.bot_id, name: b.name, description: b.description, ...(b.model ? { model: b.model } : {}),
+      requiredResources: await this.requiredResources(b.bot_id) }))); this.assert(context); return bots;
   }
-  async bindLocalBot(uid: string, input: BindLocalTeamBotInput): Promise<{ botKey: string; revision: number }> {
-    const key = JSON.stringify([uid, input?.teamId, input?.botId]);
-    if (this.bindingOperations.has(key)) throw new Error('BOT_REVISION_CONFLICT');
-    this.bindingOperations.add(key);
-    try { return await this.bind(uid, input); } finally { this.bindingOperations.delete(key); }
+  private async requiredResources(instanceId: string): Promise<string[]> {
+    const bot = this.options.store.get(instanceId); if (!bot.marketOrigin) return [];
+    const path = join(this.options.store.botDir(instanceId), 'market-package.json');
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try { const info = await handle.stat(); if (!info.isFile() || info.nlink !== 1 || info.size > 1024 * 1024) throw new Error('INVALID_BOT_PACKAGE');
+      return validateBotManifest(JSON.parse(await handle.readFile('utf8'))).resources.filter(r => r.required).map(r => r.id); }
+    finally { await handle.close(); }
   }
-  private async bind(uid: string, input: BindLocalTeamBotInput): Promise<{ botKey: string; revision: number }> {
-    this.available(); const context = this.context(uid), service = this.options.service;
-    if (!input || Object.keys(input).some(key => !['teamId', 'generation', 'botId', 'use', 'uids', 'expectedRevision'].includes(key))
-      || !/^[A-Za-z0-9_-]{8,64}$/u.test(input.teamId) || !/^[A-Za-z0-9_-]{22}$/u.test(input.botId)
-      || !Number.isSafeInteger(input.generation) || input.generation < 1
-      || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0
-      || !['all', 'listed'].includes(input.use) || !Array.isArray(input.uids) || input.uids.length > 200
-      || !input.uids.every(value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(value))
-      || new Set(input.uids).size !== input.uids.length) throw new Error('INVALID_INPUT');
-    this.options.binaries(); // Surface an unsupported/unpackaged runtime before enabling a card.
-    const bot = this.options.store.get(input.botId);
-    const botKey = `bot:${uid}:${this.options.privateStore.hostId}:${bot.bot_id}`;
-    const cards = await service.hostMessages<{ bots: TeamBotCard[] }>(context, { action: 'bots', teamId: input.teamId, generation: input.generation });
-    service.assertHostContext(context);
-    if ((cards.bots.find(card => card.key === botKey)?.revision ?? 0) !== input.expectedRevision) throw new Error('BOT_REVISION_CONFLICT');
-    const selected = bot.model ?? this.options.defaultModel();
-    if (!selected) throw new Error('TEAM_MODEL_UNAVAILABLE');
-    const selection = await this.options.modelRoute(selected); service.assertHostContext(context);
-    const route = structuredClone(selection.route);
-    validateTeamModelRoute(route);
-    const instructions = await this.options.content.teamInstructions(input.botId); service.assertHostContext(context);
-    // A racing local edit cannot bind a mixture of two Bot configurations.
-    if (this.options.store.get(input.botId).revision !== bot.revision) throw new Error('BOT_REVISION_CONFLICT');
-    const accounts = await this.options.modelAccounts(route.credential_id, route.model_provider, selection.profiles); service.assertHostContext(context);
-    if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
-    await selection.assertCurrent(); service.assertHostContext(context);
-    const snapshot = await this.options.privateStore.saveSnapshot(uid, { instructions, ...route, provider_account_profiles: selection.profiles }); service.assertHostContext(context);
-    await selection.assertCurrent(); service.assertHostContext(context);
-    this.stopBinding(input.teamId, botKey);
-    // Save the intended revision first. A lost bind response can then be discovered,
-    // while a rejected request never matches the server card and cannot execute.
-    const binding: BotTeamBinding = { ownerUid: uid, teamId: input.teamId, generation: input.generation,
-      botKey, revision: input.expectedRevision + 1, snapshot, use: input.use, uids: [...input.uids].sort() };
-    const current = this.options.store.get(input.botId);
-    if (current.revision !== bot.revision) throw new Error('BOT_REVISION_CONFLICT');
-    this.options.store.setTeamBindings(bot.bot_id, [...(current.teams ?? []).filter(value => value.ownerUid !== uid || value.teamId !== input.teamId), binding]);
+  async selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]> {
+    this.available(); const context = this.context(uid); this.options.store.get(instanceId);
+    const paths = await this.options.chooseFiles(); this.assert(context);
+    if (!Array.isArray(paths) || paths.length > 49) throw new Error('INVALID_SHARED_FILE');
+    for (const [token,selected] of this.selections) if (selected.expires<=this.now()) this.selections.delete(token);
+    if (this.selections.size+paths.length>200) throw new Error('SHARED_FILE_LIMIT');
+    const result: SelectedSharedFile[] = []; let total = 0;
+    for (const path of paths) {
+      if (typeof path !== 'string' || resolve(path) !== path || !['.md','.txt','.csv','.json'].includes(extname(path).toLowerCase())) throw new Error('INVALID_SHARED_FILE');
+      // Refuse links at every path component. Only the captured bytes are published.
+      let parent = dirname(path); while (parent !== parse(parent).root) { if (!(await lstat(parent)).isDirectory()) throw new Error('INVALID_SHARED_FILE'); parent = dirname(parent); }
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      let text: string;
+      try { const info = await handle.stat(); if (!info.isFile() || info.nlink !== 1 || info.size > 256 * 1024) throw new Error('INVALID_SHARED_FILE');
+        const bytes = Buffer.alloc(256 * 1024 + 1); let length=0;
+        while (length<bytes.length) { const part=await handle.read(bytes,length,bytes.length-length,length); if (!part.bytesRead) break; length+=part.bytesRead; }
+        const after=await handle.stat();
+        if (length>256*1024 || after.size!==length || after.nlink!==1 || after.mtimeMs!==info.mtimeMs || after.ctimeMs!==info.ctimeMs) throw new Error('INVALID_SHARED_FILE');
+        text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0,length)); }
+      finally { await handle.close(); }
+      this.assert(context); total += Buffer.byteLength(text); if (!text.trim() || text.includes('\0') || total > 2 * 1024 * 1024) throw new Error('INVALID_SHARED_FILE');
+      const name = basename(path), token = newId(), hash = digest(text);
+      const document: PublishedDocument = { resourceId: newId(), revision: 1, kind: name === 'SKILL.md' ? 'skill' : 'file', name, text, digest: hash };
+      this.selections.set(token, { context, instanceId, expires: this.now() + 600000, document });
+      result.push({ token, name, sha256: hash, bytes: Buffer.byteLength(text), mediaType: 'text/plain', kind: document.kind as 'file' | 'skill' });
+    }
+    return result;
+  }
+  async publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }> {
+    this.available(); const context = this.context(uid), key = JSON.stringify([uid, input?.teamId, input?.sharedBotId]);
+    if (this.publishing.has(key)) throw new Error('BOT_REVISION_CONFLICT'); this.publishing.add(key);
     try {
-      const result = await service.hostMessages<{ botKey: string; revision: number }>(context, {
-        action: 'bindBot', teamId: input.teamId, generation: input.generation, hostId: this.options.privateStore.hostId,
-        botId: bot.bot_id, name: bot.name, description: bot.description, use: input.use, uids: [...input.uids], expectedRevision: input.expectedRevision,
-      });
-      service.assertHostContext(context);
-      if (result.botKey !== botKey || result.revision !== binding.revision) throw new Error('INVALID_BOT_BINDING');
-      return result;
-    } finally { this.wake(); }
-  }
-  stopBinding(teamId: string, botKey: string): void {
-    const prefix = scopeKey(teamId, botKey);
-    for (const [key, active] of this.active) if (key.startsWith(`${prefix}:`)) { active.controller.abort(); this.active.delete(key); }
-    this.heartbeats.delete(prefix); this.scans.delete(prefix); this.scheduled.delete(prefix);
-    for (const map of [this.emptyQueues, this.observations, this.blocked]) for (const key of map.keys()) if (key.startsWith(`${prefix}:`)) map.delete(key);
-  }
-  /** Called synchronously before local Bot deletion/settings changes are published. */
-  localChanged(): void { this.cancelAll(); this.wake(); }
-  invalidate(): void { this.cancelAll(); this.scans.clear(); this.emptyQueues.clear(); this.observations.clear(); this.scheduled.clear(); this.blocked.clear(); this.heartbeats.clear(); this.statuses.clear(); this.wake(); }
-  runStatus(uid: string, teamId: string, conversationId: string, triggerId: string): string | undefined {
-    this.context(uid); return this.statuses.get(JSON.stringify([uid, teamId, conversationId, triggerId]));
-  }
-  private status(target: TeamBotTarget, value?: string): void {
-    const key = JSON.stringify([target.ownerUid, target.teamId, target.conversationId, target.triggerId]);
-    if (this.statuses.get(key) === value) return;
-    if (value) this.statuses.set(key, value); else this.statuses.delete(key);
-    // The owner UI needs the diagnostic, but this synchronous local echo is
-    // not a remote queue change and must not drive another observation.
-    this.notifyingStatus = true;
-    try { this.options.service.notifyHostChanged?.(); } finally { this.notifyingStatus = false; }
-  }
-  private cancelAll(): void { this.revision++; for (const active of this.active.values()) active.controller.abort(); this.active.clear(); }
-  private wake(): void {
-    if (this.closed || (this.options.platform ?? process.platform) !== 'darwin') return;
-    this.pending = true;
-    if (this.refresh) return;
-    this.refresh = (async () => {
-      while (this.pending && !this.closed) {
-        this.pending = false;
-        this.failedDiscovery = false;
-        try { await this.discover(); } catch { this.failedDiscovery = true; this.cancelAll(); }
+      if (!input || Object.keys(input).some(k => !['teamId','generation','publicationId','sharedBotId','instanceId','expectedRevision','usePolicy','fileTokens','quotas','role','resourceBindings'].includes(k))
+        || ![input.teamId,input.publicationId,input.sharedBotId,input.instanceId].every(id) || !Number.isSafeInteger(input.generation) || input.generation < 1
+        || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0 || typeof input.role !== 'string' || !input.role.trim() || input.role.includes('\0') || Buffer.byteLength(input.role) > 64 * 1024
+        || !Array.isArray(input.fileTokens) || input.fileTokens.length > 49 || new Set(input.fileTokens).size !== input.fileTokens.length) throw new Error('INVALID_INPUT');
+      const policy = input.usePolicy;
+      const member = (value: unknown): boolean => !!value && typeof value === 'object' && !Array.isArray(value)
+        && Object.keys(value).sort().join(',') === 'generation,uid' && typeof (value as {uid?:unknown}).uid === 'string'
+        && /^[A-Za-z0-9_-]{1,128}$/u.test((value as {uid:string}).uid) && Number.isSafeInteger((value as {generation?:unknown}).generation) && (value as {generation:number}).generation > 0;
+      if (!policy || typeof policy !== 'object' || (policy.mode === 'all' ? Object.keys(policy).join(',') !== 'mode' : policy.mode !== 'listed'
+        || Object.keys(policy).sort().join(',') !== 'members,mode' || !Array.isArray(policy.members) || policy.members.length > 200 || !policy.members.every(member)
+        || new Set(policy.members.map(m=>m.uid)).size !== policy.members.length)
+        || !input.quotas || typeof input.quotas !== 'object' || Object.keys(input.quotas).sort().join(',') !== 'bot,member,team'
+        || Object.values(input.quotas).some(n=>!Number.isSafeInteger(n)||n<1||n>10000) || input.sharedBotId === input.instanceId) throw new Error('INVALID_INPUT');
+      const requestDigest = digest(JSON.stringify(input));
+      const pending = await this.options.privateStore.publication(uid,input.publicationId); this.assert(context);
+      if (pending) {
+        if (pending.requestDigest !== requestDigest) throw new Error('COMMAND_ID_CONFLICT');
+        const result = await this.command<{sharedBotId:string;revision:number;grantIds:string[]}>(context,pending.binding,'publishSharedBot',pending.payload,input.publicationId); this.assert(context);
+        if (result.sharedBotId !== pending.binding.sharedBotId || result.revision !== pending.binding.revision || JSON.stringify(result.grantIds)!==JSON.stringify(pending.binding.grantIds)) throw new Error('INVALID_PUBLICATION');
+        await this.adoptPublication(context,pending.binding); this.wake(); return {sharedBotId:result.sharedBotId,revision:result.revision};
       }
-    })().finally(() => { this.refresh = undefined; if (this.pending) this.wake(); else this.schedule(); });
+      this.options.binaries(); const bot = this.options.store.get(input.instanceId), selected = bot.model ?? this.options.defaultModel(); if (!selected) throw new Error('TEAM_MODEL_UNAVAILABLE');
+      const route = await this.options.modelRoute(selected); this.assert(context); validateTeamModelRoute(route.route);
+      const accounts = await this.options.modelAccounts(route.route.credential_id, route.route.model_provider, route.profiles); this.assert(context); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
+      const documents: PublishedDocument[] = [{ resourceId: digest(JSON.stringify([input.publicationId, 'persona'])), revision: 1, kind: 'persona', name: 'Role', text: input.role, digest: digest(input.role) }];
+      for (const token of input.fileTokens) { const selection = this.selections.get(token);
+        if (!selection || selection.context.uid !== uid || selection.context.epoch !== context.epoch || selection.instanceId !== input.instanceId || selection.expires <= this.now()) throw new Error('INVALID_SHARED_FILE_TOKEN'); documents.push({...selection.document}); }
+      const required = await this.requiredResources(input.instanceId); this.assert(context);
+      const bindings = input.resourceBindings ?? {};
+      if (!bindings || typeof bindings !== 'object' || Array.isArray(bindings) || Object.keys(bindings).some(key => !required.includes(key))
+        || required.some(key => typeof bindings[key] !== 'string' || !input.fileTokens.includes(bindings[key]!))) throw new Error('RESOURCE_BINDING_REQUIRED');
+      for (const [resource, token] of Object.entries(bindings)) { const selected = this.selections.get(token); const document = documents.find(d => d.resourceId === selected?.document.resourceId); if (document) document.name = `${resource}: ${document.name}`; }
+      await route.assertCurrent(); this.assert(context); if (this.options.store.get(input.instanceId).revision !== bot.revision) throw new Error('BOT_REVISION_CONFLICT');
+      const instructions = [input.role,...documents.filter(d => d.kind === 'skill').map(d => `\n\n# Published Skill: ${d.name}\n${d.text}`)].join('');
+      const snapshot: TeamPersonaSnapshot = { ...route.route, instructions, provider_account_profiles: route.profiles, documents };
+      const snapshotId = await this.options.privateStore.saveSnapshot(uid, snapshot); this.assert(context);
+      if (this.active.size+this.probes>=Math.min(4,this.options.maxConcurrent??4)) throw new Error('TEAM_HOST_BUSY');
+      this.probes++;
+      try { if (this.options.validateModel) await this.options.validateModel(context,snapshot,route); else await this.validateModel(context,snapshot,route); }
+      finally { this.probes--; this.wake(); }
+      this.assert(context);
+      const existing = (await this.options.privateStore.bindings(uid)).find(b => b.teamId === input.teamId && b.sharedBotId === input.sharedBotId);
+      const binding: SharedBotBinding = { schemaVersion: 1, ownerUid: uid, teamId: input.teamId, generation: input.generation, sharedBotId: input.sharedBotId,
+        instanceId: input.instanceId, deploymentId: digest(JSON.stringify([input.publicationId,'deployment'])), revision: input.expectedRevision + 1,
+        snapshot: snapshotId, accountEpoch: Math.max(1, (existing?.accountEpoch ?? 0) + 1), publicationId: input.publicationId,
+        grantIds: documents.map(d => digest(JSON.stringify([input.sharedBotId,input.expectedRevision+1,d.resourceId]))), sessionEpoch: (existing?.sessionEpoch ?? 0) + 1 };
+      const payload = {
+        sharedBotId: input.sharedBotId, expectedRevision: input.expectedRevision, name: bot.name, description: bot.description, usePolicy: input.usePolicy, quotas: input.quotas,
+        deployment: { deploymentId: binding.deploymentId, sharedBotId: binding.sharedBotId, revision: binding.revision, hostId: this.options.privateStore.hostId, owner: { uid, generation: input.generation },
+          instanceId: input.instanceId, definitionDigest: snapshotId, capabilitySnapshotDigest: digest(JSON.stringify({ executionVersion: 2, documents: documents.map(d => d.digest) })), executionVersion: 2,
+          capabilities: { durableWait: false, writeOperations: false, delegation: false }, accountEpoch: binding.accountEpoch, enabled: true },
+        inputs: documents.map(d => ({ resourceId: d.resourceId, revision: d.revision, digest: d.digest, kind: d.kind, sourceAudience: { mode: 'team' } })),
+      };
+      await this.options.privateStore.savePublication(uid,{schemaVersion:1,requestDigest,binding,payload}); this.assert(context);
+      const result = await this.command<{sharedBotId:string;revision:number;grantIds:string[]}>(context,binding,'publishSharedBot',payload,input.publicationId);
+      this.assert(context); if (result.sharedBotId !== binding.sharedBotId || result.revision !== binding.revision || JSON.stringify(result.grantIds) !== JSON.stringify(binding.grantIds)) throw new Error('INVALID_PUBLICATION');
+      if (await this.adoptPublication(context,binding)) this.activated.set(scopeKey(binding),activation(binding,context)); for (const token of input.fileTokens) this.selections.delete(token); this.wake(); return { sharedBotId: result.sharedBotId, revision: result.revision };
+    } finally { this.publishing.delete(key); this.wake(); }
   }
-  private schedule(): void {
-    clearTimeout(this.timer); this.timer = undefined;
-    if (this.closed) return;
-    const now = (this.options.now ?? Date.now)();
-    const deadlines = [...this.heartbeats.values()].map(value => value + 20000);
-    for (const value of this.observations.values()) if (value.until > now) deadlines.push(value.until);
-    if (this.scans.size && this.slots.size < (this.options.maxConcurrent ?? 4)) deadlines.push(now + 1);
-    if (this.failedDiscovery) deadlines.push(now + (this.options.retryMs ?? 5000));
-    if (!deadlines.length) return;
-    const delay = this.failedDiscovery ? this.options.retryMs ?? 5000 : Math.max(1, Math.min(...deadlines) - now);
-    this.timer = setTimeout(() => this.wake(), delay); this.timer.unref();
+  private async adoptPublication(c: TeamAccountContext, candidate: SharedBotBinding): Promise<boolean> {
+    const directory=await this.command<{bots:SharedBotCard[]}>(c,candidate,'listSharedBots',{}); this.assert(c);
+    if (!directory.bots.some(card=>card.sharedBotId===candidate.sharedBotId&&card.revision===candidate.revision&&card.maintainer.uid===c.uid&&card.maintainer.generation===candidate.generation)) return false;
+    const current=(await this.options.privateStore.bindings(c.uid)).find(b=>b.teamId===candidate.teamId&&b.sharedBotId===candidate.sharedBotId); this.assert(c);
+    if (current && (current.revision>candidate.revision || current.revision===candidate.revision && current.accountEpoch>=candidate.accountEpoch)) return false;
+    await this.options.privateStore.saveBinding(c.uid,candidate); this.assert(c); this.stopBinding(candidate.teamId,candidate.sharedBotId); this.activated.delete(scopeKey(candidate)); return true;
   }
-  /** Exposed for deterministic lifecycle tests and trusted app shutdown only. */
-  async idle(): Promise<void> {
-    do {
-      await this.refresh;
-      await Promise.all([...this.slots].map(value => value.ready));
-      await new Promise<void>(resolve => setImmediate(resolve));
-      await Promise.all([...this.slots].filter(value => value.settling).map(value => value.promise));
-    } while (this.refresh);
+  /** Explicit owner publication checks the chosen model with one bounded private call. */
+  private async validateModel(c: TeamAccountContext, snapshot: TeamPersonaSnapshot, selection: TeamModelSelection): Promise<void> {
+    const paths = await this.options.privateStore.owner(c.uid), bins = this.options.binaries(), taskId = newId();
+    const scope: BotChatScope = { teamId:newId(),sharedBotId:newId(),conversationId:newId(),sessionEpoch:1 };
+    const source = {messageId:newId(),seq:1,changeSeq:1,changeId:newId(),author:{kind:'user',uid:c.uid,displayName:'Publisher'},createdAt:this.now(),text:'Reply with READY to confirm this model is available.'};
+    const reference = await this.options.privateStore.dataRef(c.uid,{schemaVersion:1,batchId:taskId,...scope,expectedSessionRevision:0,fromSeqExclusive:0,toSeqInclusive:1,lastChangeSeq:1,bootstrap:true,currentMessageId:source.messageId,messages:[source],changes:[]});
+    const assert = () => this.assert(c); const authorize = async () => { assert(); await selection.assertCurrent(); assert(); };
+    try {
+      await authorize(); const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
+      const {credential_id:_credential,provider_account_profiles:_profiles,instructions:_instructions,documents:_documents,...model} = snapshot;
+      const result = await (this.options.run ?? runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,assertCurrent:assert,authorize,signal:AbortSignal.timeout(45000),timeoutMs:45000,
+        accountCredentials:async request => { await authorize(); const selected=accounts.providerAccountCredentials[request.accountId];
+          if (!selected || selected.identity_generation !== request.identityGeneration) throw new Error('TEAM_MODEL_UNAVAILABLE');
+          await this.options.renewModelAccount?.(request.accountId,request.identityGeneration,request.credentialRevision); await authorize();
+          const refreshed=await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!refreshed) throw new Error('TEAM_MODEL_UNAVAILABLE'); return refreshed; },
+        bootstrap:{version:3,type:'run',storageRoot:paths.runtime,workerExecutable:bins.worker,scope,taskId,invocationId:randomUUID(),instructions:'Confirm model readiness. Reply READY. Do not call tools.',inputBatchRef:reference,knowledge:[],deadlineAt:this.now()+45000,
+          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),limits:{max_turns:1,context_window_tokens:32768,output_tokens_per_request:64,physical_dispatches:1}}});
+      assert(); if (result.status !== 'completed' || !result.text?.trim()) throw new Error('TEAM_MODEL_UNAVAILABLE'); await authorize();
+    } finally { await this.options.privateStore.releaseDataRef(c.uid,reference); }
   }
-  private async discover(): Promise<void> {
-    const context = this.options.service.hostContext();
-    if (!context) { this.cancelAll(); return; }
-    const service = this.options.service, version = this.revision;
-    const assert = () => { service.assertHostContext(context); if (this.closed || version !== this.revision) throw new Error('INVALID_SESSION'); };
-    const own = this.options.store.list().flatMap(bot => (bot.teams ?? []).filter(binding => binding.ownerUid === context.uid).map(binding => ({ bot, binding })));
-    if (!own.length) { this.cancelAll(); return; }
-    const pendingTargets = await this.options.privateStore.pending(context.uid); assert();
-    const { teams } = await service.list(context.uid); assert();
-    type Candidate = { bot: ReturnType<BotStore['list']>[number]; binding: BotTeamBinding; conversation?: TeamConversation; pending?: PendingTeamTarget };
-    const groups: Array<{ scope: string; candidates: Candidate[] }> = [];
-    const validScopes = new Set<string>();
-    for (const team of teams) {
-      const local = own.filter(value => value.binding.teamId === team.id && value.binding.generation === team.generation);
-      if (!local.length) continue;
+  stopBinding(teamId: string, sharedBotId: string) { for (const [key, a] of this.active) { const scope = JSON.parse(key) as string[]; if (scope[0] === teamId && scope[1] === sharedBotId) a.controller.abort(); } this.heartbeats.delete(JSON.stringify([teamId,sharedBotId])); }
+  localChanged() { this.invalidate(); }
+  invalidate() { this.revision++; for (const a of this.active.values()) a.controller.abort(); this.selections.clear(); this.deferred.clear(); this.activated.clear(); this.heartbeats.clear(); this.wake(); }
+  private wake() {
+    if (this.closed || (this.options.platform ?? process.platform) !== 'darwin') return; this.pending = true; if (this.refresh) return;
+    this.refresh = (async () => { while (this.pending && !this.closed) { this.pending = false; try { await this.discover(); } catch { /* Retry discovery; a failed authorization never starts work. */ } } })()
+      .finally(() => { this.refresh = undefined; clearTimeout(this.timer); if (!this.closed) { this.timer = setTimeout(() => this.wake(), this.options.retryMs ?? 5000); this.timer.unref(); } });
+  }
+  async idle() { await this.refresh; }
+  private async discover() {
+    const c = this.options.service.hostContext(); if (!c) return; const revision = this.revision;
+    const assert = () => { this.assert(c); if (revision !== this.revision) throw new Error('INVALID_SESSION'); };
+    let bindings = await this.options.privateStore.bindings(c.uid); assert();
+    for (const publication of await this.options.privateStore.publications(c.uid)) {
+      assert(); const candidate=publication.binding;
+      const current=bindings.find(b=>b.teamId===candidate.teamId&&b.sharedBotId===candidate.sharedBotId);
+      if (this.publishing.has(JSON.stringify([c.uid,candidate.teamId,candidate.sharedBotId])) || current && current.revision>=candidate.revision) continue;
       try {
-        const { bots } = await service.hostMessages<{ bots: TeamBotCard[] }>(context, { action: 'bots', teamId: team.id, generation: team.generation }); assert();
-        for (const { bot, binding } of local) {
-          const card = bots.find(card => card.enabled !== false && card.key === binding.botKey && card.ownerUid === context.uid && card.hostId === this.options.privateStore.hostId
-            && card.botId === bot.bot_id && card.revision === binding.revision && card.use === binding.use
-            && JSON.stringify([...card.uids].sort()) === JSON.stringify(binding.uids));
-          if (!card) continue;
-          const scope = scopeKey(team.id, binding.botKey), now = (this.options.now ?? Date.now)();
-          validScopes.add(scope);
-          if (now - (this.heartbeats.get(scope) ?? -Infinity) >= 20_000) {
-            await service.hostMessages(context, { action: 'heartbeatBot', teamId: team.id, generation: team.generation, botKey: binding.botKey, revision: binding.revision }); assert();
-            this.heartbeats.set(scope, now);
-          }
-          // One bounded page per Bot per pass. Ordinary human-only threads cannot
-          // consume this scan, and a large directory resumes on the next pass.
-          const after = this.scans.get(scope);
-          const page = await service.hostMessages<{ conversations: TeamConversation[]; next?: string | null }>(context,
-            { action: 'botConversations', teamId: team.id, generation: team.generation, botKey: binding.botKey, ...(after ? { after } : {}) }); assert();
-          if (!Array.isArray(page.conversations) || page.conversations.length > 100
-            || page.next && (!/^[A-Za-z0-9_-]{8,64}$/u.test(page.next) || after && page.next <= after)) throw new Error('INVALID_BOT_QUEUE');
-          if (page.next) this.scans.set(scope, page.next); else this.scans.delete(scope);
-          const saved = pendingTargets.filter(value => value.target.ownerUid === context.uid && value.target.ownerGeneration === team.generation
-            && value.target.teamId === team.id && value.target.botKey === binding.botKey && value.target.hostId === this.options.privateStore.hostId
-            && value.target.botId === bot.bot_id && value.target.botRevision === binding.revision && value.snapshot === binding.snapshot);
-          const savedIds = new Set(saved.map(value => value.target.conversationId));
-          groups.push({ scope, candidates: [
-            ...saved.map(pending => ({ bot, binding, pending })),
-            ...page.conversations.filter(conversation => conversation.participants.includes(binding.botKey) && !savedIds.has(conversation.id))
-              .map(conversation => ({ bot, binding, conversation })),
-          ] });
-        }
-      } catch (error) {
-        assert();
-        const code = error instanceof Error ? error.message : '';
-        if (['INVALID_SESSION', 'SIGN_IN_REQUIRED'].includes(code)) throw error;
-        // A failed Team cannot cancel independent Teams. Stop only this Team on
-        // an authorization/protocol failure; transient HTTP errors defer discovery.
-        if (['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'BOT_OWNER_REQUIRED', 'BOT_REVISION_CONFLICT', 'INVALID_BOT_QUEUE'].includes(code)) {
-          for (const { binding } of local) { validScopes.delete(scopeKey(team.id, binding.botKey)); this.stopBinding(team.id, binding.botKey); }
-        } else { this.failedDiscovery = true; for (const { binding } of local) validScopes.add(scopeKey(team.id, binding.botKey)); }
-      }
+        const directory=await this.command<{bots:SharedBotCard[]}>(c,candidate,'listSharedBots',{}); assert();
+        if (!directory.bots.some(card=>card.sharedBotId===candidate.sharedBotId&&card.revision===candidate.revision&&card.maintainer.uid===c.uid)) continue;
+        const receipt=await this.command<{sharedBotId:string;revision:number;grantIds:string[]}>(c,candidate,'publishSharedBot',publication.payload,candidate.publicationId); assert();
+        if(receipt.sharedBotId!==candidate.sharedBotId||receipt.revision!==candidate.revision||JSON.stringify(receipt.grantIds)!==JSON.stringify(candidate.grantIds))throw new Error('INVALID_PUBLICATION');
+        await this.adoptPublication(c,candidate); assert();
+        bindings=await this.options.privateStore.bindings(c.uid); assert();
+      } catch { assert(); }
     }
-    assert();
-    for (const [key, active] of this.active) if (![...validScopes].some(scope => key.startsWith(`${scope}:`))) active.controller.abort();
-    for (const map of [this.scans, this.heartbeats, this.scheduled]) for (const scope of map.keys()) if (!validScopes.has(scope)) map.delete(scope);
-    groups.sort((a, b) => (this.scheduled.get(a.scope) ?? 0) - (this.scheduled.get(b.scope) ?? 0));
-    const limit = this.options.maxConcurrent ?? 4;
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 16) throw new Error('INVALID_HOST_CONCURRENCY');
-    // Round robin across Bots; the resumable scan rotates their conversations.
-    while (groups.some(group => group.candidates.length) && this.slots.size < limit) {
-      for (const group of groups) {
-        if (!validScopes.has(group.scope)) { group.candidates = []; continue; }
-        if (this.slots.size >= limit) break;
-        const candidate = group.candidates.shift();
-        if (!candidate) continue;
-        const { bot, binding, conversation } = candidate, scope = group.scope;
-        const id = candidate.pending?.target.conversationId ?? conversation!.id;
-        const key = `${scope}:${id}`, signature = JSON.stringify([context.uid, context.epoch, binding]);
-        const active = this.active.get(key);
-        if (active) { if (active.signature !== signature) active.controller.abort(); continue; }
-        let pending = candidate.pending;
-        if (pending && !await this.options.privateStore.hasPending(context.uid, pending)) pending = undefined;
-        assert();
-        const retry = pending !== undefined;
-        if (!pending) {
-          if (!conversation) continue;
-          const queueVersion = JSON.stringify([signature, conversation.lastChangeSeq]);
-          if (Number.isSafeInteger(conversation.lastChangeSeq) && this.emptyQueues.get(key) === queueVersion) continue;
-          let queue: QueuePage;
-          try {
-            queue = await service.hostMessages<QueuePage>(context,
-              { action: 'botQueue', teamId: binding.teamId, generation: binding.generation, conversationId: id, botKey: binding.botKey, after: 0 }); assert();
-            if (!Number.isSafeInteger(queue.cursor) || queue.cursor < 0 || !Array.isArray(queue.triggers) || queue.triggers.length > 30) throw new Error('INVALID_BOT_QUEUE');
-            const head = queue.triggers[0];
-            if (head && (!/^[A-Za-z0-9_-]{8,64}$/u.test(head.id) || !Number.isSafeInteger(head.seq) || head.seq <= queue.cursor)) throw new Error('INVALID_BOT_QUEUE');
-          } catch (error) {
-            assert();
-            const code = error instanceof Error ? error.message : '';
-            if (['INVALID_SESSION', 'SIGN_IN_REQUIRED'].includes(code)) throw error;
-            if (['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'BOT_OWNER_REQUIRED', 'BOT_REVISION_CONFLICT', 'INVALID_BOT_QUEUE'].includes(code)) { validScopes.delete(scope); this.stopBinding(binding.teamId, binding.botKey); }
-            else if (code !== 'CONVERSATION_REQUIRED') this.failedDiscovery = true;
-            continue;
-          }
-          const trigger = queue.triggers[0];
-          if (!trigger) { this.emptyQueues.set(key, queueVersion); if (this.emptyQueues.size > 4096) this.emptyQueues.delete(this.emptyQueues.keys().next().value!); this.blocked.delete(key); continue; }
-          this.emptyQueues.delete(key);
-          // A slot is available before persisting a new execution identity.
-          pending = { version: 1, snapshot: binding.snapshot, sequence: trigger.seq,
-            target: { ownerUid: context.uid, ownerGeneration: binding.generation, hostId: this.options.privateStore.hostId,
-              botId: bot.bot_id, botRevision: binding.revision, teamId: binding.teamId, conversationId: id, botKey: binding.botKey, triggerId: trigger.id } };
-          await this.options.privateStore.savePending(context.uid, pending); assert();
+    if (!bindings.length) return;
+    const { teams } = await this.options.service.list(c.uid); assert();
+    const candidates: Array<{ binding: SharedBotBinding; task: HostTask; snapshot: TeamPersonaSnapshot }> = [];
+    for (let b of bindings) {
+      if (!teams.some(t => t.id === b.teamId && t.generation === b.generation)) continue;
+      try {
+        const { bots } = await this.command<{ bots: SharedBotCard[] }>(c,b,'listSharedBots',{}); assert();
+        const card = bots.find(v => v.sharedBotId === b.sharedBotId); if (!card || card.state !== 'published' || card.revision !== b.revision || card.maintainer.uid !== c.uid) { this.stopBinding(b.teamId,b.sharedBotId); continue; }
+        if (this.activated.get(scopeKey(b)) !== activation(b,c)) {
+          const next = b.accountEpoch + 1; await this.command(c,b,'activateDeployment',{ deploymentId:b.deploymentId,hostId:this.options.privateStore.hostId,expectedAccountEpoch:b.accountEpoch,newAccountEpoch:next },digest(JSON.stringify([b.deploymentId,next,'activate']))); assert();
+          b = { ...b, accountEpoch: next }; await this.options.privateStore.saveBinding(c.uid,b); assert(); this.activated.set(scopeKey(b),activation(b,c));
         }
-        const observation = this.observations.get(key);
-        if (observation?.triggerId === pending.target.triggerId && observation.until > (this.options.now ?? Date.now)()) continue;
-          const durable = pending, target = durable.target;
-          if (this.blocked.get(key) === target.triggerId && !retry) continue;
-          const controller = new AbortController();
-          let ready!: () => void;
-          const record: Active = { signature, controller, promise: Promise.resolve(), ready: new Promise(resolve => { ready = resolve; }) };
-          let advanced = false;
-          this.active.set(key, record); this.slots.add(record);
-          this.scheduled.set(scope, ++this.admissions);
-          record.promise = this.execute(context, target, binding, controller, assert, retry, ready).then(async result => {
-            record.settling = true;
-            if (controller.signal.aborted) return;
-            assert();
-            if (result.status === 'unstarted' && !retry) throw new Error('TEAM_HOST_PROTOCOL');
-            if (result.status === 'settled' || result.status === 'unstarted') {
-              await this.options.privateStore.settlePending(context.uid, durable);
-              assert(); if (controller.signal.aborted) return;
-              this.observations.delete(key); this.blocked.delete(key);
-              this.status(target); advanced = true;
-            } else if (result.status === 'recovery_required') {
-              this.status(target, 'recovery_required'); this.blocked.set(key, target.triggerId);
-              const prior = this.observations.get(key);
-              const delay = Math.min(prior?.triggerId === target.triggerId ? prior.delay * 2 : 10000, 60000);
-              this.observations.set(key, { triggerId: target.triggerId, delay, until: (this.options.now ?? Date.now)() + delay });
-            } else if (result.state === 'result_pending') {
-              this.status(target, 'result_pending');
-            }
-          }).catch(error => {
-            if (controller.signal.aborted) return;
-            let code = '';
-            if (error instanceof TeamHostFailure) code = error.code;
-            else if (error instanceof Error) code = error.message;
-            // Journal-lock contention is an observation delay, not evidence
-            // that a saved result or required recovery disappeared.
-            switch (code) {
-              case 'BUSY':
-                return;
-              case 'RESULT_PENDING':
-                this.status(target, 'result_pending');
-                break;
-              case 'MODEL_UNAVAILABLE':
-                this.status(target, 'model_unavailable');
-                break;
-              case 'TEAM_RUNTIME_UNAVAILABLE':
-                this.status(target, 'runtime_unavailable');
-                break;
-              case 'STORAGE':
-              case 'UNSAFE_TEAM_STORAGE':
-              case 'INVALID_TEAM_SNAPSHOT':
-                this.status(target, 'storage_error');
-                break;
-              default:
-                this.status(target, 'retrying');
-            }
-            // Same journal + queue head on retry; never invent a new attempt.
-          }).finally(() => {
-            this.slots.delete(record);
-            if (this.active.get(key) === record) this.active.delete(key);
-            if (advanced || controller.signal.aborted) this.wake(); else this.schedule();
-          });
+        const snapshot = await this.options.privateStore.snapshot(c.uid,b.snapshot); assert(); let ready = true;
+        try { this.options.store.get(b.instanceId); this.options.binaries(); const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) ready = false; } catch { ready = false; }
+        if ((this.heartbeats.get(scopeKey(b)) ?? 0) + 20000 < this.now() || !ready) {
+          await this.command(c,b,'heartbeatDeployment',{...this.hostFields(b),ready}); assert(); this.heartbeats.set(scopeKey(b),this.now());
+        }
+        if (!ready) { this.stopBinding(b.teamId,b.sharedBotId); continue; }
+        let after: string | undefined; const pages = new Set<string>();
+        do {
+          const response = await this.command<{ tasks: HostTask[]; nextCursor?: string | null }>(c,b,'listHostTasks',{...this.hostFields(b),...(after?{after}:{})}); assert();
+          if (!Array.isArray(response.tasks) || response.tasks.length>100) throw new Error('INVALID_TASK_PAGE');
+          for (const task of response.tasks) if (task.state === 'queued' && (this.deferred.get(task.taskId)??0)<=this.now()) candidates.push({binding:b,task,snapshot});
+          if (!response.nextCursor) break;
+          if (!id(response.nextCursor) || pages.has(response.nextCursor)) throw new Error('INVALID_TASK_PAGE');
+          pages.add(response.nextCursor); after=response.nextCursor;
+        } while (after);
+      } catch { this.stopBinding(b.teamId,b.sharedBotId); }
+    }
+    for (const intent of await this.options.privateStore.executions(c.uid)) {
+      assert(); if ([...this.active.values()].some(active => active.taskId === intent.taskId)) continue;
+      let result = await this.options.privateStore.savedResult(c.uid,intent.taskId); assert();
+      if (!result) {
+        try { const paths = await this.options.privateStore.owner(c.uid), bins = this.options.binaries();
+          const recovered = await (this.options.run ?? runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,signal:AbortSignal.timeout(10000),timeoutMs:10000,assertCurrent:assert,
+            bootstrap:{version:3,type:'inspect_result',storageRoot:paths.runtime,workerExecutable:bins.worker,scope:intent.scope,taskId:intent.taskId}});
+          assert(); if (recovered.status === 'completed' || recovered.status === 'failed') result=recovered;
+        } catch { assert(); }
       }
+      if (result) await this.saveResult(c,intent,result);
+    }
+    for (const delivery of await this.options.privateStore.deliveries(c.uid)) {
+      assert(); const b = (await this.options.privateStore.bindings(c.uid)).find(b => b.teamId === delivery.teamId && b.deploymentId === delivery.payload.deploymentId); if (!b) continue;
+      const payload = { ...delivery.payload, accountEpoch: b.accountEpoch };
+      const commandId = delivery.payload.accountEpoch === b.accountEpoch ? delivery.commandId : digest(JSON.stringify([delivery.commandId,b.accountEpoch]));
+      try { await this.command(c,delivery,'completeTask',payload,commandId); assert(); await this.options.privateStore.delivered(c.uid,delivery.taskId); } catch { /* Persist exact result for delivery, never run its model again. */ }
+    }
+    candidates.sort((a,b) => (this.scheduled.get(serialKey(a.binding,a.task)) ?? 0) - (this.scheduled.get(serialKey(b.binding,b.task)) ?? 0) || a.task.messageSeq - b.task.messageSeq);
+    for (const candidate of candidates) {
+      assert(); if (this.active.size+this.probes >= Math.min(4,this.options.maxConcurrent ?? 4)) break;
+      const key = serialKey(candidate.binding,candidate.task); if (this.active.has(key)) continue;
+      const controller = new AbortController(); this.scheduled.set(key,this.now());
+      const promise = this.execute(c,candidate.binding,candidate.task,candidate.snapshot,controller.signal).catch(() => { this.deferred.set(candidate.task.taskId,this.now()+(this.options.retryMs??5000)); }).finally(() => { this.active.delete(key); this.wake(); });
+      this.active.set(key,{taskId:candidate.task.taskId,controller,promise});
     }
   }
-  private async execute(context: TeamAccountContext, target: TeamBotTarget, binding: BotTeamBinding, controller: AbortController, assert: () => void, retry: boolean, ready: () => void): Promise<TeamHostResult> {
+  private async execute(c: TeamAccountContext, b: SharedBotBinding, task: HostTask, snapshot: TeamPersonaSnapshot, signal: AbortSignal) {
+    const execution = new AbortController(); signal = AbortSignal.any([signal, execution.signal]);
+    const assert = () => { this.assert(c); signal.throwIfAborted(); };
+    const fields = {...this.hostFields(b),taskId:task.taskId}, paths = await this.options.privateStore.owner(c.uid), bins = this.options.binaries(); assert();
+    const prepared = await this.command<TaskContext>(c,b,'prepareTask',fields); assert();
+    const scope: BotChatScope = { teamId:b.teamId, sharedBotId:b.sharedBotId, conversationId:task.conversationId, sessionEpoch:b.sessionEpoch };
+    const run = this.options.run ?? runTeamHost;
+    const inspected = await run({ executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,bootstrap:{version:3,type:'inspect_scope',storageRoot:paths.runtime,workerExecutable:bins.worker,scope} }); assert();
+    const cursor = inspected.cursor, sourceScope = {teamId:b.teamId,generation:b.generation,conversationId:task.conversationId};
+    if (cursor.lastMessageSeq >= prepared.messageSeq) throw new Error('TASK_INPUT_ALREADY_COMMITTED');
+    const source = await this.options.service.hostReadChat(c,{...sourceScope,...(cursor.sessionRevision === 0 ? {mode:'recent' as const,throughSeq:prepared.messageSeq} : {mode:'range' as const,fromSeqExclusive:cursor.lastMessageSeq,toSeqInclusive:prepared.messageSeq})}); assert();
+    const changes = cursor.lastMessageSeq ? await this.options.service.hostReadChat(c,{...sourceScope,mode:'changes',afterChangeSeq:cursor.lastChangeSeq,throughMessageSeq:cursor.lastMessageSeq}) : undefined; assert();
+    if (changes && (changes.lastChangeSeq < source.lastChangeSeq
+      || changes.messages.some(message => message.changeSeq > source.lastChangeSeq))) throw new Error('CHAT_CHANGED');
+    if (prepared.deployment.definitionDigest !== b.snapshot || prepared.deployment.accountEpoch !== b.accountEpoch || prepared.inputs.some(g => !snapshot.documents.some(d => d.resourceId === g.resourceId && d.digest === g.digest))
+      || prepared.inputs.length !== snapshot.documents.length) throw new Error('INPUT_GRANT_REQUIRED');
+    const reference = await this.options.privateStore.dataRef(c.uid,{schemaVersion:1,batchId:task.taskId,...scope,expectedSessionRevision:cursor.sessionRevision,
+      fromSeqExclusive:cursor.sessionRevision === 0 ? Math.max(0,prepared.messageSeq-200) : cursor.lastMessageSeq,toSeqInclusive:prepared.messageSeq,lastChangeSeq:source.lastChangeSeq,
+      bootstrap:cursor.sessionRevision === 0,currentMessageId:prepared.messageId,messages:source.messages,changes:changes?.messages ?? []});
+    const references = [reference]; let interval: ReturnType<typeof setInterval> | undefined;
     try {
-    const binaries = this.options.binaries(), roots = await this.options.privateStore.owner(context.uid); assert();
-    let snapshot: TeamPersonaSnapshot | undefined, accounts: ProviderAccountLaunch | undefined;
-    if (!retry) {
-      snapshot = await this.options.privateStore.snapshot(context.uid, binding.snapshot); assert();
-      accounts = await this.options.modelAccounts(snapshot.credential_id, snapshot.model_provider, snapshot.provider_account_profiles); assert();
-    }
-    if (controller.signal.aborted) throw new Error('INVALID_SESSION');
-    const assertCurrent = () => {
-      assert(); if (controller.signal.aborted) throw new Error('INVALID_SESSION');
-      const bot = this.options.store.get(target.botId);
-      if (!(bot.teams ?? []).some(current => JSON.stringify(current) === JSON.stringify(binding))) throw new Error('BOT_REVISION_CONFLICT');
-    };
-    assertCurrent();
-    return (this.options.run ?? runTeamHost)({ executable: binaries.host, home: roots.home, tmp: roots.tmp,
-      bootstrap: { version: 1, type: 'start', mode: retry ? 'retry_result' : 'run', owner_uid: context.uid, account_epoch: context.epoch,
-        endpoint: 'https://lingxios.net/v1/teams/messages', journal_root: roots.journal, runtime_root: roots.runtime,
-        worker_executable: binaries.worker, target, ...(accounts ? { credentials: providerAccountEnvelope(accounts, snapshot!.provider_account_profiles) } : {}), ...(accounts && snapshot ? { snapshot: { instructions: snapshot.instructions, model_provider: snapshot.model_provider, model_protocol: snapshot.model_protocol,
-          model_id: snapshot.model_id, model_endpoint: snapshot.model_endpoint, model_profile: snapshot.model_profile,
-          max_turns: 8, max_input_bytes: 32 * 1024, output_tokens_per_request: 2048, physical_dispatches: 12 } } : {}) },
-      accountCredentials: snapshot && this.options.modelAccounts ? async request => {
-        assertCurrent();
-        const current = await this.options.modelAccounts!(snapshot!.credential_id, snapshot!.model_provider, snapshot!.provider_account_profiles); assertCurrent();
-        if (!current?.providerAccounts.accounts.some(account => account.accountId === request.accountId && account.identityGeneration === request.identityGeneration)) throw new Error('TEAM_MODEL_UNAVAILABLE');
-        if (!this.options.renewModelAccount) throw new Error('TEAM_MODEL_UNAVAILABLE');
-        await this.options.renewModelAccount(request.accountId, request.identityGeneration, request.credentialRevision); assertCurrent();
-        const refreshed = await this.options.modelAccounts!(snapshot!.credential_id, snapshot!.model_provider, snapshot!.provider_account_profiles); assertCurrent();
-        if (!refreshed) throw new Error('TEAM_MODEL_UNAVAILABLE');
-        return refreshed;
-      } : undefined,
-      signal: controller.signal, assertCurrent, token: () => this.options.service.hostToken(context),
-      permission: async (input, signal) => {
-        assertCurrent(); const allow = await this.options.permission({ ...input, accountEpoch: context.epoch, assertCurrent }, signal).catch(() => false); assertCurrent(); return allow === true;
-      } });
-    } finally { ready(); }
+    assert(); const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    const startPayload={...fields,expectedLastChangeSeq:source.lastChangeSeq};
+    const started = await this.command<TaskContext & {execute:boolean;permitId?:string}>(c,b,'startTask',startPayload,digest(JSON.stringify(['startTask',startPayload,reference.sha256]))); assert();
+    if (!started.execute || !started.permitId) { this.deferred.set(task.taskId,this.now()+(this.options.retryMs??5000)); return; }
+    this.deferred.delete(task.taskId);
+    const permitId = started.permitId;
+    const intent: SavedExecution = { schemaVersion:1, scope, teamId:b.teamId,generation:b.generation,taskId:task.taskId,
+      commandId:digest(JSON.stringify([task.taskId,'delivery'])),payload:{...fields,permitId,inputGrantIds:b.grantIds} };
+    await this.options.privateStore.saveExecution(c.uid,intent); assert();
+    const authorize = async () => { assert(); await this.command(c,b,'validateTask',{...fields,permitId,expectedLastChangeSeq:source.lastChangeSeq}); assert(); };
+    interval = setInterval(() => { void authorize().catch(() => execution.abort()); },2000); interval.unref();
+      const {credential_id:_credential,provider_account_profiles:_profiles,instructions,documents,...model} = snapshot;
+      const result = await run({executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,authorize,
+        bootstrap:{version:3,type:'run',storageRoot:paths.runtime,workerExecutable:bins.worker,scope,taskId:task.taskId,invocationId:randomUUID(),instructions,
+          inputBatchRef:reference,knowledge:documents.filter(d=>d.kind==='file').map(d=>({id:d.resourceId,title:d.name,text:d.text})),deadlineAt:started.task.deadline,
+          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),limits:{max_turns:20,context_window_tokens:2000000,output_tokens_per_request:4096,physical_dispatches:32}},
+        accountCredentials:async request => { await authorize();
+          const permitted = accounts.providerAccountCredentials[request.accountId]; if (!permitted || permitted.identity_generation !== request.identityGeneration) throw new Error('TEAM_MODEL_UNAVAILABLE');
+          await this.options.renewModelAccount?.(request.accountId,request.identityGeneration,request.credentialRevision); assert();
+          const current = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!current) throw new Error('TEAM_MODEL_UNAVAILABLE'); return current; },
+        readChat:async query => { await authorize();
+          if (query.kind==='before' && query.before_seq>prepared.messageSeq+1 || query.kind==='range' && query.to_seq_inclusive>prepared.messageSeq) throw new Error('HISTORY_BOUND_EXCEEDED');
+          const request: ChatReadRequest = {...sourceScope,...(query.kind==='before' ? {mode:'before' as const,beforeSeq:query.before_seq,limit:query.limit} : query.kind==='range' ? {mode:'range' as const,fromSeqExclusive:query.from_seq_exclusive,toSeqInclusive:query.to_seq_inclusive} : {mode:'byId' as const,messageId:query.message_id})};
+          const result = await this.options.service.hostReadChat(c,request); assert(); if (result.messages.some(message=>message.seq>prepared.messageSeq)) throw new Error('HISTORY_BOUND_EXCEEDED');
+          await authorize(); const ref = await this.options.privateStore.dataRef(c.uid,{messages:result.messages,complete:query.kind !== 'before' || !result.hasMore,nextBeforeSeq:query.kind === 'before' && result.hasMore ? result.messages[0]?.seq ?? null : null}); references.push(ref); return ref; },
+      }); assert();
+      const delivery = await this.saveResult(c,intent,result); assert();
+      await this.command(c,b,'completeTask',delivery.payload,delivery.commandId); assert(); await this.options.privateStore.delivered(c.uid,task.taskId);
+    } finally { clearInterval(interval); await Promise.all(references.map(ref=>this.options.privateStore.releaseDataRef(c.uid,ref))); }
   }
-  close(): void { if (this.closed) return; this.closed = true; clearTimeout(this.timer); this.stops.forEach(stop => stop()); this.cancelAll(); }
+  private async saveResult(c: TeamAccountContext, intent: SavedExecution, result: TeamHostResult) {
+    const payload = {...intent.payload,outcome:result.status==='completed'?'completed':'failed',text:result.text || 'The assistant could not complete this request.',finishedAt:result.finishedAt,
+      outputAudience:{mode:'published_inputs'},usage:result.usage ?? {status:'missing'},...(result.document ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
+    const delivery = {...intent,payload}; await this.options.privateStore.saveDelivery(c.uid,delivery); return delivery;
+  }
+  close() { this.closed=true; clearTimeout(this.timer); for(const stop of this.stops)stop(); for(const a of this.active.values())a.controller.abort(); this.selections.clear(); }
 }

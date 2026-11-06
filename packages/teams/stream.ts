@@ -1,4 +1,4 @@
-import type { TeamMessage } from './messages.js';
+import { authorIdentity, type TeamMessage } from './messages.js';
 
 /** Messages from one author within this long of each other read as one run. */
 export const GROUP_WINDOW_MS = 5 * 60_000;
@@ -72,7 +72,7 @@ export function formatListTime(value: string | null | undefined, now: Date | num
   return new Intl.DateTimeFormat(locale, { ...zone, month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) }).format(ms);
 }
 
-const sameAuthor = (a: TeamMessage['author'], b: TeamMessage['author']) => a.kind === b.kind && a.uid === b.uid && (a.botKey ?? '') === (b.botKey ?? '');
+const sameAuthor = (a: TeamMessage['author'], b: TeamMessage['author']) => authorIdentity(a) === authorIdentity(b);
 
 /** The first unread message written by someone else: where the "new messages" divider goes. */
 export function firstUnreadMessage(messages: readonly TeamMessage[], lastReadSeq: number, uid: string): TeamMessage | undefined {

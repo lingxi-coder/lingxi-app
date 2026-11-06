@@ -1,3837 +1,3910 @@
 {
- "_meta": {
-  "about": "Shared test vectors for SPEC-mobile-team-bot-ui.md section 8. Sections teams/stream/compose/avatars(index, color, initials)/lastMessage were produced by EXECUTING the real Desktop modules (packages/teams/{workspace,stream,compose,firestore}.ts, apps/electron AgentAvatar.tsx, packages/teams/ui.tsx) on 2026-11-03 with Node 25 --experimental-transform-types; the composerLock cases mirror Composer.tsx by hand (it is a .tsx). Everything under \"mobile\" has no Desktop counterpart: those expectations come from reference implementations of the rules in section 8.6.",
-  "nowMs": 1793613600000,
-  "now": "2026-11-02T10:00:00Z",
-  "zone": "UTC (day boundaries, clocks)",
-  "uid": "u1",
-  "encoding": {
-   "instants": "ISO-8601 UTC strings or epoch milliseconds (field name ends in Ms).",
-   "conversations[].at": "absent = conversation has no lastMessage pointer; null = pointer whose server timestamp is not stamped yet; string = lastMessage.at. The pointer used by the list tests is {id:\"m\"+id, seq:lastSeq, at, author:{kind:\"user\",uid:\"u2\"}, preview:\"hi\"}.",
-   "labels[].conversation / previews": "{id} refers to conversations[]; otherwise a full inline conversation. zh=true selects strings.zh, false strings.en.",
-   "lastMessage[].input": "{\"$ts\": ISO} stands for a Firestore Timestamp; {\"$absent\": true} means the field is not present in the document at all (differs from an explicit null).",
-   "stream rows": "\"message:<id>:head|grouped\", \"date:<YYYY-MM-DD>:today|yesterday|other\", \"unread\".",
-   "listTimeKinds / dayLabelKinds": "classification only; each platform formats the string with its own date APIs (see section 8.2).",
-   "\"<unit>×<N>\"": "N repetitions of the single code point before the multiplication sign (kept short in the file); expand before use.",
-   "compose.*": "indices (caret, start) are UTF-16 code-unit offsets, as in JavaScript; snippet counts Unicode code points; byteLength is UTF-8 bytes."
-  }
- },
- "members": [
-  {
-   "uid": "u1",
-   "displayName": "Me"
+  "_meta": {
+    "about": "Execution-2 SharedBot presentation vectors. Human-only sorting/read/compose cases retained; Bot identity, author and card fixtures replaced for the new contract. Avatar-only fixtures continue to test independent personal avatar rendering.",
+    "nowMs": 1793613600000,
+    "now": "2026-11-02T10:00:00Z",
+    "zone": "UTC (day boundaries, clocks)",
+    "uid": "u1",
+    "encoding": {
+      "instants": "ISO-8601 UTC strings or epoch milliseconds (field name ends in Ms).",
+      "conversations[].at": "absent = conversation has no lastMessage pointer; null = pointer whose server timestamp is not stamped yet; string = lastMessage.at. The pointer used by the list tests is {id:\"m\"+id, seq:lastSeq, at, author:{kind:\"user\",uid:\"u2\"}, preview:\"hi\"}.",
+      "labels[].conversation / previews": "{id} refers to conversations[]; otherwise a full inline conversation. zh=true selects strings.zh, false strings.en.",
+      "lastMessage[].input": "{\"$ts\": ISO} stands for a Firestore Timestamp; {\"$absent\": true} means the field is not present in the document at all (differs from an explicit null).",
+      "stream rows": "\"message:<id>:head|grouped\", \"date:<YYYY-MM-DD>:today|yesterday|other\", \"unread\".",
+      "listTimeKinds / dayLabelKinds": "classification only; each platform formats the string with its own date APIs (see section 8.2).",
+      "\"<unit>×<N>\"": "N repetitions of the single code point before the multiplication sign (kept short in the file); expand before use.",
+      "compose.*": "indices (caret, start) are UTF-16 code-unit offsets, as in JavaScript; snippet counts Unicode code points; byteLength is UTF-8 bytes."
+    }
   },
-  {
-   "uid": "u2",
-   "displayName": "Ann"
-  },
-  {
-   "uid": "u3",
-   "displayName": "Bob"
-  },
-  {
-   "uid": "u9",
-   "displayName": "Zed"
-  }
- ],
- "bots": [
-  {
-   "key": "bot:t1:h:helper",
-   "ownerUid": "u1",
-   "hostId": "h",
-   "botId": "helper",
-   "name": "Helper",
-   "permitted": true,
-   "online": true,
-   "enabled": true
-  }
- ],
- "conversations": [
-  {
-   "id": "a",
-   "kind": "channel",
-   "title": "alpha",
-   "participants": [],
-   "lastSeq": 3,
-   "lastReadSeq": 3,
-   "at": "2026-11-02T10:00:00Z"
-  },
-  {
-   "id": "b",
-   "kind": "channel",
-   "title": "beta",
-   "participants": [],
-   "lastSeq": 9,
-   "lastReadSeq": 0,
-   "at": "2026-11-02T11:00:00Z"
-  },
-  {
-   "id": "c",
-   "kind": "channel",
-   "title": "room 10",
-   "participants": [],
-   "lastSeq": 4,
-   "lastReadSeq": 4
-  },
-  {
-   "id": "d",
-   "kind": "channel",
-   "title": "room 2",
-   "participants": [],
-   "lastSeq": 4,
-   "lastReadSeq": 4
-  },
-  {
-   "id": "e",
-   "kind": "channel",
-   "title": "zeta",
-   "participants": [],
-   "lastSeq": 7,
-   "lastReadSeq": 7
-  },
-  {
-   "id": "f",
-   "kind": "channel",
-   "title": "pending",
-   "participants": [],
-   "lastSeq": 8,
-   "lastReadSeq": 8,
-   "at": null
-  },
-  {
-   "id": "g",
-   "kind": "channel",
-   "title": "same",
-   "participants": [],
-   "lastSeq": 2,
-   "lastReadSeq": 2,
-   "at": "2026-11-02T11:00:00Z"
-  },
-  {
-   "id": "dm1",
-   "kind": "dm",
-   "title": "",
-   "participants": [
-    "user:u1",
-    "user:u2"
-   ],
-   "lastSeq": 2,
-   "lastReadSeq": 0,
-   "at": "2026-11-02T09:00:00Z"
-  },
-  {
-   "id": "grp",
-   "kind": "group",
-   "title": "Ann, Bob, You",
-   "participants": [
-    "user:u1",
-    "user:u2",
-    "user:u3"
-   ],
-   "lastSeq": 5,
-   "lastReadSeq": 5,
-   "at": "2026-11-02T12:00:00Z"
-  },
-  {
-   "id": "bd1",
-   "kind": "bot_dm",
-   "title": "Helper",
-   "participants": [
-    "user:u1",
-    "bot:t1:h:helper"
-   ],
-   "lastSeq": 1,
-   "lastReadSeq": 1,
-   "at": "2026-11-02T08:00:00Z",
-   "botKey": "bot:t1:h:helper"
-  },
-  {
-   "id": "bd2",
-   "kind": "bot_dm",
-   "title": "Helper",
-   "participants": [
-    "user:u9",
-    "bot:t1:h:helper"
-   ],
-   "lastSeq": 1,
-   "lastReadSeq": 1,
-   "at": "2026-11-02T13:00:00Z",
-   "botKey": "bot:t1:h:helper"
-  },
-  {
-   "id": "bd3",
-   "kind": "bot_dm",
-   "title": "Other",
-   "participants": [
-    "user:u1",
-    "bot:t1:h:other"
-   ],
-   "lastSeq": 1,
-   "lastReadSeq": 1,
-   "at": "2026-11-02T07:00:00Z",
-   "botKey": "bot:t1:h:other"
-  }
- ],
- "unreadCount": [
-  {
-   "lastSeq": 5,
-   "lastReadSeq": 2,
-   "expect": 3
-  },
-  {
-   "lastSeq": 2,
-   "lastReadSeq": 5,
-   "expect": 0
-  },
-  {
-   "lastSeq": 0,
-   "lastReadSeq": 0,
-   "expect": 0
-  }
- ],
- "sort": {
-  "input": [
-   "a",
-   "b",
-   "c",
-   "d",
-   "e",
-   "f",
-   "g"
-  ],
-  "expect": [
-   "b",
-   "g",
-   "a",
-   "f",
-   "e",
-   "d",
-   "c"
-  ]
- },
- "group": {
-  "input": [
-   "a",
-   "b",
-   "dm1",
-   "grp",
-   "bd2",
-   "bd1",
-   "bd3"
-  ],
-  "expect": {
-   "channels": [
-    "b",
-    "a"
-   ],
-   "direct": [
-    "grp",
-    "dm1"
-   ],
-   "botDirect": [
-    "bd1",
-    "bd3",
-    "bd2"
-   ]
-  }
- },
- "labels": [
-  {
-   "conversation": {
-    "id": "x",
-    "kind": "channel",
-    "title": "  ",
-    "participants": []
-   },
-   "zh": false,
-   "expect": "Channel",
-   "name": "channel with a blank title"
-  },
-  {
-   "conversation": {
-    "id": "x",
-    "kind": "channel",
-    "title": "alpha",
-    "participants": []
-   },
-   "zh": false,
-   "expect": "alpha",
-   "name": "channel with a title"
-  },
-  {
-   "conversation": {
-    "id": "dm1"
-   },
-   "zh": false,
-   "expect": "Ann",
-   "name": "dm: the other person (stored title empty)"
-  },
-  {
-   "conversation": {
-    "id": "x",
-    "kind": "dm",
-    "title": "",
-    "participants": [
-     "user:u1"
-    ]
-   },
-   "zh": false,
-   "expect": "Direct message",
-   "name": "dm with only yourself, no title"
-  },
-  {
-   "conversation": {
-    "id": "x",
-    "kind": "dm",
-    "title": "",
-    "participants": [
-     "user:u1"
-    ]
-   },
-   "zh": true,
-   "expect": "私信",
-   "name": "same, Chinese"
-  },
-  {
-   "conversation": {
-    "id": "x",
-    "kind": "group",
-    "title": "Me, Ann, Bob",
-    "participants": [
-     "user:u1",
-     "user:u2",
-     "user:u3"
-    ]
-   },
-   "zh": false,
-   "expect": "Ann, Bob",
-   "name": "group whose title is the generated default (hidden)"
-  },
-  {
-   "conversation": {
-    "id": "x",
-    "kind": "group",
-    "title": "Launch crew",
-    "participants": [
-     "user:u1",
-     "user:u2",
-     "user:u3"
-    ]
-   },
-   "zh": false,
-   "expect": "Launch crew",
-   "name": "group with a chosen title"
-  },
-  {
-   "conversation": {
-    "id": "x",
-    "kind": "group",
-    "title": "",
-    "participants": [
-     "user:u1",
-     "user:u7"
-    ]
-   },
-   "zh": false,
-   "expect": "Member",
-   "name": "group of you + one unlisted member"
-  },
-  {
-   "conversation": {
-    "id": "x",
-    "kind": "group",
-    "title": "",
-    "participants": [
-     "user:u1",
-     "user:u7"
-    ]
-   },
-   "zh": true,
-   "expect": "成员",
-   "name": "same, Chinese"
-  },
-  {
-   "conversation": {
-    "id": "bd1"
-   },
-   "zh": false,
-   "expect": "Helper",
-   "name": "Bot DM of yours: the Bot name"
-  },
-  {
-   "conversation": {
-    "id": "bd2"
-   },
-   "zh": false,
-   "expect": "Helper · Zed",
-   "name": "Bot owner reading someone else’s Bot DM"
-  },
-  {
-   "conversation": {
-    "id": "x",
-    "kind": "bot_dm",
-    "title": "Legacy",
-    "participants": [
-     "user:u1",
-     "bot:zz"
-    ]
-   },
-   "zh": false,
-   "expect": "Legacy",
-   "name": "Bot DM without a Bot card: stored title"
-  }
- ],
- "defaultConversationTitle": [
-  {
-   "uids": [
-    "u2",
-    "u3"
-   ],
-   "limit": 120,
-   "expect": "Me, Ann, Bob"
-  },
-  {
-   "uids": [
-    "u2",
-    "u3"
-   ],
-   "limit": 8,
-   "expect": "Me, Ann"
-  }
- ],
- "participants": {
-  "conversation": "bd2",
-  "expect": [
-   {
-    "kind": "user",
-    "id": "u9",
-    "name": "Zed",
-    "self": false
-   },
-   {
-    "kind": "bot",
-    "id": "helper",
-    "name": "Helper",
-    "self": false
-   }
-  ]
- },
- "finds": {
-  "botDm": "bd1",
-  "dm": "dm1",
-  "dmMissing": null
- },
- "previews": {
-  "authorNames": {
-   "u2": "Ann",
-   "bot": "Bot"
-  },
-  "cases": [
-   {
-    "kind": "dm",
-    "lastMessage": null,
-    "zh": false,
-    "expect": "No messages yet",
-    "name": "no message, English"
-   },
-   {
-    "kind": "dm",
-    "lastMessage": null,
-    "zh": true,
-    "expect": "暂无消息",
-    "name": "no message, Chinese"
-   },
-   {
-    "kind": "dm",
-    "lastMessage": {
-     "id": "m",
-     "seq": 1,
-     "at": "2026-11-02T10:00:00Z",
-     "author": {
-      "kind": "user",
-      "uid": "u1"
-     },
-     "preview": "hello"
-    },
-    "zh": false,
-    "expect": "You: hello",
-    "name": "own message, English"
-   },
-   {
-    "kind": "dm",
-    "lastMessage": {
-     "id": "m",
-     "seq": 1,
-     "at": "2026-11-02T10:00:00Z",
-     "author": {
-      "kind": "user",
-      "uid": "u1"
-     },
-     "preview": "hello"
-    },
-    "zh": true,
-    "expect": "你：hello",
-    "name": "own message, Chinese"
-   },
-   {
-    "kind": "dm",
-    "lastMessage": {
-     "id": "m",
-     "seq": 1,
-     "at": "2026-11-02T10:00:00Z",
-     "author": {
-      "kind": "user",
-      "uid": "u2"
-     },
-     "preview": "hello"
-    },
-    "zh": false,
-    "expect": "hello",
-    "name": "other person in a dm: no author prefix"
-   },
-   {
-    "kind": "group",
-    "lastMessage": {
-     "id": "m",
-     "seq": 1,
-     "at": "2026-11-02T10:00:00Z",
-     "author": {
-      "kind": "user",
-      "uid": "u2"
-     },
-     "preview": "hello"
-    },
-    "zh": false,
-    "expect": "Ann: hello",
-    "name": "other person in a group: author prefix"
-   },
-   {
-    "kind": "channel",
-    "lastMessage": {
-     "id": "m",
-     "seq": 1,
-     "at": "2026-11-02T10:00:00Z",
-     "author": {
-      "kind": "user",
-      "uid": "u2"
-     },
-     "preview": "hello"
-    },
-    "zh": true,
-    "expect": "Ann：hello",
-    "name": "other person in a channel, Chinese separator"
-   },
-   {
-    "kind": "dm",
-    "lastMessage": {
-     "id": "m",
-     "seq": 1,
-     "at": "2026-11-02T10:00:00Z",
-     "author": {
-      "kind": "user",
-      "uid": "u2"
-     },
-     "preview": "x",
-     "recalled": true
-    },
-    "zh": false,
-    "expect": "Message recalled",
-    "name": "recalled by someone else"
-   },
-   {
-    "kind": "dm",
-    "lastMessage": {
-     "id": "m",
-     "seq": 1,
-     "at": "2026-11-02T10:00:00Z",
-     "author": {
-      "kind": "user",
-      "uid": "u1"
-     },
-     "preview": "x",
-     "recalled": true
-    },
-    "zh": true,
-    "expect": "你：消息已撤回",
-    "name": "recalled by you, Chinese"
-   },
-   {
-    "kind": "dm",
-    "lastMessage": {
-     "id": "m",
-     "seq": 1,
-     "at": "2026-11-02T10:00:00Z",
-     "author": {
-      "kind": "user",
-      "uid": "u2"
-     },
-     "preview": ""
-    },
-    "zh": false,
-    "expect": "[Non-text message]",
-    "name": "non-text (empty preview)"
-   },
-   {
-    "kind": "group",
-    "lastMessage": {
-     "id": "m",
-     "seq": 1,
-     "at": null,
-     "author": {
-      "kind": "bot",
-      "uid": "u5",
-      "botKey": "bot:k"
-     },
-     "preview": "done"
-    },
-    "zh": false,
-    "expect": "Bot: done",
-    "name": "Bot author in a group, pointer time not stamped"
-   }
-  ]
- },
- "stream": {
-  "lastReadSeq": 4,
-  "messages": [
-   {
-    "id": "m1",
-    "seq": 1,
-    "authorKind": "user",
-    "authorUid": "u2",
-    "createdAtMs": 1793577480000,
-    "recalled": false,
-    "authorBotKey": null
-   },
-   {
-    "id": "m2",
-    "seq": 2,
-    "authorKind": "user",
-    "authorUid": "u2",
-    "createdAtMs": 1793577540000,
-    "recalled": false,
-    "authorBotKey": null
-   },
-   {
-    "id": "m3",
-    "seq": 3,
-    "authorKind": "user",
-    "authorUid": "u2",
-    "createdAtMs": 1793577660000,
-    "recalled": false,
-    "authorBotKey": null
-   },
-   {
-    "id": "m4",
-    "seq": 4,
-    "authorKind": "user",
-    "authorUid": "u2",
-    "createdAtMs": 1793578080000,
-    "recalled": false,
-    "authorBotKey": null
-   },
-   {
-    "id": "m5",
-    "seq": 5,
-    "authorKind": "user",
-    "authorUid": "u1",
-    "createdAtMs": 1793578140000,
-    "recalled": false,
-    "authorBotKey": null
-   },
-   {
-    "id": "m6",
-    "seq": 6,
-    "authorKind": "user",
-    "authorUid": "u2",
-    "createdAtMs": 1793578200000,
-    "recalled": false,
-    "authorBotKey": null
-   },
-   {
-    "id": "m7",
-    "seq": 7,
-    "authorKind": "user",
-    "authorUid": "u2",
-    "createdAtMs": 1793578260000,
-    "recalled": true,
-    "authorBotKey": null
-   },
-   {
-    "id": "m8",
-    "seq": 8,
-    "authorKind": "user",
-    "authorUid": "u2",
-    "createdAtMs": 1793578320000,
-    "recalled": false,
-    "authorBotKey": null
-   },
-   {
-    "id": "m9",
-    "seq": 9,
-    "authorKind": "user",
-    "authorUid": "u2",
-    "createdAtMs": null,
-    "recalled": false,
-    "authorBotKey": null
-   },
-   {
-    "id": "m10",
-    "seq": 10,
-    "authorKind": "bot",
-    "authorUid": "u2",
-    "createdAtMs": 1793578380000,
-    "recalled": false,
-    "authorBotKey": "bot:k"
-   }
-  ],
-  "expectRows": [
-   "date:2026-11-01:yesterday",
-   "message:m1:head",
-   "message:m2:grouped",
-   "date:2026-11-02:today",
-   "message:m3:head",
-   "message:m4:head",
-   "message:m5:head",
-   "unread",
-   "message:m6:head",
-   "message:m7:grouped",
-   "message:m8:head",
-   "message:m9:head",
-   "message:m10:head"
-  ],
-  "expectRowsAllRead": [
-   "date:2026-11-01:yesterday",
-   "message:m1:head",
-   "message:m2:grouped",
-   "date:2026-11-02:today",
-   "message:m3:head",
-   "message:m4:head",
-   "message:m5:head",
-   "message:m6:head",
-   "message:m7:grouped",
-   "message:m8:head",
-   "message:m9:head",
-   "message:m10:head"
-  ],
-  "ownOnly": {
-   "messages": [
+  "members": [
     {
-     "id": "a",
-     "seq": 1,
-     "authorKind": "user",
-     "authorUid": "u1",
-     "createdAtMs": 1793577660000,
-     "recalled": false
+      "uid": "u1",
+      "displayName": "Me"
     },
     {
-     "id": "b",
-     "seq": 2,
-     "authorKind": "user",
-     "authorUid": "u1",
-     "createdAtMs": 1793577720000,
-     "recalled": false
-    }
-   ],
-   "lastReadSeq": 0,
-   "expectRows": [
-    "date:2026-11-02:today",
-    "message:a:head",
-    "message:b:grouped"
-   ]
-  },
-  "groupWindowMs": 300000,
-  "firstUnreadId": "m6",
-  "more": [
-   {
-    "name": "Bot authors: same uid but different botKey never group",
-    "lastReadSeq": 3,
-    "uid": "u1",
-    "messages": [
-     {
-      "id": "b1",
-      "seq": 1,
-      "authorKind": "bot",
-      "authorUid": "u5",
-      "authorBotKey": "bot:a",
-      "createdAtMs": 1793606400000,
-      "recalled": false
-     },
-     {
-      "id": "b2",
-      "seq": 2,
-      "authorKind": "bot",
-      "authorUid": "u5",
-      "authorBotKey": "bot:b",
-      "createdAtMs": 1793606460000,
-      "recalled": false
-     },
-     {
-      "id": "b3",
-      "seq": 3,
-      "authorKind": "bot",
-      "authorUid": "u5",
-      "authorBotKey": "bot:b",
-      "createdAtMs": 1793606520000,
-      "recalled": false
-     }
-    ],
-    "expectRows": [
-     "date:2026-11-02:today",
-     "message:b1:head",
-     "message:b2:head",
-     "message:b3:grouped"
-    ]
-   },
-   {
-    "name": "Group window is inclusive: exactly 5 min groups, 5 min + 1 ms does not",
-    "lastReadSeq": 3,
-    "uid": "u1",
-    "messages": [
-     {
-      "id": "x1",
-      "seq": 1,
-      "authorKind": "user",
-      "authorUid": "u2",
-      "authorBotKey": null,
-      "createdAtMs": 1793606400000,
-      "recalled": false
-     },
-     {
-      "id": "x2",
-      "seq": 2,
-      "authorKind": "user",
-      "authorUid": "u2",
-      "authorBotKey": null,
-      "createdAtMs": 1793606700000,
-      "recalled": false
-     },
-     {
-      "id": "x3",
-      "seq": 3,
-      "authorKind": "user",
-      "authorUid": "u2",
-      "authorBotKey": null,
-      "createdAtMs": 1793607000001,
-      "recalled": false
-     }
-    ],
-    "expectRows": [
-     "date:2026-11-02:today",
-     "message:x1:head",
-     "message:x2:grouped",
-     "message:x3:head"
-    ]
-   },
-   {
-    "name": "A message without a time never groups and never starts a day",
-    "lastReadSeq": 3,
-    "uid": "u1",
-    "messages": [
-     {
-      "id": "y1",
-      "seq": 1,
-      "authorKind": "user",
-      "authorUid": "u2",
-      "authorBotKey": null,
-      "createdAtMs": 1793606400000,
-      "recalled": false
-     },
-     {
-      "id": "y2",
-      "seq": 2,
-      "authorKind": "user",
-      "authorUid": "u2",
-      "authorBotKey": null,
-      "createdAtMs": null,
-      "recalled": false
-     },
-     {
-      "id": "y3",
-      "seq": 3,
-      "authorKind": "user",
-      "authorUid": "u2",
-      "authorBotKey": null,
-      "createdAtMs": 1793606401000,
-      "recalled": false
-     }
-    ],
-    "expectRows": [
-     "date:2026-11-02:today",
-     "message:y1:head",
-     "message:y2:head",
-     "message:y3:head"
-    ]
-   },
-   {
-    "name": "Unread divider: first message by someone else after the watermark; own messages never anchor",
-    "lastReadSeq": 1,
-    "uid": "u1",
-    "messages": [
-     {
-      "id": "z1",
-      "seq": 1,
-      "authorKind": "user",
-      "authorUid": "u2",
-      "authorBotKey": null,
-      "createdAtMs": 1793606400000,
-      "recalled": false
-     },
-     {
-      "id": "z2",
-      "seq": 2,
-      "authorKind": "user",
-      "authorUid": "u1",
-      "authorBotKey": null,
-      "createdAtMs": 1793606401000,
-      "recalled": false
-     },
-     {
-      "id": "z3",
-      "seq": 3,
-      "authorKind": "user",
-      "authorUid": "u2",
-      "authorBotKey": null,
-      "createdAtMs": 1793606402000,
-      "recalled": false
-     },
-     {
-      "id": "z4",
-      "seq": 4,
-      "authorKind": "user",
-      "authorUid": "u2",
-      "authorBotKey": null,
-      "createdAtMs": 1793606403000,
-      "recalled": false
-     }
-    ],
-    "expectRows": [
-     "date:2026-11-02:today",
-     "message:z1:head",
-     "message:z2:head",
-     "unread",
-     "message:z3:head",
-     "message:z4:grouped"
-    ]
-   },
-   {
-    "name": "No divider when everything newer is your own",
-    "lastReadSeq": 1,
-    "uid": "u1",
-    "messages": [
-     {
-      "id": "w1",
-      "seq": 1,
-      "authorKind": "user",
-      "authorUid": "u2",
-      "authorBotKey": null,
-      "createdAtMs": 1793606400000,
-      "recalled": false
-     },
-     {
-      "id": "w2",
-      "seq": 2,
-      "authorKind": "user",
-      "authorUid": "u1",
-      "authorBotKey": null,
-      "createdAtMs": 1793606401000,
-      "recalled": false
-     }
-    ],
-    "expectRows": [
-     "date:2026-11-02:today",
-     "message:w1:head",
-     "message:w2:head"
-    ]
-   },
-   {
-    "name": "Divider message starts its own run even when the author and time would group it",
-    "lastReadSeq": 1,
-    "uid": "u1",
-    "messages": [
-     {
-      "id": "v1",
-      "seq": 1,
-      "authorKind": "user",
-      "authorUid": "u2",
-      "authorBotKey": null,
-      "createdAtMs": 1793606400000,
-      "recalled": false
-     },
-     {
-      "id": "v2",
-      "seq": 2,
-      "authorKind": "user",
-      "authorUid": "u2",
-      "authorBotKey": null,
-      "createdAtMs": 1793606401000,
-      "recalled": false
-     }
-    ],
-    "expectRows": [
-     "date:2026-11-02:today",
-     "message:v1:head",
-     "unread",
-     "message:v2:head"
-    ]
-   },
-   {
-    "name": "Empty conversation",
-    "lastReadSeq": 0,
-    "uid": "u1",
-    "messages": [],
-    "expectRows": []
-   }
-  ]
- },
- "visibleStart": {
-  "constants": {
-   "WINDOW_SIZE": 100,
-   "WINDOW_MAX": 400,
-   "UNREAD_CONTEXT": 3
-  },
-  "cases": [
-   {
-    "messages": "n1..n150 (150, alternating)",
-    "lastReadSeq": 150,
-    "expect": 50
-   },
-   {
-    "messages": "n1..n150 (150, alternating)",
-    "lastReadSeq": 140,
-    "expect": 50
-   },
-   {
-    "messages": "n1..n150 (150, alternating)",
-    "lastReadSeq": 10,
-    "expect": 7
-   },
-   {
-    "messages": "n1..n150 (150, alternating)",
-    "lastReadSeq": 150,
-    "startId": "n20",
-    "expect": 19
-   },
-   {
-    "messages": "n1..n30 (30, alternating)",
-    "lastReadSeq": 30,
-    "expect": 0
-   },
-   {
-    "messages": "c1..c600 (600, all u2)",
-    "lastReadSeq": 0,
-    "expect": 200
-   }
-  ]
- },
- "listTimeKinds": [
-  {
-   "at": "2026-11-02T08:05:00Z",
-   "expect": "clock"
-  },
-  {
-   "at": "2026-11-01T08:05:00Z",
-   "expect": "yesterday"
-  },
-  {
-   "at": "2026-10-31T08:05:00Z",
-   "expect": "weekday"
-  },
-  {
-   "at": "2026-10-28T08:05:00Z",
-   "expect": "weekday"
-  },
-  {
-   "at": "2026-10-27T08:05:00Z",
-   "expect": "weekday"
-  },
-  {
-   "at": "2026-10-26T08:05:00Z",
-   "expect": "dateThisYear"
-  },
-  {
-   "at": "2025-12-24T08:05:00Z",
-   "expect": "dateOtherYear"
-  },
-  {
-   "at": "nope",
-   "expect": "none"
-  },
-  {
-   "at": null,
-   "expect": "none"
-  }
- ],
- "dayLabelKinds": [
-  {
-   "at": "2026-11-02T01:00:00Z",
-   "expect": "today"
-  },
-  {
-   "at": "2026-11-01T23:59:00Z",
-   "expect": "yesterday"
-  },
-  {
-   "at": "2026-10-31T12:00:00Z",
-   "expect": "dateThisYear"
-  },
-  {
-   "at": "2025-12-24T12:00:00Z",
-   "expect": "dateOtherYear"
-  }
- ],
- "compose": {
-  "canSendText": [
-   {
-    "text": "   ",
-    "expect": false
-   },
-   {
-    "text": "a",
-    "expect": true
-   },
-   {
-    "text": "a×8192",
-    "expect": true
-   },
-   {
-    "text": "a×8193",
-    "expect": false
-   },
-   {
-    "text": "你×2730",
-    "expect": true
-   },
-   {
-    "text": "你×2731",
-    "expect": false
-   }
-  ],
-  "byteLength": [
-   [
-    "🧠",
-    4
-   ],
-   [
-    "你",
-    3
-   ],
-   [
-    "a",
-    1
-   ]
-  ],
-  "messageBytes": 8192,
-  "mentionAt": [
-   {
-    "text": "hi @he",
-    "caret": 6,
-    "expect": {
-     "start": 3,
-     "query": "he"
-    }
-   },
-   {
-    "text": "@",
-    "caret": 1,
-    "expect": {
-     "start": 0,
-     "query": ""
-    }
-   },
-   {
-    "text": "(@Al",
-    "caret": 4,
-    "expect": {
-     "start": 1,
-     "query": "Al"
-    }
-   },
-   {
-    "text": "（@张",
-    "caret": 3,
-    "expect": {
-     "start": 1,
-     "query": "张"
-    }
-   },
-   {
-    "text": "mail me@x",
-    "caret": 9,
-    "expect": null
-   },
-   {
-    "text": "a @b c",
-    "caret": 4,
-    "expect": {
-     "start": 2,
-     "query": "b"
-    }
-   },
-   {
-    "text": "hi @a",
-    "caret": 3,
-    "expect": null
-   },
-   {
-    "text": "x @",
-    "caret": 3,
-    "expect": {
-     "start": 2,
-     "query": ""
-    }
-   }
-  ],
-  "withoutMention": [
-   {
-    "text": "hi @he there",
-    "start": 3,
-    "caret": 6,
-    "expect": "hi there"
-   },
-   {
-    "text": "hi @he",
-    "start": 3,
-    "caret": 6,
-    "expect": "hi "
-   },
-   {
-    "text": "@he there",
-    "start": 0,
-    "caret": 3,
-    "expect": " there"
-   },
-   {
-    "text": "a @b c",
-    "start": 2,
-    "caret": 4,
-    "expect": "a c"
-   }
-  ],
-  "snippet": [
-   {
-    "text": "  a\n\n b\t c  ",
-    "length": 90,
-    "expect": "a b c"
-   },
-   {
-    "text": "x×100",
-    "length": 90,
-    "expect": "x×90…"
-   },
-   {
-    "text": "你×100",
-    "length": 5,
-    "expect": "你你你你你…"
-   },
-   {
-    "text": "🧠×95",
-    "length": 90,
-    "expect": "🧠×90…"
-   }
-  ],
-  "botCards": [
-   {
-    "key": "bot:a",
-    "name": "Alpha",
-    "enabled": true,
-    "permitted": true
-   },
-   {
-    "key": "bot:b",
-    "name": "Bravo",
-    "enabled": false,
-    "permitted": true
-   },
-   {
-    "key": "bot:c",
-    "name": "Charlie",
-    "enabled": true,
-    "permitted": false
-   },
-   {
-    "key": "bot:d",
-    "name": "Delta",
-    "enabled": true,
-    "permitted": true
-   }
-  ],
-  "mentionCandidates": [
-   {
-    "kind": "channel",
-    "participants": [
-     "user:u1",
-     "bot:a",
-     "bot:b",
-     "bot:c",
-     "bot:d"
-    ],
-    "chosen": [],
-    "query": "",
-    "expect": [
-     "bot:a",
-     "bot:d"
-    ]
-   },
-   {
-    "kind": "group",
-    "participants": [
-     "user:u1",
-     "bot:a",
-     "bot:d"
-    ],
-    "chosen": [],
-    "query": "AL",
-    "expect": [
-     "bot:a"
-    ]
-   },
-   {
-    "kind": "group",
-    "participants": [
-     "user:u1",
-     "bot:a",
-     "bot:d"
-    ],
-    "chosen": [
-     "bot:a"
-    ],
-    "query": "",
-    "expect": [
-     "bot:d"
-    ]
-   },
-   {
-    "kind": "dm",
-    "participants": [
-     "user:u1",
-     "user:u2"
-    ],
-    "chosen": [],
-    "query": "",
-    "expect": []
-   },
-   {
-    "kind": "bot_dm",
-    "participants": [
-     "user:u1",
-     "bot:a"
-    ],
-    "chosen": [],
-    "query": "",
-    "expect": []
-   }
-  ],
-  "composerLock": [
-   {
-    "uid": "u1",
-    "kind": "dm",
-    "participants": [
-     "user:u1",
-     "user:u2"
-    ],
-    "bots": [],
-    "botsLoaded": true,
-    "botsUnverified": false,
-    "expect": "none"
-   },
-   {
-    "uid": "u1",
-    "kind": "dm",
-    "participants": [],
-    "bots": [],
-    "botsLoaded": true,
-    "botsUnverified": false,
-    "expect": "none"
-   },
-   {
-    "uid": "u1",
-    "kind": "bot_dm",
-    "participants": [
-     "user:u9",
-     "bot:a"
-    ],
-    "bots": [
-     "bot:a"
-    ],
-    "botsLoaded": true,
-    "botsUnverified": false,
-    "expect": "ownerReading"
-   },
-   {
-    "uid": "u1",
-    "kind": "bot_dm",
-    "participants": [
-     "user:u1",
-     "bot:a"
-    ],
-    "bots": [
-     "bot:a"
-    ],
-    "botsLoaded": true,
-    "botsUnverified": false,
-    "expect": "none"
-   },
-   {
-    "uid": "u1",
-    "kind": "bot_dm",
-    "participants": [
-     "user:u1",
-     "bot:a"
-    ],
-    "bots": [],
-    "botsLoaded": true,
-    "botsUnverified": true,
-    "expect": "botUnverified"
-   },
-   {
-    "uid": "u1",
-    "kind": "bot_dm",
-    "participants": [
-     "user:u1",
-     "bot:a"
-    ],
-    "bots": [],
-    "botsLoaded": false,
-    "botsUnverified": false,
-    "expect": "botChecking"
-   },
-   {
-    "uid": "u1",
-    "kind": "bot_dm",
-    "participants": [
-     "user:u1",
-     "bot:c"
-    ],
-    "bots": [
-     "bot:c"
-    ],
-    "botsLoaded": true,
-    "botsUnverified": false,
-    "expect": "botUnavailable"
-   },
-   {
-    "uid": "u1",
-    "kind": "bot_dm",
-    "participants": [
-     "user:u1",
-     "bot:b"
-    ],
-    "bots": [
-     "bot:b"
-    ],
-    "botsLoaded": true,
-    "botsUnverified": false,
-    "expect": "botUnavailable"
-   },
-   {
-    "uid": "u1",
-    "kind": "group",
-    "participants": [
-     "user:u1",
-     "bot:c"
-    ],
-    "bots": [
-     "bot:c"
-    ],
-    "botsLoaded": true,
-    "botsUnverified": false,
-    "expect": "none"
-   }
-  ],
-  "maxTargets": 8
- },
- "avatars": {
-  "indexPrefixed": [
-   {
-    "agentId": "",
-    "expect": 14,
-    "legacyMobileWouldGive": 0
-   },
-   {
-    "agentId": "main",
-    "expect": 1,
-    "legacyMobileWouldGive": 13
-   },
-   {
-    "agentId": "agent-review-42",
-    "expect": 26,
-    "legacyMobileWouldGive": 13
-   },
-   {
-    "agentId": "搜索-agent",
-    "expect": 2,
-    "legacyMobileWouldGive": 20
-   },
-   {
-    "agentId": "🧠-review",
-    "expect": 26,
-    "legacyMobileWouldGive": 23
-   },
-   {
-    "agentId": "a×128",
-    "repeat": {
-     "char": "a",
-     "count": 128
-    },
-    "expect": 12,
-    "legacyMobileWouldGive": 9
-   },
-   {
-    "agentId": "c0ffee00-1234-5678-9abc-def012345678",
-    "expect": 14,
-    "legacyMobileWouldGive": 17
-   },
-   {
-    "agentId": "agent:c0ffee00-1234-5678-9abc-def012345678",
-    "expect": 14,
-    "legacyMobileWouldGive": 14
-   }
-  ],
-  "colorList": [
-   "#4a5fc1",
-   "#2e7d6b",
-   "#b04a6e",
-   "#8a5a1f",
-   "#6b4fa3",
-   "#2a7aa3",
-   "#9a4b2d",
-   "#4f7a28",
-   "#a1427d",
-   "#5a6b78",
-   "#3f6fb5",
-   "#a8571a"
-  ],
-  "color": [
-   {
-    "id": "",
-    "fnv1a": 2166136261,
-    "index": 1,
-    "color": "#2e7d6b"
-   },
-   {
-    "id": "u1",
-    "fnv1a": 71477235,
-    "index": 3,
-    "color": "#8a5a1f"
-   },
-   {
-    "id": "u2",
-    "fnv1a": 88254854,
-    "index": 2,
-    "color": "#b04a6e"
-   },
-   {
-    "id": "abc",
-    "fnv1a": 440920331,
-    "index": 11,
-    "color": "#a8571a"
-   },
-   {
-    "id": "用户",
-    "fnv1a": 3303804768,
-    "index": 0,
-    "color": "#4a5fc1"
-   },
-   {
-    "id": "bot:t1:h:helper",
-    "fnv1a": 3155100593,
-    "index": 5,
-    "color": "#2a7aa3"
-   }
-  ],
-  "initials": [
-   {
-    "name": "Ann Lee",
-    "expect": "AL"
-   },
-   {
-    "name": "张伟",
-    "expect": "张"
-   },
-   {
-    "name": "  ",
-    "expect": "?"
-   },
-   {
-    "name": "ann",
-    "expect": "A"
-   },
-   {
-    "name": "  bob   smith  jr",
-    "expect": "BS"
-   },
-   {
-    "name": "élan vital",
-    "expect": "ÉV"
-   },
-   {
-    "name": "🧠 brain",
-    "expect": "🧠B"
-   },
-   {
-    "name": "カタカナ テスト",
-    "expect": "カ"
-   },
-   {
-    "name": "한글 이름",
-    "expect": "한"
-   },
-   {
-    "name": "Zed",
-    "expect": "Z"
-   }
-  ],
-  "teamBotAvatarId": [
-   [
-    "bot:t1:h:helper",
-    "helper"
-   ],
-   [
-    "helper",
-    "helper"
-   ],
-   [
-    "bot:o:h:a:b",
-    "b"
-   ]
-  ]
- },
- "mobile": {
-  "tabBadgeText": [
-   {
-    "n": 0,
-    "expect": null
-   },
-   {
-    "n": 1,
-    "expect": "1"
-   },
-   {
-    "n": 7,
-    "expect": "7"
-   },
-   {
-    "n": 99,
-    "expect": "99"
-   },
-   {
-    "n": 100,
-    "expect": "99+"
-   },
-   {
-    "n": 1234,
-    "expect": "99+"
-   },
-   {
-    "n": -3,
-    "expect": null
-   }
-  ],
-  "chatWindow": [
-   {
-    "total": 0,
-    "expanded": false,
-    "first": 5,
-    "expect": {
-     "shown": 0,
-     "hidden": 0,
-     "showMore": false,
-     "showLess": false
-    }
-   },
-   {
-    "total": 3,
-    "expanded": false,
-    "first": 5,
-    "expect": {
-     "shown": 3,
-     "hidden": 0,
-     "showMore": false,
-     "showLess": false
-    }
-   },
-   {
-    "total": 5,
-    "expanded": false,
-    "first": 5,
-    "expect": {
-     "shown": 5,
-     "hidden": 0,
-     "showMore": false,
-     "showLess": false
-    }
-   },
-   {
-    "total": 6,
-    "expanded": false,
-    "first": 5,
-    "expect": {
-     "shown": 5,
-     "hidden": 1,
-     "showMore": true,
-     "showLess": false
-    }
-   },
-   {
-    "total": 12,
-    "expanded": false,
-    "first": 5,
-    "expect": {
-     "shown": 5,
-     "hidden": 7,
-     "showMore": true,
-     "showLess": false
-    }
-   },
-   {
-    "total": 12,
-    "expanded": true,
-    "first": 5,
-    "expect": {
-     "shown": 12,
-     "hidden": 0,
-     "showMore": false,
-     "showLess": true
-    }
-   },
-   {
-    "total": 5,
-    "expanded": true,
-    "first": 5,
-    "expect": {
-     "shown": 5,
-     "hidden": 0,
-     "showMore": false,
-     "showLess": false
-    }
-   }
-  ],
-  "sortBots": {
-   "input": [
-    {
-     "botId": "b3",
-     "name": "beta 10",
-     "lastActivityAtMs": 1000
+      "uid": "u2",
+      "displayName": "Ann"
     },
     {
-     "botId": "b1",
-     "name": "Alpha",
-     "lastActivityAtMs": null
+      "uid": "u3",
+      "displayName": "Bob"
     },
     {
-     "botId": "b2",
-     "name": "beta 2",
-     "lastActivityAtMs": 1000
-    },
-    {
-     "botId": "b4",
-     "name": "Zed",
-     "lastActivityAtMs": 5000
-    },
-    {
-     "botId": "b0",
-     "name": "alpha",
-     "lastActivityAtMs": null
+      "uid": "u9",
+      "displayName": "Zed"
     }
-   ],
-   "expect": [
-    "b4",
-    "b2",
-    "b3",
-    "b0",
-    "b1"
-   ]
-  },
-  "sortHosts": {
-   "connected": "h3",
-   "input": [
-    {
-     "hostId": "h1",
-     "name": "Mac",
-     "online": true,
-     "lastSeenMs": 100
-    },
-    {
-     "hostId": "h2",
-     "name": "Linux",
-     "online": false,
-     "lastSeenMs": 900
-    },
-    {
-     "hostId": "h3",
-     "name": "Studio",
-     "online": false,
-     "lastSeenMs": 50
-    },
-    {
-     "hostId": "h4",
-     "name": "Air",
-     "online": true,
-     "lastSeenMs": 500
-    },
-    {
-     "hostId": "h5",
-     "name": "Box",
-     "online": true,
-     "lastSeenMs": 500
-    }
-   ],
-   "expect": [
-    "h3",
-    "h4",
-    "h5",
-    "h1",
-    "h2"
-   ]
-  },
-  "tabBarVisible": [
-   {
-    "wide": false,
-    "depth": 0,
-    "keyboardVisible": false,
-    "drawerOpen": false,
-    "selectedTab": "chats",
-    "overlayOpen": false,
-    "expect": true
-   },
-   {
-    "wide": false,
-    "depth": 1,
-    "keyboardVisible": false,
-    "drawerOpen": false,
-    "selectedTab": "teams",
-    "overlayOpen": false,
-    "expect": false
-   },
-   {
-    "wide": false,
-    "depth": 0,
-    "keyboardVisible": true,
-    "drawerOpen": false,
-    "selectedTab": "chats",
-    "overlayOpen": false,
-    "expect": false
-   },
-   {
-    "wide": false,
-    "depth": 0,
-    "keyboardVisible": false,
-    "drawerOpen": true,
-    "selectedTab": "chats",
-    "overlayOpen": false,
-    "expect": false
-   },
-   {
-    "wide": false,
-    "depth": 0,
-    "keyboardVisible": false,
-    "drawerOpen": true,
-    "selectedTab": "bots",
-    "overlayOpen": false,
-    "expect": true
-   },
-   {
-    "wide": false,
-    "depth": 0,
-    "keyboardVisible": false,
-    "drawerOpen": false,
-    "selectedTab": "settings",
-    "overlayOpen": true,
-    "expect": false
-   },
-   {
-    "wide": true,
-    "depth": 3,
-    "keyboardVisible": true,
-    "drawerOpen": true,
-    "selectedTab": "settings",
-    "overlayOpen": false,
-    "expect": true
-   },
-   {
-    "wide": true,
-    "depth": 0,
-    "keyboardVisible": false,
-    "drawerOpen": false,
-    "selectedTab": "chats",
-    "overlayOpen": true,
-    "expect": false
-   }
   ],
-  "tabForLink": [
-   {
-    "route": "session/abc",
-    "expect": "chats"
-   },
-   {
-    "route": "new",
-    "expect": "chats"
-   },
-   {
-    "route": "project/p",
-    "expect": "chats"
-   },
-   {
-    "route": "apps/a",
-    "expect": "chats"
-   },
-   {
-    "route": "market/m",
-    "expect": "chats"
-   },
-   {
-    "route": "runtime/agent/r1",
-    "expect": "chats"
-   },
-   {
-    "route": "terminal/interactive",
-    "expect": "chats"
-   },
-   {
-    "route": "cron/run/r1",
-    "expect": "chats"
-   },
-   {
-    "route": "cron/job/j1",
-    "expect": "chats"
-   },
-   {
-    "route": "remote/h1/s1",
-    "expect": "bots"
-   },
-   {
-    "route": "team/join",
-    "expect": "teams"
-   },
-   {
-    "route": "team/inbox",
-    "expect": "teams"
-   },
-   {
-    "route": "settings/account",
-    "expect": "settings"
-   },
-   {
-    "route": "settings/permission-mode",
-    "expect": "settings"
-   },
-   {
-    "route": "provider/p1",
-    "expect": "settings"
-   },
-   {
-    "route": "extensions/mcp/x",
-    "expect": "settings"
-   },
-   {
-    "route": "extensions/plugin/y",
-    "expect": "settings"
-   },
-   {
-    "route": "import/provider",
-    "expect": "stay"
-   },
-   {
-    "route": "import/mcp",
-    "expect": "stay"
-   },
-   {
-    "route": "unknown/x",
-    "expect": "none"
-   },
-   {
-    "route": "",
-    "expect": "none"
-   }
-  ],
-  "settingsJump": [
-   {
-    "name": "jump from chats then back",
-    "events": [
-     {
-      "type": "jump",
-      "page": "account",
-      "origin": "chats"
-     },
-     {
-      "type": "back"
-     }
-    ],
-    "trace": [
-     {
-      "event": {
-       "type": "jump",
-       "page": "account",
-       "origin": "chats"
+  "bots": [
+    {
+      "sharedBotId": "sharedbot_helper",
+      "name": "Helper",
+      "description": "",
+      "maintainer": {
+        "uid": "u1",
+        "generation": 1
       },
-      "stack": [
-       "account"
+      "revision": 1,
+      "state": "published",
+      "permitted": true,
+      "ready": true,
+      "onlineUntil": 0,
+      "usePolicy": {
+        "mode": "all"
+      },
+      "quotas": {
+        "team": 100,
+        "member": 100,
+        "bot": 100
+      }
+    }
+  ],
+  "conversations": [
+    {
+      "id": "a",
+      "kind": "channel",
+      "title": "alpha",
+      "participants": [],
+      "lastSeq": 3,
+      "lastReadSeq": 3,
+      "at": "2026-11-02T10:00:00Z"
+    },
+    {
+      "id": "b",
+      "kind": "channel",
+      "title": "beta",
+      "participants": [],
+      "lastSeq": 9,
+      "lastReadSeq": 0,
+      "at": "2026-11-02T11:00:00Z"
+    },
+    {
+      "id": "c",
+      "kind": "channel",
+      "title": "room 10",
+      "participants": [],
+      "lastSeq": 4,
+      "lastReadSeq": 4
+    },
+    {
+      "id": "d",
+      "kind": "channel",
+      "title": "room 2",
+      "participants": [],
+      "lastSeq": 4,
+      "lastReadSeq": 4
+    },
+    {
+      "id": "e",
+      "kind": "channel",
+      "title": "zeta",
+      "participants": [],
+      "lastSeq": 7,
+      "lastReadSeq": 7
+    },
+    {
+      "id": "f",
+      "kind": "channel",
+      "title": "pending",
+      "participants": [],
+      "lastSeq": 8,
+      "lastReadSeq": 8,
+      "at": null
+    },
+    {
+      "id": "g",
+      "kind": "channel",
+      "title": "same",
+      "participants": [],
+      "lastSeq": 2,
+      "lastReadSeq": 2,
+      "at": "2026-11-02T11:00:00Z"
+    },
+    {
+      "id": "dm1",
+      "kind": "dm",
+      "title": "",
+      "participants": [
+        "user:u1",
+        "user:u2"
       ],
-      "origin": "chats",
-      "leaveTo": null
-     },
-     {
-      "event": {
-       "type": "back"
-      },
-      "stack": [],
-      "origin": null,
-      "leaveTo": "chats"
-     }
-    ]
-   },
-   {
-    "name": "deeper pages pop first",
-    "events": [
-     {
-      "type": "jump",
-      "page": "providerList",
-      "origin": "chats"
-     },
-     {
-      "type": "push",
-      "page": "providerEdit"
-     },
-     {
-      "type": "back"
-     },
-     {
-      "type": "back"
-     }
-    ],
-    "trace": [
-     {
-      "event": {
-       "type": "jump",
-       "page": "providerList",
-       "origin": "chats"
-      },
-      "stack": [
-       "providerList"
-      ],
-      "origin": "chats",
-      "leaveTo": null
-     },
-     {
-      "event": {
-       "type": "push",
-       "page": "providerEdit"
-      },
-      "stack": [
-       "providerList",
-       "providerEdit"
-      ],
-      "origin": "chats",
-      "leaveTo": null
-     },
-     {
-      "event": {
-       "type": "back"
-      },
-      "stack": [
-       "providerList"
-      ],
-      "origin": "chats",
-      "leaveTo": null
-     },
-     {
-      "event": {
-       "type": "back"
-      },
-      "stack": [],
-      "origin": null,
-      "leaveTo": "chats"
-     }
-    ]
-   },
-   {
-    "name": "manual navigation never leaves the tab",
-    "events": [
-     {
-      "type": "push",
-      "page": "group.models"
-     },
-     {
-      "type": "back"
-     }
-    ],
-    "trace": [
-     {
-      "event": {
-       "type": "push",
-       "page": "group.models"
-      },
-      "stack": [
-       "group.models"
-      ],
-      "origin": null,
-      "leaveTo": null
-     },
-     {
-      "event": {
-       "type": "back"
-      },
-      "stack": [],
-      "origin": null,
-      "leaveTo": null
-     }
-    ]
-   },
-   {
-    "name": "user tab tap clears origin",
-    "events": [
-     {
-      "type": "jump",
-      "page": "account",
-      "origin": "teams"
-     },
-     {
-      "type": "userSelectedTab"
-     },
-     {
-      "type": "back"
-     }
-    ],
-    "trace": [
-     {
-      "event": {
-       "type": "jump",
-       "page": "account",
-       "origin": "teams"
-      },
-      "stack": [
-       "account"
-      ],
-      "origin": "teams",
-      "leaveTo": null
-     },
-     {
-      "event": {
-       "type": "userSelectedTab"
-      },
-      "stack": [
-       "account"
-      ],
-      "origin": null,
-      "leaveTo": null
-     },
-     {
-      "event": {
-       "type": "back"
-      },
-      "stack": [],
-      "origin": null,
-      "leaveTo": null
-     }
-    ]
-   },
-   {
-    "name": "external link has no origin",
-    "events": [
-     {
-      "type": "jump",
-      "page": "provider",
-      "origin": null
-     },
-     {
-      "type": "back"
-     }
-    ],
-    "trace": [
-     {
-      "event": {
-       "type": "jump",
-       "page": "provider",
-       "origin": null
-      },
-      "stack": [
-       "provider"
-      ],
-      "origin": null,
-      "leaveTo": null
-     },
-     {
-      "event": {
-       "type": "back"
-      },
-      "stack": [],
-      "origin": null,
-      "leaveTo": null
-     }
-    ]
-   },
-   {
-    "name": "jump to the settings root with an origin; Back leaves",
-    "events": [
-     {
-      "type": "jump",
-      "page": "main",
-      "origin": "bots"
-     },
-     {
-      "type": "back"
-     }
-    ],
-    "trace": [
-     {
-      "event": {
-       "type": "jump",
-       "page": "main",
-       "origin": "bots"
-      },
-      "stack": [],
-      "origin": "bots",
-      "leaveTo": null
-     },
-     {
-      "event": {
-       "type": "back"
-      },
-      "stack": [],
-      "origin": null,
-      "leaveTo": "bots"
-     }
-    ]
-   },
-   {
-    "name": "back at the root without an origin changes nothing (the shell decides)",
-    "events": [
-     {
-      "type": "back"
-     }
-    ],
-    "trace": [
-     {
-      "event": {
-       "type": "back"
-      },
-      "stack": [],
-      "origin": null,
-      "leaveTo": null
-     }
-    ]
-   },
-   {
-    "name": "a second jump replaces both the stack and the origin",
-    "events": [
-     {
-      "type": "jump",
-      "page": "account",
-      "origin": "chats"
-     },
-     {
-      "type": "push",
-      "page": "x"
-     },
-     {
-      "type": "jump",
-      "page": "provider",
-      "origin": "teams"
-     },
-     {
-      "type": "back"
-     }
-    ],
-    "trace": [
-     {
-      "event": {
-       "type": "jump",
-       "page": "account",
-       "origin": "chats"
-      },
-      "stack": [
-       "account"
-      ],
-      "origin": "chats",
-      "leaveTo": null
-     },
-     {
-      "event": {
-       "type": "push",
-       "page": "x"
-      },
-      "stack": [
-       "account",
-       "x"
-      ],
-      "origin": "chats",
-      "leaveTo": null
-     },
-     {
-      "event": {
-       "type": "jump",
-       "page": "provider",
-       "origin": "teams"
-      },
-      "stack": [
-       "provider"
-      ],
-      "origin": "teams",
-      "leaveTo": null
-     },
-     {
-      "event": {
-       "type": "back"
-      },
-      "stack": [],
-      "origin": null,
-      "leaveTo": "teams"
-     }
-    ]
-   }
-  ],
-  "hostBody": [
-   {
-    "name": "connected, Bots not delivered yet",
-    "input": {
-     "connected": true,
-     "online": true,
-     "paired": true,
-     "live": "unknown",
-     "snapshot": null
+      "lastSeq": 2,
+      "lastReadSeq": 0,
+      "at": "2026-11-02T09:00:00Z"
     },
-    "expect": {
-     "kind": "loading",
-     "source": "live",
-     "dimmed": false,
-     "actionable": true,
-     "notes": []
-    }
-   },
-   {
-    "name": "connected, old desktop",
-    "input": {
-     "connected": true,
-     "online": true,
-     "paired": true,
-     "live": "unsupported",
-     "snapshot": null
-    },
-    "expect": {
-     "kind": "unsupported",
-     "source": "live",
-     "dimmed": false,
-     "actionable": true,
-     "notes": []
-    }
-   },
-   {
-    "name": "connected, zero Bots",
-    "input": {
-     "connected": true,
-     "online": true,
-     "paired": true,
-     "live": 0,
-     "snapshot": null
-    },
-    "expect": {
-     "kind": "noBots",
-     "source": "live",
-     "dimmed": false,
-     "actionable": true,
-     "notes": []
-    }
-   },
-   {
-    "name": "connected, live Bots win over the cache",
-    "input": {
-     "connected": true,
-     "online": true,
-     "paired": true,
-     "live": 2,
-     "snapshot": 5
-    },
-    "expect": {
-     "kind": "bots",
-     "source": "live",
-     "dimmed": false,
-     "actionable": true,
-     "notes": []
-    }
-   },
-   {
-    "name": "connected although presence says offline (presence lags)",
-    "input": {
-     "connected": true,
-     "online": false,
-     "paired": true,
-     "live": 2,
-     "snapshot": null
-    },
-    "expect": {
-     "kind": "bots",
-     "source": "live",
-     "dimmed": false,
-     "actionable": true,
-     "notes": []
-    }
-   },
-   {
-    "name": "other computer, online, cache present",
-    "input": {
-     "connected": false,
-     "online": true,
-     "paired": true,
-     "live": "unknown",
-     "snapshot": 2
-    },
-    "expect": {
-     "kind": "bots",
-     "source": "cached",
-     "dimmed": true,
-     "actionable": true,
-     "notes": [
-      "savedNote"
-     ]
-    }
-   },
-   {
-    "name": "other computer, offline, cache present",
-    "input": {
-     "connected": false,
-     "online": false,
-     "paired": true,
-     "live": "unknown",
-     "snapshot": 2
-    },
-    "expect": {
-     "kind": "bots",
-     "source": "cached",
-     "dimmed": true,
-     "actionable": false,
-     "notes": [
-      "savedNote",
-      "offlineChatsNote"
-     ]
-    }
-   },
-   {
-    "name": "other computer, cache says zero Bots",
-    "input": {
-     "connected": false,
-     "online": true,
-     "paired": true,
-     "live": "unknown",
-     "snapshot": 0
-    },
-    "expect": {
-     "kind": "noBots",
-     "source": "cached",
-     "dimmed": false,
-     "actionable": true,
-     "notes": [
-      "savedNote"
-     ]
-    }
-   },
-   {
-    "name": "other computer, online, never connected",
-    "input": {
-     "connected": false,
-     "online": true,
-     "paired": true,
-     "live": "unknown",
-     "snapshot": null
-    },
-    "expect": {
-     "kind": "connectToLoad",
-     "source": "none",
-     "dimmed": false,
-     "actionable": true,
-     "notes": []
-    }
-   },
-   {
-    "name": "offline, never connected",
-    "input": {
-     "connected": false,
-     "online": false,
-     "paired": true,
-     "live": "unknown",
-     "snapshot": null
-    },
-    "expect": {
-     "kind": "offlineNoSnapshot",
-     "source": "none",
-     "dimmed": false,
-     "actionable": false,
-     "notes": []
-    }
-   },
-   {
-    "name": "online, not paired",
-    "input": {
-     "connected": false,
-     "online": true,
-     "paired": false,
-     "live": "unknown",
-     "snapshot": null
-    },
-    "expect": {
-     "kind": "notPaired",
-     "source": "none",
-     "dimmed": false,
-     "actionable": true,
-     "notes": []
-    }
-   },
-   {
-    "name": "offline and not paired: offline wins",
-    "input": {
-     "connected": false,
-     "online": false,
-     "paired": false,
-     "live": "unknown",
-     "snapshot": null
-    },
-    "expect": {
-     "kind": "offlineNoSnapshot",
-     "source": "none",
-     "dimmed": false,
-     "actionable": false,
-     "notes": []
-    }
-   },
-   {
-    "name": "a cache for an unpaired computer is ignored",
-    "input": {
-     "connected": false,
-     "online": true,
-     "paired": false,
-     "live": "unknown",
-     "snapshot": 3
-    },
-    "expect": {
-     "kind": "notPaired",
-     "source": "none",
-     "dimmed": false,
-     "actionable": true,
-     "notes": []
-    }
-   }
-  ],
-  "snapshot": {
-   "caps": {
-    "hosts": 20,
-    "botsPerHost": 100,
-    "chatsPerBot": 50
-   },
-   "applyBots": [
     {
-     "name": "live list replaces the Bot list, kept Bots keep their chats, new Bots have none",
-     "prior": {
-      "hostId": "h1",
-      "savedAtMs": 100,
-      "bots": [
-       {
-        "botId": "a",
-        "chats": [
-         "a1",
-         "a2"
-        ]
-       },
-       {
-        "botId": "b",
-        "chats": [
-         "b1"
-        ]
-       }
-      ]
-     },
-     "hostId": "h1",
-     "live": [
+      "id": "grp",
+      "kind": "group",
+      "title": "Ann, Bob, You",
+      "participants": [
+        "user:u1",
+        "user:u2",
+        "user:u3"
+      ],
+      "lastSeq": 5,
+      "lastReadSeq": 5,
+      "at": "2026-11-02T12:00:00Z"
+    },
+    {
+      "id": "bd1",
+      "kind": "bot_dm",
+      "title": "Helper",
+      "participants": [
+        "user:u1",
+        "shared_bot:sharedbot_helper"
+      ],
+      "lastSeq": 1,
+      "lastReadSeq": 1,
+      "at": "2026-11-02T08:00:00Z",
+      "sharedBotId": "sharedbot_helper"
+    },
+    {
+      "id": "bd2",
+      "kind": "bot_dm",
+      "title": "Helper",
+      "participants": [
+        "user:u9",
+        "shared_bot:sharedbot_helper"
+      ],
+      "lastSeq": 1,
+      "lastReadSeq": 1,
+      "at": "2026-11-02T13:00:00Z",
+      "sharedBotId": "sharedbot_helper"
+    },
+    {
+      "id": "bd3",
+      "kind": "bot_dm",
+      "title": "Other",
+      "participants": [
+        "user:u1",
+        "shared_bot:sharedbot_other"
+      ],
+      "lastSeq": 1,
+      "lastReadSeq": 1,
+      "at": "2026-11-02T07:00:00Z",
+      "sharedBotId": "sharedbot_other"
+    }
+  ],
+  "unreadCount": [
+    {
+      "lastSeq": 5,
+      "lastReadSeq": 2,
+      "expect": 3
+    },
+    {
+      "lastSeq": 2,
+      "lastReadSeq": 5,
+      "expect": 0
+    },
+    {
+      "lastSeq": 0,
+      "lastReadSeq": 0,
+      "expect": 0
+    }
+  ],
+  "sort": {
+    "input": [
       "a",
-      "c"
-     ],
-     "now": 200,
-     "expect": {
-      "hostId": "h1",
-      "savedAtMs": 200,
-      "bots": [
-       {
-        "botId": "a",
-        "chats": [
-         "a1",
-         "a2"
-        ]
-       },
-       {
-        "botId": "c",
-        "chats": null
-       }
-      ]
-     }
-    },
-    {
-     "name": "first save for a computer",
-     "prior": null,
-     "hostId": "h2",
-     "live": [
-      "x"
-     ],
-     "now": 300,
-     "expect": {
-      "hostId": "h2",
-      "savedAtMs": 300,
-      "bots": [
-       {
-        "botId": "x",
-        "chats": null
-       }
-      ]
-     }
-    },
-    {
-     "name": "Bot cap: first 100 in the host order",
-     "prior": null,
-     "hostId": "h3",
-     "live": [
-      "b1",
-      "b2",
-      "b3",
-      "b4",
-      "b5",
-      "b6",
-      "b7",
-      "b8",
-      "b9",
-      "b10",
-      "b11",
-      "b12",
-      "b13",
-      "b14",
-      "b15",
-      "b16",
-      "b17",
-      "b18",
-      "b19",
-      "b20",
-      "b21",
-      "b22",
-      "b23",
-      "b24",
-      "b25",
-      "b26",
-      "b27",
-      "b28",
-      "b29",
-      "b30",
-      "b31",
-      "b32",
-      "b33",
-      "b34",
-      "b35",
-      "b36",
-      "b37",
-      "b38",
-      "b39",
-      "b40",
-      "b41",
-      "b42",
-      "b43",
-      "b44",
-      "b45",
-      "b46",
-      "b47",
-      "b48",
-      "b49",
-      "b50",
-      "b51",
-      "b52",
-      "b53",
-      "b54",
-      "b55",
-      "b56",
-      "b57",
-      "b58",
-      "b59",
-      "b60",
-      "b61",
-      "b62",
-      "b63",
-      "b64",
-      "b65",
-      "b66",
-      "b67",
-      "b68",
-      "b69",
-      "b70",
-      "b71",
-      "b72",
-      "b73",
-      "b74",
-      "b75",
-      "b76",
-      "b77",
-      "b78",
-      "b79",
-      "b80",
-      "b81",
-      "b82",
-      "b83",
-      "b84",
-      "b85",
-      "b86",
-      "b87",
-      "b88",
-      "b89",
-      "b90",
-      "b91",
-      "b92",
-      "b93",
-      "b94",
-      "b95",
-      "b96",
-      "b97",
-      "b98",
-      "b99",
-      "b100",
-      "b101",
-      "b102",
-      "b103",
-      "b104",
-      "b105",
-      "b106",
-      "b107",
-      "b108",
-      "b109",
-      "b110",
-      "b111",
-      "b112",
-      "b113",
-      "b114",
-      "b115",
-      "b116",
-      "b117",
-      "b118",
-      "b119",
-      "b120"
-     ],
-     "now": 1,
-     "expectBotIds": "b1..b100 (100 Bots, chats null)",
-     "expectCount": 100
-    }
-   ],
-   "applyChats": [
-    {
-     "name": "replaces that Bot’s chats and stamps the save time",
-     "prior": {
-      "hostId": "h1",
-      "savedAtMs": 100,
-      "bots": [
-       {
-        "botId": "a",
-        "chats": [
-         "a1",
-         "a2"
-        ]
-       },
-       {
-        "botId": "b",
-        "chats": [
-         "b1"
-        ]
-       }
-      ]
-     },
-     "botId": "a",
-     "chats": [
-      "a3",
-      "a4"
-     ],
-     "now": 400,
-     "expect": {
-      "hostId": "h1",
-      "savedAtMs": 400,
-      "bots": [
-       {
-        "botId": "a",
-        "chats": [
-         "a3",
-         "a4"
-        ]
-       },
-       {
-        "botId": "b",
-        "chats": [
-         "b1"
-        ]
-       }
-      ]
-     }
-    },
-    {
-     "name": "unknown Bot: snapshot unchanged (time too)",
-     "prior": {
-      "hostId": "h1",
-      "savedAtMs": 100,
-      "bots": [
-       {
-        "botId": "a",
-        "chats": [
-         "a1",
-         "a2"
-        ]
-       },
-       {
-        "botId": "b",
-        "chats": [
-         "b1"
-        ]
-       }
-      ]
-     },
-     "botId": "z",
-     "chats": [
-      "z1"
-     ],
-     "now": 400,
-     "expect": {
-      "hostId": "h1",
-      "savedAtMs": 100,
-      "bots": [
-       {
-        "botId": "a",
-        "chats": [
-         "a1",
-         "a2"
-        ]
-       },
-       {
-        "botId": "b",
-        "chats": [
-         "b1"
-        ]
-       }
-      ]
-     }
-    },
-    {
-     "name": "no snapshot yet: nothing is created from chats alone",
-     "prior": null,
-     "botId": "a",
-     "chats": [
-      "a1"
-     ],
-     "now": 400,
-     "expect": null
-    },
-    {
-     "name": "chat cap: first 50 in the host order (newest first)",
-     "prior": {
-      "hostId": "h1",
-      "savedAtMs": 100,
-      "bots": [
-       {
-        "botId": "a",
-        "chats": [
-         "a1",
-         "a2"
-        ]
-       },
-       {
-        "botId": "b",
-        "chats": [
-         "b1"
-        ]
-       }
-      ]
-     },
-     "botId": "b",
-     "chats": [
-      "c1",
-      "c2",
-      "c3",
-      "c4",
-      "c5",
-      "c6",
-      "c7",
-      "c8",
-      "c9",
-      "c10",
-      "c11",
-      "c12",
-      "c13",
-      "c14",
-      "c15",
-      "c16",
-      "c17",
-      "c18",
-      "c19",
-      "c20",
-      "c21",
-      "c22",
-      "c23",
-      "c24",
-      "c25",
-      "c26",
-      "c27",
-      "c28",
-      "c29",
-      "c30",
-      "c31",
-      "c32",
-      "c33",
-      "c34",
-      "c35",
-      "c36",
-      "c37",
-      "c38",
-      "c39",
-      "c40",
-      "c41",
-      "c42",
-      "c43",
-      "c44",
-      "c45",
-      "c46",
-      "c47",
-      "c48",
-      "c49",
-      "c50",
-      "c51",
-      "c52",
-      "c53",
-      "c54",
-      "c55",
-      "c56",
-      "c57",
-      "c58",
-      "c59",
-      "c60"
-     ],
-     "now": 500,
-     "expectCount": 50,
-     "expectFirstLast": [
-      "c1",
-      "c50"
-     ]
-    }
-   ],
-   "evictHosts": {
-    "name": "22 computers saved at times 1..22: the 20 newest stay, newest first",
-    "savedAtMs": {
-     "h01": 1,
-     "h02": 2,
-     "h03": 3,
-     "h04": 4,
-     "h05": 5,
-     "h06": 6,
-     "h07": 7,
-     "h08": 8,
-     "h09": 9,
-     "h10": 10,
-     "h11": 11,
-     "h12": 12,
-     "h13": 13,
-     "h14": 14,
-     "h15": 15,
-     "h16": 16,
-     "h17": 17,
-     "h18": 18,
-     "h19": 19,
-     "h20": 20,
-     "h21": 21,
-     "h22": 22
-    },
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+      "g"
+    ],
     "expect": [
-     "h22",
-     "h21",
-     "h20",
-     "h19",
-     "h18",
-     "h17",
-     "h16",
-     "h15",
-     "h14",
-     "h13",
-     "h12",
-     "h11",
-     "h10",
-     "h09",
-     "h08",
-     "h07",
-     "h06",
-     "h05",
-     "h04",
-     "h03"
+      "b",
+      "g",
+      "a",
+      "f",
+      "e",
+      "d",
+      "c"
     ]
-   }
   },
-  "autoMarkRead": [
-   {
-    "name": "all conditions met",
-    "input": {
-     "online": true,
-     "fromCache": false,
-     "foreground": true,
-     "atBottomMs": 1500,
-     "newestRenderedSeq": 12,
-     "lastReadSeq": 9,
-     "thresholdMs": 1000
+  "group": {
+    "input": [
+      "a",
+      "b",
+      "dm1",
+      "grp",
+      "bd2",
+      "bd1",
+      "bd3"
+    ],
+    "expect": {
+      "channels": [
+        "b",
+        "a"
+      ],
+      "direct": [
+        "grp",
+        "dm1"
+      ],
+      "botDirect": [
+        "bd1",
+        "bd3",
+        "bd2"
+      ]
+    }
+  },
+  "labels": [
+    {
+      "conversation": {
+        "id": "x",
+        "kind": "channel",
+        "title": "  ",
+        "participants": []
+      },
+      "zh": false,
+      "expect": "Channel",
+      "name": "channel with a blank title"
     },
-    "expect": 12
-   },
-   {
-    "name": "exactly at the threshold",
-    "input": {
-     "online": true,
-     "fromCache": false,
-     "foreground": true,
-     "atBottomMs": 1000,
-     "newestRenderedSeq": 12,
-     "lastReadSeq": 9,
-     "thresholdMs": 1000
+    {
+      "conversation": {
+        "id": "x",
+        "kind": "channel",
+        "title": "alpha",
+        "participants": []
+      },
+      "zh": false,
+      "expect": "alpha",
+      "name": "channel with a title"
     },
-    "expect": 12
-   },
-   {
-    "name": "just under the threshold",
-    "input": {
-     "online": true,
-     "fromCache": false,
-     "foreground": true,
-     "atBottomMs": 999,
-     "newestRenderedSeq": 12,
-     "lastReadSeq": 9,
-     "thresholdMs": 1000
+    {
+      "conversation": {
+        "id": "dm1"
+      },
+      "zh": false,
+      "expect": "Ann",
+      "name": "dm: the other person (stored title empty)"
     },
-    "expect": null
-   },
-   {
-    "name": "not at the bottom",
-    "input": {
-     "online": true,
-     "fromCache": false,
-     "foreground": true,
-     "atBottomMs": null,
-     "newestRenderedSeq": 12,
-     "lastReadSeq": 9,
-     "thresholdMs": 1000
+    {
+      "conversation": {
+        "id": "x",
+        "kind": "dm",
+        "title": "",
+        "participants": [
+          "user:u1"
+        ]
+      },
+      "zh": false,
+      "expect": "Direct message",
+      "name": "dm with only yourself, no title"
     },
-    "expect": null
-   },
-   {
-    "name": "offline",
-    "input": {
-     "online": false,
-     "fromCache": false,
-     "foreground": true,
-     "atBottomMs": 1500,
-     "newestRenderedSeq": 12,
-     "lastReadSeq": 9,
-     "thresholdMs": 1000
+    {
+      "conversation": {
+        "id": "x",
+        "kind": "dm",
+        "title": "",
+        "participants": [
+          "user:u1"
+        ]
+      },
+      "zh": true,
+      "expect": "私信",
+      "name": "same, Chinese"
     },
-    "expect": null
-   },
-   {
-    "name": "directory/messages come from the cache",
-    "input": {
-     "online": true,
-     "fromCache": true,
-     "foreground": true,
-     "atBottomMs": 1500,
-     "newestRenderedSeq": 12,
-     "lastReadSeq": 9,
-     "thresholdMs": 1000
+    {
+      "conversation": {
+        "id": "x",
+        "kind": "group",
+        "title": "Me, Ann, Bob",
+        "participants": [
+          "user:u1",
+          "user:u2",
+          "user:u3"
+        ]
+      },
+      "zh": false,
+      "expect": "Ann, Bob",
+      "name": "group whose title is the generated default (hidden)"
     },
-    "expect": null
-   },
-   {
-    "name": "app in background",
-    "input": {
-     "online": true,
-     "fromCache": false,
-     "foreground": false,
-     "atBottomMs": 1500,
-     "newestRenderedSeq": 12,
-     "lastReadSeq": 9,
-     "thresholdMs": 1000
+    {
+      "conversation": {
+        "id": "x",
+        "kind": "group",
+        "title": "Launch crew",
+        "participants": [
+          "user:u1",
+          "user:u2",
+          "user:u3"
+        ]
+      },
+      "zh": false,
+      "expect": "Launch crew",
+      "name": "group with a chosen title"
     },
-    "expect": null
-   },
-   {
-    "name": "nothing unread",
-    "input": {
-     "online": true,
-     "fromCache": false,
-     "foreground": true,
-     "atBottomMs": 1500,
-     "newestRenderedSeq": 12,
-     "lastReadSeq": 12,
-     "thresholdMs": 1000
+    {
+      "conversation": {
+        "id": "x",
+        "kind": "group",
+        "title": "",
+        "participants": [
+          "user:u1",
+          "user:u7"
+        ]
+      },
+      "zh": false,
+      "expect": "Member",
+      "name": "group of you + one unlisted member"
     },
-    "expect": null
-   },
-   {
-    "name": "feature switched off (threshold null)",
-    "input": {
-     "online": true,
-     "fromCache": false,
-     "foreground": true,
-     "atBottomMs": 1500,
-     "newestRenderedSeq": 12,
-     "lastReadSeq": 9,
-     "thresholdMs": null
+    {
+      "conversation": {
+        "id": "x",
+        "kind": "group",
+        "title": "",
+        "participants": [
+          "user:u1",
+          "user:u7"
+        ]
+      },
+      "zh": true,
+      "expect": "成员",
+      "name": "same, Chinese"
     },
-    "expect": null
-   },
-   {
-    "name": "read mark ahead of the stream (never moves backwards)",
-    "input": {
-     "online": true,
-     "fromCache": false,
-     "foreground": true,
-     "atBottomMs": 1500,
-     "newestRenderedSeq": 12,
-     "lastReadSeq": 20,
-     "thresholdMs": 1000
+    {
+      "conversation": {
+        "id": "bd1"
+      },
+      "zh": false,
+      "expect": "Helper",
+      "name": "Bot DM of yours: the Bot name"
     },
-    "expect": null
-   }
+    {
+      "conversation": {
+        "id": "bd2"
+      },
+      "zh": false,
+      "expect": "Helper · Zed",
+      "name": "Bot owner reading someone else’s Bot DM"
+    },
+    {
+      "conversation": {
+        "id": "x",
+        "kind": "bot_dm",
+        "title": "Legacy",
+        "participants": [
+          "user:u1",
+          "shared_bot:sharedbot_zz"
+        ]
+      },
+      "zh": false,
+      "expect": "Legacy",
+      "name": "Bot DM without a Bot card: stored title"
+    }
   ],
-  "autoConnectTarget": [
-   {
-    "name": "last-used computer is paired and online",
-    "input": {
-     "signedIn": true,
-     "connectedHostId": null,
-     "lastHostId": "h1",
-     "hosts": [
-      {
-       "hostId": "h1",
-       "online": true,
-       "paired": true
-      },
-      {
-       "hostId": "h2",
-       "online": false,
-       "paired": true
-      },
-      {
-       "hostId": "h3",
-       "online": true,
-       "paired": false
-      }
-     ]
+  "defaultConversationTitle": [
+    {
+      "uids": [
+        "u2",
+        "u3"
+      ],
+      "limit": 120,
+      "expect": "Me, Ann, Bob"
     },
-    "expect": "h1"
-   },
-   {
-    "name": "signed out",
-    "input": {
-     "signedIn": false,
-     "connectedHostId": null,
-     "lastHostId": "h1",
-     "hosts": [
-      {
-       "hostId": "h1",
-       "online": true,
-       "paired": true
-      },
-      {
-       "hostId": "h2",
-       "online": false,
-       "paired": true
-      },
-      {
-       "hostId": "h3",
-       "online": true,
-       "paired": false
-      }
-     ]
-    },
-    "expect": null
-   },
-   {
-    "name": "already connected somewhere",
-    "input": {
-     "signedIn": true,
-     "connectedHostId": "h2",
-     "lastHostId": "h1",
-     "hosts": [
-      {
-       "hostId": "h1",
-       "online": true,
-       "paired": true
-      },
-      {
-       "hostId": "h2",
-       "online": false,
-       "paired": true
-      },
-      {
-       "hostId": "h3",
-       "online": true,
-       "paired": false
-      }
-     ]
-    },
-    "expect": null
-   },
-   {
-    "name": "no last-used computer yet",
-    "input": {
-     "signedIn": true,
-     "connectedHostId": null,
-     "lastHostId": null,
-     "hosts": [
-      {
-       "hostId": "h1",
-       "online": true,
-       "paired": true
-      },
-      {
-       "hostId": "h2",
-       "online": false,
-       "paired": true
-      },
-      {
-       "hostId": "h3",
-       "online": true,
-       "paired": false
-      }
-     ]
-    },
-    "expect": null
-   },
-   {
-    "name": "last-used computer is offline",
-    "input": {
-     "signedIn": true,
-     "connectedHostId": null,
-     "lastHostId": "h2",
-     "hosts": [
-      {
-       "hostId": "h1",
-       "online": true,
-       "paired": true
-      },
-      {
-       "hostId": "h2",
-       "online": false,
-       "paired": true
-      },
-      {
-       "hostId": "h3",
-       "online": true,
-       "paired": false
-      }
-     ]
-    },
-    "expect": null
-   },
-   {
-    "name": "last-used computer is not paired",
-    "input": {
-     "signedIn": true,
-     "connectedHostId": null,
-     "lastHostId": "h3",
-     "hosts": [
-      {
-       "hostId": "h1",
-       "online": true,
-       "paired": true
-      },
-      {
-       "hostId": "h2",
-       "online": false,
-       "paired": true
-      },
-      {
-       "hostId": "h3",
-       "online": true,
-       "paired": false
-      }
-     ]
-    },
-    "expect": null
-   },
-   {
-    "name": "last-used computer no longer listed",
-    "input": {
-     "signedIn": true,
-     "connectedHostId": null,
-     "lastHostId": "h9",
-     "hosts": [
-      {
-       "hostId": "h1",
-       "online": true,
-       "paired": true
-      },
-      {
-       "hostId": "h2",
-       "online": false,
-       "paired": true
-      },
-      {
-       "hostId": "h3",
-       "online": true,
-       "paired": false
-      }
-     ]
-    },
-    "expect": null
-   }
+    {
+      "uids": [
+        "u2",
+        "u3"
+      ],
+      "limit": 8,
+      "expect": "Me, Ann"
+    }
   ],
-  "botsBadgeCount": {
-   "input": [
+  "participants": {
+    "conversation": "bd2",
+    "expect": [
+      {
+        "kind": "user",
+        "id": "u9",
+        "name": "Zed",
+        "self": false
+      },
+      {
+        "kind": "shared_bot",
+        "id": "sharedbot_helper",
+        "name": "Helper",
+        "self": false
+      }
+    ]
+  },
+  "finds": {
+    "botDm": "bd1",
+    "dm": "dm1",
+    "dmMissing": null
+  },
+  "previews": {
+    "authorNames": {
+      "u2": "Ann",
+      "bot": "Bot"
+    },
+    "cases": [
+      {
+        "kind": "dm",
+        "lastMessage": null,
+        "zh": false,
+        "expect": "No messages yet",
+        "name": "no message, English"
+      },
+      {
+        "kind": "dm",
+        "lastMessage": null,
+        "zh": true,
+        "expect": "暂无消息",
+        "name": "no message, Chinese"
+      },
+      {
+        "kind": "dm",
+        "lastMessage": {
+          "id": "m",
+          "seq": 1,
+          "at": "2026-11-02T10:00:00Z",
+          "author": {
+            "kind": "user",
+            "uid": "u1"
+          },
+          "preview": "hello"
+        },
+        "zh": false,
+        "expect": "You: hello",
+        "name": "own message, English"
+      },
+      {
+        "kind": "dm",
+        "lastMessage": {
+          "id": "m",
+          "seq": 1,
+          "at": "2026-11-02T10:00:00Z",
+          "author": {
+            "kind": "user",
+            "uid": "u1"
+          },
+          "preview": "hello"
+        },
+        "zh": true,
+        "expect": "你：hello",
+        "name": "own message, Chinese"
+      },
+      {
+        "kind": "dm",
+        "lastMessage": {
+          "id": "m",
+          "seq": 1,
+          "at": "2026-11-02T10:00:00Z",
+          "author": {
+            "kind": "user",
+            "uid": "u2"
+          },
+          "preview": "hello"
+        },
+        "zh": false,
+        "expect": "hello",
+        "name": "other person in a dm: no author prefix"
+      },
+      {
+        "kind": "group",
+        "lastMessage": {
+          "id": "m",
+          "seq": 1,
+          "at": "2026-11-02T10:00:00Z",
+          "author": {
+            "kind": "user",
+            "uid": "u2"
+          },
+          "preview": "hello"
+        },
+        "zh": false,
+        "expect": "Ann: hello",
+        "name": "other person in a group: author prefix"
+      },
+      {
+        "kind": "channel",
+        "lastMessage": {
+          "id": "m",
+          "seq": 1,
+          "at": "2026-11-02T10:00:00Z",
+          "author": {
+            "kind": "user",
+            "uid": "u2"
+          },
+          "preview": "hello"
+        },
+        "zh": true,
+        "expect": "Ann：hello",
+        "name": "other person in a channel, Chinese separator"
+      },
+      {
+        "kind": "dm",
+        "lastMessage": {
+          "id": "m",
+          "seq": 1,
+          "at": "2026-11-02T10:00:00Z",
+          "author": {
+            "kind": "user",
+            "uid": "u2"
+          },
+          "preview": "x",
+          "recalled": true
+        },
+        "zh": false,
+        "expect": "Message recalled",
+        "name": "recalled by someone else"
+      },
+      {
+        "kind": "dm",
+        "lastMessage": {
+          "id": "m",
+          "seq": 1,
+          "at": "2026-11-02T10:00:00Z",
+          "author": {
+            "kind": "user",
+            "uid": "u1"
+          },
+          "preview": "x",
+          "recalled": true
+        },
+        "zh": true,
+        "expect": "你：消息已撤回",
+        "name": "recalled by you, Chinese"
+      },
+      {
+        "kind": "dm",
+        "lastMessage": {
+          "id": "m",
+          "seq": 1,
+          "at": "2026-11-02T10:00:00Z",
+          "author": {
+            "kind": "user",
+            "uid": "u2"
+          },
+          "preview": ""
+        },
+        "zh": false,
+        "expect": "[Non-text message]",
+        "name": "non-text (empty preview)"
+      },
+      {
+        "kind": "group",
+        "lastMessage": {
+          "id": "m",
+          "seq": 1,
+          "at": null,
+          "author": {
+            "kind": "shared_bot",
+            "sharedBotId": "sharedbot_k"
+          },
+          "preview": "done"
+        },
+        "zh": false,
+        "expect": "Bot: done",
+        "name": "Bot author in a group, pointer time not stamped"
+      }
+    ]
+  },
+  "stream": {
+    "lastReadSeq": 4,
+    "messages": [
+      {
+        "id": "m1",
+        "seq": 1,
+        "authorKind": "user",
+        "authorUid": "u2",
+        "createdAtMs": 1793577480000,
+        "recalled": false,
+        "authorSharedBotId": null
+      },
+      {
+        "id": "m2",
+        "seq": 2,
+        "authorKind": "user",
+        "authorUid": "u2",
+        "createdAtMs": 1793577540000,
+        "recalled": false,
+        "authorSharedBotId": null
+      },
+      {
+        "id": "m3",
+        "seq": 3,
+        "authorKind": "user",
+        "authorUid": "u2",
+        "createdAtMs": 1793577660000,
+        "recalled": false,
+        "authorSharedBotId": null
+      },
+      {
+        "id": "m4",
+        "seq": 4,
+        "authorKind": "user",
+        "authorUid": "u2",
+        "createdAtMs": 1793578080000,
+        "recalled": false,
+        "authorSharedBotId": null
+      },
+      {
+        "id": "m5",
+        "seq": 5,
+        "authorKind": "user",
+        "authorUid": "u1",
+        "createdAtMs": 1793578140000,
+        "recalled": false,
+        "authorSharedBotId": null
+      },
+      {
+        "id": "m6",
+        "seq": 6,
+        "authorKind": "user",
+        "authorUid": "u2",
+        "createdAtMs": 1793578200000,
+        "recalled": false,
+        "authorSharedBotId": null
+      },
+      {
+        "id": "m7",
+        "seq": 7,
+        "authorKind": "user",
+        "authorUid": "u2",
+        "createdAtMs": 1793578260000,
+        "recalled": true,
+        "authorSharedBotId": null
+      },
+      {
+        "id": "m8",
+        "seq": 8,
+        "authorKind": "user",
+        "authorUid": "u2",
+        "createdAtMs": 1793578320000,
+        "recalled": false,
+        "authorSharedBotId": null
+      },
+      {
+        "id": "m9",
+        "seq": 9,
+        "authorKind": "user",
+        "authorUid": "u2",
+        "createdAtMs": null,
+        "recalled": false,
+        "authorSharedBotId": null
+      },
+      {
+        "id": "m10",
+        "seq": 10,
+        "authorKind": "shared_bot",
+        "authorUid": "",
+        "createdAtMs": 1793578380000,
+        "recalled": false,
+        "authorSharedBotId": "sharedbot_k"
+      }
+    ],
+    "expectRows": [
+      "date:2026-11-01:yesterday",
+      "message:m1:head",
+      "message:m2:grouped",
+      "date:2026-11-02:today",
+      "message:m3:head",
+      "message:m4:head",
+      "message:m5:head",
+      "unread",
+      "message:m6:head",
+      "message:m7:grouped",
+      "message:m8:head",
+      "message:m9:head",
+      "message:m10:head"
+    ],
+    "expectRowsAllRead": [
+      "date:2026-11-01:yesterday",
+      "message:m1:head",
+      "message:m2:grouped",
+      "date:2026-11-02:today",
+      "message:m3:head",
+      "message:m4:head",
+      "message:m5:head",
+      "message:m6:head",
+      "message:m7:grouped",
+      "message:m8:head",
+      "message:m9:head",
+      "message:m10:head"
+    ],
+    "ownOnly": {
+      "messages": [
+        {
+          "id": "a",
+          "seq": 1,
+          "authorKind": "user",
+          "authorUid": "u1",
+          "createdAtMs": 1793577660000,
+          "recalled": false
+        },
+        {
+          "id": "b",
+          "seq": 2,
+          "authorKind": "user",
+          "authorUid": "u1",
+          "createdAtMs": 1793577720000,
+          "recalled": false
+        }
+      ],
+      "lastReadSeq": 0,
+      "expectRows": [
+        "date:2026-11-02:today",
+        "message:a:head",
+        "message:b:grouped"
+      ]
+    },
+    "groupWindowMs": 300000,
+    "firstUnreadId": "m6",
+    "more": [
+      {
+        "name": "Bot authors: same uid but different botKey never group",
+        "lastReadSeq": 3,
+        "uid": "u1",
+        "messages": [
+          {
+            "id": "b1",
+            "seq": 1,
+            "authorKind": "shared_bot",
+            "authorUid": "",
+            "authorSharedBotId": "sharedbot_a",
+            "createdAtMs": 1793606400000,
+            "recalled": false
+          },
+          {
+            "id": "b2",
+            "seq": 2,
+            "authorKind": "shared_bot",
+            "authorUid": "",
+            "authorSharedBotId": "sharedbot_b",
+            "createdAtMs": 1793606460000,
+            "recalled": false
+          },
+          {
+            "id": "b3",
+            "seq": 3,
+            "authorKind": "shared_bot",
+            "authorUid": "",
+            "authorSharedBotId": "sharedbot_b",
+            "createdAtMs": 1793606520000,
+            "recalled": false
+          }
+        ],
+        "expectRows": [
+          "date:2026-11-02:today",
+          "message:b1:head",
+          "message:b2:head",
+          "message:b3:grouped"
+        ]
+      },
+      {
+        "name": "Group window is inclusive: exactly 5 min groups, 5 min + 1 ms does not",
+        "lastReadSeq": 3,
+        "uid": "u1",
+        "messages": [
+          {
+            "id": "x1",
+            "seq": 1,
+            "authorKind": "user",
+            "authorUid": "u2",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793606400000,
+            "recalled": false
+          },
+          {
+            "id": "x2",
+            "seq": 2,
+            "authorKind": "user",
+            "authorUid": "u2",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793606700000,
+            "recalled": false
+          },
+          {
+            "id": "x3",
+            "seq": 3,
+            "authorKind": "user",
+            "authorUid": "u2",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793607000001,
+            "recalled": false
+          }
+        ],
+        "expectRows": [
+          "date:2026-11-02:today",
+          "message:x1:head",
+          "message:x2:grouped",
+          "message:x3:head"
+        ]
+      },
+      {
+        "name": "A message without a time never groups and never starts a day",
+        "lastReadSeq": 3,
+        "uid": "u1",
+        "messages": [
+          {
+            "id": "y1",
+            "seq": 1,
+            "authorKind": "user",
+            "authorUid": "u2",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793606400000,
+            "recalled": false
+          },
+          {
+            "id": "y2",
+            "seq": 2,
+            "authorKind": "user",
+            "authorUid": "u2",
+            "authorSharedBotId": null,
+            "createdAtMs": null,
+            "recalled": false
+          },
+          {
+            "id": "y3",
+            "seq": 3,
+            "authorKind": "user",
+            "authorUid": "u2",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793606401000,
+            "recalled": false
+          }
+        ],
+        "expectRows": [
+          "date:2026-11-02:today",
+          "message:y1:head",
+          "message:y2:head",
+          "message:y3:head"
+        ]
+      },
+      {
+        "name": "Unread divider: first message by someone else after the watermark; own messages never anchor",
+        "lastReadSeq": 1,
+        "uid": "u1",
+        "messages": [
+          {
+            "id": "z1",
+            "seq": 1,
+            "authorKind": "user",
+            "authorUid": "u2",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793606400000,
+            "recalled": false
+          },
+          {
+            "id": "z2",
+            "seq": 2,
+            "authorKind": "user",
+            "authorUid": "u1",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793606401000,
+            "recalled": false
+          },
+          {
+            "id": "z3",
+            "seq": 3,
+            "authorKind": "user",
+            "authorUid": "u2",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793606402000,
+            "recalled": false
+          },
+          {
+            "id": "z4",
+            "seq": 4,
+            "authorKind": "user",
+            "authorUid": "u2",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793606403000,
+            "recalled": false
+          }
+        ],
+        "expectRows": [
+          "date:2026-11-02:today",
+          "message:z1:head",
+          "message:z2:head",
+          "unread",
+          "message:z3:head",
+          "message:z4:grouped"
+        ]
+      },
+      {
+        "name": "No divider when everything newer is your own",
+        "lastReadSeq": 1,
+        "uid": "u1",
+        "messages": [
+          {
+            "id": "w1",
+            "seq": 1,
+            "authorKind": "user",
+            "authorUid": "u2",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793606400000,
+            "recalled": false
+          },
+          {
+            "id": "w2",
+            "seq": 2,
+            "authorKind": "user",
+            "authorUid": "u1",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793606401000,
+            "recalled": false
+          }
+        ],
+        "expectRows": [
+          "date:2026-11-02:today",
+          "message:w1:head",
+          "message:w2:head"
+        ]
+      },
+      {
+        "name": "Divider message starts its own run even when the author and time would group it",
+        "lastReadSeq": 1,
+        "uid": "u1",
+        "messages": [
+          {
+            "id": "v1",
+            "seq": 1,
+            "authorKind": "user",
+            "authorUid": "u2",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793606400000,
+            "recalled": false
+          },
+          {
+            "id": "v2",
+            "seq": 2,
+            "authorKind": "user",
+            "authorUid": "u2",
+            "authorSharedBotId": null,
+            "createdAtMs": 1793606401000,
+            "recalled": false
+          }
+        ],
+        "expectRows": [
+          "date:2026-11-02:today",
+          "message:v1:head",
+          "unread",
+          "message:v2:head"
+        ]
+      },
+      {
+        "name": "Empty conversation",
+        "lastReadSeq": 0,
+        "uid": "u1",
+        "messages": [],
+        "expectRows": []
+      }
+    ]
+  },
+  "visibleStart": {
+    "constants": {
+      "WINDOW_SIZE": 100,
+      "WINDOW_MAX": 400,
+      "UNREAD_CONTEXT": 3
+    },
+    "cases": [
+      {
+        "messages": "n1..n150 (150, alternating)",
+        "lastReadSeq": 150,
+        "expect": 50
+      },
+      {
+        "messages": "n1..n150 (150, alternating)",
+        "lastReadSeq": 140,
+        "expect": 50
+      },
+      {
+        "messages": "n1..n150 (150, alternating)",
+        "lastReadSeq": 10,
+        "expect": 7
+      },
+      {
+        "messages": "n1..n150 (150, alternating)",
+        "lastReadSeq": 150,
+        "startId": "n20",
+        "expect": 19
+      },
+      {
+        "messages": "n1..n30 (30, alternating)",
+        "lastReadSeq": 30,
+        "expect": 0
+      },
+      {
+        "messages": "c1..c600 (600, all u2)",
+        "lastReadSeq": 0,
+        "expect": 200
+      }
+    ]
+  },
+  "listTimeKinds": [
     {
-     "waitingThreads": 2
+      "at": "2026-11-02T08:05:00Z",
+      "expect": "clock"
     },
     {
-     "waitingThreads": 0
+      "at": "2026-11-01T08:05:00Z",
+      "expect": "yesterday"
     },
     {
-     "waitingThreads": 3
+      "at": "2026-10-31T08:05:00Z",
+      "expect": "weekday"
+    },
+    {
+      "at": "2026-10-28T08:05:00Z",
+      "expect": "weekday"
+    },
+    {
+      "at": "2026-10-27T08:05:00Z",
+      "expect": "weekday"
+    },
+    {
+      "at": "2026-10-26T08:05:00Z",
+      "expect": "dateThisYear"
+    },
+    {
+      "at": "2025-12-24T08:05:00Z",
+      "expect": "dateOtherYear"
+    },
+    {
+      "at": "nope",
+      "expect": "none"
+    },
+    {
+      "at": null,
+      "expect": "none"
     }
-   ],
-   "expect": 5
-  }
- },
- "strings": {
-  "en": {
-   "channel": "Channel",
-   "directMessage": "Direct message",
-   "group": "Group",
-   "member": "Member",
-   "you": "You",
-   "bot": "Bot",
-   "noMessages": "No messages yet",
-   "recalled": "Message recalled",
-   "nonText": "[Non-text message]",
-   "listSeparator": ", ",
-   "authorSeparator": ": "
-  },
-  "zh": {
-   "channel": "频道",
-   "directMessage": "私信",
-   "group": "群聊",
-   "member": "成员",
-   "you": "你",
-   "bot": "Bot",
-   "noMessages": "暂无消息",
-   "recalled": "消息已撤回",
-   "nonText": "[非文本消息]",
-   "listSeparator": "、",
-   "authorSeparator": "："
-  }
- },
- "lastMessage": [
-  {
-   "name": "explicit null = no message yet",
-   "input": null,
-   "expect": {
-    "ok": null
-   }
-  },
-  {
-   "name": "whole pointer",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
+  ],
+  "dayLabelKinds": [
+    {
+      "at": "2026-11-02T01:00:00Z",
+      "expect": "today"
     },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
+    {
+      "at": "2026-11-01T23:59:00Z",
+      "expect": "yesterday"
     },
-    "preview": "hi"
-   },
-   "expect": {
-    "ok": {
-     "id": "m1",
-     "seq": 3,
-     "atMs": 1793613600000,
-     "authorKind": "user",
-     "authorUid": "u2",
-     "authorBotKey": null,
-     "preview": "hi",
-     "recalled": false
+    {
+      "at": "2026-10-31T12:00:00Z",
+      "expect": "dateThisYear"
+    },
+    {
+      "at": "2025-12-24T12:00:00Z",
+      "expect": "dateOtherYear"
     }
-   }
+  ],
+  "compose": {
+    "canSendText": [
+      {
+        "text": "   ",
+        "expect": false
+      },
+      {
+        "text": "a",
+        "expect": true
+      },
+      {
+        "text": "a×8192",
+        "expect": true
+      },
+      {
+        "text": "a×8193",
+        "expect": false
+      },
+      {
+        "text": "你×2730",
+        "expect": true
+      },
+      {
+        "text": "你×2731",
+        "expect": false
+      }
+    ],
+    "byteLength": [
+      [
+        "🧠",
+        4
+      ],
+      [
+        "你",
+        3
+      ],
+      [
+        "a",
+        1
+      ]
+    ],
+    "messageBytes": 8192,
+    "mentionAt": [
+      {
+        "text": "hi @he",
+        "caret": 6,
+        "expect": {
+          "start": 3,
+          "query": "he"
+        }
+      },
+      {
+        "text": "@",
+        "caret": 1,
+        "expect": {
+          "start": 0,
+          "query": ""
+        }
+      },
+      {
+        "text": "(@Al",
+        "caret": 4,
+        "expect": {
+          "start": 1,
+          "query": "Al"
+        }
+      },
+      {
+        "text": "（@张",
+        "caret": 3,
+        "expect": {
+          "start": 1,
+          "query": "张"
+        }
+      },
+      {
+        "text": "mail me@x",
+        "caret": 9,
+        "expect": null
+      },
+      {
+        "text": "a @b c",
+        "caret": 4,
+        "expect": {
+          "start": 2,
+          "query": "b"
+        }
+      },
+      {
+        "text": "hi @a",
+        "caret": 3,
+        "expect": null
+      },
+      {
+        "text": "x @",
+        "caret": 3,
+        "expect": {
+          "start": 2,
+          "query": ""
+        }
+      }
+    ],
+    "withoutMention": [
+      {
+        "text": "hi @he there",
+        "start": 3,
+        "caret": 6,
+        "expect": "hi there"
+      },
+      {
+        "text": "hi @he",
+        "start": 3,
+        "caret": 6,
+        "expect": "hi "
+      },
+      {
+        "text": "@he there",
+        "start": 0,
+        "caret": 3,
+        "expect": " there"
+      },
+      {
+        "text": "a @b c",
+        "start": 2,
+        "caret": 4,
+        "expect": "a c"
+      }
+    ],
+    "snippet": [
+      {
+        "text": "  a\n\n b\t c  ",
+        "length": 90,
+        "expect": "a b c"
+      },
+      {
+        "text": "x×100",
+        "length": 90,
+        "expect": "x×90…"
+      },
+      {
+        "text": "你×100",
+        "length": 5,
+        "expect": "你你你你你…"
+      },
+      {
+        "text": "🧠×95",
+        "length": 90,
+        "expect": "🧠×90…"
+      }
+    ],
+    "botCards": [
+      {
+        "sharedBotId": "sharedbot_a",
+        "name": "Alpha",
+        "description": "",
+        "maintainer": {
+          "uid": "owner",
+          "generation": 1
+        },
+        "revision": 1,
+        "state": "published",
+        "permitted": true,
+        "ready": true,
+        "onlineUntil": 0,
+        "usePolicy": {
+          "mode": "all"
+        },
+        "quotas": {
+          "team": 100,
+          "member": 100,
+          "bot": 100
+        }
+      },
+      {
+        "sharedBotId": "sharedbot_b",
+        "name": "Bravo",
+        "description": "",
+        "maintainer": {
+          "uid": "owner",
+          "generation": 1
+        },
+        "revision": 1,
+        "state": "paused",
+        "permitted": true,
+        "ready": true,
+        "onlineUntil": 0,
+        "usePolicy": {
+          "mode": "all"
+        },
+        "quotas": {
+          "team": 100,
+          "member": 100,
+          "bot": 100
+        }
+      },
+      {
+        "sharedBotId": "sharedbot_c",
+        "name": "Charlie",
+        "description": "",
+        "maintainer": {
+          "uid": "owner",
+          "generation": 1
+        },
+        "revision": 1,
+        "state": "published",
+        "permitted": false,
+        "ready": true,
+        "onlineUntil": 0,
+        "usePolicy": {
+          "mode": "all"
+        },
+        "quotas": {
+          "team": 100,
+          "member": 100,
+          "bot": 100
+        }
+      },
+      {
+        "sharedBotId": "sharedbot_d",
+        "name": "Delta",
+        "description": "",
+        "maintainer": {
+          "uid": "owner",
+          "generation": 1
+        },
+        "revision": 1,
+        "state": "published",
+        "permitted": true,
+        "ready": true,
+        "onlineUntil": 0,
+        "usePolicy": {
+          "mode": "all"
+        },
+        "quotas": {
+          "team": 100,
+          "member": 100,
+          "bot": 100
+        }
+      }
+    ],
+    "mentionCandidates": [
+      {
+        "kind": "channel",
+        "participants": [
+          "user:u1",
+          "shared_bot:sharedbot_a",
+          "shared_bot:sharedbot_b",
+          "shared_bot:sharedbot_c",
+          "shared_bot:sharedbot_d"
+        ],
+        "chosen": [],
+        "query": "",
+        "expect": [
+          "sharedbot_a",
+          "sharedbot_d"
+        ]
+      },
+      {
+        "kind": "group",
+        "participants": [
+          "user:u1",
+          "shared_bot:sharedbot_a",
+          "shared_bot:sharedbot_d"
+        ],
+        "chosen": [],
+        "query": "AL",
+        "expect": [
+          "sharedbot_a"
+        ]
+      },
+      {
+        "kind": "group",
+        "participants": [
+          "user:u1",
+          "shared_bot:sharedbot_a",
+          "shared_bot:sharedbot_d"
+        ],
+        "chosen": [
+          "sharedbot_a"
+        ],
+        "query": "",
+        "expect": [
+          "sharedbot_d"
+        ]
+      },
+      {
+        "kind": "dm",
+        "participants": [
+          "user:u1",
+          "user:u2"
+        ],
+        "chosen": [],
+        "query": "",
+        "expect": []
+      },
+      {
+        "kind": "bot_dm",
+        "participants": [
+          "user:u1",
+          "shared_bot:sharedbot_a"
+        ],
+        "chosen": [],
+        "query": "",
+        "expect": []
+      }
+    ],
+    "composerLock": [
+      {
+        "uid": "u1",
+        "kind": "dm",
+        "participants": [
+          "user:u1",
+          "user:u2"
+        ],
+        "bots": [],
+        "botsLoaded": true,
+        "botsUnverified": false,
+        "expect": "none"
+      },
+      {
+        "uid": "u1",
+        "kind": "dm",
+        "participants": [],
+        "bots": [],
+        "botsLoaded": true,
+        "botsUnverified": false,
+        "expect": "none"
+      },
+      {
+        "uid": "u1",
+        "kind": "bot_dm",
+        "participants": [
+          "user:u9",
+          "shared_bot:sharedbot_a"
+        ],
+        "bots": [
+          "sharedbot_a"
+        ],
+        "botsLoaded": true,
+        "botsUnverified": false,
+        "expect": "ownerReading"
+      },
+      {
+        "uid": "u1",
+        "kind": "bot_dm",
+        "participants": [
+          "user:u1",
+          "shared_bot:sharedbot_a"
+        ],
+        "bots": [
+          "sharedbot_a"
+        ],
+        "botsLoaded": true,
+        "botsUnverified": false,
+        "expect": "none"
+      },
+      {
+        "uid": "u1",
+        "kind": "bot_dm",
+        "participants": [
+          "user:u1",
+          "shared_bot:sharedbot_a"
+        ],
+        "bots": [],
+        "botsLoaded": true,
+        "botsUnverified": true,
+        "expect": "botUnverified"
+      },
+      {
+        "uid": "u1",
+        "kind": "bot_dm",
+        "participants": [
+          "user:u1",
+          "shared_bot:sharedbot_a"
+        ],
+        "bots": [],
+        "botsLoaded": false,
+        "botsUnverified": false,
+        "expect": "botChecking"
+      },
+      {
+        "uid": "u1",
+        "kind": "bot_dm",
+        "participants": [
+          "user:u1",
+          "shared_bot:sharedbot_c"
+        ],
+        "bots": [
+          "sharedbot_c"
+        ],
+        "botsLoaded": true,
+        "botsUnverified": false,
+        "expect": "botUnavailable"
+      },
+      {
+        "uid": "u1",
+        "kind": "bot_dm",
+        "participants": [
+          "user:u1",
+          "shared_bot:sharedbot_b"
+        ],
+        "bots": [
+          "sharedbot_b"
+        ],
+        "botsLoaded": true,
+        "botsUnverified": false,
+        "expect": "botUnavailable"
+      },
+      {
+        "uid": "u1",
+        "kind": "group",
+        "participants": [
+          "user:u1",
+          "shared_bot:sharedbot_c"
+        ],
+        "bots": [
+          "sharedbot_c"
+        ],
+        "botsLoaded": true,
+        "botsUnverified": false,
+        "expect": "none"
+      }
+    ],
+    "maxTargets": 8
   },
-  {
-   "name": "recalled true",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
+  "avatars": {
+    "indexPrefixed": [
+      {
+        "agentId": "",
+        "expect": 14,
+        "legacyMobileWouldGive": 0
+      },
+      {
+        "agentId": "main",
+        "expect": 1,
+        "legacyMobileWouldGive": 13
+      },
+      {
+        "agentId": "agent-review-42",
+        "expect": 26,
+        "legacyMobileWouldGive": 13
+      },
+      {
+        "agentId": "搜索-agent",
+        "expect": 2,
+        "legacyMobileWouldGive": 20
+      },
+      {
+        "agentId": "🧠-review",
+        "expect": 26,
+        "legacyMobileWouldGive": 23
+      },
+      {
+        "agentId": "a×128",
+        "repeat": {
+          "char": "a",
+          "count": 128
+        },
+        "expect": 12,
+        "legacyMobileWouldGive": 9
+      },
+      {
+        "agentId": "c0ffee00-1234-5678-9abc-def012345678",
+        "expect": 14,
+        "legacyMobileWouldGive": 17
+      },
+      {
+        "agentId": "agent:c0ffee00-1234-5678-9abc-def012345678",
+        "expect": 14,
+        "legacyMobileWouldGive": 14
+      }
+    ],
+    "colorList": [
+      "#4a5fc1",
+      "#2e7d6b",
+      "#b04a6e",
+      "#8a5a1f",
+      "#6b4fa3",
+      "#2a7aa3",
+      "#9a4b2d",
+      "#4f7a28",
+      "#a1427d",
+      "#5a6b78",
+      "#3f6fb5",
+      "#a8571a"
+    ],
+    "color": [
+      {
+        "id": "",
+        "fnv1a": 2166136261,
+        "index": 1,
+        "color": "#2e7d6b"
+      },
+      {
+        "id": "u1",
+        "fnv1a": 71477235,
+        "index": 3,
+        "color": "#8a5a1f"
+      },
+      {
+        "id": "u2",
+        "fnv1a": 88254854,
+        "index": 2,
+        "color": "#b04a6e"
+      },
+      {
+        "id": "abc",
+        "fnv1a": 440920331,
+        "index": 11,
+        "color": "#a8571a"
+      },
+      {
+        "id": "用户",
+        "fnv1a": 3303804768,
+        "index": 0,
+        "color": "#4a5fc1"
+      },
+      {
+        "id": "bot:t1:h:helper",
+        "fnv1a": 3155100593,
+        "index": 5,
+        "color": "#2a7aa3"
+      }
+    ],
+    "initials": [
+      {
+        "name": "Ann Lee",
+        "expect": "AL"
+      },
+      {
+        "name": "张伟",
+        "expect": "张"
+      },
+      {
+        "name": "  ",
+        "expect": "?"
+      },
+      {
+        "name": "ann",
+        "expect": "A"
+      },
+      {
+        "name": "  bob   smith  jr",
+        "expect": "BS"
+      },
+      {
+        "name": "élan vital",
+        "expect": "ÉV"
+      },
+      {
+        "name": "🧠 brain",
+        "expect": "🧠B"
+      },
+      {
+        "name": "カタカナ テスト",
+        "expect": "カ"
+      },
+      {
+        "name": "한글 이름",
+        "expect": "한"
+      },
+      {
+        "name": "Zed",
+        "expect": "Z"
+      }
+    ],
+    "teamBotAvatarId": [
+      [
+        "bot:t1:h:helper",
+        "helper"
+      ],
+      [
+        "helper",
+        "helper"
+      ],
+      [
+        "bot:o:h:a:b",
+        "b"
+      ]
+    ]
+  },
+  "mobile": {
+    "tabBadgeText": [
+      {
+        "n": 0,
+        "expect": null
+      },
+      {
+        "n": 1,
+        "expect": "1"
+      },
+      {
+        "n": 7,
+        "expect": "7"
+      },
+      {
+        "n": 99,
+        "expect": "99"
+      },
+      {
+        "n": 100,
+        "expect": "99+"
+      },
+      {
+        "n": 1234,
+        "expect": "99+"
+      },
+      {
+        "n": -3,
+        "expect": null
+      }
+    ],
+    "chatWindow": [
+      {
+        "total": 0,
+        "expanded": false,
+        "first": 5,
+        "expect": {
+          "shown": 0,
+          "hidden": 0,
+          "showMore": false,
+          "showLess": false
+        }
+      },
+      {
+        "total": 3,
+        "expanded": false,
+        "first": 5,
+        "expect": {
+          "shown": 3,
+          "hidden": 0,
+          "showMore": false,
+          "showLess": false
+        }
+      },
+      {
+        "total": 5,
+        "expanded": false,
+        "first": 5,
+        "expect": {
+          "shown": 5,
+          "hidden": 0,
+          "showMore": false,
+          "showLess": false
+        }
+      },
+      {
+        "total": 6,
+        "expanded": false,
+        "first": 5,
+        "expect": {
+          "shown": 5,
+          "hidden": 1,
+          "showMore": true,
+          "showLess": false
+        }
+      },
+      {
+        "total": 12,
+        "expanded": false,
+        "first": 5,
+        "expect": {
+          "shown": 5,
+          "hidden": 7,
+          "showMore": true,
+          "showLess": false
+        }
+      },
+      {
+        "total": 12,
+        "expanded": true,
+        "first": 5,
+        "expect": {
+          "shown": 12,
+          "hidden": 0,
+          "showMore": false,
+          "showLess": true
+        }
+      },
+      {
+        "total": 5,
+        "expanded": true,
+        "first": 5,
+        "expect": {
+          "shown": 5,
+          "hidden": 0,
+          "showMore": false,
+          "showLess": false
+        }
+      }
+    ],
+    "sortBots": {
+      "input": [
+        {
+          "botId": "b3",
+          "name": "beta 10",
+          "lastActivityAtMs": 1000
+        },
+        {
+          "botId": "b1",
+          "name": "Alpha",
+          "lastActivityAtMs": null
+        },
+        {
+          "botId": "b2",
+          "name": "beta 2",
+          "lastActivityAtMs": 1000
+        },
+        {
+          "botId": "b4",
+          "name": "Zed",
+          "lastActivityAtMs": 5000
+        },
+        {
+          "botId": "b0",
+          "name": "alpha",
+          "lastActivityAtMs": null
+        }
+      ],
+      "expect": [
+        "b4",
+        "b2",
+        "b3",
+        "b0",
+        "b1"
+      ]
     },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
+    "sortHosts": {
+      "connected": "h3",
+      "input": [
+        {
+          "hostId": "h1",
+          "name": "Mac",
+          "online": true,
+          "lastSeenMs": 100
+        },
+        {
+          "hostId": "h2",
+          "name": "Linux",
+          "online": false,
+          "lastSeenMs": 900
+        },
+        {
+          "hostId": "h3",
+          "name": "Studio",
+          "online": false,
+          "lastSeenMs": 50
+        },
+        {
+          "hostId": "h4",
+          "name": "Air",
+          "online": true,
+          "lastSeenMs": 500
+        },
+        {
+          "hostId": "h5",
+          "name": "Box",
+          "online": true,
+          "lastSeenMs": 500
+        }
+      ],
+      "expect": [
+        "h3",
+        "h4",
+        "h5",
+        "h1",
+        "h2"
+      ]
     },
-    "preview": "hi",
-    "recalled": true
-   },
-   "expect": {
-    "ok": {
-     "id": "m1",
-     "seq": 3,
-     "atMs": 1793613600000,
-     "authorKind": "user",
-     "authorUid": "u2",
-     "authorBotKey": null,
-     "preview": "hi",
-     "recalled": true
+    "tabBarVisible": [
+      {
+        "wide": false,
+        "depth": 0,
+        "keyboardVisible": false,
+        "drawerOpen": false,
+        "selectedTab": "chats",
+        "overlayOpen": false,
+        "expect": true
+      },
+      {
+        "wide": false,
+        "depth": 1,
+        "keyboardVisible": false,
+        "drawerOpen": false,
+        "selectedTab": "teams",
+        "overlayOpen": false,
+        "expect": false
+      },
+      {
+        "wide": false,
+        "depth": 0,
+        "keyboardVisible": true,
+        "drawerOpen": false,
+        "selectedTab": "chats",
+        "overlayOpen": false,
+        "expect": false
+      },
+      {
+        "wide": false,
+        "depth": 0,
+        "keyboardVisible": false,
+        "drawerOpen": true,
+        "selectedTab": "chats",
+        "overlayOpen": false,
+        "expect": false
+      },
+      {
+        "wide": false,
+        "depth": 0,
+        "keyboardVisible": false,
+        "drawerOpen": true,
+        "selectedTab": "bots",
+        "overlayOpen": false,
+        "expect": true
+      },
+      {
+        "wide": false,
+        "depth": 0,
+        "keyboardVisible": false,
+        "drawerOpen": false,
+        "selectedTab": "settings",
+        "overlayOpen": true,
+        "expect": false
+      },
+      {
+        "wide": true,
+        "depth": 3,
+        "keyboardVisible": true,
+        "drawerOpen": true,
+        "selectedTab": "settings",
+        "overlayOpen": false,
+        "expect": true
+      },
+      {
+        "wide": true,
+        "depth": 0,
+        "keyboardVisible": false,
+        "drawerOpen": false,
+        "selectedTab": "chats",
+        "overlayOpen": true,
+        "expect": false
+      }
+    ],
+    "tabForLink": [
+      {
+        "route": "session/abc",
+        "expect": "chats"
+      },
+      {
+        "route": "new",
+        "expect": "chats"
+      },
+      {
+        "route": "project/p",
+        "expect": "chats"
+      },
+      {
+        "route": "apps/a",
+        "expect": "chats"
+      },
+      {
+        "route": "market/m",
+        "expect": "chats"
+      },
+      {
+        "route": "runtime/agent/r1",
+        "expect": "chats"
+      },
+      {
+        "route": "terminal/interactive",
+        "expect": "chats"
+      },
+      {
+        "route": "cron/run/r1",
+        "expect": "chats"
+      },
+      {
+        "route": "cron/job/j1",
+        "expect": "chats"
+      },
+      {
+        "route": "remote/h1/s1",
+        "expect": "bots"
+      },
+      {
+        "route": "team/join",
+        "expect": "teams"
+      },
+      {
+        "route": "team/inbox",
+        "expect": "teams"
+      },
+      {
+        "route": "settings/account",
+        "expect": "settings"
+      },
+      {
+        "route": "settings/permission-mode",
+        "expect": "settings"
+      },
+      {
+        "route": "provider/p1",
+        "expect": "settings"
+      },
+      {
+        "route": "extensions/mcp/x",
+        "expect": "settings"
+      },
+      {
+        "route": "extensions/plugin/y",
+        "expect": "settings"
+      },
+      {
+        "route": "import/provider",
+        "expect": "stay"
+      },
+      {
+        "route": "import/mcp",
+        "expect": "stay"
+      },
+      {
+        "route": "unknown/x",
+        "expect": "none"
+      },
+      {
+        "route": "",
+        "expect": "none"
+      }
+    ],
+    "settingsJump": [
+      {
+        "name": "jump from chats then back",
+        "events": [
+          {
+            "type": "jump",
+            "page": "account",
+            "origin": "chats"
+          },
+          {
+            "type": "back"
+          }
+        ],
+        "trace": [
+          {
+            "event": {
+              "type": "jump",
+              "page": "account",
+              "origin": "chats"
+            },
+            "stack": [
+              "account"
+            ],
+            "origin": "chats",
+            "leaveTo": null
+          },
+          {
+            "event": {
+              "type": "back"
+            },
+            "stack": [],
+            "origin": null,
+            "leaveTo": "chats"
+          }
+        ]
+      },
+      {
+        "name": "deeper pages pop first",
+        "events": [
+          {
+            "type": "jump",
+            "page": "providerList",
+            "origin": "chats"
+          },
+          {
+            "type": "push",
+            "page": "providerEdit"
+          },
+          {
+            "type": "back"
+          },
+          {
+            "type": "back"
+          }
+        ],
+        "trace": [
+          {
+            "event": {
+              "type": "jump",
+              "page": "providerList",
+              "origin": "chats"
+            },
+            "stack": [
+              "providerList"
+            ],
+            "origin": "chats",
+            "leaveTo": null
+          },
+          {
+            "event": {
+              "type": "push",
+              "page": "providerEdit"
+            },
+            "stack": [
+              "providerList",
+              "providerEdit"
+            ],
+            "origin": "chats",
+            "leaveTo": null
+          },
+          {
+            "event": {
+              "type": "back"
+            },
+            "stack": [
+              "providerList"
+            ],
+            "origin": "chats",
+            "leaveTo": null
+          },
+          {
+            "event": {
+              "type": "back"
+            },
+            "stack": [],
+            "origin": null,
+            "leaveTo": "chats"
+          }
+        ]
+      },
+      {
+        "name": "manual navigation never leaves the tab",
+        "events": [
+          {
+            "type": "push",
+            "page": "group.models"
+          },
+          {
+            "type": "back"
+          }
+        ],
+        "trace": [
+          {
+            "event": {
+              "type": "push",
+              "page": "group.models"
+            },
+            "stack": [
+              "group.models"
+            ],
+            "origin": null,
+            "leaveTo": null
+          },
+          {
+            "event": {
+              "type": "back"
+            },
+            "stack": [],
+            "origin": null,
+            "leaveTo": null
+          }
+        ]
+      },
+      {
+        "name": "user tab tap clears origin",
+        "events": [
+          {
+            "type": "jump",
+            "page": "account",
+            "origin": "teams"
+          },
+          {
+            "type": "userSelectedTab"
+          },
+          {
+            "type": "back"
+          }
+        ],
+        "trace": [
+          {
+            "event": {
+              "type": "jump",
+              "page": "account",
+              "origin": "teams"
+            },
+            "stack": [
+              "account"
+            ],
+            "origin": "teams",
+            "leaveTo": null
+          },
+          {
+            "event": {
+              "type": "userSelectedTab"
+            },
+            "stack": [
+              "account"
+            ],
+            "origin": null,
+            "leaveTo": null
+          },
+          {
+            "event": {
+              "type": "back"
+            },
+            "stack": [],
+            "origin": null,
+            "leaveTo": null
+          }
+        ]
+      },
+      {
+        "name": "external link has no origin",
+        "events": [
+          {
+            "type": "jump",
+            "page": "provider",
+            "origin": null
+          },
+          {
+            "type": "back"
+          }
+        ],
+        "trace": [
+          {
+            "event": {
+              "type": "jump",
+              "page": "provider",
+              "origin": null
+            },
+            "stack": [
+              "provider"
+            ],
+            "origin": null,
+            "leaveTo": null
+          },
+          {
+            "event": {
+              "type": "back"
+            },
+            "stack": [],
+            "origin": null,
+            "leaveTo": null
+          }
+        ]
+      },
+      {
+        "name": "jump to the settings root with an origin; Back leaves",
+        "events": [
+          {
+            "type": "jump",
+            "page": "main",
+            "origin": "bots"
+          },
+          {
+            "type": "back"
+          }
+        ],
+        "trace": [
+          {
+            "event": {
+              "type": "jump",
+              "page": "main",
+              "origin": "bots"
+            },
+            "stack": [],
+            "origin": "bots",
+            "leaveTo": null
+          },
+          {
+            "event": {
+              "type": "back"
+            },
+            "stack": [],
+            "origin": null,
+            "leaveTo": "bots"
+          }
+        ]
+      },
+      {
+        "name": "back at the root without an origin changes nothing (the shell decides)",
+        "events": [
+          {
+            "type": "back"
+          }
+        ],
+        "trace": [
+          {
+            "event": {
+              "type": "back"
+            },
+            "stack": [],
+            "origin": null,
+            "leaveTo": null
+          }
+        ]
+      },
+      {
+        "name": "a second jump replaces both the stack and the origin",
+        "events": [
+          {
+            "type": "jump",
+            "page": "account",
+            "origin": "chats"
+          },
+          {
+            "type": "push",
+            "page": "x"
+          },
+          {
+            "type": "jump",
+            "page": "provider",
+            "origin": "teams"
+          },
+          {
+            "type": "back"
+          }
+        ],
+        "trace": [
+          {
+            "event": {
+              "type": "jump",
+              "page": "account",
+              "origin": "chats"
+            },
+            "stack": [
+              "account"
+            ],
+            "origin": "chats",
+            "leaveTo": null
+          },
+          {
+            "event": {
+              "type": "push",
+              "page": "x"
+            },
+            "stack": [
+              "account",
+              "x"
+            ],
+            "origin": "chats",
+            "leaveTo": null
+          },
+          {
+            "event": {
+              "type": "jump",
+              "page": "provider",
+              "origin": "teams"
+            },
+            "stack": [
+              "provider"
+            ],
+            "origin": "teams",
+            "leaveTo": null
+          },
+          {
+            "event": {
+              "type": "back"
+            },
+            "stack": [],
+            "origin": null,
+            "leaveTo": "teams"
+          }
+        ]
+      }
+    ],
+    "hostBody": [
+      {
+        "name": "connected, Bots not delivered yet",
+        "input": {
+          "connected": true,
+          "online": true,
+          "paired": true,
+          "live": "unknown",
+          "snapshot": null
+        },
+        "expect": {
+          "kind": "loading",
+          "source": "live",
+          "dimmed": false,
+          "actionable": true,
+          "notes": []
+        }
+      },
+      {
+        "name": "connected, old desktop",
+        "input": {
+          "connected": true,
+          "online": true,
+          "paired": true,
+          "live": "unsupported",
+          "snapshot": null
+        },
+        "expect": {
+          "kind": "unsupported",
+          "source": "live",
+          "dimmed": false,
+          "actionable": true,
+          "notes": []
+        }
+      },
+      {
+        "name": "connected, zero Bots",
+        "input": {
+          "connected": true,
+          "online": true,
+          "paired": true,
+          "live": 0,
+          "snapshot": null
+        },
+        "expect": {
+          "kind": "noBots",
+          "source": "live",
+          "dimmed": false,
+          "actionable": true,
+          "notes": []
+        }
+      },
+      {
+        "name": "connected, live Bots win over the cache",
+        "input": {
+          "connected": true,
+          "online": true,
+          "paired": true,
+          "live": 2,
+          "snapshot": 5
+        },
+        "expect": {
+          "kind": "bots",
+          "source": "live",
+          "dimmed": false,
+          "actionable": true,
+          "notes": []
+        }
+      },
+      {
+        "name": "connected although presence says offline (presence lags)",
+        "input": {
+          "connected": true,
+          "online": false,
+          "paired": true,
+          "live": 2,
+          "snapshot": null
+        },
+        "expect": {
+          "kind": "bots",
+          "source": "live",
+          "dimmed": false,
+          "actionable": true,
+          "notes": []
+        }
+      },
+      {
+        "name": "other computer, online, cache present",
+        "input": {
+          "connected": false,
+          "online": true,
+          "paired": true,
+          "live": "unknown",
+          "snapshot": 2
+        },
+        "expect": {
+          "kind": "bots",
+          "source": "cached",
+          "dimmed": true,
+          "actionable": true,
+          "notes": [
+            "savedNote"
+          ]
+        }
+      },
+      {
+        "name": "other computer, offline, cache present",
+        "input": {
+          "connected": false,
+          "online": false,
+          "paired": true,
+          "live": "unknown",
+          "snapshot": 2
+        },
+        "expect": {
+          "kind": "bots",
+          "source": "cached",
+          "dimmed": true,
+          "actionable": false,
+          "notes": [
+            "savedNote",
+            "offlineChatsNote"
+          ]
+        }
+      },
+      {
+        "name": "other computer, cache says zero Bots",
+        "input": {
+          "connected": false,
+          "online": true,
+          "paired": true,
+          "live": "unknown",
+          "snapshot": 0
+        },
+        "expect": {
+          "kind": "noBots",
+          "source": "cached",
+          "dimmed": false,
+          "actionable": true,
+          "notes": [
+            "savedNote"
+          ]
+        }
+      },
+      {
+        "name": "other computer, online, never connected",
+        "input": {
+          "connected": false,
+          "online": true,
+          "paired": true,
+          "live": "unknown",
+          "snapshot": null
+        },
+        "expect": {
+          "kind": "connectToLoad",
+          "source": "none",
+          "dimmed": false,
+          "actionable": true,
+          "notes": []
+        }
+      },
+      {
+        "name": "offline, never connected",
+        "input": {
+          "connected": false,
+          "online": false,
+          "paired": true,
+          "live": "unknown",
+          "snapshot": null
+        },
+        "expect": {
+          "kind": "offlineNoSnapshot",
+          "source": "none",
+          "dimmed": false,
+          "actionable": false,
+          "notes": []
+        }
+      },
+      {
+        "name": "online, not paired",
+        "input": {
+          "connected": false,
+          "online": true,
+          "paired": false,
+          "live": "unknown",
+          "snapshot": null
+        },
+        "expect": {
+          "kind": "notPaired",
+          "source": "none",
+          "dimmed": false,
+          "actionable": true,
+          "notes": []
+        }
+      },
+      {
+        "name": "offline and not paired: offline wins",
+        "input": {
+          "connected": false,
+          "online": false,
+          "paired": false,
+          "live": "unknown",
+          "snapshot": null
+        },
+        "expect": {
+          "kind": "offlineNoSnapshot",
+          "source": "none",
+          "dimmed": false,
+          "actionable": false,
+          "notes": []
+        }
+      },
+      {
+        "name": "a cache for an unpaired computer is ignored",
+        "input": {
+          "connected": false,
+          "online": true,
+          "paired": false,
+          "live": "unknown",
+          "snapshot": 3
+        },
+        "expect": {
+          "kind": "notPaired",
+          "source": "none",
+          "dimmed": false,
+          "actionable": true,
+          "notes": []
+        }
+      }
+    ],
+    "snapshot": {
+      "caps": {
+        "hosts": 20,
+        "botsPerHost": 100,
+        "chatsPerBot": 50
+      },
+      "applyBots": [
+        {
+          "name": "live list replaces the Bot list, kept Bots keep their chats, new Bots have none",
+          "prior": {
+            "hostId": "h1",
+            "savedAtMs": 100,
+            "bots": [
+              {
+                "botId": "a",
+                "chats": [
+                  "a1",
+                  "a2"
+                ]
+              },
+              {
+                "botId": "b",
+                "chats": [
+                  "b1"
+                ]
+              }
+            ]
+          },
+          "hostId": "h1",
+          "live": [
+            "a",
+            "c"
+          ],
+          "now": 200,
+          "expect": {
+            "hostId": "h1",
+            "savedAtMs": 200,
+            "bots": [
+              {
+                "botId": "a",
+                "chats": [
+                  "a1",
+                  "a2"
+                ]
+              },
+              {
+                "botId": "c",
+                "chats": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "first save for a computer",
+          "prior": null,
+          "hostId": "h2",
+          "live": [
+            "x"
+          ],
+          "now": 300,
+          "expect": {
+            "hostId": "h2",
+            "savedAtMs": 300,
+            "bots": [
+              {
+                "botId": "x",
+                "chats": null
+              }
+            ]
+          }
+        },
+        {
+          "name": "Bot cap: first 100 in the host order",
+          "prior": null,
+          "hostId": "h3",
+          "live": [
+            "b1",
+            "b2",
+            "b3",
+            "b4",
+            "b5",
+            "b6",
+            "b7",
+            "b8",
+            "b9",
+            "b10",
+            "b11",
+            "b12",
+            "b13",
+            "b14",
+            "b15",
+            "b16",
+            "b17",
+            "b18",
+            "b19",
+            "b20",
+            "b21",
+            "b22",
+            "b23",
+            "b24",
+            "b25",
+            "b26",
+            "b27",
+            "b28",
+            "b29",
+            "b30",
+            "b31",
+            "b32",
+            "b33",
+            "b34",
+            "b35",
+            "b36",
+            "b37",
+            "b38",
+            "b39",
+            "b40",
+            "b41",
+            "b42",
+            "b43",
+            "b44",
+            "b45",
+            "b46",
+            "b47",
+            "b48",
+            "b49",
+            "b50",
+            "b51",
+            "b52",
+            "b53",
+            "b54",
+            "b55",
+            "b56",
+            "b57",
+            "b58",
+            "b59",
+            "b60",
+            "b61",
+            "b62",
+            "b63",
+            "b64",
+            "b65",
+            "b66",
+            "b67",
+            "b68",
+            "b69",
+            "b70",
+            "b71",
+            "b72",
+            "b73",
+            "b74",
+            "b75",
+            "b76",
+            "b77",
+            "b78",
+            "b79",
+            "b80",
+            "b81",
+            "b82",
+            "b83",
+            "b84",
+            "b85",
+            "b86",
+            "b87",
+            "b88",
+            "b89",
+            "b90",
+            "b91",
+            "b92",
+            "b93",
+            "b94",
+            "b95",
+            "b96",
+            "b97",
+            "b98",
+            "b99",
+            "b100",
+            "b101",
+            "b102",
+            "b103",
+            "b104",
+            "b105",
+            "b106",
+            "b107",
+            "b108",
+            "b109",
+            "b110",
+            "b111",
+            "b112",
+            "b113",
+            "b114",
+            "b115",
+            "b116",
+            "b117",
+            "b118",
+            "b119",
+            "b120"
+          ],
+          "now": 1,
+          "expectBotIds": "b1..b100 (100 Bots, chats null)",
+          "expectCount": 100
+        }
+      ],
+      "applyChats": [
+        {
+          "name": "replaces that Bot’s chats and stamps the save time",
+          "prior": {
+            "hostId": "h1",
+            "savedAtMs": 100,
+            "bots": [
+              {
+                "botId": "a",
+                "chats": [
+                  "a1",
+                  "a2"
+                ]
+              },
+              {
+                "botId": "b",
+                "chats": [
+                  "b1"
+                ]
+              }
+            ]
+          },
+          "botId": "a",
+          "chats": [
+            "a3",
+            "a4"
+          ],
+          "now": 400,
+          "expect": {
+            "hostId": "h1",
+            "savedAtMs": 400,
+            "bots": [
+              {
+                "botId": "a",
+                "chats": [
+                  "a3",
+                  "a4"
+                ]
+              },
+              {
+                "botId": "b",
+                "chats": [
+                  "b1"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "unknown Bot: snapshot unchanged (time too)",
+          "prior": {
+            "hostId": "h1",
+            "savedAtMs": 100,
+            "bots": [
+              {
+                "botId": "a",
+                "chats": [
+                  "a1",
+                  "a2"
+                ]
+              },
+              {
+                "botId": "b",
+                "chats": [
+                  "b1"
+                ]
+              }
+            ]
+          },
+          "botId": "z",
+          "chats": [
+            "z1"
+          ],
+          "now": 400,
+          "expect": {
+            "hostId": "h1",
+            "savedAtMs": 100,
+            "bots": [
+              {
+                "botId": "a",
+                "chats": [
+                  "a1",
+                  "a2"
+                ]
+              },
+              {
+                "botId": "b",
+                "chats": [
+                  "b1"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "no snapshot yet: nothing is created from chats alone",
+          "prior": null,
+          "botId": "a",
+          "chats": [
+            "a1"
+          ],
+          "now": 400,
+          "expect": null
+        },
+        {
+          "name": "chat cap: first 50 in the host order (newest first)",
+          "prior": {
+            "hostId": "h1",
+            "savedAtMs": 100,
+            "bots": [
+              {
+                "botId": "a",
+                "chats": [
+                  "a1",
+                  "a2"
+                ]
+              },
+              {
+                "botId": "b",
+                "chats": [
+                  "b1"
+                ]
+              }
+            ]
+          },
+          "botId": "b",
+          "chats": [
+            "c1",
+            "c2",
+            "c3",
+            "c4",
+            "c5",
+            "c6",
+            "c7",
+            "c8",
+            "c9",
+            "c10",
+            "c11",
+            "c12",
+            "c13",
+            "c14",
+            "c15",
+            "c16",
+            "c17",
+            "c18",
+            "c19",
+            "c20",
+            "c21",
+            "c22",
+            "c23",
+            "c24",
+            "c25",
+            "c26",
+            "c27",
+            "c28",
+            "c29",
+            "c30",
+            "c31",
+            "c32",
+            "c33",
+            "c34",
+            "c35",
+            "c36",
+            "c37",
+            "c38",
+            "c39",
+            "c40",
+            "c41",
+            "c42",
+            "c43",
+            "c44",
+            "c45",
+            "c46",
+            "c47",
+            "c48",
+            "c49",
+            "c50",
+            "c51",
+            "c52",
+            "c53",
+            "c54",
+            "c55",
+            "c56",
+            "c57",
+            "c58",
+            "c59",
+            "c60"
+          ],
+          "now": 500,
+          "expectCount": 50,
+          "expectFirstLast": [
+            "c1",
+            "c50"
+          ]
+        }
+      ],
+      "evictHosts": {
+        "name": "22 computers saved at times 1..22: the 20 newest stay, newest first",
+        "savedAtMs": {
+          "h01": 1,
+          "h02": 2,
+          "h03": 3,
+          "h04": 4,
+          "h05": 5,
+          "h06": 6,
+          "h07": 7,
+          "h08": 8,
+          "h09": 9,
+          "h10": 10,
+          "h11": 11,
+          "h12": 12,
+          "h13": 13,
+          "h14": 14,
+          "h15": 15,
+          "h16": 16,
+          "h17": 17,
+          "h18": 18,
+          "h19": 19,
+          "h20": 20,
+          "h21": 21,
+          "h22": 22
+        },
+        "expect": [
+          "h22",
+          "h21",
+          "h20",
+          "h19",
+          "h18",
+          "h17",
+          "h16",
+          "h15",
+          "h14",
+          "h13",
+          "h12",
+          "h11",
+          "h10",
+          "h09",
+          "h08",
+          "h07",
+          "h06",
+          "h05",
+          "h04",
+          "h03"
+        ]
+      }
+    },
+    "autoMarkRead": [
+      {
+        "name": "all conditions met",
+        "input": {
+          "online": true,
+          "fromCache": false,
+          "foreground": true,
+          "atBottomMs": 1500,
+          "newestRenderedSeq": 12,
+          "lastReadSeq": 9,
+          "thresholdMs": 1000
+        },
+        "expect": 12
+      },
+      {
+        "name": "exactly at the threshold",
+        "input": {
+          "online": true,
+          "fromCache": false,
+          "foreground": true,
+          "atBottomMs": 1000,
+          "newestRenderedSeq": 12,
+          "lastReadSeq": 9,
+          "thresholdMs": 1000
+        },
+        "expect": 12
+      },
+      {
+        "name": "just under the threshold",
+        "input": {
+          "online": true,
+          "fromCache": false,
+          "foreground": true,
+          "atBottomMs": 999,
+          "newestRenderedSeq": 12,
+          "lastReadSeq": 9,
+          "thresholdMs": 1000
+        },
+        "expect": null
+      },
+      {
+        "name": "not at the bottom",
+        "input": {
+          "online": true,
+          "fromCache": false,
+          "foreground": true,
+          "atBottomMs": null,
+          "newestRenderedSeq": 12,
+          "lastReadSeq": 9,
+          "thresholdMs": 1000
+        },
+        "expect": null
+      },
+      {
+        "name": "offline",
+        "input": {
+          "online": false,
+          "fromCache": false,
+          "foreground": true,
+          "atBottomMs": 1500,
+          "newestRenderedSeq": 12,
+          "lastReadSeq": 9,
+          "thresholdMs": 1000
+        },
+        "expect": null
+      },
+      {
+        "name": "directory/messages come from the cache",
+        "input": {
+          "online": true,
+          "fromCache": true,
+          "foreground": true,
+          "atBottomMs": 1500,
+          "newestRenderedSeq": 12,
+          "lastReadSeq": 9,
+          "thresholdMs": 1000
+        },
+        "expect": null
+      },
+      {
+        "name": "app in background",
+        "input": {
+          "online": true,
+          "fromCache": false,
+          "foreground": false,
+          "atBottomMs": 1500,
+          "newestRenderedSeq": 12,
+          "lastReadSeq": 9,
+          "thresholdMs": 1000
+        },
+        "expect": null
+      },
+      {
+        "name": "nothing unread",
+        "input": {
+          "online": true,
+          "fromCache": false,
+          "foreground": true,
+          "atBottomMs": 1500,
+          "newestRenderedSeq": 12,
+          "lastReadSeq": 12,
+          "thresholdMs": 1000
+        },
+        "expect": null
+      },
+      {
+        "name": "feature switched off (threshold null)",
+        "input": {
+          "online": true,
+          "fromCache": false,
+          "foreground": true,
+          "atBottomMs": 1500,
+          "newestRenderedSeq": 12,
+          "lastReadSeq": 9,
+          "thresholdMs": null
+        },
+        "expect": null
+      },
+      {
+        "name": "read mark ahead of the stream (never moves backwards)",
+        "input": {
+          "online": true,
+          "fromCache": false,
+          "foreground": true,
+          "atBottomMs": 1500,
+          "newestRenderedSeq": 12,
+          "lastReadSeq": 20,
+          "thresholdMs": 1000
+        },
+        "expect": null
+      }
+    ],
+    "autoConnectTarget": [
+      {
+        "name": "last-used computer is paired and online",
+        "input": {
+          "signedIn": true,
+          "connectedHostId": null,
+          "lastHostId": "h1",
+          "hosts": [
+            {
+              "hostId": "h1",
+              "online": true,
+              "paired": true
+            },
+            {
+              "hostId": "h2",
+              "online": false,
+              "paired": true
+            },
+            {
+              "hostId": "h3",
+              "online": true,
+              "paired": false
+            }
+          ]
+        },
+        "expect": "h1"
+      },
+      {
+        "name": "signed out",
+        "input": {
+          "signedIn": false,
+          "connectedHostId": null,
+          "lastHostId": "h1",
+          "hosts": [
+            {
+              "hostId": "h1",
+              "online": true,
+              "paired": true
+            },
+            {
+              "hostId": "h2",
+              "online": false,
+              "paired": true
+            },
+            {
+              "hostId": "h3",
+              "online": true,
+              "paired": false
+            }
+          ]
+        },
+        "expect": null
+      },
+      {
+        "name": "already connected somewhere",
+        "input": {
+          "signedIn": true,
+          "connectedHostId": "h2",
+          "lastHostId": "h1",
+          "hosts": [
+            {
+              "hostId": "h1",
+              "online": true,
+              "paired": true
+            },
+            {
+              "hostId": "h2",
+              "online": false,
+              "paired": true
+            },
+            {
+              "hostId": "h3",
+              "online": true,
+              "paired": false
+            }
+          ]
+        },
+        "expect": null
+      },
+      {
+        "name": "no last-used computer yet",
+        "input": {
+          "signedIn": true,
+          "connectedHostId": null,
+          "lastHostId": null,
+          "hosts": [
+            {
+              "hostId": "h1",
+              "online": true,
+              "paired": true
+            },
+            {
+              "hostId": "h2",
+              "online": false,
+              "paired": true
+            },
+            {
+              "hostId": "h3",
+              "online": true,
+              "paired": false
+            }
+          ]
+        },
+        "expect": null
+      },
+      {
+        "name": "last-used computer is offline",
+        "input": {
+          "signedIn": true,
+          "connectedHostId": null,
+          "lastHostId": "h2",
+          "hosts": [
+            {
+              "hostId": "h1",
+              "online": true,
+              "paired": true
+            },
+            {
+              "hostId": "h2",
+              "online": false,
+              "paired": true
+            },
+            {
+              "hostId": "h3",
+              "online": true,
+              "paired": false
+            }
+          ]
+        },
+        "expect": null
+      },
+      {
+        "name": "last-used computer is not paired",
+        "input": {
+          "signedIn": true,
+          "connectedHostId": null,
+          "lastHostId": "h3",
+          "hosts": [
+            {
+              "hostId": "h1",
+              "online": true,
+              "paired": true
+            },
+            {
+              "hostId": "h2",
+              "online": false,
+              "paired": true
+            },
+            {
+              "hostId": "h3",
+              "online": true,
+              "paired": false
+            }
+          ]
+        },
+        "expect": null
+      },
+      {
+        "name": "last-used computer no longer listed",
+        "input": {
+          "signedIn": true,
+          "connectedHostId": null,
+          "lastHostId": "h9",
+          "hosts": [
+            {
+              "hostId": "h1",
+              "online": true,
+              "paired": true
+            },
+            {
+              "hostId": "h2",
+              "online": false,
+              "paired": true
+            },
+            {
+              "hostId": "h3",
+              "online": true,
+              "paired": false
+            }
+          ]
+        },
+        "expect": null
+      }
+    ],
+    "botsBadgeCount": {
+      "input": [
+        {
+          "waitingThreads": 2
+        },
+        {
+          "waitingThreads": 0
+        },
+        {
+          "waitingThreads": 3
+        }
+      ],
+      "expect": 5
     }
-   }
   },
-  {
-   "name": "bot author",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
+  "strings": {
+    "en": {
+      "channel": "Channel",
+      "directMessage": "Direct message",
+      "group": "Group",
+      "member": "Member",
+      "you": "You",
+      "bot": "Bot",
+      "noMessages": "No messages yet",
+      "recalled": "Message recalled",
+      "nonText": "[Non-text message]",
+      "listSeparator": ", ",
+      "authorSeparator": ": "
     },
-    "author": {
-     "kind": "bot",
-     "uid": "u5",
-     "botKey": "bot:t1:h:helper"
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "ok": {
-     "id": "m1",
-     "seq": 3,
-     "atMs": 1793613600000,
-     "authorKind": "bot",
-     "authorUid": "u5",
-     "authorBotKey": "bot:t1:h:helper",
-     "preview": "hi",
-     "recalled": false
+    "zh": {
+      "channel": "频道",
+      "directMessage": "私信",
+      "group": "群聊",
+      "member": "成员",
+      "you": "你",
+      "bot": "Bot",
+      "noMessages": "暂无消息",
+      "recalled": "消息已撤回",
+      "nonText": "[非文本消息]",
+      "listSeparator": "、",
+      "authorSeparator": "："
     }
-   }
   },
-  {
-   "name": "server time not stamped yet (at null)",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": null,
-    "author": {
-     "kind": "user",
-     "uid": "u2"
+  "lastMessage": [
+    {
+      "name": "explicit null = no message yet",
+      "input": null,
+      "expect": {
+        "ok": null
+      }
     },
-    "preview": "hi"
-   },
-   "expect": {
-    "ok": {
-     "id": "m1",
-     "seq": 3,
-     "atMs": null,
-     "authorKind": "user",
-     "authorUid": "u2",
-     "authorBotKey": null,
-     "preview": "hi",
-     "recalled": false
+    {
+      "name": "whole pointer",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "ok": {
+          "id": "m1",
+          "seq": 3,
+          "atMs": 1793613600000,
+          "authorKind": "user",
+          "authorUid": "u2",
+          "authorSharedBotId": null,
+          "preview": "hi",
+          "recalled": false
+        }
+      }
+    },
+    {
+      "name": "recalled true",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi",
+        "recalled": true
+      },
+      "expect": {
+        "ok": {
+          "id": "m1",
+          "seq": 3,
+          "atMs": 1793613600000,
+          "authorKind": "user",
+          "authorUid": "u2",
+          "authorSharedBotId": null,
+          "preview": "hi",
+          "recalled": true
+        }
+      }
+    },
+    {
+      "name": "bot author",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "shared_bot",
+          "sharedBotId": "sharedbot_helper"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "ok": {
+          "id": "m1",
+          "seq": 3,
+          "atMs": 1793613600000,
+          "authorKind": "shared_bot",
+          "authorUid": "",
+          "authorSharedBotId": "sharedbot_helper",
+          "preview": "hi",
+          "recalled": false
+        }
+      }
+    },
+    {
+      "name": "server time not stamped yet (at null)",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": null,
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "ok": {
+          "id": "m1",
+          "seq": 3,
+          "atMs": null,
+          "authorKind": "user",
+          "authorUid": "u2",
+          "authorSharedBotId": null,
+          "preview": "hi",
+          "recalled": false
+        }
+      }
+    },
+    {
+      "name": "empty preview is allowed",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": ""
+      },
+      "expect": {
+        "ok": {
+          "id": "m1",
+          "seq": 3,
+          "atMs": 1793613600000,
+          "authorKind": "user",
+          "authorUid": "u2",
+          "authorSharedBotId": null,
+          "preview": "",
+          "recalled": false
+        }
+      }
+    },
+    {
+      "name": "unknown extra fields are ignored",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi",
+        "extra": 1
+      },
+      "expect": {
+        "ok": {
+          "id": "m1",
+          "seq": 3,
+          "atMs": 1793613600000,
+          "authorKind": "user",
+          "authorUid": "u2",
+          "authorSharedBotId": null,
+          "preview": "hi",
+          "recalled": false
+        }
+      }
+    },
+    {
+      "name": "field absent entirely",
+      "input": {
+        "$absent": true
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "not an object: string",
+      "input": "x",
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "not an object: number",
+      "input": 3,
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "not an object: array",
+      "input": [],
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "id empty",
+      "input": {
+        "id": "",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "id missing",
+      "input": {
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "seq fractional",
+      "input": {
+        "id": "m1",
+        "seq": 1.5,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "seq string",
+      "input": {
+        "id": "m1",
+        "seq": "3",
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "seq beyond 2^53-1",
+      "input": {
+        "id": "m1",
+        "seq": 9007199254740992,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "at is a plain string, not a timestamp",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": "2026-11-02T10:00:00Z",
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "at missing",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "preview missing",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        }
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "preview not a string",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": 5
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "recalled false (only true or absent is valid)",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi",
+        "recalled": false
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "recalled string",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": "u2"
+        },
+        "preview": "hi",
+        "recalled": "true"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "author missing",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "author kind unknown",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "system",
+          "uid": "u2"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "user author without uid",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "user author with empty uid",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "user",
+          "uid": ""
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
+    },
+    {
+      "name": "bot author without botKey",
+      "input": {
+        "id": "m1",
+        "seq": 3,
+        "at": {
+          "$ts": "2026-11-02T10:00:00Z"
+        },
+        "author": {
+          "kind": "shared_bot"
+        },
+        "preview": "hi"
+      },
+      "expect": {
+        "error": "INVALID_DATA"
+      }
     }
-   }
-  },
-  {
-   "name": "empty preview is allowed",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
+  ],
+  "search": [
+    {
+      "label": "Design Review",
+      "query": "review",
+      "expect": true
     },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
+    {
+      "label": "Design Review",
+      "query": " DESIGN ",
+      "expect": true
     },
-    "preview": ""
-   },
-   "expect": {
-    "ok": {
-     "id": "m1",
-     "seq": 3,
-     "atMs": 1793613600000,
-     "authorKind": "user",
-     "authorUid": "u2",
-     "authorBotKey": null,
-     "preview": "",
-     "recalled": false
+    {
+      "label": "Design Review",
+      "query": "",
+      "expect": true
+    },
+    {
+      "label": "Design Review",
+      "query": "   ",
+      "expect": true
+    },
+    {
+      "label": "Design Review",
+      "query": "x",
+      "expect": false
+    },
+    {
+      "label": "设计评审",
+      "query": "评审",
+      "expect": true
+    },
+    {
+      "label": "Ann, Bob",
+      "query": "ann,",
+      "expect": true
     }
-   }
-  },
-  {
-   "name": "unknown extra fields are ignored",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
-    },
-    "preview": "hi",
-    "extra": 1
-   },
-   "expect": {
-    "ok": {
-     "id": "m1",
-     "seq": 3,
-     "atMs": 1793613600000,
-     "authorKind": "user",
-     "authorUid": "u2",
-     "authorBotKey": null,
-     "preview": "hi",
-     "recalled": false
-    }
-   }
-  },
-  {
-   "name": "field absent entirely",
-   "input": {
-    "$absent": true
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "not an object: string",
-   "input": "x",
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "not an object: number",
-   "input": 3,
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "not an object: array",
-   "input": [],
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "id empty",
-   "input": {
-    "id": "",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "id missing",
-   "input": {
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "seq fractional",
-   "input": {
-    "id": "m1",
-    "seq": 1.5,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "seq string",
-   "input": {
-    "id": "m1",
-    "seq": "3",
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "seq beyond 2^53-1",
-   "input": {
-    "id": "m1",
-    "seq": 9007199254740992,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "at is a plain string, not a timestamp",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": "2026-11-02T10:00:00Z",
-    "author": {
-     "kind": "user",
-     "uid": "u2"
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "at missing",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "author": {
-     "kind": "user",
-     "uid": "u2"
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "preview missing",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
-    }
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "preview not a string",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
-    },
-    "preview": 5
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "recalled false (only true or absent is valid)",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
-    },
-    "preview": "hi",
-    "recalled": false
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "recalled string",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "user",
-     "uid": "u2"
-    },
-    "preview": "hi",
-    "recalled": "true"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "author missing",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "author kind unknown",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "system",
-     "uid": "u2"
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "user author without uid",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "user"
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "user author with empty uid",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "user",
-     "uid": ""
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  },
-  {
-   "name": "bot author without botKey",
-   "input": {
-    "id": "m1",
-    "seq": 3,
-    "at": {
-     "$ts": "2026-11-02T10:00:00Z"
-    },
-    "author": {
-     "kind": "bot",
-     "uid": "u5"
-    },
-    "preview": "hi"
-   },
-   "expect": {
-    "error": "INVALID_DATA"
-   }
-  }
- ],
- "search": [
-  {
-   "label": "Design Review",
-   "query": "review",
-   "expect": true
-  },
-  {
-   "label": "Design Review",
-   "query": " DESIGN ",
-   "expect": true
-  },
-  {
-   "label": "Design Review",
-   "query": "",
-   "expect": true
-  },
-  {
-   "label": "Design Review",
-   "query": "   ",
-   "expect": true
-  },
-  {
-   "label": "Design Review",
-   "query": "x",
-   "expect": false
-  },
-  {
-   "label": "设计评审",
-   "query": "评审",
-   "expect": true
-  },
-  {
-   "label": "Ann, Bob",
-   "query": "ann,",
-   "expect": true
-  }
- ]
+  ]
 }

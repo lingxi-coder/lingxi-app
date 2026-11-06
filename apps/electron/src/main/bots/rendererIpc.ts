@@ -5,6 +5,7 @@
  */
 
 import type { PermissionModeId } from '@lingxi/bridge-client';
+import { CH_BOTS_MARKET } from '../../shared/botMarket.js';
 
 import {
   CH_BOTS_AVAILABILITY,
@@ -67,6 +68,7 @@ export interface BotsUiDeps {
   content: BotContent;
   tasks: BotsUiTasks;
   loginItem: BotsUiLoginItem;
+  market?: { handle(request: unknown): Promise<unknown> };
 }
 
 function plainObject(value: unknown, allowed: readonly string[]): Record<string, unknown> {
@@ -173,6 +175,7 @@ export function botUi(record: BotRecord, lastActivityAt?: number): BotUi {
     createdAt: record.created_at,
     updatedAt: record.updated_at,
     revision: record.revision,
+    ...(record.marketOrigin ? { marketOrigin: { ...record.marketOrigin } } : {}),
     ...(record.model !== undefined ? { model: record.model } : {}),
     ...(record.permission_mode !== undefined ? { permissionMode: record.permission_mode } : {}),
     ...(record.accept_from !== undefined ? { acceptFrom: [...record.accept_from] } : {}),
@@ -210,6 +213,7 @@ export class BotsUi {
     const { service, content, tasks, loginItem } = this.deps;
     const present = async (record: BotRecord): Promise<BotUi> => botUi(record, await service.lastActivityAt(record.bot_id));
     const handlers: Record<string, BotsIpcHandler> = {
+      [CH_BOTS_MARKET]: request => { if (!this.deps.market) throw new Error('Bot market unavailable'); return this.deps.market.handle(request); },
       [CH_BOTS_LIST]: async (): Promise<BotUi[]> => Promise.all(service.list().map(present)),
       [CH_BOTS_GET]: (id): Promise<BotUi> => present(service.get(botId(id))),
       [CH_BOTS_CREATE]: (request): Promise<BotUi> => present(service.create(createRequest(request))),

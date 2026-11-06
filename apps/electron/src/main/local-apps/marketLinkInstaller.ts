@@ -7,7 +7,7 @@ export function marketApplicationId(value: unknown): string {
 
 /** Links contain an identity only; the trusted market supplies the package. */
 export class MarketLinkInstaller {
-  private readonly pending = new Map<string, Promise<DesktopLocalApp | null>>();
+  private readonly pending = new MarketInstallGuard<DesktopLocalApp | null>();
   constructor(private readonly options: {
     list(): Promise<DesktopLocalApp[]>;
     preview(id: string): Promise<{ id: string; name: string; summary: string }>;
@@ -17,11 +17,7 @@ export class MarketLinkInstaller {
   }) {}
   install(value: unknown): Promise<DesktopLocalApp | null> {
     const id = marketApplicationId(value);
-    const pending = this.pending.get(id);
-    if (pending) return pending;
-    const operation = this.perform(id).finally(() => this.pending.delete(id));
-    this.pending.set(id, operation);
-    return operation;
+    return this.pending.run(id, () => this.perform(id));
   }
   private async perform(id: string): Promise<DesktopLocalApp | null> {
     const existing = (await this.options.list()).find(app => app.marketOrigin?.appId === id && !app.marketOrigin.remixedFrom);
@@ -32,5 +28,14 @@ export class MarketLinkInstaller {
     const installed = await this.options.install(id);
     this.options.installed();
     return installed;
+  }
+}
+
+/** Shared duplicate-click guard; persistent identity remains the destination store's responsibility. */
+export class MarketInstallGuard<T> {
+  private readonly pending = new Map<string, Promise<T>>();
+  run(key: string, operation: () => Promise<T>): Promise<T> {
+    const prior = this.pending.get(key); if (prior) return prior;
+    const next = operation().finally(() => this.pending.delete(key)); this.pending.set(key,next); return next;
   }
 }

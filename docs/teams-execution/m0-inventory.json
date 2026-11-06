@@ -1,0 +1,473 @@
+{
+  "schemaVersion": 1,
+  "productHead": "da3d305fd48a0ace6599f6b42353ed0172b10615",
+  "productStatus": "M apps/web/src/pages/TeamsPage.tsx\n?? .cargo/\n?? acceptance/conversation-spaces-closeout-20261103/\n?? apps/firebase/src/team-execution-contract.mjs\n?? apps/firebase/test/team-execution-contract.test.mjs\n?? docs/teams-execution/\n?? scripts/teams-execution-inventory.mjs",
+  "retiredSymbolMatches": [
+    {
+      "symbol": "prepareBotTriggers",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 60
+    },
+    {
+      "symbol": "prepareBotTriggers",
+      "file": "apps/firebase/src/team-messages.mjs",
+      "line": 4
+    },
+    {
+      "symbol": "prepareBotTriggers",
+      "file": "apps/firebase/src/team-messages.mjs",
+      "line": 117
+    },
+    {
+      "symbol": "claimBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 18
+    },
+    {
+      "symbol": "claimBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 28
+    },
+    {
+      "symbol": "claimBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 227
+    },
+    {
+      "symbol": "startBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 18
+    },
+    {
+      "symbol": "startBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 29
+    },
+    {
+      "symbol": "startBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 240
+    },
+    {
+      "symbol": "finishBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 18
+    },
+    {
+      "symbol": "finishBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 30
+    },
+    {
+      "symbol": "finishBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 189
+    },
+    {
+      "symbol": "finishBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 274
+    },
+    {
+      "symbol": "recoverBot",
+      "file": "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamBots.kt",
+      "line": 26
+    },
+    {
+      "symbol": "recoverBot",
+      "file": "apps/electron/src/main/teams/service.ts",
+      "line": 188
+    },
+    {
+      "symbol": "recoverBot",
+      "file": "apps/electron/src/main/teams/service.ts",
+      "line": 197
+    },
+    {
+      "symbol": "recoverBot",
+      "file": "apps/ios/native/Sources/Teams/TeamMessagingModel.swift",
+      "line": 430
+    },
+    {
+      "symbol": "recoverBot",
+      "file": "apps/ios/native/Sources/Teams/TeamMessagingModel.swift",
+      "line": 460
+    },
+    {
+      "symbol": "recoverBot",
+      "file": "packages/teams/bots.ts",
+      "line": 21
+    },
+    {
+      "symbol": "recoverBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 18
+    },
+    {
+      "symbol": "recoverBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 39
+    },
+    {
+      "symbol": "recoverBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 190
+    },
+    {
+      "symbol": "recoverBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 210
+    },
+    {
+      "symbol": "recoverBot",
+      "file": "apps/ios/native/Sources/Teams/TeamBotViews.swift",
+      "line": 38
+    },
+    {
+      "symbol": "recoverBot",
+      "file": "packages/teams/messages.ts",
+      "line": 246
+    },
+    {
+      "symbol": "botQueue",
+      "file": "apps/electron/src/main/teams/service.ts",
+      "line": 251
+    },
+    {
+      "symbol": "botQueue",
+      "file": "apps/electron/src/main/teams/connector.ts",
+      "line": 274
+    },
+    {
+      "symbol": "botQueue",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 18
+    },
+    {
+      "symbol": "botQueue",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 27
+    },
+    {
+      "symbol": "botQueue",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 180
+    },
+    {
+      "symbol": "bindLocalBot",
+      "file": "apps/electron/src/preload/index.ts",
+      "line": 478
+    },
+    {
+      "symbol": "bindLocalBot",
+      "file": "apps/electron/src/main/teams/service.ts",
+      "line": 17
+    },
+    {
+      "symbol": "bindLocalBot",
+      "file": "apps/electron/src/main/teams/service.ts",
+      "line": 233
+    },
+    {
+      "symbol": "bindLocalBot",
+      "file": "apps/electron/src/main/teams/service.ts",
+      "line": 234
+    },
+    {
+      "symbol": "bindLocalBot",
+      "file": "apps/electron/src/main/teams/ipc.ts",
+      "line": 39
+    },
+    {
+      "symbol": "bindLocalBot",
+      "file": "apps/electron/src/main/teams/ipc.ts",
+      "line": 41
+    },
+    {
+      "symbol": "bindLocalBot",
+      "file": "apps/electron/src/main/teams/connector.ts",
+      "line": 81
+    },
+    {
+      "symbol": "bindLocalBot",
+      "file": "packages/teams/index.ts",
+      "line": 21
+    },
+    {
+      "symbol": "bindLocalBot",
+      "file": "packages/teams/index.ts",
+      "line": 30
+    },
+    {
+      "symbol": "bindLocalBot",
+      "file": "packages/teams/BotDirectory.tsx",
+      "line": 51
+    },
+    {
+      "symbol": "bindLocalBot",
+      "file": "apps/electron/src/renderer/bridge/useTeams.ts",
+      "line": 11
+    },
+    {
+      "symbol": "bindBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 18
+    },
+    {
+      "symbol": "bindBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 23
+    },
+    {
+      "symbol": "bindBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 122
+    },
+    {
+      "symbol": "bindBot",
+      "file": "apps/electron/src/main/teams/connector.ts",
+      "line": 125
+    },
+    {
+      "symbol": "bindBot",
+      "file": "apps/electron/src/main/teams/service.ts",
+      "line": 251
+    },
+    {
+      "symbol": "unbindBot",
+      "file": "apps/electron/src/main/teams/service.ts",
+      "line": 188
+    },
+    {
+      "symbol": "unbindBot",
+      "file": "apps/electron/src/main/teams/service.ts",
+      "line": 189
+    },
+    {
+      "symbol": "unbindBot",
+      "file": "apps/electron/src/main/teams/service.ts",
+      "line": 197
+    },
+    {
+      "symbol": "unbindBot",
+      "file": "apps/electron/src/main/teams/service.ts",
+      "line": 251
+    },
+    {
+      "symbol": "unbindBot",
+      "file": "apps/ios/native/Sources/Teams/TeamMessagingModel.swift",
+      "line": 450
+    },
+    {
+      "symbol": "unbindBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 18
+    },
+    {
+      "symbol": "unbindBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 25
+    },
+    {
+      "symbol": "unbindBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 166
+    },
+    {
+      "symbol": "unbindBot",
+      "file": "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamMessagingModel.kt",
+      "line": 375
+    },
+    {
+      "symbol": "unbindBot",
+      "file": "packages/teams/BotDirectory.tsx",
+      "line": 52
+    },
+    {
+      "symbol": "unbindBot",
+      "file": "packages/teams/bots.ts",
+      "line": 26
+    },
+    {
+      "symbol": "heartbeatBot",
+      "file": "apps/electron/src/main/teams/service.ts",
+      "line": 251
+    },
+    {
+      "symbol": "heartbeatBot",
+      "file": "apps/electron/src/main/teams/connector.ts",
+      "line": 213
+    },
+    {
+      "symbol": "heartbeatBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 18
+    },
+    {
+      "symbol": "heartbeatBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 26
+    },
+    {
+      "symbol": "heartbeatBot",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 171
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 185
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 299
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 328
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamMessagingModel.kt",
+      "line": 34
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamMessagingModel.kt",
+      "line": 137
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamMessagingModel.kt",
+      "line": 174
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamMessagingModel.kt",
+      "line": 298
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamMessagingModel.kt",
+      "line": 330
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamMessagingModel.kt",
+      "line": 364
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamMessagingModel.kt",
+      "line": 376
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamMessagingModel.kt",
+      "line": 405
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamConversationScreen.kt",
+      "line": 424
+    },
+    {
+      "symbol": "botRuns",
+      "file": "apps/android/native/app/src/main/java/com/lingxi/code/teams/TeamConversationScreen.kt",
+      "line": 430
+    },
+    {
+      "symbol": "triggerIdentity",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 46
+    },
+    {
+      "symbol": "triggerIdentity",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 69
+    },
+    {
+      "symbol": "triggerIdentity",
+      "file": "apps/firebase/src/team-bots.mjs",
+      "line": 72
+    },
+    {
+      "symbol": "triggerIdentity",
+      "file": "apps/firebase/src/team-messages.mjs",
+      "line": 4
+    },
+    {
+      "symbol": "triggerIdentity",
+      "file": "apps/firebase/src/team-messages.mjs",
+      "line": 103
+    }
+  ],
+  "workerReplacementScope": [
+    {
+      "file": "crates/runtime/src/desktop/team_connector",
+      "exists": true
+    },
+    {
+      "file": "crates/runtime/src/desktop/team_process",
+      "exists": true
+    },
+    {
+      "file": "crates/runtime/src/desktop/team_invocation.rs",
+      "exists": true
+    }
+  ],
+  "protectedModules": [
+    {
+      "file": "apps/firebase/src/teams.mjs",
+      "exists": true
+    },
+    {
+      "file": "apps/firebase/src/team-messages.mjs",
+      "exists": true
+    },
+    {
+      "file": "apps/electron/src/main/teams/messageWindow.ts",
+      "exists": true
+    },
+    {
+      "file": "apps/electron/src/renderer/teams-data.ts",
+      "exists": true
+    },
+    {
+      "file": "apps/electron/src/main/account.ts",
+      "exists": true
+    },
+    {
+      "file": "apps/electron/src/main/provider-accounts.ts",
+      "exists": true
+    },
+    {
+      "file": "apps/electron/src/main/bots/service.ts",
+      "exists": true
+    },
+    {
+      "file": "packages/teams/BotDirectory.tsx",
+      "exists": true
+    },
+    {
+      "file": "packages/teams/BotRunCards.tsx",
+      "exists": true
+    },
+    {
+      "file": "apps/electron/src/main/local-apps/serviceBroker.ts",
+      "exists": true
+    }
+  ],
+  "obsoleteData": {
+    "cloud": [
+      "teams/{teamId}/bots",
+      "teams/{teamId}/conversations/{id}/triggers",
+      "teams/{teamId}/conversations/{id}/botRuns"
+    ],
+    "conditional": "Only conversations containing a retired bot principal and their descendants; never all conversations.",
+    "local": "Resolve exact owner/project/account-scoped private store paths before cleanup; no guessed home directory or recursive application-data deletion."
+  },
+  "scope": "Read-only source inventory. No deletion, deployment, migration or execution is performed."
+}

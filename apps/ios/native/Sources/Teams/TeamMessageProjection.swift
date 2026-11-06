@@ -8,11 +8,11 @@ struct TeamLastMessage: Equatable, Sendable {
     let seq: Int
     /// Epoch milliseconds; `nil` while the server has not stamped a write made on this device.
     let atMs: Int64?
-    /// `user` or `bot`.
+    /// `user` or `shared_bot`.
     let authorKind: String
     let authorUid: String
     /// Set for Bot authors.
-    let authorBotKey: String?
+    let authorSharedBotId: String?
     /// May be empty (a non-text message).
     let preview: String
     let recalled: Bool
@@ -26,19 +26,34 @@ struct TeamMessageConversation: Equatable, Identifiable, Sendable {
     var lastSeq: Int
     var lastChangeSeq: Int
     var lastReadSeq: Int
-    /// The `botKey` field of a Bot DM document.
-    var botKey: String? = nil
+    /// The `sharedBotId` field of a Bot DM document.
+    var sharedBotId: String? = nil
     /// The pointer to the newest message; `nil` = no message yet. Parsed strictly (`TeamsPointerParser`).
     var lastMessage: TeamLastMessage? = nil
     func merging(_ old: TeamMessageConversation?) -> TeamMessageConversation {
         var value = self; value.lastReadSeq = max(old?.lastReadSeq ?? 0, lastReadSeq); value.lastSeq = max(old?.lastSeq ?? 0, lastSeq); value.lastChangeSeq = max(old?.lastChangeSeq ?? 0, lastChangeSeq); return value
     }
     var unread: Int { max(0, lastSeq - lastReadSeq) }
-    /// The Bot of a Bot DM: the document's `botKey`, else the first `bot:` participant (Desktop `botKeyOf`).
-    var effectiveBotKey: String? { botKey ?? participants.first { $0.hasPrefix("bot:") } }
+    /// The raw SharedBot ID stored on a DM or carried by its explicit `shared_bot:` participant.
+    var effectiveSharedBotId: String? { sharedBotId ?? participants.first { $0.hasPrefix("shared_bot:") }.map { String($0.dropFirst(11)) } }
 }
 struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
-    struct Author: Decodable, Equatable, Sendable { let kind: String; let uid: String; let botKey: String? }
+    struct Author: Decodable, Equatable, Sendable {
+        let kind: String; let uid: String; let sharedBotId: String?; let displayName: String?
+        private enum CodingKeys: String, CodingKey { case kind, uid, sharedBotId, displayName }
+        init(kind: String, uid: String = "", sharedBotId: String? = nil, displayName: String? = nil) {
+            self.kind = kind; self.uid = uid; self.sharedBotId = sharedBotId; self.displayName = displayName
+        }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self); kind = try c.decode(String.self, forKey: .kind)
+            displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
+            switch kind {
+            case "user": uid = try c.decode(String.self, forKey: .uid); sharedBotId = nil
+            case "shared_bot": uid = ""; sharedBotId = try c.decode(String.self, forKey: .sharedBotId)
+            default: throw TeamMessageFailure(code: "INVALID_DATA")
+            }
+        }
+    }
     let id: String
     let seq: Int
     let author: Author
@@ -51,9 +66,10 @@ struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     let changeSeq: Int
     let changeId: String
     var mentions: [String]? = nil
-    var triggerId: String? = nil
-    var origin: TeamBotOrigin? = nil
-    var question: TeamBotQuestion? = nil
+    var taskIds: [String]? = nil
+    var taskId: String? = nil
+    var artifactId: String? = nil
+
 }
 struct TeamMessageIntent: Codable, Equatable, Identifiable, Sendable {
     var action = "mutate"
@@ -70,6 +86,17 @@ struct TeamMessageIntent: Codable, Equatable, Identifiable, Sendable {
     var leaseUntil: Double?
     var attempted: Bool?
     var id: String { changeId }
+    var body: [String: Any] {
+        let targets = targets ?? []
+        var payload: [String: Any] = ["conversationId": conversationId, "messageId": messageId, "changeId": changeId, "text": text]
+        if let replyTo { payload["replyTo"] = replyTo }
+        if operation == "create", !targets.isEmpty {
+            payload["targets"] = targets
+            return ["schemaVersion": 1, "commandId": changeId, "teamId": teamId, "generation": generation, "action": "submit", "payload": payload]
+        }
+        payload["action"] = "mutate"; payload["operation"] = operation
+        return payload
+    }
 }
 struct TeamMessageCreation: Codable, Equatable, Sendable {
     var action = "create"
@@ -79,10 +106,30 @@ struct TeamMessageCreation: Codable, Equatable, Sendable {
     let kind: String
     let title: String
     let participantUids: [String]
-    var botKeys: [String]? = nil
+    var sharedBotIds: [String]? = nil
     var error: String?
     var leaseUntil: Double?
     var attempted: Bool?
+    var body: [String: Any] {
+        var payload: [String: Any] = ["conversationId": conversationId, "kind": kind, "title": title, "participantUids": participantUids]
+        if let sharedBotIds, !sharedBotIds.isEmpty {
+            payload["sharedBotIds"] = sharedBotIds
+            return ["schemaVersion": 1, "commandId": conversationId, "teamId": teamId, "generation": generation, "action": "createConversation", "payload": payload]
+        }
+        payload["action"] = "create"
+        return payload
+    }
+}
+struct TeamExecutionIntent: Codable, Equatable, Identifiable, Sendable {
+    let commandId: String
+    let action: String
+    let sharedBotId: String
+    let expectedRevision: Int
+    var error: String?
+    var leaseUntil: Double?
+    var attempted: Bool?
+    var id: String { commandId }
+    var payload: [String: Any] { ["sharedBotId": sharedBotId, "expectedRevision": expectedRevision] }
 }
 struct TeamMessageProjection: Codable, Equatable, Sendable {
     struct Thread: Equatable, Sendable { var messages: [TeamMessage] = [] }
@@ -90,16 +137,12 @@ struct TeamMessageProjection: Codable, Equatable, Sendable {
     let uid: String
     let teamId: String
     let generation: Int
-    private enum CodingKeys: String, CodingKey { case version, uid, teamId, generation, outbox, creation, botOutbox }
+    private enum CodingKeys: String, CodingKey { case version, uid, teamId, generation, outbox, creation, commands }
     var conversations: [TeamMessageConversation] = []
     var threads: [String: Thread] = [:]
     var outbox: [TeamMessageIntent] = []
     var creation: TeamMessageCreation?
-    var botOutbox: [TeamBotIntent]? = nil
-    mutating func acknowledgeBotIntent(_ id: String) { botOutbox?.removeAll { $0.id == id } }
-    func hasPendingAnswer(for message: TeamMessage) -> Bool {
-        (botOutbox ?? []).contains { $0.action == "botAnswer" && $0.triggerId == message.triggerId && $0.questionId == message.question?.id }
-    }
+    var commands: [TeamExecutionIntent]? = nil
 
 }
 struct TeamMessageFailure: Error { let code: String }
@@ -122,12 +165,16 @@ actor TeamCommandFiles {
         let file = try url(uid: uid, teamId: teamId, generation: generation)
         guard FileManager.default.fileExists(atPath: file.path) else { return TeamMessageProjection(version: 1, uid: uid, teamId: teamId, generation: generation) }
         let data = try Data(contentsOf: file)
-        let value = try JSONDecoder().decode(TeamMessageProjection.self, from: data)
-        if let old = try JSONSerialization.jsonObject(with: data) as? [String: Any], old["conversations"] != nil || old["threads"] != nil {
-            try JSONEncoder().encode(value).write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        guard var raw = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw TeamMessageFailure(code: "STORAGE_FAILED") }
+        var cleaned = raw.removeValue(forKey: "botOutbox") != nil
+        if let creation = raw["creation"] as? [String: Any], (creation["botKeys"] as? [String])?.isEmpty == false { raw.removeValue(forKey: "creation"); cleaned = true }
+        if let outbox = raw["outbox"] as? [[String: Any]] {
+            let retained = outbox.filter { !(($0["targets"] as? [String])?.contains(where: { $0.hasPrefix("bot:") }) ?? false) }
+            if retained.count != outbox.count { raw["outbox"] = retained; cleaned = true }
         }
+        let value = try JSONDecoder().decode(TeamMessageProjection.self, from: JSONSerialization.data(withJSONObject: raw))
         guard value.version == 1, value.uid == uid, value.teamId == teamId, value.generation == generation else { throw TeamMessageFailure(code: "STORAGE_FAILED") }
+        if cleaned { try JSONSerialization.data(withJSONObject: raw).write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen]) }
         return value
     }
     func update(uid: String, teamId: String, generation: Int, _ reduce: @Sendable (inout TeamMessageProjection) throws -> Void) throws -> TeamMessageProjection {
@@ -136,16 +183,12 @@ actor TeamCommandFiles {
         try reduce(&value)
         guard value != old else { return old }
         let file = try url(uid: uid, teamId: teamId, generation: generation)
-        try JSONEncoder().encode(value).write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
+        var raw: [String: Any] = [:]
+        if let data = try? Data(contentsOf: file), let existing = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { raw = existing }
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as! [String: Any]
+        for key in ["version", "uid", "teamId", "generation", "outbox", "creation", "commands"] { raw[key] = encoded[key] }
+        try JSONSerialization.data(withJSONObject: raw).write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         return value
-    }
-}
-
-enum TeamBotTrigger {
-    static func identity(messageId: String, botKey: String) -> String {
-        // Both fields use the backend's ASCII URL-safe identity grammar.
-        let data = Data("[\"\(messageId)\",\"\(botKey)\"]".utf8)
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }

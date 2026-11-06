@@ -23,10 +23,10 @@ test('the five-minute window is inclusive and measured from the previous message
 });
 
 test('a different author, author kind or Bot breaks the run', () => {
-  const bot = (botKey: string, uid = 'owner') => ({ author: { kind: 'bot' as const, uid, botKey } });
+  const bot = (sharedBotId: string, displayName = 'Helper') => ({ author: { kind: 'shared_bot' as const, sharedBotId, displayName } });
   const rows = buildStreamRows([
     msg(1, when(2, 10, 0)), msg(2, when(2, 10, 1), { author: { kind: 'user', uid: 'carol' } }), msg(3, when(2, 10, 2), { author: { kind: 'user', uid: 'carol' } }),
-    msg(4, when(2, 10, 3), bot('bot:owner:h:a')), msg(5, when(2, 10, 3), bot('bot:owner:h:a')), msg(6, when(2, 10, 3), bot('bot:owner:h:b')),
+    msg(4, when(2, 10, 3), bot('bot:owner:h:a')), msg(5, when(2, 10, 3), bot('bot:owner:h:a')), msg(6, when(2, 10, 3), bot('assistant-fixture')),
     msg(7, when(2, 10, 3), { author: { kind: 'user', uid: 'owner' } }),
   ], options());
   assert.equal(shape(rows), '[Today] 1 2 3+ 4 5+ 6 7');
@@ -68,7 +68,7 @@ test('the viewer\'s own unread messages never anchor the divider; later messages
   assert.equal(firstUnreadMessage(mixed, 1, 'alice')?.id, 'message-3');
   assert.equal(firstUnreadMessage(mixed, 1, 'bob')?.id, 'message-2', 'someone else\'s view');
   assert.equal(firstUnreadMessage(mixed, 4, 'alice'), undefined);
-  const bot = msg(5, when(2, 10, 4), { author: { kind: 'bot', uid: 'alice', botKey: 'bot:alice:h:b' } });
+  const bot = msg(5, when(2, 10, 4), { author: { kind: 'shared_bot', displayName: 'Helper', sharedBotId: 'assistant-alice' } });
   assert.equal(firstUnreadMessage([bot], 4, 'alice')?.id, bot.id, 'a Bot of the viewer is still someone else');
 });
 

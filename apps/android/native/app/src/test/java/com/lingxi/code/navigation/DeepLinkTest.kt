@@ -2,6 +2,12 @@ package com.lingxi.code.navigation
 import org.junit.Assert.*
 import org.junit.Test
 class DeepLinkTest {
+    @Test fun botHandoffRetainsPinnedReleaseAndRejectsBindings() {
+        val raw = DeepLink.build("market/bot/travel-helper", mapOf("versionId" to "release1"))
+        assertEquals("release1", DeepLink.parse(raw)!!.params["versionId"])
+        for (link in listOf("lingxi://market/bot/helper?workspace=private", "lingxi://market/bot/helper?token=secret", "lingxi://market/app1?versionId=release1")) assertNull(link, DeepLink.parse(link))
+    }
+
     @Test fun browserAgentReturnIsLimitedToAppReview() {
         assertEquals("agent", DeepLink.parse("lingxi://apps/a123?review=agent")!!.params["review"])
         assertEquals("apps/a123", DeepLink.parse(DeepLink.build("apps/a123", mapOf("review" to "agent")))!!.route)

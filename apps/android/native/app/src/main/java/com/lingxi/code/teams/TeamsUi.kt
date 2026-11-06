@@ -97,8 +97,8 @@ internal fun teamsErrorRes(code: String): Int = when {
     code == "INVALID_DATA" || code == "INVALID_MESSAGE_SNAPSHOT" -> R.string.teams_error_invalid_data
     code in setOf("MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED") -> R.string.teams_stale_error
     code.contains("STORAGE") -> R.string.teams_messages_storage_error
-    code in setOf("BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "BOT_SELECTION_STALE") -> R.string.teams_error_bot_access_changed
-    code in setOf("QUESTION_RECIPIENT_REQUIRED", "ANSWER_CONFLICT", "INVALID_ANSWER") -> R.string.teams_error_answer_rejected
+    code in setOf("BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "BOT_SELECTION_STALE", "CONVERSATION_POLICY_REQUIRED", "ARTIFACT_READ_REQUIRED", "GRANT_READ_REQUIRED", "INPUT_GRANT_REQUIRED") -> R.string.teams_error_bot_access_changed
+    code == "REQUEST_QUOTA_EXCEEDED" -> R.string.teams_error_request_quota
     code == "MESSAGE_LISTENER_FAILED" -> R.string.teams_error_sync_failed
     code in setOf("MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT") -> R.string.teams_message_failed
     code == "INVITE_UNAVAILABLE" -> R.string.teams_invite_error

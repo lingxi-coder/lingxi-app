@@ -1,93 +1,75 @@
 package com.lingxi.code.teams
 
-import org.json.JSONArray
 import org.json.JSONObject
-import java.security.MessageDigest
 
-internal fun teamBotTriggers(message: TeamMessage, conversation: TeamMessageConversation?): List<String> {
-    message.triggerId?.let { return listOf(it) }
-    if (message.authorKind != "user" || message.recalled) return emptyList()
-    val keys = if (conversation?.kind == "bot_dm") conversation.botKeys else message.targets
-    return keys.map { key -> MessageDigest.getInstance("SHA-256").digest(JSONArray(listOf(message.id, key)).toString().toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) } }
+internal data class TeamMemberRef(val uid: String, val generation: Long) {
+    companion object { fun parse(v: JSONObject) = TeamMemberRef(v.getString("uid"), v.getLong("generation")) }
 }
-
-internal fun visibleTeamBotTriggers(messages: List<TeamMessage>, conversation: TeamMessageConversation?, limit: Int) =
-    messages.takeLast(maxOf(100, limit)).flatMap { teamBotTriggers(it, conversation) }.distinct()
-
-internal fun teamBotStateQuery(conversationId: String, triggerId: String, questionId: String? = null) =
-    JSONObject().put("action", "botState").put("conversationId", conversationId).put("triggerId", triggerId).also { value -> questionId?.let { value.put("questionId", it) } }
-
-internal fun canDiscardTeamBotIntent(intent: JSONObject, now: Long) =
-    !(intent.optBoolean("attempted") && !intent.has("error")) && intent.optLong("leaseUntil") <= now
-
-internal fun teamBotSettlementIntent(cache: TeamMessageCache, conversationId: String, triggerId: String, run: TeamBotRun, text: String, settlementId: String, now: Long): JSONObject {
-    if (!run.canRecover(cache.uid, now) || text.isBlank() || text.toByteArray(Charsets.UTF_8).size > 8192) throw TeamMessageFailure("BOT_RECOVERY_REQUIRED")
-    if (cache.settlements.any { it.getJSONObject("body").getString("conversationId") == conversationId && it.getJSONObject("body").getString("triggerId") == triggerId }) throw TeamMessageFailure("MESSAGE_IN_FLIGHT")
-    val body = JSONObject().put("action", "recoverBot").put("teamId", cache.teamId).put("generation", cache.generation)
-        .put("conversationId", conversationId).put("botKey", run.botKey).put("triggerId", triggerId).put("text", text)
-    // The local identity is not a new backend parameter. The immutable wire body
-    // is retried exactly; backend trigger + text digest supplies its receipt.
-    return JSONObject().put("settlementId", settlementId).put("body", body)
+internal data class TeamBotCard(val sharedBotId: String, val name: String, val description: String, val maintainer: TeamMemberRef,
+    val revision: Long, val state: String, val permitted: Boolean, val ready: Boolean, val onlineUntil: Long, val usePolicy: JSONObject,
+    val quotas: JSONObject, val instanceId: String?) {
+    val selectable get() = state == "published" && permitted
+    val avatarId get() = sharedBotId
+    fun canPause(uid: String, generation: Long) = state == "published" && maintainer == TeamMemberRef(uid, generation)
+    companion object {
+        fun parse(v: JSONObject) = TeamBotCard(v.getString("sharedBotId"), v.getString("name"), v.getString("description"),
+            TeamMemberRef.parse(v.getJSONObject("maintainer")), v.getLong("revision"), v.getString("state"), v.getBoolean("permitted"),
+            v.getBoolean("ready"), v.getLong("onlineUntil"), v.getJSONObject("usePolicy"), v.getJSONObject("quotas"), v.stringOrNull("instanceId"))
+    }
 }
-
-internal data class TeamBotQuestion(val id: String, val questions: List<String>) {
-    fun json() = JSONObject().put("id", id).put("questions", JSONArray(questions))
-    companion object { fun parse(v: JSONObject) = TeamBotQuestion(v.getString("id"), v.getJSONArray("questions").strings()) }
+internal data class TeamTask(val taskId: String, val conversationId: String, val sharedBotId: String, val requester: TeamMemberRef,
+    val state: String, val createdAt: Long, val deadline: Long, val replyId: String?, val artifactId: String?) {
+    val terminal get() = state !in setOf("queued", "running")
+    companion object { fun parse(v: JSONObject) = TeamTask(v.getString("taskId"), v.getString("conversationId"), v.getString("sharedBotId"),
+        TeamMemberRef.parse(v.getJSONObject("requester")), v.getString("state"), v.getLong("createdAt"), v.getLong("deadline"), v.stringOrNull("replyId"), v.stringOrNull("artifactId")) }
 }
-
-/**
- * A Bot shared with the team (HTTP `bots`). [botId] / [hostId] are the backend's own fields of the key
- * `bot:<owner>:<host>:<botId>`; the avatar is drawn from [botId], and from the key's last segment before the card has loaded
- * (`AvatarIdentity.teamBotAvatarId`). Both are null only for cards built in code, never for parsed ones.
- */
-internal data class TeamBotCard(val key: String, val ownerUid: String, val name: String, val description: String, val revision: Long, val use: String, val permitted: Boolean, val online: Boolean, val enabled: Boolean = true, val onlineUntil: Long = 0, val botId: String? = null, val hostId: String? = null) {
-    val selectable get() = enabled && permitted
-    fun canUnbind(uid: String) = enabled && ownerUid == uid
-    /** The id [com.lingxi.code.theme.AgentAvatar] draws this Bot from. */
-    val avatarId get() = botId ?: com.lingxi.code.theme.AvatarIdentity.teamBotAvatarId(key)
-    companion object { fun parse(v: JSONObject) = TeamBotCard(v.getString("key"), v.getString("ownerUid"), v.getString("name"), v.getString("description"), v.getLong("revision"), v.getString("use"), v.getBoolean("permitted"), v.getBoolean("online"), v.optBoolean("enabled", true), v.optLong("onlineUntil"), v.getString("botId"), v.getString("hostId")) }
+internal data class TeamArtifact(val artifactId: String, val revision: Long, val digest: String, val title: String, val body: String) {
+    companion object { fun parse(v: JSONObject) = TeamArtifact(v.getString("artifactId"), v.getLong("revision"), v.getString("digest"), v.getJSONObject("document").getString("title"), v.getJSONObject("document").getString("body")) }
 }
-
-/** Preserve selected keys until the human clears them; never downgrade a Bot draft to plain text. */
 internal fun staleTeamBotSelections(selected: Collection<String>, bots: List<TeamBotCard>, participants: Collection<String>? = null): Set<String> =
-    selected.filterTo(mutableSetOf()) { key -> bots.none { it.key == key && it.selectable } || (participants != null && key !in participants) }
-
+    selected.filterTo(mutableSetOf()) { id -> bots.none { it.sharedBotId == id && it.selectable } || (participants != null && "shared_bot:$id" !in participants) }
 internal fun requireTeamBotSelections(selected: Collection<String>, bots: List<TeamBotCard>, participants: Collection<String>? = null) {
     if (selected.size > 8 || staleTeamBotSelections(selected, bots, participants).isNotEmpty()) throw TeamMessageFailure("BOT_SELECTION_STALE")
 }
 
-/** Never persisted as authority: only a fresh authenticated observation enables an answer. */
-/** [hostStatus] is what the owner's Desktop reports about the run (`retrying`, `result_pending`, ...); only the owner sees it. */
-internal data class TeamBotRun(val state: String, val ownerUid: String, val botKey: String, val originUid: String, val originGeneration: Long, val leaseUntil: Long, val questionId: String?, val answered: Boolean, val hostStatus: String? = null) {
-    fun canAnswer(message: TeamMessage, uid: String, generation: Long, now: Long): Boolean =
-        state == "running" && leaseUntil > now && !answered && questionId == message.question?.id &&
-            originUid == uid && originGeneration == generation && message.originUid == uid && message.originGeneration == generation &&
-            message.authorKind == "bot" && message.botKey == botKey && !message.recalled
-    fun canRecover(uid: String, now: Long) = ownerUid == uid && hostStatus != "result_pending" && (state == "recovery" || (state in setOf("running", "claimed") && leaseUntil <= now))
-    fun canRetryAnswer(intent: JSONObject, uid: String, generation: Long, now: Long) =
-        originUid == uid && originGeneration == generation && questionId == intent.getString("questionId") &&
-            (answered || (state == "running" && leaseUntil > now))
-    companion object {
-        fun parse(v: JSONObject): TeamBotRun {
-            val origin = v.getJSONObject("origin")
-            return TeamBotRun(v.getString("state"), v.getString("ownerUid"), v.getString("botKey"), origin.getString("uid"), origin.getLong("generation"), v.optLong("leaseUntil"), v.stringOrNull("questionId"), v.getBoolean("answered"), v.stringOrNull("hostStatus"))
+/** Strict execution-2 member envelope. The transport never adapts retired commands. */
+internal object TeamExecutionContract {
+    fun validate(v: JSONObject) {
+        fun fail(): Nothing = throw TeamMessageFailure("INVALID_INPUT")
+        fun JSONObject.keysSet() = keys().asSequence().toSet()
+        fun id(value: Any?) = value is String && Regex("^[A-Za-z0-9_-]{8,64}$").matches(value)
+        fun integer(value: Any?, minimum: Long): Boolean = value is Number && value.toDouble().let { it.isFinite() && it == Math.rint(it) && it >= minimum && it <= 9007199254740991.0 }
+        if (v.keysSet() != setOf("schemaVersion", "commandId", "teamId", "generation", "action", "payload") ||
+            !integer(v.opt("schemaVersion"), 1) || (v.opt("schemaVersion") as Number).toLong() != 1L || !integer(v.opt("generation"), 1) ||
+            !id(v.opt("commandId")) || !id(v.opt("teamId"))) fail()
+        val p = v.optJSONObject("payload") ?: fail()
+        fun shape(required: Set<String>, optional: Set<String> = emptySet()) { if (!p.keysSet().containsAll(required) || !((required + optional).containsAll(p.keysSet()))) fail() }
+        fun requireId(key: String) { if (!id(p.opt(key))) fail() }
+        fun ids(key: String, minimum: Int = 1) {
+            val a = p.optJSONArray(key) ?: fail(); val values = (0 until a.length()).map { a.get(it) }
+            if (values.size !in minimum..8 || values.distinct().size != values.size || values.any { !id(it) }) fail()
+        }
+        when (v.opt("action")) {
+            "listSharedBots" -> shape(emptySet())
+            "getTask" -> { shape(setOf("taskId")); requireId("taskId") }
+            "readArtifact" -> { shape(setOf("artifactId")); requireId("artifactId") }
+            "listTasks" -> { shape(emptySet(), setOf("conversationId", "after")); p.keysSet().forEach(::requireId) }
+            "pauseSharedBot" -> { shape(setOf("sharedBotId", "expectedRevision")); requireId("sharedBotId"); if (!integer(p.opt("expectedRevision"), 1)) fail() }
+            "setConversationPolicy" -> { shape(setOf("conversationId", "expectedRevision", "targets")); requireId("conversationId"); ids("targets", 0); if (!integer(p.opt("expectedRevision"), 0)) fail() }
+            "submit" -> {
+                shape(setOf("conversationId", "messageId", "changeId", "text", "targets"), setOf("replyTo"))
+                listOf("conversationId", "messageId", "changeId").forEach(::requireId); ids("targets")
+                if (p.has("replyTo")) requireId("replyTo")
+                val text = p.opt("text") as? String ?: fail(); if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 8192) fail()
+            }
+            "createConversation" -> {
+                shape(setOf("conversationId", "kind", "title", "participantUids", "sharedBotIds")); requireId("conversationId"); ids("sharedBotIds")
+                if (p.opt("kind") !in setOf("bot_dm", "group", "channel")) fail()
+                val title = (p.opt("title") as? String)?.trim() ?: fail(); if (title.isEmpty() || title.length > 120) fail()
+                val raw = p.optJSONArray("participantUids") ?: fail(); val uids = (0 until raw.length()).map { raw.get(it) }
+                if (uids.size !in 1..200 || uids.distinct().size != uids.size || uids.any { it !is String || !it.matches(Regex("^[A-Za-z0-9_-]{1,128}$")) }) fail()
+            }
+            else -> fail()
         }
     }
-}
-
-internal fun teamBotAnswerIntent(cache: TeamMessageCache, conversationId: String, message: TeamMessage, run: TeamBotRun, values: Map<String, String>, answerId: String, now: Long): JSONObject {
-    val question = message.question ?: throw TeamMessageFailure("INVALID_ANSWER")
-    if (!run.canAnswer(message, cache.uid, cache.generation, now) || values.keys != question.questions.toSet() || values.values.any { it.isBlank() || it.length > 2000 }) throw TeamMessageFailure("QUESTION_RECIPIENT_REQUIRED")
-    if (cache.answers.any { it.getString("questionId") == question.id && it.getString("conversationId") == conversationId }) throw TeamMessageFailure("ANSWER_PENDING")
-    return JSONObject().put("action", "botAnswer").put("teamId", cache.teamId).put("generation", cache.generation)
-        .put("conversationId", conversationId).put("triggerId", requireNotNull(message.triggerId)).put("questionId", question.id)
-        .put("answerId", answerId).put("answers", JSONObject(values.toSortedMap()))
-}
-
-/** After the first send, only the backend's immutable answer receipt can decide
- * whether delivery committed. Mutable public run state may already be revoked. */
-internal fun teamBotAnswerRetryBody(cache: TeamMessageCache, intent: JSONObject, run: TeamBotRun?, now: Long): JSONObject {
-    if (intent.getString("action") != "botAnswer" || intent.getString("teamId") != cache.teamId || intent.getLong("generation") != cache.generation) throw TeamMessageFailure("INVALID_SESSION")
-    if (!intent.optBoolean("attempted") && run?.canRetryAnswer(intent, cache.uid, cache.generation, now) != true) throw TeamMessageFailure("QUESTION_RECIPIENT_REQUIRED")
-    return JSONObject(intent.toString()).also { it.remove("attempted"); it.remove("error") }
 }

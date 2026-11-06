@@ -2763,7 +2763,7 @@
     <string name="teams_bot_unbind_title_fmt">%1$s のバインドを解除しますか？</string>
     <string name="teams_bot_unbind_detail">新しい Bot リクエストは停止します。既存の会話履歴は残ります。</string>
     <string name="teams_bots_share_hint">ローカルの Bot を共有したり権限を変更したりするには、LingXi Desktop のチームを開いてください。</string>
-    <string name="teams_bot_owner_fmt">所有者: %1$s</string>
+    <string name="teams_bot_owner_fmt">Maintainer: %1$s</string>
     <string name="teams_invite_none">招待はまだありません。</string>
     <string name="teams_invite_share">招待を共有</string>
     <string name="teams_link_copied">リンクをコピーしました</string>
@@ -2792,4 +2792,14 @@
     <string name="teams_error_answer_rejected">この回答は受け付けられません。質問と元の依頼者を確認してください。</string>
     <string name="teams_conversation_details">会話の詳細</string>
     <string name="teams_choose_conversation">会話を選択</string>
+    <string name="teams_assistants">Assistants</string>
+    <string name="teams_recent_tasks">Recent tasks and results</string>
+    <string name="teams_artifact_open">Open document</string>
+    <string name="teams_artifact_title">Document</string>
+    <string name="teams_bot_pause">Pause sharing</string>
+    <string name="teams_task_expired">Request expired</string>
+    <string name="teams_task_interrupted">Request interrupted; send a new request</string>
+    <string name="teams_task_authorization_required">Maintainer action required</string>
+    <string name="teams_error_request_quota">Request limit reached. Try later or contact the maintainer.</string>
+    <string name="teams_task_view">View task status</string>
 </resources>

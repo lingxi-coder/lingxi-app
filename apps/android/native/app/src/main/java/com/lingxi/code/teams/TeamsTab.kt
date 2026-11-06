@@ -60,6 +60,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     val workspace = workspaceOverride ?: remember(context) { TeamsWorkspace.get(context.applicationContext) }
     val teams by workspace.teams.collectAsStateWithLifecycle()
     val messaging by workspace.messaging.collectAsStateWithLifecycle()
+    messaging.artifact?.let { artifact -> TeamArtifactViewer(artifact, workspace.messagingModel::closeArtifact) }
     val collapsed by workspace.collapsed.collectAsStateWithLifecycle()
     val unreadByTeam by workspace.unreadByTeam.collectAsStateWithLifecycle()
     val host = LocalTabHost.current
@@ -118,6 +119,10 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                         onOpenConversation = ::openConversation, onSwitchTeam = { sheet = "switcher" }, onNew = { sheet = it },
                         onToggleSection = workspace::toggleSection,
                         onMarkRead = { workspace.messagingModel.markRead(it.id, it.lastSeq) },
+                        onMessageBot = { id -> messageBot(workspace, messaging, uid, id) { openConversation(it) } },
+                        onArtifact = { workspace.messagingModel.openArtifact(it) },
+                        onRefreshTask = { workspace.messagingModel.refreshTask(it) },
+                        onDiscardCommand = { workspace.messagingModel.discardCommand(it) },
                         onReconnect = workspace::reconnect, onDiscardCreation = { workspace.messagingModel.discardCreation() }, modifier = m,
                     )
                 }
@@ -173,9 +178,9 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
             sheet == "newMessage" || sheet == "newChannel" || sheet == "newBot" -> NewConversationSheet(
                 mode = sheet, uid = uid, members = teams.detail?.members.orEmpty(), messaging = messaging,
                 onOpen = { id -> sheet = ""; openConversation(id) },
-                onCreate = { kind, title, parties, botKeys ->
+                onCreate = { kind, title, parties, sharedBotIds ->
                     val id = UUID.randomUUID().toString()
-                    workspace.messagingModel.create(kind, title, parties, id, botKeys) { sheet = ""; openConversation(id) }
+                    workspace.messagingModel.create(kind, title, parties, id, sharedBotIds) { sheet = ""; openConversation(id) }
                 },
                 onDismiss = dismiss,
             )
@@ -184,12 +189,12 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
 }
 
 /** Opens the viewer's Bot DM with the Bot or creates it; the same rule as the Bots list on the Desktop. */
-private fun messageBot(workspace: TeamsWorkspace, messaging: TeamMessagingState, uid: String, botKey: String, open: (String) -> Unit) {
-    val existing = TeamsListLogic.findBotDm(messaging.cache?.conversations.orEmpty(), uid, botKey)
+private fun messageBot(workspace: TeamsWorkspace, messaging: TeamMessagingState, uid: String, sharedBotId: String, open: (String) -> Unit) {
+    val existing = TeamsListLogic.findBotDm(messaging.cache?.conversations.orEmpty(), uid, sharedBotId)
     if (existing != null) { open(existing.id); return }
-    val bot = messaging.bots.firstOrNull { it.key == botKey } ?: return
+    val bot = messaging.bots.firstOrNull { it.sharedBotId == sharedBotId } ?: return
     val id = UUID.randomUUID().toString()
-    workspace.messagingModel.create("bot_dm", bot.name, emptyList(), id, listOf(botKey)) { open(id) }
+    workspace.messagingModel.create("bot_dm", bot.name, emptyList(), id, listOf(sharedBotId)) { open(id) }
 }
 
 @Composable

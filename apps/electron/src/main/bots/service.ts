@@ -19,6 +19,7 @@ import { basename, isAbsolute, join } from 'node:path';
 
 import type { SessionRowDto } from '@lingxi/bridge-client';
 import type { BotsAvailability } from '../../shared/bots.js';
+import type { BotMarketOrigin } from '../../shared/botMarket.js';
 import type { SessionRef, WorkspaceLaunchSettings } from '../bridgeTypes.js';
 import type { SessionRuntime } from '../bridge.js';
 import type { RemoteBot, RemoteBotLookup, BotChat } from '../remoteControl/remoteBots.js';
@@ -165,6 +166,15 @@ export class BotService {
     const record = this.store.create(input, (draft) => { this.writeSettings(draft); });
     // Every other Bot must now keep out of this one.
     writeAllBotSettings(this.store, (message) => this.warn(message), record.bot_id);
+    this.changed();
+    return record;
+  }
+
+  /** A market copy uses the same settings isolation and change notifications as any personal Bot. */
+  createFromMarket(input: BotCreateInput, origin: BotMarketOrigin, prepare: (record: BotRecord) => void): BotRecord {
+    this.assertAvailable();
+    const record = this.store.createFromMarket(input, origin, draft => { prepare(draft); this.writeSettings(draft); });
+    writeAllBotSettings(this.store, message => this.warn(message), record.bot_id);
     this.changed();
     return record;
   }

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
-import { useBotRuns } from './bot-runs.js';
+import { useTeamTasks } from './bot-runs.js';
+import { MemberHome } from './MemberHome';
 import { snippet } from './compose.js';
 import { Composer, composerLock } from './Composer';
 import { messageErrorText } from './errors.js';
-import type { TeamConversation, TeamMessage } from './messages.js';
-import { BotQuestion, BotRun } from './BotRunCards';
+import { pendingPayload, type TeamConversation, type TeamMessage } from './messages.js';
+import { ArtifactButton, BotRun } from './BotRunCards';
 import { buildStreamRows, formatClock, visibleStart, WINDOW_SIZE } from './stream.js';
 import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useIsoLayoutEffect, type RenderAvatar } from './ui';
 import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
@@ -27,10 +28,10 @@ export interface TeamConversationViewProps {
 export function conversationSubtitle(conversation: TeamConversation, snapshot: Pick<TeamsSnapshot, 'bots' | 'directory' | 'uid'>, zh: boolean): string {
   const t = (en: string, cn: string) => zh ? cn : en;
   if (conversation.kind === 'bot_dm') {
-    const card = snapshot.bots.find(bot => conversation.participants.includes(bot.key));
+    const card = snapshot.bots.find(bot => conversation.participants.includes(`shared_bot:${bot.sharedBotId}`));
     if (!card) return '';
-    const owner = snapshot.directory.find(member => member.uid === card.ownerUid)?.displayName || (card.ownerUid === snapshot.uid ? t('You', '你') : t('Member', '成员'));
-    const presence = card.enabled === false ? t('Disabled', '已停用') : card.online ? t('Online', '在线') : t('Offline · requests are queued', '离线 · 请求将排队');
+    const owner = snapshot.directory.find(member => member.uid === card.maintainer.uid)?.displayName || (card.maintainer.uid === snapshot.uid ? t('You', '你') : t('Member', '成员'));
+    const presence = card.state !== 'published' ? t('Disabled', '已停用') : card.ready ? t('Online', '在线') : t('Host unavailable', '宿主不可用');
     return `${presence} · ${t('Owner', '所有者')}: ${owner}`;
   }
   if (conversation.kind === 'dm') return t('Direct message', '私信');
@@ -56,13 +57,14 @@ export function TeamConversationView(props: TeamConversationViewProps): ReactEle
   const conversation = snapshot.conversation, model = snapshot.messaging, team = snapshot.team;
   if (!conversation || !model || !team) {
     if (snapshot.loading) return <section className="tw-scope tw-conv tw-conv-empty"><p className="tw-empty-line" role="status">{zh ? '正在加载…' : 'Loading…'}</p></section>;
+    if (team && !snapshot.selectedConversationId && !snapshot.creation) return <MemberHome key={`${snapshot.uid}:${team.id}:${team.generation}`} workspace={props.workspace} snapshot={snapshot} zh={zh} />;
     const { title, body } = emptyState(snapshot, zh);
     return <section className="tw-scope tw-conv tw-conv-empty">
       <div className="tw-empty"><h2>{title}</h2><p>{body}</p><p className="tw-hint">{platformNotice(zh)}</p></div>
       {snapshot.creation ? <CreationBanner workspace={props.workspace} snapshot={snapshot} zh={zh} /> : null}
     </section>;
   }
-  return <ConversationPane key={`${team.id}:${team.generation}:${conversation.id}`} {...props} conversation={conversation} model={model} team={team} />;
+  return <ConversationPane key={`${snapshot.uid}:${team.id}:${team.generation}:${conversation.id}`} {...props} conversation={conversation} model={model} team={team} />;
 }
 
 function CreationBanner({ workspace, snapshot, zh }: { workspace: TeamsWorkspace; snapshot: TeamsSnapshot; zh: boolean }): ReactElement | null {
@@ -70,7 +72,7 @@ function CreationBanner({ workspace, snapshot, zh }: { workspace: TeamsWorkspace
   if (!creation || !model) return null;
   const t = (en: string, cn: string) => zh ? cn : en;
   return <div className="tw-banner" role="status" data-kind="creation">
-    <span>{t('Creating conversation…', '正在创建会话…')} <b>{creation.title}</b> {creation.error ? messageErrorText(creation.error, zh) : ''}</span>
+    <span>{t('Creating conversation…', '正在创建会话…')} <b>{pendingPayload(creation).title}</b> {creation.error ? messageErrorText(creation.error, zh) : ''}</span>
     <button type="button" className="tw-link" disabled={Boolean(creation.attempted && !creation.error) || (creation.leaseUntil ?? 0) > Date.now()}
       onClick={() => void workspace.attempt(() => model.discardCreation())}>{t('Discard', '丢弃')}</button>
   </div>;
@@ -96,15 +98,16 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
   const visible = useMemo(() => messages.slice(start), [messages, start]);
   const rows = useMemo(() => buildStreamRows(visible, { lastReadSeq: conversation.lastReadSeq, uid, locale: tag, now: minute * 60_000 }), [visible, conversation.lastReadSeq, uid, tag, minute]);
   const byId = useMemo(() => new Map(messages.map(message => [message.id, message])), [messages]);
-  const runs = useBotRuns({ api: workspace.api, uid, team: { id: team.id, generation: team.generation }, selected: conversation.id, conversation, visibleMessages: visible });
+  const runs = useTeamTasks(workspace.api, { teamId: team.id, generation: team.generation }, conversation.id);
 
   const lock = composerLock({ uid, conversation, bots: snapshot.bots, botsLoaded: snapshot.botsLoaded, botsUnverified: snapshot.botsUnverified }, zh);
   const participant = !conversation.participants.length || conversation.participants.includes(`user:${uid}`);
   const nameOf = (id: string) => snapshot.directory.find(member => member.uid === id)?.displayName || (id === uid ? t('You', '你') : t('Member', '成员'));
   const authorOf = (message: TeamMessage): Identity => {
     if (message.author.kind === 'user') return { kind: 'user', id: message.author.uid, name: nameOf(message.author.uid) };
-    const card = snapshot.bots.find(bot => bot.key === message.author.botKey);
-    return { kind: 'bot', id: card?.botId ?? message.author.botKey ?? message.author.uid, name: card?.name || 'Bot' };
+    const author = message.author;
+    const card = snapshot.bots.find(bot => bot.sharedBotId === author.sharedBotId);
+    return { kind: 'bot', id: card?.sharedBotId ?? message.author.sharedBotId, name: card?.name || message.author.displayName || 'Bot' };
   };
   const isMine = (message: TeamMessage) => message.author.kind === 'user' && message.author.uid === uid;
   const quoteOf = (message: TeamMessage) => {
@@ -193,6 +196,8 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
         : null}
     {snapshot.actionError && snapshot.actionError !== snapshot.messagingError ? <p className="tw-banner" role="alert" data-kind="error">{messageErrorText(snapshot.actionError, zh)}</p> : null}
     <CreationBanner workspace={workspace} snapshot={snapshot} zh={zh} />
+    {runs.error ? <p role="alert" className="tw-banner">{messageErrorText(runs.error, zh)}</p> : null}
+    {runs.tasks.filter(task => !task.replyId).map(task => <BotRun key={task.taskId} task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} />)}
 
     <div className="tw-stream-wrap">
       <div ref={scroller} className="tw-stream" role="log" aria-label={t('Messages', '消息')} tabIndex={0} onScroll={measure}>
@@ -203,23 +208,24 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
             if (row.type === 'date') return <li key={row.key} className="tw-date"><span>{row.label}</span></li>;
             if (row.type === 'unread') return <li key={row.key} className="tw-unread" data-unread-divider=""><span>{t('New messages', '新消息')}</span></li>;
             const message = row.message, author = authorOf(message), mine = isMine(message);
-            const triggers = (runs.messageTriggers[message.id] ?? []).filter(id => runs.states[id] && runs.latestMessageByTrigger.get(id) === message.id);
-            return <MessageItem key={row.key} message={message} grouped={row.grouped} author={author} mine={mine} owner={author.kind === 'bot' ? nameOf(message.author.uid) : ''}
+            const tasks = runs.tasks.filter(task => task.replyId === message.id);
+            return <MessageItem key={row.key} message={message} grouped={row.grouped} author={author} mine={mine} owner={message.author.kind === 'shared_bot' ? nameOf(snapshot.bots.find(bot => bot.sharedBotId === (message.author as Extract<TeamMessage['author'], { kind: 'shared_bot' }>).sharedBotId)?.maintainer.uid ?? '') : ''}
               quote={quoteOf(message)} locale={tag} zh={zh} renderAvatar={renderAvatar}
               onReply={lock ? undefined : answer} onEdit={mine && participant ? edit : undefined} onRecall={mine && participant ? setRecall : undefined}>
-              {message.question && !message.recalled
-                ? <div className="tw-embed"><BotQuestion message={message} uid={uid} generation={team.generation} state={message.triggerId ? runs.states[message.triggerId] : undefined} model={model} busy={snapshot.messageBusy} zh={zh} attempt={workspace.attempt} /></div> : null}
-              {triggers.map(id => <div className="tw-embed" key={id}><BotRun state={runs.states[id]!} triggerId={id} conversationId={conversation.id} model={model} uid={uid} zh={zh} busy={snapshot.messageBusy} attempt={workspace.attempt} /></div>)}
+              {message.artifactId && !tasks.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} artifactId={message.artifactId} zh={zh} /> : null}
+              {tasks.map(task => <div className="tw-embed" key={task.taskId}><BotRun task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} /></div>)}
             </MessageItem>;
           })}
           {snapshot.pending.map(intent => {
+            const payload = pendingPayload(intent);
+            const operation = 'operation' in payload ? payload.operation : 'create';
             const status = (intent.error ? messageErrorText(intent.error, zh) : '') || (intent.attempted ? t('Waiting for server confirmation. Retries keep the same message identity.', '等待服务器确认，重试会沿用同一条消息。') : t('Pending · sends when connected', '待发送 · 联网后发送'));
-            return <li key={intent.changeId} className="tw-msg tw-pending" data-error={intent.error ? 'true' : undefined}>
+            return <li key={payload.changeId} className="tw-msg tw-pending" data-error={intent.error ? 'true' : undefined}>
               <div className="tw-msg-lead"><Avatar identity={{ kind: 'user', id: uid, name: nameOf(uid) }} size={32} render={renderAvatar} /></div>
               <div className="tw-msg-main">
                 <div className="tw-msg-head"><b className="tw-msg-author">{nameOf(uid)}</b><small role="status">{status}</small></div>
-                <p className="tw-msg-body">{intent.operation === 'recall' ? t('Recall message', '撤回消息') : `${intent.operation === 'edit' ? `${t('Edit', '编辑')}: ` : ''}${intent.text}`}</p>
-                <button type="button" disabled={Boolean(intent.attempted && !intent.error) || (intent.leaseUntil ?? 0) > Date.now()} onClick={() => void workspace.attempt(() => model.discard(intent.changeId))}>{t('Discard', '丢弃')}</button>
+                <p className="tw-msg-body">{operation === 'recall' ? t('Recall message', '撤回消息') : `${operation === 'edit' ? `${t('Edit', '编辑')}: ` : ''}${payload.text}`}</p>
+                <button type="button" disabled={Boolean(intent.attempted && !intent.error) || (intent.leaseUntil ?? 0) > Date.now()} onClick={() => void workspace.attempt(() => model.discard(payload.changeId))}>{t('Discard', '丢弃')}</button>
               </div>
             </li>;
           })}

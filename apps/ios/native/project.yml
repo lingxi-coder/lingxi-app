@@ -264,6 +264,12 @@ targets:
       - path: Tests
       - path: ../../../packages/deep-links/fixtures.json
         buildPhase: resources
+      - path: ../../../packages/teams/contracts/execution-vectors.json
+        buildPhase: resources
+      - path: ../../../packages/bridge-client/fixtures/mobile-team-bot-vectors.json
+        buildPhase: resources
+      - path: ../../../packages/bridge-client/fixtures/agent-avatar-identities.json
+        buildPhase: resources
     preBuildScripts:
       - name: Stage pinned Harness protocol fixtures
         basedOnDependencyAnalysis: false

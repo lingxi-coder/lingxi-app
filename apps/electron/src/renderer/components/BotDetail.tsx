@@ -1,3 +1,4 @@
+import { BotMarketPanel } from './BotMarketPanel';
 import { useEffect, useState } from 'react';
 import type { BotUi, BotsApi } from '../../shared/bots';
 import { tr } from '../i18n/locale';
@@ -26,9 +27,9 @@ import {
   type ModelChoices,
 } from './BotFields';
 
-export type BotTab = 'routines' | 'tasks' | 'general' | 'persona' | 'memory' | 'skills' | 'folders' | 'permissions';
+export type BotTab = 'routines' | 'tasks' | 'general' | 'persona' | 'memory' | 'skills' | 'folders' | 'permissions' | 'market';
 
-const TABS: readonly BotTab[] = ['routines', 'tasks', 'general', 'persona', 'memory', 'skills', 'folders', 'permissions'];
+const TABS: readonly BotTab[] = ['routines', 'tasks', 'general', 'persona', 'memory', 'skills', 'folders', 'permissions', 'market'];
 /** The tabs whose fields are one draft, saved together. */
 const DRAFT_TABS: ReadonlySet<BotTab> = new Set<BotTab>(['general', 'persona', 'folders', 'permissions']);
 
@@ -42,6 +43,7 @@ function tabLabel(tab: BotTab): string {
     case 'skills': return tr('bots_tab_skills');
     case 'folders': return tr('bots_tab_folders');
     case 'permissions': return tr('bots_tab_permissions');
+    case 'market': return 'Package & Market';
   }
 }
 
@@ -209,6 +211,7 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
     {tab === 'tasks' ? <BotTasksPanel controller={tasks} opening={opening} disabled={sessionLoading}
       onOpen={(task) => void openWith(task.taskId, () => onOpenTaskChat(task.botId, task.sessionId))} /> : null}
     {tab === 'memory' ? <BotMemoryPanel controller={memory} /> : null}
+    {tab === 'market' && state.bot ? <BotMarketPanel api={api} bot={state.bot} onInstalled={bot=>bots.put(bot)} /> : null}
     {tab === 'skills' ? <BotSkillsPanel controller={skills} /> : null}
     {DRAFT_TABS.has(tab) && state.phase === 'ready' ? <>
       {tab === 'general' ? <BotGeneralFields draft={state.draft} problems={problems} models={models} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} /> : null}

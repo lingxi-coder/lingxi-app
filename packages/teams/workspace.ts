@@ -1,7 +1,7 @@
-import { teamBotUsable, type TeamBotCard } from './bots.js';
+import { executionCommand, sharedBotUsable, type SharedBotCard } from './execution.js';
 import { indexedDbCommandStorage } from './command-storage.js';
 import { inviteLink, type TeamCommand, type TeamDetail, type TeamMember, type TeamSummary, type TeamsApi } from './index.js';
-import { TeamMessaging, type CommandStorage, type MessageScope, type PendingCommands, type TeamConversation, type TeamMessage } from './messages.js';
+import { TeamMessaging, pendingPayload, type CommandStorage, type MessageScope, type PendingCommands, type TeamConversation, type TeamMessage } from './messages.js';
 
 // ─── Pure helpers ───────────────────────────────────────────────────────────
 
@@ -44,10 +44,10 @@ export function groupConversations(conversations: readonly TeamConversation[], u
 }
 
 const userIds = (conversation: TeamConversation): string[] => conversation.participants.filter(value => value.startsWith('user:')).map(value => value.slice(5));
-const botKeyOf = (conversation: TeamConversation): string | undefined => conversation.botKey ?? conversation.participants.find(value => value.startsWith('bot:'));
-const cardFor = (key: string | undefined, bots: readonly TeamBotCard[]) => key ? bots.find(bot => bot.key === key) : undefined;
+const sharedBotIdOf = (conversation: TeamConversation): string | undefined => conversation.participants.find(value => value.startsWith('shared_bot:'))?.slice(11);
+const cardFor = (key: string | undefined, bots: readonly SharedBotCard[]) => key ? bots.find(bot => bot.sharedBotId === key) : undefined;
 
-export interface LabelOptions { bots?: readonly TeamBotCard[]; zh?: boolean }
+export interface LabelOptions { bots?: readonly SharedBotCard[]; zh?: boolean }
 /** A person's display name, falling back to "You" / "Member" for people the directory does not list. */
 function memberName(id: string, members: readonly TeamMember[], uid: string, zh: boolean): string {
   return members.find(member => member.uid === id)?.displayName || (id === uid ? (zh ? '你' : 'You') : (zh ? '成员' : 'Member'));
@@ -74,7 +74,7 @@ export function conversationLabel(conversation: TeamConversation, members: reado
   const people = userIds(conversation);
   if (conversation.kind === 'channel') return title || (zh ? '频道' : 'Channel');
   if (conversation.kind === 'bot_dm') {
-    const bot = cardFor(botKeyOf(conversation), options.bots ?? [])?.name || title || 'Bot';
+    const bot = cardFor(sharedBotIdOf(conversation), options.bots ?? [])?.name || title || 'Bot';
     const others = people.filter(id => id !== uid);
     return people.includes(uid) || !others.length ? bot : `${bot} · ${others.map(id => memberName(id, members, uid, zh)).join(zh ? '、' : ', ')}`;
   }
@@ -85,18 +85,19 @@ export function conversationLabel(conversation: TeamConversation, members: reado
 }
 
 /** Everyone in a conversation as avatar identities: other people, then Bots, then the viewer. */
-export function conversationParticipants(conversation: TeamConversation, members: readonly TeamMember[], bots: readonly TeamBotCard[], uid: string, zh = false): (Identity & { self: boolean })[] {
+export function conversationParticipants(conversation: TeamConversation, members: readonly TeamMember[], bots: readonly SharedBotCard[], uid: string, zh = false): (Identity & { self: boolean })[] {
   const people = userIds(conversation).map(id => ({ kind: 'user' as const, id, name: memberName(id, members, uid, zh), self: id === uid }));
-  const robots = conversation.participants.filter(value => value.startsWith('bot:')).map(key => {
+  const robots = conversation.participants.filter(value => value.startsWith('shared_bot:')).map(principal => {
+    const key = principal.slice(11);
     const card = cardFor(key, bots);
-    return { kind: 'bot' as const, id: card?.botId ?? key, name: card?.name || 'Bot', self: false };
+    return { kind: 'bot' as const, id: card?.sharedBotId ?? key, name: card?.name || 'Bot', self: false };
   });
   return [...people.filter(person => !person.self), ...robots, ...people.filter(person => person.self)];
 }
 
 /** The viewer's own Bot DM with a Bot, if there is one. (A Bot's owner also sees other people's.) */
-export function findBotDm(conversations: readonly TeamConversation[], uid: string, botKey: string): TeamConversation | undefined {
-  return conversations.find(conversation => conversation.kind === 'bot_dm' && conversation.participants.includes(botKey) && conversation.participants.includes(`user:${uid}`));
+export function findBotDm(conversations: readonly TeamConversation[], uid: string, sharedBotId: string): TeamConversation | undefined {
+  return conversations.find(conversation => conversation.kind === 'bot_dm' && conversation.participants.includes(`shared_bot:${sharedBotId}`) && conversation.participants.includes(`user:${uid}`));
 }
 
 /** The viewer's existing two-person DM with someone. */
@@ -178,7 +179,7 @@ export interface TeamsSnapshot {
   readonly messagingConnecting: boolean;
   /** `TeamMessaging.error`: the controller's own failure code. */
   readonly messagingError: string;
-  readonly bots: TeamBotCard[];
+  readonly bots: SharedBotCard[];
   /** The Bot list has been fetched at least once for this team. */
   readonly botsLoaded: boolean;
   /** The Bot list could not be fetched, so Bot availability is unknown. */
@@ -201,29 +202,29 @@ export interface TeamsWorkspaceOptions {
   maxWatchedTeams?: number;
 }
 
-const EMPTY_MEMBERS: TeamMember[] = [], EMPTY_BOTS: TeamBotCard[] = [], EMPTY_CONVERSATIONS: TeamConversation[] = [], EMPTY_MESSAGES: TeamMessage[] = [];
+const EMPTY_MEMBERS: TeamMember[] = [], EMPTY_BOTS: SharedBotCard[] = [], EMPTY_CONVERSATIONS: TeamConversation[] = [], EMPTY_MESSAGES: TeamMessage[] = [];
 const EMPTY_OUTBOX: PendingCommands['outbox'] = [];
 
 const codeOf = (error: unknown, fallback = 'SERVICE_UNAVAILABLE'): string => error instanceof Error ? error.message : fallback;
 /** A server verdict (an explicit error code) rather than a connectivity failure. */
 const isVerdict = (error: unknown): boolean => error instanceof Error && /^[A-Z][A-Z_]{2,59}$/u.test(error.message) && error.message !== 'SERVICE_UNAVAILABLE';
 
-/** Loads a team's Bot cards and reloads them when the next presence or claim expires. */
+/** Loads a team's Bot cards and reloads them when presence expires. */
 class BotCards {
   private closed = false;
   private running = false;
   private again = false;
   private deadline: ReturnType<typeof setTimeout> | undefined;
-  constructor(private readonly api: TeamsApi, private readonly scope: MessageScope, private readonly apply: (bots: TeamBotCard[] | undefined) => void) {}
+  constructor(private readonly api: TeamsApi, private readonly scope: MessageScope, private readonly apply: (bots: SharedBotCard[] | undefined) => void) {}
   readonly refresh = async (): Promise<void> => {
     if (this.closed) return;
     if (this.running) { this.again = true; return; }
     this.running = true;
     try {
-      const result = await this.api.messages<{ bots: TeamBotCard[] }>({ action: 'bots', ...this.scope });
+      const result = await this.api.messages<{ bots: SharedBotCard[] }>(executionCommand(this.scope, 'listSharedBots', {}));
       if (!this.closed) {
         this.apply(result.bots); clearTimeout(this.deadline);
-        const expirations = result.bots.filter(bot => bot.online && bot.onlineUntil && bot.onlineUntil > Date.now()).map(bot => bot.onlineUntil!);
+        const expirations = result.bots.filter(bot => bot.ready && bot.onlineUntil && bot.onlineUntil > Date.now()).map(bot => bot.onlineUntil!);
         if (expirations.length) this.deadline = setTimeout(() => void this.refresh(), Math.max(1, Math.min(...expirations) - Date.now()));
       }
     } catch { if (!this.closed) this.apply(undefined); }
@@ -276,7 +277,7 @@ export class TeamsWorkspace {
   private messagingTeam: TeamSummary | undefined;
   private releaseMessaging: (() => void) | undefined;
   private botCards: BotCards | undefined;
-  private bots: TeamBotCard[] = EMPTY_BOTS;
+  private bots: SharedBotCard[] = EMPTY_BOTS;
   private botsLoaded = false;
   private botsUnverified = false;
   private readonly conversationByTeam = new Map<string, string>();
@@ -395,19 +396,19 @@ export class TeamsWorkspace {
   createConversation = (kind: 'dm' | 'group' | 'channel', title: string, parties: string[], botParties: string[] = []): Promise<boolean> => this.run(async () => {
     const model = this.messaging;
     if (!model) return;
-    if (botParties.some(key => !this.bots.some(bot => bot.key === key && teamBotUsable(bot)))) throw new Error('BOT_USE_REQUIRED');
+    if (botParties.some(key => !this.bots.some(bot => bot.sharedBotId === key && sharedBotUsable(bot)))) throw new Error('BOT_USE_REQUIRED');
     await model.create(kind, title.trim(), [this.uid, ...parties], botParties);
   });
   /** Open the viewer's Bot DM, creating it when `fresh` or when there is none. Throws when the Bot is not usable; wrap it in `attempt`. */
-  startBotDm = async (bot: TeamBotCard, fresh = false): Promise<void> => {
+  startBotDm = async (bot: SharedBotCard, fresh = false): Promise<void> => {
     const model = this.messaging;
     if (!model) return;
-    if (!teamBotUsable(bot)) throw new Error('BOT_USE_REQUIRED');
-    const existing = fresh ? undefined : findBotDm(model.state.conversations, this.uid, bot.key);
+    if (!sharedBotUsable(bot)) throw new Error('BOT_USE_REQUIRED');
+    const existing = fresh ? undefined : findBotDm(model.state.conversations, this.uid, bot.sharedBotId);
     if (existing) model.select(existing.id);
-    else await model.create('bot_dm', bot.name, [this.uid], [bot.key]);
+    else await model.create('bot_dm', bot.name, [this.uid], [bot.sharedBotId]);
   };
-  openBotDm = (bot: TeamBotCard, fresh = false): Promise<boolean> => this.run(() => this.startBotDm(bot, fresh));
+  openBotDm = (bot: SharedBotCard, fresh = false): Promise<boolean> => this.run(() => this.startBotDm(bot, fresh));
   /** Open the viewer's DM with a person, creating it when there is none. */
   openDm = (peerUid: string): Promise<boolean> => this.run(async () => {
     const model = this.messaging;
@@ -560,7 +561,7 @@ export class TeamsWorkspace {
     const conversations = model?.state.conversations ?? EMPTY_CONVERSATIONS;
     const outbox = model?.state.outbox ?? EMPTY_OUTBOX;
     if (!this.outboxFor || this.outboxFor.outbox !== outbox || this.outboxFor.id !== selected) {
-      this.outboxFor = { outbox, id: selected, value: outbox.length ? outbox.filter(value => value.conversationId === selected) : EMPTY_OUTBOX };
+      this.outboxFor = { outbox, id: selected, value: outbox.length ? outbox.filter(value => pendingPayload(value).conversationId === selected) : EMPTY_OUTBOX };
     }
     const unreadByTeam: Record<string, number> = Object.fromEntries(this.unread);
     if (model && this.messagingTeam) unreadByTeam[this.messagingTeam.id] = totalUnreadOf(conversations);

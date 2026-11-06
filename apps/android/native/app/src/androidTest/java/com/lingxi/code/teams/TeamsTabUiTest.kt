@@ -62,12 +62,12 @@ class TeamsTabUiTest {
     private val uid = "u1"
     private val team = TeamSummary("t1", "Crew", 4, "owner", 1)
     private val members = listOf(TeamMember("u1", "Me", "owner", 1), TeamMember("u2", "Ann", "member", 1), TeamMember("u3", "Bob", "member", 1), TeamMember("u9", "Zed", "member", 1))
-    private val helper = TeamBotCard("bot:t1:h:helper", "u1", "Helper", "", 1, "all", true, true, true, 0, "helper", "h")
+    private val helper = TeamBotCard("sharedbot_helper", "Helper", "", TeamMemberRef("u1", 1), 1, "published", true, true, 0, JSONObject().put("mode", "all"), JSONObject().put("team",100).put("member",100).put("bot",100), null)
     private val teamsState = TeamsState(uid = uid, teams = listOf(team), detail = TeamDetail(team, members, emptyList()), selectedId = team.id, loaded = true)
 
     private fun pointer(id: String, seq: Long, atMs: Long?, author: String = "u2", preview: String = "hi") = TeamLastMessage("m$id", seq, atMs, "user", author, null, preview)
     private fun conversation(id: String, kind: String, title: String, participants: List<String>, lastSeq: Long, readSeq: Long, atMs: Long?, author: String = "u2", preview: String = "hi") =
-        TeamMessageConversation(id, kind, title, participants, lastSeq, lastSeq, readSeq, participants.filter { it.startsWith("bot:") }, pointer(id, lastSeq, atMs, author, preview))
+        TeamMessageConversation(id, kind, title, participants.map { if (it.startsWith("sharedbot_")) "shared_bot:$it" else it }, lastSeq, lastSeq, readSeq, participants.filter { it.startsWith("sharedbot_") }, pointer(id, lastSeq, atMs, author, preview))
 
     private val base = 1_793_606_400_000L
     private val standard = listOf(
@@ -75,9 +75,9 @@ class TeamsTabUiTest {
         conversation("b", "channel", "beta", emptyList(), 9, 0, base + 3_600_000),
         conversation("dm1", "dm", "", listOf("user:u1", "user:u2"), 2, 0, base - 3_600_000, preview = "see you"),
         conversation("grp", "group", "Ann, Bob, You", listOf("user:u1", "user:u2", "user:u3"), 5, 5, base + 7_200_000),
-        conversation("bd1", "bot_dm", "Helper", listOf("user:u1", helper.key), 1, 1, base - 7_200_000),
-        conversation("bd2", "bot_dm", "Helper", listOf("user:u9", helper.key), 1, 1, base + 10_800_000),
-        conversation("bd3", "bot_dm", "Other", listOf("user:u1", "bot:t1:h:other"), 1, 1, base - 10_800_000),
+        conversation("bd1", "bot_dm", "Helper", listOf("user:u1", helper.sharedBotId), 1, 1, base - 7_200_000),
+        conversation("bd2", "bot_dm", "Helper", listOf("user:u9", helper.sharedBotId), 1, 1, base + 10_800_000),
+        conversation("bd3", "bot_dm", "Other", listOf("user:u1", "sharedbot_other"), 1, 1, base - 10_800_000),
     )
 
     private fun messaging(
@@ -98,6 +98,7 @@ class TeamsTabUiTest {
                             listState = rememberLazyListState(), onOpenConversation = { events += "open:$it" }, onSwitchTeam = { events += "switch" },
                             onNew = { events += "new:$it" }, onToggleSection = { events += "toggle:$it" }, onMarkRead = { events += "read:${it.id}" },
                             onReconnect = { events += "reconnect" }, onDiscardCreation = { events += "discard" },
+                            onMessageBot = { events += "assistant:$it" },
                         )
                     }
                 }
@@ -164,10 +165,16 @@ class TeamsTabUiTest {
     }
 
     @Test fun anEmptyTeamOffersToStartAConversation() {
-        showList(messaging(conversations = emptyList()))
+        showList(messaging(conversations = emptyList()).copy(bots = emptyList()))
         rule.onNodeWithTag(TeamsTags.NO_CONVERSATIONS).assertIsDisplayed()
         rule.onNodeWithText(text(R.string.teams_conversation_new)).performClick()
         assertEquals(listOf("new:newMessage"), events)
+    }
+
+    @Test fun aMemberWithoutModelConfigurationStartsWithAvailableAssistants() {
+        showList(messaging(conversations = emptyList()))
+        rule.onNodeWithTag("teams.assistant.${helper.sharedBotId}").assertIsDisplayed().performClick()
+        assertEquals(listOf("assistant:${helper.sharedBotId}"), events)
     }
 
     @Test fun theNewMenuOffersMessageChannelAndBot() {
@@ -279,23 +286,23 @@ class TeamsTabUiTest {
     }
 
     @Test fun askingABotPicksItFromTheListAndKeepsItAsAChip() {
-        showComposer(conversation("g", "group", "Crew chat", listOf("user:u1", "user:u2", helper.key), 1, 1, base))
+        showComposer(conversation("g", "group", "Crew chat", listOf("user:u1", "user:u2", helper.sharedBotId), 1, 1, base))
         rule.onNodeWithTag(TeamsTags.ASK_BOT).performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Helper").performClick()
         rule.waitForIdle()
-        assertEquals(setOf(helper.key), draft.targets)
+        assertEquals(setOf(helper.sharedBotId), draft.targets)
         rule.onNode(hasContentDescription(rule.activity.getString(R.string.teams_composer_remove_bot_fmt, "Helper"))).assertIsDisplayed()
         rule.onNodeWithTag(TeamsTags.COMPOSER_FIELD).performTextInput("please summarise")
         rule.onNodeWithTag(TeamsTags.SEND).performClick()
         rule.waitForIdle()
-        assertEquals(listOf("send:please summarise:[${helper.key}]"), events)
+        assertEquals(listOf("send:please summarise:[${helper.sharedBotId}]"), events)
     }
 
     @Test fun aBotThatLeftTheChatBlocksSendingUntilTheChipIsRemoved() {
         showComposer(
-            conversation("g", "group", "Crew chat", listOf("user:u1", "user:u2", helper.key), 1, 1, base),
-            initial = ComposerDraft(text = "hello", targets = setOf("bot:t1:h:gone")),
+            conversation("g", "group", "Crew chat", listOf("user:u1", "user:u2", helper.sharedBotId), 1, 1, base),
+            initial = ComposerDraft(text = "hello", targets = setOf("sharedbot_gone")),
         )
         rule.onNodeWithText(text(R.string.teams_error_bot_access_changed)).assertIsDisplayed()
         rule.onNodeWithTag(TeamsTags.SEND).assertIsNotEnabled()

@@ -1,15 +1,81 @@
 {
   "indexes": [
     {
-      "collectionGroup": "triggers",
+      "collectionGroup": "tasks",
       "queryScope": "COLLECTION",
       "fields": [
         {
-          "fieldPath": "botKey",
+          "fieldPath": "deploymentId",
           "order": "ASCENDING"
         },
         {
-          "fieldPath": "seq",
+          "fieldPath": "state",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "tasks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "sharedBotId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "conversationId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "state",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "deadline",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "messageSeq",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "tasks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "requester.uid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "requester.generation",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "tasks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "conversationId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "__name__",
           "order": "ASCENDING"
         }
       ]
@@ -24,6 +90,21 @@
     {
       "collectionGroup": "messages",
       "fieldPath": "text",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "artifacts",
+      "fieldPath": "document",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "executionReceipts",
+      "fieldPath": "response",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sharedBots",
+      "fieldPath": "grants",
       "indexes": []
     }
   ]

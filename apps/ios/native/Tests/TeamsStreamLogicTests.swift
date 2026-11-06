@@ -17,7 +17,7 @@ final class TeamsStreamLogicTests: XCTestCase {
         try rows.map {
             StreamMessage(id: try XCTUnwrap($0["id"] as? String), seq: try XCTUnwrap($0["seq"] as? Int),
                           authorKind: try XCTUnwrap($0["authorKind"] as? String), authorUid: try XCTUnwrap($0["authorUid"] as? String),
-                          authorBotKey: $0["authorBotKey"] as? String, createdAtMs: ($0["createdAtMs"] as? NSNumber)?.int64Value,
+                          authorSharedBotId: $0["authorSharedBotId"] as? String, createdAtMs: ($0["createdAtMs"] as? NSNumber)?.int64Value,
                           recalled: $0["recalled"] as? Bool ?? false)
         }
     }
@@ -200,16 +200,16 @@ final class TeamsStreamLogicTests: XCTestCase {
         let message = try JSONDecoder().decode(TeamMessage.self, from: Data(json.utf8))
         XCTAssertEqual(message.createdAtMs, 1_793_613_600_250)
         let stream = StreamMessage(message)
-        XCTAssertEqual(stream, StreamMessage(id: "m", seq: 1, authorKind: "user", authorUid: "u2", authorBotKey: nil, createdAtMs: 1_793_613_600_250, recalled: false))
+        XCTAssertEqual(stream, StreamMessage(id: "m", seq: 1, authorKind: "user", authorUid: "u2", authorSharedBotId: nil, createdAtMs: 1_793_613_600_250, recalled: false))
         let unstamped = try JSONDecoder().decode(TeamMessage.self, from: Data(json.replacingOccurrences(of: #""2026-11-02T10:00:00.250Z""#, with: "null").utf8))
         XCTAssertNil(unstamped.createdAtMs)
     }
 
     func testABotMessageCarriesItsKeyIntoTheGroupingIdentity() throws {
-        let json = #"{"id":"b","seq":2,"author":{"kind":"bot","uid":"o","botKey":"bot:o:h:x"},"kind":"text","text":"","recalled":true,"changeSeq":1,"changeId":"c"}"#
+        let json = #"{"id":"b","seq":2,"author":{"kind":"shared_bot","uid":"o","sharedBotId":"sharedbot_x"},"kind":"text","text":"","recalled":true,"changeSeq":1,"changeId":"c"}"#
         let message = try JSONDecoder().decode(TeamMessage.self, from: Data(json.utf8))
         let stream = StreamMessage(message)
-        XCTAssertEqual(stream.authorBotKey, "bot:o:h:x")
+        XCTAssertEqual(stream.authorSharedBotId, "sharedbot_x")
         XCTAssertTrue(stream.recalled)
         XCTAssertNil(stream.createdAtMs)
     }

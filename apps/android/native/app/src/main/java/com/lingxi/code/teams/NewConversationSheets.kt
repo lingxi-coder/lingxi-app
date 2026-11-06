@@ -139,7 +139,7 @@ internal fun JoinTeamSheet(prefill: String, busy: Boolean, error: String?, onSub
 @Composable
 internal fun NewConversationSheet(
     mode: String, uid: String, members: List<TeamMember>, messaging: TeamMessagingState,
-    onOpen: (String) -> Unit, onCreate: (kind: String, title: String, parties: List<String>, botKeys: List<String>) -> Unit, onDismiss: () -> Unit,
+    onOpen: (String) -> Unit, onCreate: (kind: String, title: String, parties: List<String>, sharedBotIds: List<String>) -> Unit, onDismiss: () -> Unit,
 ) {
     val online = !messaging.offline
     val others = members.filter { it.uid != uid }
@@ -148,14 +148,14 @@ internal fun NewConversationSheet(
     var group by rememberSaveable { mutableStateOf(false) }
     var peer by rememberSaveable { mutableStateOf("") }
     var people by rememberSaveable { mutableStateOf(setOf<String>()) }
-    var botKeys by rememberSaveable { mutableStateOf(setOf<String>()) }
+    var sharedBotIds by rememberSaveable { mutableStateOf(setOf<String>()) }
     var name by rememberSaveable { mutableStateOf("") }
     val title = stringResource(when (mode) { "newChannel" -> R.string.teams_new_channel_title; "newBot" -> R.string.teams_new_bot_title; else -> R.string.teams_new_message_title })
     TeamsSheet(title, onDismiss) {
         if (!online) Text(stringResource(R.string.teams_new_offline), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         when (mode) {
             "newBot" -> NewBotList(uid, members, messaging, conversations, usableBots, online, onOpen) { key ->
-                val bot = usableBots.first { it.key == key }
+                val bot = usableBots.first { it.sharedBotId == key }
                 onCreate("bot_dm", bot.name, emptyList(), listOf(key))
             }
             else -> {
@@ -187,31 +187,31 @@ internal fun NewConversationSheet(
                     if (usableBots.isNotEmpty()) {
                         Text(stringResource(R.string.teams_new_participating_bots), style = MaterialTheme.typography.labelLarge)
                         usableBots.forEach { bot ->
-                            val chosen = bot.key in botKeys
+                            val chosen = bot.sharedBotId in sharedBotIds
                             Row(
-                                Modifier.fillMaxWidth().clickable(enabled = chosen || botKeys.size < TeamsComposeLogic.MAX_TARGETS) { botKeys = if (chosen) botKeys - bot.key else botKeys + bot.key },
+                                Modifier.fillMaxWidth().clickable(enabled = chosen || sharedBotIds.size < TeamsComposeLogic.MAX_TARGETS) { sharedBotIds = if (chosen) sharedBotIds - bot.sharedBotId else sharedBotIds + bot.sharedBotId },
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                Checkbox(checked = chosen, enabled = chosen || botKeys.size < TeamsComposeLogic.MAX_TARGETS, onCheckedChange = { botKeys = if (it) botKeys + bot.key else botKeys - bot.key })
+                                Checkbox(checked = chosen, enabled = chosen || sharedBotIds.size < TeamsComposeLogic.MAX_TARGETS, onCheckedChange = { sharedBotIds = if (it) sharedBotIds + bot.sharedBotId else sharedBotIds - bot.sharedBotId })
                                 BotAvatar(bot.avatarId, 28.dp)
                                 Text(bot.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
                     }
-                    if (botKeys.isNotEmpty()) Text(stringResource(R.string.teams_new_bot_owner_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (sharedBotIds.isNotEmpty()) Text(stringResource(R.string.teams_new_bot_owner_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                val chosenBotKeys = botKeys.sorted()
+                val chosenSharedBotIds = sharedBotIds.sorted()
                 val valid = when {
-                    channel -> name.isNotBlank() && people.size + botKeys.size >= 1
-                    group -> people.size + botKeys.size >= 1 && (people.isNotEmpty() || name.isNotBlank())
+                    channel -> name.isNotBlank() && people.size + sharedBotIds.size >= 1
+                    group -> people.size + sharedBotIds.size >= 1 && (people.isNotEmpty() || name.isNotBlank())
                     else -> peer.isNotEmpty()
                 }
                 Button(
                     enabled = online && valid,
                     onClick = {
                         when {
-                            channel -> onCreate("channel", name.trim(), people.sorted(), chosenBotKeys)
-                            group -> onCreate("group", name.trim().ifEmpty { TeamsListLogic.defaultConversationTitle(people.sorted(), members, uid) }, people.sorted(), chosenBotKeys)
+                            channel -> onCreate("channel", name.trim(), people.sorted(), chosenSharedBotIds)
+                            group -> onCreate("group", name.trim().ifEmpty { TeamsListLogic.defaultConversationTitle(people.sorted(), members, uid) }, people.sorted(), chosenSharedBotIds)
                             else -> {
                                 val existing = TeamsListLogic.findDm(conversations, uid, peer)
                                 if (existing != null) onOpen(existing.id) else onCreate("dm", TeamsListLogic.defaultConversationTitle(listOf(peer), members, uid), listOf(peer), emptyList())
@@ -238,18 +238,18 @@ private fun NewBotList(
     }
     Text(stringResource(R.string.teams_new_bots_pickable), style = MaterialTheme.typography.labelLarge)
     bots.forEach { bot ->
-        val existing = TeamsListLogic.findBotDm(conversations, uid, bot.key)
+        val existing = TeamsListLogic.findBotDm(conversations, uid, bot.sharedBotId)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             BotAvatar(bot.avatarId, 40.dp)
             Column(Modifier.weight(1f)) {
                 Text(bot.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                val owner = members.firstOrNull { it.uid == bot.ownerUid }?.displayName ?: bot.ownerUid
+                val owner = members.firstOrNull { it.uid == bot.maintainer.uid }?.displayName ?: bot.maintainer.uid
                 Text("${botAvailabilityText(bot)} · ${stringResource(R.string.teams_bot_owner_fmt, owner)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             if (existing != null) {
                 TextButton(enabled = online, onClick = { onOpen(existing.id) }) { Text(stringResource(R.string.teams_new_bot_open)) }
-                OutlinedButton(enabled = online, onClick = { onStart(bot.key) }) { Text(stringResource(R.string.remote_bot_new_chat)) }
-            } else Button(enabled = online, onClick = { onStart(bot.key) }) { Text(stringResource(R.string.teams_new_bot_start)) }
+                OutlinedButton(enabled = online, onClick = { onStart(bot.sharedBotId) }) { Text(stringResource(R.string.remote_bot_new_chat)) }
+            } else Button(enabled = online, onClick = { onStart(bot.sharedBotId) }) { Text(stringResource(R.string.teams_new_bot_start)) }
         }
         Spacer(Modifier.height(2.dp))
     }
@@ -259,8 +259,8 @@ private fun NewBotList(
 @Composable
 internal fun botAvailabilityText(bot: TeamBotCard): String = stringResource(
     when {
-        !bot.enabled -> R.string.teams_bot_disabled
-        bot.online -> R.string.remote_online
+        bot.state != "published" -> R.string.teams_bot_disabled
+        bot.ready -> R.string.remote_online
         else -> R.string.teams_bot_offline_queued
     },
 )

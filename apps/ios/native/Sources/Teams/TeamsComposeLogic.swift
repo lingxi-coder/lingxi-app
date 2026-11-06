@@ -69,7 +69,7 @@ enum TeamsComposeLogic {
         guard conversation.kind == "group" || conversation.kind == "channel" else { return [] }
         let needle = JSText.trim(query).lowercased()
         return bots.filter {
-            $0.selectable && conversation.participants.contains($0.key) && !chosenKeys.contains($0.key)
+            $0.selectable && conversation.participants.contains("shared_bot:\($0.sharedBotId)") && !chosenKeys.contains($0.sharedBotId)
                 && (needle.isEmpty || $0.name.lowercased().contains(needle))
         }
     }
@@ -88,7 +88,7 @@ enum TeamsComposeLogic {
     /// reason says whether they are being checked or could not be verified.
     static func composerLock(uid: String, kind: String, participants: [String], bots: [TeamBotCard], botsLoaded: Bool, botsUnverified: Bool) -> ComposerLock {
         if !participants.isEmpty, !participants.contains("user:\(uid)") { return .ownerReading }
-        if kind == "bot_dm", !participants.contains(where: { key in key.hasPrefix("bot:") && bots.contains { $0.key == key && $0.selectable } }) {
+        if kind == "bot_dm", !participants.contains(where: { key in key.hasPrefix("shared_bot:") && bots.contains { $0.sharedBotId == String(key.dropFirst(11)) && $0.selectable } }) {
             if botsUnverified { return .botUnverified }
             if !botsLoaded { return .botChecking }
             return .botUnavailable

@@ -13,6 +13,8 @@ import { createHandler } from './catalog.mjs';
 import { CatalogStore } from './store.mjs';
 import { createPushHandler, PushStore } from './push.mjs';
 import { createTeamsHandler, TeamsStore } from './teams.mjs';
+import { OAuth2Client } from 'google-auth-library';
+import { createTeamMarketEligibilityHandler, TeamMarketEligibilityStore } from './team-market-eligibility.mjs';
 
 const app = initializeApp();
 const seed = JSON.parse(readFileSync(new URL('./seed.json', import.meta.url), 'utf8'));
@@ -75,3 +77,21 @@ export const teamsApi = onRequest({ region: 'us-central1', minInstances: 0, maxI
 export const onTeamMessage = onDocumentCreated({ document: 'teams/{teamId}/conversations/{conversationId}/messages/{messageId}',
   database: '(default)', region: 'us-central1', memory: '256MiB', maxInstances: 2, serviceAccount: pushServiceAccount,
 }, event => onTeamMessageCreated({ db: getFirestore(app), pushStore, messaging: getMessaging(app), ...event.params, original: event.data?.data() }));
+
+const marketServiceVerifier = new OAuth2Client();
+const eligibilityHandler = createTeamMarketEligibilityHandler({ store: new TeamMarketEligibilityStore(getFirestore(app)),
+  verifyServiceToken: async (token, audience) => (await marketServiceVerifier.verifyIdToken({ idToken: token, audience })).getPayload(),
+  config: () => ({ serviceEmail: process.env.TEAMS_MARKET_SERVICE_EMAIL, serviceSubject: process.env.TEAMS_MARKET_SERVICE_SUBJECT,
+    serviceAudience: process.env.TEAMS_MARKET_ELIGIBILITY_AUDIENCE, projectId: app.options.projectId ?? process.env.GCLOUD_PROJECT,
+    tenantId: process.env.TEAMS_AUTH_TENANT_ID || null }) });
+// IAM and exact OIDC claims both apply. Production allowlist configuration is
+// required; an absent configuration stays closed instead of trusting a viewer.
+export const marketTeamEligibility = onRequest({ region: 'us-central1', minInstances: 0, maxInstances: 2, memory: '256MiB',
+  timeoutSeconds: 30, invoker: 'private', serviceAccount: pushServiceAccount }, async (req, res) => {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(req.headers)) if (value) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
+  const output = await eligibilityHandler(new Request(new URL(req.url, 'https://teams.internal'), { method: req.method, headers,
+    ...(!['GET', 'HEAD'].includes(req.method) ? { body: req.rawBody } : {}) }));
+  output.headers.forEach((value, key) => res.set(key, value));
+  res.status(output.status).send(Buffer.from(await output.arrayBuffer()));
+});

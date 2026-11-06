@@ -15,7 +15,7 @@ type Pointer = NonNullable<TeamConversation['lastMessage']>;
 function pointerAuthor(value: unknown): Pointer['author'] {
   const by = record(value);
   if (by.kind === 'user') return { kind: 'user', uid: text(by.uid) };
-  if (by.kind === 'bot') return { kind: 'bot', uid: text(by.uid), botKey: text(by.botKey) };
+  if (by.kind === 'shared_bot') return { kind: 'shared_bot', sharedBotId: text(by.sharedBotId), displayName: text(by.displayName) };
   throw invalidData();
 }
 
@@ -33,10 +33,10 @@ export function firestoreLastMessage(value: unknown): TeamConversation['lastMess
 }
 
 export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
-  return { id, seq: value.seq, author: value.author, kind: value.kind, text: value.text, changeSeq: value.changeSeq, changeId: value.changeId,
+  return { id, seq: value.seq, author: pointerAuthor(value.author), kind: value.kind, text: value.text, changeSeq: value.changeSeq, changeId: value.changeId,
     createdAt: timestamp(value.createdAt), editedAt: timestamp(value.editedAt), ...(value.replyTo ? { replyTo: value.replyTo } : {}),
     ...(value.recalled ? { recalled: true } : {}), ...(value.mentions ? { mentions: value.mentions } : {}),
-    ...(value.triggerId ? { triggerId: value.triggerId } : {}), ...(value.origin ? { origin: value.origin } : {}), ...(value.question ? { question: value.question } : {}) };
+    ...(value.taskId ? { taskId: value.taskId } : {}), ...(value.taskIds ? { taskIds: value.taskIds } : {}), ...(value.artifactId ? { artifactId: value.artifactId } : {}) };
 }
 
 /** SDK snapshots are the only ordinary-message read path, including offline reads. */
@@ -75,10 +75,12 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
       { includeMetadataChanges: true }, page => {
         if (closed || !selectedAllowed) return;
         const changes = page.docChanges();
-        emit({ kind: 'messages', conversationId, fromCache: page.metadata.fromCache, replace: firstSnapshot,
-          messages: changes.filter(change => change.type !== 'removed').map(change => firestoreMessage(change.doc.id, change.doc.data())),
-          removed: changes.filter(change => change.type === 'removed').map(change => change.doc.id) });
-        firstSnapshot = false;
+        try {
+          emit({ kind: 'messages', conversationId, fromCache: page.metadata.fromCache, replace: firstSnapshot,
+            messages: changes.filter(change => change.type !== 'removed').map(change => firestoreMessage(change.doc.id, change.doc.data())),
+            removed: changes.filter(change => change.type === 'removed').map(change => change.doc.id) });
+          firstSnapshot = false;
+        } catch { emit({ kind: 'error', fromCache: page.metadata.fromCache, error: 'INVALID_DATA' }); close(); }
       }, fail);
   }
   function close(): void {
@@ -96,7 +98,9 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
       try {
         conversations = snapshot.docs.map(snapshot => {
           const value = snapshot.data(), lastMessage = firestoreLastMessage(value.lastMessage);
-          return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants, lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(snapshot.id) ?? 0, ...(value.botKey ? { botKey: value.botKey } : {}), ...(lastMessage ? { lastMessage } : {}) };
+          if (!Array.isArray(value.participants) || !value.participants.every((principal: unknown) => typeof principal === 'string' && /^(user:[A-Za-z0-9_-]{1,128}|shared_bot:[A-Za-z0-9_-]{8,64})$/u.test(principal))) throw invalidData();
+          if (value.kind === 'bot_dm' && value.participants.filter((principal: string) => principal.startsWith('shared_bot:')).length !== 1) throw invalidData();
+          return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants, lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(snapshot.id) ?? 0, ...(lastMessage ? { lastMessage } : {}) };
         });
       } catch {
         // A conversation that breaks the stored contract is not shown half-parsed; the team's listeners stop with the error.
@@ -120,11 +124,11 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
       if (!selectedAllowed) { stopMessages?.(); stopMessages = undefined; }
       if (!wasAllowed) watchSelected();
       publish();
-      if (authorized && !snapshot.metadata.fromCache && conversationId && snapshot.docChanges().some(change => change.doc.id === conversationId && change.doc.data().participants?.some((value: string) => value.startsWith('bot:')))) {
+      if (authorized && !snapshot.metadata.fromCache && conversationId && snapshot.docChanges().some(change => change.doc.id === conversationId && change.doc.data().participants?.some((value: string) => value.startsWith('shared_bot:')))) {
         emit({ kind: 'signal', fromCache: false, signal: { conversationId } });
       }
     }, fail));
-  // Sanitized invalidation stamps only. Private Bot run/question documents stay denied.
+  // Subscribe only to sanitized invalidation stamps; task state uses authenticated commands.
   stops.push(onSnapshot(collection(db, ...root, 'signals'), { includeMetadataChanges: true }, snapshot => {
     if (authorized && !snapshot.metadata.fromCache) emit({ kind: 'signal', fromCache: false, signal: { bots: true } });
   }, fail));

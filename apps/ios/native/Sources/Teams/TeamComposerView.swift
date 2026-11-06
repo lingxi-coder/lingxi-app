@@ -29,7 +29,7 @@ struct TeamComposerView: View {
             bots: context.bots, botsLoaded: model.botsLoaded, botsUnverified: model.botsUnverified)
     }
     private var asks: Bool { editing == nil && (conversation.kind == "group" || conversation.kind == "channel") }
-    private var askable: Bool { asks && context.bots.contains { $0.selectable && conversation.participants.contains($0.key) } }
+    private var askable: Bool { asks && context.bots.contains { $0.selectable && conversation.participants.contains("shared_bot:\($0.sharedBotId)") } }
     private var bytes: Int { TeamsComposeLogic.byteLength(draft.text) }
     private var tooLong: Bool { bytes > TeamsComposeLogic.messageBytes }
 
@@ -121,7 +121,7 @@ struct TeamComposerView: View {
                         ForEach(draft.targets, id: \.self) { key in
                             let name = context.card(forKey: key)?.name ?? context.strings.bot
                             HStack(spacing: 4) {
-                                AgentAvatar(agentID: context.avatarID(forBotKey: key), size: 20)
+                                AgentAvatar(agentID: context.avatarID(forSharedBotId: key), size: 20)
                                 Text("@" + name).font(.footnote.weight(.semibold))
                                 Button { draft.targets.removeAll { $0 == key } } label: {
                                     Image(systemName: "xmark.circle.fill").font(.footnote).foregroundStyle(.secondary)
@@ -158,13 +158,13 @@ struct TeamComposerView: View {
                             AgentAvatar(agentID: bot.avatarId, size: 24)
                             Text(bot.name).font(.body.weight(.semibold)).foregroundStyle(.primary).lineLimit(1)
                             Spacer()
-                            Text(LocalizedStringKey(bot.online ? "remote_online" : "teams_bot_offline_queued")).font(.caption).foregroundStyle(.secondary)
+                            Text(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued")).font(.caption).foregroundStyle(.secondary)
                         }
                         .padding(.horizontal, 12).padding(.vertical, 8)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityIdentifier("teams.composer.mention.\(bot.key)")
+                    .accessibilityIdentifier("teams.composer.mention.\(bot.sharedBotId)")
                 }
             }
             .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -173,7 +173,7 @@ struct TeamComposerView: View {
 
     private func pick(_ bot: TeamBotCard, mention: MentionAt) {
         let next = TeamsComposeLogic.withoutMention(draft.text, start: mention.start, caret: caret)
-        draft.targets.append(bot.key)
+        draft.targets.append(bot.sharedBotId)
         draft.text = next
         selection = TextSelection(insertionPoint: String.Index(utf16Offset: min(mention.start, next.utf16.count), in: next))
         focus.wrappedValue = true

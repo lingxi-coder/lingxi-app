@@ -96,7 +96,7 @@ try {
   await wait(`document.querySelector('.bots-page h1')?.textContent === 'Alpha'`);
   assert.deepEqual(await marked(), ['Bots']);
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.bots-tabs button')).map(button => button.textContent)`),
-    ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions'], 'no Chats tab: the chats are in the sidebar');
+    ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Package & Market'], 'no Chats tab: the chats are in the sidebar');
   assert.equal(await run(`document.querySelector('.bots-tabs button[aria-current="page"]').textContent`), 'General');
   result.botPageFromTitle = true;
 

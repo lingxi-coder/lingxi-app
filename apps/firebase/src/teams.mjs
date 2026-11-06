@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { TeamConversationError } from './team-conversations.mjs';
 import { TeamMessagesStore, TeamMessageError } from './team-messages.mjs';
-import { TeamBotError } from './team-bots.mjs';
+import { SharedBotError } from './shared-bots.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
@@ -213,7 +213,7 @@ export function createTeamsHandler({ store, verifyToken, createCustomToken, orig
       if (detail && detail[1] !== 'session' && request.method === 'GET') return reply(await store.detail(user.uid, detail[1]));
       if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages'].includes(path)) fail(404, 'NOT_FOUND');
       const raw = await request.text();
-      if (Buffer.byteLength(raw) > (path === '/v1/teams/messages' ? 65536 : 16384)) fail(413, 'REQUEST_TOO_LARGE');
+      if (Buffer.byteLength(raw) > (path === '/v1/teams/messages' ? 1048576 : 16384)) fail(413, 'REQUEST_TOO_LARGE');
       let body;
       try { body = JSON.parse(raw); } catch { fail(400, 'INVALID_JSON'); }
       if (path === '/v1/teams/session') {
@@ -225,7 +225,7 @@ export function createTeamsHandler({ store, verifyToken, createCustomToken, orig
     } catch (error) {
       if (error instanceof z.ZodError) return reply({ error: { code: 'INVALID_INPUT' } }, 400);
       if (error instanceof TeamMessageError) return reply({ error: { code: error.code } }, error.status);
-      if (error instanceof TeamBotError) return reply({ error: { code: error.code } }, error.status);
+      if (error instanceof SharedBotError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof TeamsError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof TeamConversationError) return reply({ error: { code: error.code } }, error.status);
       return reply({ error: { code: 'SERVICE_UNAVAILABLE' } }, 503);

@@ -13,6 +13,7 @@ interface LayoutProps {
   /** An invitation from a link: the join dialog opens with it filled in, but never joins by itself. */
   invite?: string;
   onInviteHandled?(): void;
+  onInviteResolved?(): void;
 }
 
 /** The Teams workspace of a signed-in account, opened with it and closed when the account or the page goes. */
@@ -26,14 +27,14 @@ export function TeamsWorkspaceView({ api, uid, ...layout }: LayoutProps & { api:
  * on the right. Under 760px wide only one of the sidebar and the conversation is shown at a time. Wrap it in
  * `.teams-web`, which sets the workspace's colors from the site's theme.
  */
-export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, zh, invite, onInviteHandled }: LayoutProps & { teams: UseTeams }) {
+export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, zh, invite, onInviteHandled, onInviteResolved }: LayoutProps & { teams: UseTeams }) {
   const [drawer, setDrawer] = useState<{ open: boolean; tab: DrawerTab }>({ open: false, tab: 'members' });
-  const [pane, setPane] = useState<'list' | 'conversation'>('list');
+  const [pane, setPane] = useState<'list' | 'conversation'>();
   if (!workspace || !snapshot) return <p role="status" className="teams-web-note">{zh ? '正在加载…' : 'Loading…'}</p>;
   return (
-    <div className="teams-web-body" data-pane={pane}>
+    <div className="teams-web-body" data-pane={pane ?? (snapshot.team ? 'conversation' : 'list')}>
       <div className="teams-web-sidebar">
-        <TeamSidebar workspace={workspace} snapshot={snapshot} zh={zh} initialInvite={invite} onInviteHandled={onInviteHandled}
+        <TeamSidebar workspace={workspace} snapshot={snapshot} zh={zh} initialInvite={invite} onInviteHandled={onInviteHandled} onInviteResolved={() => { setPane('conversation'); onInviteResolved?.(); }}
           onOpenSettings={tab => setDrawer(current => ({ open: true, tab: tab ?? current.tab }))} onConversationSelected={() => setPane('conversation')} />
       </div>
       <div className="teams-web-conversation">

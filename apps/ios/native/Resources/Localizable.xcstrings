@@ -85796,6 +85796,108 @@
         }
       }
     },
+    "teams_artifact_open": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开文档"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开文档"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open document"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open document"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open document"
+          }
+        }
+      }
+    },
+    "teams_artifact_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文档"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文档"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Document"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Document"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Document"
+          }
+        }
+      }
+    },
+    "teams_assistants": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "助手"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "助手"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Assistants"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Assistants"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Assistants"
+          }
+        }
+      }
+    },
     "teams_bot_disabled": {
       "localizations": {
         "zh-Hans": {
@@ -85971,31 +86073,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "所有者：%@"
+            "value": "维护者：%@"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "擁有者：%@"
+            "value": "维护者：%@"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Owner: %@"
+            "value": "Maintainer: %@"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "所有者: %@"
+            "value": "Maintainer: %@"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "소유자: %@"
+            "value": "Maintainer: %@"
           }
         }
       }
@@ -86005,31 +86107,65 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "所有者：%1$s"
+            "value": "维护者：%1$s"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "擁有者：%1$s"
+            "value": "维护者：%1$s"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Owner: %1$s"
+            "value": "Maintainer: %1$s"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "所有者: %1$s"
+            "value": "Maintainer: %1$s"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "소유자: %1$s"
+            "value": "Maintainer: %1$s"
+          }
+        }
+      }
+    },
+    "teams_bot_pause": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂停共享"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂停共享"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pause sharing"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pause sharing"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pause sharing"
           }
         }
       }
@@ -87934,6 +88070,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "이 팀의 일부 데이터가 지원되지 않는 형식이라 표시할 수 없습니다."
+          }
+        }
+      }
+    },
+    "teams_error_request_quota": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求次数已达上限，请稍后再试或联系维护者。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求次数已达上限，请稍后再试或联系维护者。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request limit reached. Try later or contact the maintainer."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request limit reached. Try later or contact the maintainer."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request limit reached. Try later or contact the maintainer."
           }
         }
       }
@@ -90862,6 +91032,40 @@
         }
       }
     },
+    "teams_recent_tasks": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近任务与成果"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近任务与成果"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recent tasks and results"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recent tasks and results"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recent tasks and results"
+          }
+        }
+      }
+    },
     "teams_recover_confirm": {
       "localizations": {
         "zh-Hans": {
@@ -91844,6 +92048,142 @@
           "stringUnit": {
             "state": "translated",
             "value": "팀 전환"
+          }
+        }
+      }
+    },
+    "teams_task_authorization_required": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "维护者需要处理授权"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "维护者需要处理授权"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Maintainer action required"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Maintainer action required"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Maintainer action required"
+          }
+        }
+      }
+    },
+    "teams_task_expired": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求已过期"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求已过期"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request expired"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request expired"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request expired"
+          }
+        }
+      }
+    },
+    "teams_task_interrupted": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求中断，请重新发送"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求中断，请重新发送"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request interrupted; send a new request"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request interrupted; send a new request"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request interrupted; send a new request"
+          }
+        }
+      }
+    },
+    "teams_task_view": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "查看任务状态"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "查看任务状态"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "View task status"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "View task status"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "View task status"
           }
         }
       }

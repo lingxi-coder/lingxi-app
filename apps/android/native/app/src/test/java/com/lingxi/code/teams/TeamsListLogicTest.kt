@@ -76,13 +76,13 @@ class TeamsListLogicTest {
         }
         // The viewer comes last; a Bot whose card has not loaded is identified by its key.
         val own = TeamsListLogic.conversationParticipants(TeamsVectors.conversationById("bd1"), members, emptyList(), uid, TeamsVectors.strings(false))
-        assertEquals(listOf("bot", "user"), own.map { it.kind }); assertEquals("bot:t1:h:helper", own.first().id); assertEquals("Bot", own.first().name); assertTrue(own.last().self)
+        assertEquals(listOf("shared_bot", "user"), own.map { it.kind }); assertEquals("sharedbot_helper", own.first().id); assertEquals("Bot", own.first().name); assertTrue(own.last().self)
     }
 
     @Test fun findDmAndFindBotDmOnlyMatchTheViewersOwnConversations() {
         val byId = TeamsVectors.conversations().associateBy { it.id }
         val finds = root.getJSONObject("finds")
-        assertEquals(finds.getString("botDm"), TeamsListLogic.findBotDm(listOf(byId.getValue("bd2"), byId.getValue("bd1")), uid, "bot:t1:h:helper")?.id)
+        assertEquals(finds.getString("botDm"), TeamsListLogic.findBotDm(listOf(byId.getValue("bd2"), byId.getValue("bd1")), uid, "sharedbot_helper")?.id)
         assertEquals(finds.getString("dm"), TeamsListLogic.findDm(listOf(byId.getValue("dm1"), byId.getValue("grp")), uid, "u2")?.id)
         assertNull(TeamsListLogic.findDm(listOf(byId.getValue("dm1")), uid, "u3"))
         assertTrue(finds.isNull("dmMissing"))
@@ -97,11 +97,11 @@ class TeamsListLogicTest {
             val pointer = row.get("lastMessage").let { value ->
                 if (value !is JSONObject) null else {
                     val author = value.getJSONObject("author")
-                    TeamLastMessage(value.getString("id"), value.getLong("seq"), TeamsVectors.parseInstant(value.stringOrNull("at")), author.getString("kind"), author.getString("uid"), author.stringOrNull("botKey"), value.getString("preview"), value.optBoolean("recalled"))
+                    TeamLastMessage(value.getString("id"), value.getLong("seq"), TeamsVectors.parseInstant(value.stringOrNull("at")), author.getString("kind"), author.optString("uid", ""), author.stringOrNull("sharedBotId"), value.getString("preview"), value.optBoolean("recalled"))
                 }
             }
             val conversation = TeamMessageConversation("c", row.getString("kind"), "t", emptyList(), 1, 1, 0, lastMessage = pointer)
-            val text = TeamsListLogic.conversationPreview(conversation, uid, TeamsVectors.strings(row.getBoolean("zh"))) { last -> if (last.authorKind == "bot") names.getString("bot") else names.optString(last.authorUid, last.authorUid) }
+            val text = TeamsListLogic.conversationPreview(conversation, uid, TeamsVectors.strings(row.getBoolean("zh"))) { last -> if (last.authorKind == "shared_bot") names.getString("bot") else names.optString(last.authorUid, last.authorUid) }
             assertEquals(row.getString("name"), row.getString("expect"), text)
         }
     }
@@ -116,7 +116,7 @@ class TeamsListLogicTest {
     /** The two word sets of the vectors are the en and zh-Hans resource values of the keys in the table (section 13.1). */
     @Test fun listStringsEqualTheEnglishAndChineseResourceValues() {
         fun resources(directory: String): Map<String, String> {
-            val file = listOf("src/main/res/$directory/strings.xml", "app/src/main/res/$directory/strings.xml").map(::File).first { it.exists() }
+            val file = listOf("src/main/res/$directory/strings.xml", "app/src/main/res/$directory/strings.xml", "apps/android/native/app/src/main/res/$directory/strings.xml").map(::File).first { it.exists() }
             // Plain text on purpose: the Android XML classes on the unit-test class path are stubs.
             return Regex("<string\\s+name=\"([^\"]+)\"[^>]*>(.*?)</string>", RegexOption.DOT_MATCHES_ALL).findAll(file.readText())
                 .associate { it.groupValues[1] to it.groupValues[2].replace("\\'", "'").replace("\\\"", "\"").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">") }

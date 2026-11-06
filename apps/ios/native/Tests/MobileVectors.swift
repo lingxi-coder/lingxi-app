@@ -55,7 +55,10 @@ enum MobileVectors {
     }
 
     /// `packages/bridge-client/fixtures/<name>`, from the nearest ancestor of `file` that has it.
+    private final class ResourceBundle {}
+
     static func url(of name: String, from file: String) throws -> URL {
+        if let bundled = Bundle(for: ResourceBundle.self).url(forResource: name, withExtension: nil) { return bundled }
         var directory = URL(fileURLWithPath: file).deletingLastPathComponent()
         for _ in 0..<10 {
             let candidate = directory.appendingPathComponent("packages/bridge-client/fixtures/\(name)")

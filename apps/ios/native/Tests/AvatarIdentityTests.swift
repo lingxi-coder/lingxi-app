@@ -78,16 +78,11 @@ final class AvatarIdentityTests: XCTestCase {
         XCTAssertEqual(AvatarIdentity.teamBotAvatarId("bot:o:h:搜索"), "搜索")
     }
 
-    /// The card knows the bare id; before it loads the key stands in.
-    func testABotCardDrawsFromItsBotIdElseFromItsKey() throws {
-        let key = "bot:owner:host:helper"
-        func card(botId: String) -> TeamBotCard {
-            TeamBotCard(key: key, ownerUid: "owner", hostId: "host", botId: botId, name: "Helper", description: "", revision: 1,
-                        use: "all", enabled: true, permitted: true, online: true)
-        }
-        XCTAssertEqual(card(botId: "helper").avatarId, "helper")
-        XCTAssertEqual(card(botId: "").avatarId, "helper")
-        // The same face as Desktop and the Bots tab: the sub-agent hash of the bare id.
-        XCTAssertEqual(agentAvatarIndex(card(botId: "helper").avatarId), agentAvatarIndex(AvatarIdentity.teamBotAvatarId(key)))
+    /// SharedBot faces remain stable across maintainer, deployment and instance changes.
+    func testASharedBotCardDrawsFromItsStableSharedBotId() throws {
+        let raw = #"{"sharedBotId":"sharedbot_helper","name":"Helper","description":"","maintainer":{"uid":"owner","generation":1},"revision":1,"state":"published","permitted":true,"ready":true,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":100,"member":10,"bot":50}}"#
+        let card = try JSONDecoder().decode(TeamBotCard.self, from: Data(raw.utf8))
+        XCTAssertEqual(card.avatarId, "sharedbot_helper")
+        XCTAssertEqual(agentAvatarIndex(card.avatarId), agentAvatarIndex("sharedbot_helper"))
     }
 }

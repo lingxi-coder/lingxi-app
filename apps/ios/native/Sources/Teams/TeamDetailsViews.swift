@@ -50,14 +50,14 @@ struct TeamConversationDetailsSheet: View {
                 return Participant(id: "user:" + member.uid, identity: TeamIdentity(kind: .user, id: member.uid, name: name, isSelf: member.uid == context.uid), card: nil, role: member.role)
             }
         }
-        let botKeys = conversation.participants.filter { $0.hasPrefix("bot:") }
+        let sharedBotIds = conversation.participants.filter { $0.hasPrefix("shared_bot:") }
         var nextBot = 0
         var result: [Participant] = []
         for identity in identities {
             if identity.kind == .bot {
-                let key = nextBot < botKeys.count ? botKeys[nextBot] : identity.id
+                let key = nextBot < sharedBotIds.count ? sharedBotIds[nextBot] : identity.id
                 nextBot += 1
-                result.append(Participant(id: key, identity: identity, card: context.card(forKey: key), role: nil))
+                result.append(Participant(id: key, identity: identity, card: context.card(forKey: identity.id), role: nil))
             } else {
                 result.append(Participant(id: "user:" + identity.id, identity: identity, card: nil, role: role(identity.id)))
             }
@@ -125,8 +125,8 @@ struct TeamConversationDetailsSheet: View {
                     }
                 }
                 if let card = person.card {
-                    Text("teams_bot_owner \(context.userName(card.ownerUid))").font(.caption).foregroundStyle(.secondary)
-                    Text(LocalizedStringKey(context.presenceKey(card))).font(.caption).foregroundStyle(card.enabled && card.online ? Color.green : Color.secondary)
+                    Text("teams_bot_owner \(context.userName(card.maintainer.uid))").font(.caption).foregroundStyle(.secondary)
+                    Text(LocalizedStringKey(context.presenceKey(card))).font(.caption).foregroundStyle(card.state == "published" && card.ready ? Color.green : Color.secondary)
                 } else if let role = person.role {
                     HStack(spacing: 4) {
                         if identity.isSelf { Text(context.strings.you); Text("·") }

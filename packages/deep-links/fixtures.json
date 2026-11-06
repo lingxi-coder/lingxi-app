@@ -115,6 +115,25 @@
     {
       "url": "https://lingxios.net/open/team/inbox",
       "route": "team/inbox"
+    },
+    {
+      "url": "lingxi://market/bot/travel-helper?versionId=release1",
+      "route": "market/bot/travel-helper",
+      "params": {
+        "versionId": "release1"
+      }
+    },
+    {
+      "url": "https://lingxios.net/open/market/bot/travel-helper",
+      "route": "market/bot/travel-helper"
+    },
+    {
+      "url": "https://lingxios.net/open/market/bot/travel-helper?versionId=release1&intentId=handoff1",
+      "route": "market/bot/travel-helper",
+      "params": {
+        "versionId": "release1",
+        "intentId": "handoff1"
+      }
     }
   ],
   "invalid": [
@@ -155,6 +174,10 @@
     "lingxi://remote/host/session#payload=%7B%22prompt%22%3A%22x%22%7D",
     "lingxi://team/inbox?code=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "lingxi://team/inbox?workspace=x",
-    "lingxi://team/inbox#payload=%7B%7D"
+    "lingxi://team/inbox#payload=%7B%7D",
+    "lingxi://market/bot/helper?workspace=private",
+    "lingxi://market/bot/helper?token=secret",
+    "lingxi://market/app1?versionId=release1",
+    "lingxi://market/app1?intentId=handoff1"
   ]
 }

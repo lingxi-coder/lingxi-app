@@ -105,7 +105,7 @@ test('revocation clears messages immediately even if command-journal cleanup fai
 test('pending command claims coordinate windows and an attempted identity cannot be discarded', async context => {
   const storage = memoryStorage(); let release: (() => void) | undefined, sends = 0;
   const pending = emptyProjection(uid, scope);
-  pending.outbox = [{ action: 'mutate', ...scope, conversationId: conversation.id, messageId: message.id, changeId: 'pending001', operation: 'create', text: 'Queued' }];
+  pending.outbox = [{ command: { action: 'mutate', ...scope, conversationId: conversation.id, messageId: message.id, changeId: 'pending001', operation: 'create', text: 'Queued' } }];
   await storage.update(JSON.stringify([uid, scope.teamId, 1]), () => pending);
   const source = fixture(async () => { sends++; await new Promise<void>(resolve => { release = resolve; }); return {} as never; });
   const first = new TeamMessaging(source.api, storage, uid, scope), second = new TeamMessaging(source.api, storage, uid, scope);

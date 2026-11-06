@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, useSyncExternalStore, type Keyboard
 import type { PermissionModeId } from '@lingxi/bridge-client';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
-import { groupModelReferences, modelDisplayLabel, type ModelCatalogDetail } from '../bridge/modelCatalog';
+import { groupModelReferences, modelBillingGroups, modelDisplayLabel, type ModelCatalogDetail } from '../bridge/modelCatalog';
 import type { BotUi } from '../../shared/bots';
 import { BOT_DESCRIPTION_MAX, BOT_FOLDERS_MAX, ipcErrorMessage, permissionModeNeedsConfirmation, withFolder, type BotDraft, type BotDraftProblem, type BotDraftProblems } from '../bridge/botForm';
 import type { BotMemoryProblem } from '../bridge/botMemory';
@@ -138,9 +138,13 @@ export function BotGeneralFields({ draft, problems, models, disabled = false, on
     <Field label={tr('bots_field_model')} hint={tr('bots_model_hint')}>
       {(control) => <select {...control} value={draft.model} disabled={disabled} onChange={(event) => onChange({ model: event.target.value })}>
         <option value="">{tr('bots_model_default')}</option>
-        {groups.map((group) => <optgroup key={group.providerId ?? ''} label={group.providerLabel}>
-          {group.models.map((model) => <option key={model.reference} value={model.reference}>{modelDisplayLabel(model, models.details)}</option>)}
-        </optgroup>)}
+        {groups.flatMap((group) => modelBillingGroups(group, models.details).map((billingGroup) => {
+          const billingLabel = billingGroup.label === 'subscription' ? tr('provider_accounts_subscription')
+            : billingGroup.label === 'api_key' ? tr('provider_accounts_key') : billingGroup.label;
+          return <optgroup key={`${group.providerId ?? ''}:${billingGroup.label ?? ''}`} label={billingLabel ? `${group.providerLabel} · ${billingLabel}` : group.providerLabel}>
+            {billingGroup.models.map((model) => <option key={model.reference} value={model.reference}>{modelDisplayLabel(model, models.details)}{billingLabel ? ` · ${billingLabel}` : ''}</option>)}
+          </optgroup>;
+        }))}
         {draft.model && !models.references.includes(draft.model) ? <option value={draft.model}>{tr('bots_model_unavailable', draft.model)}</option> : null}
       </select>}
     </Field>

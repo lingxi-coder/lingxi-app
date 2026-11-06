@@ -137,6 +137,21 @@ test('the model can be chosen from the ones the engine lists, and a model that i
   assert.match(html, /<option value="builtin\/retired-model"[^>]*selected[^>]*>builtin\/retired-model \(not available now\)<\/option>/);
 });
 
+test('Bot model choices distinguish subscription and API billing without changing model references', () => {
+  const references = ['openai/gpt-6-luna', 'openai-chatgpt/gpt-6-luna'];
+  const choices = { references, details: references.map(reference => ({ reference, display_name: 'GPT-6 Luna' })) };
+  for (const reference of references) {
+    const html = render(React.createElement(BotGeneralFields, { draft: { ...emptyBotDraft(), model: reference }, problems: {}, models: choices, onChange: noop }));
+    const options = [...html.matchAll(/<option value="([^"]+)"([^>]*)>([^<]*)<\/option>/g)];
+    assert.deepEqual(options.map(option => option[1]).sort(), [...references].sort());
+    assert.equal(options.find(option => option[1] === 'openai-chatgpt/gpt-6-luna')?.[3], 'GPT-6 Luna · ChatGPT subscription');
+    assert.equal(options.find(option => option[1] === 'openai/gpt-6-luna')?.[3], 'GPT-6 Luna · API key');
+    assert.deepEqual(options.filter(option => option[2]!.includes('selected')).map(option => option[1]), [reference]);
+    assert.match(html, /<optgroup[^>]*label="OpenAI · ChatGPT subscription"/);
+    assert.match(html, /<optgroup[^>]*label="OpenAI · API key"/);
+  }
+});
+
 test('new Bots explicitly ask for approval, while an unset mode is shown as the app default', () => {
   const html = render(React.createElement(BotPermissionField, { draft: emptyBotDraft(), onChange: noop }));
   for (const label of ['Ask for approval', 'Accept edits', 'Plan mode', 'Approve for me', 'Full access']) assert.match(html, new RegExp(`>${label}</option>`), label);

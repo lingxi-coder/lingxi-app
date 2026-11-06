@@ -777,3 +777,12 @@ test('named service root redirects stay within service and HTML ranges remain un
     assert.deepEqual({location:redirected.headers.get('location'),status:partial.status,range:partial.headers.get('content-range'),body:await partial.text(),headLength:head.headers.get('content-length')},{location:origin+'/__services/api/account?tab=one#top',status:206,range:'bytes 0-4/10',body:'<html',headLength:null});
   } finally {await f.host.services.dispose();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });
+
+test('the authoring-session index is native-only and does not become a model or remote app API', async t => {
+  const { host } = await fixture(t);
+  const source = { scope: 'current', transcriptPath: '/app/a.jsonl' };
+  host.authoringSessionIntents = { sessions: async () => [{ name: 'App', projectPath: '/app', sessionId: 'a', source }] };
+  host.store.findAuthoringSource = async () => ({ ownerAppId: id });
+  assert.deepEqual(await host.request({ action: 'authoringSessions' }), [{ name: 'App', appId: id, projectPath: '/app', sessionId: 'a', source }]);
+  for (const kind of ['tool', 'remote']) await assert.rejects(host.request({ action: 'authoringSessions' }, undefined, { kind, mode: 'code' }), /only in Desktop/);
+});

@@ -34,7 +34,7 @@ test('the Bots mode of the sidebar works in the whole window: rail, Bots and the
       child.once('exit', code => { clearTimeout(timeout); code === 0 ? resolveResult() : reject(new Error(`Bots sidebar exited ${code}\n${errors}`)); });
     });
     const result = JSON.parse(output.trim().split('\n').at(-1));
-    for (const name of ['railGroups', 'botsMode', 'chatsListed', 'chatOpens', 'pageKeepsMode', 'viewMenu', 'botPageFromTitle', 'menus', 'deleteAsksFirst', 'homeAgain', 'restored', 'dirtyGuard', 'unavailable']) assert.equal(result[name], true, name);
+    for (const name of ['railGroups', 'botsMode', 'chatsListed', 'chatOpens', 'appsWorkspace', 'pageKeepsMode', 'viewMenu', 'botPageFromTitle', 'menus', 'deleteAsksFirst', 'homeAgain', 'restored', 'dirtyGuard', 'unavailable']) assert.equal(result[name], true, name);
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();

@@ -136,6 +136,13 @@ export class AuthoringSessionIntents {
   async pending(): Promise<AuthoringSessionIntent[]> {
     return this.locked(async () => { await this.load(); return [...this.entries.values()].filter(row => row.state !== 'completed').map(row => ({ ...row })); });
   }
+  async sessions(): Promise<AuthoringSessionIntent[]> {
+    return this.locked(async () => {
+      await this.load();
+      return [...this.entries.values()].filter(row => row.state !== 'pending' && row.source)
+        .map(row => ({ ...row, source: { ...row.source! } }));
+    });
+  }
   async ready(requestId: string): Promise<void> {
     await this.locked(async () => { await this.load(); const row = this.entries.get(requestId);
       if (!row || row.state === 'completed' || !row.source) throw new Error('Local App session intent is unavailable');

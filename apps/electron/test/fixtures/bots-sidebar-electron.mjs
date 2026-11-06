@@ -2,13 +2,20 @@ import assert from 'node:assert/strict';
 import { app, BrowserWindow } from 'electron';
 
 const url = process.argv.find(arg => arg.startsWith('http://'));
+const fixtureUrl = new URL(url);
+assert.equal(fixtureUrl.hostname, '127.0.0.1');
+assert.equal(fixtureUrl.pathname, '/bots-sidebar-fixture.html');
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 async function main() {
 await app.whenReady();
 const win = new BrowserWindow({ show: false, width: 1280, height: 850, webPreferences: { sandbox: true, backgroundThrottling: false } });
 const errors = [];
 win.webContents.on('console-message', details => { if (details.level === 'error' || details.level === 3) errors.push(details.message); });
-const run = script => win.webContents.executeJavaScript(script);
+const run = script => {
+  const current = new URL(win.webContents.getURL());
+  assert.equal(current.origin + current.pathname, fixtureUrl.origin + fixtureUrl.pathname);
+  return win.webContents.executeJavaScript(script);
+};
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function wait(expression) {
   for (let i = 0; i < 250; i++) { if (await run(expression)) return; await delay(20); }
@@ -32,7 +39,7 @@ try {
   await wait(`document.querySelector('${rail('Bots')}')`);
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button')).map(button => button.getAttribute('aria-label'))`),
     ['Home', 'Bots', 'Teams', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
-  assert.equal(await run(`document.querySelector('.desktop-rail-divider').previousElementSibling.getAttribute('aria-label')`), 'Teams');
+  assert.equal(await run(`document.querySelector('.desktop-rail-divider').previousElementSibling.getAttribute('aria-label')`), 'Apps');
   assert.deepEqual(await marked(), ['Home']);
   assert.equal(await run(`Boolean(document.querySelector('.sidebar-new-chat'))`), true, 'Home lists the projects and has its own New chat');
   assert.equal(await run(`Array.from(document.querySelectorAll('.desktop-sidebar .sidebar-primary-action')).some(button => /^(Teams|Bots)$/.test(button.textContent.trim()))`), false, 'and does not repeat the rail');
@@ -70,10 +77,23 @@ try {
   assert.equal(await run(`Boolean(document.querySelector('.beta-rich-prompt'))`), true);
   result.chatOpens = true;
 
-  // The Bots mode survives a page: Apps marks itself and Bots keeps its mark, and the sidebar still lists the Bots.
+  // Apps owns a separate workspace; the existing Bot chat remains in its tree.
   await click(rail('Apps'));
-  await wait(`document.querySelector('${rail('Apps')}[data-active]')`);
-  assert.deepEqual(await marked(), ['Bots', 'Apps']);
+  await wait(`document.querySelector('.local-apps-sidebar')`);
+  assert.deepEqual(await marked(), ['Apps']);
+  assert.equal(await shown(sidebar), false);
+  await click(rail('Bots'));
+  await wait(`document.querySelector('${sidebar} [data-session-id="a-2"]')`);
+  assert.equal(await shown('.bots-page'), true);
+  await click(`${sidebar} [data-session-id="a-2"]`);
+  await wait(`document.querySelector('${sidebar} [data-session-id="a-2"][aria-current="page"]')`);
+  assert.equal((await calls()).some(call => call[0] === 'openSession' && !call[2]), false, 'workspace switches do not create a Bot chat');
+  result.appsWorkspace = true;
+
+  // Utility pages preserve the selected workspace and its sidebar.
+  await click(rail('Scheduled tasks'));
+  await wait(`document.querySelector('${rail('Scheduled tasks')}[data-active]')`);
+  assert.deepEqual(await marked(), ['Bots', 'Scheduled tasks']);
   assert.equal(await shown(sidebar), true);
   result.pageKeepsMode = true;
 

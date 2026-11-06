@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -10,17 +11,26 @@ import { LocalAppRuntime, shellQuote } from '../src/main/local-apps/runtime.ts';
 import { LocalAppServiceBroker } from '../src/main/local-apps/serviceBroker.ts';
 const binary = process.env.LINGXI_LOCAL_APP_CORE_BIN;
 
+async function publishSource(store: CoreLocalAppStore, source: string, sessionId: string,
+  update: { id: string; expectedRevision: number } | undefined = undefined) {
+  const requestId = randomUUID(), staged = join(store.importsRoot, requestId);
+  await fs.mkdir(store.importsRoot, { recursive: true });
+  await fs.cp(source, staged, { recursive: true });
+  return store.publish({ ...update, staged_path: staged,
+    publication: { requestId, sourceDirectory: source, authoringSessionId: sessionId } });
+}
+
 test('real Rust library owns Desktop static, Python and Node fixture lifecycles', { skip: !binary, timeout: 120000 }, async t => {
   const root = await fs.mkdtemp(join(tmpdir(), 'local-app-real-core-')), config = join(root, 'config');
   const core = new LocalAppCoreClient(binary!, config);
   const store = new CoreLocalAppStore(join(config, 'local-apps/v2'), core), broker = new LocalAppServiceBroker();
   const runtime = new LocalAppRuntime(store, () => undefined, { environment: { PATH: process.env.PATH, HOME: root }, onRunEnded: (appId, runId) => broker.revoke(appId, runId) });
   t.after(async () => { await runtime.dispose(); await broker.dispose(); await core.dispose(); await fs.rm(root, { recursive: true, force: true }); });
-  await fs.mkdir(store.importsRoot, { recursive: true });
+  const sessionId = randomUUID();
   for (const name of ['static', 'python', 'node']) {
-    const source = join(store.importsRoot, name);
+    const source = join(root, 'sources', name);
     await fs.cp(fileURLToPath(new URL(`../../../fixtures/local-apps/v2/${name}`, import.meta.url)), source, { recursive: true, filter: path => !path.split('/').includes('node_modules') });
-    const row = await store.publish({ staged_path: source });
+    const row = await publishSource(store, source, sessionId);
     if (name !== 'static') {
       await assert.rejects(runtime.start(row.id), /permission/);
       row.grants = row.manifest.capabilities ?? []; await store.save(row);
@@ -55,7 +65,7 @@ test('real Rust library owns Desktop static, Python and Node fixture lifecycles'
       const dataPath = store.dataPath(row.id);
       await fs.writeFile(join(dataPath, 'user-note.txt'), 'keep across code versions');
       await fs.appendFile(join(source, 'dist/index.html'), '\n<!-- second release -->');
-      const next = await store.publish({ id: row.id, staged_path: source, expectedRevision: row.revision });
+      const next = await publishSource(store, source, sessionId, { id: row.id, expectedRevision: row.revision });
       assert.equal(next.revision, 2); assert.equal(next.currentRevision, 1);
       await runtime.start(row.id);
       const secondOwner = runtime.owner(row.id)!; assert.equal(secondOwner.revision, 2);
@@ -78,14 +88,14 @@ test('Desktop retains the serving release on commit failure and reuses prepared 
     if (runId === failCleanupFor) throw new Error('Transient broker cleanup failure');
   } });
   t.after(async () => { await runtime.dispose(); await core.dispose(); await fs.rm(root, { recursive: true, force: true }); });
-  const source = join(store.importsRoot, 'source'); await fs.mkdir(source, { recursive: true });
+  const source = join(root, 'source'), sessionId = randomUUID(); await fs.mkdir(source, { recursive: true });
   const node = shellQuote(process.execPath), platform = process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';
   const manifest = { schema: 2, name: 'Commit and environment', entry: { type: 'server', process: 'api' }, targets: [{ platform, environment: 'native' }],
     install: [{ command: `${node} -e "require('fs').appendFileSync('install-count','x')"` }],
     processes: [{ name: 'api', command: `${node} server.cjs` }], package: { files: ['server.cjs'], dependencyLocks: [] } };
   await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify(manifest));
   await fs.writeFile(join(source, 'server.cjs'), "require('http').createServer((req,res)=>res.end('first')).listen(process.env.PORT,'127.0.0.1')");
-  const row = await store.publish({ staged_path: source }); row.grants = ['process']; await store.save(row);
+  const row = await publishSource(store, source, sessionId); row.grants = ['process']; await store.save(row);
   await runtime.start(row.id);
   const originalWorkspace = runtime.workspace(row.id)!;
   await runtime.stop(row.id); await runtime.start(row.id);
@@ -93,7 +103,7 @@ test('Desktop retains the serving release on commit failure and reuses prepared 
   assert.equal(await fs.readFile(join(originalWorkspace, 'install-count'), 'utf8'), 'x');
   const oldRun = runtime.owner(row.id)!.runId, oldUrl = runtime.service(row.id, 'api')!.url;
   await fs.writeFile(join(source, 'server.cjs'), "require('http').createServer((req,res)=>res.end('second')).listen(process.env.PORT,'127.0.0.1')");
-  const next = await store.publish({ id: row.id, expectedRevision: row.revision, staged_path: source }); next.grants = ['process']; await store.save(next);
+  const next = await publishSource(store, source, sessionId, { id: row.id, expectedRevision: row.revision }); next.grants = ['process']; await store.save(next);
   const activate = store.activate.bind(store);
   store.activate = async () => { throw new Error('Activation write failed'); };
   await assert.rejects(runtime.start(row.id, false, undefined, true), /Activation write failed/);

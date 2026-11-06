@@ -3,6 +3,17 @@ import test from 'node:test';
 
 import { modeForSettledChat, pageForMode, reconcileSidebarMode, restoredSidebarMode, SidebarModeSync, type AppPage } from '../src/renderer/bridge/sidebarMode';
 
+test('Apps is a first-level workspace and retains its own development chat', () => {
+  assert.equal(pageForMode('apps', { page: 'chat', botChat: false, appChat: true }), 'chat');
+  assert.equal(pageForMode('apps', { page: 'chat', botChat: false }), 'apps');
+  assert.equal(reconcileSidebarMode('bots', 'apps', true), 'apps');
+  assert.equal(modeForSettledChat('home', 'chat', false, true), 'apps');
+  assert.equal(modeForSettledChat('teams', 'chat', false, true), 'apps');
+  assert.equal(modeForSettledChat('apps', 'chat', false, false), 'home');
+  assert.equal(modeForSettledChat('apps', 'chat', true, false), 'bots');
+  assert.equal(new SidebarModeSync().open({ saved: 'apps', page: 'chat', mode: 'home', botsAvailable: true }), 'apps');
+});
+
 test('Home goes to the chat view and Teams to its page, from wherever the window is', () => {
   const pages: AppPage[] = ['chat', 'scheduled', 'apps', 'changes', 'bots', 'teams'];
   for (const page of pages) {
@@ -21,12 +32,12 @@ test('Bots goes to the Bots page, except that a Bot\'s chat on screen stays on s
   }
 });
 
-test('the Teams and Bots pages are their modes; the pages Apps, Scheduled and changes leave the mode as it is', () => {
+test('workspace pages select their modes; Scheduled and changes retain the sidebar', () => {
   assert.equal(reconcileSidebarMode('home', 'teams', true), 'teams');
   assert.equal(reconcileSidebarMode('bots', 'teams', true), 'teams');
   assert.equal(reconcileSidebarMode('home', 'bots', true), 'bots');
   assert.equal(reconcileSidebarMode('teams', 'bots', true), 'bots');
-  for (const page of ['chat', 'scheduled', 'apps', 'changes'] as const) {
+  for (const page of ['chat', 'scheduled', 'changes'] as const) {
     for (const mode of ['home', 'bots', 'teams'] as const) {
       assert.equal(reconcileSidebarMode(mode, page, true), mode, `${mode} stays on ${page}`);
     }
@@ -35,7 +46,7 @@ test('the Teams and Bots pages are their modes; the pages Apps, Scheduled and ch
 
 test('where Bots cannot be used they are no mode and no page', () => {
   assert.equal(reconcileSidebarMode('bots', 'chat', false), 'home');
-  assert.equal(reconcileSidebarMode('bots', 'apps', false), 'home');
+  assert.equal(reconcileSidebarMode('bots', 'apps', false), 'apps');
   assert.equal(reconcileSidebarMode('home', 'bots', false), 'home');
   assert.equal(reconcileSidebarMode('teams', 'chat', false), 'teams', 'Teams does not depend on them');
   assert.equal(reconcileSidebarMode('teams', 'teams', false), 'teams');

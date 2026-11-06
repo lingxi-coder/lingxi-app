@@ -76,6 +76,14 @@ export interface PendingLocalAppSourceCopy { requestId: string; appId: string; r
 export interface LocalAppNewSessionIntent { name: string; appId?: string; setCurrent: boolean; sourceRequestId?: string }
 export type LocalAppSessionPurpose = { kind: 'local-app'; intent: LocalAppNewSessionIntent } | { kind: 'recover-local-app'; requestId: string };
 export interface PendingLocalAppSession { requestId: string; appId?: string; name: string }
+/** Native verified authoring sessions, including drafts that have not published an app. */
+export interface LocalAppAuthoringSession {
+  name: string;
+  appId?: string;
+  projectPath: string;
+  sessionId: string;
+  source: { scope: 'current' | 'repository' | 'all'; transcriptPath: string };
+}
 export interface LocalAppEditRequest {
   id: string;
   name: string;
@@ -132,6 +140,7 @@ export interface LocalAppsApi {
   pendingSourceCopies(): Promise<PendingLocalAppSourceCopy[]>;
   resumeSourceCopy(requestId: string): Promise<void>;
   pendingAuthoringSessions(): Promise<PendingLocalAppSession[]>;
+  authoringSessions(): Promise<LocalAppAuthoringSession[]>;
   resumeAuthoringSession(requestId: string): Promise<void>;
   marketBrowse(): Promise<void>;
   marketInstallLink(remoteId: string): Promise<DesktopLocalApp | null>;

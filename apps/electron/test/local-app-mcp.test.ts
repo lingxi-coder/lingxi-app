@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -40,13 +41,18 @@ async function setup(t: { after(callback: () => Promise<void>): void }, binary?:
     await client.close(); await runtime.dispose(); await manager.dispose(); await gateway.dispose(); await core?.dispose(); await fs.rm(root, { recursive: true, force: true });
   });
   async function publish(type: 'stdio' | 'http' = 'stdio', id?: string, serverCommand = command) {
-    const source = join(store instanceof CoreLocalAppStore ? store.importsRoot : join(store.root, 'imports'), `source-${Math.random().toString(16).slice(2)}`); await fs.mkdir(source, { recursive: true });
+    const source = join(root, 'sources', randomUUID()); await fs.mkdir(source, { recursive: true });
     await fs.writeFile(join(source, 'index.html'), '<!doctype html><title>MCP app</title>');
     const manifest = { schema: 2, name: 'MCP app', targets: [{ platform: 'macos', environment: 'native' }], capabilities: ['mcp'], entry: { type: 'static', path: 'index.html' },
       ...(type === 'http' ? { processes: [{ name: 'backend', command: `${serverCommand} http`, ready: { path: '/health', timeoutMs: 5000 } }], mcpServers: { tools: { type: 'http', process: 'backend', path: '/mcp' } } }
         : { mcpServers: { tools: { type: 'stdio', command: serverCommand } } }) };
     await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify(manifest));
-    const row = await store.publish({ staged_path: source, id }); row.grants = row.manifest.capabilities ?? []; await store.save(row); return row;
+    const imports = store instanceof CoreLocalAppStore ? store.importsRoot : join(store.root, 'imports');
+    await fs.mkdir(imports, { recursive: true });
+    const staged = join(imports, randomUUID());
+    await fs.cp(source, staged, { recursive: true });
+    const publication = { requestId: randomUUID(), sourceDirectory: source, authoringSessionId: randomUUID() };
+    const row = await store.publish({ staged_path: staged, id, publication, ...(id ? { expectedRevision: (await store.get(id)).revision } : {}) }); row.grants = row.manifest.capabilities ?? []; await store.save(row); return row;
   }
   async function named(name: string) { return (await client.listTools()).tools.find(tool => tool.description?.startsWith(`MCP app / tools / ${name}\n`))?.name; }
   return { root, store, manager, gateway, runtime, client, publish, named, descriptor, url };

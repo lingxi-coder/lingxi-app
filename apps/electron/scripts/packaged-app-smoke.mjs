@@ -1362,16 +1362,13 @@ async function assertColdSessionOpen(page, sessionId) {
 }
 
 async function openPackagedProjectDraft(page, projectPath) {
-  const label = `Edit ${projectPath.split('/').at(-1)}`;
-  await waitFor(() => evaluate(page, `(() => {
-    const button = Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === ${JSON.stringify(label)});
-    return Boolean(button && !button.disabled && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true');
-  })()`), { label: 'Code project draft action after renderer admission' });
-  await evaluate(page, `(() => {
-    const button = Array.from(document.querySelectorAll('button')).find(button => button.getAttribute('aria-label') === ${JSON.stringify(label)});
-    if (!button || button.disabled) throw new Error('The Code project must expose its draft action');
-    button.click();
-  })()`);
+  // App source projects now belong to the first-level Apps workspace. Exercise
+  // the ordinary New chat action to prove its draft is isolated from authoring.
+  const active = await evaluate(page, 'window.lingxi.bootstrap().then(state => state.activeSession)');
+  assert.equal(active?.projectPath, projectPath);
+  await evaluate(page, `Array.from(document.querySelectorAll('.desktop-nav-rail button')).find(button => button.getAttribute('aria-label') === 'Home')?.click()`);
+  await waitFor(() => evaluate(page, `Boolean(Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'New chat' && !button.disabled)) && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'ordinary New chat action after Apps navigation' });
+  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'New chat' && !button.disabled).click()`);
 }
 
 async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, configHome) {

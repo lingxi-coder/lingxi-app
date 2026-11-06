@@ -1,3 +1,6 @@
+import { LocalAppsSidebar } from './components/LocalAppsSidebar';
+import { useLocalAppWorkspace } from './bridge/useLocalAppWorkspace';
+import type { AppDevelopmentChat } from './bridge/localAppWorkspace';
 import { tr } from './i18n/locale';
 import { useI18n } from './i18n/useI18n';
 import { LocalApps, LocalAppsTopBar } from './components/LocalApps';
@@ -104,6 +107,7 @@ export function App() {
   }, []);
   const clearLocalAppNavigationError = useCallback(() => setLocalAppNavigationError(''), [setLocalAppNavigationError]);
   const localAppNavigation = useRef(0);
+  const localAppProjectTarget = useRef<string>();
   const localAppNavigationQueue = useRef<Promise<void>>(Promise.resolve());
   const [page, setPage] = useState<AppPage>('chat');
   const [teamInvite, setTeamInvite] = useState<string>();
@@ -117,6 +121,11 @@ export function App() {
   const bridge = useBridge();
   const botsApi = window.lingxi?.bots;
   const bots = useBots(botsApi);
+  const { setMode: setSidebarMode, mode: sidebarMode } = useSidebarMode({
+    page, setPage, botsAvailable: bots.available, botsKnown: bots.state.availability !== undefined,
+    settings: bridge.bootstrap?.settings, save: bridge.updateSidebarPreferences,
+  });
+  const appWorkspace = useLocalAppWorkspace(bridge);
   const localAppBridge = useRef(bridge);
   localAppBridge.current = bridge;
   // The Scheduled page lists the workspace of every Bot as a scope; ask for the scopes again when Bots are made, renamed or deleted.
@@ -151,6 +160,8 @@ export function App() {
         recoverSession: requestId => localAppBridge.current.newSession(undefined, { kind: 'recover-local-app', requestId }),
       }, () => localAppNavigation.current === nonce);
       if (!target || localAppNavigation.current !== nonce) return;
+      localAppProjectTarget.current = target.projectPath;
+      setSidebarMode('apps');
       setPage('chat');
       setActivityView(false);
       setLocalAppDraft({ id: app?.id ?? '', name: app?.name ?? '', nonce, target });
@@ -161,7 +172,7 @@ export function App() {
         else setLocalAppNavigationError(localAppErrorMessage(error));
       }
     });
-  }, [sessionNavigationBlocked, setLocalAppNavigationError]);
+  }, [sessionNavigationBlocked, setLocalAppNavigationError, setSidebarMode]);
   const consumeLocalAppDraft = useCallback((nonce: number) => {
     setLocalAppDraft(current => current?.nonce === nonce ? undefined : current);
   }, []);
@@ -235,10 +246,6 @@ export function App() {
   const botChat = activeBotId !== undefined;
   const activeBot = botChat ? bots.state.bots.find((bot) => bot.botId === activeBotId) : undefined;
   const botSessions = useBotSessions(botsApi);
-  const { setMode: setSidebarMode, mode: sidebarMode } = useSidebarMode({
-    page, setPage, botsAvailable: bots.available, botsKnown: bots.state.availability !== undefined,
-    settings: bridge.bootstrap?.settings, save: bridge.updateSidebarPreferences,
-  });
   // Teams: one workspace for the window, which the sidebar, the page and the rail's unread count all read.
   const zh = locale.startsWith('zh');
   const teams = useTeams();
@@ -250,26 +257,29 @@ export function App() {
   const teamsTheme = useMemo(() => teamsThemeVariables(palette), [palette]);
   // The sidebar follows the chat on screen when that changes from a Bot's chat to a project's or back (a link, the picker, a notification),
   // so the chat is always listed beside it. Only settled changes count: a chat that is still opening says nothing yet.
-  const settledBotChat = useRef(botChat);
+  const appChat = !botChat && bridge.activeSession?.mode === 'code' && (Boolean(appWorkspace.activeGroup)
+    || (localAppProjectTarget.current !== undefined && localAppProjectTarget.current === bridge.activeSession.projectId));
+  const settledChatOwner = useRef(`${botChat}:${appChat}:${bridge.activeSession?.sessionId}`);
   useEffect(() => {
-    if (bridge.sessionLoading || settledBotChat.current === botChat) return;
-    settledBotChat.current = botChat;
-    const next = modeForSettledChat(sidebarMode, page, botChat);
+    const owner = `${botChat}:${appChat}:${bridge.activeSession?.sessionId}`;
+    if (bridge.sessionLoading || settledChatOwner.current === owner) return;
+    settledChatOwner.current = owner;
+    const next = modeForSettledChat(sidebarMode, page, botChat, appChat);
     if (next !== sidebarMode) setSidebarMode(next);
-  }, [botChat, bridge.sessionLoading, page, sidebarMode, setSidebarMode]);
+  }, [botChat, appChat, bridge.activeSession?.sessionId, bridge.sessionLoading, page, sidebarMode, setSidebarMode]);
   // Whether the sidebar is hidden. The View menu toggles it here, and the sidebar's own button reports its change here too.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   /** Run `go`, which takes the owner off the Bots page. A Bot there with edits that are not saved is asked about first, with the question of its own Back button; `go` waits for the answer. */
   const leaveBots = useCallback((go: () => void) => { if (page === 'bots') bots.guard.leave(go); else go(); }, [bots.guard, page]);
-  /** The rail's Home, Bots and Teams: the sidebar lists what the mode is for, and the main area goes to the page that goes with it. `after` runs once it does. */
+  /** The rail's Home, Apps, Bots and Teams: the sidebar lists what the mode is for, and the main area goes to the page that goes with it. `after` runs once it does. */
   const selectSidebarMode = useCallback((mode: SidebarMode, after?: () => void) => {
     if (sessionNavigationBlocked() || (mode === 'bots' && !bots.available)) return;
-    const next = pageForMode(mode, { page, botChat });
+    const next = pageForMode(mode, { page, botChat, appChat });
     const go = () => { setSidebarMode(mode); openPage(next); after?.(); };
     // Staying on the page, or coming to it, leaves nothing behind.
     if (next === page) go(); else leaveBots(go);
-  }, [bots.available, botChat, leaveBots, openPage, page, sessionNavigationBlocked, setSidebarMode]);
-  /** Bring the Teams page forward. The sidebar can list Teams while the main area shows the Apps, say; whatever is pressed in it is about Teams. */
+  }, [bots.available, botChat, appChat, leaveBots, openPage, page, sessionNavigationBlocked, setSidebarMode]);
+  /** Bring Teams forward when its sidebar is shown beside a utility page. */
   const showTeams = useCallback(() => { if (page !== 'teams') openPage('teams'); }, [openPage, page]);
   /** The team menu of the sidebar: the details panel beside the conversation, on a tab when one is asked for. */
   const openTeamDetails = useCallback((tab?: DrawerTab) => { showTeams(); showTeamDetails(tab); }, [showTeams, showTeamDetails]);
@@ -278,6 +288,27 @@ export function App() {
     setPage('chat');
     setActivityView(false);
   }, [cancelLocalAppNavigation]);
+  const showAppLibrary = useCallback(() => { setSidebarMode('apps'); openPage('apps'); }, [openPage, setSidebarMode]);
+  const openAppDevelopmentChat = useCallback(async (chat: AppDevelopmentChat) => {
+    if (sessionNavigationBlocked()) return;
+    cancelLocalAppNavigation();
+    try {
+      const opened = await localAppBridge.current.openSession(chat.projectPath, chat.sessionId, chat.selection, 'code');
+      if (opened) { setSidebarMode('apps'); setPage('chat'); setActivityView(false); }
+    } catch (cause) { setLocalAppNavigationError(localAppErrorMessage(cause)); }
+  }, [cancelLocalAppNavigation, sessionNavigationBlocked, setLocalAppNavigationError, setSidebarMode]);
+  const appAction = useCallback(async (id: string, edit: boolean) => {
+    if (sessionNavigationBlocked()) return;
+    try {
+      if (edit && localAppBridge.current.bootstrap?.conversationSpaces.activeMode !== 'code') {
+        if (!await localAppBridge.current.switchConversationSpace('code')) return;
+      }
+      const app = appWorkspace.groups.find(group => group.app?.id === id)?.app;
+      if (edit && app?.marketOrigin && !app.authoring?.sourceDirectory) await window.lingxi?.localApps?.remix(id);
+      else if (edit) await window.lingxi?.localApps?.edit(id);
+      else await window.lingxi?.localApps?.open(id);
+    } catch (cause) { setLocalAppNavigationError(localAppErrorMessage(cause)); }
+  }, [appWorkspace.groups, sessionNavigationBlocked, setLocalAppNavigationError]);
   const botDeleteRequests = useRef(0);
   const { available: botsAvailable, view: botsView, setView: setBotsView, guard: botsGuard } = bots;
   /**
@@ -419,7 +450,7 @@ export function App() {
       setPage('chat');
       setActivityView(!activityView);
       bridge.setRuntimeCenterOverviewOpen(!activityView);
-    } else if ((action === 'home' || action === 'bots' || action === 'teams') && !settingsRoute) {
+    } else if ((action === 'home' || action === 'bots' || action === 'teams' || action === 'apps') && !settingsRoute) {
       // Bots is ignored where Bots cannot run: the menu shows that item dimmed.
       // A key brought the person to Teams, so the keyboard comes along: to the open conversation in the sidebar, unless it is in Teams already.
       selectSidebarMode(action, action === 'teams' ? () => { if (!document.activeElement?.closest('.teams-sidebar, .teams-page')) focusTeamsSidebarSoon(); } : undefined);
@@ -585,12 +616,23 @@ export function App() {
             onToggleActivityView={toggleActivityView}
             apps={page === 'apps'}
             changes={page === 'changes'}
-            onOpenApps={() => openPage('apps')}
+            onOpenApps={showAppLibrary}
             botsAvailable={bots.available}
             teamsUnread={teams.snapshot?.totalUnread ?? 0}
             sidebarMode={sidebarMode}
+            localAppProjects={appWorkspace.projectPaths}
             onSelectSidebarMode={selectSidebarMode}
-            modePanel={(mode, search) => mode === 'bots'
+            modePanel={(mode, search) => mode === 'apps'
+              ? <LocalAppsSidebar groups={appWorkspace.groups} activeSessionId={bridge.activeSession?.sessionId}
+                  chatVisible={page === 'chat'} libraryVisible={page === 'apps'} query={search}
+                  busy={sessionNavigationBlocked()} loading={appWorkspace.loading} error={appWorkspace.error} onRetry={() => { void appWorkspace.refresh(); }}
+                  onLibrary={showAppLibrary} onCreate={() => openLocalAppChat()}
+                  onNewChat={group => openLocalAppChat({ id: group.app?.id ?? '', name: group.name,
+                    authoring: group.app?.authoring ?? { sourceDirectory: group.projectPath! },
+                    authoringAction: 'createSession', authoringSetCurrent: Boolean(group.app) })}
+                  onOpen={id => { void appAction(id, false); }} onEdit={id => { void appAction(id, true); }}
+                  onChat={chat => { void openAppDevelopmentChat(chat); }} />
+              : mode === 'bots'
               ? <BotsSidebar bots={bots} sessions={botSessions} bridge={bridge} query={search} chatVisible={page === 'chat'}
                   onOpenChat={showChat} onLeave={leaveBots} onOpenBot={openBot} onCreateBot={createBot} />
               : <TeamsSidebar teams={teams} zh={zh} query={search} initialInvite={teamInvite} onInviteHandled={handledTeamInvite}
@@ -606,6 +648,7 @@ export function App() {
               <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
+                  app={appChat ? { name: appWorkspace.activeGroup?.name ?? bridge.activeSession!.projectPath.split(/[\\/]+/).at(-1) ?? '', onOpen: showAppLibrary } : undefined}
                   bot={activeBotId !== undefined ? { botId: activeBotId, name: activeBot?.name ?? '', onOpen: () => openBot(activeBotId) } : undefined}
                   sideChatOpen={sideChats.open && Boolean(sideChats.selected)}
                   sideChatAvailable={sideChats.sides.length > 0}

@@ -6,7 +6,8 @@ import { fixtureAccountSnapshot } from './provider-accounts-mock';
 import { FakeTeams, botCard, conversation, message, team } from '../../../web/test/support/fakeTeams';
 import '../../src/renderer/global.css';
 
-// The whole window with a signed-in account, a stand-in Teams service and three Bots (one of them also a team's Bot), to drive the Teams mode of the sidebar in a real renderer.
+// A real renderer with a signed-in account, a Teams fixture, three personal Bots
+// and a separately published SharedBot.
 //   ?saved=teams|bots      the settings file says the window was last in that mode
 //   ?drawerWidth=420       the settings file holds this width for the Teams details panel
 //   ?theme=light|dark      the appearance (dark by default)
@@ -22,15 +23,16 @@ const ago = (minutes: number) => new Date(now - minutes * MINUTE).toISOString();
 // ---- Teams ----
 const fake = new FakeTeams();
 const ownerBot = botCard();
+const sharedBotIdentity = `shared_bot:${ownerBot.sharedBotId}`;
 fake.teams = [team('team-aaaa', { name: 'Acme', role: 'owner', memberCount: 3 }), team('team-bbbb', { name: 'Beta', generation: 2, memberCount: 2 })];
 fake.bots = [ownerBot];
 const lastMessage = (id: string, seq: number, minutes: number, preview: string, uid: string) => ({ id, seq, at: ago(minutes), preview, author: { kind: 'user' as const, uid } });
 fake.conversations.set('team-aaaa', [
-  conversation('chan-general', { title: 'general', participants: ['user:alice', 'user:bob', ownerBot.key], lastSeq: 7, lastReadSeq: 3, lastMessage: lastMessage('message-7', 7, 20, 'Ship it', 'bob') }),
+  conversation('chan-general', { title: 'general', participants: ['user:alice', 'user:bob', sharedBotIdentity], lastSeq: 7, lastReadSeq: 3, lastMessage: lastMessage('message-7', 7, 20, 'Ship it', 'bob') }),
   conversation('chan-design', { title: 'design', participants: ['user:alice', 'user:bob'], lastSeq: 2, lastReadSeq: 2, lastMessage: lastMessage('d-2', 2, 300, 'Mockups are in the folder', 'bob') }),
   conversation('dm-bob', { kind: 'dm', title: 'Alice, Bob', participants: ['user:alice', 'user:bob'], lastSeq: 1, lastReadSeq: 1, lastMessage: lastMessage('dm-1', 1, 10, 'Lunch?', 'alice') }),
-  conversation('bot-chat', { kind: 'bot_dm', title: 'Fixture Bot', participants: ['user:alice', ownerBot.key], botKey: ownerBot.key, lastSeq: 2, lastReadSeq: 2,
-    lastMessage: { id: 'b-2', seq: 2, at: ago(90), preview: 'Done: the summary is ready', author: { kind: 'bot', uid: 'owner', botKey: ownerBot.key } } }),
+  conversation('bot-chat', { kind: 'bot_dm', title: 'Fixture Bot', participants: ['user:alice', sharedBotIdentity], lastSeq: 2, lastReadSeq: 2,
+    lastMessage: { id: 'b-2', seq: 2, at: ago(90), preview: 'Done: the summary is ready', author: { kind: 'shared_bot', sharedBotId: ownerBot.sharedBotId, displayName: ownerBot.name } } }),
 ]);
 const many = params.get('many') === '1';
 fake.conversations.set('team-bbbb', [conversation('chan-b', { title: 'announcements', lastSeq: many ? 250 : 4, lastReadSeq: 1, lastMessage: lastMessage('m-b', many ? 250 : 4, 700, 'Welcome to Beta', 'bob') })]);
@@ -40,7 +42,7 @@ fake.threads.set('chan-general', [
   message(3, { text: 'Notes are in the doc', createdAt: ago(60) }),
   message(4, { text: 'Thanks, reading them now', author: { kind: 'user', uid: 'alice' }, createdAt: ago(41) }),
   message(5, { text: 'Anytime', replyTo: 'message-4', createdAt: ago(40) }),
-  message(6, { text: 'Summary: three items are open and one is blocked.', author: { kind: 'bot', uid: 'owner', botKey: ownerBot.key }, createdAt: ago(25) }),
+  message(6, { text: 'Summary: three items are open and one is blocked.', author: { kind: 'shared_bot', sharedBotId: ownerBot.sharedBotId, displayName: ownerBot.name }, createdAt: ago(25) }),
   message(7, { text: 'Ship it', createdAt: ago(20) }),
 ]);
 
@@ -69,7 +71,6 @@ fake.execute = async command => { calls.push(['execute', command]); return baseE
 
 const desktopTeams = {
   localBots: async () => [],
-  bindLocalBot: async () => ({ botKey: ownerBot.key, revision: 1 }),
   list: async () => fake.api.list(),
   detail: async (_uid: string, teamId: string) => fake.api.detail(teamId),
   execute: async (_uid: string, command: any) => fake.api.execute(command),
@@ -87,13 +88,13 @@ const chat = (uuid: string, title: string, minutesAgo: number) => ({
 const bots = [
   { botId: 'alpha', name: 'Alpha', description: 'Writes things down', createdAt: now - 900 * MINUTE, updatedAt: now, revision: 1, workspaces: [], lastActivityAt: now - 30 * MINUTE },
   { botId: 'beta', name: 'Beta', description: 'Reviews changes', createdAt: now - 800 * MINUTE, updatedAt: now, revision: 1, workspaces: [], lastActivityAt: now - 3 * MINUTE },
-  // The Bot the team's card is of, under the same id: it has to look the same here as in the Teams views.
-  { botId: ownerBot.botId, name: ownerBot.name, description: ownerBot.description, createdAt: now - 700 * MINUTE, updatedAt: now, revision: 1, workspaces: [], lastActivityAt: now - 10 * MINUTE },
+  // A personal Bot keeps its local identity after being published as a SharedBot.
+  { botId: ownerBot.instanceId, name: ownerBot.name, description: ownerBot.description, createdAt: now - 700 * MINUTE, updatedAt: now, revision: 1, workspaces: [], lastActivityAt: now - 10 * MINUTE },
 ];
 const chats: Record<string, ReturnType<typeof chat>[]> = {
   alpha: [chat('a-1', 'Plan the launch', 30), chat('a-2', 'Weekly notes', 60), chat('a-3', 'Draft the post', 90)],
   beta: [chat('b-1', 'Review the diff', 3)],
-  [ownerBot.botId]: [chat('f-1', 'Summarize the backlog', 10)],
+  [ownerBot.instanceId]: [chat('f-1', 'Summarize the backlog', 10)],
 };
 
 // ---- The window ----

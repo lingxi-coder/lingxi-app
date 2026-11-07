@@ -446,7 +446,7 @@ export function SessionRow({ projectPath, session, active, pinned, opening, stat
   );
 }
 
-export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, teamsUnread = 0, sidebarMode = 'home', localAppProjects = [], onSelectSidebarMode, modePanel, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, teamsUnread = 0, sidebarMode = 'home', localAppProjects = [], onSelectSidebarMode, modePanel, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar, pageSidebarRef }: {
   bridge: UseBridge;
   activityView?: boolean;
   onToggleActivityView?(): void;
@@ -472,8 +472,10 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   onOpenChat?(): void;
   children?: ReactNode;
   topbar?: ReactNode;
+  pageSidebarRef?(element: HTMLDivElement | null): void;
 }) {
   const t = useT();
+  const homePage = sidebarMode === 'home' && !apps && !scheduled && !changes;
   const asideRef = useRef<HTMLElement>(null);
   const railRef = useRef<HTMLElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -930,29 +932,29 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         <div className="desktop-sidebar-brand">
           <button type="button" className="desktop-rail-button desktop-rail-toggle" aria-label={sidebarCollapsed ? tr('desktop_show_sidebar') : tr('desktop_hide_sidebar')} aria-controls="desktop-session-sidebar" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? tr('desktop_show_sidebar') : tr('desktop_hide_sidebar')} onClick={() => setSidebarCollapsed(!sidebarCollapsed)}><DesktopIcon name="sidebar" size={19} /></button>
           <strong style={{ color: t.text, fontSize: 17, fontWeight: 650, letterSpacing: '-.035em', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>LingXi</strong>
-          <button type="button" className="sidebar-header-icon" aria-label={activityView ? tr('desktop_chat_activity_off') : tr('desktop_chat_activity_on')} title={`${tr(activityView ? 'desktop_chat_activity_off' : 'desktop_chat_activity_on')} (⌥⌘U)`} aria-pressed={activityView} onClick={onToggleActivityView ?? (() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); })} style={{ color: activityView ? t.accent : t.text3, background: activityView ? t.accentBg : undefined }}><DesktopIcon name="bell" size={18} /></button>
-          <button type="button" className="sidebar-header-icon" aria-label={tr('desktop_search_chats')} title={tr('desktop_search_chats')} aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><DesktopIcon name="search" size={18} /></button>
+          {homePage && <><button type="button" className="sidebar-header-icon" aria-label={activityView ? tr('desktop_chat_activity_off') : tr('desktop_chat_activity_on')} title={`${tr(activityView ? 'desktop_chat_activity_off' : 'desktop_chat_activity_on')} (⌥⌘U)`} aria-pressed={activityView} onClick={onToggleActivityView ?? (() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); })} style={{ color: activityView ? t.accent : t.text3, background: activityView ? t.accentBg : undefined }}><DesktopIcon name="bell" size={18} /></button>
+          <button type="button" className="sidebar-header-icon" aria-label={tr('desktop_search_chats')} title={tr('desktop_search_chats')} aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><DesktopIcon name="search" size={18} /></button></>}
         </div>
-        <div className="no-drag" data-conversation-space role="tablist" aria-label={tr('desktop_chat_conversation_mode')} style={{ display: 'flex', gap: 2, padding: '4px 8px' }}>
+        {homePage && <div className="no-drag" data-conversation-space role="tablist" aria-label={tr('desktop_chat_conversation_mode')} style={{ display: 'flex', gap: 2, padding: '4px 8px' }}>
           {(['chat', 'code'] as const).map((mode) => <button key={mode} type="button" role="tab" aria-selected={currentSpace === mode}
             onClick={() => { onOpenChat?.(); void bridge.switchConversationSpace(mode); }}
             style={{ border: 0, borderRadius: 7, padding: '6px 11px', background: currentSpace === mode ? t.surfaceActive : 'transparent', color: currentSpace === mode ? t.text : t.text3, cursor: 'pointer' }}>
             {mode === 'chat' ? 'Chat' : 'Code'}
           </button>)}
-        </div>
+        </div>}
         {topbar}
       </div>
       <div className="desktop-body">
       <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
-        <button type="button" className="desktop-rail-button" data-active={sidebarMode === 'home' || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={() => selectMode('home')}><DesktopIcon name="home" size={20} /></button>
-        {botsAvailable && <button type="button" className="desktop-rail-button" data-active={sidebarMode === 'bots' || undefined} aria-label={tr('bots_title')} title={tr('bots_title')} onClick={() => selectMode('bots')}><Icon name="bot" size={21} stroke={1.7} /></button>}
-        <button type="button" className="desktop-rail-button desktop-rail-teams" data-active={sidebarMode === 'teams' || undefined} aria-label={teamsRailLabel} title={teamsRailLabel} onClick={() => selectMode('teams')}>
+        <button type="button" className="desktop-rail-button" data-active={!scheduled && !changes && sidebarMode === 'home' || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={() => selectMode('home')}><DesktopIcon name="home" size={20} /></button>
+        {botsAvailable && <button type="button" className="desktop-rail-button" data-active={!scheduled && !changes && sidebarMode === 'bots' || undefined} aria-label={tr('bots_title')} title={tr('bots_title')} onClick={() => selectMode('bots')}><Icon name="bot" size={21} stroke={1.7} /></button>}
+        <button type="button" className="desktop-rail-button desktop-rail-teams" data-active={!scheduled && !changes && sidebarMode === 'teams' || undefined} aria-label={teamsRailLabel} title={teamsRailLabel} onClick={() => selectMode('teams')}>
           <Icon name="users" size={21} stroke={1.7} />
           {teamsBadge && <span className="desktop-rail-count" data-kind="unread" aria-hidden="true">{teamsBadge}</span>}
         </button>
-        <button type="button" className="desktop-rail-button" data-active={sidebarMode === 'apps' || (!onSelectSidebarMode && apps) || undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={() => onSelectSidebarMode ? selectMode('apps') : onOpenApps?.()}><DesktopIcon name="apps" size={20}/></button>
+        <button type="button" className="desktop-rail-button" data-active={!scheduled && !changes && (sidebarMode === 'apps' || (!onSelectSidebarMode && apps)) || undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={() => onSelectSidebarMode ? selectMode('apps') : onOpenApps?.()}><DesktopIcon name="apps" size={20}/></button>
         <span className="desktop-rail-divider" aria-hidden="true" />
-        <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label={tr('desktop_chat_scheduled_tasks')} title={tr('desktop_chat_scheduled_tasks')} onClick={onOpenScheduled}><DesktopIcon name="clock" size={20} /></button>
+        <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-current={scheduled ? 'page' : undefined} aria-label={tr('desktop_chat_scheduled_tasks')} title={tr('desktop_chat_scheduled_tasks')} onClick={onOpenScheduled}><DesktopIcon name="clock" size={20} /></button>
         <GitChangesButton active={changes} />
         <button type="button" className="desktop-rail-button desktop-rail-settings" aria-label={tr('settings_title_main')} title={tr('settings_title_main')} onClick={onOpenSettings}><DesktopIcon name="cog" size={20} /></button>
         <DesktopUpdateReminder />
@@ -968,6 +970,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       data-resizing={resizingSidebar || undefined}
       style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', '--desktop-accent': t.accent } as CSSProperties}
     >
+      {scheduled ? <div ref={pageSidebarRef} className="desktop-page-sidebar" /> : <>
       {searchOpen && <div className="sidebar-search"><DesktopIcon name="search" size={15} /><input ref={searchInputRef} type="search" aria-label={tr('desktop_search_chats_projects')} placeholder={tr('desktop_search_chats_projects')} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label={tr('desktop_close_search')} onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
 
       {sidebarMode === 'home' && <div style={{ padding: '16px 12px 14px' }}>
@@ -1315,6 +1318,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         }}
       </DragOverlay>
       </DragDropProvider>
+      </>}
 
       <div
         className="sidebar-resize-handle no-drag"

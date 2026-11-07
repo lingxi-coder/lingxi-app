@@ -1,3 +1,5 @@
+import { CH_DECISION } from '../shared/decision.js';
+import type { DecisionHost } from './decision.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import { CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, type ProviderAccountCommand } from '../shared/providerAccounts.js';
 import type { DesktopProviderAccounts } from './provider-accounts.js';
@@ -630,6 +632,8 @@ export class HostController {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
   }
 
+  private decision?: DecisionHost;
+  attachDecision(service: DecisionHost): void { this.decision = service; }
   private providerAccounts?: DesktopProviderAccounts;
   attachProviderAccounts(service: DesktopProviderAccounts): void { this.providerAccounts = service; }
   attachLocalAppAuthoring(capture: (appId: string, ref: SessionRef, version: number) => Promise<CapturedLocalAppAuthoring>): void {
@@ -808,6 +812,7 @@ export class HostController {
       this.terminalDeliveries.delete(webContents);
     };
     const detachAudio = () => {
+      this.decision?.cancelOwner(webContents.id);
       const lease = this.audioFlowLeases.get(webContents);
       this.audioFlowLeases.delete(webContents);
       if (lease) this.detachedAudioLeases.add(lease);
@@ -845,6 +850,13 @@ export class HostController {
     if (this.registered) return;
     this.registered = true;
     this.bridge.registerIpc();
+    this.ipc.handle(CH_DECISION, async (event: IpcMainInvokeEvent, command: unknown) => {
+      this.assertSender(event);
+      if (!this.decision) throw new Error('Decision service is unavailable');
+      const result = await this.decision.command(event.sender.id, command, () => this.assertSender(event));
+      this.assertSender(event);
+      return result;
+    });
     this.ipc.handle(CH_COMPUTER_SETTINGS, async (event: IpcMainInvokeEvent, command: unknown) => {
       this.assertSender(event);
       if (!this.computerSettings) throw new Error('Computer settings are unavailable');
@@ -3326,6 +3338,7 @@ export class HostController {
     for (const channel of this.botsChannels) this.ipc.removeHandler(channel);
     this.botsChannels = [];
     this.botsUi = undefined;
+    this.decision?.dispose();
     this.providerAccounts?.cancel();
     this.offTerminals?.();
     this.offGit?.();
@@ -3334,7 +3347,7 @@ export class HostController {
     this.terminalDeliveries.clear();
     if (!this.registered) return;
     for (const channel of [
-      CH_APPLICATION_ICON, CH_IMAGE_SAVE,
+      CH_DECISION, CH_APPLICATION_ICON, CH_IMAGE_SAVE,
       CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_FOLDER_PICK, CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL,

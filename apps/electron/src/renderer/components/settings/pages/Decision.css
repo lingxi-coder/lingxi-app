@@ -1,0 +1,9 @@
+.decision-settings { font-size: 13px; line-height: 1.5; }
+.decision-settings h1 { margin: 0 0 8px; font-size: 24px; line-height: 1.25; }
+.decision-settings label { display: grid; gap: 6px; }
+.decision-settings label:has(> input[type="checkbox"]) { display: flex; align-items: center; gap: 8px; }
+.decision-settings input[type="checkbox"] { margin: 0; width: 14px; height: 14px; accent-color: var(--decision-accent); }
+.decision-settings input[type="file"] { min-width: 0; width: 100%; font: inherit; color: inherit; }
+.decision-settings input[type="file"]::file-selector-button { margin-right: 8px; padding: 6px 10px; border: 1px solid var(--decision-border); border-radius: 6px; background: var(--decision-surface); color: var(--decision-text); font: inherit; cursor: pointer; }
+.decision-settings legend { padding: 0 5px; font-weight: 500; }
+.decision-settings pre { max-height: 400px; overflow: auto; }

@@ -77,11 +77,13 @@ try {
   assert.equal(await run(`Boolean(document.querySelector('.beta-rich-prompt'))`), true);
   result.chatOpens = true;
 
-  // Apps owns a separate workspace; the existing Bot chat remains in its tree.
+  // Apps owns a separate workspace with its own sidebar; the existing Bot chat remains in the Bots tree.
   await click(rail('Apps'));
+  await wait(`document.querySelector('${rail('Apps')}[data-active]')`);
   await wait(`document.querySelector('.local-apps-sidebar')`);
   assert.deepEqual(await marked(), ['Apps']);
   assert.equal(await shown(sidebar), false);
+  assert.equal(await shown('.local-apps-sidebar'), true);
   await click(rail('Bots'));
   await wait(`document.querySelector('${sidebar} [data-session-id="a-2"]')`);
   assert.equal(await shown('.bots-page'), true);
@@ -90,11 +92,13 @@ try {
   assert.equal((await calls()).some(call => call[0] === 'openSession' && !call[2]), false, 'workspace switches do not create a Bot chat');
   result.appsWorkspace = true;
 
-  // Utility pages preserve the selected workspace and its sidebar.
+  // Cron replaces the sidebar with its task list.
   await click(rail('Scheduled tasks'));
-  await wait(`document.querySelector('${rail('Scheduled tasks')}[data-active]')`);
-  assert.deepEqual(await marked(), ['Bots', 'Scheduled tasks']);
-  assert.equal(await shown(sidebar), true);
+  await wait(`document.querySelector('.desktop-sidebar .scheduled-master')`);
+  assert.deepEqual(await marked(), ['Scheduled tasks']);
+  assert.equal(await shown(sidebar), false);
+  assert.equal(await run(`Boolean(document.querySelector('.desktop-main .scheduled-master'))`), false);
+  assert.equal(await run(`Boolean(document.querySelector('[data-conversation-space], .desktop-sidebar-brand .sidebar-header-icon'))`), false);
   result.pageKeepsMode = true;
 
   // The View menu: Home, Bots (which stays on a Bot's chat), the Bot's own page from the chat's title, and the sidebar's visibility.

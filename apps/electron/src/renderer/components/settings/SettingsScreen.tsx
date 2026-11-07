@@ -22,6 +22,7 @@ function bindSettingsPage(exportName: string, load: () => Promise<unknown>) {
   })));
 }
 const settingsPageLoaders = {
+  Decision: () => import('./pages/Decision'),
   About: () => import('./pages/About'),
   Account: () => import('./pages/Account'),
   Appearance: () => import('./pages/Appearance'),
@@ -50,6 +51,7 @@ const eagerSettingsPages: Partial<Record<keyof typeof settingsPageLoaders, Compo
       return [exportName, module[exportName]!];
     })))
   : {};
+const Decision = eagerSettingsPages.Decision ?? bindSettingsPage('Decision', settingsPageLoaders.Decision);
 const About = eagerSettingsPages.About ?? bindSettingsPage('About', settingsPageLoaders.About);
 const Account = eagerSettingsPages.Account ?? bindSettingsPage('Account', settingsPageLoaders.Account);
 const Appearance = eagerSettingsPages.Appearance ?? bindSettingsPage('Appearance', settingsPageLoaders.Appearance);
@@ -217,6 +219,7 @@ export function parseSettingsSnapshot(
 // typo'd key with no type error, and the only visible symptom would be the
 // `not-wired` placeholder quietly standing in for a page that should exist.
 export const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {
+  decision: Decision,
   general: General,
   account: Account,
   appearance: Appearance,

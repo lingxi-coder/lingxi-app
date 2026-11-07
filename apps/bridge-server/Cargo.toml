@@ -29,6 +29,8 @@ name = "bridge_server"
 path = "src/lib.rs"
 
 [dependencies]
+decision-api.workspace = true
+decision-runtime.workspace = true
 audio-provider = { path = "../audio-provider" }
 media-api.workspace = true
 media-runtime.workspace = true

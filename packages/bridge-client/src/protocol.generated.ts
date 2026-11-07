@@ -2,7 +2,7 @@
 // Do not edit. Run scripts/checks/generate-client-protocol.py after updating the pin.
 // Nested DTOs and semantic validation remain in protocol.ts and validation.ts.
 
-// Custom Serde fingerprints (review changes): command=42b97d850372f8cd event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=096d34a3148b3e7c event_source=e616c543d0d535a1
+// Custom Serde fingerprints (review changes): command=42b97d850372f8cd event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=2868b31e72b66b77 event_source=b4c892514985eeff
 
 import type {
   AgentDto,
@@ -145,6 +145,8 @@ export type ClientCommand =
   | { type: 'update_workspace_directories'; destination: WritableScopeDto; add: Array<string>; remove: Array<string> }
   | { type: 'upsert_mcp_server'; scope: WritableScopeDto; name: string; config_json: string }
   | { type: 'remove_mcp_server'; scope: WritableScopeDto; name: string }
+  | { type: 'decision_configuration_changed'; configured: boolean }
+  | { type: 'decision_response'; request_id: string; result_json: string }
   | { type: 'audio_response'; identity: AudioOperationIdDto; result: AudioOperationResultDto }
   | { type: 'attach_turn'; turn_id: number; after_sequence?: number | null }
   | { type: 'resume_turn'; turn_id: number }
@@ -247,6 +249,8 @@ export type ClientEvent =
   | { type: 'workflow_resumed'; previous_task_id: string; task: TaskRowDto; run_id: string; origin_session_id?: string }
   | { type: 'conversation_controls_changed'; controls: ConversationControlsDto }
   | { type: 'fast_mode_changed'; enabled: boolean }
+  | { type: 'decision_request'; request_id: string; input_json: string; timeout_ms: number }
+  | { type: 'decision_cancel'; request_id: string }
   | { type: 'audio_request'; request: AudioOperationRequestDto }
   | { type: 'turn_recovery_state'; snapshot: TurnRecoverySnapshotDto }
   | { type: 'turn_event_replay'; session_id: string; turn_id: number; sequence: number; event_json: string }
@@ -551,6 +555,14 @@ const CLIENT_EVENT_FIELDS: Record<ClientEvent['type'], readonly BasicField[]> = 
   ],
   fast_mode_changed: [
     ['enabled', 'boolean', false, false, false],
+  ],
+  decision_request: [
+    ['request_id', 'string', false, false, false],
+    ['input_json', 'string', false, false, false],
+    ['timeout_ms', 'unsigned', false, false, false],
+  ],
+  decision_cancel: [
+    ['request_id', 'string', false, false, false],
   ],
   audio_request: [
     ['request', 'opaque', false, false, false],
@@ -888,6 +900,8 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   update_workspace_directories: true,
   upsert_mcp_server: true,
   remove_mcp_server: true,
+  decision_configuration_changed: true,
+  decision_response: true,
   audio_response: true,
   attach_turn: true,
   resume_turn: true,
@@ -990,6 +1004,8 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   workflow_resumed: true,
   conversation_controls_changed: true,
   fast_mode_changed: true,
+  decision_request: true,
+  decision_cancel: true,
   audio_request: true,
   turn_recovery_state: true,
   turn_event_replay: true,

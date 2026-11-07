@@ -75,3 +75,6 @@ pub mod session_metadata;
 mod workspace_commands;
 pub use configuration_admin::settings_bridge;
 pub use configuration_admin::skills_admin;
+
+pub mod decision_bridge;
+pub mod decision_service;

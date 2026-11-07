@@ -174,6 +174,7 @@ export interface VisualizationApi {
 }
 
 export interface LingxiApi {
+  decision: import('../../shared/decision').DecisionApi;
   computerSettings: import('../../shared/computerSettings').ComputerSettingsApi;
   saveImage(request: import('../../shared/imageSave').ImageSaveRequest): Promise<boolean>;
   applicationIcon: import('../../shared/applicationIcon').ApplicationIconApi;

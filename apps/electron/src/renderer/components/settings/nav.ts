@@ -33,6 +33,7 @@ export const SETTINGS_NAV: NavPage[] = [
 
   // Account credentials are managed by the current Host independently of a session.
   { id: 'provider-credentials', label: '提供方与账号', group: '模型与服务', icon: 'key', needsEngine: false, layered: false, searchKeys: ['provider', 'credential', '凭据', 'API Key', 'keychain', 'defaultProtocols', '默认格式', '请求格式'], implemented: true },
+  { id: 'decision', label: 'Decision', group: '模型与服务', icon: 'sliders', needsEngine: false, layered: false, searchKeys: ['decision', '决策', 'Jev', 'System One', '自建服务'], implemented: true },
   // 组↔layered 的例外 1/3：不在 编码 组，但是 layered。settings.providers /
   // settings.routing 是活在四层设置文件里的普通设置键，写入前必须选定目标层——
   // 与它挂在哪个导航分组下无关。

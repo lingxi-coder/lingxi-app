@@ -1384,24 +1384,16 @@ async function assertColdSessionOpen(page, sessionId) {
 }
 
 async function openPackagedProjectDraft(page, projectPath) {
-  // App source projects are deliberately hidden from Home. Keep this check of
-  // ordinary Code draft isolation on the same public new-session IPC as Home.
-  // Apps' explicit bound-session flow is covered separately by its UI fixtures.
+  // App source projects belong to the first-level Apps workspace and are
+  // hidden from Home. Exercise Home's ordinary New chat action to prove its
+  // Global draft is isolated from authoring.
   const active = await evaluate(page, 'window.lingxi.bootstrap().then(state => state.activeSession)');
   assert.equal(active?.projectPath, projectPath);
-  const opened = await evaluate(page, `window.lingxi.newSession(${JSON.stringify(projectPath)})`);
-  assert.equal(opened.activeSession?.projectPath, projectPath);
-  assert.notEqual(opened.activeSession?.sessionId, active.sessionId);
-  // This direct native IPC returns a new bootstrap to its caller. Reopen the
-  // renderer to consume that bootstrap through its ordinary startup path.
-  const before = (await page.send('Page.getFrameTree')).frameTree.frame;
-  await page.send('Page.reload', { ignoreCache: true });
-  await waitFor(async () => {
-    const frame = (await page.send('Page.getFrameTree')).frameTree.frame;
-    return frame.url === before.url && frame.loaderId !== before.loaderId;
-  }, { label: 'ordinary Code draft renderer reload' });
-  await waitFor(() => evaluate(page, `document.readyState === 'complete' && Boolean(document.querySelector('.desktop-nav-rail button[aria-label="Home"]')) && !document.querySelector('.desktop-nav-rail button[aria-label="Home"]').disabled && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'ordinary Code draft renderer admission' });
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.desktop-nav-rail button[aria-label="Home"]')) && !document.querySelector('.desktop-nav-rail button[aria-label="Home"]').disabled && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'Home navigation admission before ordinary New chat' });
   await evaluate(page, `document.querySelector('.desktop-nav-rail button[aria-label="Home"]').click()`);
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.sidebar-new-chat:not(:disabled)'))`), { label: 'ordinary Home New chat action' });
+  await evaluate(page, `document.querySelector('.sidebar-new-chat').click()`);
+  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectId === null && state.activeSession?.sessionId !== ${JSON.stringify(active.sessionId)})`), { label: 'ordinary Global chat draft opened from Home' });
 }
 
 async function showPackagedAppLibrary(page) {
@@ -1497,7 +1489,7 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
   await openPackagedProjectDraft(page, sourceSession.projectPath);
   const otherSession = await waitFor(async () => {
     const current = await evaluate(page, 'window.lingxi.bootstrap()');
-    return current.activeSession?.projectPath === sourceSession.projectPath
+    return current.activeSession?.projectId === null
       && current.activeSession?.sessionId !== sessionId && current.activeSession?.sessionId;
   }, { label: 'second chat for LocalApp modification' });
   assert.notEqual(otherSession, sessionId, 'the pre-Modify chat must differ from the saved authoring session');
@@ -1571,9 +1563,9 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
     await evaluate(page, 'window.__packagedModifyObserver?.disconnect(); window.__packagedModifyOff?.(); window.__packagedModifyOff = undefined');
   }
   await assertPackagedAppDraftWithoutReload(page, probe, created, sessionId);
-  // Open the current Code project draft and verify its composer is isolated.
+  // Open an ordinary Global Code draft and verify its composer is isolated from Apps.
   await openPackagedProjectDraft(page, sourceSession.projectPath);
-  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId !== '${sessionId}' && !document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && !document.querySelector('.local-app-chat-card'))`), { label: 'new unrelated source-project chat has its own transcript and draft' });
+  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectId === null && state.activeSession?.sessionId !== '${sessionId}' && !document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && !document.querySelector('.local-app-chat-card'))`), { label: 'ordinary Global chat has its own transcript and draft' });
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('[aria-label="Prompt"][contenteditable="true"]')) && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'unrelated chat renderer admission before returning to Apps' });
   await showPackagedAppLibrary(page);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'return to application library' });

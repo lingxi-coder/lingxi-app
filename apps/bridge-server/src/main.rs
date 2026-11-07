@@ -84,6 +84,9 @@ async fn async_main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("browser descriptor path is required"))?;
         return bridge_server::browser_native_host::run(std::path::Path::new(&path)).await;
     }
+    if std::env::args().nth(1).as_deref() == Some("--decision-service-json") {
+        return bridge_server::decision_service::run().await;
+    }
     if std::env::args().nth(1).as_deref() == Some("--audio-service-json") {
         return bridge_server::audio_provider::run().await;
     }

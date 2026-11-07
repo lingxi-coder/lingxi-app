@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { UseBridge } from '../bridge/bridgeTypes.js';
 import {
@@ -27,7 +28,14 @@ const SUGGESTIONS = [
 type ScopedJob = { job: ScheduledCronJob; scopeId: string };
 type Initial = { title: string; description: string; draft?: ScheduledTaskDraft; preset?: Pick<ScheduledTaskDraft, 'frequency' | 'day' | 'time'>; scopeId?: string };
 const taskKey = (item: ScopedJob) => `${item.scopeId}:${item.job.id}`;
-export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget }: { bridge: UseBridge; visible: boolean; onOpenChat?(): void; initialTarget?: ScheduledLinkRequest }) {
+export function ScheduledTasksTopBar() {
+  const t = useT();
+  return <header className="drag-region desktop-topbar scheduled-topbar" style={{ '--toolbar-material': t.sidebarBg } as CSSProperties}>
+    <span className="scheduled-topbar-title">{tr('settings_title_cron')}</span>
+  </header>;
+}
+
+export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget, sidebarTarget }: { sidebarTarget?: HTMLElement | null; bridge: UseBridge; visible: boolean; onOpenChat?(): void; initialTarget?: ScheduledLinkRequest }) {
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const [jobs, setJobs] = useState<ScopedJob[]>([]);
@@ -215,8 +223,7 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget }: {
     .map((session) => ({ id: session.uuid, title: session.title || `${tr('drawer_tab_chat')} ${session.uuid.slice(0, 8)}`, scopeId })));
   const suggestions = SUGGESTIONS.map(item => ({ ...item, title: tr(`desktop_scheduled_${item.key}_title`), description: tr(`desktop_scheduled_${item.key}_description`), preset: { frequency: item.frequency, day: item.day, time: item.time } }));
   const editing = Boolean(selected || initial);
-  return <section className={`scheduled-tasks${editing ? ' scheduled-has-detail' : ''}`} style={variables} aria-label={tr('settings_title_cron')}>
-    <div className="scheduled-master">
+  const master = (<div className="scheduled-master">
       <header className="scheduled-tasks-toolbar"><h1>{tr('settings_title_cron')}</h1><div className="scheduled-toolbar-actions">
         <button type="button" className="scheduled-icon-button" aria-label={tr('desktop_scheduled_filter_aria')} aria-expanded={filterOpen} onClick={() => setFilterOpen(value => !value)}><Icon name="sliders" size={17} /></button>
         <button type="button" className="scheduled-icon-button" aria-label={tr('cron_search_tasks')} aria-expanded={searchOpen} onClick={() => setSearchOpen(value => !value)}><Icon name="search" size={18} /></button>
@@ -258,7 +265,9 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget }: {
         })}
         {!loading && filtered.length === 0 && <p className="scheduled-empty">{query || filter !== 'all' ? tr('desktop_scheduled_no_matches') : tr('cron_no_tasks_yet')}</p>}
       </div>
-    </div>
+    </div>);
+  return <section className={`scheduled-tasks${editing ? ' scheduled-has-detail' : ''}`} style={variables} aria-label={tr('settings_title_cron')}>
+    {sidebarTarget ? visible && createPortal(<div className="scheduled-tasks scheduled-navigation" style={variables}>{master}</div>, sidebarTarget) : master}
     {!editing && <div className="scheduled-welcome"><div className="scheduled-welcome-icon"><span aria-hidden="true">🕘</span></div><h2>{tr('desktop_scheduled_welcome_title')}</h2><p>{tr('desktop_scheduled_welcome_description')}</p><div className="scheduled-suggestions">{suggestions.map(suggestion => <button className="scheduled-suggestion" type="button" key={suggestion.title} disabled={busy} onClick={() => choose(() => open(null, suggestion))}><span className="scheduled-suggestion-emoji" aria-hidden="true">{suggestion.emoji}</span><span className="scheduled-suggestion-copy"><span>{suggestion.title}</span><span className="scheduled-suggestion-description">{suggestion.description}</span></span></button>)}</div></div>}
     {editing && <aside className={`scheduled-detail${editorOpen ? ' scheduled-detail-editing' : ''}`}>
       {!editorOpen && selected && <ScheduledOverview

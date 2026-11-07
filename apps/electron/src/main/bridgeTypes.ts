@@ -130,6 +130,8 @@ export interface BridgeManagerOptions {
   diagnostics?: DiagnosticBuffer;
   /** Main-process device service. Engine audio is dispatched here directly. */
   audioService?: DesktopAudioService;
+  /** Main-process global Decision service; never supplied by a renderer. */
+  decisionService?: import('./decisionToolBridge.js').DesktopDecisionService;
   /** Bare persisted AudioConfigurationV4 JSON snapshot for the shared media router. */
   getMediaAudioConfigurationJson?: () => string;
   /** Internal process-inspection seam used to recover detached Desktop runtimes after a main-process restart. */

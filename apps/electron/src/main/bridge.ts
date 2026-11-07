@@ -823,8 +823,9 @@ export class SessionRuntime {
   /** Drafts have no transcript to resume, so retain their confirmed profile across process starts. */
   private draftSessionMode?: RuntimeSessionMode;
   private draftModeRestorationRequired: boolean;
+  private freshOwnedReplay?: { client: BridgeClient; generation: number };
   constructor(private readonly opts: BridgeManagerOptions, sessionMode?: RuntimeSessionMode,
-    private readonly durableDraftTitle?: string) {
+    private readonly durableDraftTitle?: string, private readonly freshOwnedSession = false) {
     this.sessionMode = sessionMode ?? opts.expectedSessionMode;
     this.draftSessionMode = sessionMode;
     this.draftModeRestorationRequired = sessionMode !== undefined;
@@ -2132,6 +2133,7 @@ export class SessionRuntime {
       if (this.disposed) throw new Error('SessionRuntime is disposed');
       const connectStartedAt = Date.now();
       await this.connectBridgeClient(lockfilePath, generation, true, publishConnected);
+      if (this.freshOwnedSession) this.freshOwnedReplay = { client: this.requireClient(), generation };
       established = true;
       this.startupDiagnostic('bridge_start_completed', {
         connectDurationMs: Date.now() - connectStartedAt,
@@ -3845,7 +3847,20 @@ export class SessionRuntime {
     if (!this.draftModeRestorationRequired || this.draftSessionMode === undefined) return;
     // Boot creates or restores the owner under the transcript writer lease.
     // The confirmation only reads it; a conversation never changes mode.
+    const client = this.requireClient(), generation = this.generation, mode = this.draftSessionMode;
     await this.requestDraftModeSnapshot();
+    if (client !== this.client || generation !== this.generation || mode !== this.draftSessionMode || this.disposed) {
+      throw new Error('Draft mode restoration was interrupted.');
+    }
+    // A boot-owned new UUID has no native NewSession event. Publish its verified
+    // empty base before prompt admission; reconnects and saved sources cannot
+    // manufacture this baseline or replace an existing transcript.
+    if (this.freshOwnedReplay?.client === client && this.freshOwnedReplay.generation === generation
+      && this.state.status === 'connected' && this.replayEvents.length === 0 && this.promptJournal.length === 0
+      && !this.sessionHasHistory && !this.sessionIdentityCommitted && !this.ownedSessionResumeRequired && !this.ownedTranscriptPath) {
+      this.broadcastClientEvent({ type: 'session_started', session_id: this.sessionId, mode });
+      this.freshOwnedReplay = undefined;
+    }
     this.draftModeRestorationRequired = false;
   }
 

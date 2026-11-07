@@ -227,6 +227,7 @@ test('App page, settings, local app and picker navigation use the latest loading
     useCallback: (fn: unknown) => fn, localAppBridge: { current: { sessionLoading: false } },
     cancelLocalAppNavigation: () => calls.push('cancel-local'), setPage: (page: string) => calls.push(['page', page]),
     setLocalAppNavigationError() {},
+    setSidebarMode: (mode: string) => calls.push(['sidebar', mode]),
     setSettingsRoute: (route: unknown) => calls.push(['settings', route]),
   };
   evaluate('globalThis.sessionNavigationBlocked = ' + initializer(appSource, 'sessionNavigationBlocked'), context);

@@ -242,6 +242,77 @@ test('execute: a result that arrives after an invalidation is not applied', asyn
   assert.equal(await created, false); assert.equal(snapshot().selectedTeamId, 'team-aaaa', 'the new team is not selected on a stale authority');
 });
 
+test('join: fresh same-account membership reconciles a success invalidated during dispatch', async context => {
+  const target = team('team-joined', { generation: 7 });
+  const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
+  await until(() => !!snapshot().detail, 'initial detail');
+  fake.execute = async () => { fake.invalidate(); return { teamId: target.id, generation: 7, alreadyMember: false }; };
+  fake.details.set(target.id, { team: target, members: [{ uid, displayName: 'Alice', role: 'member', generation: 7 }], invites: [] });
+  fake.teams.push(target);
+  assert.equal(await workspace.execute({ action: 'join', code: 'A'.repeat(32), requestId: 'join-race' }), true);
+  assert.equal(snapshot().selectedTeamId, target.id); assert.equal(snapshot().detail?.team.generation, 7);
+  assert.equal(snapshot().busy, false); assert.equal(snapshot().error, '');
+});
+
+test('join: invalidated success confirms verified self/detail while the remaining team list stays loading', async context => {
+  const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
+  await until(() => !!snapshot().detail, 'initial detail');
+  fake.execute = async () => { fake.invalidate(); return { teamId: 'team-aaaa', generation: 1, alreadyMember: true }; };
+  fake.list = () => new Promise(() => {});
+  assert.equal(await workspace.execute({ action: 'join', code: 'A'.repeat(32), requestId: 'join-list-pending' }), true);
+  assert.equal(snapshot().detail?.team.id, 'team-aaaa'); assert.equal(snapshot().busy, false);
+  assert.equal(snapshot().detail?.members.find(member => member.uid === uid)?.generation, 1);
+  assert.equal(snapshot().loading, true, 'the outstanding list has not completed');
+  assert.deepEqual(snapshot().teams.map(value => value.id), ['team-aaaa'], 'only the verified Team is reconciled');
+});
+
+for (const invalid of ['revoked', 'unavailable', 'account-changed', 'wrong-team', 'missing-self', 'team-generation', 'self-generation'] as const) {
+  test(`join: fresh membership proof rejects ${invalid} after an invalidated success`, async context => {
+    const target = team('team-joined', { generation: 7 });
+    const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
+    await until(() => !!snapshot().detail, 'initial detail');
+    fake.execute = async () => { fake.invalidate(); return { teamId: target.id, generation: 7 }; };
+    const detail = fake.detail;
+    fake.detail = async id => {
+      if (id !== target.id) return detail(id);
+      if (invalid === 'revoked') throw new Error('MEMBERSHIP_REQUIRED');
+      if (invalid === 'unavailable') throw new Error('SERVICE_UNAVAILABLE');
+      if (invalid === 'account-changed') throw new Error('INVALID_SESSION');
+      return { team: { ...target, ...(invalid === 'wrong-team' ? { id: 'team-other' } : {}), ...(invalid === 'team-generation' ? { generation: 8 } : {}) },
+        members: [{ uid: invalid === 'missing-self' ? 'other-account' : uid, displayName: 'Alice', role: 'member', generation: invalid === 'self-generation' ? 8 : 7 }], invites: [] };
+    };
+    assert.equal(await workspace.execute({ action: 'join', code: 'A'.repeat(32), requestId: 'join-rejected' }), false);
+    assert.notEqual(snapshot().selectedTeamId, target.id);
+  });
+}
+
+for (const interruption of ['invalidation', 'close'] as const) {
+  test(`join: ${interruption} while current membership proof is pending rejects the old response`, async context => {
+    const target = team('team-joined', { generation: 7 });
+    const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
+    await until(() => !!snapshot().detail, 'initial detail');
+    fake.execute = async () => { fake.invalidate(); return { teamId: target.id, generation: 7 }; };
+    let release: ((detail: Awaited<ReturnType<typeof fake.detail>>) => void) | undefined;
+    const detail = fake.detail;
+    fake.detail = id => id === target.id ? new Promise(resolve => { release = resolve; }) : detail(id);
+    const pending = workspace.execute({ action: 'join', code: 'A'.repeat(32), requestId: 'join-interrupted' });
+    await until(() => !!release, 'membership proof pending');
+    if (interruption === 'close') workspace.close(); else fake.invalidate();
+    release!({ team: target, members: [{ uid, displayName: 'Alice', role: 'member', generation: 7 }], invites: [] });
+    assert.equal(await pending, false); assert.notEqual(snapshot().selectedTeamId, target.id);
+  });
+}
+
+for (const generation of [undefined, 0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+  test(`join: a success without a valid returned membership generation (${generation}) is rejected`, async context => {
+    const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
+    await until(() => !!snapshot().detail, 'initial detail');
+    fake.execute = async () => ({ teamId: 'team-joined', generation });
+    assert.equal(await workspace.execute({ action: 'join', code: 'A'.repeat(32), requestId: 'join-no-generation' }), false);
+    assert.equal(snapshot().error, 'STALE_MEMBERSHIP'); assert.notEqual(snapshot().selectedTeamId, 'team-joined');
+  });
+}
+
 test('execute: leaving or deleting drops the selection at once, even after an invalidation, and opens the next team', async context => {
   let release!: (value: object) => void;
   const { fake, workspace, snapshot } = workspaceFixture(value => { value.execute = () => new Promise(resolve => { release = resolve; }); });

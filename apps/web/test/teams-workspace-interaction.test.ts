@@ -219,7 +219,7 @@ scenario('sidebar: arrow keys move between rows; the + buttons open dialogs that
 });
 
 scenario('sidebar: an invitation link opens the join dialog without joining; a bad code cannot be confirmed', async context => {
-  const { fake, workspace } = await open(context);
+  const { fake, workspace, snapshot } = await open(context);
   let handled = 0;
   const code = 'B'.repeat(32);
   const page = await mount(workspace, snapshot => createElement(TeamSidebar, { workspace, snapshot, zh: false, initialInvite: code, onInviteHandled: () => { handled++; } } as never)); context.after(() => page.unmount());
@@ -228,10 +228,16 @@ scenario('sidebar: an invitation link opens the join dialog without joining; a b
   const field = page.find(node => node.type === 'input')[0]; assert.equal(field.props.value, code);
   await page.type(field, 'not an invite'); assert.equal(page.button('Confirm and join').props.disabled, true);
   await page.type(field, `https://lingxios.net/open/team/join?code=${code}`); assert.equal(page.button('Confirm and join').props.disabled, false);
+  fake.execute = async command => { fake.teamCommands.push(command); fake.invalidate(); return { teamId: 'team-aaaa', generation: 1, alreadyMember: true }; };
+  fake.list = () => new Promise(() => {});
   await page.submit();
   await until(() => fake.teamCommands.length === 1, 'the join');
   assert.equal(fake.teamCommands[0]!.action, 'join'); assert.equal((fake.teamCommands[0] as { code: string }).code, code);
   await until(() => page.find(node => node.type === 'dialog').length === 0, 'the dialog to close');
+  assert.equal(snapshot().detail?.members.find(member => member.uid === uid)?.generation, 1);
+  assert.equal(snapshot().detail?.team.id, 'team-aaaa');
+  assert.equal(snapshot().loading, true);
+  assert.match(page.text(), /Loading teams/);
 });
 
 // ── Drawer ──

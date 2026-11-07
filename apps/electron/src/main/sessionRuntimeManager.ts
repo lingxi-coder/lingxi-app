@@ -385,13 +385,13 @@ export class SessionRuntimeManager {
   }
 
   /** Create, validate, and optionally start one session-owned runtime. */
-  async ensure(ref: SessionRef, start = true, resumeModel?: string, remountControls?: string, sessionMode?: RuntimeSessionMode, durableDraftTitle?: string): Promise<SessionRuntime> {
+  async ensure(ref: SessionRef, start = true, resumeModel?: string, remountControls?: string, sessionMode?: RuntimeSessionMode, durableDraftTitle?: string, freshOwnedSession = false): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const eviction = this.evictingSessions.get(ref.sessionId);
     if (eviction) {
       await eviction;
-      return this.ensure(ref, start, resumeModel, remountControls, sessionMode, durableDraftTitle);
+      return this.ensure(ref, start, resumeModel, remountControls, sessionMode, durableDraftTitle, freshOwnedSession);
     }
     const existing = this.runtimes.get(ref.sessionId);
     if (existing) {
@@ -407,7 +407,7 @@ export class SessionRuntimeManager {
     const runtimeOptions = this.runtimeOptions(ref);
     const draft = this.findDraft(ref);
     const draftMode = draft?.sessionId === ref.sessionId ? draft.mode : sessionMode;
-    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls }, draftMode, durableDraftTitle);
+    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls }, draftMode, durableDraftTitle, freshOwnedSession);
     this.runtimes.set(ref.sessionId, runtime);
     this.touch(ref.sessionId);
     for (const listener of [...this.runtimeCreatedListeners]) this.announceRuntime(listener, runtime);
@@ -697,7 +697,7 @@ export class SessionRuntimeManager {
     this.draftSessions.set(key, { ...ref, projectId, mode });
     try {
       await onAllocated?.(ref);
-      const runtime = await this.ensure(ref, true, model, undefined, mode, durableDraftTitle);
+      const runtime = await this.ensure(ref, true, model, undefined, mode, durableDraftTitle, true);
       if (!shouldActivate || shouldActivate()) this.activate(runtime);
     } catch (error) {
       this.clearDraftSession(ref);

@@ -1358,8 +1358,9 @@ async function assertColdSessionOpen(page, sessionId) {
   // Home explicitly before checking the ordinary Code transcript on reload.
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.desktop-nav-rail button[aria-label="Home"]')) && !document.querySelector('.desktop-nav-rail button[aria-label="Home"]').disabled && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'cold-open renderer session admission before Home navigation' });
   await evaluate(page, `document.querySelector('.desktop-nav-rail button[aria-label="Home"]').click()`);
+  // useSidebarMode treats an absent sidebar preference as Home.
   try {
-    await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.settings.sidebar?.mode === 'home')`), { label: 'cold-open Home workspace persisted' });
+    await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => (state.settings.sidebar?.mode ?? 'home') === 'home' && document.querySelector('.desktop-nav-rail button[aria-label="Home"]')?.getAttribute('data-active') === 'true')`), { label: 'cold-open Home workspace persisted' });
   } catch (error) {
     log(`cold-open Home navigation state: ${JSON.stringify(await evaluate(page, `(async () => ({ body: document.body?.innerText, home: document.querySelector('.desktop-nav-rail button[aria-label="Home"]')?.outerHTML, rail: document.querySelector('.desktop-nav-rail')?.outerHTML, bootstrap: await window.lingxi.bootstrap() }))()`))}`);
     throw error;
@@ -1439,6 +1440,8 @@ async function assertPackagedAppDraftWithoutReload(page, probe, created, session
     await evaluate(page, `document.querySelector('.desktop-nav-rail button[aria-label="Apps"]').click()`);
     await waitFor(() => evaluate(page, `(() => {
       const group = Array.from(document.querySelectorAll('.local-apps-sidebar-group')).find(group => group.querySelector('.local-apps-sidebar-name')?.textContent === ${JSON.stringify(created.name)});
+      const disclosure = group?.querySelector('.local-apps-sidebar-disclosure');
+      if (disclosure?.getAttribute('aria-expanded') === 'false') { disclosure.click(); return false; }
       const matches = Array.from(group?.querySelectorAll('.local-apps-sidebar-chats button') ?? []).filter(button => button.title === ${JSON.stringify(title)});
       if (matches.length !== 1 || matches[0].disabled) return false; matches[0].click(); return true;
     })()`), { label: 'return through original Apps chat without Modify' });
@@ -1514,12 +1517,59 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
     throw error;
   }
   await evaluate(page, `(() => {
+    window.__packagedModifyEvents = []; window.__packagedModifyAlerts = []; window.__packagedModifyDomClicks = 0;
+    window.__packagedModifyOff = window.lingxi.onLocalAppEdit(event => window.__packagedModifyEvents.push(event));
+    const collect = () => { for (const node of document.querySelectorAll('[role="alert"], .local-app-error, .error-banner')) {
+      const text = node.innerText?.trim();
+      if (text && window.__packagedModifyAlerts.length < 20 && !window.__packagedModifyAlerts.includes(text)) window.__packagedModifyAlerts.push(text);
+    } };
+    collect(); window.__packagedModifyObserver = new MutationObserver(collect);
+    window.__packagedModifyObserver.observe(document.body, { subtree: true, childList: true, characterData: true });
+  })()`);
+  try {
+    await waitFor(() => evaluate(page, `(() => {
+      const code = Array.from(document.querySelectorAll('[data-conversation-space] button[role="tab"]')).find(button => button.textContent.trim() === 'Code');
+      const library = document.querySelector('.local-app-library');
+      const tile = Array.from(library?.querySelectorAll('.local-app-tile') ?? []).find(tile => tile.querySelector('h2')?.textContent === ${JSON.stringify(created.name)});
+      const modify = Array.from(tile?.querySelectorAll('button') ?? []).find(button => button.textContent.trim() === 'Modify');
+      const visible = node => Boolean(node && node.getClientRects().length && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0);
+      return code?.getAttribute('aria-selected') === 'true' && document.querySelector('.local-apps-library-link')?.getAttribute('aria-current') === 'page'
+        && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'
+        && visible(library) && visible(tile) && visible(modify) && !modify.disabled;
+    })()`), { label: 'visible Apps library and Modify action admitted in Code mode' });
+    await evaluate(page, `(() => {
     const tile = Array.from(document.querySelectorAll('.local-app-tile')).find(tile => tile.querySelector('h2')?.textContent === ${JSON.stringify(created.name)});
     const modify = Array.from(tile?.querySelectorAll('button') ?? []).find(button => button.textContent.trim() === 'Modify');
     if (!modify || modify.disabled) throw new Error('The published app must expose an enabled Modify action');
+    window.__packagedModifyClickState = { code: Array.from(document.querySelectorAll('[data-conversation-space] button[role="tab"]')).find(button => button.getAttribute('aria-selected') === 'true')?.textContent, libraryCurrent: document.querySelector('.local-apps-library-link')?.getAttribute('aria-current'), visible: modify.getClientRects().length > 0, railDisabled: document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') };
+    modify.addEventListener('click', () => window.__packagedModifyDomClicks++, { capture: true, once: true });
     modify.click();
   })()`);
-  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId === '${sessionId}' && document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && Boolean(document.querySelector('.local-app-chat-card')))`), { label: 'Modify restores the dedicated authoring Code session, transcript and app draft' });
+    await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId === '${sessionId}' && document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && Boolean(document.querySelector('.local-app-chat-card')))`), { label: 'Modify restores the dedicated authoring Code session, transcript and app draft' });
+  } catch (error) {
+    const state = await evaluate(page, `(async () => {
+      const bootstrap = await window.lingxi.bootstrap();
+      return { activeSession: bootstrap.activeSession, activeMode: bootstrap.conversationSpaces?.activeMode,
+        connection: bootstrap.connection, sidebar: bootstrap.settings.sidebar,
+        prompt: document.querySelector('[aria-label="Prompt"]')?.innerText,
+        cards: Array.from(document.querySelectorAll('.local-app-chat-card')).map(node => node.innerText),
+        promptEditable: document.querySelector('[aria-label="Prompt"]')?.isContentEditable,
+        railDisabled: document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled'),
+        alerts: Array.from(document.querySelectorAll('[role="alert"], .local-app-error, .error-banner')).map(node => node.innerText),
+        editEvents: window.__packagedModifyEvents, clickState: window.__packagedModifyClickState,
+        domClicks: window.__packagedModifyDomClicks, observedAlerts: window.__packagedModifyAlerts,
+        body: document.body.innerText };
+    })()`);
+    const evidence = process.env.LINGXI_LOCAL_APP_EVIDENCE;
+    if (evidence) {
+      mkdirSync(evidence, { recursive: true });
+      writeFileSync(join(evidence, 'packaged-modify-failure.json'), JSON.stringify({ expected: { sessionId, projectPath: sourceSession.projectPath, appId: created.id, authoring: created.authoring }, actual: state }, null, 2), { mode: 0o600 });
+    }
+    log(`packaged Modify failure: active session matches=${state.activeSession?.sessionId === sessionId}, project matches=${state.activeSession?.projectPath === sourceSession.projectPath}, draft matches=${Boolean(state.prompt?.includes(created.id))}, card count=${state.cards.length}`);
+    throw error;
+  } finally {
+    await evaluate(page, 'window.__packagedModifyObserver?.disconnect(); window.__packagedModifyOff?.(); window.__packagedModifyOff = undefined');
+  }
   await assertPackagedAppDraftWithoutReload(page, probe, created, sessionId);
   // Open the current Code project draft and verify its composer is isolated.
   await openPackagedProjectDraft(page, sourceSession.projectPath);

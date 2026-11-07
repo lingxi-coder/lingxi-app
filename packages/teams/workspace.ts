@@ -356,10 +356,26 @@ export class TeamsWorkspace {
     try {
       const result = await this.api.execute(command);
       if (this.closed) return false;
+      if (command.action === 'join') {
+        if (!result.teamId || typeof result.generation !== 'number' || !Number.isSafeInteger(result.generation) || result.generation <= 0) throw new Error('STALE_MEMBERSHIP');
+        const proofAuthority = this.authority;
+        // Account-scoped HTTP detail verifies current membership, independently of cached invalidations during join.
+        const current = await this.api.detail(result.teamId);
+        if (this.closed || proofAuthority !== this.authority) return false;
+        const self = current.members.find(member => member.uid === this.uid);
+        if (current.team.id !== result.teamId || current.team.generation !== result.generation || self?.generation !== result.generation) throw new Error('STALE_MEMBERSHIP');
+        this.selection = result.teamId; this.detail = current;
+        this.teams = [...this.teams.filter(team => team.id !== result.teamId), current.team];
+        this.directories.set(result.teamId, current.members);
+        this.syncSelection();
+        // The proof resolves confirmation; remaining refresh errors belong to the workspace load state.
+        void this.refresh().catch(() => {});
+        return true;
+      }
       if (command.action === 'delete' || command.action === 'leave') { this.dropSelection(); this.closeMessaging(); }
       if (authorized !== this.authority) { await this.refresh(); return false; }
       if (result.code) this.link = inviteLink(result.code);
-      if (result.teamId && (command.action === 'create' || command.action === 'join')) { this.selection = result.teamId; this.detail = null; }
+      if (result.teamId && command.action === 'create') { this.selection = result.teamId; this.detail = null; }
       await this.refresh();
       return true;
     } catch (error) {

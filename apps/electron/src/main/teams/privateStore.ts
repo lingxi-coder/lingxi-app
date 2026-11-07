@@ -13,7 +13,7 @@ export interface TeamPersonaSnapshot extends TeamModelRoute { instructions: stri
 export interface SharedBotBinding { schemaVersion: 1; ownerUid: string; teamId: string; generation: number; sharedBotId: string; deploymentId: string; instanceId: string; revision: number; snapshot: string; accountEpoch: number; publicationId: string; grantIds: string[]; sessionEpoch: number }
 export interface TeamDataRef { path: string; sha256: string; bytes: number }
 export interface SavedPublication { schemaVersion: 1; requestDigest: string; binding: SharedBotBinding; payload: Record<string, unknown> }
-export interface SavedExecution { schemaVersion: 1; scope: BotChatScope; teamId: string; generation: number; taskId: string; commandId: string; payload: Record<string, unknown> }
+export interface SavedExecution { schemaVersion: 1; scope: BotChatScope; teamId: string; generation: number; taskId: string; deadlineAt: number; commandId: string; payload: Record<string, unknown> }
 export interface SavedDelivery { schemaVersion: 1; teamId: string; generation: number; taskId: string; commandId: string; payload: Record<string, unknown> }
 
 export interface TeamModelSelection { route: TeamModelRoute; profiles: Record<string, unknown>[]; assertCurrent(): Promise<void> }

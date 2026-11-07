@@ -1012,6 +1012,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
             return { ...accounts, providerAccountCredentials: Object.fromEntries(Object.entries(accounts.providerAccountCredentials).filter(([id]) => ids.has(id))) };
           },
           renewModelAccount: renewProviderAccount,
+          diagnostics: (event, details) => diagnostics.add('warn', 'host', diagnosticEvent(event, details)),
           chooseFiles: async () => {
             const parent = [...mainWindows].find(window => !window.isDestroyed());
             const options = { title: 'Choose files to share with Team members', properties: ['openFile', 'multiSelections'] as Array<'openFile' | 'multiSelections'>,

@@ -17,7 +17,7 @@ export interface LocalTeamHost {
   localBots(uid: string): Promise<LocalPublishableBot[]>;
   selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]>;
   publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }>;
-  invalidate(): void;
+  revoke(): void;
   stopBinding(teamId: string, sharedBotId: string): void;
   close(): void;
 }
@@ -60,7 +60,7 @@ export class TeamsService {
     for (const [leaseId, lease] of this.messageLeases) this.events.emit('snapshot', { leaseId, snapshot: {
       uid: lease.uid, teamId: lease.teamId, generation: lease.generation, kind: 'error', fromCache: true, error: 'INVALID_SESSION',
     } });
-    this.host?.invalidate();
+    this.host?.revoke();
     for (const stop of this.stops.values()) stop();
     this.stops.clear();
     this.failed.clear(); this.messageLeases.clear();
@@ -191,7 +191,6 @@ export class TeamsService {
     } else if (!['create', 'read', 'mutate'].includes(command.action)) throw new Error('INVALID_INPUT');
     await this.connect(expectedUid);
     const result = await this.checked<T>(expectedUid, '/messages', command);
-    if (command.action === 'pauseSharedBot') this.host?.invalidate();
     if (['create','mutate','createConversation','submit','pauseSharedBot','setConversationPolicy'].includes(command.action)) this.events.emit('messages');
     return result;
   }

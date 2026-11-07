@@ -4,12 +4,12 @@ import { open, lstat } from 'node:fs/promises';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { providerAccountEnvelope, type ProviderAccountLaunch } from '../provider-accounts.js';
 import type { LocalPublishableBot, PublishLocalBotInput, SelectedSharedFile, SharedBotCard, TeamTaskView } from '../../../../../packages/teams/execution.js';
-import type { TeamSummary } from '../../../../../packages/teams/index.js';
+import { TeamsApiError, type TeamSummary } from '../../../../../packages/teams/index.js';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source.js';
 import type { BotStore } from '../bots/store.js';
 import { validateBotManifest } from '../bots/package.js';
 import { TeamPrivateStore, digest, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution } from './privateStore.js';
-import { runTeamHost, type TeamHostProcessOptions, type TeamHostResult, type BotChatScope } from './process.js';
+import { runTeamHost, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type BotChatScope } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
 
 export interface TeamHostApi {
@@ -33,6 +33,8 @@ export interface TeamConnectorOptions {
   validateModel?(context: TeamAccountContext, snapshot: TeamPersonaSnapshot, selection: TeamModelSelection): Promise<void>;
   platform?: NodeJS.Platform; run?: (options: TeamHostProcessOptions) => Promise<TeamHostResult>;
   retryMs?: number; now?: () => number; maxConcurrent?: number;
+  /** Event name plus ids and codes only; never user text, credentials or model output. */
+  diagnostics?: (event: string, details: Record<string, unknown>) => void;
 }
 interface Selected { context: TeamAccountContext; instanceId: string; expires: number; document: PublishedDocument }
 interface HostTask extends TeamTaskView { messageId: string; messageSeq: number }
@@ -42,6 +44,14 @@ const scopeKey = (b: SharedBotBinding) => JSON.stringify([b.teamId, b.sharedBotI
 const serialKey = (b: SharedBotBinding, task: HostTask) => JSON.stringify([b.teamId, b.sharedBotId, task.conversationId]);
 const activation = (b: SharedBotBinding, c: TeamAccountContext) => JSON.stringify([c.epoch,b.deploymentId,b.accountEpoch]);
 const newId = () => randomBytes(16).toString('base64url');
+const errorCode = (error: unknown) => error instanceof TeamHostFailure || error instanceof TeamsApiError ? error.code
+  : error instanceof Error && /^[A-Z][A-Z0-9_]{2,59}$/u.test(error.message) ? error.message : 'ERROR';
+/** The server or the account answered no; anything else (network, 5xx, timeout) may succeed on the next try. */
+const definitive = (error: unknown) => error instanceof TeamsApiError ? error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429
+  : error instanceof Error && error.message === 'INVALID_SESSION';
+/** Server answers after which a saved result can never be accepted; retrying would loop forever. */
+const terminalDelivery = (error: unknown) => error instanceof TeamsApiError && ['TASK_REVOKED','TASK_EXPIRED','TASK_REQUIRED','TASK_RESULT_CONFLICT','EXECUTION_PERMIT_REQUIRED'].includes(error.code);
+const noCursor = { scope: null, sessionRevision: 0, lastMessageSeq: 0, lastChangeSeq: 0, bootstrapFromSeq: 0 };
 /** Source reads, selected account credentials and backend permits stay in trusted main. */
 export class TeamConnector implements LocalTeamHost {
   private closed = false; private pending = false; private refresh?: Promise<void>; private timer?: ReturnType<typeof setTimeout>;
@@ -51,9 +61,11 @@ export class TeamConnector implements LocalTeamHost {
   private readonly deferred = new Map<string, number>(); private readonly scheduled = new Map<string, number>(); private readonly stops: Array<() => void>;
   private revision = 0; private probes = 0;
   constructor(private readonly options: TeamConnectorOptions) {
-    this.stops = [options.service.onChanged(event => { if (event.invalidated) this.invalidate(); else this.wake(); }), options.service.onMessagesChanged(() => this.wake())]; this.wake();
+    this.stops = [options.service.onChanged(() => this.wake()), options.service.onMessagesChanged(() => this.wake())]; this.wake();
   }
   private now() { return (this.options.now ?? Date.now)(); }
+  private log(event: string, details: Record<string, unknown>) { try { this.options.diagnostics?.(event, details); } catch { /* Diagnostics never interrupt a task. */ } }
+  private abort(a: { taskId: string; controller: AbortController }, reason: string) { this.log('team_task_aborted', { taskId: a.taskId, reason }); a.controller.abort(reason); }
   private available() { if ((this.options.platform ?? process.platform) !== 'darwin') throw new Error('TEAM_HOST_MACOS_REQUIRED'); }
   private context(uid: string) { const c = this.options.service.hostContext(); if (!c || c.uid !== uid || this.closed) throw new Error('INVALID_SESSION'); return c; }
   private assert(c: TeamAccountContext) { if (this.closed) throw new Error('INVALID_SESSION'); this.options.service.assertHostContext(c); }
@@ -192,9 +204,10 @@ export class TeamConnector implements LocalTeamHost {
       assert(); if (result.status !== 'completed' || !result.text?.trim()) throw new Error('TEAM_MODEL_UNAVAILABLE'); await authorize();
     } finally { await this.options.privateStore.releaseDataRef(c.uid,reference); }
   }
-  stopBinding(teamId: string, sharedBotId: string) { for (const [key, a] of this.active) { const scope = JSON.parse(key) as string[]; if (scope[0] === teamId && scope[1] === sharedBotId) a.controller.abort(); } this.heartbeats.delete(JSON.stringify([teamId,sharedBotId])); }
-  localChanged() { this.invalidate(); }
-  invalidate() { this.revision++; for (const a of this.active.values()) a.controller.abort(); this.selections.clear(); this.deferred.clear(); this.activated.clear(); this.heartbeats.clear(); this.wake(); }
+  stopBinding(teamId: string, sharedBotId: string) { for (const [key, a] of this.active) { const scope = JSON.parse(key) as string[]; if (scope[0] === teamId && scope[1] === sharedBotId) this.abort(a,'BINDING_STOPPED'); } this.heartbeats.delete(JSON.stringify([teamId,sharedBotId])); }
+  localChanged() { this.revoke(); }
+  /** Account reset, sign-out, Team revocation or a local Bot change: running tasks lose their authority. A cache or listener flicker never comes here. */
+  revoke() { this.revision++; for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.activated.clear(); this.heartbeats.clear(); this.wake(); }
   private wake() {
     if (this.closed || (this.options.platform ?? process.platform) !== 'darwin') return; this.pending = true; if (this.refresh) return;
     this.refresh = (async () => { while (this.pending && !this.closed) { this.pending = false; try { await this.discover(); } catch { /* Retry discovery; a failed authorization never starts work. */ } } })()
@@ -245,10 +258,11 @@ export class TeamConnector implements LocalTeamHost {
           if (!id(response.nextCursor) || pages.has(response.nextCursor)) throw new Error('INVALID_TASK_PAGE');
           pages.add(response.nextCursor); after=response.nextCursor;
         } while (after);
-      } catch { this.stopBinding(b.teamId,b.sharedBotId); }
+      } catch (error) { if (definitive(error)) this.stopBinding(b.teamId,b.sharedBotId); }
     }
+    const delivering = new Set((await this.options.privateStore.deliveries(c.uid)).map(d => d.taskId)); assert();
     for (const intent of await this.options.privateStore.executions(c.uid)) {
-      assert(); if ([...this.active.values()].some(active => active.taskId === intent.taskId)) continue;
+      assert(); if (delivering.has(intent.taskId) || [...this.active.values()].some(active => active.taskId === intent.taskId)) continue;
       let result = await this.options.privateStore.savedResult(c.uid,intent.taskId); assert();
       if (!result) {
         try { const paths = await this.options.privateStore.owner(c.uid), bins = this.options.binaries();
@@ -257,20 +271,24 @@ export class TeamConnector implements LocalTeamHost {
           assert(); if (recovered.status === 'completed' || recovered.status === 'failed') result=recovered;
         } catch { assert(); }
       }
+      // No result and no process left past the deadline: end the task instead of inspecting it forever.
+      if (!result && !(this.now() < intent.deadlineAt)) { this.log('team_task_recovered_failed', { taskId: intent.taskId }); result = this.failedResult(intent); }
       if (result) await this.saveResult(c,intent,result);
     }
     for (const delivery of await this.options.privateStore.deliveries(c.uid)) {
       assert(); const b = (await this.options.privateStore.bindings(c.uid)).find(b => b.teamId === delivery.teamId && b.deploymentId === delivery.payload.deploymentId); if (!b) continue;
       const payload = { ...delivery.payload, accountEpoch: b.accountEpoch };
       const commandId = delivery.payload.accountEpoch === b.accountEpoch ? delivery.commandId : digest(JSON.stringify([delivery.commandId,b.accountEpoch]));
-      try { await this.command(c,delivery,'completeTask',payload,commandId); assert(); await this.options.privateStore.delivered(c.uid,delivery.taskId); } catch { /* Persist exact result for delivery, never run its model again. */ }
+      try { await this.command(c,delivery,'completeTask',payload,commandId); assert(); await this.options.privateStore.delivered(c.uid,delivery.taskId); }
+      catch (error) { // Keep the exact result for another try, never run its model again, unless the server will never accept it.
+        if (terminalDelivery(error)) { this.log('team_task_delivery_rejected', { taskId: delivery.taskId, code: errorCode(error) }); await this.options.privateStore.delivered(c.uid,delivery.taskId).catch(() => undefined); } }
     }
     candidates.sort((a,b) => (this.scheduled.get(serialKey(a.binding,a.task)) ?? 0) - (this.scheduled.get(serialKey(b.binding,b.task)) ?? 0) || a.task.messageSeq - b.task.messageSeq);
     for (const candidate of candidates) {
       assert(); if (this.active.size+this.probes >= Math.min(4,this.options.maxConcurrent ?? 4)) break;
       const key = serialKey(candidate.binding,candidate.task); if (this.active.has(key)) continue;
       const controller = new AbortController(); this.scheduled.set(key,this.now());
-      const promise = this.execute(c,candidate.binding,candidate.task,candidate.snapshot,controller.signal).catch(() => { this.deferred.set(candidate.task.taskId,this.now()+(this.options.retryMs??5000)); }).finally(() => { this.active.delete(key); this.wake(); });
+      const promise = this.execute(c,candidate.binding,candidate.task,candidate.snapshot,controller.signal).catch(error => { this.log('team_task_deferred', { taskId: candidate.task.taskId, code: errorCode(error) }); this.deferred.set(candidate.task.taskId,this.now()+(this.options.retryMs??5000)); }).finally(() => { this.active.delete(key); this.wake(); });
       this.active.set(key,{taskId:candidate.task.taskId,controller,promise});
     }
   }
@@ -302,12 +320,13 @@ export class TeamConnector implements LocalTeamHost {
     this.deferred.delete(task.taskId);
     const permitId = started.permitId;
     const intent: SavedExecution = { schemaVersion:1, scope, teamId:b.teamId,generation:b.generation,taskId:task.taskId,
-      commandId:digest(JSON.stringify([task.taskId,'delivery'])),payload:{...fields,permitId,inputGrantIds:b.grantIds} };
+      commandId:digest(JSON.stringify([task.taskId,'delivery'])),deadlineAt:started.task.deadline,payload:{...fields,permitId,inputGrantIds:b.grantIds} };
     await this.options.privateStore.saveExecution(c.uid,intent); assert();
     const authorize = async () => { assert(); await this.command(c,b,'validateTask',{...fields,permitId,expectedLastChangeSeq:source.lastChangeSeq}); assert(); };
-    interval = setInterval(() => { void authorize().catch(() => execution.abort()); },2000); interval.unref();
+    interval = setInterval(() => { void authorize().catch(error => { if (definitive(error)) execution.abort(errorCode(error)); }); },2000); interval.unref();
       const {credential_id:_credential,provider_account_profiles:_profiles,instructions,documents,...model} = snapshot;
-      const result = await run({executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,authorize,
+      let result: TeamHostResult | undefined, failure: unknown;
+      try { result = await run({executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,authorize,
         bootstrap:{version:3,type:'run',storageRoot:paths.runtime,workerExecutable:bins.worker,scope,taskId:task.taskId,invocationId:randomUUID(),instructions,
           inputBatchRef:reference,knowledge:documents.filter(d=>d.kind==='file').map(d=>({id:d.resourceId,title:d.name,text:d.text})),deadlineAt:started.task.deadline,
           model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),limits:{max_turns:20,context_window_tokens:2000000,output_tokens_per_request:4096,physical_dispatches:32}},
@@ -320,15 +339,25 @@ export class TeamConnector implements LocalTeamHost {
           const request: ChatReadRequest = {...sourceScope,...(query.kind==='before' ? {mode:'before' as const,beforeSeq:query.before_seq,limit:query.limit} : query.kind==='range' ? {mode:'range' as const,fromSeqExclusive:query.from_seq_exclusive,toSeqInclusive:query.to_seq_inclusive} : {mode:'byId' as const,messageId:query.message_id})};
           const result = await this.options.service.hostReadChat(c,request); assert(); if (result.messages.some(message=>message.seq>prepared.messageSeq)) throw new Error('HISTORY_BOUND_EXCEEDED');
           await authorize(); const ref = await this.options.privateStore.dataRef(c.uid,{messages:result.messages,complete:query.kind !== 'before' || !result.hasMore,nextBeforeSeq:query.kind === 'before' && result.hasMore ? result.messages[0]?.seq ?? null : null}); references.push(ref); return ref; },
-      }); assert();
+      }); } catch (error) { failure = error; }
+      // The permit is spent: whatever stopped the worker, the task ends with a result and the model never runs again for it.
+      if (!result) {
+        const code = signal.aborted && typeof signal.reason === 'string' ? signal.reason : errorCode(failure);
+        this.log('team_task_failed', { taskId: task.taskId, code, aborted: signal.aborted });
+        result = await this.options.privateStore.savedResult(c.uid,task.taskId).catch(() => undefined) ?? this.failedResult(intent);
+        await this.saveResult(c,intent,result); return; // Delivered by discovery once the account and fence are current again.
+      }
       const delivery = await this.saveResult(c,intent,result); assert();
       await this.command(c,b,'completeTask',delivery.payload,delivery.commandId); assert(); await this.options.privateStore.delivered(c.uid,task.taskId);
     } finally { clearInterval(interval); await Promise.all(references.map(ref=>this.options.privateStore.releaseDataRef(c.uid,ref))); }
+  }
+  private failedResult(intent: SavedExecution): TeamHostResult {
+    return { status: 'failed', cursor: noCursor, finishedAt: Number.isSafeInteger(intent.deadlineAt) ? Math.min(this.now(), intent.deadlineAt) : this.now() };
   }
   private async saveResult(c: TeamAccountContext, intent: SavedExecution, result: TeamHostResult) {
     const payload = {...intent.payload,outcome:result.status==='completed'?'completed':'failed',text:result.text || 'The assistant could not complete this request.',finishedAt:result.finishedAt,
       outputAudience:{mode:'published_inputs'},usage:result.usage ?? {status:'missing'},...(result.document ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
     const delivery = {...intent,payload}; await this.options.privateStore.saveDelivery(c.uid,delivery); return delivery;
   }
-  close() { this.closed=true; clearTimeout(this.timer); for(const stop of this.stops)stop(); for(const a of this.active.values())a.controller.abort(); this.selections.clear(); }
+  close() { this.closed=true; clearTimeout(this.timer); for(const stop of this.stops)stop(); for(const a of this.active.values())this.abort(a,'CLOSED'); this.selections.clear(); }
 }

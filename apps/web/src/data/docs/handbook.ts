@@ -452,7 +452,7 @@ export const extraProductPages: DocPage[] = [
         { label: t('Download page', '下载页'), href: '/download' },
       ] },
       { id: 'guest-paths', title: t('Paths the command can see', '命令看得到的路径'), paragraphs: [
-        t('The default Linux profile uses /home/lingxi as its home. Its config directory is /home/lingxi/.lingxi, and its projects directory is /home/lingxi/.lingxi/projects. A command’s working directory is one of these guest paths. A folder path from the phone’s own file browser is a different coordinate, and it is not automatically the path the command sees.', '默认的 Linux 配置把 /home/lingxi 当作主目录。它的配置目录是 /home/lingxi/.lingxi，项目目录是 /home/lingxi/.lingxi/projects。命令的工作目录是这些 guest 路径之一。手机自己的文件浏览器里的文件夹路径是另一套坐标，不会自动变成命令看到的路径。'),
+        t('The default Linux profile uses /home/lingxi as its home. Its config directory is /home/lingxi/.lingxi, and its projects directory is /home/lingxi/.lingxi-workspaces/projects. A command’s working directory is one of these guest paths. A folder path from the phone’s own file browser is a different coordinate, and it is not automatically the path the command sees.', '默认的 Linux 配置把 /home/lingxi 当作主目录。它的配置目录是 /home/lingxi/.lingxi，项目目录是 /home/lingxi/.lingxi-workspaces/projects。命令的工作目录是这些 guest 路径之一。手机自己的文件浏览器里的文件夹路径是另一套坐标，不会自动变成命令看到的路径。'),
         t('Embedding that environment in another app, choosing mounts, and passing host paths to the runtime are covered by the Mobile Linux SDK.', '把这个环境嵌进另一个应用、选择挂载，以及把宿主路径传给运行时，见 Mobile Linux SDK。'),
       ], links: [{ label: t('Guest paths in the SDK', 'SDK 里的 guest 路径'), href: '/docs/mobile-linux#guest-identity' }] },
     ],

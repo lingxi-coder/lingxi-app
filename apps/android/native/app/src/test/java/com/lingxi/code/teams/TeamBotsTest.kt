@@ -58,4 +58,20 @@ class TeamBotsTest {
         assertEquals(setOf(card.sharedBotId), staleTeamBotSelections(listOf(card.sharedBotId), listOf(card), listOf(card.sharedBotId)))
         assertFalse(card.canPause("owner", 2))
     }
+
+    private fun groupBot(permitted: Boolean = true) = TeamBotCard.parse(JSONObject("""{"sharedBotId":"sharedbot_01","name":"Helper","description":"","maintainer":{"uid":"owner","generation":1},"revision":1,"state":"published","permitted":$permitted,"ready":true,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":100,"member":10,"bot":50}}"""))
+    private fun groupConversation(participants: List<String>, sharedBotIds: List<String>) =
+        TeamMessageConversation("chat_0001", "group", "Group", participants, 0, 0, 0, sharedBotIds)
+
+    @Test fun composerAcceptsAPublishedBotThatIsAGroupParticipant() {
+        val conversation = groupConversation(listOf("user:alice", "shared_bot:sharedbot_01"), listOf("sharedbot_01"))
+        assertEquals(emptySet<String>(), composerStaleTargets(setOf("sharedbot_01"), listOf(groupBot()), conversation))
+    }
+
+    @Test fun composerFlagsABotThatIsNotPermittedOrNotAParticipant() {
+        val member = groupConversation(listOf("user:alice", "shared_bot:sharedbot_01"), listOf("sharedbot_01"))
+        assertEquals(setOf("sharedbot_01"), composerStaleTargets(setOf("sharedbot_01"), listOf(groupBot(permitted = false)), member))
+        val other = groupConversation(listOf("user:alice"), emptyList())
+        assertEquals(setOf("sharedbot_01"), composerStaleTargets(setOf("sharedbot_01"), listOf(groupBot()), other))
+    }
 }

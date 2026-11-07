@@ -28,6 +28,9 @@ internal data class TeamArtifact(val artifactId: String, val revision: Long, val
 }
 internal fun staleTeamBotSelections(selected: Collection<String>, bots: List<TeamBotCard>, participants: Collection<String>? = null): Set<String> =
     selected.filterTo(mutableSetOf()) { id -> bots.none { it.sharedBotId == id && it.selectable } || (participants != null && "shared_bot:$id" !in participants) }
+/** Composer rule: a chosen Bot is stale when it is not selectable or not a participant (`shared_bot:<id>`) of the conversation. */
+internal fun composerStaleTargets(targets: Collection<String>, bots: List<TeamBotCard>, conversation: TeamMessageConversation): Set<String> =
+    staleTeamBotSelections(targets, bots, conversation.participants)
 internal fun requireTeamBotSelections(selected: Collection<String>, bots: List<TeamBotCard>, participants: Collection<String>? = null) {
     if (selected.size > 8 || staleTeamBotSelections(selected, bots, participants).isNotEmpty()) throw TeamMessageFailure("BOT_SELECTION_STALE")
 }

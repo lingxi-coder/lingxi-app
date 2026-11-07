@@ -75,7 +75,7 @@ internal fun TeamComposer(
     val askable = conversation.kind == "group" || conversation.kind == "channel"
     val mention = if (askable && editing == null) TeamsComposeLogic.mentionAt(field.text, field.selection.end) else null
     val candidates = if (mention != null && draft.targets.size < TeamsComposeLogic.MAX_TARGETS) TeamsComposeLogic.mentionCandidates(bots, conversation, draft.targets, mention.query) else emptyList()
-    val staleTargets = if (editing == null && askable) staleTeamBotSelections(draft.targets, bots, conversation.sharedBotIds) else emptySet()
+    val staleTargets = if (editing == null && askable) composerStaleTargets(draft.targets, bots, conversation) else emptySet()
     val staleBotDm = conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1
     val tooLong = TeamsComposeLogic.byteLength(field.text) > TeamsComposeLogic.MESSAGE_BYTES
     val canSend = TeamsComposeLogic.canSendText(field.text) && !messaging.submitting && (editing != null || (staleTargets.isEmpty() && !staleBotDm))

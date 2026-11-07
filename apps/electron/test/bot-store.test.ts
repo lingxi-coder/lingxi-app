@@ -71,7 +71,7 @@ test('the memory folder is where the engine keeps the memory of the Bot workspac
 test('list is oldest first, skips a Bot that was never finished, and names a damaged one', (t) => {
   let now = 1000;
   const f = botFixture(t);
-  const store = new BotStore({ userData: f.userData, home: f.home, defaultConfigHome: f.defaultConfigHome, now: () => now, newId: (() => { let n = 100; return () => `Bot${String(++n).padStart(19, '0')}`; })() });
+  const store = new BotStore({ userData: f.userData, home: f.home, defaultConfigHome: f.defaultConfigHome, defaultWorkspaceRoot: f.defaultWorkspaceRoot, now: () => now, newId: (() => { let n = 100; return () => `Bot${String(++n).padStart(19, '0')}`; })() });
   now = 3000; const later = store.create({ name: 'Later' });
   now = 2000; const earlier = store.create({ name: 'Earlier' });
   mkdirSync(join(store.root, 'Bot0000000000000000999', 'home'), { recursive: true });
@@ -150,7 +150,7 @@ test('a failure while a Bot is made leaves nothing of it', (t) => {
 test('an update takes the revision it was based on and a stale one is a conflict', (t) => {
   let now = 5000;
   const f = botFixture(t);
-  const store = new BotStore({ userData: f.userData, home: f.home, defaultConfigHome: f.defaultConfigHome, now: () => now, newId: () => ID });
+  const store = new BotStore({ userData: f.userData, home: f.home, defaultConfigHome: f.defaultConfigHome, defaultWorkspaceRoot: f.defaultWorkspaceRoot, now: () => now, newId: () => ID });
   const bot = store.create({ name: 'Original', description: 'one', model: 'a/b' });
   now = 6000;
   const updated = store.update(bot.bot_id, 1, { name: 'Renamed', description: 'two' });
@@ -294,19 +294,24 @@ test('the app data, the Bots and the configuration home of normal sessions are r
   for (const path of [f.defaultConfigHome, join(f.defaultConfigHome, 'skills')]) {
     assert.throws(() => f.store.workspace(path, 'read'), /configuration folder/, path);
   }
+  for (const path of [f.defaultWorkspaceRoot, join(f.defaultWorkspaceRoot, 'chat')]) {
+    assert.throws(() => f.store.workspace(path, 'write'), /workspace folder/, path);
+  }
   // Through a link, too.
   mkdirSync(join(f.root, 'work'), { recursive: true });
   symlinkSync(f.store.root, join(f.root, 'work', 'to-bots'));
   symlinkSync(f.defaultConfigHome, join(f.root, 'work', 'to-config'));
   assert.throws(() => f.store.workspace(join(f.root, 'work', 'to-bots'), 'read'), /app's own data folder/);
   assert.throws(() => f.store.workspace(join(f.root, 'work', 'to-config'), 'read'), /configuration folder/);
+  symlinkSync(join(f.defaultWorkspaceRoot, 'chat'), join(f.root, 'work', 'to-chat'));
+  assert.throws(() => f.store.workspace(join(f.root, 'work', 'to-chat'), 'read'), /workspace folder/);
 });
 
 test('a configuration home outside the home is protected from both sides', (t) => {
   const f = botFixture(t);
   const configHome = join(f.root, 'elsewhere', 'config');
   mkdirSync(configHome, { recursive: true });
-  const store = new BotStore({ userData: f.userData, home: f.home, defaultConfigHome: configHome });
+  const store = new BotStore({ userData: f.userData, home: f.home, defaultConfigHome: configHome, defaultWorkspaceRoot: f.defaultWorkspaceRoot });
   assert.throws(() => store.workspace(configHome, 'read'), /configuration folder/);
   assert.throws(() => store.workspace(join(f.root, 'elsewhere'), 'read'), /configuration folder/, 'a folder that contains it');
 });

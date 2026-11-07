@@ -68,9 +68,9 @@ export function pathRule(tool: 'Read' | 'Edit', absolutePath: string, directory 
   return `${tool}(${pattern.replace(/[\\()]/g, '\\$&')})`;
 }
 
-/** Every place this Bot must not see: its siblings, the app's other data, the default configuration home. */
+/** Every place this Bot must not see: its siblings, the app's other data, the default configuration home and workspace root. */
 function isolatedPaths(store: BotStore, botId: string): string[] {
-  const { userData, root, defaultConfigHomes, defaultGlobalConfigs } = store.locations;
+  const { userData, root, defaultConfigHomes, defaultWorkspaceRoots, defaultGlobalConfigs } = store.locations;
   const paths = new Set<string>(store.otherEntries(botId));
   // Every entry of the data folder but the Bots folder, whatever put it there:
   // the bridge's lockfiles, the settings, the account, the logs, the trash.
@@ -78,7 +78,7 @@ function isolatedPaths(store: BotStore, botId: string): string[] {
     const path = join(userData, name);
     if (path !== root) paths.add(path);
   }
-  for (const path of [...defaultConfigHomes, ...defaultGlobalConfigs]) paths.add(path);
+  for (const path of [...defaultConfigHomes, ...defaultWorkspaceRoots, ...defaultGlobalConfigs]) paths.add(path);
   return [...paths].sort();
 }
 

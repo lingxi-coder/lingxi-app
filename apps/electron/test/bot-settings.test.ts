@@ -70,7 +70,7 @@ test('a Bot may use its bound folders and its own memory, and is walled off from
   const isolated = [
     f.store.botDir(sibling.bot_id),
     join(f.userData, 'bridge-runtime'), join(f.userData, 'logs'), join(f.userData, 'settings.v1.json'),
-    f.defaultConfigHome, join(f.home, '.lingxi.json'),
+    f.defaultConfigHome, f.defaultWorkspaceRoot, join(f.home, '.lingxi.json'),
   ].sort();
   assert.deepEqual(settings.sandbox.filesystem.denyRead, isolated);
   for (const path of isolated) {

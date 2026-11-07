@@ -7,9 +7,11 @@
  *                            tasks/        the tasks other Bots handed this one, a file each
  *     <userData>/bots-trash/<botId>-<ms>/  a deleted Bot, kept until its owner removes it
  *
- * The root is deliberately outside the default configuration home (`~/.lingxi`):
- * nothing a normal session sees lists, reads or writes a Bot, and nothing a Bot
- * sees is the owner's own configuration.
+ * The root is deliberately outside the default configuration home (`~/.lingxi`)
+ * and the brand workspace root (`~/.lingxi-workspaces`, where no-project chats,
+ * Local App sources and cron runs live): nothing a normal session sees lists,
+ * reads or writes a Bot, and nothing a Bot sees is the owner's own configuration
+ * or working files.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -99,6 +101,8 @@ export interface BotStoreOptions {
   home: string;
   /** The configuration home normal sessions use. */
   defaultConfigHome: string;
+  /** The brand workspace root normal sessions use (the engine's product-paths `workspace_root`). */
+  defaultWorkspaceRoot: string;
   now?: () => number;
   newId?: () => string;
 }
@@ -112,6 +116,8 @@ export interface BotLocations {
   home: string;
   /** The default configuration home: as given and, if it exists, as it really is. */
   defaultConfigHomes: string[];
+  /** The brand workspace root of normal sessions (chats, Local App sources, cron runs): as given and, if it exists, as it really is. */
+  defaultWorkspaceRoots: string[];
   /** The global configuration file of the default home (`~/.lingxi.json`). */
   defaultGlobalConfigs: string[];
 }
@@ -283,17 +289,23 @@ export class BotStore {
     const root = join(userData, 'bots');
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const home = realDirectory(options.home);
-    const defaultConfigHomes = [resolve(options.defaultConfigHome)];
-    try {
-      const real = realpathSync.native(defaultConfigHomes[0]!);
-      if (!defaultConfigHomes.includes(real)) defaultConfigHomes.push(real);
-    } catch { /* A configuration home that does not exist yet has one spelling. */ }
+    const spellings = (path: string): string[] => {
+      const given = [resolve(path)];
+      try {
+        const real = realpathSync.native(given[0]!);
+        if (!given.includes(real)) given.push(real);
+      } catch { /* A folder that does not exist yet has one spelling. */ }
+      return given;
+    };
+    const defaultConfigHomes = spellings(options.defaultConfigHome);
+    const defaultWorkspaceRoots = spellings(options.defaultWorkspaceRoot);
     this.locations = {
       userData,
       root: realDirectory(root),
       trashRoot: join(userData, 'bots-trash'),
       home,
       defaultConfigHomes,
+      defaultWorkspaceRoots,
       defaultGlobalConfigs: [join(home, '.lingxi.json')],
     };
     this.now = options.now ?? Date.now;
@@ -530,18 +542,21 @@ export class BotStore {
    * A folder the owner wants a Bot to work in: absolute, an existing
    * directory, kept as its real path. Not the filesystem root, the home folder
    * or a folder that contains it, anything of the app's own data (the Bots
-   * included), or the configuration home of normal sessions.
+   * included), or the configuration home and workspace root of normal sessions.
    */
   workspace(path: unknown, mode: unknown): BotWorkspace {
     const entry = parseWorkspaceEntry({ path, mode });
     let real: string;
     try { real = realDirectory(entry.path); } catch { throw new Error('The folder does not exist or is not a directory.'); }
-    const { userData, root, home, defaultConfigHomes } = this.locations;
+    const { userData, root, home, defaultConfigHomes, defaultWorkspaceRoots } = this.locations;
     if (real === parse(real).root) throw new Error('A Bot cannot work in the filesystem root.');
     if (isInside(home, real)) throw new Error('A Bot cannot work in your home folder or in a folder that contains it.');
     if (isInside(real, userData) || isInside(root, real)) throw new Error("A Bot cannot work in the app's own data folder.");
     if (defaultConfigHomes.some((configHome) => isInside(real, configHome) || isInside(configHome, real))) {
       throw new Error('A Bot cannot work in the LingXi configuration folder.');
+    }
+    if (defaultWorkspaceRoots.some((workspaceRoot) => isInside(real, workspaceRoot) || isInside(workspaceRoot, real))) {
+      throw new Error('A Bot cannot work in the LingXi workspace folder.');
     }
     return { path: real, mode: entry.mode };
   }

@@ -565,7 +565,7 @@ test('the Bots offered to remote devices are ordered by when they were made, not
   const f = botFixture(t);
   const ids = ['Bot0000000000000000003', 'Bot0000000000000000002', 'Bot0000000000000000001'];
   let now = 1000;
-  const store = new BotStore({ userData: f.userData, home: f.home, defaultConfigHome: f.defaultConfigHome, now: () => now, newId: () => ids.shift()! });
+  const store = new BotStore({ userData: f.userData, home: f.home, defaultConfigHome: f.defaultConfigHome, defaultWorkspaceRoot: f.defaultWorkspaceRoot, now: () => now, newId: () => ids.shift()! });
   const service = new BotService({ store, platform: 'darwin', runtimes: NO_RUNTIMES, catalogFor: NO_CATALOGS });
   for (const name of ['Oldest', 'Middle', 'Newest']) {
     const bot = service.create({ name });

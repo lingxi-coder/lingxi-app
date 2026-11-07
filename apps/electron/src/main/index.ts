@@ -916,7 +916,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     let teamBotStore: BotStore | undefined;
     // The Bots live beside the app's other data and keep clear of the default configuration home.
     try {
-      const botStore = new BotStore({ userData, home: app.getPath('home'), defaultConfigHome: productPaths.brandHome });
+      const botStore = new BotStore({ userData, home: app.getPath('home'), defaultConfigHome: productPaths.brandHome, defaultWorkspaceRoot: productPaths.workspaceRoot });
       teamBotStore = botStore;
       const manager = bridge;
       const botWarn = (message: string): void => { diagnostics.add('warn', 'host', `bots: ${message}`); };

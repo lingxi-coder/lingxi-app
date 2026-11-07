@@ -15,15 +15,17 @@ export function botFixture(t: { after(fn: () => void): void }, options: { ids?: 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, 'home');
   const defaultConfigHome = join(home, '.lingxi');
+  const defaultWorkspaceRoot = join(home, '.lingxi-workspaces');
   const userData = join(root, 'Application Support', 'LingXi');
   mkdirSync(join(defaultConfigHome, 'skills'), { recursive: true });
+  mkdirSync(join(defaultWorkspaceRoot, 'chat'), { recursive: true });
   mkdirSync(join(userData, 'logs'), { recursive: true });
   mkdirSync(join(userData, 'bridge-runtime'), { recursive: true });
   writeFileSync(join(userData, 'settings.v1.json'), '{}');
   writeFileSync(join(defaultConfigHome, 'settings.json'), '{"theme":"owner"}');
   let sequence = 0;
   const store = new BotStore({
-    userData, home, defaultConfigHome,
+    userData, home, defaultConfigHome, defaultWorkspaceRoot,
     ...(options.ids ? {} : { newId: () => `Bot${String(++sequence).padStart(19, '0')}` }),
   });
   const folder = (name: string): string => {
@@ -31,7 +33,7 @@ export function botFixture(t: { after(fn: () => void): void }, options: { ids?: 
     mkdirSync(path, { recursive: true });
     return realpathSync(path);
   };
-  return { root, home, defaultConfigHome, userData, store, folder };
+  return { root, home, defaultConfigHome, defaultWorkspaceRoot, userData, store, folder };
 }
 
 export const SESSION = '11111111-2222-4333-8444-555555555555';

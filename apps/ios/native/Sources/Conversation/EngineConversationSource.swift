@@ -4357,7 +4357,7 @@ final class EngineConversationSource: ConversationSource {
             }
             model.statusLine = String(localized: "chat_retrying \(attempt) \(maxRetries)")
 
-        case let .costUpdate(_, _, _, _, _, formatted):
+        case let .costUpdate(_, _, _, _, _, formatted, _):
             guard acceptTurnEvent(event) else { return }
             updateActiveRun { $0.costFormatted = formatted }
 

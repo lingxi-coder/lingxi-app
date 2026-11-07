@@ -731,7 +731,7 @@ import SwiftUI
                 .usageUpdate(isSnapshot: nil, inputTokens: 11, outputTokens: 22, cacheReadTokens: 3, cacheCreationTokens: 4))
             source.applyForTesting(.apiRetry(message: "429", attempt: 2, maxRetries: 5, delayMs: 1200))
             source.applyForTesting(.costUpdate(
-                totalUsd: 0.12, inputTokens: 11, outputTokens: 22, apiCalls: 1, sessionDurationSecs: 9, formatted: "$0.12"))
+                totalUsd: 0.12, inputTokens: 11, outputTokens: 22, apiCalls: 1, sessionDurationSecs: 9, formatted: "$0.12", byAccount: []))
             source.applyForTesting(.compactionCompleted(
                 messagesBefore: 20,
                 messagesAfter: 7,

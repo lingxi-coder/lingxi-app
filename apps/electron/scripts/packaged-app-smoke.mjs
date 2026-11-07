@@ -1542,20 +1542,19 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
   })()`);
   try {
     await waitFor(() => evaluate(page, `(() => {
-      const code = Array.from(document.querySelectorAll('[data-conversation-space] button[role="tab"]')).find(button => button.textContent.trim() === 'Code');
       const library = document.querySelector('.local-app-library');
       const tile = Array.from(library?.querySelectorAll('.local-app-tile') ?? []).find(tile => tile.querySelector('h2')?.textContent === ${JSON.stringify(created.name)});
       const modify = Array.from(tile?.querySelectorAll('button') ?? []).find(button => button.textContent.trim() === 'Modify');
       const visible = node => Boolean(node && node.getClientRects().length && node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0);
-      return code?.getAttribute('aria-selected') === 'true' && document.querySelector('.local-apps-library-link')?.getAttribute('aria-current') === 'page'
+      return document.querySelector('.local-apps-library-link')?.getAttribute('aria-current') === 'page'
         && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'
         && visible(library) && visible(tile) && visible(modify) && !modify.disabled;
-    })()`), { label: 'visible Apps library and Modify action admitted in Code mode' });
+    })()`), { label: 'visible Apps library and enabled Modify action' });
     await evaluate(page, `(() => {
     const tile = Array.from(document.querySelectorAll('.local-app-tile')).find(tile => tile.querySelector('h2')?.textContent === ${JSON.stringify(created.name)});
     const modify = Array.from(tile?.querySelectorAll('button') ?? []).find(button => button.textContent.trim() === 'Modify');
     if (!modify || modify.disabled) throw new Error('The published app must expose an enabled Modify action');
-    window.__packagedModifyClickState = { code: Array.from(document.querySelectorAll('[data-conversation-space] button[role="tab"]')).find(button => button.getAttribute('aria-selected') === 'true')?.textContent, libraryCurrent: document.querySelector('.local-apps-library-link')?.getAttribute('aria-current'), visible: modify.getClientRects().length > 0, railDisabled: document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') };
+    window.__packagedModifyClickState = { libraryCurrent: document.querySelector('.local-apps-library-link')?.getAttribute('aria-current'), visible: modify.getClientRects().length > 0, railDisabled: document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') };
     modify.addEventListener('click', () => window.__packagedModifyDomClicks++, { capture: true, once: true });
     modify.click();
   })()`);

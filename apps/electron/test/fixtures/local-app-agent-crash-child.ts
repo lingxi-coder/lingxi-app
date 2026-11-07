@@ -12,7 +12,7 @@ const authorization: LocalAppAgentAuthorization = {
   skillSpecs: [skill], releaseFiles: [{ path: skill.path, sha256: 'a'.repeat(64), bytes: 18, executable: false }],
   model: { providerId: 'test-provider', modelId: 'test-model', label: 'Test', canSelect: true, supportsAttachments: true, supportsVision: true, supportsStructuredOutput: true },
 };
-const broker = new LocalAppAgentBroker({ root, authorize: async () => authorization, revalidate: async () => true,
+const broker = new LocalAppAgentBroker({ workspaceRoot: join(root, 'workspaces'), root, authorize: async () => authorization, revalidate: async () => true,
   execute: async execution => {
     // Stand in for an already-issued external side effect, then die before a
     // provider/tool result can be durably recorded.

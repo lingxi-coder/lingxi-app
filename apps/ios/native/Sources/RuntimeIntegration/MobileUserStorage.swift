@@ -60,16 +60,18 @@ enum MobileUserStorage {
         }
         let record = try JSONDecoder().decode(Record.self, from: data)
         let parts = record.workspace.split(separator: "/", omittingEmptySubsequences: false)
-        guard record.version == 1, parts.count == 3, parts[0] == "workspaces",
+        guard record.version == 1, parts.count == 5, parts[0] == "cron", parts[2] == "runs",
               parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") && !$0.contains("\0") }) else { throw ProjectRepositoryError.escapedWorkspace }
-        var workspace = brandHome
-        var workspaceDescriptor = config
+        let workspaceName = paths.configDirName + "-workspaces"
+        let workspaceHome = brandHome.deletingLastPathComponent().appendingPathComponent(workspaceName, isDirectory: true)
+        var workspace = workspaceHome
+        var workspaceDescriptor = try openDirectory(home, workspaceName)
         for part in parts {
             workspaceDescriptor = try openDirectory(workspaceDescriptor, String(part))
             workspace.appendPathComponent(String(part), isDirectory: true)
         }
         let canonical = workspace.resolvingSymlinksInPath().standardizedFileURL
-        let root = brandHome.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent("workspaces", isDirectory: true)
+        let root = workspaceHome.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent("cron", isDirectory: true)
         guard canonical.path.hasPrefix(root.path + "/") else { throw ProjectRepositoryError.escapedWorkspace }
         return canonical.path
     }
@@ -167,7 +169,7 @@ enum MobileUserStorage {
                       !zip(components, components.dropFirst()).contains(where: { $0.0 == "library" && $0.1 == "preferences" })
                 else { throw ProjectRepositoryError.escapedWorkspace }
             }
-            if overlapsConfigGuest && !isLocalAppSource && contentRoot == nil {
+            if overlapsConfigGuest {
                 throw ProjectRepositoryError.escapedWorkspace
             }
 
@@ -181,11 +183,7 @@ enum MobileUserStorage {
                 throw ProjectRepositoryError.escapedWorkspace
             }
             let overlapsConfigHost = overlaps(hostPath, configHost)
-            let isManagedContent = contentRoot.map { root in
-                let expected = URL(fileURLWithPath: root.host, isDirectory: true).standardizedFileURL.path
-                return hostPath.path == expected || hostPath.path.hasPrefix(expected + "/")
-            } ?? false
-            if overlapsConfigHost && !(isLocalAppSource && hostPath.path.hasPrefix(appsHost.path + "/")) && !isManagedContent {
+            if overlapsConfigHost {
                 throw ProjectRepositoryError.escapedWorkspace
             }
             if overlaps(hostPath, appsHost) && !isLocalAppSource {
@@ -266,7 +264,7 @@ enum MobileUserStorage {
               UUID(uuidString: home[5]) != nil else { return false }
         let profile = directories()
         let managedProjects = ["Library", "Application Support", "mobile-linux", "ios-ish",
-                               "persistent", profile.linuxUser, profile.configDirName, "projects"]
+                               "persistent", profile.linuxUser, profile.configDirName + "-workspaces", "projects"]
         return current == home + managedProjects && previous.count == current.count
             && Array(previous.prefix(5)) == Array(home.prefix(5))
             && UUID(uuidString: previous[5]) != nil && previous[5] != home[5]

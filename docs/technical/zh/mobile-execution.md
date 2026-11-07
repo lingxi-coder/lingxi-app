@@ -15,7 +15,7 @@ iPhone 版和 Android 版灵犀是内部测试版。本站没有公布 App Store
 
 ## 命令看得到的路径
 
-默认的 Linux 配置把 /home/lingxi 当作主目录。它的配置目录是 /home/lingxi/.lingxi，项目目录是 /home/lingxi/.lingxi/projects。命令的工作目录是这些 guest 路径之一。手机自己的文件浏览器里的文件夹路径是另一套坐标，不会自动变成命令看到的路径。
+默认的 Linux 配置把 /home/lingxi 当作主目录。它的配置目录是 /home/lingxi/.lingxi，项目目录是 /home/lingxi/.lingxi-workspaces/projects。命令的工作目录是这些 guest 路径之一。手机自己的文件浏览器里的文件夹路径是另一套坐标，不会自动变成命令看到的路径。
 
 把这个环境嵌进另一个应用、选择挂载，以及把宿主路径传给运行时，见 Mobile Linux SDK。
 

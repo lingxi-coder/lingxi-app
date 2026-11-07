@@ -19,7 +19,7 @@ async function main() {
   const settings = { enabled: true, model: { providerId: 'test', modelId: 'test' }, tools: [], skills: [], background: false, maxTurns: 20, timeoutMs: 600_000 };
   const authorization = { settings, requestedTools: [], requestedSkills: [], releaseRevision: 1, releaseSourceDirectory: '/test', skillSpecs: [], releaseFiles: [],
     model: { providerId: 'test', modelId: 'test', label: 'Test', canSelect: true, supportsAttachments: true, supportsVision: true, supportsStructuredOutput: true } };
-  const broker = new LocalAppAgentBroker({ root: join(root, 'storage'), authorize: async () => authorization, revalidate: async () => true,
+  const broker = new LocalAppAgentBroker({ workspaceRoot: join(root, 'workspaces'), root: join(root, 'storage'), authorize: async () => authorization, revalidate: async () => true,
     execute: async () => { throw new Error('not used'); } });
   const host = new LocalAppHost({ configHome: root, appProjectsRoot: join(root, '.apps'), core: {} as any, currentConversationMode: () => 'code', preload: join(root, 'preload.cjs'), mainWindow: () => undefined, edit: async () => undefined });
   const partition = session.fromPartition(`persist:local-app-${appId}`);

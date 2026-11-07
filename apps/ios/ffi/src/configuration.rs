@@ -494,22 +494,10 @@ pub(super) fn validate_mobile_linux_workspace_config(
             purpose: mobile_linux_api::MountPurpose::Workspace,
         },
     );
-    // The native conversation runtime has one primary projects mount.  The
-    // brand container is also the config home, so only its exact projects
-    // child may bypass the config-tree protection here.
-    let managed_projects_workspace = persistent_workspace
-        && config.stable_workspace_id == "projects"
-        && workspace_host_path == brand_config_home.join("projects")
-        && (requested_workspace_host_path
-            == brand_profile
-                .persistent_home_host_path(std::path::Path::new(&config.managed_root))
-                .join(&config.config_dir_name)
-                .join("projects")
-            || requested_workspace_host_path == workspace_host_path);
     if workspace_host_path == sandbox_root
         || (workspace_host_path.starts_with(&managed_root) && !persistent_workspace)
         || managed_root.starts_with(&workspace_host_path)
-        || (workspace_host_path.starts_with(&brand_config_home) && !managed_projects_workspace)
+        || workspace_host_path.starts_with(&brand_config_home)
         || brand_config_home.starts_with(&workspace_host_path)
     {
         return Err(MobileLinuxOperationFfiError::InvalidRequest {
@@ -519,12 +507,10 @@ pub(super) fn validate_mobile_linux_workspace_config(
         });
     }
 
-    if !managed_projects_workspace
-        && mobile_linux_path_contains_protected_config_subtree(
-            &workspace_host_path,
-            &config.config_dir_name,
-        )
-    {
+    if mobile_linux_path_contains_protected_config_subtree(
+        &workspace_host_path,
+        &config.config_dir_name,
+    ) {
         return Err(MobileLinuxOperationFfiError::InvalidRequest {
             message: "workspace_host_path may not target provider/config subtrees".to_string(),
         });
@@ -547,8 +533,8 @@ pub(super) fn validate_mobile_linux_workspace_config(
 /// Resolve native Project-authorized extra guest directories to exact host
 /// mounts. The primary Projects mount is created separately by `platform-ios`;
 /// this adapter adds only individual directories under the selected brand's
-/// user home and keeps the app's config tree fenced except for an exact Local
-/// App source below `.apps/`.
+/// user home. The app's config tree stays fenced; an exact Local App source
+/// below the branded workspace `apps/` directory needs native authorization.
 #[cfg(feature = "uniffi")]
 pub(super) fn ios_project_mount_grants(
     config: &IosEngineLaunchConfigFfi,
@@ -649,31 +635,15 @@ fn validate_project_mount_grants(
             return Err("project mount grant overlaps the primary Projects mount".into());
         }
 
-        let under_apps = guest.starts_with(apps_guest) && guest != apps_guest;
-        // A Project may explicitly register a global or scheduled workspace.
-        // These were not config subtrees before the container was hidden; the
-        // registration and exact host/guest mapping remain mandatory.
-        let workspace_guest = [
-            &directories.chat_guest_cwd,
-            &directories.code_guest_cwd,
-            &directories.scheduled_guest_cwd,
-        ]
-        .iter()
-        .any(|root| guest.starts_with(Path::new(root)));
-        let safe_workspace_guest = workspace_guest
-            && guest != Path::new(&directories.scheduled_guest_cwd)
-            && guest.strip_prefix(config_guest).is_ok_and(|relative| {
-                !mobile_linux_path_contains_protected_config_subtree(
-                    relative,
-                    &directories.config_dir_name,
-                )
-            });
+        if guest == Path::new(&directories.scheduled_guest_cwd) {
+            return Err("project mount grant may not expose the scheduled controller root".into());
+        }
         if guest == apps_guest || apps_guest.starts_with(guest) {
             return Err(
                 "project mount grant may not expose the Local App root or its parent".into(),
             );
         }
-        if paths_overlap(guest, config_guest) && !under_apps && !safe_workspace_guest {
+        if paths_overlap(guest, config_guest) {
             return Err("project mount grant overlaps the protected brand config tree".into());
         }
 
@@ -681,15 +651,7 @@ fn validate_project_mount_grants(
         if paths_overlap(&host, &primary_host) {
             return Err("project mount grant overlaps the primary Projects mount".into());
         }
-        let under_apps_host = host.starts_with(&apps_host) && host != apps_host;
-        let safe_workspace_host = safe_workspace_guest
-            && host.strip_prefix(&config_host).is_ok_and(|relative| {
-                !mobile_linux_path_contains_protected_config_subtree(
-                    relative,
-                    &directories.config_dir_name,
-                )
-            });
-        if paths_overlap(&host, &config_host) && !under_apps_host && !safe_workspace_host {
+        if paths_overlap(&host, &config_host) {
             return Err("project mount grant overlaps the protected native config tree".into());
         }
         if apps_host.starts_with(&host) {

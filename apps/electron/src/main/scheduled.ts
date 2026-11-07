@@ -542,9 +542,9 @@ export class ScheduledTaskService {
       this.assertRunAllowed();
       let executionTask = task;
       if (path === this.settings.scheduledWorkspace && !existing) {
-        const { brandHome } = await this.catalog.productPaths();
+        const { workspaceRoot } = await this.catalog.productPaths();
         this.assertRunAllowed();
-        const workspace = await createScheduledRunWorkspace(brandHome, task.id, ref.sessionId, config.name ?? task.prompt.split('\n')[0].replace(/^# /, ''));
+        const workspace = await createScheduledRunWorkspace(workspaceRoot, task.id, ref.sessionId, config.name ?? task.prompt.split('\n')[0].replace(/^# /, ''));
         ref.projectPath = workspace.directory;
         this.settings.registerScheduledSession(ref, task.id, workspace.memory);
         this.bridge.setSessionDirectoryGrants(ref.sessionId, [dirname(workspace.memory)]);

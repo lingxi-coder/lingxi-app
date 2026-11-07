@@ -20,22 +20,23 @@ class MobileUserStorageTest {
     private fun directories(): MobileUserDirectories {
         val home = temporary.root.canonicalFile
         val config = File(home, ".brand")
+        val workspace = File(home, ".brand-workspaces")
         return MobileUserDirectories(
             brandId = "brand", linuxUser = "user", configDirName = ".brand",
             home = home.path, guestHome = "/home/user", configHome = config.path,
-            configGuestPath = "/home/user/.brand", projects = File(config, "projects").path,
-            projectsGuestPath = "/home/user/.brand/projects",
-            chatCwd = File(config, "chat").path, chatGuestCwd = "/home/user/.brand/chat",
-            codeCwd = File(config, "code").path, codeGuestCwd = "/home/user/.brand/code",
-            scheduledCwd = File(config, "scheduled").path, scheduledGuestCwd = "/home/user/.brand/scheduled",
-            apps = File(config, ".apps").path, appsGuestPath = "/home/user/.brand/.apps",
+            configGuestPath = "/home/user/.brand", projects = File(workspace, "projects").path,
+            projectsGuestPath = "/home/user/.brand-workspaces/projects",
+            chatCwd = File(workspace, "chat").path, chatGuestCwd = "/home/user/.brand-workspaces/chat",
+            codeCwd = File(workspace, "code").path, codeGuestCwd = "/home/user/.brand-workspaces/code",
+            scheduledCwd = File(workspace, "scheduled").path, scheduledGuestCwd = "/home/user/.brand-workspaces/scheduled",
+            apps = File(workspace, "apps").path, appsGuestPath = "/home/user/.brand-workspaces/apps",
         )
     }
 
     @Test fun globalModeChoosesItsWorkspaceWithoutChangingLogicalScope() {
         val paths = directories()
-        assertEquals("/home/user/.brand/chat", paths.globalGuestCwd(SessionMode.Chat))
-        assertEquals("/home/user/.brand/code", paths.globalGuestCwd(SessionMode.Code))
+        assertEquals("/home/user/.brand-workspaces/chat", paths.globalGuestCwd(SessionMode.Chat))
+        assertEquals("/home/user/.brand-workspaces/code", paths.globalGuestCwd(SessionMode.Code))
         assertEquals(ConversationScope.Global to SessionMode.Chat, defaultNewChatTarget(SessionMode.Chat))
         assertEquals(ConversationScope.Global to SessionMode.Code, defaultNewChatTarget(SessionMode.Code))
         assertEquals("/home/user/.brand", paths.configGuestPath)
@@ -58,8 +59,8 @@ class MobileUserStorageTest {
         assertFalse(workspaceOwnerStoreMatches(true, healthy.copy(storageUnavailable = true), listOf(project)))
         assertFalse(workspaceOwnerStoreMatches(false, healthy, listOf(project)))
         assertFalse(workspaceOwnerStoreMatches(true, healthy.copy(projects = emptyList()), listOf(project)))
-        val task = File(paths.configHome, "workspaces/$id/run").apply { mkdirs() }
-        val taskGuest = "${paths.configGuestPath}/workspaces/$id/run"
+        val task = File(paths.home, paths.configDirName + "-workspaces/cron/$id/runs/day/run").apply { mkdirs() }
+        val taskGuest = "${paths.guestHome}/${paths.configDirName}-workspaces/cron/$id/runs/day/run"
         val scheduled = ProjectWorkspace("scheduled", task.canonicalPath, taskGuest)
 
         val withoutOwners = paths.workspaceDirectoryRepository(paths.chatGuestCwd)

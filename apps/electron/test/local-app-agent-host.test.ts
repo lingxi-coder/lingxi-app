@@ -797,7 +797,7 @@ test('closing and reopening an Agent-background app preserves its task and invoc
   row.agent.background = true; await host.store.save(row);
   let complete!: () => void;
   const held = new Promise<void>(resolve => { complete = resolve; });
-  const broker = new LocalAppAgentBroker({ root: join(root, 'ledger'), authorize: owner => host.authorizeAgent(owner), revalidate: (owner, authorization) => host.revalidateAgent(owner, authorization),
+  const broker = new LocalAppAgentBroker({ workspaceRoot: join(root, 'workspaces'), root: join(root, 'ledger'), authorize: owner => host.authorizeAgent(owner), revalidate: (owner, authorization) => host.revalidateAgent(owner, authorization),
     execute: async execution => { await held; await execution.assertAuthorized(); return { result: { text: 'Finished after reopening', output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}` }, usage: { turns: 1 } }; } });
   host.setAgentBroker(broker); t.after(async () => { complete(); await broker.dispose(); });
   await host.open(row.id);
@@ -838,7 +838,7 @@ test('a Desktop Agent settling after the last remote session releases its retain
     open: async (run: any) => { live = true; return { app_id: run.appId, revision: run.revision, url: 'https://example.com/#ticket', expires_at: Date.now() + 60000 }; },
     hasRun: () => live, hasAccess: () => live, revokeApp: () => { live = false; },
   };
-  const broker = new LocalAppAgentBroker({ root: join(root, 'remote-ledger'), authorize: owner => host.authorizeAgent(owner), revalidate: (owner, authorization) => host.revalidateAgent(owner, authorization),
+  const broker = new LocalAppAgentBroker({ workspaceRoot: join(root, 'workspaces'), root: join(root, 'remote-ledger'), authorize: owner => host.authorizeAgent(owner), revalidate: (owner, authorization) => host.revalidateAgent(owner, authorization),
     execute: async execution => { entered(); await held; await execution.assertAuthorized(); return { result: { text: 'done', output: { ok: true }, attachments: [], messageId: 'assistant' }, usage: { turns: 1 } }; } });
   host.setAgentBroker(broker); t.after(async () => { complete(); await broker.dispose(); });
   await host.open(row.id);
@@ -870,7 +870,7 @@ test('remote opening resumes the invocation retained by a Desktop background Age
   host.remoteSettings = async () => ({ [row.id]: true });
   host.remoteGateway = { open: async (run: any) => { live = true; return { app_id: run.appId, revision: run.revision, url: 'https://example.com/#ticket', expires_at: Date.now() + 60000 }; },
     hasRun: () => live, hasAccess: () => live, revokeApp: () => { live = false; } };
-  const broker = new LocalAppAgentBroker({ root: join(root, 'resume-ledger'), authorize: owner => host.authorizeAgent(owner), revalidate: (owner, authorization) => host.revalidateAgent(owner, authorization),
+  const broker = new LocalAppAgentBroker({ workspaceRoot: join(root, 'workspaces'), root: join(root, 'resume-ledger'), authorize: owner => host.authorizeAgent(owner), revalidate: (owner, authorization) => host.revalidateAgent(owner, authorization),
     execute: async execution => { entered(); await held; await execution.assertAuthorized(); return { result: { text: 'done', output: { ok: true }, attachments: [], messageId: 'assistant' }, usage: { turns: 1 } }; } });
   host.setAgentBroker(broker); t.after(async () => { complete(); await broker.dispose(); });
   await host.open(row.id);

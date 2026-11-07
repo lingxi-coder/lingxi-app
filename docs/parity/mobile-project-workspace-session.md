@@ -16,11 +16,14 @@ For the current LingXi account the paths are:
 | Data | Linux path | Native backing |
 | --- | --- | --- |
 | Account HOME | `/home/lingxi` | `<managed_root>/persistent/lingxi` |
-| Default cwd | `~/lingxi` | `<HOME>/lingxi` |
-| Project sources and manifests | `~/lingxi/projects` | `<HOME>/lingxi/projects` |
-| Scheduled conversation cwd | `~/lingxi/scheduled` | `<HOME>/lingxi/scheduled` |
+| No-project Chat / Code cwd | `~/.lingxi-workspaces/chat`, `~/.lingxi-workspaces/code` | `<HOME>/.lingxi-workspaces/chat`, `<HOME>/.lingxi-workspaces/code` |
+| Project sources and manifests | `~/.lingxi-workspaces/projects` | `<HOME>/.lingxi-workspaces/projects` |
+| Scheduled conversation cwd | `~/.lingxi-workspaces/scheduled` | `<HOME>/.lingxi-workspaces/scheduled` |
 | Configuration and transcripts | `~/.lingxi` | `<HOME>/.lingxi` |
-| Reserved LocalApp source directory | `~/.lingxi/.apps` | `<HOME>/.lingxi/.apps` |
+| Reserved LocalApp source directory | `~/.lingxi-workspaces/apps` | `<HOME>/.lingxi-workspaces/apps` |
+
+See [workspace storage](../WORKSPACE_STORAGE.md) for cron runs, task memory,
+Local App Agent files and the private configuration boundary.
 
 The `projects` mount is stable for the account. A conversation's selected cwd does
 not replace that mount. Both FFI constructors reject another host root or mount

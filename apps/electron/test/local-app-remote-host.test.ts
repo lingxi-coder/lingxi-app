@@ -463,7 +463,7 @@ test('the production gateway fences a real Host and Broker response after Agent 
     if (previousOrigin === undefined) delete process.env.LINGXI_LOCAL_APP_REMOTE_ORIGIN; else process.env.LINGXI_LOCAL_APP_REMOTE_ORIGIN = previousOrigin;
     if (previousPort === undefined) delete process.env.LINGXI_LOCAL_APP_GATEWAY_PORT; else process.env.LINGXI_LOCAL_APP_GATEWAY_PORT = previousPort;
   }
-  const broker = new LocalAppAgentBroker({ root: join(f.store.root, 'ledger'),
+  const broker = new LocalAppAgentBroker({ workspaceRoot: join(f.store.root, 'workspaces'), root: join(f.store.root, 'ledger'),
     authorize: principal => f.host.authorizeAgent(principal), revalidate: (principal, authorization) => f.host.revalidateAgent(principal, authorization),
     execute: async () => { throw new Error('Resource reads must not execute an Agent'); } });
   f.host.setAgentBroker(broker);

@@ -753,7 +753,7 @@ fn without_settings_credentials(
 
 /// Brand data home: the branding crate's configuration-directory override when
 /// set to a non-empty value, otherwise the branded hidden home directory.
-/// Shared by configuration, sessions, apps, and scheduled workspaces.
+/// Private configuration and session state; workspace files use a sibling root.
 #[must_use]
 pub fn brand_home() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV).filter(|dir| !dir.is_empty()) {
@@ -1713,8 +1713,9 @@ fn product_paths_json_from(
         }
     });
     serde_json::to_string(&serde_json::json!({
-        "version": 1,
-        "app_projects_root": brand_home.join(".apps"),
+        "version": 2,
+        "workspace_root": branding::workspace_home(&brand_home),
+        "app_projects_root": branding::workspace_home(&brand_home).join("apps"),
         "brand_home": brand_home,
         "global_config_path": global_config_path,
     }))
@@ -3013,7 +3014,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             paths,
-            serde_json::json!({"version": 1, "brand_home": home, "app_projects_root": home.join(".apps"), "global_config_path": null})
+            serde_json::json!({"version": 2, "brand_home": home, "workspace_root": branding::workspace_home(&home), "app_projects_root": branding::workspace_home(&home).join("apps"), "global_config_path": null})
         );
         assert_eq!(
             std::fs::read_to_string(settings).unwrap(),
@@ -3040,7 +3041,7 @@ mod tests {
         );
         assert_eq!(
             paths["app_projects_root"],
-            serde_json::json!(root.path().join("custom-product/.apps"))
+            serde_json::json!(root.path().join("custom-product-workspaces/apps"))
         );
         assert_eq!(
             paths["global_config_path"],

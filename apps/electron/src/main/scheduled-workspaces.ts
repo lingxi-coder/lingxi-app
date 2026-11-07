@@ -16,9 +16,13 @@ async function realDirectory(path: string): Promise<string> {
   return realpath(path);
 }
 
-/** brandHome comes from the engine's product-paths API, which owns branding. */
-export async function createScheduledRunWorkspace(brandHome: string, taskId: string, sessionId: string, title: string, now = new Date()): Promise<ScheduledRunWorkspace> {
-  const root = await realDirectory(join(brandHome, 'workspaces'));
+/** workspaceRoot comes from the engine's product-paths API, which owns branding. */
+export async function createScheduledRunWorkspace(workspaceRoot: string, taskId: string, sessionId: string, title: string, now = new Date()): Promise<ScheduledRunWorkspace> {
+  const taskKey = createHash('sha256').update(taskId).digest('hex');
+  const workspace = await realDirectory(workspaceRoot);
+  const cron = await realDirectory(join(workspace, 'cron'));
+  const taskRoot = await realDirectory(join(cron, taskKey));
+  const root = await realDirectory(join(taskRoot, 'runs'));
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
   const day = await realDirectory(join(root, date));
   const slug = title.normalize('NFKC').replace(/[^\p{L}\p{N}-]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'task';
@@ -27,10 +31,7 @@ export async function createScheduledRunWorkspace(brandHome: string, taskId: str
   const directory = join(day, `${slug}-${sessionId}`);
   await mkdir(directory, { mode: 0o700 });
   const [work, outputs] = await Promise.all(['work', 'outputs'].map(name => realDirectory(join(directory, name))));
-  const taskKey = createHash('sha256').update(taskId).digest('hex');
-  const memoryRoot = await realDirectory(join(brandHome, 'automations'));
-  const memoryDirectory = await realDirectory(join(memoryRoot, taskKey));
-  const memory = join(memoryDirectory, 'memory.md');
+  const memory = join(taskRoot, 'memory.md');
   try { await writeFile(memory, '', { flag: 'wx', mode: 0o600 }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
   const memoryMetadata = await lstat(memory);

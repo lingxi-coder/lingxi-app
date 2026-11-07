@@ -45,6 +45,7 @@ export interface ProjectSessionCatalogResult {
 
 export interface ProductPaths {
   brandHome: string;
+  workspaceRoot: string;
   appProjectsRoot: string;
   globalConfigPath?: string;
 }
@@ -224,13 +225,13 @@ export class ProjectSessionCatalog {
     catch { throw new Error('invalid product paths response'); }
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid product paths response');
     const input = value as Record<string, unknown>;
-    if (input['version'] !== 1 || [input['brand_home'], input['app_projects_root']].some(path =>
+    if (input['version'] !== 2 || [input['brand_home'], input['workspace_root'], input['app_projects_root']].some(path =>
       typeof path !== 'string' || !isAbsolute(path) || path.includes('\0') || path.length > 32_768)
       || (input['global_config_path'] !== null && (typeof input['global_config_path'] !== 'string'
         || !isAbsolute(input['global_config_path']) || input['global_config_path'].includes('\0') || input['global_config_path'].length > 32_768))) {
       throw new Error('invalid product paths response');
     }
-    return { brandHome: input['brand_home'] as string, appProjectsRoot: input['app_projects_root'] as string,
+    return { brandHome: input['brand_home'] as string, workspaceRoot: input['workspace_root'] as string, appProjectsRoot: input['app_projects_root'] as string,
       ...(typeof input['global_config_path'] === 'string' ? { globalConfigPath: input['global_config_path'] } : {}) };
   }
 

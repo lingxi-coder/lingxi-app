@@ -123,19 +123,12 @@ test('a persisted UUID cannot name two owners in different workspaces', (t) => {
   assert.equal(readFileSync(file, 'utf8'), JSON.stringify(contents));
 });
 
-test('Global workspace honors the explicit brand home instead of Electron userData', (t) => {
+test('Global workspace uses the native workspace root without reading config-home environment', (t) => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'conversation-brand-root-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const previous = process.env.LINGXI_CONFIG_DIR;
-  try {
-    process.env.LINGXI_CONFIG_DIR = join(root, '.atlas');
-    const store = new ConversationSpaceStore(root);
-    assert.equal(store.globalWorkspaces.chat, join(root, '.atlas', 'chat'));
-    assert.equal(store.globalWorkspaces.code, join(root, '.atlas', 'code'));
-    process.env.LINGXI_CONFIG_DIR = 'relative-brand-home';
-    assert.throws(() => new ConversationSpaceStore(root), /absolute path/);
-  } finally {
-    if (previous === undefined) delete process.env.LINGXI_CONFIG_DIR;
-    else process.env.LINGXI_CONFIG_DIR = previous;
-  }
+  const workspaceRoot = join(root, '.atlas-workspaces');
+  const store = new ConversationSpaceStore(root, workspaceRoot);
+  assert.equal(store.globalWorkspaces.chat, join(workspaceRoot, 'chat'));
+  assert.equal(store.globalWorkspaces.code, join(workspaceRoot, 'code'));
+  assert.throws(() => new ConversationSpaceStore(root, 'relative'), /absolute path/);
 });

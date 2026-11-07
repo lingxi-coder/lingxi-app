@@ -75,13 +75,15 @@ struct WorkspaceDirectoryPaths: Sendable {
     }
     var protectedRoots: [String] { [guestHome, projects, scheduled] + managedWorkspaces }
     var settingsPath: String { guestHome + "/" + settings }
+    var workspaceContainerPath: String { settingsPath + "-workspaces" }
 
     func contains(_ path: String, in root: String) -> Bool {
         path == root || path.hasPrefix(root + "/")
     }
 
     func allowsWorkspace(_ path: String) -> Bool {
-        !contains(path, in: settingsPath) || managedWorkspaces.contains { contains(path, in: $0) }
+        !contains(path, in: settingsPath)
+            && (!contains(path, in: workspaceContainerPath) || managedWorkspaces.contains { contains(path, in: $0) })
     }
 
     func protects(_ path: String, additional: [String]) -> Bool {
@@ -264,7 +266,7 @@ actor WorkspaceDirectoryRepository {
         guard paths.allowsWorkspace(path), paths.allowsWorkspace(canonicalPath) else {
             throw WorkspaceDirectoryError.protectedDirectory
         }
-        if paths.contains(path, in: paths.settingsPath) || paths.contains(canonicalPath, in: paths.settingsPath) {
+        if paths.contains(path, in: paths.workspaceContainerPath) || paths.contains(canonicalPath, in: paths.workspaceContainerPath) {
             // Both names must stay inside the same SDK-owned workspace. This
             // rejects aliases into config or across workspace boundaries.
             guard let workspace = paths.managedWorkspaces.first(where: {

@@ -34,7 +34,7 @@ test('broker preserves remote session identity for later task revalidation', asy
   const root=await fs.mkdtemp(join(tmpdir(),'remote-agent-owner-'));let valid=true;const observed:string[]=[];
   let continueExecution!:()=>void, started!:()=>void;
   const entered=new Promise<void>(resolve=>{started=resolve;});
-  const broker=new LocalAppAgentBroker({root,authorize:async owner=>{observed.push(owner.remoteSessionId ?? 'missing');return authorization;},revalidate:async owner=>{observed.push(owner.remoteSessionId ?? 'missing');return valid;},execute:async execution=>{started();await new Promise<void>(resolve=>{continueExecution=resolve;});await execution.assertAuthorized();return {result:{text:'done',output:{ok:true},attachments:[],messageId:'m'},usage:{turns:1}};}});
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async owner=>{observed.push(owner.remoteSessionId ?? 'missing');return authorization;},revalidate:async owner=>{observed.push(owner.remoteSessionId ?? 'missing');return valid;},execute:async execution=>{started();await new Promise<void>(resolve=>{continueExecution=resolve;});await execution.assertAuthorized();return {result:{text:'done',output:{ok:true},attachments:[],messageId:'m'},usage:{turns:1}};}});
   t.after(async()=>{await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
   const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
@@ -47,7 +47,7 @@ test('broker preserves remote session identity for later task revalidation', asy
 test('session revocation cancels its actual active task after a terminal retry and leaves other sessions running', async t => {
   const root=await fs.mkdtemp(join(tmpdir(),'remote-agent-cancel-'));
   const running=new Map<string,()=>void>();
-  const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async execution=>{
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async()=>authorization,revalidate:async()=>true,execute:async execution=>{
     await new Promise<void>((resolve,reject)=>{running.set(execution.runId,resolve);execution.signal.addEventListener('abort',()=>reject(execution.signal.reason),{once:true});});
     return {result:{text:'done',output:{ok:true},attachments:[],messageId:'m'},usage:{turns:1}};
   }});
@@ -75,7 +75,7 @@ test('revoked queued chat mutations and admissions do not commit after the ledge
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
   const other={appId:`a${'2'.repeat(32)}`,releaseDigest:'2'.repeat(64),invocationId:'other',remoteSessionId:'t'.repeat(43)};
   const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
-  const broker=new LocalAppAgentBroker({root,authorize:async principal=>{
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async principal=>{
     if(principal.appId===other.appId){entered();await blocked;}
     return authorization;
   },revalidate:async()=>true,execute:async()=>({result:{text:'done',output:{ok:true},attachments:[],messageId:'m'},usage:{turns:1}})});
@@ -102,7 +102,7 @@ test('session revocation aborts its active executor without waiting for the ledg
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
   const other={appId:`a${'2'.repeat(32)}`,releaseDigest:'2'.repeat(64),invocationId:'other',remoteSessionId:'t'.repeat(43)};
   const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
-  const broker=new LocalAppAgentBroker({root,authorize:async principal=>{
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async principal=>{
     if(principal.appId===other.appId){entered();await blocked;}
     return authorization;
   },revalidate:async()=>true,execute:async execution=>{
@@ -124,7 +124,7 @@ test('session revocation aborts its active executor without waiting for the ledg
 test('revoked chat creation removes its incomplete directory and remains restartable', async t => {
   const root=await fs.mkdtemp(join(tmpdir(),'remote-agent-create-revoke-'));
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
-  const options={root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>({result:{text:'done',attachments:[] as [],messageId:'m'},usage:{turns:1}})};
+  const options={root,workspaceRoot:join(root,'workspaces'),authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>({result:{text:'done',attachments:[] as [],messageId:'m'},usage:{turns:1}})};
   const broker=new LocalAppAgentBroker(options);
   t.after(async()=>{await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
   let release!:()=>void, entered!:()=>void;
@@ -144,7 +144,7 @@ test('revoked chat creation removes its incomplete directory and remains restart
 test('revocation before an archive rename preserves the original chat', async t => {
   const root=await fs.mkdtemp(join(tmpdir(),'remote-agent-archive-revoke-'));
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
-  const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>({result:{text:'done',attachments:[],messageId:'m'},usage:{turns:1}})});
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>({result:{text:'done',attachments:[],messageId:'m'},usage:{turns:1}})});
   t.after(async()=>{await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
   const chat=await broker.createChat(owner,chatCreation('Keep this chat'));
   const target=join(root,'apps',owner.appId,'agent','agui-v1','chats',chat.chatId,'chat.json');
@@ -169,7 +169,7 @@ test('app revocation aborts an executor while another app holds the ledger lock'
   const gate=new Promise<void>(resolve=>{release=resolve;}), locked=new Promise<void>(resolve=>{entered=resolve;}), executing=new Promise<AbortSignal>(resolve=>{started=resolve;});
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)}, other={...owner,appId:`a${'2'.repeat(32)}`};
   const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
-  const broker=new LocalAppAgentBroker({root,authorize:async principal=>{if(principal.appId===other.appId){entered();await gate;}return authorization;},revalidate:async()=>true,execute:async execution=>{
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async principal=>{if(principal.appId===other.appId){entered();await gate;}return authorization;},revalidate:async()=>true,execute:async execution=>{
     if(execution.owner.appId===owner.appId){started(execution.signal);await new Promise<void>((_resolve,reject)=>execution.signal.addEventListener('abort',()=>reject(execution.signal.reason),{once:true}));}
     return {result:{text:'done',attachments:[],messageId:'m'},usage:{turns:1}};
   }});
@@ -186,7 +186,7 @@ test('revocation before queued success commits prevents assistant output', async
   const lockGate=new Promise<void>(resolve=>{releaseLock=resolve;}), locked=new Promise<void>(resolve=>{enteredLock=resolve;}), resultGate=new Promise<void>(resolve=>{releaseResult=resolve;}), started=new Promise<void>(resolve=>{executing=resolve;}), queued=new Promise<void>(resolve=>{successQueued=resolve;});
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)}, other={...owner,appId:`a${'2'.repeat(32)}`};
   const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
-  const broker=new LocalAppAgentBroker({root,authorize:async principal=>{if(principal.appId===other.appId){enteredLock();await lockGate;}return authorization;},revalidate:async()=>true,execute:async execution=>{
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async principal=>{if(principal.appId===other.appId){enteredLock();await lockGate;}return authorization;},revalidate:async()=>true,execute:async execution=>{
     if(execution.owner.appId===owner.appId){executing();await resultGate;}
     return {result:{text:'secret result',output:{ok:true},attachments:[],messageId:'assistant'},usage:{turns:1}};
   }});
@@ -208,7 +208,7 @@ test('chat reads wait for aborted admission rollback before exposing history', a
   const gate=new Promise<void>(resolve=>{release=resolve;}), waiting=new Promise<void>(resolve=>{entered=resolve;});
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
   const input=JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json',import.meta.url),'utf8'));
-  const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>({result:{text:'done',attachments:[],messageId:'m'},usage:{turns:1}})});
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>({result:{text:'done',attachments:[],messageId:'m'},usage:{turns:1}})});
   t.after(async()=>{release();await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
   const chat=await broker.createChat(owner,chatCreation('Chat'));
   const internal=broker as any, save=internal.saveChat.bind(broker);
@@ -226,7 +226,7 @@ test('chat reads wait for aborted admission rollback before exposing history', a
 test('app withdrawal fences queued chat mutations and permits calls after regrant', async t => {
   const root=await fs.mkdtemp(join(tmpdir(),'agent-app-mutation-fence-'));
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
-  const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
   let release!:()=>void, entered!:()=>void;
   const gate=new Promise<void>(resolve=>{release=resolve;}), locked=new Promise<void>(resolve=>{entered=resolve;});
   t.after(async()=>{release();await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
@@ -246,7 +246,7 @@ test('app withdrawal fences queued chat mutations and permits calls after regran
 test('app withdrawal before task commit prevents durable admission', async t => {
   const root=await fs.mkdtemp(join(tmpdir(),'agent-app-admission-fence-'));
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
-  const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
   let release!:()=>void, entered!:()=>void;
   const gate=new Promise<void>(resolve=>{release=resolve;}), waiting=new Promise<void>(resolve=>{entered=resolve;});
   t.after(async()=>{release();await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
@@ -264,7 +264,7 @@ test('app withdrawal before task commit prevents durable admission', async t => 
 test('app withdrawal before chat rename cancels creation and archive', async t => {
   const root=await fs.mkdtemp(join(tmpdir(),'agent-app-chat-commit-fence-'));
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
-  const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
   t.after(async()=>{await broker.dispose();await fs.rm(root,{recursive:true,force:true});});
   await broker.initialize();
   let release!:()=>void, entered!:()=>void, gate:Promise<void>, waiting:Promise<void>;
@@ -287,7 +287,7 @@ test('app withdrawal before chat rename cancels creation and archive', async t =
 test('broker shutdown aborts pending and future mutations before commit', async t => {
   const root=await fs.mkdtemp(join(tmpdir(),'agent-shutdown-mutation-fence-'));
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
-  const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
   const chat=await broker.createChat(owner,chatCreation('Keep'));
   let releaseWrite!:()=>void, writeEntered!:()=>void;
   const writeGate=new Promise<void>(resolve=>{releaseWrite=resolve;}), writing=new Promise<void>(resolve=>{writeEntered=resolve;});
@@ -308,7 +308,7 @@ test('broker shutdown aborts active execution while another app holds the ledger
   const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)}, other={...owner,appId:`a${'2'.repeat(32)}`};
   let release!:()=>void, entered!:()=>void, started!:(signal:AbortSignal)=>void;
   const gate=new Promise<void>(resolve=>{release=resolve;}), locked=new Promise<void>(resolve=>{entered=resolve;}), executing=new Promise<AbortSignal>(resolve=>{started=resolve;});
-  const broker=new LocalAppAgentBroker({root,authorize:async principal=>{if(principal.appId===other.appId){entered();await gate;}return authorization;},revalidate:async()=>true,execute:async execution=>{
+  const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async principal=>{if(principal.appId===other.appId){entered();await gate;}return authorization;},revalidate:async()=>true,execute:async execution=>{
     if(execution.owner.appId===owner.appId){started(execution.signal);await new Promise<void>((_resolve,reject)=>execution.signal.addEventListener('abort',()=>reject(execution.signal.reason),{once:true}));}
     return {result:{text:'done',attachments:[],messageId:'m'},usage:{turns:1}};
   }});
@@ -326,7 +326,7 @@ for (const kind of ['admission', 'chat creation'] as const) {
   test(`broker shutdown waits for ${kind} rollback with no active task`, async t => {
     const root=await fs.mkdtemp(join(tmpdir(),'agent-shutdown-drain-'));
     const owner={appId:`a${'1'.repeat(32)}`,releaseDigest:'1'.repeat(64),invocationId:'run',remoteSessionId:'s'.repeat(43)};
-    const broker=new LocalAppAgentBroker({root,authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
+    const broker=new LocalAppAgentBroker({root,workspaceRoot:join(root,'workspaces'),authorize:async()=>authorization,revalidate:async()=>true,execute:async()=>{throw new Error('unexpected');}});
     await broker.initialize();
     let release!:()=>void, entered!:()=>void;
     const gate=new Promise<void>(resolve=>{release=resolve;}), waiting=new Promise<void>(resolve=>{entered=resolve;});
@@ -355,7 +355,7 @@ test('remote Chat identities survive session and release replacement, remain App
   const uncertain = { requestId: 'c6666666-6666-4666-8666-666666666666' };
   let valid = true, allocations = 0;
   const options = {
-    root, authorize: async () => authorization, revalidate: async () => valid,
+    root, workspaceRoot: join(root, 'workspaces'), authorize: async () => authorization, revalidate: async () => valid,
     uuid: () => { allocations++; return randomUUID(); },
     execute: async () => { throw new Error('Chat resource reads must not execute an Agent'); },
   };
@@ -405,7 +405,7 @@ test('remote retry can observe App-owned tasks but cannot transfer revocation ow
   const otherApp = { ...remote, appId: `a${'2'.repeat(32)}` };
   const input = JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json', import.meta.url), 'utf8'));
   const running = new Map<string, AbortSignal>();
-  const broker = new LocalAppAgentBroker({ root, authorize: async () => authorization, revalidate: async () => true,
+  const broker = new LocalAppAgentBroker({ root, workspaceRoot: join(root, 'workspaces'), authorize: async () => authorization, revalidate: async () => true,
     execute: async execution => {
       running.set(`${execution.owner.appId}:${execution.runId}`, execution.signal);
       await new Promise<void>((_resolve, reject) => execution.signal.addEventListener('abort', () => reject(execution.signal.reason), { once: true }));
@@ -451,7 +451,7 @@ test('remote shutdown persists interruption for recovery without replaying an ex
   const input = JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json', import.meta.url), 'utf8'));
   let started!: () => void, executions = 0;
   const executing = new Promise<void>(resolve => { started = resolve; });
-  const broker = new LocalAppAgentBroker({ root, authorize: async () => authorization, revalidate: async () => true,
+  const broker = new LocalAppAgentBroker({ root, workspaceRoot: join(root, 'workspaces'), authorize: async () => authorization, revalidate: async () => true,
     execute: async execution => {
       executions++; started();
       await new Promise<void>((_resolve, reject) => execution.signal.addEventListener('abort', () => reject(execution.signal.reason), { once: true }));
@@ -461,7 +461,7 @@ test('remote shutdown persists interruption for recovery without replaying an ex
   let restarted: LocalAppAgentBroker | undefined;
   t.after(async () => { await broker.dispose(); await restarted?.dispose(); await fs.rm(root, { recursive: true, force: true }); });
   await broker.run(owner, input); await executing; await broker.dispose();
-  restarted = new LocalAppAgentBroker({ root, authorize: async () => authorization, revalidate: async () => true,
+  restarted = new LocalAppAgentBroker({ root, workspaceRoot: join(root, 'workspaces'), authorize: async () => authorization, revalidate: async () => true,
     execute: async () => { executions++; throw new Error('must not replay interrupted work'); },
   });
   const reopening = { ...owner, invocationId: 'reopened', remoteSessionId: 't'.repeat(43) };
@@ -482,7 +482,7 @@ for (const revokedBy of ['session', 'app'] as const) {
     const creation = chatCreation('Keep after cancelled deletion');
     let allowed = true, release!: () => void, entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; }), writing = new Promise<void>(resolve => { entered = resolve; });
-    const broker = new LocalAppAgentBroker({ root, authorize: async () => authorization, revalidate: async () => allowed,
+    const broker = new LocalAppAgentBroker({ root, workspaceRoot: join(root, 'workspaces'), authorize: async () => authorization, revalidate: async () => allowed,
       execute: async () => { throw new Error('Chat deletion must not execute an Agent'); },
     });
     let restore = () => {};
@@ -531,7 +531,7 @@ for (const failureAt of ['rename', 'directory-sync'] as const) {
     const creation = chatCreation('Deletion outcome must remain uncertain');
     let allowed = true, release!: () => void, entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; }), dispatched = new Promise<void>(resolve => { entered = resolve; });
-    const broker = new LocalAppAgentBroker({ root, authorize: async () => authorization, revalidate: async () => allowed,
+    const broker = new LocalAppAgentBroker({ root, workspaceRoot: join(root, 'workspaces'), authorize: async () => authorization, revalidate: async () => allowed,
       execute: async () => { throw new Error('Chat deletion must not execute an Agent'); },
     });
     const writable = fs as any, rename = writable.rename, open = writable.open;

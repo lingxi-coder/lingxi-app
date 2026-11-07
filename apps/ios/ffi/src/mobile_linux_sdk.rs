@@ -379,11 +379,6 @@ fn validate_mount(
     let workspace_root = normalize_host_path(&config.workspace_host_path, "workspace_host_path")?;
     let brand_profile = config.brand_profile();
     let guest_home = mobile_linux_api::guest_paths::home_for_profile(&brand_profile);
-    let apps_guest = brand_profile
-        .apps_guest_path()
-        .to_string_lossy()
-        .into_owned();
-    let apps_host = brand_config_home.join(".apps");
     let mut authorized_project_mount = false;
     for grant in &config.project_mount_grants {
         let grant_host = normalize_host_path(&grant.host_path, "authorized project host")?;
@@ -422,31 +417,6 @@ fn validate_mount(
             "Project mount grants must map inside the selected persistent user home".into(),
         ));
     }
-    let authorized_app_source = exact_home_mapping
-        && matches!(mount.purpose, MountPurpose::External)
-        && mount.guest_path != apps_guest
-        && guest_path_has_prefix(&mount.guest_path, &apps_guest)
-        && host_path.starts_with(&apps_host)
-        && host_path != apps_host;
-    let config_guest = brand_profile.config_guest_path();
-    let authorized_workspace_source = exact_home_mapping
-        && matches!(mount.purpose, MountPurpose::External)
-        && ["chat", "code", "scheduled"].iter().any(|name| {
-            let guest_root = config_guest.join(name);
-            let host_root = brand_config_home.join(name);
-            match (
-                guest_path.strip_prefix(guest_root),
-                host_path.strip_prefix(host_root),
-            ) {
-                (Ok(guest_relative), Ok(host_relative)) => {
-                    guest_relative == host_relative
-                        && (*name != "scheduled" || !guest_relative.as_os_str().is_empty())
-                        && !path_contains_protected_subtree(guest_relative, &config.config_dir_name)
-                }
-                _ => false,
-            }
-        });
-
     if ["/", "/home"].contains(&mount.guest_path.as_str())
         || (guest_path_has_prefix(&mount.guest_path, &guest_home)
             && !matches!(mount.purpose, MountPurpose::Workspace)
@@ -468,14 +438,6 @@ fn validate_mount(
         &brand_profile,
         &canonical_mount,
     );
-    let managed_projects_workspace = persistent_workspace
-        && config.stable_workspace_id == "projects"
-        && matches!(mount.purpose, MountPurpose::Workspace)
-        && !mount.read_only
-        && host_path == brand_config_home.join("projects")
-        && (mount.host_path == config.brand_config_home().join("projects")
-            || mount.host_path == host_path)
-        && mount.guest_path == config.workspace_guest_path();
     let exact_persistent_project_mount =
         exact_home_mapping && host_path.starts_with(&user_home_host) && host_path != user_home_host;
     let overlaps_brand_config = host_path == brand_config_home
@@ -487,10 +449,7 @@ fn validate_mount(
             && !persistent_workspace
             && !exact_persistent_project_mount)
         || managed_root.starts_with(&host_path)
-        || (overlaps_brand_config
-            && !authorized_app_source
-            && !authorized_workspace_source
-            && !managed_projects_workspace)
+        || overlaps_brand_config
     {
         return Err(MobileLinuxError::InvalidRequest(
             "mount host_path may not target app root, managed_root, or brand config home"
@@ -498,11 +457,7 @@ fn validate_mount(
         ));
     }
 
-    if path_contains_protected_subtree(&host_path, &config.config_dir_name)
-        && !authorized_app_source
-        && !authorized_workspace_source
-        && !managed_projects_workspace
-    {
+    if path_contains_protected_subtree(&host_path, &config.config_dir_name) {
         return Err(MobileLinuxError::InvalidRequest(
             "mount host_path may not target provider/config subtrees".to_string(),
         ));
@@ -830,14 +785,17 @@ mod tests {
         config.workspace_host_path = config
             .brand_profile()
             .persistent_home_host_path(&config.managed_root)
-            .join(".atlas/projects");
+            .join(".atlas-workspaces/projects");
         config.stable_workspace_id = "projects".to_string();
         fs::create_dir_all(&config.workspace_host_path).expect("create profile workspace");
         fs::create_dir_all(&config.managed_root).expect("create managed root");
         fs::create_dir_all(config.brand_config_home()).expect("create profile config root");
 
         let workspace = config.default_workspace_mount();
-        assert_eq!(workspace.guest_path, "/home/atlas_guest/.atlas/projects");
+        assert_eq!(
+            workspace.guest_path,
+            "/home/atlas_guest/.atlas-workspaces/projects"
+        );
         assert_eq!(
             config
                 .brand_profile()
@@ -856,7 +814,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = test_config(&temp.path().join("app"));
         config.stable_workspace_id = "projects".into();
-        config.workspace_host_path = config.brand_config_home().join("projects");
+        config.workspace_host_path =
+            branding::workspace_home(&config.brand_config_home()).join("projects");
         fs::create_dir_all(&config.workspace_host_path).unwrap();
         let workspace = config.default_workspace_mount();
         validate_mount(&workspace, &config).expect("exact projects mount");
@@ -864,7 +823,7 @@ mod tests {
         let mut changed = workspace.clone();
         changed.guest_path = config
             .brand_profile()
-            .config_guest_path()
+            .workspace_container_guest_path()
             .join("code")
             .display()
             .to_string();
@@ -900,14 +859,16 @@ mod tests {
         let mut config = test_config(&temp.path().join("app"));
         fs::create_dir_all(&config.workspace_host_path).unwrap();
         for name in ["chat", "code", "scheduled"] {
-            let host = config.brand_config_home().join(name).join("registered");
+            let host = branding::workspace_home(&config.brand_config_home())
+                .join(name)
+                .join("registered");
             fs::create_dir_all(&host).unwrap();
             if name == "scheduled" {
                 let root_grant = MountSpec {
                     host_path: host.parent().unwrap().canonicalize().unwrap(),
                     guest_path: config
                         .brand_profile()
-                        .config_guest_path()
+                        .workspace_container_guest_path()
                         .join(name)
                         .display()
                         .to_string(),
@@ -922,7 +883,7 @@ mod tests {
                 host_path: host.canonicalize().unwrap(),
                 guest_path: config
                     .brand_profile()
-                    .config_guest_path()
+                    .workspace_container_guest_path()
                     .join(name)
                     .join("registered")
                     .display()
@@ -939,7 +900,9 @@ mod tests {
             assert!(validate_mount(&mismatch, &config).is_err());
             #[cfg(unix)]
             {
-                let alias = config.brand_config_home().join(name).join("alias");
+                let alias = branding::workspace_home(&config.brand_config_home())
+                    .join(name)
+                    .join("alias");
                 std::os::unix::fs::symlink(&host, &alias).unwrap();
                 let mut aliased_config = config.clone();
                 aliased_config.project_mount_grants[0].host_path = alias;
@@ -1032,7 +995,7 @@ mod tests {
         let root = temp.path().join("app");
         let mut config = test_config(&root);
         let apps_guest = config.brand_profile().apps_guest_path();
-        let apps_host = config.brand_config_home().join(".apps");
+        let apps_host = branding::workspace_home(&config.brand_config_home()).join("apps");
         let guest = apps_guest
             .join("authorized-app")
             .to_string_lossy()
@@ -1182,7 +1145,7 @@ mod tests {
         let root = temp.path().join("app");
         let mut config = test_config(&root);
         let apps_guest = config.brand_profile().apps_guest_path();
-        let apps_host = config.brand_config_home().join(".apps");
+        let apps_host = branding::workspace_home(&config.brand_config_home()).join("apps");
         let guest = apps_guest
             .join("authorized-app")
             .to_string_lossy()

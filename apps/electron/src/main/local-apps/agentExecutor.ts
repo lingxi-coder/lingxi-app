@@ -33,6 +33,8 @@ export interface LocalAppAgentExecutorOptions {
   configHome: string;
   globalConfigPath?: string;
   root: string;
+  /** Brand-owned Agent workspace root, separate from the private ledger. */
+  workspaceRoot: string;
   isPackaged?: boolean;
   resourcesPath?: string;
   serverBin?: string;
@@ -231,11 +233,13 @@ export class LocalAppAgentExecutor {
       ? wire.mcpTools.filter(tool => toolId(tool) === grant.id) : []);
     const mcpConfigs = [...new Set(mcp.map(tool => tool.configIndex))].map(index => wire.mcpConfigs[index]);
     const taskDirectory = join(this.options.root, 'apps', owner.appId, 'agent', 'agui-v1', 'tasks', execution.taskStorageId);
-    const cwd = execution.chat ? join(this.options.root, 'apps', owner.appId, 'agent', 'agui-v1', 'workspaces', execution.chat.chatId) : taskDirectory;
+    const workspaceApp = join(this.options.workspaceRoot, owner.appId);
+    const workspaceGroup = join(workspaceApp, execution.chat ? 'chats' : 'tasks');
+    const cwd = join(workspaceGroup, execution.chat?.chatId ?? execution.taskStorageId);
     const store = join(this.options.root, 'apps', owner.appId, 'agent', 'agui-v1');
     const paths = [this.options.root, join(this.options.root, 'apps'), join(this.options.root, 'apps', owner.appId),
       join(this.options.root, 'apps', owner.appId, 'agent'), store, join(store, 'tasks'), taskDirectory, join(store, 'assets'),
-      ...(execution.chat ? [join(store, 'workspaces'), cwd] : [])];
+      this.options.workspaceRoot, workspaceApp, workspaceGroup, cwd];
     for (const path of paths) {
       try { await fs.mkdir(path, { mode: 0o700 }); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }

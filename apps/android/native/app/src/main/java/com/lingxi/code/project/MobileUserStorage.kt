@@ -101,7 +101,7 @@ object MobileUserStorage {
         if (!runCatching { java.util.UUID.fromString(id).toString() == id }.getOrDefault(false)) return null
         val brand = File(directories(context).configHome)
         val candidate = runCatching { scheduledWorkspace(context, id) }.getOrNull() ?: return null
-        val expectedContainer = File(brand.canonicalFile, "workspaces").toPath().toAbsolutePath().normalize()
+        val expectedContainer = File(brand.canonicalFile.parentFile, brand.name + "-workspaces/cron").toPath().toAbsolutePath().normalize()
         val actual = File(candidate.hostPath).toPath().toAbsolutePath().normalize()
         return candidate.takeIf { actual != expectedContainer && actual.startsWith(expectedContainer) }
     }
@@ -118,18 +118,19 @@ object MobileUserStorage {
                 val workspace = record.get("workspace") as? String ?: error("Invalid scheduled workspace manifest")
                 workspace.also { value ->
                     val parts = value.split('/')
-                    require(parts.size == 3 && parts[0] == "workspaces" && parts.all { it.isNotBlank() && it != "." && it != ".." && !it.contains('\\') })
+                    require(parts.size == 5 && parts[0] == "cron" && parts[2] == "runs" && parts.all { it.isNotBlank() && it != "." && it != ".." && !it.contains('\\') })
                 }
             }
         }
         if (relative == null) return ProjectWorkspace("scheduled", paths.scheduledCwd, paths.scheduledGuestCwd)
-        val root = brandHome.canonicalFile
-        var workspace = brandHome
+        val root = File(brandHome.canonicalFile.parentFile, brandHome.name + "-workspaces").canonicalFile
+        require(!java.nio.file.Files.isSymbolicLink(File(brandHome.parentFile, brandHome.name + "-workspaces").toPath()))
+        var workspace = root
         relative.split('/').forEach { component ->
             workspace = File(workspace, component)
             require(workspace.isDirectory && !java.nio.file.Files.isSymbolicLink(workspace.toPath()))
         }
-        require(workspace.canonicalFile.toPath().startsWith(File(root, "workspaces").toPath()))
+        require(workspace.canonicalFile.toPath().startsWith(File(root, "cron").toPath()))
         val brandGuest = paths.guestHome + "/" + File(paths.home).canonicalFile.toPath().relativize(root.toPath()).toString()
         return ProjectWorkspace("scheduled", workspace.canonicalPath, "$brandGuest/$relative")
     }

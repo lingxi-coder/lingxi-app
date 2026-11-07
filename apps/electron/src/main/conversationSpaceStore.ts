@@ -1,5 +1,4 @@
 import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import type { ConversationSpace, ConversationSpacesSnapshot, OwnedConversation, SpaceNavigation } from '../shared/conversationSpaces.js';
 import { isSessionId } from './sessionIdentity.js';
@@ -89,14 +88,14 @@ export class ConversationSpaceStore {
   private readonly file: string;
   private value: StoredSpaces;
 
-  constructor(userData: string, brandHome = process.env.LINGXI_CONFIG_DIR || join(homedir(), '.lingxi')) {
+  constructor(userData: string, workspaceRoot = join(userData, 'workspaces')) {
     this.file = join(userData, 'conversation-spaces.v2.json');
-    if (!isAbsolute(brandHome)) throw new Error('The brand workspace must be an absolute path.');
-    mkdirSync(brandHome, { recursive: true, mode: 0o700 });
-    const container = lstatSync(brandHome);
+    if (!isAbsolute(workspaceRoot)) throw new Error('The brand workspace must be an absolute path.');
+    mkdirSync(workspaceRoot, { recursive: true, mode: 0o700 });
+    const container = lstatSync(workspaceRoot);
     if (!container.isDirectory() || container.isSymbolicLink()) throw new Error('The brand container must be a real directory.');
     const workspace = (space: ConversationSpace): string => {
-      const directory = join(brandHome, space);
+      const directory = join(workspaceRoot, space);
       mkdirSync(directory, { recursive: true, mode: 0o700 });
       const stat = lstatSync(directory);
       if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('The conversation workspace must be a real directory.');

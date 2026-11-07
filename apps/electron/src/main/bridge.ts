@@ -1795,7 +1795,7 @@ export class SessionRuntime {
       if (interruptedForeground && !newForegroundStarted) {
         this.broadcastClientEvent({
           type: 'turn_ended', outcome: { type: 'cancelled' },
-          cost: { ...(this.lastKnownCost ?? { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0 }), formatted: '' },
+          cost: { ...(this.lastKnownCost ?? { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, by_account: [] }), formatted: '' },
         });
         this.broadcastClientEvent({ type: 'system_notice', message: 'The previous turn was interrupted when its engine connection closed.', is_error: true });
       }
@@ -1847,7 +1847,7 @@ export class SessionRuntime {
     this.pendingSideCreates.clear();
     if (interrupted) {
       this.broadcastClientEvent({ type: 'turn_ended', outcome: { type: 'cancelled' },
-        cost: { ...(this.lastKnownCost ?? { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0 }), formatted: '' } });
+        cost: { ...(this.lastKnownCost ?? { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, by_account: [] }), formatted: '' } });
     }
     const notice = interrupted
       ? 'The engine exited. The interrupted turn will not be replayed; restoring this chat automatically.'

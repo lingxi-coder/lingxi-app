@@ -26,6 +26,7 @@
 .pa-health[data-status=ready]{color:var(--pa-ok)}
 .pa-health[data-status=needs_auth],.pa-health[data-status=storage_unavailable]{color:var(--pa-danger)}
 .pa-caption{color:var(--pa-secondary);font-size:11px;line-height:1.5;margin:5px 0 0}
+.pa-usage{margin-top:4px}.pa-usage .pa-caption{margin:1px 0 0}
 .pa-account[data-enabled=false] .pa-account-copy,.pa-account[data-enabled=false] .pa-account-icon{opacity:.5}
 .pa-reorder{gap:0}.pa-reorder .pa-icon-button{min-width:25px;padding:3px}
 .pa-switch{display:inline-flex;align-items:center;position:relative;flex-shrink:0;cursor:pointer}

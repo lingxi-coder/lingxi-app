@@ -90,6 +90,7 @@ const COST = {
   api_calls: 0,
   session_duration_secs: 0,
   formatted: '0s',
+  by_account: [],
 } as const;
 
 test('a display-only slash command claims running state and its own result releases it', () => {

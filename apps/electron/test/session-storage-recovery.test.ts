@@ -32,7 +32,7 @@ test('storage pause remains until an explicit successful recovery and stays sess
   const initial = emptyDesktopState();
   let paused = reduceDesktopEvent(initial, { type: 'session_storage_state', disk_full: true });
   paused = reduceDesktopEvent(paused, { type: 'turn_ended', outcome: { type: 'end_turn' }, stop_reason: 'error',
-    cost: { total_usd: 1, input_tokens: 10, output_tokens: 20, api_calls: 1, session_duration_secs: 1, formatted: '$1' } });
+    cost: { total_usd: 1, input_tokens: 10, output_tokens: 20, api_calls: 1, session_duration_secs: 1, formatted: '$1', by_account: [] } });
   assert.equal(paused.storagePaused, true);
   assert.equal(initial.storagePaused, false);
   const resumed = reduceDesktopEvent(paused, { type: 'session_storage_state', disk_full: false });

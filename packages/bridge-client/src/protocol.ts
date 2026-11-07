@@ -74,7 +74,7 @@ export type {
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '32.1.0';
+export const CLIENT_PROTOCOL_VERSION = '33.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -1482,6 +1482,37 @@ export interface TurnRecoverySnapshotDto {
   reason?: string;
 }
 
+/**
+ * Account that served recorded responses. The credential slot stays in the
+ * cost ledger and is not on this wire (events.rs `AccountUsageAttributionDto`).
+ */
+export interface AccountUsageAttributionDto {
+  /** Logical provider id. `openai-chatgpt` is already folded to `openai`. */
+  provider_id: string;
+  account_id: string;
+  /** Bumps when that account's credential is replaced. */
+  identity_generation: number;
+  /** `"api_key"` or `"oauth"`. */
+  auth_kind: string;
+}
+
+/** One model slice for one account, or for requests with no selected account. */
+export interface AccountUsageRowDto {
+  /** Selected account. `null` is the unattributed bucket. */
+  attribution: AccountUsageAttributionDto | null;
+  model: string;
+  /** Cumulative cost for this account and model, in nano-USD. */
+  total_nano_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  reasoning_tokens: number;
+  web_search_requests: number;
+  /** Successful recorded responses, not a provider bill. */
+  request_count: number;
+}
+
 /** Cumulative cost snapshot carried by `turn_ended` (events.rs `CostDto`). */
 export interface CostDto {
   total_usd: number;
@@ -1490,6 +1521,8 @@ export interface CostDto {
   api_calls: number;
   session_duration_secs: number;
   formatted: string;
+  /** This session's usage by provider account and model. Empty when none is recorded. */
+  by_account: AccountUsageRowDto[];
 }
 
 /**

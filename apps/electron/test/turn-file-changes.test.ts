@@ -9,7 +9,7 @@ const diff = (path = 'src/app.ts', additions = 2, removals = 1): StructuredDiffD
 });
 const header = { verb: 'update' as const, label: 'Update', title: 'Update' };
 const end = (formatted = ''): ClientEvent => ({ type: 'turn_ended', outcome: { type: 'end_turn' },
-  cost: { formatted, total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 1, session_duration_secs: 1 },
+  cost: { formatted, total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 1, session_duration_secs: 1, by_account: [] },
 });
 const start = (id: string): ClientEvent => ({ type: 'tool_use_started', id, tool: 'Edit', input_json: '{}', header });
 const result = (id: string, value = diff(), is_error = false): ClientEvent => ({

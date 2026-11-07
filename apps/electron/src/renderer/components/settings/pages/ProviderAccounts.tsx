@@ -1,7 +1,9 @@
 import { tr } from '../../../i18n/locale';
 import { useI18n } from '../../../i18n/useI18n';
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { ProviderAccountCommand, ProviderAccountHealth, ProviderAccountRouting, ProviderAccountsApi, ProviderAccountSnapshot } from '../../../../shared/providerAccounts';
+import type { AccountUsageRowDto } from '@lingxi/bridge-client';
+import { accountSessionUsage, formatSessionTokens, formatSessionUsd } from '../../../../shared/accountUsage';
+import type { ProviderAccountCommand, ProviderAccountHealth, ProviderAccountMetadata, ProviderAccountRouting, ProviderAccountsApi, ProviderAccountSnapshot } from '../../../../shared/providerAccounts';
 import { logicalProviderId, orderedProviderAccounts } from '../../../../shared/providerAccounts';
 import type { ProviderDefinition } from '../../../../shared/providers';
 import { useT } from '../../../theme/ThemeContext';
@@ -13,9 +15,21 @@ export function providerAccountHealthLabel(health?: ProviderAccountHealth): stri
   return `${tr(`provider_accounts_health_${health.status}`)}${recovery}`;
 }
 
+function AccountSessionUsageLines({ providerId, account, rows }: {
+  providerId: string; account: ProviderAccountMetadata; rows?: readonly AccountUsageRowDto[];
+}) {
+  const usage = accountSessionUsage(rows, providerId, account);
+  return <div className="pa-usage">
+    <p className="pa-caption">{tr('provider_accounts_session_usage_current', formatSessionTokens(usage.current.inputTokens), formatSessionTokens(usage.current.outputTokens), formatSessionUsd(usage.current.nanoUsd))}</p>
+    {usage.current.models.map(model => <p className="pa-caption" key={model.model}>{tr('provider_accounts_session_usage_model', model.model, formatSessionTokens(model.inputTokens), formatSessionTokens(model.outputTokens), formatSessionTokens(model.cacheReadTokens), formatSessionTokens(model.cacheCreationTokens), formatSessionUsd(model.nanoUsd), model.requestCount)}</p>)}
+    {usage.earlier.map(item => <p className="pa-caption" key={item.generation}>{tr('provider_accounts_session_usage_earlier', item.generation, formatSessionTokens(item.usage.inputTokens), formatSessionTokens(item.usage.outputTokens), formatSessionUsd(item.usage.nanoUsd))}</p>)}
+  </div>;
+}
+
 /** User priority stays stable; observed availability is shown independently. */
-export function ProviderAccounts({ api, provider, running, onConfigured }: {
+export function ProviderAccounts({ api, provider, running, onConfigured, usageRows }: {
   api: ProviderAccountsApi; provider: ProviderDefinition; running: boolean; onConfigured?: () => Promise<unknown>;
+  usageRows?: readonly AccountUsageRowDto[];
 }) {
   useI18n();
   const t = useT();
@@ -115,7 +129,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
   const menuAction = (button: HTMLButtonElement, action: () => void) => { button.closest('details')?.removeAttribute('open'); action(); };
   return <section className="pa-panel" style={theme} aria-label={tr('provider_accounts_accounts')} aria-busy={busy}>
     <header className="pa-section-heading">
-      <div><h3>{tr('provider_accounts_accounts')} {snapshot && <span className="pa-count">{accounts.length}</span>}</h3>{accounts.length > 1 && <p>{tr('provider_accounts_priority_desc')}</p>}</div>
+      <div><h3>{tr('provider_accounts_accounts')} {snapshot && <span className="pa-count">{accounts.length}</span>}</h3>{accounts.length > 1 && <p>{tr('provider_accounts_priority_desc')}</p>}{accounts.length > 0 && <p>{tr('provider_accounts_session_usage_note')}</p>}</div>
       <div className="pa-toolbar">
         <button className="pa-icon-button" aria-label={tr('provider_accounts_refresh')} disabled={busy} onClick={() => void api.snapshot().then(setSnapshot).catch(() => setError(tr('provider_accounts_status_error')))}><Icon name="refresh" size={16} /></button>
         {provider.available && <button ref={addButton} className="pa-button pa-primary" disabled={locked} onClick={() => openForm()}><Icon name="plus" size={15} />{tr('provider_accounts_add')}</button>}
@@ -136,6 +150,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured }: {
                 onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { event.currentTarget.value = account.displayName; event.currentTarget.blur(); event.stopPropagation(); } }}
                 onBlur={event => { const displayName = event.currentTarget.value.trim(); if (!displayName) event.currentTarget.value = account.displayName; else if (displayName !== account.displayName) void perform({ action: 'update', accountId: account.accountId, displayName }); }} />
               <div className="pa-meta"><span>{account.authKind === 'oauth' ? tr('provider_accounts_subscription') : tr('provider_accounts_key')}</span><span className="pa-health" data-status={health?.status} role="status"><i />{providerAccountHealthLabel(health)}</span></div>
+              <AccountSessionUsageLines providerId={provider.id} account={account} rows={usageRows} />
               {routing?.selectedAccountId === account.accountId && routing.identityGeneration === account.identityGeneration && <p className="pa-caption">{tr('provider_accounts_last_used', routing.model, routing.attempt)}</p>}
               {entitlements.length ? <details className="pa-permissions"><summary>{tr('provider_accounts_model_access')}</summary><ul>{entitlements.map(entry => <li key={entry.modelId}><span>{entry.modelId}</span><span>{tr(`provider_accounts_model_${entry.status}`)}</span></li>)}</ul></details> : <p className="pa-caption">{tr('provider_accounts_models_unverified')}</p>}
             </div>

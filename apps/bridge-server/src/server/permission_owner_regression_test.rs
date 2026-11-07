@@ -181,6 +181,7 @@ async fn background_permissions_survive_main_cancel_and_normal_terminal_but_not_
                     api_calls: 0,
                     session_duration_secs: 0,
                     formatted: String::new(),
+                    by_account: vec![],
                 },
             })
             .await;

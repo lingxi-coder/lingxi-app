@@ -46,6 +46,7 @@ const COST = {
   api_calls: 1,
   session_duration_secs: 5,
   formatted: '0m 5s · 30 tokens · $0.01',
+  by_account: [],
 };
 
 const READ_HEADER: ToolHeaderDto = {

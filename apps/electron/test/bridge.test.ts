@@ -1328,7 +1328,7 @@ test('turn terminal owns release and rejects late interactive or tool events', a
   handlers.get('event')!({
     type: 'turn_ended',
     outcome: { type: 'cancelled' },
-    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '' },
+    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '', by_account: [] },
   });
   assert.equal(manager.turnActive, false);
   assert.equal((manager as any).pendingPermissionIds.size, 0);
@@ -1403,7 +1403,7 @@ test('an engine-initiated turn re-arms the host and its permission prompts reach
   handlers.get('event')!({
     type: 'turn_ended',
     outcome: { type: 'end_turn' },
-    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '' },
+    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '', by_account: [] },
   });
   assert.equal(manager.turnActive, false, 'the user turn released the slot');
 

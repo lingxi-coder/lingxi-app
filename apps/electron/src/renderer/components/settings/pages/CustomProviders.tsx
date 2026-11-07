@@ -298,7 +298,7 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
         {saveError && <div role="alert" style={{ padding: 18, color: t.danger }}>{saveError}
           {Object.keys(pendingCredentials).length > 0 && <button disabled={busy} onClick={() => void persist(null, pendingCredentials)} style={ghostButtonStyle(t)}>{tr('desktop_settings_65f36ab91c')}</button>}
         </div>}
-      {editorOpen && originalName && bridge.providerAccounts && <ProviderAccounts api={bridge.providerAccounts} provider={{ ...providerById('openai')!, id: originalName, label: originalName, credentialManagementUrl: '', authMethod: 'api_key', authMethods: ['api_key'] }} running={bridge.running || busy} onConfigured={() => bridge.refreshModelPicker('manual')} />}
+      {editorOpen && originalName && bridge.providerAccounts && <ProviderAccounts api={bridge.providerAccounts} provider={{ ...providerById('openai')!, id: originalName, label: originalName, credentialManagementUrl: '', authMethod: 'api_key', authMethods: ['api_key'] }} running={bridge.running || busy} onConfigured={() => bridge.refreshModelPicker('manual')} usageRows={bridge.cost?.by_account} />}
       {editorOpen && <Card title={originalName ? tr('desktop_settings_39e42e9346', originalName) : tr('desktop_settings_7add78b882')}>
         <fieldset disabled={busy} style={{ border: 0, padding: 20, margin: 0, minWidth: 0 }}>
           <ProviderEditorFields key={originalName ?? "new"} name={profileName} onName={setProfileName} nameLocked={originalName !== null} draft={draft} onDraft={setDraft} apiKey={apiKey} onApiKey={setApiKey} credentialConfigured={credentialConfigured(profileName)} />

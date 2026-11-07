@@ -52,7 +52,7 @@ function fixture(t: TestContext) {
     pending.get(id)!.resolve({ request_id: id, background_owned }); await tick();
   };
   const foregroundEnds = () => client.emit('event', { type: 'turn_ended', outcome: { type: 'completed' },
-    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '' } });
+    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '', by_account: [] } });
   return { runtime, internal, client, diagnostics, sent, ask, scope, pending, queried, decisions, foregroundEnds };
 }
 

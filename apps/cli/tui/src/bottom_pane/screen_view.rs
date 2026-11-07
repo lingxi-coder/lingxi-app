@@ -291,12 +291,17 @@ impl ScreenView {
             row("└ Cache read", &cost.cache_read_tokens.to_string()),
             row("└ Cache write", &cost.cache_creation_tokens.to_string()),
             row("└ API calls", &cost.api_calls.to_string()),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Plan usage limits require a Claude.ai subscription.",
-                Style::default().add_modifier(Modifier::DIM),
-            )),
         ];
+        let account_block = cost::render::usage_by_account_block(&cost.by_account);
+        if !account_block.is_empty() {
+            usage_lines.push(Line::from(""));
+            usage_lines.extend(account_block.lines().map(|line| Line::from(line.to_string())));
+        }
+        usage_lines.push(Line::from(""));
+        usage_lines.push(Line::from(Span::styled(
+            "Plan usage limits require a Claude.ai subscription.",
+            Style::default().add_modifier(Modifier::DIM),
+        )));
         if !cost.loops.is_empty() {
             usage_lines.push(Line::from(""));
             usage_lines.extend(Self::loops_section_lines(&cost.loops));

@@ -12,7 +12,7 @@ const envelope = { taskId: 'T'.repeat(22), from: 'Alice', goal: 'Summarise the r
 const PROMPT = taskPrompt(envelope, NOW);
 
 const assistant = (text: string) => ({ role: 'assistant' as const, blocks: [{ type: 'text' as const, text }] });
-const cost = { total_usd: 0.1, input_tokens: 1, output_tokens: 1, api_calls: 1, session_duration_secs: 1, formatted: '$0.10' };
+const cost = { total_usd: 0.1, input_tokens: 1, output_tokens: 1, api_calls: 1, session_duration_secs: 1, formatted: '$0.10', by_account: [] };
 
 function rows(state: ConversationState): Array<[string, string]> {
   return state.items.flatMap((item) => (item.type === 'narration' ? [[item.role, item.text] as [string, string]] : []));

@@ -602,7 +602,7 @@ fn mobile_linux_command_api_reports_unavailable_on_host_without_device_bridge() 
         .block_on(handle.run_command(super::MobileLinuxCommandRequestFfi {
             command: "/bin/sh".to_string(),
             args: vec!["-lc".to_string(), "echo hi".to_string()],
-            cwd: Some("/home/lingxi/.lingxi/code".to_string()),
+            cwd: Some("/home/lingxi/.lingxi-workspaces/code".to_string()),
             env: std::collections::HashMap::new(),
             stdin: None,
             timeout_ms: Some(1000),
@@ -649,7 +649,7 @@ fn mobile_linux_handle_reuses_one_runtime_instance_for_multiple_calls() {
         .block_on(handle.open_pty(super::MobileLinuxPtyOpenRequestFfi {
             command: "/bin/sh".to_string(),
             args: vec![],
-            cwd: Some("/home/lingxi/.lingxi/code".to_string()),
+            cwd: Some("/home/lingxi/.lingxi-workspaces/code".to_string()),
             env: std::collections::HashMap::new(),
             cols: 80,
             rows: 24,
@@ -958,7 +958,7 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
     // Catalog paths may be PRoot guest coordinates. The FFI boundary must
     // carry them unchanged so the SDK can map them through trusted mounts.
     let selected_transcript = std::path::PathBuf::from(format!(
-        "/home/lingxi/.lingxi/projects/selected-project/{session_id}.jsonl"
+        "/home/lingxi/.lingxi-workspaces/projects/selected-project/{session_id}.jsonl"
     ));
     std::fs::create_dir_all(&workspace).expect("workspace");
 

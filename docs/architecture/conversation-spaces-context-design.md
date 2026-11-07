@@ -256,7 +256,7 @@ SDK Rust DTO、snapshot/ordinal 合约、TS 生成类型、客户端 validator�
 
 | 平台 | 当前实现 |
 | --- | --- |
-| Desktop | `userData/conversation-spaces.v2.json`：activeMode、项目成员关系、导航、已登记 owner；Global 工作目录按模式分别为 `~/.lingxi/chat` 和 `~/.lingxi/code`（或显式 `LINGXI_CONFIG_DIR` 下的同名子目录）。 |
+| Desktop | `userData/conversation-spaces.v2.json`：activeMode、项目成员关系、导航、已登记 owner；Global 工作目录按模式分别为 `~/.lingxi-workspaces/chat` 和 `~/.lingxi-workspaces/code`。显式 `LINGXI_CONFIG_DIR` 的同级目录加 `-workspaces` 为工作区根，详见[工作区存储](../WORKSPACE_STORAGE.md)。 |
 | Android | `filesDir/scope-state.json` 使用 version 2；Project/session 索引要求显式 mode 与 membership，项目和 Global 索引分别保存。 |
 | iOS | `ProjectScopedPreferences` 按空间、scope、UUID 保存导航与草稿；项目内 `session-spaces.json` 和 `global-session-spaces.json` 使用当前 session index 格式。 |
 

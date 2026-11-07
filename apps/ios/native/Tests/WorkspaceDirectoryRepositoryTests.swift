@@ -10,7 +10,7 @@ final class WorkspaceDirectoryRepositoryTests: XCTestCase {
         root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let directories = MobileUserStorage.directories()
         let project = directories.projectsGuestPath + "/11111111-1111-4111-8111-111111111111/workspace"
-        let ownedScheduled = directories.configGuestPath + "/workspaces/2026-11-02/owner"
+        let ownedScheduled = directories.configGuestPath + "-workspaces/cron/task/runs/2026-11-02/owner"
         paths = WorkspaceDirectoryPaths(home: root, guestHome: directories.guestHome,
             workspace: directories.chatGuestCwd, chatWorkspace: directories.chatGuestCwd,
             codeWorkspace: directories.codeGuestCwd, projects: directories.projectsGuestPath,
@@ -111,15 +111,15 @@ final class WorkspaceDirectoryRepositoryTests: XCTestCase {
         try FileManager.default.createDirectory(at: secret, withIntermediateDirectories: true)
         let otherProject = paths.projects + "/22222222-2222-4222-8222-222222222222/workspace"
         try FileManager.default.createDirectory(at: root.appendingPathComponent(String(otherProject.dropFirst(paths.guestHome.count + 1))), withIntermediateDirectories: true)
-        let otherScheduled = paths.settingsPath + "/workspaces/2026-11-02/other-owner"
+        let otherScheduled = paths.workspaceContainerPath + "/cron/other-task/runs/2026-11-02/other-owner"
         try FileManager.default.createDirectory(at: root.appendingPathComponent(String(otherScheduled.dropFirst(paths.guestHome.count + 1))), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: root.appendingPathComponent(String(paths.scheduled.dropFirst(paths.guestHome.count + 1))), withIntermediateDirectories: true)
         let projectMetadata = (paths.projectWorkspaces[0] as NSString).deletingLastPathComponent
-        for protected in [paths.settingsPath, paths.settingsPath + "/secrets", paths.settingsPath + "/.apps",
+        for protected in [paths.settingsPath, paths.settingsPath + "/secrets", paths.workspaceContainerPath + "/apps",
                           paths.projects, projectMetadata, otherProject, paths.scheduled,
-                          paths.settingsPath + "/workspaces", otherScheduled] {
-            if protected.hasSuffix("/.apps") {
-                try FileManager.default.createDirectory(at: config.appendingPathComponent(".apps"), withIntermediateDirectories: true)
+                          paths.workspaceContainerPath + "/cron", otherScheduled] {
+            if protected.hasSuffix("/apps") {
+                try FileManager.default.createDirectory(at: root.appendingPathComponent(paths.settings + "-workspaces/apps"), withIntermediateDirectories: true)
             }
             do {
                 _ = try await repository.createDirectory(in: protected, name: "forbidden")

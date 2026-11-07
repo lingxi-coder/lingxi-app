@@ -54,7 +54,7 @@ lines.on('line', raw => {
 async function fixture(t: { after(fn: () => Promise<void>): void }, mode='success', overrides: Partial<LocalAppAgentExecutorOptions>={}) {
  const root=await fs.mkdtemp(join(tmpdir(),'lingxi-agent-executor-'));
  const children: ReturnType<typeof spawn>[]=[];
- const options: LocalAppAgentExecutorOptions={configHome:root,globalConfigPath:join(root,'global-config.json'),root,serverBin:'test-bridge',
+ const options: LocalAppAgentExecutorOptions={workspaceRoot:join(root,'workspaces'),configHome:root,globalConfigPath:join(root,'global-config.json'),root,serverBin:'test-bridge',
   credentials:async()=>accountEnvelope(),permission:async()=>false,question:async()=>null,
   spawnProcess:((_bin:unknown,_args:unknown,opts:unknown)=>{
    const child=spawn(process.execPath,['-e',CHILD,mode],opts as Parameters<typeof spawn>[2]);children.push(child);return child;
@@ -71,7 +71,7 @@ const execution:LocalAppAgentExecution={runId:'run-one',taskStorageId:'11111111-
 }
 
 function taskCwd(root:string, execution:LocalAppAgentExecution):string {
- return execution.chat ? join(root,'apps',execution.owner.appId,'agent/agui-v1/workspaces',execution.chat.chatId) : join(root,'apps',execution.owner.appId,'agent/agui-v1/tasks',execution.taskStorageId);
+ return join(root,'workspaces',execution.owner.appId,execution.chat ? 'chats' : 'tasks',execution.chat?.chatId ?? execution.taskStorageId);
 }
 function requireRuntimeTool(execution:LocalAppAgentExecution):void {
  execution.input.tools=['builtin:Read'];
@@ -92,7 +92,7 @@ test('catalog strips private config; execution preserves model, identity, limits
  const catalog=await executor.catalog();assert.ok(!JSON.stringify(catalog).includes('PRIVATE_MCP_HEADER'));assert.equal(catalog.models[0].canSelect,true);
  assert.deepEqual(await executor.execute(execution),{result:{text:'done',attachments:[],messageId:'native-message-id',output:{color:'red'}},usage:{inputTokens:7,outputTokens:3,costUsd:0.02,costEstimated:true,turns:2}});
  assert.ok(phases.includes('thinking') && phases.includes('tool'));
- const sent=JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/agui-v1/tasks/11111111-1111-4111-8111-111111111111/start.json'),'utf8'));
+ const sent=JSON.parse(await fs.readFile(join(root,'workspaces/a11111111111111111111111111111111/tasks/11111111-1111-4111-8111-111111111111/start.json'),'utf8'));
  assert.equal(sent.model,'test/vision');assert.equal(sent.appId,'a11111111111111111111111111111111');assert.equal(sent.versionId,'1'.repeat(64));assert.equal(sent.invocationId,'inv-one');assert.equal(sent.maxTurns,4);assert.equal(sent.timeoutMs,10000);
  assert.deepEqual(sent.toolPolicy,{builtinTools:[],mcpTools:[]});assert.deepEqual(sent.mcpConfigs,[]);assert.equal(sent.credentials.provider_account_credentials['11111111-1111-4111-8111-111111111111'].kind.key,'TEST_KEY');
  assert.deepEqual(sent.modelCapabilities,{vision:true,structuredOutput:true});
@@ -108,7 +108,7 @@ test('ordered AG-UI content parts use the private Rust DTO without mutating host
  execution.input.contentParts=[{kind:'text',text:'Read this.'},{kind:'attachment',name:'notes.txt',mediaType:'text/plain',base64:Buffer.from('file text').toString('base64')}];
  const original=structuredClone(execution.input);
  await executor.execute(execution);
- const sent=JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/agui-v1/tasks/11111111-1111-4111-8111-111111111111/start.json'),'utf8'));
+ const sent=JSON.parse(await fs.readFile(join(root,'workspaces/a11111111111111111111111111111111/tasks/11111111-1111-4111-8111-111111111111/start.json'),'utf8'));
  assert.deepEqual(sent.input.contentParts,[{kind:'text',text:'Read this.'},{kind:'attachment',name:'notes.txt',mediaType:'text/plain',base64:Buffer.from('file text').toString('base64')}]);
  assert.deepEqual(execution.input,original,'the host and page-facing metadata retain camelCase');
 });
@@ -228,13 +228,13 @@ test('invalid native Chat identity is rejected before catalog, credentials or a 
 });
 test('question dismissal sends typed cancellation',async t=>{
  const {root,executor,execution}=await fixture(t,'question');await executor.execute(execution);
- assert.deepEqual(JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/agui-v1/tasks/11111111-1111-4111-8111-111111111111/control.json'),'utf8')),{type:'question_cancel',requestId:8});
+ assert.deepEqual(JSON.parse(await fs.readFile(join(root,'workspaces/a11111111111111111111111111111111/tasks/11111111-1111-4111-8111-111111111111/control.json'),'utf8')),{type:'question_cancel',requestId:8});
 });
 test('credential refresh keeps the selected provider and sends keys only over stdin',async t=>{
  const requests:unknown[]=[];
  const {root,executor,execution}=await fixture(t,'refresh',{credentials:async(providerId,refresh)=>{requests.push([providerId,refresh??false]);return accountEnvelope(refresh?'NEW_TEST_KEY':'OLD_TEST_KEY');}});
  await executor.execute(execution);assert.deepEqual(requests,[['test',false],['test',true]]);
- assert.equal(JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/agui-v1/tasks/11111111-1111-4111-8111-111111111111/control.json'),'utf8')).credentials.provider_account_credentials['11111111-1111-4111-8111-111111111111'].kind.key,'NEW_TEST_KEY');
+ assert.equal(JSON.parse(await fs.readFile(join(root,'workspaces/a11111111111111111111111111111111/tasks/11111111-1111-4111-8111-111111111111/control.json'),'utf8')).credentials.provider_account_credentials['11111111-1111-4111-8111-111111111111'].kind.key,'NEW_TEST_KEY');
 });
 for(const [mode,code] of [['wrong_owner','executor_protocol'],['missing_result','invalid_result'],['error','model_execution_failed']] as const) {
  test(`rejects ${mode} without leaking diagnostics`,async t=>{
@@ -295,8 +295,8 @@ test('continuously changing configuration is bounded and never published', async
 test('a substituted Chat workspace parent is rejected before cleanup ownership or the native task starts', { skip: process.platform === 'win32' }, async t => {
  const {root,executor,execution,children}=await fixture(t);
  execution.chat={chatId:'11111111-1111-4111-8111-111111111112',sessionId:'22222222-2222-4222-8222-222222222222',sessionDirectory:join(root,'app-chat'),generationId:execution.taskStorageId,cleanupNonce:'b'.repeat(64),nativeUserMessageId:`msg:${execution.taskStorageId}`};
- const store=join(root,'apps',execution.owner.appId,'agent/agui-v1'), target=join(root,'business-data');
- await fs.mkdir(store,{recursive:true});await fs.mkdir(target);await fs.symlink(target,join(store,'workspaces'));
+ const store=join(root,'workspaces',execution.owner.appId), target=join(root,'business-data');
+ await fs.mkdir(store,{recursive:true});await fs.mkdir(target);await fs.symlink(target,join(store,'chats'));
  let ownership=0;execution.requireCleanupConfirmation=async()=>{ownership++;};
  await assert.rejects(executor.execute(execution),{code:'agent_storage_unavailable'});
  assert.equal(children.length,1,'only the catalog child can run');assert.equal(ownership,0);

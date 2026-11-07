@@ -17,13 +17,13 @@ class ProjectWorkspaceGrantTest {
 
     @Test fun explicitProjectPathsProtectMetadataAndRequireExactHostGuestCoordinates() {
         val home = temporary.root.canonicalFile
-        val brand = File(home, ".brand")
+        val brand = File(home, ".brand-workspaces")
         val id = UUID.randomUUID().toString()
         val projectRoot = File(brand, "projects/$id/workspace").apply { mkdirs() }
         val roots = ProjectGrantRoots(home, "/home/user", ".brand", "/home/user/.brand",
-            "/home/user/.brand/chat", "/home/user/.brand/code", "/home/user/.brand/scheduled",
-            "/home/user/.brand/.apps", "/home/user/.brand/projects")
-        listOf("chat", "code", "scheduled/safe", "scheduled/providers", "providers", ".apps/app", "projects").forEach {
+            "/home/user/.brand-workspaces/chat", "/home/user/.brand-workspaces/code", "/home/user/.brand-workspaces/scheduled",
+            "/home/user/.brand-workspaces/apps", "/home/user/.brand-workspaces/projects")
+        listOf("chat", "code", "scheduled/safe", "scheduled/providers", "providers", "apps/app", "projects").forEach {
             File(brand, it).mkdirs()
         }
         File(home, "normal/folder").mkdirs()
@@ -48,7 +48,7 @@ class ProjectWorkspaceGrantTest {
         assertFalse(allowed(roots.projectsGuestPath))
         assertFalse(allowed(projectGuest, File(home, "normal/folder").canonicalPath))
         assertFalse(allowed("${roots.appsGuestPath}/app"))
-        val app = AuthoringSourceIdentity("app-a", id, File(brand, ".apps/app").canonicalPath, "${roots.appsGuestPath}/app")
+        val app = AuthoringSourceIdentity("app-a", id, File(brand, "apps/app").canonicalPath, "${roots.appsGuestPath}/app")
         assertTrue(allowed(app.guestPath, app.hostPath, app))
         assertFalse(allowed(app.guestPath, app.hostPath, app.copy(projectId = UUID.randomUUID().toString())))
 
@@ -68,11 +68,11 @@ class ProjectWorkspaceGrantTest {
     }
 
     @Test fun scheduledPickerRequiresItsOwnVerifiedContentWorkspace() {
-        val path = "/home/user/.brand/workspaces/day/job"
+        val path = "/home/user/.brand-workspaces/workspaces/day/job"
         val owner = ProjectWorkspace("scheduled", "/host/day/job", path)
         assertTrue(scheduledPickerPathAllowed(true, owner, path))
         assertTrue(scheduledPickerPathAllowed(true, owner, "$path/subdir"))
-        assertFalse(scheduledPickerPathAllowed(true, owner, "/home/user/.brand/workspaces/day/other"))
+        assertFalse(scheduledPickerPathAllowed(true, owner, "/home/user/.brand-workspaces/workspaces/day/other"))
         assertFalse(scheduledPickerPathAllowed(true, null, path))
         assertFalse(scheduledPickerPathAllowed(true, owner.copy(projectId = "other"), path))
         assertTrue(scheduledPickerPathAllowed(false, null, "/home/user/other"))
@@ -96,11 +96,11 @@ class ProjectWorkspaceGrantTest {
         val projectId = UUID.randomUUID().toString()
         val sessionId = UUID.randomUUID().toString()
         val workspaceId = UUID.randomUUID().toString()
-        val appHost = File(home, ".brand/.apps/app").apply { mkdirs() }.canonicalPath
-        val projectHost = File(home, ".brand/projects/$projectId/workspace").apply { mkdirs() }.canonicalPath
+        val appHost = File(home, ".brand-workspaces/apps/app").apply { mkdirs() }.canonicalPath
+        val projectHost = File(home, ".brand-workspaces/projects/$projectId/workspace").apply { mkdirs() }.canonicalPath
         val roots = ProjectGrantRoots(home, "/home/user", ".brand", "/home/user/.brand",
-            "/home/user/.brand/chat", "/home/user/.brand/code", "/home/user/.brand/scheduled",
-            "/home/user/.brand/.apps", "/home/user/.brand/projects")
+            "/home/user/.brand-workspaces/chat", "/home/user/.brand-workspaces/code", "/home/user/.brand-workspaces/scheduled",
+            "/home/user/.brand-workspaces/apps", "/home/user/.brand-workspaces/projects")
         val guest = "${roots.appsGuestPath}/app"
         val workspace = ProjectWorkspace(projectId, appHost, guest)
         val row = ProjectSessionSummary(sessionId, "App", 0, "", 0, SessionMode.Code)
@@ -132,11 +132,11 @@ class ProjectWorkspaceGrantTest {
     @Test fun preparedSourceCannotBeTransferredOrInventedFromAnAppPath() = runBlocking {
         val home = temporary.root.canonicalFile
         val projectId = UUID.randomUUID().toString()
-        val appHost = File(home, ".brand/.apps/app").apply { mkdirs() }.canonicalPath
-        val projectHost = File(home, ".brand/projects/$projectId/workspace").apply { mkdirs() }.canonicalPath
+        val appHost = File(home, ".brand-workspaces/apps/app").apply { mkdirs() }.canonicalPath
+        val projectHost = File(home, ".brand-workspaces/projects/$projectId/workspace").apply { mkdirs() }.canonicalPath
         val roots = ProjectGrantRoots(home, "/home/user", ".brand", "/home/user/.brand",
-            "/home/user/.brand/chat", "/home/user/.brand/code", "/home/user/.brand/scheduled",
-            "/home/user/.brand/.apps", "/home/user/.brand/projects")
+            "/home/user/.brand-workspaces/chat", "/home/user/.brand-workspaces/code", "/home/user/.brand-workspaces/scheduled",
+            "/home/user/.brand-workspaces/apps", "/home/user/.brand-workspaces/projects")
         val guest = "${roots.appsGuestPath}/app"
         val workspace = ProjectWorkspace(projectId, appHost, guest)
         val project = ProjectSnapshot(ProjectRecord(projectId, "App", ProjectStorageKind.Internal, 0, 0,

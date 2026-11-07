@@ -1126,7 +1126,7 @@ async function assertScheduledPersistenceBeforeRestart(page, model) {
   return records;
 }
 
-async function assertScheduledPersistenceAfterRestart(page, records) {
+async function assertScheduledPersistenceAfterRestart(page, records, workspaceRoot) {
   for (const record of records) {
     const jobs = await evaluate(page, `window.lingxi.scheduled.manage(${JSON.stringify(record.scopeId)}, {action: 'list'})`);
     const task = jobs.find(job => job.id === record.id);
@@ -1136,6 +1136,28 @@ async function assertScheduledPersistenceAfterRestart(page, records) {
     assert.equal(task.automation.runMode, 'new_session');
     assert.equal(task.prompt, 'Updated packaged cron probe');
     await evaluate(page, `window.lingxi.scheduled.manage(${JSON.stringify(record.scopeId)}, ${JSON.stringify({action: 'history', id: record.id})})`);
+    if (record.scopeId === 'global') {
+      await evaluate(page, `window.lingxi.scheduled.manage('global', ${JSON.stringify({ action: 'update', id: record.id, cron: '* * * * *', prompt: task.prompt })})`);
+      await evaluate(page, `window.lingxi.scheduled.manage('global', ${JSON.stringify({ action: 'resume', id: record.id })})`);
+      const run = await waitFor(async () => {
+        const jobs = await evaluate(page, `window.lingxi.scheduled.manage('global', {action: 'history', id: ${JSON.stringify(record.id)}})`);
+        const latest = jobs.find(job => job.id === record.id)?.automation?.runs?.at(-1);
+        if (latest && ['failed', 'cancelled', 'interrupted'].includes(latest.status)) {
+          throw new Error(`Packaged cron failed: ${latest.error ?? latest.status}`);
+        }
+        return latest?.status === 'succeeded' ? latest : undefined;
+      }, { timeoutMs: 95_000, label: 'No project cron executes in its generated workspace' });
+      assert(run.sessionTranscriptPath, 'cron must retain its exact transcript source');
+      const rows = readFileSync(run.sessionTranscriptPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+      const cwd = rows.map(row => row.relocatedCwd ?? row.cwd).filter(value => typeof value === 'string').at(-1);
+      const taskRoot = join(realpathSync.native(workspaceRoot), 'cron', createHash('sha256').update(record.id).digest('hex'));
+      assert(cwd?.startsWith(join(taskRoot, 'runs') + sep), 'cron session cwd must be below the branded workspace sibling');
+      assert(lstatSync(join(cwd, 'work')).isDirectory());
+      assert(lstatSync(join(cwd, 'outputs')).isDirectory());
+      assert(lstatSync(join(taskRoot, 'memory.md')).isFile());
+      await evaluate(page, `window.lingxi.scheduled.manage('global', ${JSON.stringify({ action: 'pause', id: record.id })})`);
+      log('No project cron execution, transcript cwd, work/outputs and task memory verified');
+    }
     const remaining = await evaluate(page, `window.lingxi.scheduled.manage(${JSON.stringify(record.scopeId)}, ${JSON.stringify({action: 'delete', id: record.id})})`);
     assert(!remaining.some(job => job.id === record.id), 'scheduled task deletion persists');
   }
@@ -1295,7 +1317,7 @@ async function createPackagedLocalAppSourceSession(page, creatorSessionId, confi
   await enterPackagedProjectName(page, projectName);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.create-project-submit:not(:disabled)'))`), { label: 'native Local App source Project is ready to create' });
   await evaluate(page, `document.querySelector('.create-project-submit').click()`);
-  await confirmPackagedLocalAppSourceTrust(page, join(configHome, '.apps', projectName));
+  await confirmPackagedLocalAppSourceTrust(page, join(configHome + '-workspaces', 'apps', projectName));
   const sourceSession = await waitFor(async () => {
     const state = await evaluate(page, 'window.lingxi.bootstrap()');
     const active = state.activeSession;
@@ -1714,7 +1736,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     ({ browser, page } = await connectToDebugger(cdpPort, rendererUrl));
     await monitorRenderer(page);
     await waitFor(() => evaluate(page, 'window.lingxi?.bootstrap().then(b => b.connection?.status === "connected")'), { label: 'restarted custom provider app' });
-    await assertScheduledPersistenceAfterRestart(page, scheduledRecords);
+    await assertScheduledPersistenceAfterRestart(page, scheduledRecords, join(tempHome, '.lingxi-workspaces'));
     await assertColdSessionOpen(page, coldSession);
     const customSession = await prepareCustomProvider(page, customProbe, true);
     await assertCustomProviderRequest(page, customProbe, customSession);

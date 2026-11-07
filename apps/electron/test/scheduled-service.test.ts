@@ -136,7 +136,7 @@ async function harness(t: TestContext) {
     newSession: () => assert.fail('Scheduled tasks must not create foreground drafts'),
   } as unknown as SessionRuntimeManager;
   const catalog = {
-    productPaths: async () => ({ brandHome: join(directory, '.test-brand'), appProjectsRoot: join(directory, '.test-brand', 'apps') }),
+    productPaths: async () => ({ workspaceRoot: join(directory, '.test-brand-workspaces'), brandHome: join(directory, '.test-brand'), appProjectsRoot: join(directory, '.test-brand', 'apps') }),
     list: async (path: string, _scope?: string, include?: (row: any) => boolean) => ({ sessions: (catalogRows.get(path) ?? [])
       .map((row) => ({ ...row, mode: row.mode ?? 'code' as const })).filter((row) => include?.(row) ?? true).slice(0, 200) }),
     find: async (path: string, sessionId: string) => {
@@ -465,7 +465,7 @@ test('no-project runs use branded per-run workspaces, stable task memory, and re
   const one = h.managedSessions.get(first.sessionId)!;
   const two = h.managedSessions.get(second.sessionId)!;
   assert.notEqual(one.projectPath, two.projectPath);
-  assert.ok(one.projectPath.startsWith(join(h.directory, '.test-brand', 'workspaces') + '/'));
+  assert.ok(one.projectPath.startsWith(join(h.directory, '.test-brand-workspaces', 'cron') + '/'));
   assert.match(one.projectPath, /\/\d{4}-\d{2}-\d{2}\/Morning-brief-[a-f0-9-]+$/);
   assert.deepEqual((await readdir(one.projectPath)).sort(), ['outputs', 'work']);
   assert.equal(one.memory, two.memory, 'runs of the same task share durable memory');

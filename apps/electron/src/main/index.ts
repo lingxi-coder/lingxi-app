@@ -388,7 +388,16 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   diagnostics.add('info', 'host', credentialBroker
     ? 'credential store: macOS credential broker'
     : 'credential store: shared engine secure storage');
-  const settings = new SettingsStore(userData);
+  const catalogOptions = {
+    appVersion: app.getVersion(),
+    providerAccountChannel: credentialBroker?.credentialChannel ?? 'development',
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
+  };
+  const sessionCatalog = new ProjectSessionCatalog(catalogOptions);
+  const productPaths = await sessionCatalog.productPaths();
+  const settings = new SettingsStore(userData, productPaths.workspaceRoot);
   let lastComputerRevision = '';
   const computerSettings = new ComputerSettingsStore(userData, {
     showExtension: async path => { const error = await shell.openPath(path); if (error) throw new Error(error); },
@@ -461,14 +470,6 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         isForeground: () => windowFocused,
       })
     : null;
-  const catalogOptions = {
-    appVersion: app.getVersion(),
-    providerAccountChannel: credentialBroker?.credentialChannel ?? 'development',
-    isPackaged: app.isPackaged,
-    resourcesPath: process.resourcesPath,
-    serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
-  };
-  const sessionCatalog = new ProjectSessionCatalog(catalogOptions);
   // Off unless the owner (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns Remote Control on for this computer.
   const remoteControlOn = (): boolean => settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1');
   // The one refresher of the Codex session. Engines get only access tokens.
@@ -923,10 +924,6 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   } });
   host.attachGit(git);
   host.registerIpc();
-  const productPaths = await sessionCatalog.productPaths().catch(error => {
-    diagnostics.add('warn', 'host', `local application directory unavailable: ${sanitizeDiagnostic(error)}`);
-    return undefined;
-  });
   if (productPaths) {
     let teamBotStore: BotStore | undefined;
     // The Bots live beside the app's other data and keep clear of the default configuration home.
@@ -982,6 +979,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       configHome: productPaths.brandHome,
       globalConfigPath: productPaths.globalConfigPath,
       root: agentRoot,
+      workspaceRoot: join(productPaths.workspaceRoot, 'app-agents'),
       isPackaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
       catalogCredentials: async () => providerAccounts ? { providerAccounts: await providerAccounts.snapshot(), providerAccountCredentials: {}, providerAccountHome: productPaths.brandHome } : {},
@@ -1067,6 +1065,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     });
     const agentBroker = new LocalAppAgentBroker({
       root: agentRoot,
+      workspaceRoot: join(productPaths.workspaceRoot, 'app-agents'),
       authorize: owner => localApps!.authorizeAgent(owner),
       revalidate: (owner, authorization) => localApps!.revalidateAgent(owner, authorization),
       execute: execution => agentExecutor.execute(execution),

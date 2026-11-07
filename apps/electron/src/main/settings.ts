@@ -49,9 +49,9 @@ export class SettingsStore {
   // The app's own data folder, as a real path when it can be resolved.
   private readonly userDataFolder: string;
 
-  constructor(userData: string) {
+  constructor(userData: string, workspaceRoot = join(userData, 'workspaces')) {
     this.settingsPath = join(userData, 'settings.v1.json');
-    this.conversationSpaces = new ConversationSpaceStore(userData);
+    this.conversationSpaces = new ConversationSpaceStore(userData, workspaceRoot);
     const managed = join(userData, 'scheduled-workspace');
     let canonical = managed;
     let folder = userData;

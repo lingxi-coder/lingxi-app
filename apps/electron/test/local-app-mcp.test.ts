@@ -148,7 +148,7 @@ test('gateway rejects missing credentials, browser origins and forged hosts, and
 test('real Rust store and native Agent catalog discover managed MCP without user configuration', { skip: !process.env.LINGXI_LOCAL_APP_CORE_BIN, timeout: 120000 }, async t => {
   const binary = process.env.LINGXI_LOCAL_APP_CORE_BIN!;
   const f = await setup(t, binary);
-  const executor = new LocalAppAgentExecutor({ configHome: f.root, root: f.root, serverBin: binary,
+  const executor = new LocalAppAgentExecutor({ workspaceRoot: join(f.root, 'workspaces'), configHome: f.root, root: f.root, serverBin: binary,
     catalogTimeoutMs: 30000, environment: { PATH: process.env.PATH, HOME: f.root }, credentials: async () => ({}),
     permission: async () => false, question: async () => null });
   const row = await f.publish();

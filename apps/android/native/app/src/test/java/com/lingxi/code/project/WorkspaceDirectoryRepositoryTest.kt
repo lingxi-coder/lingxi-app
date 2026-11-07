@@ -87,29 +87,30 @@ class WorkspaceDirectoryRepositoryTest {
         fails(R.string.workspace_browser_outside_home) { repo.save("/home/brand/workspace", "workspace") }
         assertEquals("keep", original.readText())
     }
-    @Test fun managedWorkspacesInsideConfigurationAreWritableButTheirRootsAndSecretsStayProtected() {
+    @Test fun managedWorkspacesAreWritableButTheirRootsAndConfigurationStayProtected() {
         val config = File(temp.root, ".brand").apply { mkdir() }
-        val roots = listOf("chat", "code", "projects/6d0793ab-3426-4c84-8b38-c0ab3896dcee/workspace", "workspaces/6d0793ab-3426-4c84-8b38-c0ab3896dcee/run")
-        roots.forEach { File(config, it).mkdirs() }
-        File(config, "scheduled").mkdir()
+        val workspace = File(temp.root, ".brand-workspaces").apply { mkdir() }
+        val roots = listOf("chat", "code", "projects/6d0793ab-3426-4c84-8b38-c0ab3896dcee/workspace", "cron/task/runs/day/run")
+        roots.forEach { File(workspace, it).mkdirs() }
+        File(workspace, "scheduled").mkdir()
         File(config, "provider").mkdir()
-        File(config, ".apps").mkdir()
-        val projectIndex = File(config, "projects/index.json").apply { writeText("keep") }
-        val projectManifest = File(config, "projects/6d0793ab-3426-4c84-8b38-c0ab3896dcee/project.json").apply { writeText("keep") }
-        val guestRoots = roots.map { "/home/brand/.brand/$it" }
-        val repo = WorkspaceDirectoryRepository(temp.root, "/home/brand", guestRoots[0], "/home/brand/.brand/projects", config, guestRoots)
+        File(workspace, "apps").mkdir()
+        val projectIndex = File(workspace, "projects/index.json").apply { writeText("keep") }
+        val projectManifest = File(workspace, "projects/6d0793ab-3426-4c84-8b38-c0ab3896dcee/project.json").apply { writeText("keep") }
+        val guestRoots = roots.map { "/home/brand/.brand-workspaces/$it" }
+        val repo = WorkspaceDirectoryRepository(temp.root, "/home/brand", guestRoots[0], "/home/brand/.brand-workspaces/projects", config, guestRoots)
 
         guestRoots.forEach { root ->
             assertTrue(repo.resolve(repo.create(root, "content")).isDirectory)
             fails(R.string.workspace_browser_in_use) { repo.rename(root, "renamed", emptyList()) }
             fails(R.string.workspace_browser_in_use) { repo.delete(root, emptyList()) }
         }
-        for (restricted in listOf("/home/brand/.brand", "/home/brand/.brand/provider", "/home/brand/.brand/.apps", "/home/brand/.brand/scheduled",
-            "/home/brand/.brand/projects", "/home/brand/.brand/projects/6d0793ab-3426-4c84-8b38-c0ab3896dcee")) {
+        for (restricted in listOf("/home/brand/.brand", "/home/brand/.brand/provider", "/home/brand/.brand-workspaces/apps", "/home/brand/.brand-workspaces/scheduled",
+            "/home/brand/.brand-workspaces/projects", "/home/brand/.brand-workspaces/projects/6d0793ab-3426-4c84-8b38-c0ab3896dcee")) {
             fails(R.string.workspace_browser_in_use) { repo.create(restricted, "not-allowed") }
         }
-        fails(R.string.workspace_browser_in_use) { repo.delete("/home/brand/.brand/projects/index.json", emptyList()) }
-        fails(R.string.workspace_browser_in_use) { repo.delete("/home/brand/.brand/projects/6d0793ab-3426-4c84-8b38-c0ab3896dcee/project.json", emptyList()) }
+        fails(R.string.workspace_browser_in_use) { repo.delete("/home/brand/.brand-workspaces/projects/index.json", emptyList()) }
+        fails(R.string.workspace_browser_in_use) { repo.delete("/home/brand/.brand-workspaces/projects/6d0793ab-3426-4c84-8b38-c0ab3896dcee/project.json", emptyList()) }
         fails(R.string.workspace_browser_in_use) { repo.delete("/home/brand/.brand", emptyList()) }
         assertEquals("keep", projectIndex.readText())
         assertEquals("keep", projectManifest.readText())
@@ -117,16 +118,16 @@ class WorkspaceDirectoryRepositoryTest {
 
     @Test fun symlinksCannotTurnConfigurationIntoAContentWorkspace() {
         val config = File(temp.root, ".brand").apply { mkdir() }
-        val chat = File(config, "chat").apply { mkdir() }
+        val chat = File(temp.root, ".brand-workspaces/chat").apply { mkdirs() }
         val provider = File(config, "provider").apply { mkdir() }
-        val repo = WorkspaceDirectoryRepository(temp.root, "/home/brand", "/home/brand/.brand/chat",
-            "/home/brand/.brand/projects", config, listOf("/home/brand/.brand/chat"))
+        val repo = WorkspaceDirectoryRepository(temp.root, "/home/brand", "/home/brand/.brand-workspaces/chat",
+            "/home/brand/.brand-workspaces/projects", config, listOf("/home/brand/.brand-workspaces/chat"))
         Files.createSymbolicLink(File(chat, "private").toPath(), provider.toPath())
-        fails(R.string.workspace_browser_in_use) { repo.create("/home/brand/.brand/chat/private", "not-allowed") }
+        fails(R.string.workspace_browser_in_use) { repo.create("/home/brand/.brand-workspaces/chat/private", "not-allowed") }
         File(chat, "private").delete()
         chat.delete()
         Files.createSymbolicLink(chat.toPath(), provider.toPath())
-        fails(R.string.workspace_browser_in_use) { repo.create("/home/brand/.brand/chat", "not-allowed") }
+        fails(R.string.workspace_browser_in_use) { repo.create("/home/brand/.brand-workspaces/chat", "not-allowed") }
         assertTrue(provider.listFiles()!!.isEmpty())
     }
     private fun fails(resource: Int, action: () -> Unit) {

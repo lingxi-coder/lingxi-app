@@ -71,6 +71,8 @@ export interface LocalAppAgentExecution {
 export interface LocalAppAgentBrokerOptions {
   /** `<config>/local-apps/v2` */
   root: string;
+  /** Brand-owned Agent workspace root, separate from the private ledger. */
+  workspaceRoot: string;
   authorize(owner: LocalAppAgentOwner): Promise<LocalAppAgentAuthorization>;
   revalidate(owner: LocalAppAgentOwner, authorization: LocalAppAgentAuthorization): Promise<boolean>;
   execute(execution: LocalAppAgentExecution): Promise<LocalAppAgentExecutorResult>;
@@ -444,11 +446,13 @@ export class LocalAppAgentBroker {
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('unsafe Chat directory');
     for (const name of await fs.readdir(directory)) if (name !== 'chat.json') await fs.rm(join(directory, name), { recursive: true, force: true });
     await syncDirectory(directory);
-    const workspaces = join(this.appRoot(principal.appId), 'workspaces');
-    let parent;
-    try { parent = await fs.lstat(workspaces); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
-    if (!parent.isDirectory() || parent.isSymbolicLink()) throw new Error('unsafe Chat workspace parent');
+    const workspaces = join(this.options.workspaceRoot, principal.appId, 'chats');
+    for (const path of [this.options.workspaceRoot, join(this.options.workspaceRoot, principal.appId), workspaces]) {
+      let parent;
+      try { parent = await fs.lstat(path); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+      if (!parent.isDirectory() || parent.isSymbolicLink()) throw new Error('unsafe Chat workspace parent');
+    }
     const workspace = join(workspaces, chatId);
     let workspaceStat;
     try { workspaceStat = await fs.lstat(workspace); }
@@ -541,6 +545,25 @@ export class LocalAppAgentBroker {
       }
     }
   }
+  private async validateWorkspaceDirectories(appId: string): Promise<void> {
+    const app = join(this.options.workspaceRoot, appId);
+    for (const path of [this.options.workspaceRoot, app]) {
+      let stat;
+      try { stat = await fs.lstat(path); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('unsafe Agent workspace parent');
+    }
+    for (const group of ['chats', 'tasks']) {
+      const path = join(app, group);
+      let stat;
+      try { stat = await fs.lstat(path); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('unsafe Agent workspace group');
+      for (const entry of await fs.readdir(path, { withFileTypes: true })) {
+        if (!PRIVATE_TASK_ID.test(entry.name) || !entry.isDirectory() || entry.isSymbolicLink()) throw new Error('unsafe Agent workspace');
+      }
+    }
+  }
   private async loadApp(appId: string): Promise<void> {
     const agentRoot = this.appRoot(appId);
     // Validate the unversioned parent too: lstat of agui-v1 alone follows a
@@ -553,22 +576,19 @@ export class LocalAppAgentBroker {
     try { agentStat = await fs.lstat(agentRoot); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
     if (!agentStat.isDirectory() || agentStat.isSymbolicLink()) throw new LocalAppAgentError('ledger_invalid', 'Agent storage contains an unsafe application directory.');
+    await this.validateWorkspaceDirectories(appId);
 
     // Inspect the entire App before changing any of it. Recovery can update a
     // task, rewrite a Chat or delete tombstoned assets, so doing those while a
     // later record is still unchecked would alter data belonging to a rejected App.
     const groups = new Map<string, { path: string; entries: Dirent[] }>();
-    for (const group of ['tasks', 'chats', 'assets', 'workspaces']) {
+    for (const group of ['tasks', 'chats', 'assets']) {
       const groupPath = join(agentRoot, group);
       let stat;
       try { stat = await fs.lstat(groupPath); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
       if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('unsafe Agent directory');
-      if (group === 'workspaces') {
-        for (const entry of await fs.readdir(groupPath, { withFileTypes: true })) {
-          if (!CHAT_ID.test(entry.name) || !entry.isDirectory() || entry.isSymbolicLink()) throw new Error('unsafe Chat workspace');
-        }
-      } else if (group !== 'assets') groups.set(group, { path: groupPath, entries: await fs.readdir(groupPath, { withFileTypes: true }) });
+      if (group !== 'assets') groups.set(group, { path: groupPath, entries: await fs.readdir(groupPath, { withFileTypes: true }) });
     }
 
     const tasks: Array<{ path: string; record: LedgerRecord; principal: LocalAppAgentOwner; fence: 'missing' | 'valid' | 'invalid'; uncertain: boolean; cleanupConfirmed: boolean }> = [];

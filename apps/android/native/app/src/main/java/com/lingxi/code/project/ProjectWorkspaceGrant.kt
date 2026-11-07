@@ -95,10 +95,11 @@ internal fun isSafeProjectWorkspace(
 
     fun within(path: String, root: String): Boolean = path == root || path.startsWith("$root/")
     val inConfig = within(guestPath, roots.configGuestPath)
-    val checked = if (inConfig) components.drop(1) else components
+    require(!inConfig)
+    val checked = components
     require(checked.none { it.equals(roots.configDirName, true) || it.equals("provider", true) || it.equals("providers", true) })
     require(checked.zipWithNext().none { (a, b) -> a.equals("Library", true) && b.equals("Preferences", true) })
-    if (inConfig) {
+    if (within(guestPath, roots.guestHome.trimEnd('/') + "/" + roots.configDirName + "-workspaces")) {
         val ownedProjectRoot = project?.let { snapshot ->
             require(snapshot.sourceWorkspace.projectId == snapshot.record.id)
             val source = File(snapshot.sourceWorkspace.hostPath).absoluteFile.toPath().normalize()

@@ -15,7 +15,7 @@ LingXi for iPhone and LingXi for Android are internal betas. This site does not 
 
 ## Paths the command can see
 
-The default Linux profile uses /home/lingxi as its home. Its config directory is /home/lingxi/.lingxi, and its projects directory is /home/lingxi/.lingxi/projects. A command’s working directory is one of these guest paths. A folder path from the phone’s own file browser is a different coordinate, and it is not automatically the path the command sees.
+The default Linux profile uses /home/lingxi as its home. Its config directory is /home/lingxi/.lingxi, and its projects directory is /home/lingxi/.lingxi-workspaces/projects. A command’s working directory is one of these guest paths. A folder path from the phone’s own file browser is a different coordinate, and it is not automatically the path the command sees.
 
 Embedding that environment in another app, choosing mounts, and passing host paths to the runtime are covered by the Mobile Linux SDK.
 

@@ -96,9 +96,9 @@ Mobile runtime paths come from the host's `BrandRuntimeProfile { brandId, linuxU
 | --- | --- |
 | Guest home | `/home/<linuxUser>` |
 | Config root | `/home/<linuxUser>/<configDirName>` |
-| Brand workspace root | `/home/<linuxUser>/<brandId>` |
-| Projects | `/home/<linuxUser>/<brandId>/projects` |
-| Local App authoring sources | `<config root>/.apps/<slug>-<uuid8>` |
+| Brand workspace root | `/home/<linuxUser>/<configDirName>-workspaces` |
+| Projects | `<workspace root>/projects` |
+| Local App authoring sources | `<workspace root>/apps/<slug>-<uuid8>` |
 | Native persistent backing | `<managedRoot>/persistent/<linuxUser>` |
 
 The source-directory `uuid8` suffix is generated independently from the Project's `workspaceId`; the directory name is not an encoding of the workspace identity.
@@ -107,10 +107,11 @@ The App library lives below the config root at `local-apps/v2/apps/<appId>`.
 Immutable release source (`releases/<revision>/source`), application business
 data (`data`) and application process runs (`runs`) remain separate. The current
 Agent store is `agent/agui-v1`: private transcripts and checkpoints belong to
-`chats/<chatId>`, persistent Chat tool files to `workspaces/<chatId>`, and
-independent task files to `tasks/<runId>`. Attachments have their own managed
+`chats/<chatId>`. Persistent Chat tool files live in
+`<workspace root>/app-agents/<appId>/chats/<chatId>`, and independent task files
+in `<workspace root>/app-agents/<appId>/tasks/<taskStorageId>`. Attachments have their own managed
 asset directories. Tools never use the private transcript directory as their
-working directory. A selected Skill receives a fresh verified scope within its
+working directory. See [workspace storage](WORKSPACE_STORAGE.md). A selected Skill receives a fresh verified scope within its
 task or Chat workspace for each run; the host retains its handle until tool
 cleanup completes. Linux user identity is a runtime profile and is independent
 of the Firebase account. No files or paths are migrated from `/root` or another

@@ -48,7 +48,7 @@ function deferred<T>() {
 async function fixture(t: { after(callback: () => Promise<void>): void }, overrides: Partial<LocalAppAgentBrokerOptions> = {}) {
   const root = await fs.mkdtemp(join(tmpdir(), 'lingxi-agui-broker-'));
   const options: LocalAppAgentBrokerOptions = {
-    root, authorize: async () => auth(), revalidate: async () => true,
+    root, workspaceRoot: join(root, 'workspaces'), authorize: async () => auth(), revalidate: async () => true,
     execute: async execution => ({ result: { text: 'done', output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}`,
       ...(execution.chat ? { chatId: execution.chat.chatId } : {}) }, usage: { inputTokens: 8, outputTokens: 2, turns: 1 } }),
     ...overrides,
@@ -409,7 +409,7 @@ test('current Agent storage ignores old namespaces and markers without reading o
     [join(appPath, 'workspace', 'keep.txt'), Buffer.from('business data')],
   ]);
   for (const [path, bytes] of originalFiles) { await fs.mkdir(dirname(path), { recursive: true }); await fs.writeFile(path, bytes); }
-  const options: LocalAppAgentBrokerOptions = { root, authorize: async () => auth(), revalidate: async () => true,
+  const options: LocalAppAgentBrokerOptions = { root, workspaceRoot: join(root, 'workspaces'), authorize: async () => auth(), revalidate: async () => true,
     execute: async execution => ({ result: { text: 'healthy', output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}` }, usage: {} }) };
   const broker = new LocalAppAgentBroker(options);
   t.after(async () => { await broker.dispose().catch(() => undefined); await fs.rm(root, { recursive: true, force: true }); });
@@ -487,6 +487,20 @@ test('current Agent stores isolate task and directory faults without changing th
     } },
     { name: 'task workspace is a symlink', links: true, inject: async (root, agent) => {
       await fs.symlink(join(root, 'original-target'), join(agent, 'tasks', taskId));
+    } },
+    { name: 'Agent working task directory is a symlink', links: true, inject: async root => {
+      const tasks = join(root, 'workspaces', principal.appId, 'tasks');
+      await fs.mkdir(tasks, { recursive: true });
+      await fs.symlink(join(root, 'original-target'), join(tasks, taskId));
+    } },
+    { name: 'Agent working chats directory is a symlink', links: true, inject: async root => {
+      const app = join(root, 'workspaces', principal.appId);
+      await fs.mkdir(app, { recursive: true });
+      await fs.symlink(join(root, 'original-target'), join(app, 'chats'));
+    } },
+    { name: 'Agent working App directory is a symlink', links: true, inject: async root => {
+      await fs.mkdir(join(root, 'workspaces'), { recursive: true });
+      await fs.symlink(join(root, 'original-target'), join(root, 'workspaces', principal.appId));
     } },
     { name: 'tasks directory is a file', inject: async (root, agent) => {
       await fs.rename(join(agent, 'tasks'), join(root, 'original-target', 'tasks'));
@@ -1887,7 +1901,7 @@ test('Chat deletion removes only its drained workspace and rejects a substituted
   const { root, broker } = await fixture(t);
   const first = await broker.createChat(principal, { requestId: 'de777777-7777-4777-8777-777777777777' });
   const second = await broker.createChat(principal, { requestId: 'de888888-8888-4888-8888-888888888888' });
-  const workspaces = join(root, 'apps', principal.appId, 'agent/agui-v1/workspaces');
+  const workspaces = join(root, 'workspaces', principal.appId, 'chats');
   const firstWorkspace = join(workspaces, first.chatId), secondWorkspace = join(workspaces, second.chatId);
   await fs.mkdir(firstWorkspace, { recursive: true }); await fs.mkdir(secondWorkspace);
   await fs.writeFile(join(firstWorkspace, 'owned.txt'), 'first'); await fs.writeFile(join(secondWorkspace, 'business.txt'), 'preserve');

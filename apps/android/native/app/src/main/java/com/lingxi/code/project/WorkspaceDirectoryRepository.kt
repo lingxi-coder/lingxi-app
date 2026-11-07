@@ -101,7 +101,9 @@ internal class WorkspaceDirectoryRepository(
         return current.canonicalFile.takeIf { within(it, home.canonicalFile) }
     }
     internal fun writable(path: String): File = resolve(path, false).also { target ->
-        if (within(target, config.canonicalFile) && managedWorkspaces.none { root ->
+        if (within(target, config.canonicalFile)) fail(R.string.workspace_browser_in_use)
+        val container = File(config.parentFile, config.name + "-workspaces").canonicalFile
+        if (within(target, container) && managedWorkspaces.none { root ->
                 managedRoot(root)?.let { within(target, it) } == true
             }) fail(R.string.workspace_browser_in_use)
     }

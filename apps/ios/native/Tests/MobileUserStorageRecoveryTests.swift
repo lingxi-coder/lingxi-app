@@ -9,8 +9,8 @@ final class MobileUserStorageRecoveryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let paths = MobileUserStorage.directories(managedRoot: root.path)
         let brandHome = URL(fileURLWithPath: paths.configHome)
-        let relative = "workspaces/2026-10-30/task-run"
-        let workspace = brandHome.appendingPathComponent(relative)
+        let relative = "cron/test-task/runs/2026-10-30/task-run"
+        let workspace = brandHome.deletingLastPathComponent().appendingPathComponent(paths.configDirName + "-workspaces").appendingPathComponent(relative)
         let manifests = brandHome.appendingPathComponent("automations/sessions")
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: manifests, withIntermediateDirectories: true)
@@ -24,7 +24,7 @@ final class MobileUserStorageRecoveryTests: XCTestCase {
         XCTAssertThrowsError(try MobileUserStorage.scheduledGuestWorkspace(sessionID: id, managedRoot: root.path))
         try write(relative)
         XCTAssertEqual(try MobileUserStorage.scheduledWorkspace(sessionID: "sess:" + id, managedRoot: root.path), workspace.resolvingSymlinksInPath().path)
-        XCTAssertEqual(try MobileUserStorage.scheduledGuestWorkspace(sessionID: id, managedRoot: root.path), paths.configGuestPath + "/" + relative)
+        XCTAssertEqual(try MobileUserStorage.scheduledGuestWorkspace(sessionID: id, managedRoot: root.path), paths.guestHome + "/" + paths.configDirName + "-workspaces/" + relative)
         XCTAssertThrowsError(try MobileUserStorage.scheduledGuestWorkspace(sessionID: UUID().uuidString.lowercased(), managedRoot: root.path))
         let realManifests = manifests.deletingLastPathComponent().appendingPathComponent("sessions-real")
         try FileManager.default.moveItem(at: manifests, to: realManifests)
@@ -38,7 +38,7 @@ final class MobileUserStorageRecoveryTests: XCTestCase {
         try FileManager.default.removeItem(at: manifest)
         try JSONSerialization.data(withJSONObject: ["version": 1, "workspace": relative]).write(to: manifest)
         XCTAssertThrowsError(try MobileUserStorage.scheduledGuestWorkspace(sessionID: id, managedRoot: root.path))
-        try write("workspaces/../outside")
+        try write("cron/../outside")
         XCTAssertThrowsError(try MobileUserStorage.scheduledWorkspace(sessionID: id, managedRoot: root.path))
         XCTAssertThrowsError(try MobileUserStorage.scheduledGuestWorkspace(sessionID: id, managedRoot: root.path))
         try write(relative)
@@ -51,7 +51,7 @@ final class MobileUserStorageRecoveryTests: XCTestCase {
         let home = "/var/mobile/Containers/Data/Application/11111111-1111-4111-8111-111111111111"
         let previous = "/private/var/mobile/Containers/Data/Application/22222222-2222-4222-8222-222222222222"
         let profile = MobileUserStorage.directories()
-        let suffix = "/Library/Application Support/mobile-linux/ios-ish/persistent/\(profile.linuxUser)/\(profile.configDirName)/projects"
+        let suffix = "/Library/Application Support/mobile-linux/ios-ish/persistent/\(profile.linuxUser)/\(profile.configDirName)-workspaces/projects"
         let projects = home + suffix
         XCTAssertTrue(MobileUserStorage.isRelocatedManagedWorkspaceLink(previous + suffix, projects: projects, applicationHome: home))
         for target in [previous + "/Documents/project", previous + suffix + "/source", home + suffix,

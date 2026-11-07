@@ -92,7 +92,7 @@ class SessionBootstrapTest {
         assertEquals(VisualizationRef("chart", 2u),
             buildChatRenderItems(vm.state.value).filterIsInstance<ChatRenderItem.Visualization>().single().reference)
         source.emit(ClientEvent.TurnEnded(TurnOutcomeDto.END_TURN, null,
-            CostDto(0.0, 0u, 0u, 0u, 0u, "$0.00")))
+            CostDto(0.0, 0u, 0u, 0u, 0u, "$0.00", emptyList())))
         runCurrent()
         assertFalse(vm.state.value.streaming)
         assertEquals(owner, vm.state.value.session.id)

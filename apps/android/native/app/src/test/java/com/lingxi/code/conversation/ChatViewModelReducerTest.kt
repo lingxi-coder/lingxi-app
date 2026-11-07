@@ -3404,7 +3404,7 @@ class ChatViewModelReducerTest {
         outputTokens = 0u,
         apiCalls = 0u,
         sessionDurationSecs = 0u,
-        formatted = "$0.00",
+        formatted = "$0.00", byAccount = emptyList()
     )
     @Test fun appAuthoringWaitsForConfirmedSessionAndWorkspace() = runTest {
         val source = SessionControlSource()

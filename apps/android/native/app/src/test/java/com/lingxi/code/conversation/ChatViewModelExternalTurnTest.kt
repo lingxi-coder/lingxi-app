@@ -68,7 +68,7 @@ class ChatViewModelExternalTurnTest {
         title = null,
     )
 
-    private val cost = CostDto(0.0, 0u, 0u, 0u, 0u, "$0.00")
+    private val cost = CostDto(0.0, 0u, 0u, 0u, 0u, "$0.00", emptyList())
 
     @Test fun baseReplacesEverythingHeld() = runTest(dispatcher) {
         val source = FakeExternalSource()

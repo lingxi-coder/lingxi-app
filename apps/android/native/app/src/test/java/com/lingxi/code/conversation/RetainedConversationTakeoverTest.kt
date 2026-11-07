@@ -389,7 +389,7 @@ class RetainedConversationTakeoverTest {
         }
         val old = ChatViewModel(source, backgroundExecution = retention)
         val store = ViewModelStore().apply { put("chat", old) }
-        val cost = CostDto(0.0, 0u, 0u, 0u, 0u, "")
+        val cost = CostDto(0.0, 0u, 0u, 0u, 0u, "", emptyList())
         fun finish(answer: String) {
             relay.offer(ClientEvent.TextDelta(answer.toClientTextDto()))
             relay.offer(ClientEvent.TurnEnded(TurnOutcomeDto.END_TURN, null, cost))

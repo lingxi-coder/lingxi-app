@@ -24,7 +24,7 @@ function fakeProcess(pid: number) {
   });
 }
 
-const cost = (totalUsd: number) => ({ total_usd: totalUsd, input_tokens: 10, output_tokens: 20, api_calls: 1, session_duration_secs: 1, formatted: `$${totalUsd}` });
+const cost = (totalUsd: number) => ({ total_usd: totalUsd, input_tokens: 10, output_tokens: 20, api_calls: 1, session_duration_secs: 1, formatted: `$${totalUsd}`, by_account: [] });
 const assistant = (text: string) => ({ role: 'assistant', blocks: [{ type: 'text' as const, text }] });
 
 interface Prompt { text: string; turnId: number }

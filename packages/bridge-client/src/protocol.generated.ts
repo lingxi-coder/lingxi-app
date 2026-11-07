@@ -2,9 +2,10 @@
 // Do not edit. Run scripts/checks/generate-client-protocol.py after updating the pin.
 // Nested DTOs and semantic validation remain in protocol.ts and validation.ts.
 
-// Custom Serde fingerprints (review changes): command=42b97d850372f8cd event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=296784fce33f4474 event_source=964c915560325679
+// Custom Serde fingerprints (review changes): command=42b97d850372f8cd event=b5e0d772b9960a19 text=d1e3623a10a3c634 answers=32cce2f70b5bbf9b credential=e30228f13e5454fd command_source=2868b31e72b66b77 event_source=9279459cec5ab569
 
 import type {
+  AccountUsageRowDto,
   AgentDto,
   AskUserQuestionRequestDto,
   AttachmentDto,
@@ -209,7 +210,7 @@ export type ClientEvent =
   | { type: 'message_complete'; stop_reason?: string; message?: MessageDto }
   | { type: 'turn_started'; turn_id?: number }
   | { type: 'turn_ended'; outcome: TurnOutcomeDto; stop_reason?: string; cost: CostDto }
-  | { type: 'cost_update'; total_usd: number; input_tokens: number; output_tokens: number; api_calls: number; session_duration_secs: number; formatted: string }
+  | { type: 'cost_update'; total_usd: number; input_tokens: number; output_tokens: number; api_calls: number; session_duration_secs: number; formatted: string; by_account: Array<AccountUsageRowDto> }
   | { type: 'compaction_completed'; messages_before: number; messages_after: number; bytes_saved: number; summary: string }
   | { type: 'session_started'; session_id: string; mode: SessionModeDto }
   | { type: 'session_ended' }
@@ -389,6 +390,7 @@ const CLIENT_EVENT_FIELDS: Record<ClientEvent['type'], readonly BasicField[]> = 
     ['api_calls', 'unsigned', false, false, false],
     ['session_duration_secs', 'unsigned', false, false, false],
     ['formatted', 'string', false, false, false],
+    ['by_account', 'array', false, false, false],
   ],
   compaction_completed: [
     ['messages_before', 'unsigned', false, false, false],

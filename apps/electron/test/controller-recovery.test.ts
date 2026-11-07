@@ -262,7 +262,7 @@ for (const operation of ['open', 'restart'] as const) {
     h.internal.client.emit('event', { type: 'turn_started', turn_id: 17 });
     h.internal.client.emit('event', { type: 'coordinator_status', active_workers: 1 });
     h.activeWorkers = 1;
-    h.internal.client.emit('event', { type: 'cost_update', total_usd: 5, input_tokens: 11, output_tokens: 7, api_calls: 2, session_duration_secs: 3, formatted: 'prior cumulative cost' });
+    h.internal.client.emit('event', { type: 'cost_update', total_usd: 5, input_tokens: 11, output_tokens: 7, api_calls: 2, session_duration_secs: 3, formatted: 'prior cumulative cost', by_account: [] });
     h.internal.client.emit('permission', { request_id: 1, kind: { type: 'exit_plan_mode' } });
     for (let attempt = 0; attempt < 50 && h.internal.permissionScopeChecks.size; attempt++) await new Promise((resolve) => setImmediate(resolve));
     h.internal.client.emit('event', { type: 'ask_user_question', request: { request_id: 2, questions: [] } });

@@ -103,7 +103,7 @@ test('submitted and queued turns each publish one correlated remote start before
   client.emitEvent({ type: 'text_delta', text: 'first output' });
   client.emitEvent({
     type: 'turn_ended', outcome: 'end_turn', stop_reason: 'end_turn',
-    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '$0' },
+    cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '$0', by_account: [] },
   });
   client.emitEvent({ type: 'turn_started', turn_id: 2 });
   client.emitEvent({ type: 'text_delta', text: 'queued output' });
@@ -113,7 +113,7 @@ test('submitted and queued turns each publish one correlated remote start before
       { type: 'text_delta', text: 'first output' },
       {
         type: 'turn_ended', outcome: 'end_turn', stop_reason: 'end_turn',
-        cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '$0' },
+        cost: { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0, formatted: '$0', by_account: [] },
       },
       { type: 'turn_started', turn_id: 2 },
       { type: 'text_delta', text: 'queued output' },

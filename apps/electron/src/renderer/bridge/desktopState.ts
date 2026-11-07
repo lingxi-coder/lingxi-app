@@ -169,6 +169,7 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
           api_calls: event.api_calls,
           session_duration_secs: event.session_duration_secs,
           formatted: event.formatted,
+          by_account: event.by_account,
         },
       };
     case 'compaction_completed':

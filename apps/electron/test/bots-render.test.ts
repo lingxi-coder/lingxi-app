@@ -475,7 +475,7 @@ function sidebarBridge(overrides: Record<string, unknown> = {}) {
 
 const railOf = (html: string) => /<nav[^>]*desktop-nav-rail[\s\S]*?<\/nav>/.exec(html)?.[0] ?? '';
 const buttonLabels = (html: string) => [...html.matchAll(/<button[^>]*aria-label="([^"]+)"/g)].map((match) => match[1]);
-const markedLabels = (html: string) => [...railOf(html).matchAll(/data-active="true" aria-label="([^"]+)"/g)].map((match) => match[1]);
+const markedLabels = (html: string) => [...railOf(html).matchAll(/data-active="true"(?: aria-current="page")? aria-label="([^"]+)"/g)].map((match) => match[1]);
 
 test('the sidebar offers Bots only where the host said they can be used, and only once', () => {
   const without = render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop }));
@@ -490,18 +490,18 @@ test('the sidebar offers Bots only where the host said they can be used, and onl
   assert.ok(!offered.includes('<span>Apps</span>') && !offered.includes('<span>Scheduled</span>'), 'Home does not repeat Apps or Scheduled from the rail');
 });
 
-test('the rail has the modes Home, Bots and Teams, then a divider, then the pages', () => {
+test('the rail has the modes Home, Bots, Teams and Apps, then a divider, then the pages', () => {
   const rail = railOf(render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true })));
   const divider = rail.indexOf('desktop-rail-divider');
   assert.ok(divider > 0);
-  assert.deepEqual(buttonLabels(rail.slice(0, divider)), ['Home', 'Bots', 'Teams']);
-  assert.deepEqual(buttonLabels(rail.slice(divider)), ['Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
+  assert.deepEqual(buttonLabels(rail.slice(0, divider)), ['Home', 'Bots', 'Teams', 'Apps']);
+  assert.deepEqual(buttonLabels(rail.slice(divider)), ['Scheduled tasks', 'Review changes', 'Settings']);
 
   const noBots = railOf(render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop })));
-  assert.deepEqual(buttonLabels(noBots.slice(0, noBots.indexOf('desktop-rail-divider'))), ['Home', 'Teams']);
+  assert.deepEqual(buttonLabels(noBots.slice(0, noBots.indexOf('desktop-rail-divider'))), ['Home', 'Teams', 'Apps']);
 });
 
-test('the sidebar mode marks Home, Bots or Teams, Home when none was given, and a page marks itself without taking the mark off the mode', () => {
+test('the sidebar mode marks Home, Bots or Teams, Home when none was given, Apps marks itself beside the mode, and Cron replaces the mark of the mode', () => {
   const sidebar = (props: Record<string, unknown> = {}) => render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true, ...props }));
   assert.deepEqual(markedLabels(sidebar()), ['Home']);
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'home' })), ['Home']);
@@ -509,7 +509,7 @@ test('the sidebar mode marks Home, Bots or Teams, Home when none was given, and 
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'teams' })), ['Teams']);
 
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'bots', apps: true })), ['Bots', 'Apps']);
-  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'teams', scheduled: true })), ['Teams', 'Scheduled tasks']);
+  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'teams', scheduled: true })), ['Scheduled tasks'], 'Cron owns its sidebar, so the mode is not marked behind it');
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'home', apps: true })), ['Home', 'Apps']);
 });
 

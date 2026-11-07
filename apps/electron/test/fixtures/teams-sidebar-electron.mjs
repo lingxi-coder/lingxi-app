@@ -183,15 +183,16 @@ try {
   await wait(`document.querySelector('.teams-conversation .tw-msg')`);
   result.appsWorkspace = true;
 
-  // Utility pages preserve Teams; a conversation returns to the Teams page.
+  // Cron replaces the sidebar with its task list; the Teams rail button returns to the Teams page.
   await click(rail('Scheduled tasks'));
-  await wait(`document.querySelector('${rail('Scheduled tasks')}[data-active]')`);
-  assert.deepEqual(await marked(), ['Teams', 'Scheduled tasks']);
-  assert.equal(await shown(sidebar), true);
+  await wait(`document.querySelector('.desktop-sidebar .scheduled-master')`);
+  assert.deepEqual(await marked(), ['Scheduled tasks']);
+  assert.equal(await shown(sidebar), false);
   assert.equal(await shown('.teams-page'), false);
-  await click(row('dm-bob'));
-  await wait(`document.querySelector('${row('dm-bob')}[aria-current="page"]') && document.querySelector('.teams-page')?.getClientRects().length > 0`);
+  await click(railTeams);
+  await wait(`document.querySelector('${row('dm-bob')}') && document.querySelector('.teams-page')?.getClientRects().length > 0`);
   assert.deepEqual(await marked(), ['Teams']);
+  assert.equal(await run(`Boolean(document.querySelector('.desktop-sidebar .scheduled-master'))`), false);
   result.pageForward = true;
 
   // Reading a conversation takes its messages off the rail's count.

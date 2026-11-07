@@ -176,7 +176,7 @@ test('unknown permission mode events preserve the last confirmed desktop state',
   }
 });
 
-const SESSION_COST = { total_usd: 1, input_tokens: 10_000, output_tokens: 2_000, api_calls: 3, session_duration_secs: 60, formatted: '$1.00' };
+const SESSION_COST = { total_usd: 1, input_tokens: 10_000, output_tokens: 2_000, api_calls: 3, session_duration_secs: 60, formatted: '$1.00', by_account: [] };
 
 test('session totals replace cumulative snapshots without double counting or per-call resets', () => {
   let state = reduceDesktopEvent(emptyDesktopState(), { type: 'cost_update', ...SESSION_COST });
@@ -187,6 +187,25 @@ test('session totals replace cumulative snapshots without double counting or per
   assert.equal(state.lastCost?.output_tokens, 3_000);
   state = reduceDesktopEvent(state, { type: 'cost_update', ...state.lastCost! });
   assert.equal(state.lastCost?.input_tokens, 12_000);
+});
+
+test('a later cost total replaces account rows', () => {
+  const first = [{
+    attribution: { provider_id: 'anthropic', account_id: 'key-a', identity_generation: 1, auth_kind: 'api_key' },
+    model: 'claude', total_nano_usd: 10, input_tokens: 2, output_tokens: 3,
+    cache_read_input_tokens: 0, cache_creation_input_tokens: 0, reasoning_tokens: 0, web_search_requests: 0, request_count: 1,
+  }];
+  const second = [{ ...first[0], attribution: { ...first[0].attribution, account_id: 'key-b' }, model: 'opus' }];
+  let state = reduceDesktopEvent(emptyDesktopState(), {
+    type: 'turn_ended', outcome: { type: 'end_turn' }, cost: { ...SESSION_COST, by_account: first },
+  });
+  assert.equal(state.lastCost?.by_account[0]?.attribution?.account_id, 'key-a');
+  state = reduceDesktopEvent(state, { type: 'cost_update', ...SESSION_COST, input_tokens: 11_000, by_account: second });
+  assert.equal(state.lastCost?.input_tokens, 11_000);
+  assert.equal(state.lastCost?.by_account[0]?.attribution?.account_id, 'key-b');
+  assert.equal(state.lastCost?.by_account[0]?.model, 'opus');
+  state = reduceDesktopEvent(state, { type: 'cost_update', ...SESSION_COST });
+  assert.deepEqual(state.lastCost?.by_account, []);
 });
 
 for (const type of ['session_started', 'session_resumed', 'session_ended'] as const) {

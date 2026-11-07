@@ -526,7 +526,7 @@ function engineTurn(client: FakeClient, turnId: number, parts: string[]): void {
   client.emitEvent({ type: 'turn_started', turn_id: turnId });
   for (const text of parts) client.emitEvent({ type: 'text_delta', text });
   client.emitEvent({ type: 'message_complete', stop_reason: 'end_turn', message: { role: 'assistant', blocks: [{ type: 'text', text: parts.join('') }] } });
-  client.emitEvent({ type: 'turn_ended', outcome: { type: 'end_turn' }, stop_reason: 'end_turn', cost: { total_usd: 0, input_tokens: 1, output_tokens: 1, api_calls: 1, session_duration_secs: 1, formatted: '$0' } });
+  client.emitEvent({ type: 'turn_ended', outcome: { type: 'end_turn' }, stop_reason: 'end_turn', cost: { total_usd: 0, input_tokens: 1, output_tokens: 1, api_calls: 1, session_duration_secs: 1, formatted: '$0', by_account: [] } });
 }
 
 /** The records a connection received for a session, in arrival order. */

@@ -71,6 +71,7 @@ impl TurnDriver for EchoTurnDriver {
                     api_calls: 0,
                     session_duration_secs: 0,
                     formatted: "$0.0000".to_string(),
+                    by_account: vec![],
                 },
             })
             .await;

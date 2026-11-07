@@ -524,5 +524,33 @@ export const providerAccountsCatalog: Record<string, Record<string, string>> = {
     "zh-Hant": "%s / %s 個帳號已啟用",
     "ja": "%s / %s アカウントが有効",
     "ko": "%s / %s개 계정 활성화"
+  },
+  "provider_accounts_session_usage_note": {
+    "en": "Usage in this session on this computer. This is not the provider's bill.",
+    "zh-Hans": "这是本机当前会话的用量，不是提供商账单。",
+    "zh-Hant": "這是這部電腦目前工作階段的用量，不是供應商帳單。",
+    "ja": "このコンピュータの現在のセッション用量です。プロバイダーの請求額ではありません。",
+    "ko": "이 컴퓨터의 현재 세션 사용량입니다. 제공업체 청구 금액이 아닙니다."
+  },
+  "provider_accounts_session_usage_current": {
+    "en": "%s in · %s out · %s",
+    "zh-Hans": "输入 %s · 输出 %s · %s",
+    "zh-Hant": "輸入 %s · 輸出 %s · %s",
+    "ja": "入力 %s · 出力 %s · %s",
+    "ko": "입력 %s · 출력 %s · %s"
+  },
+  "provider_accounts_session_usage_model": {
+    "en": "%s · %s in · %s out · cache read %s · cache write %s · %s · %s requests",
+    "zh-Hans": "%s · 输入 %s · 输出 %s · 缓存读取 %s · 缓存写入 %s · %s · %s 次请求",
+    "zh-Hant": "%s · 輸入 %s · 輸出 %s · 快取讀取 %s · 快取寫入 %s · %s · %s 次請求",
+    "ja": "%s · 入力 %s · 出力 %s · キャッシュ読取 %s · 書込 %s · %s · %s リクエスト",
+    "ko": "%s · 입력 %s · 출력 %s · 캐시 읽기 %s · 캐시 쓰기 %s · %s · %s회 요청"
+  },
+  "provider_accounts_session_usage_earlier": {
+    "en": "Previous key, generation %s · %s in · %s out · %s",
+    "zh-Hans": "上一把密钥，第 %s 代 · 输入 %s · 输出 %s · %s",
+    "zh-Hant": "上一把金鑰，第 %s 代 · 輸入 %s · 輸出 %s · %s",
+    "ja": "以前のキー（世代 %s）· 入力 %s · 出力 %s · %s",
+    "ko": "이전 키, %s세대 · 입력 %s · 출력 %s · %s"
   }
 };

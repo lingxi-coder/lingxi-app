@@ -352,7 +352,7 @@ export class TeamConnector implements LocalTeamHost {
     } finally { clearInterval(interval); await Promise.all(references.map(ref=>this.options.privateStore.releaseDataRef(c.uid,ref))); }
   }
   private failedResult(intent: SavedExecution): TeamHostResult {
-    return { status: 'failed', cursor: noCursor, finishedAt: Number.isSafeInteger(intent.deadlineAt) ? Math.min(this.now(), intent.deadlineAt) : this.now() };
+    return { status: 'failed', cursor: noCursor, finishedAt: Math.min(this.now(), intent.deadlineAt) };
   }
   private async saveResult(c: TeamAccountContext, intent: SavedExecution, result: TeamHostResult) {
     const payload = {...intent.payload,outcome:result.status==='completed'?'completed':'failed',text:result.text || 'The assistant could not complete this request.',finishedAt:result.finishedAt,

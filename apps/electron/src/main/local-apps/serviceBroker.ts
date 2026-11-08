@@ -8,6 +8,43 @@ interface ServiceLease {
   appId: string; runId: string; name: string; port: number; origin?: string;
   token: string; controller: AbortController; sockets: Set<Duplex>;
 }
+const SERVICE_BODY_IDLE_MS = 60_000;
+
+/** Abort a non-SSE body that stops producing bytes. Progress resets the wait. */
+function idleLimitedBody(body: ReadableStream<Uint8Array>, idleMs: number): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  const stalled = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const clear = () => { if (timer !== undefined) clearTimeout(timer); timer = undefined; };
+  const arm = () => {
+    clear();
+    timer = setTimeout(() => {
+      stalled.abort(new Error('Service response stalled'));
+      void reader.cancel(stalled.signal.reason).catch(() => undefined);
+    }, idleMs);
+    timer.unref?.();
+  };
+  return new ReadableStream({
+    async pull(controller) {
+      arm();
+      try {
+        const next = await reader.read();
+        if (stalled.signal.aborted) { clear(); controller.error(stalled.signal.reason); return; }
+        if (next.done) { clear(); controller.close(); return; }
+        clear();
+        controller.enqueue(next.value);
+      } catch (error) {
+        clear();
+        controller.error(stalled.signal.aborted ? stalled.signal.reason : error);
+      }
+    },
+    cancel(reason) {
+      clear();
+      return reader.cancel(reason);
+    },
+  });
+}
+
 function localPath(path: string): string {
   if (!path.startsWith('/') || path.startsWith('//') || /[\\\r\n\0]/.test(path)) throw new Error('Invalid service path');
   return path;
@@ -66,6 +103,8 @@ export class LocalAppServiceBroker {
       ...(request.method !== 'GET' && request.method !== 'HEAD' ? { body, duplex: 'half' } : {}),
     } as RequestInit).finally(() => deadline.removeEventListener('abort', expireBudget));
     signal.throwIfAborted();
+    const eventStream = response.headers.get('content-type')?.toLowerCase().includes('text/event-stream') === true;
+    const guarded = (body: ReadableStream<Uint8Array> | null) => body && !eventStream ? idleLimitedBody(body, SERVICE_BODY_IDLE_MS) : body;
     // Node fetch transparently decodes supported Content-Encoding values while
     // retaining the upstream representation's headers. Do not advertise those
     // encodings or lengths for the decoded stream delivered to the app.
@@ -82,7 +121,10 @@ export class LocalAppServiceBroker {
       }
       const decodedHeaders = new Headers(response.headers);
       for (const name of ['content-encoding', 'content-length', 'content-md5', 'digest', 'content-digest', 'repr-digest', 'etag']) decodedHeaders.delete(name);
-      return new Response(response.body, { status: response.status, statusText: response.statusText, headers: decodedHeaders });
+      return new Response(guarded(response.body), { status: response.status, statusText: response.statusText, headers: decodedHeaders });
+    }
+    if (!eventStream && response.body) {
+      return new Response(guarded(response.body), { status: response.status, statusText: response.statusText, headers: response.headers });
     }
     return response;
   }

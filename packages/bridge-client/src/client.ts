@@ -399,6 +399,7 @@ export class BridgeClient extends EventEmitter {
 
     const ws = new WebSocket(url, [WS_SUBPROTOCOL], {
       headers: { [AUTH_HEADER_NAME]: lockfile.body.authToken },
+      maxPayload: MAX_BRIDGE_FRAME_BYTES,
     });
     this.ws = ws;
 

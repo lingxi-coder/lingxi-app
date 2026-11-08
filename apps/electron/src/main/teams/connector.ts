@@ -62,6 +62,8 @@ export class TeamConnector implements LocalTeamHost {
   private readonly activated = new Map<string, string>(); private readonly heartbeats = new Map<string, number>();
   private readonly deferred = new Map<string, number>(); private readonly scheduled = new Map<string, number>(); private readonly stops: Array<() => void>;
   private revision = 0; private probes = 0;
+  /** taskId → earliest time another missing-result inspect may spawn. */
+  private readonly resultProbes = new Map<string, number>();
   constructor(private readonly options: TeamConnectorOptions) {
     this.stops = [options.service.onChanged(() => this.wake()), options.service.onMessagesChanged(() => this.wake())]; this.wake();
   }
@@ -212,7 +214,7 @@ export class TeamConnector implements LocalTeamHost {
     for (const [key, a] of [...this.active]) if (a.instanceId === botId) { const scope = JSON.parse(key) as string[]; this.stopBinding(scope[0]!,scope[1]!); }
   }
   /** Account reset or sign-out: every running task loses its authority. A cache or listener flicker never comes here. */
-  revoke() { this.revision++; for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.activated.clear(); this.heartbeats.clear(); this.wake(); }
+  revoke() { this.revision++; for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.activated.clear(); this.heartbeats.clear(); this.resultProbes.clear(); this.wake(); }
   private wake() {
     if (this.closed || (this.options.platform ?? process.platform) !== 'darwin') return; this.pending = true; if (this.refresh) return;
     this.refresh = (async () => { while (this.pending && !this.closed) { this.pending = false; try { await this.discover(); } catch { /* Retry discovery; a failed authorization never starts work. */ } } })()
@@ -239,14 +241,15 @@ export class TeamConnector implements LocalTeamHost {
     if (!bindings.length) return;
     const { teams } = await this.options.service.list(c.uid); assert();
     const candidates: Array<{ binding: SharedBotBinding; task: HostTask; snapshot: TeamPersonaSnapshot }> = [];
-    for (let b of bindings) {
+    for (let index = 0; index < bindings.length; index += 1) {
+      let b = bindings[index]!;
       if (!teams.some(t => t.id === b.teamId && t.generation === b.generation)) continue;
       try {
         const { bots } = await this.command<{ bots: SharedBotCard[] }>(c,b,'listSharedBots',{}); assert();
         const card = bots.find(v => v.sharedBotId === b.sharedBotId); if (!card || card.state !== 'published' || card.revision !== b.revision || card.maintainer.uid !== c.uid) { this.stopBinding(b.teamId,b.sharedBotId); continue; }
         if (this.activated.get(scopeKey(b)) !== activation(b,c)) {
           const next = b.accountEpoch + 1; await this.command(c,b,'activateDeployment',{ deploymentId:b.deploymentId,hostId:this.options.privateStore.hostId,expectedAccountEpoch:b.accountEpoch,newAccountEpoch:next },digest(JSON.stringify([b.deploymentId,next,'activate']))); assert();
-          b = { ...b, accountEpoch: next }; await this.options.privateStore.saveBinding(c.uid,b); assert(); this.activated.set(scopeKey(b),activation(b,c));
+          b = { ...b, accountEpoch: next }; await this.options.privateStore.saveBinding(c.uid,b); assert(); bindings[index] = b; this.activated.set(scopeKey(b),activation(b,c));
         }
         const snapshot = await this.options.privateStore.snapshot(c.uid,b.snapshot); assert(); let ready = true;
         try { this.options.store.get(b.instanceId); this.options.binaries(); const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) ready = false; } catch { ready = false; }
@@ -268,22 +271,33 @@ export class TeamConnector implements LocalTeamHost {
     // A live run may save its delivery, or finish and clean up, while recovery works: check each intent afresh.
     const handled = async (intent: SavedExecution) => { assert(); const store = this.options.privateStore;
       return [...this.active.values()].some(active => active.taskId === intent.taskId) || (await store.deliveries(c.uid)).some(d => d.taskId === intent.taskId) || !(await store.executions(c.uid)).some(e => e.taskId === intent.taskId); };
+    let paths: Awaited<ReturnType<TeamPrivateStore['owner']>> | undefined;
+    let bins: ReturnType<TeamConnectorOptions['binaries']> | undefined;
     for (const intent of await this.options.privateStore.executions(c.uid)) {
       if (await handled(intent)) continue;
       let result = await this.options.privateStore.savedResult(c.uid,intent.taskId); assert();
-      if (!result) {
-        try { const paths = await this.options.privateStore.owner(c.uid), bins = this.options.binaries();
+      if (!result && (this.resultProbes.get(intent.taskId) ?? 0) <= this.now()) {
+        try {
+          paths ??= await this.options.privateStore.owner(c.uid); bins ??= this.options.binaries();
           const recovered = await (this.options.run ?? runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,signal:AbortSignal.timeout(10000),timeoutMs:10000,assertCurrent:assert,
             bootstrap:{version:3,type:'inspect_result',storageRoot:paths.runtime,workerExecutable:bins.worker,scope:intent.scope,taskId:intent.taskId}});
-          assert(); if (recovered.status === 'completed' || recovered.status === 'failed') result=recovered;
-        } catch { assert(); }
+          assert();
+          if (recovered.status === 'completed' || recovered.status === 'failed') { result = recovered; this.resultProbes.delete(intent.taskId); }
+          else this.resultProbes.set(intent.taskId, this.now() + (this.options.retryMs ?? 5000));
+        } catch { assert(); this.resultProbes.set(intent.taskId, this.now() + (this.options.retryMs ?? 5000)); }
       }
       // No result and no process left past the deadline: end the task instead of inspecting it forever.
       if (!result && !(this.now() < intent.deadlineAt)) { this.log('team_task_recovered_failed', { taskId: intent.taskId }); result = this.failedResult(intent); }
-      if (result && !await handled(intent)) await this.saveResult(c,intent,result);
+      if (result && !await handled(intent)) { this.resultProbes.delete(intent.taskId); await this.saveResult(c,intent,result); }
+    }
+    const bindingsByDeployment = new Map<string, SharedBotBinding>();
+    for (const binding of bindings) {
+      const key = `${binding.teamId}\0${binding.deploymentId}`;
+      if (!bindingsByDeployment.has(key)) bindingsByDeployment.set(key, binding);
     }
     for (const delivery of await this.options.privateStore.deliveries(c.uid)) {
-      assert(); const b = (await this.options.privateStore.bindings(c.uid)).find(b => b.teamId === delivery.teamId && b.deploymentId === delivery.payload.deploymentId);
+      assert(); const deploymentId = delivery.payload.deploymentId;
+      const b = typeof deploymentId === 'string' ? bindingsByDeployment.get(`${delivery.teamId}\0${deploymentId}`) : undefined;
       const expired = this.now() > delivery.deadlineAt + DELIVERY_SKEW_MS;
       const drop = async (code: string) => { this.log('team_task_delivery_rejected', { taskId: delivery.taskId, code }); await this.options.privateStore.delivered(c.uid,delivery.taskId).catch(() => undefined); };
       if (!b) { if (expired) await drop('BINDING_MISSING'); continue; }

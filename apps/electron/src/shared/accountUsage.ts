@@ -68,27 +68,76 @@ function emptySlice(): AccountUsageSlice {
   };
 }
 
-function addRow(slice: AccountUsageSlice, row: AccountUsageRowDto): AccountUsageSlice {
-  const model = slice.models.find(item => item.model === row.model);
-  const nextModel: AccountModelUsage = {
-    model: row.model,
-    inputTokens: (model?.inputTokens ?? 0) + row.input_tokens,
-    outputTokens: (model?.outputTokens ?? 0) + row.output_tokens,
-    cacheReadTokens: (model?.cacheReadTokens ?? 0) + row.cache_read_input_tokens,
-    cacheCreationTokens: (model?.cacheCreationTokens ?? 0) + row.cache_creation_input_tokens,
-    nanoUsd: (model?.nanoUsd ?? 0) + row.total_nano_usd,
-    requestCount: (model?.requestCount ?? 0) + row.request_count,
-  };
+interface MutableModelUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  nanoUsd: number;
+  requestCount: number;
+}
+
+interface MutableUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  reasoningTokens: number;
+  webSearchRequests: number;
+  nanoUsd: number;
+  requestCount: number;
+  models: Map<string, MutableModelUsage>;
+}
+
+function emptyMutable(): MutableUsage {
   return {
-    inputTokens: slice.inputTokens + row.input_tokens,
-    outputTokens: slice.outputTokens + row.output_tokens,
-    cacheReadTokens: slice.cacheReadTokens + row.cache_read_input_tokens,
-    cacheCreationTokens: slice.cacheCreationTokens + row.cache_creation_input_tokens,
-    reasoningTokens: slice.reasoningTokens + row.reasoning_tokens,
-    webSearchRequests: slice.webSearchRequests + row.web_search_requests,
-    nanoUsd: slice.nanoUsd + row.total_nano_usd,
-    requestCount: slice.requestCount + row.request_count,
-    models: [...slice.models.filter(item => item.model !== row.model), nextModel].sort((a, b) => a.model.localeCompare(b.model)),
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
+    reasoningTokens: 0, webSearchRequests: 0, nanoUsd: 0, requestCount: 0, models: new Map(),
+  };
+}
+
+function addRow(slice: MutableUsage, row: AccountUsageRowDto): void {
+  slice.inputTokens += row.input_tokens;
+  slice.outputTokens += row.output_tokens;
+  slice.cacheReadTokens += row.cache_read_input_tokens;
+  slice.cacheCreationTokens += row.cache_creation_input_tokens;
+  slice.reasoningTokens += row.reasoning_tokens;
+  slice.webSearchRequests += row.web_search_requests;
+  slice.nanoUsd += row.total_nano_usd;
+  slice.requestCount += row.request_count;
+  const model = slice.models.get(row.model);
+  if (model) {
+    model.inputTokens += row.input_tokens;
+    model.outputTokens += row.output_tokens;
+    model.cacheReadTokens += row.cache_read_input_tokens;
+    model.cacheCreationTokens += row.cache_creation_input_tokens;
+    model.nanoUsd += row.total_nano_usd;
+    model.requestCount += row.request_count;
+    return;
+  }
+  slice.models.set(row.model, {
+    model: row.model,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheReadTokens: row.cache_read_input_tokens,
+    cacheCreationTokens: row.cache_creation_input_tokens,
+    nanoUsd: row.total_nano_usd,
+    requestCount: row.request_count,
+  });
+}
+
+function freeze(slice: MutableUsage): AccountUsageSlice {
+  return {
+    inputTokens: slice.inputTokens,
+    outputTokens: slice.outputTokens,
+    cacheReadTokens: slice.cacheReadTokens,
+    cacheCreationTokens: slice.cacheCreationTokens,
+    reasoningTokens: slice.reasoningTokens,
+    webSearchRequests: slice.webSearchRequests,
+    nanoUsd: slice.nanoUsd,
+    requestCount: slice.requestCount,
+    models: [...slice.models.values()].sort((a, b) => a.model.localeCompare(b.model)),
   };
 }
 
@@ -99,22 +148,58 @@ function addRow(slice: AccountUsageSlice, row: AccountUsageRowDto): AccountUsage
  * id on an older `identity_generation` is a previous key. `openai-chatgpt`
  * folds to `openai` before the provider comparison.
  */
+/** One pass over session rows, keyed by account id then credential generation. */
+export function accountUsageByAccount(
+  rows: readonly AccountUsageRowDto[] | undefined,
+  providerId: string,
+): ReadonlyMap<string, ReadonlyMap<number, AccountUsageSlice>> {
+  const provider = logicalProviderId(providerId);
+  const accounts = new Map<string, Map<number, MutableUsage>>();
+  for (const row of rows ?? []) {
+    const attribution = row.attribution;
+    if (!attribution || logicalProviderId(attribution.provider_id) !== provider) continue;
+    let generations = accounts.get(attribution.account_id);
+    if (!generations) {
+      generations = new Map();
+      accounts.set(attribution.account_id, generations);
+    }
+    let slice = generations.get(attribution.identity_generation);
+    if (!slice) {
+      slice = emptyMutable();
+      generations.set(attribution.identity_generation, slice);
+    }
+    addRow(slice, row);
+  }
+  const frozen = new Map<string, ReadonlyMap<number, AccountUsageSlice>>();
+  for (const [accountId, generations] of accounts) {
+    const slices = new Map<number, AccountUsageSlice>();
+    for (const [generation, slice] of generations) slices.set(generation, freeze(slice));
+    frozen.set(accountId, slices);
+  }
+  return frozen;
+}
+
+/** Current generation versus earlier keys for one live account. */
+export function sessionUsageFromIndex(
+  index: ReadonlyMap<string, ReadonlyMap<number, AccountUsageSlice>>,
+  account: AccountUsageTarget,
+): AccountSessionUsage {
+  const generations = index.get(account.accountId);
+  const current = generations?.get(account.identityGeneration) ?? emptySlice();
+  const earlier: { generation: number; usage: AccountUsageSlice }[] = [];
+  if (generations) {
+    for (const [generation, usage] of generations) {
+      if (generation !== account.identityGeneration) earlier.push({ generation, usage });
+    }
+    earlier.sort((a, b) => a.generation - b.generation);
+  }
+  return { current, earlier };
+}
+
 export function accountSessionUsage(
   rows: readonly AccountUsageRowDto[] | undefined,
   providerId: string,
   account: AccountUsageTarget,
 ): AccountSessionUsage {
-  const provider = logicalProviderId(providerId);
-  let current = emptySlice();
-  const earlier = new Map<number, AccountUsageSlice>();
-  for (const row of rows ?? []) {
-    const attribution = row.attribution;
-    if (!attribution || logicalProviderId(attribution.provider_id) !== provider || attribution.account_id !== account.accountId) continue;
-    if (attribution.identity_generation === account.identityGeneration) current = addRow(current, row);
-    else earlier.set(attribution.identity_generation, addRow(earlier.get(attribution.identity_generation) ?? emptySlice(), row));
-  }
-  return {
-    current,
-    earlier: [...earlier.entries()].sort((a, b) => a[0] - b[0]).map(([generation, usage]) => ({ generation, usage })),
-  };
+  return sessionUsageFromIndex(accountUsageByAccount(rows, providerId), account);
 }

@@ -925,11 +925,31 @@ export class DiagnosticBuffer {
       }
     }
     if (this.entries.length > MAX_DIAGNOSTICS) this.entries.splice(0, this.entries.length - MAX_DIAGNOSTICS);
-    this.persist();
+    this.appendLive(entry);
   }
 
   snapshot(): DiagnosticEntry[] {
     return this.entries.map((entry) => ({ ...entry }));
+  }
+
+  /** Append one line. Rewrite the ring only after the live file reaches 2 MiB, so the loader still sees the tail. */
+  private appendLive(entry: DiagnosticEntry): void {
+    if (!this.filePath) return;
+    try {
+      mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
+      if (existsSync(this.filePath) && statSync(this.filePath).size >= 2_000_000) {
+        renameSync(this.filePath, `${this.filePath}.1`);
+        this.persist();
+        return;
+      }
+      appendFileSync(this.filePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+      if (statSync(this.filePath).size >= 2_000_000) {
+        renameSync(this.filePath, `${this.filePath}.1`);
+        this.persist();
+      }
+    } catch {
+      // Diagnostics must never destabilize the desktop host.
+    }
   }
 
   private persist(): void {

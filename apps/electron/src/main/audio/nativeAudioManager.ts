@@ -466,6 +466,7 @@ export class NativeAudioManager {
   private capabilityInitialization: Promise<void> | null = null;
   private permissionResolution: Promise<NativeAudioSnapshot> | null = null;
   private helperStdoutBuffer = '';
+  private static readonly maxHelperStdoutBuffer = 1024 * 1024;
   private snapshot = defaultNativeAudioSnapshot();
   private audioSuspending = false;
   private suspensionRevision = 0;
@@ -2245,7 +2246,12 @@ export class NativeAudioManager {
     const stdoutDecoder = new StringDecoder('utf8');
     child.stdout.on('data', (chunk: Buffer | string) => {
       if (this.helper !== child) return;
-      this.helperStdoutBuffer += typeof chunk === 'string' ? chunk : stdoutDecoder.write(chunk);
+      const text = typeof chunk === 'string' ? chunk : stdoutDecoder.write(chunk);
+      if (this.helperStdoutBuffer.length + text.length > NativeAudioManager.maxHelperStdoutBuffer) {
+        this.failHelper(child, 'native audio helper stdout exceeded 1 MiB without a newline');
+        return;
+      }
+      this.helperStdoutBuffer += text;
       this.drainStdout(child);
     });
     child.stderr.on('data', (chunk: Buffer | string) => {

@@ -300,7 +300,7 @@ export class TeamConnector implements LocalTeamHost {
       assert(); if (this.active.size+this.probes >= Math.min(4,this.options.maxConcurrent ?? 4)) break;
       const key = serialKey(candidate.binding,candidate.task); if (this.active.has(key)) continue;
       const controller = new AbortController(); this.scheduled.set(key,this.now());
-      const promise = this.execute(c,candidate.binding,candidate.task,candidate.snapshot,controller.signal).catch(error => { this.log('team_task_deferred', { taskId: candidate.task.taskId, code: errorCode(error) }); this.deferred.set(candidate.task.taskId,this.now()+(this.options.retryMs??5000)); }).finally(() => { this.active.delete(key); this.wake(); });
+      const promise = this.execute(c,candidate.binding,candidate.task,candidate.snapshot,controller.signal).catch(error => { this.log('team_task_deferred', { taskId: candidate.task.taskId, code: errorCode(error) }); if (revision === this.revision) this.deferred.set(candidate.task.taskId,this.now()+(this.options.retryMs??5000)); }).finally(() => { this.active.delete(key); this.wake(); });
       this.active.set(key,{taskId:candidate.task.taskId,instanceId:candidate.binding.instanceId,controller,promise});
     }
   }
@@ -334,6 +334,8 @@ export class TeamConnector implements LocalTeamHost {
     const intent: SavedExecution = { schemaVersion:1, scope, teamId:b.teamId,generation:b.generation,taskId:task.taskId,
       commandId:digest(JSON.stringify([task.taskId,'delivery'])),deadlineAt:started.task.deadline,payload:{...fields,permitId,inputGrantIds:b.grantIds} };
     // The permit is spent: save it before any abort check, so a revoke now ends in a failed result instead of losing the permit.
+    // `c` is the account that sent startTask: the execution and its failed delivery stay in that account's private store, never in the current one, and `assert` below keeps the worker from starting.
+    // The stale context can no longer send completeTask; discovery delivers it once that account is current again, or the deadline derives `interrupted`.
     await this.options.privateStore.saveExecution(c.uid,intent);
     const authorize = async () => { assert(); await this.command(c,b,'validateTask',{...fields,permitId,expectedLastChangeSeq:source.lastChangeSeq}); assert(); };
     interval = setInterval(() => { void authorize().catch(error => { if (definitive(error)) execution.abort(errorCode(error)); }); },2000); interval.unref();

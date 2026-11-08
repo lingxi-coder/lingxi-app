@@ -31,7 +31,7 @@ function fakeService(){
  return result as T;},
  hostReadChat:async(_c,request)=>{reads.push(request);if(request.mode==='changes')return {messages:[],lastSeq:1000,lastChangeSeq:1000,hasMore:false};const through=request.mode==='recent'?request.throughSeq:request.mode==='range'?request.toSeqInclusive:1;const from=request.mode==='recent'?Math.max(0,through-200):request.mode==='range'?request.fromSeqExclusive:0;
  return {messages:Array.from({length:through-from},(_,i)=>({messageId:`message${String(from+i+1).padStart(6,'0')}`,seq:from+i+1,changeSeq:from+i+1,changeId:`change${String(from+i+1).padStart(6,'0')}`,author:{kind:'user' as const,uid:i%2?'human2':'human1',displayName:'Same name'},createdAt:1700000000000+i,text:`original ${i}`})),lastSeq:1000,lastChangeSeq:1000,hasMore:from>0};},};
- return {service,commands,tasks,reads,wake:()=>events.emit('messages'),flicker:()=>events.emit('change',{invalidated:true}),switch:()=>{context={uid:'other',epoch:1};events.emit('change',{invalidated:true});}};
+ return {service,commands,tasks,reads,wake:()=>events.emit('messages'),flicker:()=>events.emit('change',{invalidated:true}),switch:(uid='other',epoch=1)=>{context={uid,epoch};events.emit('change',{invalidated:true});}};
 }
 function fixture(t:any,run?:TeamHostProcessOptions extends never?never:(o:TeamHostProcessOptions)=>Promise<TeamHostResult>){
  const f=botFixture(t),privateStore=new TeamPrivateStore(f.userData),mock=fakeService(),bot=f.store.create({name:'Personal',persona:'PRIVATE_ROLE_NOT_SHARED',model:'anthropic/synthetic'});let selected:string[]=[];
@@ -321,6 +321,42 @@ test('a revoke while startTask is pending still saves the execution and delivers
  f.mock.tasks.push(queued());f.mock.wake();await settle(()=>entered);f.connector.revoke();release();
  await settle(()=>completions(f).length===1);await f.connector.idle();
  assert.equal(modelRuns,0);assert.equal(completions(f)[0].payload.outcome,'failed');assert.equal(completions(f)[0].payload.permitId,'permit00001');assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);assert.deepEqual(await pendingFiles(f),[0,0]);
+});
+test('an account change while startTask is pending keeps the permit in the sending account and delivers its failed result when that account returns',async t=>{
+ let modelRuns=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};modelRuns++;return {status:'completed',cursor,text:'Must not run',finishedAt:Date.now()};});
+ (f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);
+ const original=f.mock.service.hostMessages.bind(f.mock.service);let entered=false,release=()=>{};const gate=new Promise<void>(resolve=>{release=resolve;});
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='startTask'){const result=await original(c,command);entered=true;await gate;return result;}return original(c,command);};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>entered);
+ f.mock.switch();f.connector.revoke();release();
+ // The other account is current: nothing runs, nothing is reported with the stale credentials, and nothing lands in the other account's store.
+ await new Promise(r=>setTimeout(r,80));await f.connector.idle();
+ assert.equal(modelRuns,0);assert.equal(completions(f).length,0);assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);
+ assert.deepEqual([(await f.privateStore.deliveries('other')).length,(await f.privateStore.executions('other')).length],[0,0]);
+ const [delivery]=await f.privateStore.deliveries('owner');assert.equal(delivery!.payload.outcome,'failed');assert.equal(delivery!.payload.permitId,'permit00001');assert.equal((await f.privateStore.executions('owner')).length,1);
+ // The sending account signs back in: the failed result ends the task without another start or a model run.
+ f.mock.switch('owner',2);await settle(()=>completions(f).length===1);await f.connector.idle();
+ assert.equal(completions(f)[0].payload.outcome,'failed');assert.equal(completions(f)[0].payload.permitId,'permit00001');assert.equal(modelRuns,0);assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);
+ assert.deepEqual(await pendingFiles(f),[0,0]);assert.deepEqual([(await f.privateStore.deliveries('other')).length,(await f.privateStore.executions('other')).length],[0,0]);
+});
+test('an account change while startTask is pending and denied writes nothing and does not defer the task for the returning account',async t=>{
+ const f=fixture(t);(f.connector as any).options.retryMs=60000;await f.connector.publishLocalBot('owner',f.input);
+ const original=f.mock.service.hostMessages.bind(f.mock.service);let entered=false,release=()=>{},starts=0;const gate=new Promise<void>(resolve=>{release=resolve;});
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='startTask'){starts++;if(starts===1){entered=true;await gate;return {execute:false,taskId:'task00001'} as any;}}return original(c,command);};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>entered);
+ f.mock.switch();f.connector.revoke();release();await new Promise(r=>setTimeout(r,40));await f.connector.idle();
+ assert.deepEqual(await pendingFiles(f),[0,0]);assert.deepEqual([(await f.privateStore.deliveries('other')).length,(await f.privateStore.executions('other')).length],[0,0]);
+ f.mock.switch('owner',2);await settle(()=>completions(f).length===1);assert.equal(starts,2);
+});
+test('the service hands a start permit back after an account reset mid-request, and discards every other late answer',async t=>{
+ let uid='owner',epoch=0,notify=()=>{};const service=new TeamsService({snapshot:()=>({user:{uid}}),sessionEpoch:()=>epoch,getIdToken:async()=>'token',onChanged:cb=>{notify=cb;return()=>{};}},{});t.after(()=>service.close());
+ (service as any).connect=async()=>({db:{}});(service as any).sdk={collection:()=>({}),onSnapshot:()=>()=>{}};
+ const context:TeamAccountContext={uid:'owner',epoch:(service as any).epoch};const real=globalThis.fetch;t.after(()=>{globalThis.fetch=real;});
+ const answer=(body:unknown)=>{globalThis.fetch=(async()=>{uid='other';epoch++;notify();return new Response(JSON.stringify(body),{status:200});}) as typeof fetch;};
+ answer({execute:true,permitId:'permit00001'});
+ assert.deepEqual(await service.hostMessages(context,{schemaVersion:1,commandId:'command001',teamId,generation:1,action:'startTask',payload:{}}),{execute:true,permitId:'permit00001'});
+ uid='owner';epoch++;notify();const second:TeamAccountContext={uid:'owner',epoch:(service as any).epoch};answer({tasks:[]});
+ await assert.rejects(service.hostMessages(second,{schemaVersion:1,commandId:'command002',teamId,generation:1,action:'prepareTask',payload:{}}),/INVALID_SESSION/);
 });
 test('a Bot edit stops only the shared-Bot runs bound to that Bot',async t=>{
  const runs:TeamHostProcessOptions[]=[];const f=fixture(t,hold(runs));(f.connector as any).options.retryMs=10;

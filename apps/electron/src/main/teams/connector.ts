@@ -51,7 +51,7 @@ const definitive = (error: unknown) => error instanceof TeamsApiError ? error.st
   : error instanceof Error && error.message === 'INVALID_SESSION';
 /** Server answers after which a saved result can never be accepted, whatever the clocks say. */
 const permanentDelivery = (error: unknown) => error instanceof TeamsApiError && ['TASK_REVOKED','TASK_REQUIRED','TASK_RESULT_CONFLICT','EXECUTION_PERMIT_REQUIRED'].includes(error.code);
-/** Past the deadline the server derives `interrupted`, so nothing sent later changes the outcome. The margin covers a host clock ahead of the server, which also yields TASK_EXPIRED. */
+/** Past the deadline the host stops retrying a refused or orphaned delivery (a policy choice): the server still accepts a completion while the task is `running` and finished by the deadline, replacing the derived `interrupted`. The margin covers a host clock ahead of the server, which also yields TASK_EXPIRED. */
 export const DELIVERY_SKEW_MS = 2 * 60 * 1000;
 const noCursor = { scope: null, sessionRevision: 0, lastMessageSeq: 0, lastChangeSeq: 0, bootstrapFromSeq: 0 };
 /** Source reads, selected account credentials and backend permits stay in trusted main. */
@@ -292,7 +292,8 @@ export class TeamConnector implements LocalTeamHost {
       try { await this.command(c,delivery,'completeTask',payload,commandId); assert(); await this.options.privateStore.delivered(c.uid,delivery.taskId); }
       catch (error) { // Keep the exact result for another try, never run its model again, unless the server will never accept it.
         // Only a server answer counts: a local INVALID_SESSION means the account moved on, not that the result is dead.
-        if (permanentDelivery(error) || expired && error instanceof TeamsApiError && definitive(error)) await drop(errorCode(error)); }
+        // DEPLOYMENT_REQUIRED only ends the delivery once this binding's activation is confirmed current: a lost activation response leaves the old epoch locally, and the next pass replays it.
+        if (permanentDelivery(error) || expired && error instanceof TeamsApiError && definitive(error) && (error.code !== 'DEPLOYMENT_REQUIRED' || this.activated.get(scopeKey(b)) === activation(b,c))) await drop(errorCode(error)); }
     }
     candidates.sort((a,b) => (this.scheduled.get(serialKey(a.binding,a.task)) ?? 0) - (this.scheduled.get(serialKey(b.binding,b.task)) ?? 0) || a.task.messageSeq - b.task.messageSeq);
     for (const candidate of candidates) {

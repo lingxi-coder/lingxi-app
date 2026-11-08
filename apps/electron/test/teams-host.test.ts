@@ -284,6 +284,16 @@ test('a refused delivery is dropped only once the deadline plus the skew margin 
   f.connector.close();
  }
 });
+test('DEPLOYMENT_REQUIRED past the margin drops the delivery only once the binding activation is confirmed current',async t=>{
+ const events:Array<[string,any]>=[];let clock=Date.now();const f=fixture(t);(f.connector as any).options.now=()=>clock;(f.connector as any).options.diagnostics=(event:string,details:any)=>events.push([event,details]);
+ await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();const deadline=clock+60000;await seedDelivery(f,deadline);const attempts=refuseCompletions(f,'DEPLOYMENT_REQUIRED',403);
+ // A lost activation response: the local binding keeps the old epoch and the replay cannot get through yet.
+ (f.connector as any).activated.clear();const hostMessages=f.mock.service.hostMessages;
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='activateDeployment')throw new TeamsApiError('SERVICE_UNAVAILABLE',503);return hostMessages(c,command);};
+ clock=deadline+DELIVERY_SKEW_MS+1;await wakeAndIdle(f);assert.ok(attempts.count>=1);assert.deepEqual(await pendingFiles(f),[1,1]);assert.ok(!events.some(([event])=>event==='team_task_delivery_rejected'));
+ f.mock.service.hostMessages=hostMessages;await wakeAndIdle(f);
+ assert.deepEqual(await pendingFiles(f),[0,0]);assert.deepEqual(events.filter(([event])=>event==='team_task_delivery_rejected'),[['team_task_delivery_rejected',{taskId:'task00001',code:'DEPLOYMENT_REQUIRED'}]]);
+});
 test('an always-permanent refusal drops the delivery before the deadline',async t=>{
  const f=fixture(t);await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();await seedDelivery(f,Date.now()+60000);refuseCompletions(f,'TASK_REVOKED',403);
  await wakeAndIdle(f);assert.deepEqual(await pendingFiles(f),[0,0]);

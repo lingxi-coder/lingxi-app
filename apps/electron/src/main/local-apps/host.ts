@@ -332,6 +332,35 @@ function htmlHasLocalAppScript(html: string, lower: string, appId: string, path:
   }
 }
 
+const MAX_HOSTED_HTML_BYTES = 2 * 1024 * 1024;
+
+async function hostedDocument(response: Response): Promise<string | undefined> {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_HOSTED_HTML_BYTES) {
+    await response.body?.cancel().catch(() => undefined);
+    return undefined;
+  }
+  if (!response.body) {
+    const text = await response.text();
+    return text.length > MAX_HOSTED_HTML_BYTES ? undefined : text;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > MAX_HOSTED_HTML_BYTES) return undefined;
+      chunks.push(next.value);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return new TextDecoder().decode(chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks));
+}
+
 function injectLocalAppScripts(html: string, appId: string, documentPath: string): string {
   const lower = asciiLowercase(html);
   const localAppAlreadyLoaded = htmlHasLocalAppScript(html, lower, appId, '/__lingxi_local_app_sdk.js', documentPath);
@@ -940,8 +969,7 @@ export class LocalAppHost {
   }
   async remoteList(): Promise<DesktopLocalApp[]> {
     const enabled = await this.remoteSettings();
-    const rows = (await this.list()).filter(row => enabled[row.id]);
-    return Promise.all(rows.map(async row => this.runtime.status(await this.store.get(row.id))));
+    return (await this.list()).filter(row => enabled[row.id]);
   }
   async remoteCurrent(run: RemoteRun): Promise<boolean> {
     try {
@@ -1972,7 +2000,8 @@ export class LocalAppHost {
         const headers = new Headers(response.headers);
         if (serviceResponse) headers.delete('set-cookie');
         if (headers.get('content-type')?.toLowerCase().includes('text/html')) {
-          const html = await response.text();
+          const html = await hostedDocument(response);
+          if (html === undefined) return new Response('Application document exceeds the 2 MiB host limit', { status: 502, headers });
           body = injectLocalAppScripts(html, id, url.pathname);
           headers.delete('Content-Length');
           headers.delete('Content-Encoding');

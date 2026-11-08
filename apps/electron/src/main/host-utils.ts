@@ -1,7 +1,7 @@
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import type { RuntimeProviderAccountCredential } from './provider-accounts.js';
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 
@@ -880,14 +880,39 @@ export function diagnosticEvent(event: string, details: Record<string, unknown>)
   }));
 }
 
+const DIAGNOSTIC_FILE_BYTES = 2_000_000;
+
+/** Last complete lines of a diagnostics file. Files over 2 MiB are ignored, matching the loader cap. */
+function diagnosticTail(filePath: string): string[] {
+  const size = statSync(filePath).size;
+  if (size > DIAGNOSTIC_FILE_BYTES) return [];
+  const fd = openSync(filePath, 'r');
+  try {
+    const chunkSize = 64 * 1024;
+    let position = size;
+    let newlines = 0;
+    const pieces: Buffer[] = [];
+    while (position > 0 && newlines <= MAX_DIAGNOSTICS) {
+      const length = Math.min(chunkSize, position);
+      position -= length;
+      const buffer = Buffer.alloc(length);
+      readSync(fd, buffer, 0, length, position);
+      pieces.push(buffer);
+      for (let index = 0; index < buffer.length; index += 1) if (buffer[index] === 10) newlines += 1;
+    }
+    return Buffer.concat(pieces.reverse()).toString('utf8').split('\n').filter(Boolean).slice(-MAX_DIAGNOSTICS);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export class DiagnosticBuffer {
   private readonly entries: DiagnosticEntry[] = [];
 
   constructor(private readonly filePath?: string) {
     if (!filePath) return;
     try {
-      if (statSync(filePath).size > 2_000_000) return;
-      for (const line of readFileSync(filePath, 'utf8').split('\n').filter(Boolean).slice(-MAX_DIAGNOSTICS)) {
+      for (const line of diagnosticTail(filePath)) {
         const entry = JSON.parse(line) as Partial<DiagnosticEntry>;
         if (
           typeof entry.timestamp === 'string'

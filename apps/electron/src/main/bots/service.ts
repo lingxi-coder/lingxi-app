@@ -91,7 +91,7 @@ export interface BotServiceOptions {
   openProject?: (sessionId: string) => string | undefined;
   /** A Bot was made, changed or deleted, which Remote Control must hear of: its switch, name and chats are what viewers see. */
   changed?: () => void;
-  /** Stop the shared-Bot runs bound to this Bot once its edit has landed, or before a deletion awaits. */
+  /** Revoke private Team runs before a local policy change or deletion awaits. */
   teamRevoking?: (botId: string) => void;
   /** The platform the app runs on; this process's by default. */
   platform?: NodeJS.Platform;
@@ -182,8 +182,9 @@ export class BotService {
   update(botId: string, expectedRevision: number, patch: BotPatch): BotRecord {
     this.assertAvailable();
     this.assertNotDeleting(botId);
+    this.options.teamRevoking?.(botId);
     const record = this.store.update(botId, expectedRevision, patch, (draft) => { this.writeSettings(draft); });
-    if (record.revision !== expectedRevision) { this.changed(); this.options.teamRevoking?.(botId); }
+    if (record.revision !== expectedRevision) this.changed();
     return record;
   }
 
@@ -318,12 +319,17 @@ export class BotService {
         .filter((name) => name.endsWith('.jsonl') && !this.options.routines?.isControllerSession(workspace, name.slice(0, -'.jsonl'.length)))
         .slice(0, MAX_ACTIVITY_FILES);
     } catch { return undefined; }
-    let newest: number | undefined;
-    for (const name of names) {
+    const times = await Promise.all(names.map(async (name) => {
       try {
         const { mtimeMs } = await stat(join(directory, name));
-        if (newest === undefined || mtimeMs > newest) newest = mtimeMs;
-      } catch { /* A transcript that went away has no time to give. */ }
+        return mtimeMs;
+      } catch {
+        return undefined;
+      }
+    }));
+    let newest: number | undefined;
+    for (const mtimeMs of times) {
+      if (mtimeMs !== undefined && (newest === undefined || mtimeMs > newest)) newest = mtimeMs;
     }
     return newest === undefined ? undefined : Math.floor(newest);
   }

@@ -13,6 +13,7 @@ type Page = 'changes' | 'history' | 'stash' | 'commit' | 'sync';
 interface ViewState { page: Page; mode: Mode; path: string; filter: string; tree: boolean; split: boolean; base: string; target: string; message: string; scroll: number }
 const initialView = (): ViewState => ({ page: 'changes', mode: 'working', path: '', filter: '', tree: true, split: false, base: 'HEAD', target: '', message: '', scroll: 0 });
 const views = new Map<string, ViewState>();
+const NO_BRANCHES: GitBranch[] = [];
 interface GitContextValue {
   scope: GitScope | null; api?: GitApi; status?: GitStatus; branches: GitBranch[]; loading: boolean; busy: boolean; error: string; notice: string;
   refresh(): Promise<void>; run(request: GitRequest): Promise<GitResult | undefined>; read(request: GitRequest): Promise<GitResult | undefined>;
@@ -86,7 +87,13 @@ function GitWorkspaceSession({ scope, onOpen, onTerminal, children }: { scope: G
     catch (e) { if (live.current && (currentKey.current === key && generation.current === epoch)) setError(String(e instanceof Error ? e.message : e)); await refresh(); return undefined; }
     finally { if (mutation.current === epoch) mutation.current = null; if (live.current && (currentKey.current === key && generation.current === epoch)) setBusy(false); }
   }, [key, api, refresh, epoch]);
-  return <GitContext.Provider value={{ scope, api, status: statusKey === key ? status : undefined, branches: statusKey === key ? branches : [], loading, busy, error, notice, refresh, read, run, view, update, open: (page) => { if (page) update({ page }); onOpen(); }, terminal: onTerminal }}>{children}</GitContext.Provider>;
+  const open = useCallback((page?: Page) => { if (page) update({ page }); onOpen(); }, [onOpen, update]);
+  const visibleStatus = statusKey === key ? status : undefined;
+  const visibleBranches = statusKey === key ? branches : NO_BRANCHES;
+  const value = useMemo<GitContextValue>(() => ({
+    scope, api, status: visibleStatus, branches: visibleBranches, loading, busy, error, notice, refresh, read, run, view, update, open, terminal: onTerminal,
+  }), [scope, api, visibleStatus, visibleBranches, loading, busy, error, notice, refresh, read, run, view, update, open, onTerminal]);
+  return <GitContext.Provider value={value}>{children}</GitContext.Provider>;
 }
 function useGit() { const value = useContext(GitContext); if (!value) throw new Error(tr('desktop_git_7a5bd8399b')); return value; }
 export function GitChangesButton({ active }: { active: boolean }) {

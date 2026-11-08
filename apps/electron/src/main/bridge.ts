@@ -201,8 +201,11 @@ interface PendingSlashCommand {
   generation: number;
   fusion: boolean;
   snapshotInFlight?: boolean;
+  handoffAttempts?: number;
   retryTimer?: ReturnType<typeof setTimeout>;
 }
+
+const FUSION_HANDOFF_ATTEMPTS = 5;
 
 // Mod UI requests share the runtime's ordinary command lane, and a transcript
 // mounts a render site per tool row, so opening a long chat asks for well over
@@ -1581,6 +1584,11 @@ export class SessionRuntime {
         if (this.pendingSlashCommands.get(turnId) !== pending || this.disposed
           || pending.generation !== this.generation || pending.client !== this.client) return;
         this.diagnostics.add('warn', 'bridge', `Fusion task handoff is unconfirmed: ${sanitizeDiagnostic(error)}`);
+        pending.handoffAttempts = (pending.handoffAttempts ?? 0) + 1;
+        if (pending.handoffAttempts >= FUSION_HANDOFF_ATTEMPTS) {
+          this.finishPendingSlashCommand(turnId, pending);
+          return;
+        }
         pending.retryTimer = setTimeout(() => {
           pending.retryTimer = undefined;
           this.reconcileFusionSlash(turnId, pending);

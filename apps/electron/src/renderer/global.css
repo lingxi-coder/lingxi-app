@@ -179,7 +179,7 @@ body {
   border-radius: 0;
   background: var(--sidebar-material);
   backdrop-filter: blur(24px) saturate(1.15);
-  transition: width 170ms cubic-bezier(.2, 0, 0, 1), border-color 170ms ease;
+  transition: border-color 170ms ease;
 }
 .desktop-sidebar[data-resizing='true'] { transition: none; }
 .desktop-navigation[data-collapsed='true'] .desktop-sidebar {
@@ -2512,7 +2512,6 @@ textarea, input, select { font-family: inherit; }
   width: 40px;
   height: 40px;
   flex: 0 0 auto;
-  transition: width var(--composer-action-duration) var(--composer-action-ease);
 }
 .composer-send-presence,
 .composer-stop-presence {
@@ -2562,6 +2561,7 @@ textarea, input, select { font-family: inherit; }
 }
 
 /* Match the 40px tool trigger in every activity state, including an empty slot. */
+.transcript-run-item { content-visibility: auto; contain-intrinsic-size: auto 96px; }
 .transcript-thinking { min-height: 40px; min-width: 0; display: flex; align-items: center; font-size: 13px; line-height: 1.4; }
 .transcript-thinking-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .transcript-tool-group { min-width: 0; display: flex; flex-direction: column; }

@@ -49,10 +49,13 @@ export class CoreLocalAppStore implements LocalAppStore {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return { background: false, grantsByDigest: {} }; }
   }
   private async row(record: AppRecord, release?: AppRelease): Promise<DesktopLocalApp> {
+    const prefsPromise = this.preferences(record.appId);
     release ??= await this.core.request<AppRelease>({ op: 'getRelease', appId: record.appId, revision: record.latestRevision });
-    const layout = await this.core.request<AppLayout>({ op: 'layout', appId: record.appId, revision: release.revision });
+    const [layout, prefs] = await Promise.all([
+      this.core.request<AppLayout>({ op: 'layout', appId: record.appId, revision: release.revision }),
+      prefsPromise,
+    ]);
     this.layouts.set(`${record.appId}:${release.revision}`, layout);
-    const prefs = await this.preferences(record.appId);
     const manifest = { ...release.manifest, capabilities: [...(release.manifest.capabilities ?? [])] };
     if (manifest.install?.length || manifest.build?.length || manifest.processes?.length || Object.keys(manifest.mcpServers ?? {}).length || manifest.entry.type === 'server') {
       if (!manifest.capabilities.includes('process')) manifest.capabilities.push('process');

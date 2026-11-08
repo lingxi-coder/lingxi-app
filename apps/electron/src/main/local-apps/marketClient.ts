@@ -36,6 +36,36 @@ export function desktopTargets(): LocalAppTarget[] {
   const architecture = process.arch === 'arm64' ? 'aarch64' : process.arch === 'x64' ? 'x86_64' : process.arch === 'ia32' ? 'x86' : process.arch;
   return ['web', 'native'].map(environment => ({ platform, environment: environment as 'web' | 'native', architecture, runtimeVersion: '0.1.0', channels: ['desktop'], capabilities: ['process', 'files', 'clipboard', 'notifications', 'camera', 'microphone', 'background', 'agent', 'network'] }));
 }
+const MAX_MARKET_BODY_BYTES = 2 * 1024 * 1024;
+
+async function marketBody(response: Response): Promise<string> {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_MARKET_BODY_BYTES) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error('Market response exceeds the 2 MiB limit');
+  }
+  if (!response.body) {
+    const text = await response.text();
+    if (text.length > MAX_MARKET_BODY_BYTES) throw new Error('Market response exceeds the 2 MiB limit');
+    return text;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > MAX_MARKET_BODY_BYTES) throw new Error('Market response exceeds the 2 MiB limit');
+      chunks.push(next.value);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return new TextDecoder().decode(chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks));
+}
+
 export class MarketApiClient {
   readonly base: URL;
   constructor(readonly token: () => Promise<string>, base = localAppMarketApiRoot, readonly fetcher: typeof fetch = fetch) {
@@ -50,7 +80,7 @@ export class MarketApiClient {
     if (authenticated) headers.Authorization = `Bearer ${await this.token()}`;
     if (method !== 'GET') headers['Idempotency-Key'] ??= randomUUID();
     const response = await this.fetcher(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(30_000) });
-    const result = await response.json() as { data?: T; error?: { code?: string; message?: string } };
+    const result = JSON.parse(await marketBody(response)) as { data?: T; error?: { code?: string; message?: string } };
     if (!response.ok) throw Object.assign(new Error(result.error?.message ?? `Market request failed (${response.status})`), { code: result.error?.code });
     return result.data as T;
   }

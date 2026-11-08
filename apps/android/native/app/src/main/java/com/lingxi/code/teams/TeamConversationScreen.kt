@@ -167,7 +167,14 @@ internal fun TeamConversationScreen(
 
 @Composable
 private fun conversationSubtitle(conversation: TeamMessageConversation, bots: List<TeamBotCard>): String? = when (conversation.kind) {
-    "channel", "group" -> conversation.participants.count { it.startsWith("user:") }.takeIf { it > 0 }?.let { stringResource(R.string.teams_members_count_fmt, it) }
+    "channel", "group" -> {
+        val members = conversation.participants.count { it.startsWith("user:") }
+        val botCount = conversation.participants.count { it.startsWith("shared_bot:") }
+        listOfNotNull(
+            members.takeIf { it > 0 }?.let { stringResource(R.string.teams_members_count_fmt, it) },
+            botCount.takeIf { it > 0 }?.let { stringResource(if (it == 1) R.string.teams_bots_count_one_fmt else R.string.teams_bots_count_other_fmt, it) },
+        ).joinToString(" · ").ifEmpty { null }
+    }
     "bot_dm" -> bots.firstOrNull { it.sharedBotId == conversation.sharedBotId }?.let { botAvailabilityText(it) }
     else -> null
 }

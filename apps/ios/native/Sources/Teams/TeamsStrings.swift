@@ -63,6 +63,8 @@ enum TeamsText {
 
     static func membersCount(_ count: Int) -> String { String(localized: "teams_members_count \(count)") }
 
+    static func botsCount(_ count: Int) -> String { String(localized: "teams_bots_count \(count)") }
+
     /// The role label of a team member: `teams_owner`, `teams_admin` or `teams_member`.
     static func role(_ role: String) -> LocalizedStringKey { LocalizedStringKey("teams_" + role) }
 }

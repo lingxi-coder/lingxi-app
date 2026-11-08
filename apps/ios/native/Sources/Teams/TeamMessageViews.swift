@@ -60,7 +60,10 @@ struct TeamConversationContext {
         case "dm":
             return strings.directMessage
         default:
-            return conversation.participants.isEmpty ? nil : TeamsText.membersCount(conversation.participants.count)
+            let members = conversation.participants.filter { $0.hasPrefix("user:") }.count
+            let bots = conversation.participants.filter { $0.hasPrefix("shared_bot:") }.count
+            let parts = [members > 0 ? TeamsText.membersCount(members) : nil, bots > 0 ? TeamsText.botsCount(bots) : nil].compactMap { $0 }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
         }
     }
 

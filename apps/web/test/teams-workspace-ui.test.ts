@@ -393,7 +393,7 @@ test('conversation view: header, stream with day and unread dividers, grouped ru
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 7, 'the thread');
   const markup = html(view(workspace, snapshot(), { detailsOpen: false, onToggleDetails() {} }));
   const header = /<header class="tw-conv-head">[^]*?<\/header>/.exec(markup)?.[0] ?? '';
-  assert.match(header, /class="tw-chan"[^>]*>#</, 'a channel\'s header has the # tile'); assert.match(header, /<h2>general<\/h2>/, 'and its title is the name alone'); assert.match(header, /<p>3 members<\/p>/);
+  assert.match(header, /class="tw-chan"[^>]*>#</, 'a channel\'s header has the # tile'); assert.match(header, /<h2>general<\/h2>/, 'and its title is the name alone'); assert.match(header, /<p>2 members · 1 Bot<\/p>/, 'Bots are not counted as members');
   assert.equal(count(header.replace(/<[^>]*>/g, ''), /#/g), 1, 'one #, the tile\'s: the title does not repeat it');
   assert.match(markup, /class="tw-platform" title="[^"]*readable by the platform[^"]*">Platform readable/);
   assert.match(markup, /role="log" aria-label="Messages" tabindex="0"/);
@@ -488,6 +488,10 @@ test('conversation subtitle names who is in a conversation or whether its Bot is
   assert.equal(conversationSubtitle(botDm, snap([]), false), '', 'nothing to say about a Bot that is not listed');
   assert.equal(conversationSubtitle(conversation('d', { kind: 'dm' }), snap([]), false), 'Direct message');
   assert.equal(conversationSubtitle(conversation('g', { kind: 'group', participants: ['user:alice', 'user:bob', 'user:owner'] }), snap([]), true), '3 位成员');
+  const mixed = conversation('m', { kind: 'group', participants: ['user:alice', 'user:bob', 'user:carol', 'user:owner', 'shared_bot:one'] });
+  assert.equal(conversationSubtitle(mixed, snap([]), false), '4 members · 1 Bot', 'Bots are not members');
+  assert.equal(conversationSubtitle(mixed, snap([]), true), '4 位成员 · 1 个 Bot');
+  assert.equal(conversationSubtitle(conversation('m2', { kind: 'channel', participants: ['user:alice', 'user:bob', 'shared_bot:one', 'shared_bot:two'] }), snap([]), false), '2 members · 2 Bots');
   assert.equal(conversationSubtitle(conversation('c', { participants: [] }), snap([]), false), '');
 });
 

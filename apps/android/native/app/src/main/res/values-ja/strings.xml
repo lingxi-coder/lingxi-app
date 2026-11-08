@@ -2694,6 +2694,8 @@
     <string name="teams_preview_non_text">[テキスト以外のメッセージ]</string>
     <string name="teams_label_direct">ダイレクトメッセージ</string>
     <string name="teams_members_count_fmt">メンバー %1$d 人</string>
+    <string name="teams_bots_count_one_fmt">%1$d 個の Bot</string>
+    <string name="teams_bots_count_other_fmt">%1$d 個の Bot</string>
     <string name="teams_bot_offline_queued">オフライン · リクエストは待機します</string>
     <string name="teams_bot_disabled">無効 · 再バインドが必要</string>
     <string name="teams_new_messages_divider">新着メッセージ</string>

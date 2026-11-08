@@ -5,7 +5,7 @@ import type { TeamsApi } from '../../../packages/teams';
 import type { MessageCommand } from '../../../packages/teams/messages';
 import { FakeTeams, botCard, conversation, memoryStorage, team, until } from './support/fakeTeams';
 import { loadTeamsModule } from './support/loadTeamsModule';
-import { mount, scenario, withDom } from './support/workspacePage';
+import { mount, scenario, textOf, withDom } from './support/workspacePage';
 const { BotDirectory } = loadTeamsModule<typeof import('../../../packages/teams/BotDirectory')>('BotDirectory');
 const { TeamConversationView } = loadTeamsModule<typeof import('../../../packages/teams/TeamConversationView')>('TeamConversationView');
 const { usageText } = loadTeamsModule<typeof import('../../../packages/teams/BotRunCards')>('BotRunCards');
@@ -49,6 +49,22 @@ scenario('Foreground task polling updates queued status within its one-second ob
   context.mock.timers.enable({ apis: ['setInterval'] });
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount()); assert.match(page.text(), /Queued/); state = 'running';
   await page.during(() => { context.mock.timers.tick(1000); }); assert.match(page.text(), /Processing/);
+});
+scenario('A task without a reply message is a Bot row inside the message log, with the same wrapper as a delivered one', async context => {
+  const { fake, workspace } = await open(context); let state = 'queued';
+  fake.messages = async <T>(command: MessageCommand) => command.action === 'listTasks' ? { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state, createdAt: 1, deadline: Date.now() + 300000 }] } as T : { bots: fake.bots } as T;
+  context.mock.timers.enable({ apis: ['setInterval'] });
+  fake.conversations.set('team-test', [conversation('test-chat')]); await workspace.refresh();
+  workspace.selectConversation('test-chat'); await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat', 'selection');
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount());
+  for (const [next, label] of [['queued', /Queued/], ['interrupted', /Interrupted/]] as const) {
+    state = next; await page.during(() => { context.mock.timers.tick(1000); });
+    const row = page.find(n => n.props['data-task-id'] === 'task-test')[0]; assert.ok(row, `the ${next} task has a row`);
+    assert.match(textOf(row), label); assert.equal(row.type, 'li');
+    assert.ok(page.find(n => n.props.role === 'log')[0].findAll((n: any) => n === row).length > 0, 'inside the message log');
+    assert.ok(row.findAll((n: any) => n.props?.className === 'tw-embed').length > 0, 'status sits in a .tw-embed wrapper like a delivered task');
+    assert.equal(page.find(n => n.props.role === 'status' && label.test(textOf(n))).length, 1, 'and nowhere else');
+  }
 });
 scenario('Imported Bot publication binds required resources to the installer’s own selected files', async context => {
   const sent: unknown[] = [];

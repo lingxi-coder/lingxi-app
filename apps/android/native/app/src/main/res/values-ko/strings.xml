@@ -2694,6 +2694,8 @@
     <string name="teams_preview_non_text">[텍스트가 아닌 메시지]</string>
     <string name="teams_label_direct">개인 메시지</string>
     <string name="teams_members_count_fmt">멤버 %1$d명</string>
+    <string name="teams_bots_count_one_fmt">Bot %1$d개</string>
+    <string name="teams_bots_count_other_fmt">Bot %1$d개</string>
     <string name="teams_bot_offline_queued">오프라인 · 요청이 대기열에 추가됩니다</string>
     <string name="teams_bot_disabled">사용 안 함 · 다시 연결 필요</string>
     <string name="teams_new_messages_divider">새 메시지</string>

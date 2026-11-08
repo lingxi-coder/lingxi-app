@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import { useTeamTasks } from './bot-runs.js';
+import type { TeamTaskView } from './execution.js';
 import { MemberHome } from './MemberHome';
 import { snippet } from './compose.js';
 import { Composer, composerLock } from './Composer';
@@ -35,8 +36,12 @@ export function conversationSubtitle(conversation: TeamConversation, snapshot: P
     return `${presence} · ${t('Owner', '所有者')}: ${owner}`;
   }
   if (conversation.kind === 'dm') return t('Direct message', '私信');
-  const count = conversation.participants.length;
-  return count ? t(`${count} members`, `${count} 位成员`) : '';
+  // Participants mix people (`user:`) and shared Bots (`shared_bot:`); only people are members.
+  const members = conversation.participants.filter(id => id.startsWith('user:')).length;
+  const bots = conversation.participants.filter(id => id.startsWith('shared_bot:')).length;
+  const people = members ? t(`${members} members`, `${members} 位成员`) : '';
+  const botText = bots ? t(`${bots} ${bots === 1 ? 'Bot' : 'Bots'}`, `${bots} 个 Bot`) : '';
+  return [people, botText].filter(Boolean).join(' · ');
 }
 
 /** What the pane says while no conversation is open, and why. */
@@ -109,6 +114,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
     const card = snapshot.bots.find(bot => bot.sharedBotId === author.sharedBotId);
     return { kind: 'bot', id: card?.sharedBotId ?? message.author.sharedBotId, name: card?.name || message.author.displayName || 'Bot' };
   };
+  const botIdentity = (sharedBotId: string): Identity => ({ kind: 'bot', id: sharedBotId, name: snapshot.bots.find(bot => bot.sharedBotId === sharedBotId)?.name || 'Bot' });
   const isMine = (message: TeamMessage) => message.author.kind === 'user' && message.author.uid === uid;
   const quoteOf = (message: TeamMessage) => {
     if (!message.replyTo) return undefined;
@@ -118,6 +124,9 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
   };
   const lastOwn = [...messages].reverse().find(message => isMine(message) && !message.recalled);
   const unseen = pinned ? 0 : messages.filter(message => message.seq > seen && !isMine(message)).length;
+  // A task gets a reply message only once it is delivered. Until then (queued, running, failed, interrupted, …)
+  // it has no message to sit under, so it is shown as its own Bot row at the end of the log, oldest first.
+  const unanswered = useMemo(() => runs.tasks.filter(task => !task.replyId).reverse(), [runs.tasks]);
   const loadingMessages = !messages.length && conversation.lastSeq > 0;
 
   // ── Scrolling: open at the first unread message (else the newest), follow the newest while at the bottom ──
@@ -197,7 +206,6 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
     {snapshot.actionError && snapshot.actionError !== snapshot.messagingError ? <p className="tw-banner" role="alert" data-kind="error">{messageErrorText(snapshot.actionError, zh)}</p> : null}
     <CreationBanner workspace={workspace} snapshot={snapshot} zh={zh} />
     {runs.error ? <p role="alert" className="tw-banner">{messageErrorText(runs.error, zh)}</p> : null}
-    {runs.tasks.filter(task => !task.replyId).map(task => <BotRun key={task.taskId} task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} />)}
 
     <div className="tw-stream-wrap">
       <div ref={scroller} className="tw-stream" role="log" aria-label={t('Messages', '消息')} tabIndex={0} onScroll={measure}>
@@ -216,6 +224,9 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
               {tasks.map(task => <div className="tw-embed" key={task.taskId}><BotRun task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} /></div>)}
             </MessageItem>;
           })}
+          {unanswered.map(task => <TaskRow key={task.taskId} task={task} author={botIdentity(task.sharedBotId)} renderAvatar={renderAvatar}>
+            <div className="tw-embed"><BotRun task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} /></div>
+          </TaskRow>)}
           {snapshot.pending.map(intent => {
             const payload = pendingPayload(intent);
             const operation = 'operation' in payload ? payload.operation : 'create';
@@ -251,6 +262,17 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
       </div>
     </Dialog> : null}
   </section>;
+}
+
+/** The row of a Bot task that has no reply message yet: the Bot's avatar and name, then its status card. */
+function TaskRow({ task, author, renderAvatar, children }: { task: TeamTaskView; author: Identity; renderAvatar?: RenderAvatar; children: ReactNode }): ReactElement {
+  return <li className="tw-msg" data-grouped="false" data-kind="bot" data-task-id={task.taskId} data-task-state={task.state}>
+    <div className="tw-msg-lead"><Avatar identity={author} size={32} render={renderAvatar} /></div>
+    <div className="tw-msg-main">
+      <div className="tw-msg-head"><b className="tw-msg-author">{author.name}</b><span className="tw-tag">Bot</span></div>
+      {children}
+    </div>
+  </li>;
 }
 
 function MessageItem({ message, grouped, author, mine, owner, quote, locale, zh, renderAvatar, onReply, onEdit, onRecall, children }: {

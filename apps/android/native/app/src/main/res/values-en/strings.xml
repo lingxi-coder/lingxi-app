@@ -2694,6 +2694,8 @@
     <string name="teams_preview_non_text">[Non-text message]</string>
     <string name="teams_label_direct">Direct message</string>
     <string name="teams_members_count_fmt">%1$d members</string>
+    <string name="teams_bots_count_one_fmt">%1$d Bot</string>
+    <string name="teams_bots_count_other_fmt">%1$d Bots</string>
     <string name="teams_bot_offline_queued">Offline · requests are queued</string>
     <string name="teams_bot_disabled">Disabled · needs rebinding</string>
     <string name="teams_new_messages_divider">New messages</string>

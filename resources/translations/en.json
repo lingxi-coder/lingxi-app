@@ -2869,6 +2869,14 @@
   "teams_label_direct": "Direct message",
   "teams_members_count %lld": "%lld members",
   "teams_members_count_fmt": "%1$d members",
+  "teams_bots_count %lld": {
+    "plural": {
+      "one": "%lld Bot",
+      "other": "%lld Bots"
+    }
+  },
+  "teams_bots_count_one_fmt": "%1$d Bot",
+  "teams_bots_count_other_fmt": "%1$d Bots",
   "teams_bot_offline_queued": "Offline · requests are queued",
   "teams_bot_disabled": "Disabled · needs rebinding",
   "teams_new_messages_divider": "New messages",

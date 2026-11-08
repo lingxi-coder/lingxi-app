@@ -2694,6 +2694,8 @@
     <string name="teams_preview_non_text">[非文本消息]</string>
     <string name="teams_label_direct">私信</string>
     <string name="teams_members_count_fmt">%1$d 位成员</string>
+    <string name="teams_bots_count_one_fmt">%1$d 个 Bot</string>
+    <string name="teams_bots_count_other_fmt">%1$d 个 Bot</string>
     <string name="teams_bot_offline_queued">离线 · 请求将排队</string>
     <string name="teams_bot_disabled">已停用 · 需重新绑定</string>
     <string name="teams_new_messages_divider">新消息</string>

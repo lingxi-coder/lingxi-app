@@ -69,19 +69,36 @@ struct TeamTaskCard: View {
         .accessibilityIdentifier("teams.task.\(task.taskId)")
     }
 }
+/// Artifact links come from Bot output, so only web links may leave the app.
+enum TeamArtifactLinkPolicy {
+    static func allows(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return false }
+        return url.host?.isEmpty == false
+    }
+}
+
 /// Cloud-backed immutable document; reading always checks current Team membership.
+/// The body is Markdown rendered by the same `AIText` as chat messages. Markdown images stay inert
+/// (alt text only, nothing is fetched) and links open only when they are http(s).
 struct TeamArtifactViewer: View {
+    @Environment(\.theme) private var theme
     let artifact: TeamArtifact
     let onClose: () -> Void
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(artifact.document.title).font(.title2.weight(.semibold))
-                    Text(artifact.document.body).textSelection(.enabled)
+                    Text(artifact.document.title).font(.title2.weight(.semibold)).foregroundStyle(theme.text)
+                    AIText(markdown: artifact.document.body)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("teams.artifact.body")
                     Text("v\(artifact.revision) · \(artifact.digest)").font(.caption.monospaced()).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding()
             }
+            .background(theme.windowBg)
+            .environment(\.openURL, OpenURLAction { url in
+                TeamArtifactLinkPolicy.allows(url) ? .systemAction : .discarded
+            })
             .navigationTitle("teams_artifact_title")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("common_close", action: onClose) } }
         }

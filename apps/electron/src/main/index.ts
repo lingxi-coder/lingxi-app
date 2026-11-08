@@ -947,8 +947,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         delegation: tasks,
         // Remote devices reach a Bot's chats by session id, and its switch decides whether they may.
         openProject: (sessionId) => manager.get(sessionId)?.projectPath,
-        changed: () => { remotePolicy?.notifySessionsChanged(); teamConnector?.localChanged(); },
-        teamRevoking: () => teamConnector?.localChanged(),
+        changed: () => remotePolicy?.notifySessionsChanged(),
+        teamRevoking: (botId) => teamConnector?.botChanged(botId),
         catalogFor: (configHome) => new ProjectSessionCatalog({ ...catalogOptions, configHome }),
         // The scheduler was made first; it learns of the Bots below, and is asked for these only when used.
         routines: {

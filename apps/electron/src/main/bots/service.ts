@@ -91,7 +91,7 @@ export interface BotServiceOptions {
   openProject?: (sessionId: string) => string | undefined;
   /** A Bot was made, changed or deleted, which Remote Control must hear of: its switch, name and chats are what viewers see. */
   changed?: () => void;
-  /** Revoke private Team runs before a local policy change or deletion awaits. */
+  /** Stop the shared-Bot runs bound to this Bot once its edit has landed, or before a deletion awaits. */
   teamRevoking?: (botId: string) => void;
   /** The platform the app runs on; this process's by default. */
   platform?: NodeJS.Platform;
@@ -182,9 +182,8 @@ export class BotService {
   update(botId: string, expectedRevision: number, patch: BotPatch): BotRecord {
     this.assertAvailable();
     this.assertNotDeleting(botId);
-    this.options.teamRevoking?.(botId);
     const record = this.store.update(botId, expectedRevision, patch, (draft) => { this.writeSettings(draft); });
-    if (record.revision !== expectedRevision) this.changed();
+    if (record.revision !== expectedRevision) { this.changed(); this.options.teamRevoking?.(botId); }
     return record;
   }
 

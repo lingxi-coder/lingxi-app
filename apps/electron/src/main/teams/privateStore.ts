@@ -14,7 +14,7 @@ export interface SharedBotBinding { schemaVersion: 1; ownerUid: string; teamId: 
 export interface TeamDataRef { path: string; sha256: string; bytes: number }
 export interface SavedPublication { schemaVersion: 1; requestDigest: string; binding: SharedBotBinding; payload: Record<string, unknown> }
 export interface SavedExecution { schemaVersion: 1; scope: BotChatScope; teamId: string; generation: number; taskId: string; deadlineAt: number; commandId: string; payload: Record<string, unknown> }
-export interface SavedDelivery { schemaVersion: 1; teamId: string; generation: number; taskId: string; commandId: string; payload: Record<string, unknown> }
+export interface SavedDelivery { schemaVersion: 1; teamId: string; generation: number; taskId: string; deadlineAt: number; commandId: string; payload: Record<string, unknown> }
 
 export interface TeamModelSelection { route: TeamModelRoute; profiles: Record<string, unknown>[]; assertCurrent(): Promise<void> }
 
@@ -231,7 +231,7 @@ export class TeamPrivateStore {
     for (const name of await readdir(root)) {
       if (!/^[A-Za-z0-9_-]{8,64}$/u.test(name)) throw new Error('UNSAFE_TEAM_STORAGE');
       const value = JSON.parse(await read(join(root, name), 512 * 1024)) as SavedDelivery;
-      if (value.schemaVersion !== 1 || value.taskId !== name || !/^[A-Za-z0-9_-]{8,64}$/u.test(value.teamId)) throw new Error('UNSAFE_TEAM_STORAGE'); values.push(value);
+      if (value.schemaVersion !== 1 || value.taskId !== name || !/^[A-Za-z0-9_-]{8,64}$/u.test(value.teamId) || !Number.isSafeInteger(value.deadlineAt)) throw new Error('UNSAFE_TEAM_STORAGE'); values.push(value);
     }
     return values;
   }); }

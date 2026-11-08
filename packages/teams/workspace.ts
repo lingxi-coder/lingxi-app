@@ -358,10 +358,9 @@ export class TeamsWorkspace {
       if (this.closed) return false;
       if (command.action === 'join') {
         if (!result.teamId || typeof result.generation !== 'number' || !Number.isSafeInteger(result.generation) || result.generation <= 0) throw new Error('STALE_MEMBERSHIP');
-        const proofAuthority = this.authority;
         // Account-scoped HTTP detail verifies current membership, independently of cached invalidations during join.
         const current = await this.api.detail(result.teamId);
-        if (this.closed || proofAuthority !== this.authority) return false;
+        if (this.closed) return false;
         const self = current.members.find(member => member.uid === this.uid);
         if (current.team.id !== result.teamId || current.team.generation !== result.generation || self?.generation !== result.generation) throw new Error('STALE_MEMBERSHIP');
         this.selection = result.teamId; this.detail = current;

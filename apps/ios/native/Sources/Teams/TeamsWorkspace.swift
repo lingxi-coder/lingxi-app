@@ -391,8 +391,7 @@ final class TeamsWorkspace {
         guard started else { return }
         scheduleRefresh()
         // A revoked model never reopens; the list says whether the team is still ours.
-        if let model = messaging, model.revoked, let team = messagingTeam { openMessaging(team) }
-        messaging?.reconnect()
+        if let model = messaging, model.revoked, let team = messagingTeam { openMessaging(team) } else { messaging?.reconnect() }
         for watcher in watchers.values { watcher.stop() }
         watchers = [:]
         reconcileWatchers()
@@ -476,6 +475,7 @@ final class TeamsWorkspace {
     func openArtifact(_ artifactId: String) async {
         guard started, let model = messaging else { return }
         let life = lifecycle
+        actionError = ""
         do { try await model.openArtifact(artifactId) } catch {
             if life == lifecycle { actionError = Self.code(error, fallback: "UNKNOWN") }
         }

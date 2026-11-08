@@ -1560,25 +1560,25 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
   })()`);
     await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId === '${sessionId}' && document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && Boolean(document.querySelector('.local-app-chat-card')))`), { label: 'Modify restores the dedicated authoring Code session, transcript and app draft' });
   } catch (error) {
+    // Structural evidence only: no page text, prompt text, transcript or bootstrap payload, which carry account content.
     const state = await evaluate(page, `(async () => {
       const bootstrap = await window.lingxi.bootstrap();
-      return { activeSession: bootstrap.activeSession, activeMode: bootstrap.conversationSpaces?.activeMode,
-        connection: bootstrap.connection, sidebar: bootstrap.settings.sidebar,
-        prompt: document.querySelector('[aria-label="Prompt"]')?.innerText,
-        cards: Array.from(document.querySelectorAll('.local-app-chat-card')).map(node => node.innerText),
-        promptEditable: document.querySelector('[aria-label="Prompt"]')?.isContentEditable,
+      const prompt = document.querySelector('[aria-label="Prompt"]');
+      return { sessionMatches: bootstrap.activeSession?.sessionId === ${JSON.stringify(sessionId)}, projectMatches: bootstrap.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)},
+        activeMode: bootstrap.conversationSpaces?.activeMode, connectionStatus: bootstrap.connection?.status, sidebarMode: bootstrap.settings.sidebar?.mode,
+        hasPrompt: Boolean(prompt), draftMatches: Boolean(prompt?.innerText.includes(${JSON.stringify(created.id)})), promptEditable: prompt?.isContentEditable,
+        cardCount: document.querySelectorAll('.local-app-chat-card').length,
         railDisabled: document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled'),
-        alerts: Array.from(document.querySelectorAll('[role="alert"], .local-app-error, .error-banner')).map(node => node.innerText),
+        alertCount: document.querySelectorAll('[role="alert"], .local-app-error, .error-banner').length,
         editEvents: window.__packagedModifyEvents, clickState: window.__packagedModifyClickState,
-        domClicks: window.__packagedModifyDomClicks, observedAlerts: window.__packagedModifyAlerts,
-        body: document.body.innerText };
+        domClicks: window.__packagedModifyDomClicks, observedAlertCount: window.__packagedModifyAlerts?.length, url: location.protocol + '//' + location.host + location.pathname, title: document.title };
     })()`);
     const evidence = process.env.LINGXI_LOCAL_APP_EVIDENCE;
     if (evidence) {
       mkdirSync(evidence, { recursive: true });
-      writeFileSync(join(evidence, 'packaged-modify-failure.json'), JSON.stringify({ expected: { sessionId, projectPath: sourceSession.projectPath, appId: created.id, authoring: created.authoring }, actual: state }, null, 2), { mode: 0o600 });
+      writeFileSync(join(evidence, 'packaged-modify-failure.json'), JSON.stringify({ actual: state }, null, 2), { mode: 0o600 });
     }
-    log(`packaged Modify failure: active session matches=${state.activeSession?.sessionId === sessionId}, project matches=${state.activeSession?.projectPath === sourceSession.projectPath}, draft matches=${Boolean(state.prompt?.includes(created.id))}, card count=${state.cards.length}`);
+    log(`packaged Modify failure: active session matches=${state.sessionMatches}, project matches=${state.projectMatches}, draft matches=${state.draftMatches}, card count=${state.cardCount}`);
     throw error;
   } finally {
     await evaluate(page, 'window.__packagedModifyObserver?.disconnect(); window.__packagedModifyOff?.(); window.__packagedModifyOff = undefined');

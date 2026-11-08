@@ -287,7 +287,7 @@ for (const invalid of ['revoked', 'unavailable', 'account-changed', 'wrong-team'
 }
 
 for (const interruption of ['invalidation', 'close'] as const) {
-  test(`join: ${interruption} while current membership proof is pending rejects the old response`, async context => {
+  test(`join: ${interruption} while current membership proof is pending ${interruption === 'close' ? 'rejects the old response' : 'still confirms the verified join'}`, async context => {
     const target = team('team-joined', { generation: 7 });
     const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
     await until(() => !!snapshot().detail, 'initial detail');
@@ -299,7 +299,9 @@ for (const interruption of ['invalidation', 'close'] as const) {
     await until(() => !!release, 'membership proof pending');
     if (interruption === 'close') workspace.close(); else fake.invalidate();
     release!({ team: target, members: [{ uid, displayName: 'Alice', role: 'member', generation: 7 }], invites: [] });
-    assert.equal(await pending, false); assert.notEqual(snapshot().selectedTeamId, target.id);
+    // The proof is account-scoped HTTP: a cache invalidation cannot make a server-successful join fail; only close does.
+    if (interruption === 'close') { assert.equal(await pending, false); assert.notEqual(snapshot().selectedTeamId, target.id); }
+    else { assert.equal(await pending, true); assert.equal(snapshot().selectedTeamId, target.id); }
   });
 }
 

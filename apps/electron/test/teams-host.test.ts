@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { TeamsApiError } from '../../../packages/teams';
 import { TeamsService, type TeamAccountContext } from '../src/main/teams/service';
-import { TeamConnector, type TeamHostApi } from '../src/main/teams/connector';
+import { TeamConnector, DELIVERY_SKEW_MS, type TeamHostApi } from '../src/main/teams/connector';
 import { TeamPrivateStore, digest, type TeamModelRoute, type TeamPersonaSnapshot } from '../src/main/teams/privateStore';
 import { runTeamHost, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult } from '../src/main/teams/process';
 import { botFixture } from './bot-helpers';
@@ -19,19 +19,19 @@ function route():TeamModelRoute{return {model_provider:'anthropic',model_protoco
 function accounts(){return {providerAccountHome:'/synthetic',providerAccounts:{storeScope:'fixture',configRevision:1,accounts:[],health:[]},providerAccountCredentials:{}};}
 function snapshot():TeamPersonaSnapshot{const text='Only the published role';return {...route(),instructions:text,provider_account_profiles:[route().model_profile],documents:[{resourceId:'resource001',revision:1,kind:'persona',name:'Role',text,digest:digest(text)}]};}
 function fakeService(){
- const events=new EventEmitter();let context:TeamAccountContext|undefined={uid:'owner',epoch:0};const commands:any[]=[],tasks:any[]=[],reads:any[]=[],cards:any[]=[];let deployment:any,inputs:any[]=[];let deny=false;const publicationReceipts=new Map<string,any>();
+ const events=new EventEmitter();let context:TeamAccountContext|undefined={uid:'owner',epoch:0};const commands:any[]=[],tasks:any[]=[],reads:any[]=[],cards:any[]=[];let deployment:any,inputs:any[]=[];const publicationReceipts=new Map<string,any>();
  const service:TeamHostApi={hostContext:()=>context,assertHostContext:c=>{if(!context||c.uid!==context.uid||c.epoch!==context.epoch)throw Error('INVALID_SESSION');},list:async()=>({teams:[{id:teamId,name:'Team',memberCount:1,role:'owner',generation:1}]}),onChanged:cb=>{events.on('change',cb);return()=>events.off('change',cb);},onMessagesChanged:cb=>{events.on('messages',cb);return()=>events.off('messages',cb);},
  hostMessages:async<T>(c,command)=>{service.assertHostContext(c);commands.push(command);const p=command.payload as any;let result:any={};
  if(command.action==='publishSharedBot'){if(publicationReceipts.has(command.commandId as string))return publicationReceipts.get(command.commandId as string) as T;deployment=p.deployment;inputs=p.inputs.map((v:any)=>({...v,grantId:digest(JSON.stringify([p.sharedBotId,p.expectedRevision+1,v.resourceId]))}));const previous=cards.findIndex(card=>card.sharedBotId===p.sharedBotId);if(previous>=0)cards.splice(previous,1);cards.push({sharedBotId:p.sharedBotId,state:'published',revision:p.expectedRevision+1,maintainer:{uid:'owner',generation:1}});result={sharedBotId:p.sharedBotId,revision:p.expectedRevision+1,grantIds:inputs.map(v=>v.grantId)};publicationReceipts.set(command.commandId as string,result);}
  else if(command.action==='listSharedBots')result={bots:cards};
  else if(command.action==='activateDeployment'){assert.equal(p.expectedAccountEpoch,deployment.accountEpoch);deployment.accountEpoch=p.newAccountEpoch;}
  else if(command.action==='listHostTasks')result={tasks:tasks.filter(t=>t.state==='queued')};
- else if(command.action==='prepareTask'||command.action==='validateTask'||command.action==='startTask'){if(deny)throw Error('TASK_REVOKED');const task=tasks.find(t=>t.taskId===p.taskId);result={task:{...task},messageId:task.messageId,messageSeq:task.messageSeq,inputs,deployment};if(command.action==='startTask'){task.state='running';result={...result,task:{...task},execute:true,permitId:'permit00001'};}}
+ else if(command.action==='prepareTask'||command.action==='validateTask'||command.action==='startTask'){const task=tasks.find(t=>t.taskId===p.taskId);result={task:{...task},messageId:task.messageId,messageSeq:task.messageSeq,inputs,deployment};if(command.action==='startTask'){task.state='running';result={...result,task:{...task},execute:true,permitId:'permit00001'};}}
  else if(command.action==='completeTask'){const task=tasks.find(t=>t.taskId===p.taskId);if(task)task.state='completed';}
  return result as T;},
  hostReadChat:async(_c,request)=>{reads.push(request);if(request.mode==='changes')return {messages:[],lastSeq:1000,lastChangeSeq:1000,hasMore:false};const through=request.mode==='recent'?request.throughSeq:request.mode==='range'?request.toSeqInclusive:1;const from=request.mode==='recent'?Math.max(0,through-200):request.mode==='range'?request.fromSeqExclusive:0;
  return {messages:Array.from({length:through-from},(_,i)=>({messageId:`message${String(from+i+1).padStart(6,'0')}`,seq:from+i+1,changeSeq:from+i+1,changeId:`change${String(from+i+1).padStart(6,'0')}`,author:{kind:'user' as const,uid:i%2?'human2':'human1',displayName:'Same name'},createdAt:1700000000000+i,text:`original ${i}`})),lastSeq:1000,lastChangeSeq:1000,hasMore:from>0};},};
- return {service,commands,tasks,reads,wake:()=>events.emit('messages'),flicker:()=>events.emit('change',{invalidated:true}),switch:()=>{context={uid:'other',epoch:1};events.emit('change',{invalidated:true});},deny:()=>{deny=true;}};
+ return {service,commands,tasks,reads,wake:()=>events.emit('messages'),flicker:()=>events.emit('change',{invalidated:true}),switch:()=>{context={uid:'other',epoch:1};events.emit('change',{invalidated:true});}};
 }
 function fixture(t:any,run?:TeamHostProcessOptions extends never?never:(o:TeamHostProcessOptions)=>Promise<TeamHostResult>){
  const f=botFixture(t),privateStore=new TeamPrivateStore(f.userData),mock=fakeService(),bot=f.store.create({name:'Personal',persona:'PRIVATE_ROLE_NOT_SHARED',model:'anthropic/synthetic'});let selected:string[]=[];
@@ -64,7 +64,7 @@ test('large input is a verified private transport reference, not a JSONL frame',
  const f=fixture(t),value={messages:Array.from({length:450},(_,i)=>({seq:i+1,text:'x'.repeat(1000)}))},ref=await f.privateStore.dataRef('owner',value);assert.ok(ref.bytes>256*1024);assert.ok(ref.path.startsWith((await f.privateStore.owner('owner')).runtime));assert.equal(digest(readFileSync(ref.path,'utf8')),ref.sha256);await f.privateStore.releaseDataRef('owner',ref);assert.equal(existsSync(ref.path),false);
 });
 test('delivery outbox is immutable and account-private',async t=>{
- const f=fixture(t),delivery={schemaVersion:1 as const,teamId,generation:1,taskId:'task00001',commandId:'delivery001',payload:{text:'One result'}};await f.privateStore.saveDelivery('owner',delivery);await f.privateStore.saveDelivery('owner',delivery);await assert.rejects(f.privateStore.saveDelivery('owner',{...delivery,payload:{text:'changed'}}),/UNSAFE_TEAM_STORAGE/);assert.deepEqual(await f.privateStore.deliveries('other'),[]);
+ const f=fixture(t),delivery={schemaVersion:1 as const,teamId,generation:1,taskId:'task00001',deadlineAt:Date.now()+1000,commandId:'delivery001',payload:{text:'One result'}};await f.privateStore.saveDelivery('owner',delivery);await f.privateStore.saveDelivery('owner',delivery);await assert.rejects(f.privateStore.saveDelivery('owner',{...delivery,payload:{text:'changed'}}),/UNSAFE_TEAM_STORAGE/);assert.deepEqual(await f.privateStore.deliveries('other'),[]);
 });
 test('all Bots read the service data session, including current ACL and account fence',async()=>{
  let uid='owner',epoch=0;const service=new TeamsService({snapshot:()=>({user:{uid}}),sessionEpoch:()=>epoch,getIdToken:async()=>'',onChanged:()=>()=>{}},{});const request={teamId,generation:1,conversationId,mode:'before' as const,beforeSeq:20};let reads=0;
@@ -252,4 +252,82 @@ test('a fromCache snapshot reaches listeners but never revokes the host; an acco
  const events:any[]=[];service.onChanged(e=>events.push(e));await service.detail(teamId,'owner');assert.ok(snapshotCallback);
  snapshotCallback!({metadata:{fromCache:true}});assert.deepEqual(events,[{invalidated:true}]);assert.equal(revokes,0);
  uid='other';epoch++;notify();assert.equal(revokes,1);
+});
+
+const seedDelivery=async(f:ReturnType<typeof fixture>,deadlineAt:number,deploymentId?:string)=>{
+ const b=(await f.privateStore.bindings('owner'))[0]!,payload={deploymentId:deploymentId??b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:'permit0001',inputGrantIds:b.grantIds};
+ const intent={schemaVersion:1 as const,scope:{teamId,sharedBotId,conversationId,sessionEpoch:b.sessionEpoch},teamId,generation:1,taskId:'task00001',deadlineAt,commandId:'delivery001',payload};
+ await f.privateStore.saveExecution('owner',intent);
+ await f.privateStore.saveDelivery('owner',{...intent,payload:{...payload,outcome:'failed',text:'Failed',finishedAt:deadlineAt-1,outputAudience:{mode:'published_inputs'},usage:{status:'missing'}}});
+};
+const refuseCompletions=(f:ReturnType<typeof fixture>,code:string,status:number)=>{const original=f.mock.service.hostMessages.bind(f.mock.service),attempts={count:0};
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='completeTask'){attempts.count++;throw new TeamsApiError(code,status);}return original(c,command);};return attempts;};
+const pendingFiles=async(f:ReturnType<typeof fixture>)=>[(await f.privateStore.deliveries('owner')).length,(await f.privateStore.executions('owner')).length];
+const wakeAndIdle=async(f:ReturnType<typeof fixture>)=>{f.mock.wake();await f.connector.idle();};
+
+test('TASK_EXPIRED from a host clock ahead of the server keeps the result and delivers it on the next try',async t=>{
+ const events:Array<[string,any]>=[];const f=fixture(t,async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:o.bootstrap.type==='inspect_result'?{status:'not_found',cursor}:{status:'completed',cursor,text:'Skewed but done',finishedAt:Date.now()});
+ (f.connector as any).options.retryMs=10;(f.connector as any).options.diagnostics=(event:string,details:any)=>events.push([event,details]);await f.connector.publishLocalBot('owner',f.input);
+ const original=f.mock.service.hostMessages.bind(f.mock.service);let refused=0;
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='completeTask'&&!refused++)throw new TeamsApiError('TASK_EXPIRED',409);return original(c,command);};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>f.mock.tasks[0].state==='completed');await f.connector.idle();
+ assert.equal(refused,2);assert.equal(completions(f).length,1);assert.equal(completions(f)[0].payload.text,'Skewed but done');assert.equal(completions(f)[0].payload.outcome,'completed');
+ assert.deepEqual(await pendingFiles(f),[0,0]);assert.ok(!events.some(([event])=>event==='team_task_delivery_rejected'));
+});
+test('a refused delivery is dropped only once the deadline plus the skew margin has passed',async t=>{
+ for(const [code,status] of [['DEPLOYMENT_REQUIRED',403],['MEMBERSHIP_REQUIRED',403],['STALE_MEMBERSHIP',403],['TASK_EXPIRED',409]] as const){
+  const events:Array<[string,any]>=[];let clock=Date.now();const f=fixture(t);(f.connector as any).options.now=()=>clock;(f.connector as any).options.diagnostics=(event:string,details:any)=>events.push([event,details]);
+  await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();const deadline=clock+60000;await seedDelivery(f,deadline);const attempts=refuseCompletions(f,code,status);
+  clock=deadline+DELIVERY_SKEW_MS;await wakeAndIdle(f);assert.ok(attempts.count>=1);assert.deepEqual(await pendingFiles(f),[1,1],code);assert.ok(!events.some(([event])=>event==='team_task_delivery_rejected'));
+  clock=deadline+DELIVERY_SKEW_MS+1;await wakeAndIdle(f);
+  assert.deepEqual(await pendingFiles(f),[0,0],code);assert.deepEqual(events.filter(([event])=>event==='team_task_delivery_rejected'),[['team_task_delivery_rejected',{taskId:'task00001',code}]]);
+  f.connector.close();
+ }
+});
+test('an always-permanent refusal drops the delivery before the deadline',async t=>{
+ const f=fixture(t);await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();await seedDelivery(f,Date.now()+60000);refuseCompletions(f,'TASK_REVOKED',403);
+ await wakeAndIdle(f);assert.deepEqual(await pendingFiles(f),[0,0]);
+});
+test('a transient server error never drops a delivery, even long past the deadline',async t=>{
+ const f=fixture(t);let clock=Date.now();(f.connector as any).options.now=()=>clock;await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();await seedDelivery(f,clock+1000);const attempts=refuseCompletions(f,'SERVICE_UNAVAILABLE',503);
+ clock+=DELIVERY_SKEW_MS*10;await wakeAndIdle(f);assert.ok(attempts.count>=1);assert.deepEqual(await pendingFiles(f),[1,1]);
+});
+test('a delivery whose binding is gone after a republish is dropped only after the deadline plus the margin',async t=>{
+ const events:Array<[string,any]>=[];let clock=Date.now();const f=fixture(t);(f.connector as any).options.now=()=>clock;(f.connector as any).options.diagnostics=(event:string,details:any)=>events.push([event,details]);
+ await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();const deadline=clock+60000;await seedDelivery(f,deadline,'olddeployment01');
+ clock=deadline+DELIVERY_SKEW_MS;await wakeAndIdle(f);assert.deepEqual(await pendingFiles(f),[1,1]);assert.equal(completions(f).length,0);
+ clock=deadline+DELIVERY_SKEW_MS+1;await wakeAndIdle(f);assert.deepEqual(await pendingFiles(f),[0,0]);assert.equal(completions(f).length,0);
+ assert.deepEqual(events.filter(([event])=>event==='team_task_delivery_rejected'),[['team_task_delivery_rejected',{taskId:'task00001',code:'BINDING_MISSING'}]]);
+});
+test('a saved delivery without a deadline is rejected by the reader',async t=>{
+ const f=fixture(t);await f.privateStore.saveDelivery('owner',{schemaVersion:1,teamId,generation:1,taskId:'task00001',commandId:'delivery001',payload:{}} as any);
+ await assert.rejects(f.privateStore.deliveries('owner'),/UNSAFE_TEAM_STORAGE/);
+});
+test('a revoke while startTask is pending still saves the execution and delivers a failed result',async t=>{
+ let modelRuns=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};modelRuns++;return {status:'completed',cursor,text:'Must not run',finishedAt:Date.now()};});
+ (f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);
+ const original=f.mock.service.hostMessages.bind(f.mock.service);let entered=false,release=()=>{};const gate=new Promise<void>(resolve=>{release=resolve;});
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='startTask'){entered=true;await gate;}return original(c,command);};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>entered);f.connector.revoke();release();
+ await settle(()=>completions(f).length===1);await f.connector.idle();
+ assert.equal(modelRuns,0);assert.equal(completions(f)[0].payload.outcome,'failed');assert.equal(completions(f)[0].payload.permitId,'permit00001');assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);assert.deepEqual(await pendingFiles(f),[0,0]);
+});
+test('a Bot edit stops only the shared-Bot runs bound to that Bot',async t=>{
+ const runs:TeamHostProcessOptions[]=[];const f=fixture(t,hold(runs));(f.connector as any).options.retryMs=10;
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await settle(()=>runs.length===1);
+ const activations=f.mock.commands.filter(c=>c.action==='activateDeployment').length;
+ f.connector.botChanged('unrelatedBot01');await f.connector.idle();await new Promise(r=>setTimeout(r,30));
+ assert.equal(runs[0]!.signal.aborted,false);assert.equal(f.mock.commands.filter(c=>c.action==='activateDeployment').length,activations);
+ f.connector.botChanged(f.bot.bot_id);await settle(()=>completions(f).length===1);assert.equal(runs[0]!.signal.aborted,true);assert.equal(completions(f)[0].payload.outcome,'failed');
+});
+test('validateTask polling keeps the run through transient errors and aborts it on a definitive refusal',async t=>{
+ const runs:TeamHostProcessOptions[]=[];const f=fixture(t,hold(runs));(f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);
+ const original=f.mock.service.hostMessages.bind(f.mock.service);let validations=0,failure:Error|undefined=new TeamsApiError('SERVICE_UNAVAILABLE',503);
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='validateTask'){validations++;if(failure)throw failure;}return original(c,command);};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>runs.length===1);
+ const until=async(check:()=>boolean)=>{for(let i=0;i<120&&!check();i++)await new Promise(r=>setTimeout(r,50));assert.ok(check(),'condition settled');};
+ await until(()=>validations>=1);assert.equal(runs[0]!.signal.aborted,false);
+ failure=new Error('network down');const seen=validations;await until(()=>validations>seen);assert.equal(runs[0]!.signal.aborted,false);
+ failure=new TeamsApiError('DEPLOYMENT_REQUIRED',403);await until(()=>runs[0]!.signal.aborted);
+ await settle(()=>completions(f).length===1);assert.equal(completions(f)[0].payload.outcome,'failed');
 });

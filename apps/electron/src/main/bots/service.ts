@@ -91,7 +91,7 @@ export interface BotServiceOptions {
   openProject?: (sessionId: string) => string | undefined;
   /** A Bot was made, changed or deleted, which Remote Control must hear of: its switch, name and chats are what viewers see. */
   changed?: () => void;
-  /** Stop the shared-Bot runs bound to this Bot once its edit has landed, or before a deletion awaits. */
+  /** Stop the shared-Bot runs bound to this Bot once its edit has landed, or before a deletion awaits and again once the Bot is trashed (a run may start while the deletion waits). */
   teamRevoking?: (botId: string) => void;
   /** The platform the app runs on; this process's by default. */
   platform?: NodeJS.Platform;
@@ -204,6 +204,7 @@ export class BotService {
       this.options.routines?.releaseScope(workspace);
       await this.options.runtimes.closeProject(workspace);
       this.store.trash(botId);
+      this.options.teamRevoking?.(botId);
       this.catalogs.delete(botId);
       this.options.router?.revokeBot(botId);
     } finally {

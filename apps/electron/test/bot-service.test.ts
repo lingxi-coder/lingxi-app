@@ -20,7 +20,7 @@ function row(uuid: string, extra: Partial<ProjectSessionCatalogRow> = {}): Proje
   };
 }
 
-function setup(t: { after(fn: () => void): void }, options: Pick<BotServiceOptions, 'openProject' | 'changed'> = {}) {
+function setup(t: { after(fn: () => void): void }, options: Pick<BotServiceOptions, 'openProject' | 'changed' | 'teamRevoking'> = {}) {
   const f = botFixture(t);
   const calls: unknown[][] = [];
   const warnings: string[] = [];
@@ -301,6 +301,20 @@ test('deleting a Bot stops its sessions, then moves it to the trash, and frees t
   assert.ok(after.permissions.deny.includes(pathRule('Read', s.store.locations.trashRoot)));
   await assert.rejects(s.service.delete(gone.bot_id), BotNotFoundError);
   assert.equal(s.service.ownsWorkspace(workspace), false);
+});
+
+test('a deletion stops the Bot\'s shared-Bot runs before it waits and again once the Bot is trashed', async (t) => {
+  const stopped: Array<[string, boolean]> = [];
+  const s = setup(t, { teamRevoking: (botId) => { stopped.push([botId, existsSync(s.store.botDir(botId))]); } });
+  const busy = s.service.create({ name: 'Busy' });
+  s.setActiveWork(true);
+  await assert.rejects(s.service.delete(busy.bot_id), /cancel active turns/);
+  assert.deepEqual(stopped, [[busy.bot_id, true]], 'a deletion that failed stops them once, before it waits');
+  s.setActiveWork(false);
+  stopped.length = 0;
+  await s.service.delete(busy.bot_id);
+  // A shared-Bot run may start while the deletion waits, when the Bot is still there.
+  assert.deepEqual(stopped, [[busy.bot_id, true], [busy.bot_id, false]]);
 });
 
 test('a Bot that is working is not deleted', async (t) => {

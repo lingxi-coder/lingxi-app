@@ -155,14 +155,14 @@ export class TeamsService {
     if (!keepAfterReset && (epoch !== this.epoch || this.account.snapshot().user?.uid !== uid)) throw new Error('INVALID_SESSION');
     return result;
   }
-  private async checked<T>(expectedUid: string, path = '', body?: unknown, keepAfterReset = false): Promise<T> {
+  private async checked<T>(expectedUid: string, path = '', body?: unknown): Promise<T> {
     this.syncAccount();
     const currentUid = this.account.snapshot().user?.uid;
     if (currentUid !== expectedUid) throw new Error('INVALID_SESSION');
     const epoch = this.epoch;
     if (!this.uid) throw new Error('SIGN_IN_REQUIRED');
-    const result = await this.request<T>(path, body, keepAfterReset);
-    if (!keepAfterReset && epoch !== this.epoch) throw new Error('INVALID_SESSION');
+    const result = await this.request<T>(path, body);
+    if (epoch !== this.epoch) throw new Error('INVALID_SESSION');
     return result;
   }
   async list(expectedUid: string): Promise<{ teams: TeamSummary[] }> { await this.connect(expectedUid); return this.checked(expectedUid); }
@@ -256,7 +256,8 @@ export class TeamsService {
     }
     // The server grants a start permit once and answers a replay with `execute: false`: an account reset while the request is in flight must still hand the permit
     // to the connector, which saves it under the sending account and ends the task. Every other answer is discarded once the account moved on.
-    if (command.action === 'startTask') return this.checked<T>(context.uid, '/messages', command, true);
+    // The context was asserted just above with no await since, so the request is sent under it.
+    if (command.action === 'startTask') return this.request<T>('/messages', command, true);
     const result = await this.checked<T>(context.uid, '/messages', command); this.assertHostContext(context); return result;
   }
   /** UI and every Bot read through the same UID/project message service and SDK cache. */

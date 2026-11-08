@@ -87,6 +87,8 @@ final class TeamsWorkspace {
     @ObservationIgnored private var authEpoch = 0
     /// Bumped per refetch and per invalidation; only the newest response is applied.
     @ObservationIgnored private var revision = 0
+    /// Bot documents being read for the viewer.
+    @ObservationIgnored private var openingArtifacts: Set<String> = []
     @ObservationIgnored private var authListener: AuthStateDidChangeListenerHandle?
     @ObservationIgnored private var indexListener: ListenerRegistration?
     @ObservationIgnored private var memberListener: (teamID: String, registration: ListenerRegistration)?
@@ -471,13 +473,16 @@ final class TeamsWorkspace {
         }
     }
 
-    /// Opens a Bot document in the viewer. Takes no lock (a read); a failure is kept as `actionError`.
+    /// Opens a Bot document in the viewer. Takes no lock (a read), but reads one document once at a time: a repeated tap waits
+    /// for the first read. A failure is kept as `actionError` only while the same team is open.
     func openArtifact(_ artifactId: String) async {
-        guard started, let model = messaging else { return }
+        guard started, let model = messaging, !openingArtifacts.contains(artifactId) else { return }
         let life = lifecycle
+        openingArtifacts.insert(artifactId)
+        defer { openingArtifacts.remove(artifactId) }
         actionError = ""
         do { try await model.openArtifact(artifactId) } catch {
-            if life == lifecycle { actionError = Self.code(error, fallback: "UNKNOWN") }
+            if life == lifecycle, messaging === model { actionError = Self.code(error, fallback: "UNKNOWN") }
         }
     }
 

@@ -66,6 +66,14 @@ test('large input is a verified private transport reference, not a JSONL frame',
 test('delivery outbox is immutable and account-private',async t=>{
  const f=fixture(t),delivery={schemaVersion:1 as const,teamId,generation:1,taskId:'task00001',deadlineAt:Date.now()+1000,commandId:'delivery001',payload:{text:'One result'}};await f.privateStore.saveDelivery('owner',delivery);await f.privateStore.saveDelivery('owner',delivery);await assert.rejects(f.privateStore.saveDelivery('owner',{...delivery,payload:{text:'changed'}}),/UNSAFE_TEAM_STORAGE/);assert.deepEqual(await f.privateStore.deliveries('other'),[]);
 });
+test('a write torn at exit leaves only a skipped temporary file, never a partial record',async t=>{
+ const f=fixture(t),paths=await f.privateStore.owner('owner');
+ for(const dir of [paths.outbox,paths.executions])writeFileSync(join(dir,'.write-0123456789abcdef'),'{"schemaVer',{mode:0o600});
+ assert.deepEqual(await f.privateStore.deliveries('owner'),[]);assert.deepEqual(await f.privateStore.executions('owner'),[]);
+ const delivery={schemaVersion:1 as const,teamId,generation:1,taskId:'task00002',deadlineAt:Date.now()+1000,commandId:'delivery002',payload:{text:'Kept'}};
+ await f.privateStore.saveDelivery('owner',delivery);assert.deepEqual(await f.privateStore.deliveries('owner'),[delivery]);
+ await assert.rejects(f.privateStore.saveDelivery('owner',{...delivery,payload:{text:'changed'}}),/UNSAFE_TEAM_STORAGE/);
+});
 test('all Bots read the service data session, including current ACL and account fence',async()=>{
  let uid='owner',epoch=0;const service=new TeamsService({snapshot:()=>({user:{uid}}),sessionEpoch:()=>epoch,getIdToken:async()=>'',onChanged:()=>()=>{}},{});const request={teamId,generation:1,conversationId,mode:'before' as const,beforeSeq:20};let reads=0;
  (service as any).dataSession={read:async(value:unknown)=>{assert.equal(value,request);reads++;return {messages:[],lastSeq:20,lastChangeSeq:20,hasMore:false};},close:async()=>{}};
@@ -293,6 +301,24 @@ test('DEPLOYMENT_REQUIRED past the margin drops the delivery only once the bindi
  clock=deadline+DELIVERY_SKEW_MS+1;await wakeAndIdle(f);assert.ok(attempts.count>=1);assert.deepEqual(await pendingFiles(f),[1,1]);assert.ok(!events.some(([event])=>event==='team_task_delivery_rejected'));
  f.mock.service.hostMessages=hostMessages;await wakeAndIdle(f);
  assert.deepEqual(await pendingFiles(f),[0,0]);assert.deepEqual(events.filter(([event])=>event==='team_task_delivery_rejected'),[['team_task_delivery_rejected',{taskId:'task00001',code:'DEPLOYMENT_REQUIRED'}]]);
+});
+test('DEPLOYMENT_REQUIRED past the margin drops the delivery of a paused Bot, whose deployment is never activated again',async t=>{
+ const events:Array<[string,any]>=[];let clock=Date.now();const f=fixture(t);(f.connector as any).options.now=()=>clock;(f.connector as any).options.diagnostics=(event:string,details:any)=>events.push([event,details]);
+ await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();const deadline=clock+60000;await seedDelivery(f,deadline);const attempts=refuseCompletions(f,'DEPLOYMENT_REQUIRED',403);
+ // After a restart nothing is activated, and discovery never activates a paused card.
+ (f.connector as any).activated.clear();const hostMessages=f.mock.service.hostMessages;
+ f.mock.service.hostMessages=async(c,command)=>{const result:any=await hostMessages(c,command);return (command.action==='listSharedBots'?{bots:result.bots.map((bot:any)=>({...bot,state:'paused'}))}:result) as any;};
+ const activations=f.mock.commands.filter(c=>c.action==='activateDeployment').length;
+ clock=deadline+DELIVERY_SKEW_MS;await wakeAndIdle(f);assert.ok(attempts.count>=1);assert.deepEqual(await pendingFiles(f),[1,1]);
+ clock=deadline+DELIVERY_SKEW_MS+1;await wakeAndIdle(f);
+ assert.deepEqual(await pendingFiles(f),[0,0]);assert.deepEqual(events.filter(([event])=>event==='team_task_delivery_rejected'),[['team_task_delivery_rejected',{taskId:'task00001',code:'DEPLOYMENT_REQUIRED'}]]);
+ assert.equal(f.mock.commands.filter(c=>c.action==='activateDeployment').length,activations);
+});
+test('a task deferred again and again for the same reason is logged once',async t=>{
+ const events:Array<[string,any]>=[];const f=fixture(t,async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor:{...cursor,scope:o.bootstrap.scope,sessionRevision:1,lastMessageSeq:200,lastChangeSeq:200}}:{status:'completed',cursor,text:'Unexpected',finishedAt:Date.now()});
+ (f.connector as any).options.retryMs=10;(f.connector as any).options.diagnostics=(event:string,details:any)=>events.push([event,details]);await f.connector.publishLocalBot('owner',f.input);
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>f.mock.commands.filter(c=>c.action==='prepareTask').length>=3);await f.connector.idle();
+ assert.deepEqual(events.filter(([event])=>event==='team_task_deferred'),[['team_task_deferred',{taskId:'task00001',code:'TASK_INPUT_ALREADY_COMMITTED'}]]);
 });
 test('an always-permanent refusal drops the delivery before the deadline',async t=>{
  const f=fixture(t);await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();await seedDelivery(f,Date.now()+60000);refuseCompletions(f,'TASK_REVOKED',403);

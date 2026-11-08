@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
-import { lstat, mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
 import type { TeamHostResult, BotChatScope } from './process.js';
 import { dirname, join } from 'node:path';
 
@@ -89,9 +89,18 @@ async function syncDirectory(path: string): Promise<void> {
   const file = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try { await file.sync(); } finally { await file.close(); }
 }
-async function create(path: string, value: string): Promise<void> {
+const TEMPORARY = '.write-';
+const listed = async (root: string): Promise<string[]> => (await readdir(root)).filter(name => !name.startsWith(TEMPORARY));
+async function writeTemporary(root: string, value: string): Promise<string> {
+  const path = join(root, `${TEMPORARY}${randomBytes(16).toString('hex')}`);
   const file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try { await file.writeFile(value); await file.sync(); } finally { await file.close(); }
+  return path;
+}
+/** Create-once and atomic: the complete file is linked into place (EEXIST if it already exists), so an exit mid-write leaves at most a skipped temporary file. */
+async function create(path: string, value: string): Promise<void> {
+  const temporary = await writeTemporary(dirname(path), value);
+  try { await link(temporary, path); } finally { await unlink(temporary).catch(() => undefined); }
   await syncDirectory(dirname(path));
 }
 function bindingText(value: SharedBotBinding, uid: string): string {
@@ -136,7 +145,7 @@ export class TeamPrivateStore {
   }
   async publications(uid: string): Promise<SavedPublication[]> {
     const root=(await this.owner(uid)).publications, values:SavedPublication[]=[];
-    for (const name of await readdir(root)) { const value=await this.publication(uid,name); if(value)values.push(value); }
+    for (const name of await listed(root)) { const value=await this.publication(uid,name); if(value)values.push(value); }
     return values;
   }
   async savePublication(uid: string, value: SavedPublication): Promise<void> {
@@ -152,11 +161,10 @@ export class TeamPrivateStore {
       if (previous.revision>value.revision || previous.revision===value.revision && (previous.accountEpoch>value.accountEpoch
         || JSON.stringify({...previous,accountEpoch:value.accountEpoch})!==text)) throw new Error('STALE_PUBLICATION_BINDING');
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    const temporary = join(root, `.write-${randomBytes(16).toString('hex')}`);
-    await create(temporary, text); await rename(temporary, path); await syncDirectory(root);
+    await rename(await writeTemporary(root, text), path); await syncDirectory(root);
   }); }
   bindings(uid: string): Promise<SharedBotBinding[]> { return this.serial(async () => {
-    const root = (await this.owner(uid)).bindings, names = (await readdir(root)).filter(n => !n.startsWith('.write-'));
+    const root = (await this.owner(uid)).bindings, names = await listed(root);
     if (names.length > 1000) throw new Error('UNSAFE_TEAM_STORAGE');
     const values: SharedBotBinding[] = [];
     for (const name of names) {
@@ -201,12 +209,18 @@ export class TeamPrivateStore {
   }); }
   async executions(uid: string): Promise<SavedExecution[]> {
     const root = (await this.owner(uid)).executions, values: SavedExecution[] = [];
-    for (const name of await readdir(root)) {
+    for (const name of await listed(root)) {
       if (!/^[A-Za-z0-9_-]{8,64}$/u.test(name)) throw new Error('UNSAFE_TEAM_STORAGE');
       const value = JSON.parse(await read(join(root,name),64*1024)) as SavedExecution;
       if (value.schemaVersion !== 1 || value.taskId !== name) throw new Error('UNSAFE_TEAM_STORAGE'); values.push(value);
     }
     return values;
+  }
+  /** Whether a saved execution still waits for recovery: its intent is saved and its delivery is not. Only two names are looked up, so a run that cleans up meanwhile reads as done. */
+  async awaitingRecovery(uid: string, taskId: string): Promise<boolean> {
+    if (!/^[A-Za-z0-9_-]{8,64}$/u.test(taskId)) throw new Error('UNSAFE_TEAM_STORAGE');
+    const paths = await this.owner(uid), exists = (path: string) => lstat(path).then(() => true, (error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return false; throw error; });
+    return await exists(join(paths.executions, taskId)) && !await exists(join(paths.outbox, taskId));
   }
   async savedResult(uid: string, taskId: string): Promise<TeamHostResult | undefined> {
     if (!/^[A-Za-z0-9_-]{8,64}$/u.test(taskId)) throw new Error('UNSAFE_TEAM_STORAGE');
@@ -228,7 +242,7 @@ export class TeamPrivateStore {
   }); }
   deliveries(uid: string): Promise<SavedDelivery[]> { return this.serial(async () => {
     const root = (await this.owner(uid)).outbox, values: SavedDelivery[] = [];
-    for (const name of await readdir(root)) {
+    for (const name of await listed(root)) {
       if (!/^[A-Za-z0-9_-]{8,64}$/u.test(name)) throw new Error('UNSAFE_TEAM_STORAGE');
       const value = JSON.parse(await read(join(root, name), 512 * 1024)) as SavedDelivery;
       if (value.schemaVersion !== 1 || value.taskId !== name || !/^[A-Za-z0-9_-]{8,64}$/u.test(value.teamId) || !Number.isSafeInteger(value.deadlineAt)) throw new Error('UNSAFE_TEAM_STORAGE'); values.push(value);

@@ -44,8 +44,11 @@ const scopeKey = (b: SharedBotBinding) => JSON.stringify([b.teamId, b.sharedBotI
 const serialKey = (b: SharedBotBinding, task: HostTask) => JSON.stringify([b.teamId, b.sharedBotId, task.conversationId]);
 const activation = (b: SharedBotBinding, c: TeamAccountContext) => JSON.stringify([c.epoch,b.deploymentId,b.accountEpoch]);
 const newId = () => randomBytes(16).toString('base64url');
-const errorCode = (error: unknown) => error instanceof TeamHostFailure || error instanceof TeamsApiError ? error.code
-  : error instanceof Error && /^[A-Z][A-Z0-9_]{2,59}$/u.test(error.message) ? error.message : 'ERROR';
+const errorCode = (error: unknown) => {
+  if (error instanceof TeamHostFailure || error instanceof TeamsApiError) return error.code;
+  const text = error instanceof Error ? error.message : error; // An abort reason (`signal.throwIfAborted()`) is the bare code.
+  return typeof text === 'string' && /^[A-Z][A-Z0-9_]{2,59}$/u.test(text) ? text : 'ERROR';
+};
 /** The server or the account answered no; anything else (network, 5xx, timeout) may succeed on the next try. */
 const definitive = (error: unknown) => error instanceof TeamsApiError ? error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429
   : error instanceof Error && error.message === 'INVALID_SESSION';
@@ -60,14 +63,15 @@ export class TeamConnector implements LocalTeamHost {
   private readonly active = new Map<string, { taskId: string; instanceId: string; controller: AbortController; promise: Promise<void> }>();
   private readonly selections = new Map<string, Selected>(); private readonly publishing = new Set<string>();
   private readonly activated = new Map<string, string>(); private readonly heartbeats = new Map<string, number>();
-  private readonly deferred = new Map<string, number>(); private readonly scheduled = new Map<string, number>(); private readonly stops: Array<() => void>;
+  private readonly deferred = new Map<string, number>(); private readonly deferredCodes = new Map<string, string>();
+  private readonly scheduled = new Map<string, number>(); private readonly stops: Array<() => void>;
   private revision = 0; private probes = 0;
   constructor(private readonly options: TeamConnectorOptions) {
     this.stops = [options.service.onChanged(() => this.wake()), options.service.onMessagesChanged(() => this.wake())]; this.wake();
   }
   private now() { return (this.options.now ?? Date.now)(); }
   private log(event: string, details: Record<string, unknown>) { try { this.options.diagnostics?.(event, details); } catch { /* Diagnostics never interrupt a task. */ } }
-  private abort(a: { taskId: string; controller: AbortController }, reason: string) { this.log('team_task_aborted', { taskId: a.taskId, reason }); a.controller.abort(reason); }
+  private abort(a: { taskId: string; controller: AbortController }, reason: string) { if (a.controller.signal.aborted) return; this.log('team_task_aborted', { taskId: a.taskId, reason }); a.controller.abort(reason); }
   private available() { if ((this.options.platform ?? process.platform) !== 'darwin') throw new Error('TEAM_HOST_MACOS_REQUIRED'); }
   private context(uid: string) { const c = this.options.service.hostContext(); if (!c || c.uid !== uid || this.closed) throw new Error('INVALID_SESSION'); return c; }
   private assert(c: TeamAccountContext) { if (this.closed) throw new Error('INVALID_SESSION'); this.options.service.assertHostContext(c); }
@@ -207,12 +211,13 @@ export class TeamConnector implements LocalTeamHost {
     } finally { await this.options.privateStore.releaseDataRef(c.uid,reference); }
   }
   stopBinding(teamId: string, sharedBotId: string) { for (const [key, a] of this.active) { const scope = JSON.parse(key) as string[]; if (scope[0] === teamId && scope[1] === sharedBotId) this.abort(a,'BINDING_STOPPED'); } this.heartbeats.delete(JSON.stringify([teamId,sharedBotId])); }
-  /** A local Bot was edited or deleted: only the shared-Bot runs bound to it stop. A new Bot changes nothing, and runs use the private snapshot. */
+  /** A local Bot was edited or deleted: only the shared-Bot runs bound to it stop, and discovery checks its bindings again at once. A new Bot changes nothing, and runs use the private snapshot. */
   botChanged(botId: string) {
-    for (const [key, a] of [...this.active]) if (a.instanceId === botId) { const scope = JSON.parse(key) as string[]; this.stopBinding(scope[0]!,scope[1]!); }
+    for (const [key, a] of this.active) if (a.instanceId === botId) { const scope = JSON.parse(key) as string[]; this.stopBinding(scope[0]!,scope[1]!); }
+    this.wake();
   }
   /** Account reset or sign-out: every running task loses its authority. A cache or listener flicker never comes here. */
-  revoke() { this.revision++; for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.activated.clear(); this.heartbeats.clear(); this.wake(); }
+  revoke() { this.revision++; for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.deferredCodes.clear(); this.activated.clear(); this.heartbeats.clear(); this.wake(); }
   private wake() {
     if (this.closed || (this.options.platform ?? process.platform) !== 'darwin') return; this.pending = true; if (this.refresh) return;
     this.refresh = (async () => { while (this.pending && !this.closed) { this.pending = false; try { await this.discover(); } catch { /* Retry discovery; a failed authorization never starts work. */ } } })()
@@ -239,11 +244,13 @@ export class TeamConnector implements LocalTeamHost {
     if (!bindings.length) return;
     const { teams } = await this.options.service.list(c.uid); assert();
     const candidates: Array<{ binding: SharedBotBinding; task: HostTask; snapshot: TeamPersonaSnapshot }> = [];
+    // Cards this pass found paused, unpublished, republished or handed over: their deployment is never activated here.
+    const inactive = new Set<string>();
     for (let b of bindings) {
       if (!teams.some(t => t.id === b.teamId && t.generation === b.generation)) continue;
       try {
         const { bots } = await this.command<{ bots: SharedBotCard[] }>(c,b,'listSharedBots',{}); assert();
-        const card = bots.find(v => v.sharedBotId === b.sharedBotId); if (!card || card.state !== 'published' || card.revision !== b.revision || card.maintainer.uid !== c.uid) { this.stopBinding(b.teamId,b.sharedBotId); continue; }
+        const card = bots.find(v => v.sharedBotId === b.sharedBotId); if (!card || card.state !== 'published' || card.revision !== b.revision || card.maintainer.uid !== c.uid) { inactive.add(scopeKey(b)); this.stopBinding(b.teamId,b.sharedBotId); continue; }
         if (this.activated.get(scopeKey(b)) !== activation(b,c)) {
           const next = b.accountEpoch + 1; await this.command(c,b,'activateDeployment',{ deploymentId:b.deploymentId,hostId:this.options.privateStore.hostId,expectedAccountEpoch:b.accountEpoch,newAccountEpoch:next },digest(JSON.stringify([b.deploymentId,next,'activate']))); assert();
           b = { ...b, accountEpoch: next }; await this.options.privateStore.saveBinding(c.uid,b); assert(); this.activated.set(scopeKey(b),activation(b,c));
@@ -266,8 +273,8 @@ export class TeamConnector implements LocalTeamHost {
       } catch (error) { if (definitive(error)) this.stopBinding(b.teamId,b.sharedBotId); }
     }
     // A live run may save its delivery, or finish and clean up, while recovery works: check each intent afresh.
-    const handled = async (intent: SavedExecution) => { assert(); const store = this.options.privateStore;
-      return [...this.active.values()].some(active => active.taskId === intent.taskId) || (await store.deliveries(c.uid)).some(d => d.taskId === intent.taskId) || !(await store.executions(c.uid)).some(e => e.taskId === intent.taskId); };
+    const handled = async (intent: SavedExecution) => { assert();
+      return [...this.active.values()].some(active => active.taskId === intent.taskId) || !await this.options.privateStore.awaitingRecovery(c.uid,intent.taskId); };
     for (const intent of await this.options.privateStore.executions(c.uid)) {
       if (await handled(intent)) continue;
       let result = await this.options.privateStore.savedResult(c.uid,intent.taskId); assert();
@@ -292,15 +299,21 @@ export class TeamConnector implements LocalTeamHost {
       try { await this.command(c,delivery,'completeTask',payload,commandId); assert(); await this.options.privateStore.delivered(c.uid,delivery.taskId); }
       catch (error) { // Keep the exact result for another try, never run its model again, unless the server will never accept it.
         // Only a server answer counts: a local INVALID_SESSION means the account moved on, not that the result is dead.
-        // DEPLOYMENT_REQUIRED only ends the delivery once this binding's activation is confirmed current: a lost activation response leaves the old epoch locally, and the next pass replays it.
-        if (permanentDelivery(error) || expired && error instanceof TeamsApiError && definitive(error) && (error.code !== 'DEPLOYMENT_REQUIRED' || this.activated.get(scopeKey(b)) === activation(b,c))) await drop(errorCode(error)); }
+        // DEPLOYMENT_REQUIRED only ends the delivery once this binding's activation is confirmed current, or this pass found its card inactive (activation never comes then):
+        // a lost activation response leaves the old epoch locally, and the next pass replays it.
+        if (permanentDelivery(error) || expired && error instanceof TeamsApiError && definitive(error)
+          && (error.code !== 'DEPLOYMENT_REQUIRED' || this.activated.get(scopeKey(b)) === activation(b,c) || inactive.has(scopeKey(b)))) await drop(errorCode(error)); }
     }
     candidates.sort((a,b) => (this.scheduled.get(serialKey(a.binding,a.task)) ?? 0) - (this.scheduled.get(serialKey(b.binding,b.task)) ?? 0) || a.task.messageSeq - b.task.messageSeq);
     for (const candidate of candidates) {
       assert(); if (this.active.size+this.probes >= Math.min(4,this.options.maxConcurrent ?? 4)) break;
       const key = serialKey(candidate.binding,candidate.task); if (this.active.has(key)) continue;
       const controller = new AbortController(); this.scheduled.set(key,this.now());
-      const promise = this.execute(c,candidate.binding,candidate.task,candidate.snapshot,controller.signal).catch(error => { this.log('team_task_deferred', { taskId: candidate.task.taskId, code: errorCode(error) }); if (revision === this.revision) this.deferred.set(candidate.task.taskId,this.now()+(this.options.retryMs??5000)); }).finally(() => { this.active.delete(key); this.wake(); });
+      const taskId = candidate.task.taskId;
+      const promise = this.execute(c,candidate.binding,candidate.task,candidate.snapshot,controller.signal).catch(error => {
+        // A task retried every few seconds for the same reason is logged once per reason, not per try.
+        const code = errorCode(error); if (this.deferredCodes.get(taskId) !== code) { this.deferredCodes.set(taskId,code); this.log('team_task_deferred', { taskId, code }); }
+        if (revision === this.revision) this.deferred.set(taskId,this.now()+(this.options.retryMs??5000)); }).finally(() => { this.active.delete(key); this.wake(); });
       this.active.set(key,{taskId:candidate.task.taskId,instanceId:candidate.binding.instanceId,controller,promise});
     }
   }
@@ -329,7 +342,7 @@ export class TeamConnector implements LocalTeamHost {
     const startPayload={...fields,expectedLastChangeSeq:source.lastChangeSeq};
     const started = await this.command<TaskContext & {execute:boolean;permitId?:string}>(c,b,'startTask',startPayload,digest(JSON.stringify(['startTask',startPayload,reference.sha256])));
     if (!started.execute || !started.permitId) { assert(); this.deferred.set(task.taskId,this.now()+(this.options.retryMs??5000)); return; }
-    this.deferred.delete(task.taskId);
+    this.deferred.delete(task.taskId); this.deferredCodes.delete(task.taskId);
     const permitId = started.permitId;
     const intent: SavedExecution = { schemaVersion:1, scope, teamId:b.teamId,generation:b.generation,taskId:task.taskId,
       commandId:digest(JSON.stringify([task.taskId,'delivery'])),deadlineAt:started.task.deadline,payload:{...fields,permitId,inputGrantIds:b.grantIds} };
@@ -338,7 +351,10 @@ export class TeamConnector implements LocalTeamHost {
     // The stale context can no longer send completeTask; discovery delivers it once that account is current again, or the deadline derives `interrupted`.
     await this.options.privateStore.saveExecution(c.uid,intent);
     const authorize = async () => { assert(); await this.command(c,b,'validateTask',{...fields,permitId,expectedLastChangeSeq:source.lastChangeSeq}); assert(); };
-    interval = setInterval(() => { void authorize().catch(error => { if (definitive(error)) execution.abort(errorCode(error)); }); },2000); interval.unref();
+    // One validation at a time: a slow or failing server is not sent another every tick while the last waits out its timeout.
+    let validating = false;
+    interval = setInterval(() => { if (validating) return; validating = true;
+      void authorize().catch(error => { if (definitive(error)) execution.abort(errorCode(error)); }).finally(() => { validating = false; }); },2000); interval.unref();
       const {credential_id:_credential,provider_account_profiles:_profiles,instructions,documents,...model} = snapshot;
       let result: TeamHostResult | undefined, failure: unknown;
       try { assert(); result = await run({executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,authorize,

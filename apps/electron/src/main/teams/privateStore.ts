@@ -51,7 +51,7 @@ function readPrivate(path: string, maxBytes: number): string {
     const info = fstatSync(fd);
     if (!info.isFile() || info.nlink !== 1 || (info.mode & 0o077) !== 0 || info.size > maxBytes
       || (process.getuid && info.uid !== process.getuid())) throw new Error('UNSAFE_TEAM_STORAGE');
-    const value = Buffer.alloc(maxBytes + 1), length = readSync(fd, value, 0, value.length, 0);
+    const value = Buffer.alloc(info.size + 1), length = readSync(fd, value, 0, value.length, 0);
     if (length > maxBytes) throw new Error('UNSAFE_TEAM_STORAGE');
     return new TextDecoder('utf-8', { fatal: true }).decode(value.subarray(0, length));
   } finally { closeSync(fd); }
@@ -74,7 +74,7 @@ async function read(path: string, maxBytes: number): Promise<string> {
     const info = await file.stat();
     if (!info.isFile() || info.nlink !== 1 || (info.mode & 0o077) !== 0 || info.size > maxBytes
       || (process.getuid && info.uid !== process.getuid())) throw new Error('UNSAFE_TEAM_STORAGE');
-    const bytes = Buffer.alloc(maxBytes + 1);
+    const bytes = Buffer.alloc(info.size + 1);
     let length = 0;
     while (length < bytes.length) {
       const { bytesRead } = await file.read(bytes, length, bytes.length - length, length);
@@ -138,14 +138,17 @@ export class TeamPrivateStore {
       publications: await directory(join(root, 'publications')), executions: await directory(join(root, 'executions')), outbox: await directory(join(root, 'outbox')), home: await directory(join(root, 'host-home')), tmp: await directory(join(root, 'host-tmp')) };
   }
   async publication(uid: string, publicationId: string): Promise<SavedPublication | undefined> {
+    return this.readPublication(uid, (await this.owner(uid)).publications, publicationId);
+  }
+  private async readPublication(uid: string, root: string, publicationId: string): Promise<SavedPublication | undefined> {
     if (!/^[A-Za-z0-9_-]{8,64}$/u.test(publicationId)) throw new Error('INVALID_INPUT');
-    try { const value = JSON.parse(await read(join((await this.owner(uid)).publications,publicationId),128*1024)) as SavedPublication;
+    try { const value = JSON.parse(await read(join(root,publicationId),128*1024)) as SavedPublication;
       if (value.schemaVersion !== 1 || !/^[a-f0-9]{64}$/u.test(value.requestDigest) || value.binding.publicationId !== publicationId) throw new Error('UNSAFE_TEAM_STORAGE'); bindingText(value.binding,uid); return value;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
   }
   async publications(uid: string): Promise<SavedPublication[]> {
     const root=(await this.owner(uid)).publications, values:SavedPublication[]=[];
-    for (const name of await listed(root)) { const value=await this.publication(uid,name); if(value)values.push(value); }
+    for (const name of await listed(root)) { const value=await this.readPublication(uid,root,name); if(value)values.push(value); }
     return values;
   }
   async savePublication(uid: string, value: SavedPublication): Promise<void> {

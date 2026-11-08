@@ -289,7 +289,7 @@ export const DiffView = memo(function DiffView({ diff }: DiffViewProps) {
           // no separator row kind on the wire, by design.
           const separator = previous !== undefined && previous.hunk !== row.hunk;
           return (
-            <div key={`${row.hunk}:${row.kind}:${row.line_no}:${i}`}>
+            <div key={`${row.hunk}:${row.kind}:${row.line_no}:${i}`} style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 22px' }}>
               {separator && <div style={HUNK_SEPARATOR_STYLE}>⋯</div>}
               <DiffRow row={row} gutterWidth={diff.gutter_width} dark={t.dark} />
             </div>

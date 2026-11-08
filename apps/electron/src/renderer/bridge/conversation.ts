@@ -258,6 +258,22 @@ function settleRunningTools(items: RunItem[], status: 'done' | 'error'): boolean
   return changed;
 }
 
+/** First matching row, matching `findIndex`. Later duplicate ids stay unused. */
+function firstIndexById(items: readonly { id?: string }[]): Map<string, number> {
+  const indexById = new Map<string, number>();
+  for (let index = 0; index < items.length; index += 1) {
+    const id = items[index]?.id;
+    if (id !== undefined && !indexById.has(id)) indexById.set(id, index);
+  }
+  return indexById;
+}
+
+function remapItemIndex(previous: readonly { id?: string }[], indexById: ReadonlyMap<string, number>, index: number): number {
+  if (index < 0) return -1;
+  const id = previous[index]?.id;
+  return id === undefined ? -1 : (indexById.get(id) ?? -1);
+}
+
 /** Remove renderer rows named by durable JSONL UUIDs and repair local indexes. */
 function removeTranscriptRows(state: ConversationState, uuids: readonly string[]): ConversationState {
   const removedUuids = new Set(uuids);
@@ -273,14 +289,15 @@ function removeTranscriptRows(state: ConversationState, uuids: readonly string[]
     const remaining = uuids.filter(uuid => !removedUuids.has(uuid));
     return remaining.length === uuids.length ? item : { ...item, transcriptUuid: remaining[0], transcriptUuids: remaining.slice(1) };
   });
+  const indexById = firstIndexById(items);
   const toolIndex: Record<string, number> = {};
   for (const [toolId, index] of Object.entries(state.toolIndex)) {
     const id = state.items[index]?.id;
     if (!id || removedIds.has(id)) continue;
-    const next = items.findIndex((item) => item.id === id);
-    if (next >= 0) toolIndex[toolId] = next;
+    const next = indexById.get(id);
+    if (next !== undefined) toolIndex[toolId] = next;
   }
-  const remap = (index: number) => index < 0 ? -1 : items.findIndex((item) => item.id === state.items[index]?.id);
+  const remap = (index: number) => remapItemIndex(state.items, indexById, index);
   const assistantBlockItemIds = Object.fromEntries(
     Object.entries(state.assistantBlockItemIds).filter(([, id]) => !removedIds.has(id)),
   );
@@ -860,12 +877,13 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       if (state.retractedAttemptId === event.message_id) return state;
       const ids = new Set(state.assistantAttemptItems?.[event.message_id] ?? []);
       const items = state.items.filter((item) => !ids.has(item.id));
+      const indexById = firstIndexById(items);
       const toolIndex: Record<string, number> = {};
       for (const [toolId, index] of Object.entries(state.toolIndex)) {
-        const next = items.findIndex((item) => item.id === state.items[index]?.id);
+        const next = remapItemIndex(state.items, indexById, index);
         if (next >= 0) toolIndex[toolId] = next;
       }
-      const remap = (index: number) => index < 0 ? -1 : items.findIndex((item) => item.id === state.items[index]?.id);
+      const remap = (index: number) => remapItemIndex(state.items, indexById, index);
       return { ...state, items, toolIndex, openAssistantIndex: remap(state.openAssistantIndex), openThinkingIndex: remap(state.openThinkingIndex),
         retractedAttemptId: event.message_id };
     }
@@ -878,7 +896,8 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         if (item.type === 'visualization' || item.type === 'page') return item.status !== 'pending';
         return true;
       });
-      closeThinking(items, state.openThinkingIndex === -1 ? -1 : items.findIndex((item) => item.id === state.items[state.openThinkingIndex]?.id));
+      const keptIndexById = firstIndexById(items);
+      closeThinking(items, remapItemIndex(state.items, keptIndexById, state.openThinkingIndex));
       return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1, pendingAssistantItems: [],
       };
     }
@@ -1167,7 +1186,8 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
           if (echo?.type === 'narration' && echo.role === 'user' && /^\/compact(?:\s|$)/i.test(echo.text)) removed.add(echo.id);
         }
         const items = state.items.filter((item) => !removed.has(item.id));
-        const remap = (index: number) => index < 0 ? -1 : items.findIndex((item) => item.id === state.items[index]?.id);
+        const indexById = firstIndexById(items);
+        const remap = (index: number) => remapItemIndex(state.items, indexById, index);
         return {
           ...state, items,
           openAssistantIndex: remap(state.openAssistantIndex),

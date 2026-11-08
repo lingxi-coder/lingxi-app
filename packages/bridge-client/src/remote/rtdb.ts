@@ -258,10 +258,32 @@ async function discardBody(response: Response): Promise<void> {
   }
 }
 
+async function errorBodyPrefix(response: Response): Promise<string> {
+  const limit = 2048;
+  if (!response.body) return (await response.text()).slice(0, limit);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  try {
+    while (text.length < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const room = (limit - text.length) * 4;
+      const chunk = value.byteLength > room ? value.subarray(0, room) : value;
+      text += decoder.decode(chunk, { stream: true });
+      if (chunk !== value) break;
+    }
+    text += decoder.decode();
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return text.slice(0, limit);
+}
+
 async function httpError(response: Response): Promise<RtdbError> {
   let message = response.statusText || `HTTP ${response.status}`;
   try {
-    const body = (await response.text()).slice(0, 2048);
+    const body = await errorBodyPrefix(response);
     try {
       const parsed: unknown = JSON.parse(body);
       if (typeof parsed === 'object' && parsed !== null && typeof (parsed as { error?: unknown }).error === 'string') {

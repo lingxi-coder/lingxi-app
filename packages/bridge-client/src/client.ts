@@ -399,15 +399,25 @@ export class BridgeClient extends EventEmitter {
 
     const ws = new WebSocket(url, [WS_SUBPROTOCOL], {
       headers: { [AUTH_HEADER_NAME]: lockfile.body.authToken },
+      maxPayload: MAX_BRIDGE_FRAME_BYTES,
     });
     this.ws = ws;
 
     await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        ws.off('open', onOpen);
+        ws.off('error', onError);
+        ws.close();
+        reject(new Error('bridge connect timed out'));
+      }, 10_000);
+      timer.unref?.();
       const onOpen = () => {
+        clearTimeout(timer);
         ws.off('error', onError);
         resolve();
       };
       const onError = (err: Error) => {
+        clearTimeout(timer);
         ws.off('open', onOpen);
         reject(new Error(`bridge connect failed: ${err.message}`));
       };

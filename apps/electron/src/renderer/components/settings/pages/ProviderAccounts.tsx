@@ -1,9 +1,9 @@
 import { tr } from '../../../i18n/locale';
 import { useI18n } from '../../../i18n/useI18n';
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { AccountUsageRowDto } from '@lingxi/bridge-client';
-import { accountSessionUsage, formatSessionTokens, formatSessionUsd } from '../../../../shared/accountUsage';
-import type { ProviderAccountCommand, ProviderAccountHealth, ProviderAccountMetadata, ProviderAccountRouting, ProviderAccountsApi, ProviderAccountSnapshot } from '../../../../shared/providerAccounts';
+import { accountUsageByAccount, formatSessionTokens, formatSessionUsd, sessionUsageFromIndex, type AccountSessionUsage } from '../../../../shared/accountUsage';
+import type { ProviderAccountCommand, ProviderAccountHealth, ProviderAccountModelEntitlement, ProviderAccountRouting, ProviderAccountsApi, ProviderAccountSnapshot } from '../../../../shared/providerAccounts';
 import { logicalProviderId, orderedProviderAccounts } from '../../../../shared/providerAccounts';
 import type { ProviderDefinition } from '../../../../shared/providers';
 import { useT } from '../../../theme/ThemeContext';
@@ -15,10 +15,7 @@ export function providerAccountHealthLabel(health?: ProviderAccountHealth): stri
   return `${tr(`provider_accounts_health_${health.status}`)}${recovery}`;
 }
 
-function AccountSessionUsageLines({ providerId, account, rows }: {
-  providerId: string; account: ProviderAccountMetadata; rows?: readonly AccountUsageRowDto[];
-}) {
-  const usage = accountSessionUsage(rows, providerId, account);
+function AccountSessionUsageLines({ usage }: { usage: AccountSessionUsage }) {
   return <div className="pa-usage">
     <p className="pa-caption">{tr('provider_accounts_session_usage_current', formatSessionTokens(usage.current.inputTokens), formatSessionTokens(usage.current.outputTokens), formatSessionUsd(usage.current.nanoUsd))}</p>
     {usage.current.models.map(model => <p className="pa-caption" key={model.model}>{tr('provider_accounts_session_usage_model', model.model, formatSessionTokens(model.inputTokens), formatSessionTokens(model.outputTokens), formatSessionTokens(model.cacheReadTokens), formatSessionTokens(model.cacheCreationTokens), formatSessionUsd(model.nanoUsd), model.requestCount)}</p>)}
@@ -68,6 +65,25 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
     else confirmation.current?.close();
   }, [removalId]);
   const accounts = snapshot ? orderedProviderAccounts(snapshot, provider.id) : [];
+  const usageByAccount = useMemo(() => accountUsageByAccount(usageRows, provider.id), [usageRows, provider.id]);
+  const healthByAccount = useMemo(() => {
+    const map = new Map<string, ProviderAccountHealth>();
+    for (const health of snapshot?.health ?? []) {
+      const key = `${health.accountId}:${health.identityGeneration}`;
+      if (!map.has(key)) map.set(key, health);
+    }
+    return map;
+  }, [snapshot]);
+  const entitlementsByAccount = useMemo(() => {
+    const map = new Map<string, ProviderAccountModelEntitlement[]>();
+    for (const entry of snapshot?.modelEntitlements ?? []) {
+      const key = `${entry.accountId}:${entry.identityGeneration}`;
+      const list = map.get(key);
+      if (list) list.push(entry);
+      else map.set(key, [entry]);
+    }
+    return map;
+  }, [snapshot]);
   const locked = busy || running || !snapshot;
   const supportsKey = provider.authMethods.includes('api_key') || provider.authMethods.includes('token');
   const supportsOAuth = provider.authMethods.includes('oauth');
@@ -139,8 +155,8 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
       {!snapshot ? <div className="pa-empty" role="status"><span className="pa-spinner" />{tr('provider_accounts_loading')}</div>
         : accounts.length === 0 ? <div className="pa-empty"><span className="pa-empty-icon"><Icon name="user" size={24} /></span><h4>{tr('provider_accounts_empty')}</h4><p>{tr('provider_accounts_empty_desc')}</p></div>
         : accounts.map((account, index) => {
-          const health = snapshot.health.find(h => h.accountId === account.accountId && h.identityGeneration === account.identityGeneration);
-          const entitlements = snapshot.modelEntitlements?.filter(entry => entry.accountId === account.accountId && entry.identityGeneration === account.identityGeneration) ?? [];
+          const health = healthByAccount.get(`${account.accountId}:${account.identityGeneration}`);
+          const entitlements = entitlementsByAccount.get(`${account.accountId}:${account.identityGeneration}`) ?? [];
           const testing = pending?.action === 'test' && pending.accountId === account.accountId;
           return <article className="pa-account" key={account.accountId} data-enabled={account.enabled}>
             <span className="pa-rank" aria-label={`${tr('provider_accounts_priority')} ${index + 1}`}>{index + 1}</span>
@@ -150,7 +166,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
                 onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { event.currentTarget.value = account.displayName; event.currentTarget.blur(); event.stopPropagation(); } }}
                 onBlur={event => { const displayName = event.currentTarget.value.trim(); if (!displayName) event.currentTarget.value = account.displayName; else if (displayName !== account.displayName) void perform({ action: 'update', accountId: account.accountId, displayName }); }} />
               <div className="pa-meta"><span>{account.authKind === 'oauth' ? tr('provider_accounts_subscription') : tr('provider_accounts_key')}</span><span className="pa-health" data-status={health?.status} role="status"><i />{providerAccountHealthLabel(health)}</span></div>
-              <AccountSessionUsageLines providerId={provider.id} account={account} rows={usageRows} />
+              <AccountSessionUsageLines usage={sessionUsageFromIndex(usageByAccount, account)} />
               {routing?.selectedAccountId === account.accountId && routing.identityGeneration === account.identityGeneration && <p className="pa-caption">{tr('provider_accounts_last_used', routing.model, routing.attempt)}</p>}
               {entitlements.length ? <details className="pa-permissions"><summary>{tr('provider_accounts_model_access')}</summary><ul>{entitlements.map(entry => <li key={entry.modelId}><span>{entry.modelId}</span><span>{tr(`provider_accounts_model_${entry.status}`)}</span></li>)}</ul></details> : <p className="pa-caption">{tr('provider_accounts_models_unverified')}</p>}
             </div>

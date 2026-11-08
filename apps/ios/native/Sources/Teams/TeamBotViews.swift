@@ -57,10 +57,12 @@ struct TeamTaskCard: View {
                 Label(LocalizedStringKey(TeamsBotText.stateKey(task.state)), systemImage: "arrow.clockwise")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            .buttonStyle(.borderless)
             if let artifactId = task.artifactId {
                 Button("teams_artifact_open", systemImage: "doc.text") {
-                    Task { await workspace.run { try await workspace.messaging?.openArtifact(artifactId) } }
+                    Task { await workspace.openArtifact(artifactId) }
                 }
+                .buttonStyle(.borderless)
             }
         }
         .accessibilityElement(children: .contain)

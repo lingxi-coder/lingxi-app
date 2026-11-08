@@ -83,6 +83,8 @@ final class TeamsWorkspace {
     @ObservationIgnored private var started = false
     /// Bumped on start, stop and every account change; callbacks of an older one are dropped.
     @ObservationIgnored private var lifecycle = 0
+    /// Bumped on start and stop only: the auth listener outlives account changes, which bump `lifecycle`.
+    @ObservationIgnored private var authEpoch = 0
     /// Bumped per refetch and per invalidation; only the newest response is applied.
     @ObservationIgnored private var revision = 0
     @ObservationIgnored private var authListener: AuthStateDidChangeListenerHandle?
@@ -133,13 +135,13 @@ final class TeamsWorkspace {
 
     func start() {
         guard !started else { return }
-        started = true; lifecycle += 1
+        started = true; lifecycle += 1; authEpoch += 1
         FirebaseAccount.configure()
-        let life = lifecycle
+        let current = authEpoch
         authListener = auth.addStateDidChangeListener { [weak self] _, user in
             let uid = user?.uid
             Task { @MainActor in
-                guard let self, self.started, self.lifecycle == life else { return }
+                guard let self, self.started, self.authEpoch == current else { return }
                 self.accountChanged(uid)
             }
         }
@@ -148,7 +150,7 @@ final class TeamsWorkspace {
 
     func stop() {
         guard started else { return }
-        started = false; lifecycle += 1
+        started = false; lifecycle += 1; authEpoch += 1
         if let authListener { auth.removeStateDidChangeListener(authListener) }
         authListener = nil
         reset()
@@ -388,6 +390,8 @@ final class TeamsWorkspace {
     func reconnect() {
         guard started else { return }
         scheduleRefresh()
+        // A revoked model never reopens; the list says whether the team is still ours.
+        if let model = messaging, model.revoked, let team = messagingTeam { openMessaging(team) }
         messaging?.reconnect()
         for watcher in watchers.values { watcher.stop() }
         watchers = [:]
@@ -465,6 +469,15 @@ final class TeamsWorkspace {
         } catch {
             if life == lifecycle { actionError = Self.code(error, fallback: "UNKNOWN") }
             return false
+        }
+    }
+
+    /// Opens a Bot document in the viewer. Takes no lock (a read); a failure is kept as `actionError`.
+    func openArtifact(_ artifactId: String) async {
+        guard started, let model = messaging else { return }
+        let life = lifecycle
+        do { try await model.openArtifact(artifactId) } catch {
+            if life == lifecycle { actionError = Self.code(error, fallback: "UNKNOWN") }
         }
     }
 

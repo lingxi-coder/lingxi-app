@@ -49,9 +49,15 @@ const errorCode = (error: unknown) => {
   const text = error instanceof Error ? error.message : error; // An abort reason (`signal.throwIfAborted()`) is the bare code.
   return typeof text === 'string' && /^[A-Z][A-Z0-9_]{2,59}$/u.test(text) ? text : 'ERROR';
 };
-/** The server or the account answered no; anything else (network, 5xx, timeout) may succeed on the next try. */
-const definitive = (error: unknown) => error instanceof TeamsApiError ? error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429
+/** The server or the account answered no; anything else (network, 5xx, timeout) may succeed on the next try.
+ * A server 401 is not final: the server maps every token-verification exception, a transient key fetch or network failure included, to 401 INVALID_SESSION.
+ * A session that is really invalid ends through sign-in or an epoch change, which `revoke()` and the local `INVALID_SESSION` already handle. */
+const definitive = (error: unknown) => error instanceof TeamsApiError ? error.status >= 400 && error.status < 500 && ![401, 408, 429].includes(error.status)
   : error instanceof Error && error.message === 'INVALID_SESSION';
+/** A failure a worker frame may retry: whatever the server or network did that is not final. An abort and a local account change are final (`signal` and `definitive`). */
+const transient = (error: unknown) => !definitive(error);
+/** Worker frames retry a transient failure at most this many times in all, and start no retry later than this after the first try. */
+const FRAME_ATTEMPTS = 3, FRAME_RETRY_WINDOW_MS = 10_000;
 /** Server answers after which a saved result can never be accepted, whatever the clocks say. */
 const permanentDelivery = (error: unknown) => error instanceof TeamsApiError && ['TASK_REVOKED','TASK_REQUIRED','TASK_RESULT_CONFLICT','EXECUTION_PERMIT_REQUIRED'].includes(error.code);
 /** Past the deadline the host stops retrying a refused or orphaned delivery (a policy choice): the server still accepts a completion while the task is `running` and finished by the deadline, replacing the derived `interrupted`. The margin covers a host clock ahead of the server, which also yields TASK_EXPIRED. */
@@ -294,8 +300,9 @@ export class TeamConnector implements LocalTeamHost {
         } catch { assert(); this.resultProbes.set(intent.taskId, this.now() + (this.options.retryMs ?? 5000)); }
       }
       // No result and no process left past the deadline: end the task instead of inspecting it forever.
-      if (!result && !(this.now() < intent.deadlineAt)) { this.log('team_task_recovered_failed', { taskId: intent.taskId }); result = this.failedResult(intent); }
-      if (result && !await handled(intent)) { this.resultProbes.delete(intent.taskId); await this.saveResult(c,intent,result); }
+      let synthesized = false;
+      if (!result && !(this.now() < intent.deadlineAt)) { this.log('team_task_recovered_failed', { taskId: intent.taskId }); result = this.failedResult(intent); synthesized = true; }
+      if (result && !await handled(intent)) { this.resultProbes.delete(intent.taskId); await this.saveResult(c,intent,result,synthesized); }
     }
     const bindingsByDeployment = new Map<string, SharedBotBinding>();
     for (const binding of bindings) {
@@ -310,7 +317,21 @@ export class TeamConnector implements LocalTeamHost {
       if (!b) { if (expired) await drop('BINDING_MISSING'); continue; }
       const payload = { ...delivery.payload, accountEpoch: b.accountEpoch };
       const commandId = delivery.payload.accountEpoch === b.accountEpoch ? delivery.commandId : digest(JSON.stringify([delivery.commandId,b.accountEpoch]));
-      try { await this.command(c,delivery,'completeTask',payload,commandId); assert(); await this.options.privateStore.delivered(c.uid,delivery.taskId); }
+      try {
+        try { await this.command(c,delivery,'completeTask',payload,commandId); }
+        catch (error) {
+          // A failure this host made up (no worker result) was stamped with the host clock. A host clock behind the server puts it before the server's `startedAt`, and
+          // the server then answers TASK_EXPIRED to every try. Send it again stamped with the current time, capped at the deadline. A real worker result is never restamped.
+          // Safe against the server's checks: a refused completion stores nothing (no result digest, no command receipt), so the second send is the first stored result. A send that did
+          // succeed unseen has stored its digest, and the different `finishedAt` then ends in TASK_RESULT_CONFLICT, which drops the delivery as done. The command id is derived from the new
+          // `finishedAt`, so a receipt of an unseen success can only answer an identical request. Each pass sends the stored stamp first, so a host clock AHEAD of the server still succeeds
+          // once the server catches up (a later stamp would stay ahead).
+          const restamp = Math.min(this.now(), delivery.deadlineAt), stamped = delivery.payload.finishedAt;
+          if (!(delivery.synthesized === true && error instanceof TeamsApiError && error.code === 'TASK_EXPIRED' && typeof stamped === 'number' && restamp > stamped)) throw error;
+          assert(); await this.command(c,delivery,'completeTask',{ ...payload, finishedAt: restamp },digest(JSON.stringify([commandId,'restamp',restamp])));
+        }
+        assert(); await this.options.privateStore.delivered(c.uid,delivery.taskId);
+      }
       catch (error) { // Keep the exact result for another try, never run its model again, unless the server will never accept it.
         // Only a server answer counts: a local INVALID_SESSION means the account moved on, not that the result is dead.
         // DEPLOYMENT_REQUIRED only ends the delivery once this binding's activation is confirmed current, or this pass found its card inactive (activation never comes then):
@@ -365,44 +386,62 @@ export class TeamConnector implements LocalTeamHost {
     // The stale context can no longer send completeTask; discovery delivers it once that account is current again, or the deadline derives `interrupted`.
     await this.options.privateStore.saveExecution(c.uid,intent);
     const authorize = async () => { assert(); await this.command(c,b,'validateTask',{...fields,permitId,expectedLastChangeSeq:source.lastChangeSeq}); assert(); };
+    // Worker frames (authorize, read_chat, provider_account_refresh) end the run on any refusal, so they retry a transient failure a few times; the poll below has its own tolerance.
+    const frame = <T>(operation: () => Promise<T>) => this.retrying(signal, started.task.deadline, operation);
+    const frameAuthorize = () => frame(authorize);
     // One validation at a time: a slow or failing server is not sent another every tick while the last waits out its timeout.
     let validating = false;
     interval = setInterval(() => { if (validating) return; validating = true;
       void authorize().catch(error => { if (definitive(error)) execution.abort(errorCode(error)); }).finally(() => { validating = false; }); },2000); interval.unref();
       const {credential_id:_credential,provider_account_profiles:_profiles,instructions,documents,...model} = snapshot;
       let result: TeamHostResult | undefined, failure: unknown;
-      try { assert(); result = await run({executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,authorize,
+      try { assert(); result = await run({executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,authorize:frameAuthorize,
         bootstrap:{version:3,type:'run',storageRoot:paths.runtime,workerExecutable:bins.worker,scope,taskId:task.taskId,invocationId:randomUUID(),instructions,
           inputBatchRef:reference,knowledge:documents.filter(d=>d.kind==='file').map(d=>({id:d.resourceId,title:d.name,text:d.text})),deadlineAt:started.task.deadline,
           model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),limits:{max_turns:20,context_window_tokens:2000000,output_tokens_per_request:4096,physical_dispatches:32}},
-        accountCredentials:async request => { await authorize();
+        accountCredentials:async request => { await frameAuthorize();
           const permitted = accounts.providerAccountCredentials[request.accountId]; if (!permitted || permitted.identity_generation !== request.identityGeneration) throw new Error('TEAM_MODEL_UNAVAILABLE');
           await this.options.renewModelAccount?.(request.accountId,request.identityGeneration,request.credentialRevision); assert();
           const current = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!current) throw new Error('TEAM_MODEL_UNAVAILABLE'); return current; },
-        readChat:async query => { await authorize();
+        readChat:async query => { await frameAuthorize();
           if (query.kind==='before' && query.before_seq>prepared.messageSeq+1 || query.kind==='range' && query.to_seq_inclusive>prepared.messageSeq) throw new Error('HISTORY_BOUND_EXCEEDED');
           const request: ChatReadRequest = {...sourceScope,...(query.kind==='before' ? {mode:'before' as const,beforeSeq:query.before_seq,limit:query.limit} : query.kind==='range' ? {mode:'range' as const,fromSeqExclusive:query.from_seq_exclusive,toSeqInclusive:query.to_seq_inclusive} : {mode:'byId' as const,messageId:query.message_id})};
-          const result = await this.options.service.hostReadChat(c,request); assert(); if (result.messages.some(message=>message.seq>prepared.messageSeq)) throw new Error('HISTORY_BOUND_EXCEEDED');
-          await authorize(); const ref = await this.options.privateStore.dataRef(c.uid,{messages:result.messages,complete:query.kind !== 'before' || !result.hasMore,nextBeforeSeq:query.kind === 'before' && result.hasMore ? result.messages[0]?.seq ?? null : null}); references.push(ref); return ref; },
+          const result = await frame(() => this.options.service.hostReadChat(c,request)); assert(); if (result.messages.some(message=>message.seq>prepared.messageSeq)) throw new Error('HISTORY_BOUND_EXCEEDED');
+          await frameAuthorize(); const ref = await this.options.privateStore.dataRef(c.uid,{messages:result.messages,complete:query.kind !== 'before' || !result.hasMore,nextBeforeSeq:query.kind === 'before' && result.hasMore ? result.messages[0]?.seq ?? null : null}); references.push(ref); return ref; },
       }); } catch (error) { failure = error; }
       // The permit is spent: whatever stopped the worker, the task ends with a result and the model never runs again for it.
       if (!result) {
         const code = signal.aborted && typeof signal.reason === 'string' ? signal.reason : errorCode(failure);
         this.log('team_task_failed', { taskId: task.taskId, code, aborted: signal.aborted });
-        result = await this.options.privateStore.savedResult(c.uid,task.taskId).catch(() => undefined) ?? this.failedResult(intent);
-        await this.saveResult(c,intent,result); return; // Delivered by discovery once the account and fence are current again.
+        const saved = await this.options.privateStore.savedResult(c.uid,task.taskId).catch(() => undefined);
+        result = saved ?? this.failedResult(intent);
+        await this.saveResult(c,intent,result,!saved); return; // Delivered by discovery once the account and fence are current again.
       }
       const delivery = await this.saveResult(c,intent,result); assert();
       await this.command(c,b,'completeTask',delivery.payload,delivery.commandId); assert(); await this.options.privateStore.delivered(c.uid,task.taskId);
     } finally { clearInterval(interval); await Promise.all(references.map(ref=>this.options.privateStore.releaseDataRef(c.uid,ref))); }
   }
+  /** Bounded retry of one worker-frame operation: only a transient failure, at most FRAME_ATTEMPTS tries, none begun after the window or the task deadline, and the wait ends at once when the run is aborted. */
+  private async retrying<T>(signal: AbortSignal, deadlineAt: number, operation: () => Promise<T>): Promise<T> {
+    const base = Math.min(250, this.options.retryMs ?? 5000), began = this.now();
+    for (let attempt = 1; ; attempt += 1) {
+      try { return await operation(); }
+      catch (error) {
+        const wait = base * 2 ** (attempt - 1);
+        if (attempt >= FRAME_ATTEMPTS || signal.aborted || !transient(error) || this.now() - began > FRAME_RETRY_WINDOW_MS || this.now() + wait >= deadlineAt) throw error;
+        await new Promise<void>(resolve => { const timer = setTimeout(done, wait), onAbort = () => done(); function done() { clearTimeout(timer); signal.removeEventListener('abort', onAbort); resolve(); } signal.addEventListener('abort', onAbort, { once: true }); });
+        signal.throwIfAborted();
+      }
+    }
+  }
+  /** The synthesized failure of a task that has no worker result. Its `finishedAt` is the host clock, which is why delivery may restamp it. */
   private failedResult(intent: SavedExecution): TeamHostResult {
     return { status: 'failed', cursor: noCursor, finishedAt: Math.min(this.now(), intent.deadlineAt) };
   }
-  private async saveResult(c: TeamAccountContext, intent: SavedExecution, result: TeamHostResult) {
+  private async saveResult(c: TeamAccountContext, intent: SavedExecution, result: TeamHostResult, synthesized = false) {
     const payload = {...intent.payload,outcome:result.status==='completed'?'completed':'failed',text:result.text || 'The assistant could not complete this request.',finishedAt:result.finishedAt,
       outputAudience:{mode:'published_inputs'},usage:result.usage ?? {status:'missing'},...(result.document ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
-    const delivery = {...intent,payload}; await this.options.privateStore.saveDelivery(c.uid,delivery); return delivery;
+    const delivery = {...intent,...(synthesized ? { synthesized: true as const } : {}),payload}; await this.options.privateStore.saveDelivery(c.uid,delivery); return delivery;
   }
   close() { this.closed=true; clearTimeout(this.timer); for(const stop of this.stops)stop(); for(const a of this.active.values())this.abort(a,'CLOSED'); this.selections.clear(); }
 }

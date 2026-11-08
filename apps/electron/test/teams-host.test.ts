@@ -403,3 +403,86 @@ test('validateTask polling keeps the run through transient errors and aborts it 
  failure=new TeamsApiError('DEPLOYMENT_REQUIRED',403);await until(()=>runs[0]!.signal.aborted);
  await settle(()=>completions(f).length===1);assert.equal(completions(f)[0].payload.outcome,'failed');
 });
+
+// A small model of the server's start and complete checks (apps/firebase/src/shared-bots.mjs): TASK_EXPIRED outside [startedAt, min(deadline, now)], one stored result digest, command receipts only for successes.
+const serverModel=(f:ReturnType<typeof fixture>,server:()=>number)=>{
+ const original=f.mock.service.hostMessages.bind(f.mock.service),state={startedAt:0,resultDigest:undefined as string|undefined,receipts:new Map<string,string>(),attempts:[] as Array<{commandId:string;finishedAt:number;outcome:string}>};
+ f.mock.service.hostMessages=async(c,command)=>{
+  if(command.action==='startTask'){const result:any=await original(c,command);state.startedAt=server();return result;}
+  if(command.action==='completeTask'){const p=command.payload as any,{accountEpoch:_epoch,...stable}=p,requestDigest=digest(JSON.stringify(command.payload)),resultDigest=digest(JSON.stringify(stable)),task=f.mock.tasks[0];
+   const record=(outcome:string)=>state.attempts.push({commandId:command.commandId as string,finishedAt:p.finishedAt,outcome});
+   const receipt=state.receipts.get(command.commandId as string);if(receipt&&receipt!==requestDigest){record('COMMAND_ID_CONFLICT');throw new TeamsApiError('COMMAND_ID_CONFLICT',409);}
+   if(state.resultDigest){if(state.resultDigest!==resultDigest){record('TASK_RESULT_CONFLICT');throw new TeamsApiError('TASK_RESULT_CONFLICT',409);}record('replayed');return {taskId:task.taskId} as any;}
+   if(p.finishedAt<state.startedAt||p.finishedAt>task.deadline||p.finishedAt>server()){record('TASK_EXPIRED');throw new TeamsApiError('TASK_EXPIRED',409);}
+   state.resultDigest=resultDigest;state.receipts.set(command.commandId as string,requestDigest);record('accepted');return original(c,command);}
+  return original(c,command);};
+ return state;
+};
+const crash:(o:TeamHostProcessOptions)=>Promise<TeamHostResult>=async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};throw Error('worker crashed');};
+
+test('a host clock behind the server still delivers a synthesized failure once it catches up, never past one accepted result',async t=>{
+ let server=Date.now();const f=fixture(t,crash);(f.connector as any).options.now=()=>server-1000;
+ await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();const model=serverModel(f,()=>server);
+ f.mock.tasks.push({...queued(),deadline:server+300000});f.mock.wake();await settle(()=>model.attempts.length>=1);await f.connector.idle();
+ assert.deepEqual(model.attempts.map(a=>a.outcome),['TASK_EXPIRED']);assert.deepEqual(await pendingFiles(f),[1,1]);
+ server+=500;await wakeAndIdle(f);assert.deepEqual(await pendingFiles(f),[1,1]);assert.ok(model.attempts.length>=2);
+ server+=600;await wakeAndIdle(f);
+ assert.deepEqual(await pendingFiles(f),[0,0]);assert.equal(model.attempts.filter(a=>a.outcome==='accepted').length,1);assert.ok(!model.attempts.some(a=>a.outcome==='TASK_RESULT_CONFLICT'||a.outcome==='COMMAND_ID_CONFLICT'));
+ const last=completions(f).at(-1);assert.equal(last.payload.outcome,'failed');assert.ok(last.payload.finishedAt>=model.startedAt&&last.payload.finishedAt<=server);
+});
+test('a restamped delivery whose earlier send succeeded unseen ends as delivered, not as a second result',async t=>{
+ let server=Date.now();const f=fixture(t,crash);(f.connector as any).options.now=()=>server-1000;
+ await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();const model=serverModel(f,()=>server);
+ f.mock.tasks.push({...queued(),deadline:server+300000});f.mock.wake();await settle(()=>model.attempts.length>=1);await f.connector.idle();
+ // The next accepted send loses its answer.
+ const sent=f.mock.service.hostMessages.bind(f.mock.service);let lost=false;
+ f.mock.service.hostMessages=async(c,command)=>{const result=await sent(c,command);if(command.action==='completeTask'&&!lost){lost=true;throw new TeamsApiError('SERVICE_UNAVAILABLE',503);}return result;};
+ server+=1100;await wakeAndIdle(f);assert.ok(lost);assert.deepEqual(await pendingFiles(f),[1,1]);server+=100;await wakeAndIdle(f);
+ assert.deepEqual(await pendingFiles(f),[0,0]);assert.equal(model.attempts.filter(a=>a.outcome==='accepted').length,1);
+});
+test('a real worker result is never restamped, whatever the server answers',async t=>{
+ let server=Date.now();const finishedAt=server-1000;const f=fixture(t,async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:o.bootstrap.type==='inspect_result'?{status:'not_found',cursor}:{status:'failed',cursor,text:'Worker failed',finishedAt});
+ (f.connector as any).options.now=()=>server-1000;await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();const model=serverModel(f,()=>server);
+ f.mock.tasks.push({...queued(),deadline:server+300000});f.mock.wake();await settle(()=>model.attempts.length>=1);await f.connector.idle();
+ for(const step of [500,600,1000]){server+=step;await wakeAndIdle(f);}
+ assert.ok(model.attempts.length>=3);assert.ok(model.attempts.every(a=>a.finishedAt===finishedAt&&a.outcome==='TASK_EXPIRED'));assert.equal(new Set(model.attempts.map(a=>a.commandId)).size,1);assert.deepEqual(await pendingFiles(f),[1,1]);
+});
+test('a server 401 past the deadline margin keeps the delivery',async t=>{
+ const events:Array<[string,any]>=[];let clock=Date.now();const f=fixture(t);(f.connector as any).options.now=()=>clock;(f.connector as any).options.diagnostics=(event:string,details:any)=>events.push([event,details]);
+ await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();const deadline=clock+60000;await seedDelivery(f,deadline);const attempts=refuseCompletions(f,'INVALID_SESSION',401);
+ clock=deadline+DELIVERY_SKEW_MS+1;await wakeAndIdle(f);await wakeAndIdle(f);assert.ok(attempts.count>=1);assert.deepEqual(await pendingFiles(f),[1,1]);assert.ok(!events.some(([event])=>event==='team_task_delivery_rejected'));
+});
+test('a transient 401 on discovery leaves a running task alone, a definitive refusal stops it',async t=>{
+ const runs:TeamHostProcessOptions[]=[];const f=fixture(t,hold(runs));await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await settle(()=>runs.length===1);
+ const original=f.mock.service.hostMessages.bind(f.mock.service);let failure:TeamsApiError|undefined=new TeamsApiError('INVALID_SESSION',401);
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='listSharedBots'&&failure)throw failure;return original(c,command);};
+ await wakeAndIdle(f);assert.equal(runs[0]!.signal.aborted,false);
+ failure=new TeamsApiError('MEMBERSHIP_REQUIRED',403);await wakeAndIdle(f);assert.equal(runs[0]!.signal.aborted,true);
+});
+test('a worker frame survives one transient failure of authorize or read_chat, and the task completes',async t=>{
+ let frames=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};
+  await o.authorize!();await o.readChat!({kind:'range',from_seq_exclusive:0,to_seq_inclusive:1});frames++;return {status:'completed',cursor,text:'Done after retries',finishedAt:Date.now()};});
+ (f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages.bind(f.mock.service),read=f.mock.service.hostReadChat.bind(f.mock.service);
+ let validations=0,reads=0;f.mock.service.hostMessages=async(c,command)=>{if(command.action==='validateTask'&&!validations++)throw new TeamsApiError('SERVICE_UNAVAILABLE',503);return original(c,command);};
+ f.mock.service.hostReadChat=async(c,q)=>{if(q.mode==='range'&&!reads++)throw new TeamsApiError('SERVICE_UNAVAILABLE',503);return read(c,q);};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>completions(f).length===1);
+ assert.equal(frames,1);assert.equal(reads,2);assert.ok(validations>=3);assert.equal(completions(f)[0].payload.outcome,'completed');assert.equal(completions(f)[0].payload.text,'Done after retries');
+});
+test('a worker frame fails at once on a definitive refusal and gives up after a bounded number of transient ones',async t=>{
+ for(const [error,calls] of [[new TeamsApiError('TASK_REVOKED',403),1],[new TeamsApiError('SERVICE_UNAVAILABLE',503),3]] as const){
+  const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};await o.authorize!();return {status:'completed',cursor,text:'Unexpected',finishedAt:Date.now()};});
+  (f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages.bind(f.mock.service);let validations=0;
+  f.mock.service.hostMessages=async(c,command)=>{if(command.action==='validateTask'){validations++;throw error;}return original(c,command);};
+  f.mock.tasks.push(queued());f.mock.wake();await settle(()=>completions(f).length===1);
+  assert.equal(validations,calls,error.code);assert.equal(completions(f)[0].payload.outcome,'failed');f.connector.close();
+ }
+});
+test('a worker frame stops waiting to retry as soon as the run is aborted',async t=>{
+ let reached=false,outcome:string|undefined;const runs:TeamHostProcessOptions[]=[];
+ const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};runs.push(o);reached=true;
+  try{await o.authorize!();}catch(error){outcome=error instanceof Error?error.message:String(error);}throw Error('INVALID_SESSION');});
+ (f.connector as any).options.retryMs=60000;await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages.bind(f.mock.service);let validations=0;
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='validateTask'){validations++;throw new TeamsApiError('SERVICE_UNAVAILABLE',503);}return original(c,command);};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>validations===1);const began=Date.now();f.connector.botChanged(f.bot.bot_id);await settle(()=>outcome!==undefined);
+ assert.ok(reached);assert.ok(Date.now()-began<1000);assert.equal(validations,1);
+});

@@ -1,3 +1,4 @@
+import type { TaskState } from './execution.js';
 import { authorIdentity, type TeamMessage } from './messages.js';
 
 /** Messages from one author within this long of each other read as one run. */
@@ -102,6 +103,36 @@ export function buildStreamRows(messages: readonly TeamMessage[], options: Strea
     if (day !== undefined) lastDay = day;
   }
   return rows;
+}
+
+/** States that can still change; such a task must stay reachable even when its place in the log is out of view. */
+const ACTIVE_TASKS: ReadonlySet<TaskState> = new Set<TaskState>(['queued', 'running', 'authorization_required']);
+
+/**
+ * Where Bot tasks that have no reply message sit in the log. A task is created in the same
+ * transaction and at the same server time as the message that requested it, so it goes right after
+ * the last message that is not newer than it (messages without a time are skipped). That keeps an
+ * expired or interrupted task, which never gets a reply, next to its request instead of below newer
+ * messages. A task older than every shown message belongs above the shown window: it is left out
+ * (and appears when earlier messages are shown) unless it is still active, in which case it is
+ * returned in `tail` so it stays reachable at the end of the log. With no earlier messages hidden,
+ * an older task goes first. Tasks keep the order given within one place.
+ */
+export function placeTasks<T extends { createdAt: number; state: TaskState }>(visible: readonly TeamMessage[], tasks: readonly T[], olderHidden: boolean): { after: Map<string, T[]>; head: T[]; tail: T[] } {
+  const after = new Map<string, T[]>(), head: T[] = [], tail: T[] = [];
+  for (const task of tasks) {
+    let anchor: TeamMessage | undefined;
+    for (const message of visible) {
+      const time = instant(message.createdAt);
+      if (time === undefined) continue;
+      if (time > task.createdAt) break;
+      anchor = message;
+    }
+    if (anchor) { const list = after.get(anchor.id); if (list) list.push(task); else after.set(anchor.id, [task]); }
+    else if (!olderHidden) head.push(task);
+    else if (ACTIVE_TASKS.has(task.state)) tail.push(task);
+  }
+  return { after, head, tail };
 }
 
 /** Messages rendered at once: the newest `WINDOW_SIZE`, more on request. */

@@ -3,7 +3,7 @@ import { createElement } from 'react';
 import { TeamsWorkspace } from '../../../packages/teams/workspace';
 import type { TeamsApi } from '../../../packages/teams';
 import type { MessageCommand } from '../../../packages/teams/messages';
-import { FakeTeams, botCard, conversation, memoryStorage, team, until } from './support/fakeTeams';
+import { FakeTeams, botCard, conversation, memoryStorage, message, team, until } from './support/fakeTeams';
 import { loadTeamsModule } from './support/loadTeamsModule';
 import { mount, scenario, textOf, withDom } from './support/workspacePage';
 const { BotDirectory } = loadTeamsModule<typeof import('../../../packages/teams/BotDirectory')>('BotDirectory');
@@ -65,6 +65,31 @@ scenario('A task without a reply message is a Bot row inside the message log, wi
     assert.ok(row.findAll((n: any) => n.props?.className === 'tw-embed').length > 0, 'status sits in a .tw-embed wrapper like a delivered task');
     assert.equal(page.find(n => n.props.role === 'status' && label.test(textOf(n))).length, 1, 'and nowhere else');
   }
+});
+scenario('A task without a reply sits right after the message that requested it, not below newer messages', async context => {
+  const { fake, workspace } = await open(context);
+  const at = (day: number, hour: number, minute: number) => Date.UTC(2026, 10, day, hour, minute, 0);
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const task = (taskId: string, state: string, createdAt: number) => ({ taskId, conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state, createdAt, deadline: createdAt + 300000 });
+  fake.messages = async <T>(command: MessageCommand) => command.action === 'listTasks' ? { tasks: [
+    task('task-live', 'running', at(6, 9, 1)), task('task-failed', 'failed', at(6, 9, 0)), task('task-old', 'expired', at(2, 10, 1)),
+  ] } as T : { bots: fake.bots } as T;
+  fake.conversations.set('team-test', [conversation('test-chat', { lastSeq: 4, lastReadSeq: 4 })]);
+  fake.threads.set('test-chat', [
+    message(1, { text: 'Monday hello', createdAt: iso(at(2, 10, 0)) }),
+    message(2, { text: 'Monday ask the Bot', author: { kind: 'user', uid: 'alice' }, createdAt: iso(at(2, 10, 1)) }),
+    message(3, { text: 'Friday ask', createdAt: iso(at(6, 9, 0)) }),
+    message(4, { text: 'Friday follow-up', createdAt: iso(at(6, 9, 1)) }),
+  ]);
+  context.mock.timers.enable({ apis: ['setInterval'] });
+  await workspace.refresh(); workspace.selectConversation('test-chat'); await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat' && workspace.getSnapshot().messages.length === 4, 'messages');
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount());
+  await page.during(() => { context.mock.timers.tick(1000); });
+  const log = page.find(n => n.props.role === 'log')[0];
+  const items = log.findAll((n: any) => n.type === 'li' && (n.props['data-message-id'] || n.props['data-task-id']));
+  assert.deepEqual(items.map((n: any) => n.props['data-message-id'] ?? n.props['data-task-id']), ['message-1', 'message-2', 'task-old', 'message-3', 'task-failed', 'message-4', 'task-live']);
+  assert.equal(items[5].props['data-grouped'], false, 'a message after a Bot row does not continue the run before it');
+  assert.equal(items.filter((n: any) => n.props['data-task-id']).length, 3, 'one row per task');
 });
 scenario('Imported Bot publication binds required resources to the installer’s own selected files', async context => {
   const sent: unknown[] = [];

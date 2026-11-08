@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import { useTeamTasks } from './bot-runs.js';
 import type { TeamTaskView } from './execution.js';
 import { MemberHome } from './MemberHome';
@@ -7,7 +7,7 @@ import { Composer, composerLock } from './Composer';
 import { messageErrorText } from './errors.js';
 import { pendingPayload, type TeamConversation, type TeamMessage } from './messages.js';
 import { ArtifactButton, BotRun } from './BotRunCards';
-import { buildStreamRows, formatClock, visibleStart, WINDOW_SIZE } from './stream.js';
+import { buildStreamRows, formatClock, placeTasks, visibleStart, WINDOW_SIZE } from './stream.js';
 import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useIsoLayoutEffect, type RenderAvatar } from './ui';
 import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
 
@@ -124,9 +124,13 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
   };
   const lastOwn = [...messages].reverse().find(message => isMine(message) && !message.recalled);
   const unseen = pinned ? 0 : messages.filter(message => message.seq > seen && !isMine(message)).length;
-  // A task gets a reply message only once it is delivered. Until then (queued, running, failed, interrupted, …)
-  // it has no message to sit under, so it is shown as its own Bot row at the end of the log, oldest first.
-  const unanswered = useMemo(() => runs.tasks.filter(task => !task.replyId).reverse(), [runs.tasks]);
+  // A task gets a reply message only once it is delivered. Until then (queued, running, failed, expired, …)
+  // it has no message to sit under, so it is shown as its own Bot row placed by time among the messages.
+  const unanswered = useMemo(() => placeTasks(visible, runs.tasks.filter(task => !task.replyId).reverse(), start > 0), [visible, runs.tasks, start]);
+  const taskRow = (task: TeamTaskView) => <TaskRow key={`task:${task.taskId}`} task={task} author={botIdentity(task.sharedBotId)} renderAvatar={renderAvatar}>
+    <div className="tw-embed"><BotRun task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} /></div>
+  </TaskRow>;
+  let afterTask = unanswered.head.length > 0;
   const loadingMessages = !messages.length && conversation.lastSeq > 0;
 
   // ── Scrolling: open at the first unread message (else the newest), follow the newest while at the bottom ──
@@ -212,21 +216,22 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
         {start > 0 ? <div className="tw-earlier"><button type="button" onClick={showEarlier}>{t('Show earlier messages', '显示更早的消息')} ({start})</button></div> : null}
         {!messages.length ? <p className="tw-empty-line" role="status">{loadingMessages ? t('Loading messages…', '正在加载消息…') : t('No messages yet. Say hello.', '还没有消息，打个招呼吧。')}</p> : null}
         <ol ref={content} className="tw-messages">
+          {unanswered.head.map(taskRow)}
           {rows.map(row => {
             if (row.type === 'date') return <li key={row.key} className="tw-date"><span>{row.label}</span></li>;
             if (row.type === 'unread') return <li key={row.key} className="tw-unread" data-unread-divider=""><span>{t('New messages', '新消息')}</span></li>;
             const message = row.message, author = authorOf(message), mine = isMine(message);
             const tasks = runs.tasks.filter(task => task.replyId === message.id);
-            return <MessageItem key={row.key} message={message} grouped={row.grouped} author={author} mine={mine} owner={message.author.kind === 'shared_bot' ? nameOf(snapshot.bots.find(bot => bot.sharedBotId === (message.author as Extract<TeamMessage['author'], { kind: 'shared_bot' }>).sharedBotId)?.maintainer.uid ?? '') : ''}
+            const placed = unanswered.after.get(message.id), grouped = row.grouped && !afterTask;
+            afterTask = !!placed;
+            return <Fragment key={row.key}><MessageItem message={message} grouped={grouped} author={author} mine={mine} owner={message.author.kind === 'shared_bot' ? nameOf(snapshot.bots.find(bot => bot.sharedBotId === (message.author as Extract<TeamMessage['author'], { kind: 'shared_bot' }>).sharedBotId)?.maintainer.uid ?? '') : ''}
               quote={quoteOf(message)} locale={tag} zh={zh} renderAvatar={renderAvatar}
               onReply={lock ? undefined : answer} onEdit={mine && participant ? edit : undefined} onRecall={mine && participant ? setRecall : undefined}>
               {message.artifactId && !tasks.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} artifactId={message.artifactId} zh={zh} /> : null}
               {tasks.map(task => <div className="tw-embed" key={task.taskId}><BotRun task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} /></div>)}
-            </MessageItem>;
+            </MessageItem>{placed?.map(taskRow)}</Fragment>;
           })}
-          {unanswered.map(task => <TaskRow key={task.taskId} task={task} author={botIdentity(task.sharedBotId)} renderAvatar={renderAvatar}>
-            <div className="tw-embed"><BotRun task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} /></div>
-          </TaskRow>)}
+          {unanswered.tail.map(taskRow)}
           {snapshot.pending.map(intent => {
             const payload = pendingPayload(intent);
             const operation = 'operation' in payload ? payload.operation : 'create';

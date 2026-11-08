@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { GROUP_WINDOW_MS, buildStreamRows, dayLabel, firstUnreadMessage, formatClock, formatListTime, type StreamOptions, type StreamRow } from '../../../packages/teams/stream';
+import { GROUP_WINDOW_MS, buildStreamRows, dayLabel, placeTasks, firstUnreadMessage, formatClock, formatListTime, type StreamOptions, type StreamRow } from '../../../packages/teams/stream';
 import type { TeamMessage } from '../../../packages/teams/messages';
 import { message } from './support/fakeTeams';
 
@@ -125,4 +125,20 @@ test('clock and list times', () => {
   assert.equal(list('2026-09-03T12:00:00.000Z'), 'Sep 3', 'older: the date');
   assert.equal(list('2025-10-27T12:00:00.000Z'), 'Oct 27, 2025', 'another year');
   assert.equal(list(null), ''); assert.equal(list(undefined), ''); assert.equal(list('nope'), '');
+});
+
+test('placeTasks puts a task after the last message not newer than it, and keeps active tasks reachable above the window', () => {
+  const list = [msg(1, when(2, 10, 0)), msg(2, null), msg(3, when(2, 10, 1)), msg(4, when(6, 9, 0))];
+  const task = (id: string, state: 'expired' | 'running', createdAt: number) => ({ id, state, createdAt });
+  const at = (day: number, hour: number, minute: number) => Date.UTC(2026, 10, day, hour, minute);
+  const ids = (tasks: { id: string }[] | undefined) => tasks?.map(t => t.id);
+  const placed = placeTasks(list, [task('a', 'expired', at(2, 10, 1)), task('b', 'expired', at(2, 10, 1)), task('c', 'expired', at(2, 10, 30)), task('d', 'running', at(7, 0, 0))], false);
+  assert.deepEqual(ids(placed.after.get('message-3')), ['a', 'b', 'c'], 'same time as a message: after it, and before the next newer one; untimed messages are skipped');
+  assert.deepEqual(ids(placed.after.get('message-4')), ['d']);
+  assert.deepEqual([placed.head, placed.tail, placed.after.get('message-1')], [[], [], undefined]);
+  const older = [task('old', 'expired', at(1, 0, 0)), task('live', 'running', at(1, 0, 0))];
+  const top = placeTasks(list, older, false);
+  assert.deepEqual([ids(top.head), top.tail], [['old', 'live'], []], 'nothing hidden above: older tasks go first');
+  const windowed = placeTasks(list, older, true);
+  assert.deepEqual([windowed.head, ids(windowed.tail)], [[], ['live']], 'earlier messages hidden: a finished task waits for them, an active one is pinned at the end');
 });

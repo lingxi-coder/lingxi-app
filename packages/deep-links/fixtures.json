@@ -117,6 +117,42 @@
       "route": "team/inbox"
     },
     {
+      "url": "lingxi://friend/add?code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-",
+      "route": "friend/add",
+      "params": {
+        "code": "aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-"
+      }
+    },
+    {
+      "url": "https://lingxios.net/open/friend/add?code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-",
+      "route": "friend/add",
+      "params": {
+        "code": "aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-"
+      }
+    },
+    {
+      "url": "lingxi://friend/requests",
+      "route": "friend/requests"
+    },
+    {
+      "url": "https://lingxios.net/open/friend/requests",
+      "route": "friend/requests"
+    },
+    {
+      "url": "lingxi://friend/chat?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e",
+      "route": "friend/chat",
+      "params": {
+        "uid": "Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e"
+      }
+    },
+    {
+      "url": "https://lingxios.net/open/friend/chat?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e",
+      "route": "friend/chat",
+      "params": {
+        "uid": "Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e"
+      }
+    },
+    {
       "url": "lingxi://market/bot/travel-helper?versionId=release1",
       "route": "market/bot/travel-helper",
       "params": {
@@ -178,6 +214,23 @@
     "lingxi://market/bot/helper?workspace=private",
     "lingxi://market/bot/helper?token=secret",
     "lingxi://market/app1?versionId=release1",
-    "lingxi://market/app1?intentId=handoff1"
+    "lingxi://market/app1?intentId=handoff1",
+    "lingxi://friend",
+    "lingxi://friend/other",
+    "lingxi://friend/add",
+    "lingxi://friend/add?code=short",
+    "lingxi://friend/add?code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-&workspace=x",
+    "lingxi://friend/add?code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-&uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e",
+    "lingxi://friend/add?code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-#payload=%7B%7D",
+    "lingxi://friend/requests?code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-",
+    "lingxi://friend/requests?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e",
+    "lingxi://friend/chat",
+    "lingxi://friend/chat?uid=",
+    "lingxi://friend/chat?uid=a%2Fb",
+    "lingxi://friend/chat?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e&uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e",
+    "lingxi://friend/chat?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e&code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-",
+    "lingxi://team/inbox?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e",
+    "lingxi://team/join?code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-&uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e",
+    "lingxi://new?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e"
   ]
 }

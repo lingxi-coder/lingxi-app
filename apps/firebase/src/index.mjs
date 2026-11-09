@@ -13,6 +13,7 @@ import { createHandler } from './catalog.mjs';
 import { CatalogStore } from './store.mjs';
 import { createPushHandler, PushStore } from './push.mjs';
 import { createTeamsHandler, TeamsStore } from './teams.mjs';
+import { FriendsStore, friendNotifier } from './friends.mjs';
 import { OAuth2Client } from 'google-auth-library';
 import { createTeamMarketEligibilityHandler, TeamMarketEligibilityStore } from './team-market-eligibility.mjs';
 
@@ -52,11 +53,16 @@ export const pushApi = onRequest({ region: 'us-central1', minInstances: 0, maxIn
   res.status(output.status).send(Buffer.from(await output.arrayBuffer()));
 });
 
+const teamsDb = getFirestore(app);
+// Friends share teamsApi and the (default) database. Email lookup uses Admin Auth; pushes use the Team push path.
+const friendsStore = new FriendsStore(teamsDb, Date.now, { auth: getAuth(app),
+  notify: friendNotifier({ db: teamsDb, pushStore, messaging: getMessaging(app) }) });
+
 export const prunePushRegistrations = onSchedule({ schedule: 'every 24 hours', timeZone: 'Etc/UTC',
   region: 'us-central1', memory: '256MiB', timeoutSeconds: 540, maxInstances: 1,
-  serviceAccount: pushServiceAccount }, async () => { await pushStore.prune(); });
+  serviceAccount: pushServiceAccount }, async () => { await pushStore.prune(); await friendsStore.prune(); });
 
-const teamsHandler = createTeamsHandler({ store: new TeamsStore(getFirestore(app)),
+const teamsHandler = createTeamsHandler({ store: new TeamsStore(teamsDb), friends: friendsStore,
   verifyToken: token => getAuth(app).verifyIdToken(token, true),
   createCustomToken: uid => getAuth(app).createCustomToken(uid),
   origins: ['https://lingxios.net', 'https://lingxi-5e4b2.web.app', 'https://lingxi-5e4b2.firebaseapp.com',

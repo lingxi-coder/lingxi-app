@@ -182,6 +182,19 @@
             "value": "no-store"
           }
         ]
+      },
+      {
+        "source": "/open/friend/add",
+        "headers": [
+          {
+            "key": "Referrer-Policy",
+            "value": "no-referrer"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "no-store"
+          }
+        ]
       }
     ],
     "rewrites": [
@@ -194,6 +207,20 @@
       },
       {
         "source": "/v1/teams/**",
+        "function": {
+          "functionId": "teamsApi",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/v1/friends",
+        "function": {
+          "functionId": "teamsApi",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/v1/friends/**",
         "function": {
           "functionId": "teamsApi",
           "region": "us-central1"

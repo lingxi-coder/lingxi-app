@@ -41,3 +41,20 @@ test('session links require an explicit fixed mode in either format', () => {
     assert.equal(parseDeepLink(`lingxi://session/a?workspace=global&mode=${mode}`).params.mode, mode);
   }
 });
+
+test('friend links carry exactly one code or one uid and nothing else', () => {
+  const code = 'aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-', uid = 'Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e';
+  for (const format of ['https', 'scheme'] as const) {
+    for (const target of [{ route: 'friend/add', params: { code } }, { route: 'friend/chat', params: { uid } }, { route: 'friend/requests', params: {} }]) {
+      assert.deepEqual(parseDeepLink(buildDeepLink(target, format)), target);
+    }
+  }
+  for (const raw of ['lingxi://friend/add', `lingxi://friend/add?code=${code.slice(1)}`, `lingxi://friend/add?code=${code}&uid=${uid}`,
+    `lingxi://friend/add?code=${code}#payload=%7B%7D`, `lingxi://friend/requests?code=${code}`, 'lingxi://friend/chat', 'lingxi://friend/chat?uid=a%2Fb',
+    `lingxi://friend/chat?uid=${'u'.repeat(129)}`, `lingxi://friend/chat?uid=${uid}&code=${code}`, `lingxi://team/inbox?uid=${uid}`, `lingxi://new?uid=${uid}`]) {
+    assert.throws(() => parseDeepLink(raw), raw);
+  }
+  assert.equal(parseDeepLink(`lingxi://friend/chat?uid=${'u'.repeat(128)}`).params.uid.length, 128);
+  assert.throws(() => buildDeepLink({ route: 'friend/add', params: { code, uid } }));
+  assert.throws(() => buildDeepLink({ route: 'friend/chat', params: {} }));
+});

@@ -1,7 +1,7 @@
 import { FieldValue } from 'firebase-admin/firestore';
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { TeamConversationError } from './team-conversations.mjs';
+import { TeamConversationError, conversationRecord } from './team-conversations.mjs';
 import { TeamMessagesStore, TeamMessageError } from './team-messages.mjs';
 import { SharedBotError } from './shared-bots.mjs';
 
@@ -31,13 +31,40 @@ export class TeamsError extends Error {
 }
 const fail = (status, code) => { throw new TeamsError(status, code); };
 const active = team => team?.state === 'active';
+const pair = team => team?.kind === 'pair';
 const manager = member => ['owner', 'admin'].includes(member?.role);
-function profile(user) {
-  return { displayName: typeof user.name === 'string' && user.name.trim() ? user.name.trim().slice(0, 80) : 'Member' };
+/** A friendship is a hidden two-person `kind: 'pair'` team (docs/FRIENDS.md). Its id space is reserved, so no client can occupy one. */
+export const PAIR_PREFIX = 'f_';
+export const PAIR_CONVERSATION_ID = 'friend_chat';
+const PAIR_NAME = 'Friends';
+export function displayName(user) {
+  return typeof user.name === 'string' && user.name.trim() ? user.name.trim().slice(0, 80) : 'Member';
 }
+const profile = user => ({ displayName: displayName(user) });
 function summary(snapshot, member) {
   const team = snapshot.data();
-  return { id: snapshot.id, name: team.name, memberCount: team.memberCount, role: member.role, generation: member.generation };
+  return { id: snapshot.id, name: team.name, ...(pair(team) ? { kind: 'pair' } : {}), memberCount: team.memberCount, role: member.role, generation: member.generation };
+}
+
+/** Writes a new pair team inside the caller's transaction: exactly two members (generation 1, role member) and the one
+ * `dm` conversation, built by the same code as createTeamConversation. It is never added to `users/{uid}/teams`, so it
+ * neither lists nor counts toward USER_TEAM_LIMIT. `members` is [{ uid, displayName }, { uid, displayName }]. */
+export function createPairTeam(tx, db, { teamId, createdBy, members, now }) {
+  const ref = db.doc(`teams/${teamId}`);
+  tx.create(ref, { name: PAIR_NAME, kind: 'pair', createdBy, state: 'active', memberCount: 2, createdAt: now, updatedAt: now });
+  for (const member of members) {
+    tx.create(ref.collection('membershipEpochs').doc(member.uid), { generation: 1 });
+    tx.create(ref.collection('members').doc(member.uid), { displayName: member.displayName, role: 'member', joinedAt: now, lastActiveAt: now, generation: 1 });
+  }
+  const { record } = conversationRecord({ kind: 'dm', title: PAIR_NAME, participants: members.map(member => `user:${member.uid}`), callerUid: createdBy });
+  tx.create(ref.collection('conversations').doc(PAIR_CONVERSATION_ID), record);
+}
+
+/** Team deletion in the caller's transaction (after its reads): `members` are the membership document refs to remove. */
+export function endTeam(tx, ref, members, now) {
+  // Keep the team/epochs as a tombstone. A concurrent join cannot resurrect it.
+  tx.update(ref, { state: 'deleted', memberCount: 0, deletedAt: now, updatedAt: now });
+  for (const member of members) tx.delete(member);
 }
 
 /** All membership changes read the team document, so join/delete/remove serialize. */
@@ -52,7 +79,7 @@ export class TeamsStore {
       const snapshots = await tx.getAll(...index.docs.flatMap(doc => [this.team(doc.id), this.team(doc.id).collection('members').doc(user)]));
       const teams = [];
       for (let i = 0; i < snapshots.length; i += 2) {
-        if (active(snapshots[i].data()) && snapshots[i + 1].exists) teams.push(summary(snapshots[i], snapshots[i + 1].data()));
+        if (active(snapshots[i].data()) && !pair(snapshots[i].data()) && snapshots[i + 1].exists) teams.push(summary(snapshots[i], snapshots[i + 1].data()));
       }
       return { teams };
     });
@@ -75,6 +102,7 @@ export class TeamsStore {
     uid.parse(user.uid);
     const input = command.parse(raw), now = new Date(this.clock());
     if (input.action === 'create') {
+      if (input.teamId.startsWith(PAIR_PREFIX)) fail(400, 'PAIR_TEAM');
       return this.db.runTransaction(async tx => {
         const ref = this.team(input.teamId), previous = await tx.get(ref);
         if (previous.exists) {
@@ -100,6 +128,7 @@ export class TeamsStore {
         const [team, member, invitation, epoch, receipt] = await tx.getAll(ref, memberRef, invitationRef, epochRef, receiptRef);
         const v = invitation.data();
         if (!active(team.data())) fail(404, 'INVITE_UNAVAILABLE');
+        if (pair(team.data())) fail(400, 'PAIR_TEAM');
         if (receipt.exists) {
           const old = receipt.data();
           if (old.teamId !== tid || old.inviteId !== invitationId) fail(409, 'REQUEST_ID_CONFLICT');
@@ -133,6 +162,7 @@ export class TeamsStore {
       const ref = this.team(input.teamId), selfRef = ref.collection('members').doc(user.uid);
       const [team, self] = await tx.getAll(ref, selfRef);
       if (!active(team.data()) || !self.exists) fail(403, 'MEMBERSHIP_REQUIRED');
+      if (pair(team.data())) fail(400, 'PAIR_TEAM');
       const role = self.data().role;
       if (input.action === 'invite') {
         if (!manager(self.data()) || (input.role === 'admin' && role !== 'owner')) fail(403, 'ROLE_REQUIRED');
@@ -160,9 +190,8 @@ export class TeamsStore {
       if (input.action === 'delete') {
         if (role !== 'owner') fail(403, 'OWNER_REQUIRED');
         const members = await tx.get(ref.collection('members').limit(TEAM_MEMBER_LIMIT));
-        // Keep the team/epochs as a tombstone. A concurrent join cannot resurrect it.
-        tx.update(ref, { state: 'deleted', memberCount: 0, deletedAt: now, updatedAt: now });
-        for (const member of members.docs) { tx.delete(member.ref); tx.delete(this.index(member.id, ref.id)); }
+        endTeam(tx, ref, members.docs.map(member => member.ref), now);
+        for (const member of members.docs) tx.delete(this.index(member.id, ref.id));
         return { ok: true };
       }
       const targetUid = input.action === 'leave' ? user.uid : input.uid;
@@ -188,7 +217,7 @@ export class TeamsStore {
 }
 
 /** HTTP authorization is deliberately independent from owner-only Remote Control. */
-export function createTeamsHandler({ store, verifyToken, createCustomToken, origins = [] }) {
+export function createTeamsHandler({ store, friends, verifyToken, createCustomToken, origins = [] }) {
   return async request => {
     const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
       'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', Vary: 'Origin' });
@@ -209,9 +238,10 @@ export function createTeamsHandler({ store, verifyToken, createCustomToken, orig
       try { user = await verifyToken(bearer[1]); } catch { fail(401, 'INVALID_SESSION'); }
       if (!uid.safeParse(user?.uid).success) fail(401, 'INVALID_SESSION');
       if (path === '/v1/teams' && request.method === 'GET') return reply(await store.list(user.uid));
+      if (friends && path === '/v1/friends/profile' && request.method === 'GET') return reply(await friends.profile(user));
       const detail = /^\/v1\/teams\/([A-Za-z0-9_-]{8,64})$/u.exec(path);
       if (detail && detail[1] !== 'session' && request.method === 'GET') return reply(await store.detail(user.uid, detail[1]));
-      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages'].includes(path)) fail(404, 'NOT_FOUND');
+      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
       const raw = await request.text();
       if (Buffer.byteLength(raw) > (path === '/v1/teams/messages' ? 1048576 : 16384)) fail(413, 'REQUEST_TOO_LARGE');
       let body;
@@ -221,6 +251,7 @@ export function createTeamsHandler({ store, verifyToken, createCustomToken, orig
         return reply({ uid: user.uid, customToken: await createCustomToken(user.uid) });
       }
       if (path === '/v1/teams/messages') return reply(await new TeamMessagesStore(store.db, store.clock).execute(user, body));
+      if (path === '/v1/friends') return reply(await friends.execute(user, body));
       return reply(await store.execute(user, body));
     } catch (error) {
       if (error instanceof z.ZodError) return reply({ error: { code: 'INVALID_INPUT' } }, 400);

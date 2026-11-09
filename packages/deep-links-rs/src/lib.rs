@@ -36,6 +36,7 @@ fn valid_route(route: &str) -> bool {
             | ["import", "mcp" | "plugin" | "skill" | "provider"]
             | ["remote", _, _]
             | ["team", "join" | "inbox"]
+            | ["friend", "add" | "requests" | "chat"]
     )
 }
 pub fn parse(raw: &str) -> Result<Target, &'static str> {
@@ -92,7 +93,7 @@ pub fn parse(raw: &str) -> Result<Target, &'static str> {
     }
     let mut params = BTreeMap::new();
     for (key, value) in u.query_pairs() {
-        if !["workspace", "message", "mode", "scope", "code", "versionId", "intentId"].contains(&key.as_ref())
+        if !["workspace", "message", "mode", "scope", "code", "versionId", "intentId", "uid"].contains(&key.as_ref())
             || value.is_empty()
             || value.len() > 512
             || value.chars().any(char::is_control)
@@ -112,21 +113,34 @@ pub fn parse(raw: &str) -> Result<Target, &'static str> {
     if route.starts_with("session/") && !params.contains_key("mode") {
         return Err("Session mode is required");
     }
-    if route == "team/inbox" && !params.is_empty() {
-        return Err("Unexpected team inbox parameter");
+    if (route == "team/inbox" || route == "friend/requests") && !params.is_empty() {
+        return Err("Unexpected inbox parameter");
     }
-    if route == "team/join" {
-        let valid_code = params.get("code").is_some_and(|code| {
-            code.len() == 32
-                && code
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-        });
+    // A team invitation and a friend link each carry exactly one 32-character code, which no other route accepts.
+    let url_safe = |value: &str| {
+        value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    };
+    if route == "team/join" || route == "friend/add" {
+        let valid_code = params
+            .get("code")
+            .is_some_and(|code| code.len() == 32 && url_safe(code));
         if params.len() != 1 || !valid_code {
-            return Err("Invalid team invitation");
+            return Err("Invalid invitation code");
         }
     } else if params.contains_key("code") {
-        return Err("Invalid team invitation");
+        return Err("Invalid invitation code");
+    }
+    if route == "friend/chat" {
+        let valid_uid = params
+            .get("uid")
+            .is_some_and(|uid| (1..=128).contains(&uid.len()) && url_safe(uid));
+        if params.len() != 1 || !valid_uid {
+            return Err("Invalid friend identity");
+        }
+    } else if params.contains_key("uid") {
+        return Err("Invalid friend identity");
     }
     if let Some(id) = params.get_mut("message") {
         if !route.starts_with("session/")
@@ -324,6 +338,51 @@ mod tests {
             assert!(parse(&raw).is_err(), "{raw}");
         }
     }
+    #[test]
+    fn friend_links_carry_one_code_or_one_uid_and_nothing_else() {
+        let code = "aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-";
+        let uid = "Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e";
+        for (scheme, custom) in [("lingxi://", true), ("https://lingxios.net/open/", false)] {
+            let add = parse(&format!("{scheme}friend/add?code={code}")).unwrap();
+            assert_eq!(add.route, "friend/add");
+            assert_eq!(add.params["code"], code);
+            assert_eq!(parse(&build(&add, custom).unwrap()).unwrap(), add);
+            let chat = parse(&format!("{scheme}friend/chat?uid={uid}")).unwrap();
+            assert_eq!(chat.route, "friend/chat");
+            assert_eq!(chat.params["uid"], uid);
+            assert_eq!(parse(&build(&chat, custom).unwrap()).unwrap(), chat);
+            let requests = parse(&format!("{scheme}friend/requests")).unwrap();
+            assert_eq!(requests.route, "friend/requests");
+        }
+        let long = "u".repeat(129);
+        for raw in [
+            "lingxi://friend".to_owned(),
+            "lingxi://friend/other".to_owned(),
+            "lingxi://friend/add".to_owned(),
+            "lingxi://friend/add?code=short".to_owned(),
+            format!("lingxi://friend/add?code={}!", &code[..31]),
+            format!("lingxi://friend/add?code={code}&workspace=secret"),
+            format!("lingxi://friend/add?code={code}&uid={uid}"),
+            format!("lingxi://friend/add?code={code}&code={code}"),
+            format!("lingxi://friend/add?code={code}#payload=%7B%7D"),
+            format!("lingxi://friend/requests?code={code}"),
+            format!("lingxi://friend/requests?uid={uid}"),
+            "lingxi://friend/chat".to_owned(),
+            "lingxi://friend/chat?uid=".to_owned(),
+            "lingxi://friend/chat?uid=a%2Fb".to_owned(),
+            "lingxi://friend/chat?uid=a%20b".to_owned(),
+            format!("lingxi://friend/chat?uid={long}"),
+            format!("lingxi://friend/chat?uid={uid}&uid={uid}"),
+            format!("lingxi://friend/chat?uid={uid}&code={code}"),
+            format!("lingxi://friend/chat?uid={uid}#payload=%7B%7D"),
+            format!("lingxi://team/inbox?uid={uid}"),
+            format!("lingxi://new?uid={uid}"),
+            format!("lingxi://team/join?code={code}&uid={uid}"),
+        ] {
+            assert!(parse(&raw).is_err(), "{raw}");
+        }
+    }
+
     #[test]
     fn message_uuid_is_canonical_without_folding_other_identities() {
         let target = Target {

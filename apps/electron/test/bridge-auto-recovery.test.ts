@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { test } from 'node:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test, type TestContext } from 'node:test';
 import { SessionRuntime } from '../src/main/bridge.js';
 
 function fixture(): { runtime: SessionRuntime; internal: any; child: EventEmitter; calls: string[]; events: any[] } {
@@ -16,6 +19,181 @@ function fixture(): { runtime: SessionRuntime; internal: any; child: EventEmitte
   internal.restoreOwnedSessionIfNeeded = async (): Promise<void> => { assert.equal(internal.ownedSessionResumeRequired, true); calls.push('restore'); internal.ownedSessionResumeRequired = false; };
   return { runtime, internal, child, calls, events };
 }
+
+function transportFixture(t: TestContext, external = false) {
+  const f = fixture();
+  const directory = mkdtempSync(join(tmpdir(), 'lingxi-compact-reconnect-'));
+  const lockfile = join(directory, 'bridge.lock');
+  writeFileSync(lockfile, JSON.stringify({ pid: process.pid, workspaceFolders: ['/workspace'],
+    ideName: 'LingXi-Bridge', transport: 'ws', runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef' }));
+  const sent: string[] = [];
+  const previousClient = Object.assign(new EventEmitter(), { sendCommand() {}, close() {} });
+  const recoveredClient = Object.assign(new EventEmitter(), {
+    sendCommand() {}, close() {},
+    sendPrompt: (text: string) => { sent.push(text); },
+    requestRuntimeSnapshot: async (accept: (events: any[]) => void) => {
+      const events = [
+        { type: 'session_agent_list', session_id: f.runtime.sessionId, agents: [] },
+        { type: 'coordinator_status', active_workers: 0 },
+        { type: 'task_list_complete', request_id: 'desktop-runtime-snapshot' },
+      ];
+      accept(events);
+      return events;
+    },
+  });
+  Object.assign(f.child, { pid: process.pid });
+  Object.assign(f.internal, {
+    ...(external ? { child: null, adoptedPid: process.pid, adoptedProcessOwned: false } : {}),
+    activeWorkspace: '/workspace', activeWorkspaceTrusted: true,
+    connectionLockfilePath: lockfile, processIsAlive: () => true,
+    connectBridgeClient: async (path: string, generation: number) => {
+      assert.equal(path, lockfile);
+      f.calls.push('reconnect');
+      f.internal.wireClient(recoveredClient, generation);
+      f.internal.setState({ status: 'connecting' });
+    },
+  });
+  f.internal.wireClient(previousClient, f.internal.generation);
+  t.after(async () => { await f.runtime.dispose(); rmSync(directory, { recursive: true, force: true }); });
+  return { ...f, previousClient, recoveredClient, sent };
+}
+
+test('a compact transport failure reconnects the same process and permits the next message without replay', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const external of [false, true]) {
+    const f = transportFixture(t, external);
+    f.internal.activeTurn = true;
+    f.internal.liveSideChats.add('side-1');
+    const source = f.internal.ownedTranscriptPath;
+    f.previousClient.emit('event', { type: 'compaction_status', phase: 'summarizing' });
+    f.previousClient.emit('close', 1006, 'connection lost during compaction');
+    assert.equal(f.runtime.connectionState.status, 'disconnected');
+    t.mock.timers.tick(250);
+    await f.internal.restartChain;
+    await f.runtime.waitForLifecycle();
+    assert.deepEqual(f.calls, ['reconnect'], 'transport recovery must not stop, spawn or resume a process');
+    assert.equal(f.runtime.connectionState.status, 'connected');
+    assert.equal(f.runtime.recoveredLiveConnection, true);
+    assert.equal(f.runtime.turnActive, false);
+    assert.equal(f.internal.ownedTranscriptPath, source);
+    assert.equal(f.internal.liveSideChats.has('side-1'), true);
+    assert.deepEqual(f.sent, [], 'the compact operation and interrupted prompt are never replayed');
+    await f.runtime.sendPrompt('new message after compact failure', [], 77);
+    assert.deepEqual(f.sent, ['new message after compact failure']);
+    f.previousClient.emit('close', 1006, 'stale close');
+    t.mock.timers.tick(10_000);
+    await f.runtime.waitForLifecycle();
+    assert.deepEqual(f.calls, ['reconnect']);
+  }
+});
+
+test('failed socket recovery stays reconnect-only and stops after three attempts', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = transportFixture(t, true);
+  f.internal.recoverConnection = async (only: boolean) => {
+    assert.equal(only, true);
+    f.calls.push('reconnect');
+    throw new Error('socket unavailable');
+  };
+  f.previousClient.emit('close', 1006, 'peer closed');
+  for (const delay of [250, 500, 1000]) {
+    t.mock.timers.tick(delay);
+    await f.runtime.waitForLifecycle();
+  }
+  assert.deepEqual(f.calls, ['reconnect', 'reconnect', 'reconnect']);
+  assert.equal(f.runtime.connectionState.status, 'error');
+  assert.deepEqual(f.sent, []);
+});
+
+test('a socket error before close still reconnects an established process', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = transportFixture(t);
+  f.previousClient.emit('error', new Error('socket reset'));
+  assert.equal(f.runtime.connectionState.status, 'error');
+  f.previousClient.emit('close', 1006, 'socket reset');
+  t.mock.timers.tick(250);
+  await f.internal.restartChain;
+  assert.deepEqual(f.calls, ['reconnect']);
+  assert.equal(f.runtime.connectionState.status, 'connected');
+});
+
+test('a failed initial handshake never schedules transport recovery', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = transportFixture(t);
+  f.internal.setState({ status: 'connecting' });
+  f.previousClient.emit('error', new Error('hello rejected'));
+  f.previousClient.emit('close', 1006, 'hello rejected');
+  t.mock.timers.tick(10_000);
+  await f.runtime.waitForLifecycle();
+  assert.deepEqual(f.calls, []);
+});
+
+test('an owned detached peer that exits during a socket retry restores its exact source', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = transportFixture(t, true);
+  let alive = true;
+  f.internal.adoptedProcessOwned = true;
+  f.internal.processIsAlive = () => alive;
+  f.internal.connectBridgeClient = async () => {
+    f.calls.push('reconnect');
+    throw new Error('socket handshake failed');
+  };
+  f.previousClient.emit('close', 1006, 'peer closed');
+  t.mock.timers.tick(250);
+  await f.runtime.waitForLifecycle();
+  alive = false;
+  t.mock.timers.tick(500);
+  await f.internal.restartChain;
+  assert.deepEqual(f.calls, ['reconnect', 'stop', 'start', 'restore']);
+  assert.equal(f.runtime.connectionState.status, 'connected');
+  assert.equal(f.internal.ownedTranscriptPath, '/workspace/original.jsonl');
+});
+
+test('an external peer that exits is never replaced by socket recovery', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = transportFixture(t, true);
+  f.internal.processIsAlive = () => false;
+  f.previousClient.emit('close', 1006, 'external peer exited');
+  for (const delay of [250, 500, 1000]) {
+    t.mock.timers.tick(delay);
+    await f.runtime.waitForLifecycle();
+  }
+  assert.deepEqual(f.calls, []);
+  assert.equal(f.runtime.connectionState.status, 'error');
+});
+
+test('managed process exit supersedes a queued socket reconnect', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = transportFixture(t);
+  f.previousClient.emit('close', 1006, 'peer closed');
+  f.internal.managedChildExited(f.child, 1, null, true);
+  t.mock.timers.tick(250);
+  await f.runtime.waitForLifecycle();
+  assert.deepEqual(f.calls, ['stop', 'start', 'restore']);
+  assert.equal(f.runtime.connectionState.status, 'connected');
+});
+
+test('managed process exit during a socket retry retains the queued process recovery', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = transportFixture(t);
+  let reject!: (error: Error) => void;
+  f.internal.recoverConnection = async () => {
+    f.calls.push('reconnect');
+    await new Promise<void>((_resolve, no) => { reject = no; });
+  };
+  f.previousClient.emit('close', 1006, 'peer closed');
+  t.mock.timers.tick(250);
+  for (let i = 0; i < 10 && !reject; i++) await Promise.resolve();
+  assert.equal(typeof reject, 'function');
+  f.internal.managedChildExited(f.child, 1, null, true);
+  reject(new Error('engine exited'));
+  await f.runtime.waitForLifecycle();
+  t.mock.timers.tick(500);
+  await f.runtime.waitForLifecycle();
+  assert.deepEqual(f.calls, ['reconnect', 'stop', 'start', 'restore']);
+  assert.equal(f.runtime.connectionState.status, 'connected');
+});
 
 test('unexpected managed exit restores once without replaying foreground or Side Chat work', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });

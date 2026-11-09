@@ -24,6 +24,12 @@ test('group counts describe calls rather than claim unique files or successful o
   assert.equal(withDesktopLocale('en', () => toolGroupSummary(repeated)), 'Read files · 2 calls');
 });
 
+test('task progress labels are localized without exposing tool payloads', () => {
+  const tasks: ToolRunItem[] = ['TaskList', 'TaskUpdate'].map((name) => ({ ...tool('generic', name), tool: name, view: { verb: 'generic', label: name, title: name } }));
+  assert.equal(withDesktopLocale('zh-Hans', () => toolGroupSummary(tasks)), '任务进度 · 2 次');
+  assert.equal(withDesktopLocale('en', () => toolGroupSummary(tasks)), 'Task progress · 2 calls');
+});
+
 test('file rows show a basename, preserve the full path and use lifecycle wording', () => {
   const item = tool('create');
   assert.deepEqual(toolRowPresentation(item), { action: 'Created', argument: '/work/notes.md', displayArgument: 'notes.md', file: true, qualifier: undefined });
@@ -49,4 +55,21 @@ test('activity expansion has one heading, preserving every tool without a nested
   const html = render(React.createElement(ToolGroup, { group, open: true, toolOpen: () => false, onSetOpen() {} }));
   assert.equal((html.match(/class="transcript-disclosure-trigger tool-group-trigger"/g) ?? []).length, 1);
   assert.equal((html.match(/class="transcript-tool-row"/g) ?? []).length, 2);
+});
+
+test('LocalApp has one localized, adjacent summary and keeps failed details inspectable', () => {
+  const headline = '全家人的终身学习空间：7 个年龄阶段、14 个领域';
+  const item: ToolRunItem = { type: 'tool', id: 'local-app-summary', tool: 'LocalApp', status: 'done', view: { verb: 'generic', icon: 'wrench', label: 'LocalApp', title: 'LocalApp' }, result: { headline, body: 'Complete application result', body_lines: 1 } };
+  withDesktopLocale('zh-Hans', () => {
+    assert.equal(toolRowPresentation(item)?.action, '本地应用');
+    assert.equal(toolRowPresentation(item)?.argument, headline);
+    const html = render(React.createElement(ToolCall, { item, open: false, onSetOpen() {} }));
+    assert.match(html, /data-kind="local-app"/);
+    assert.match(html, /data-tool-icon="local-app"/);
+    assert.match(html, /aria-expanded="false"/);
+    assert.doesNotMatch(html, /class="tool-row-response"/);
+    const failed = { ...item, status: 'error' as const, result: { headline: 'Failed to read application', body: 'Failure details', body_lines: 1 } };
+    assert.equal(toolRowPresentation(failed)?.argument, '');
+    assert.match(render(React.createElement(ToolCall, { item: failed, open: true, onSetOpen() {} })), /Failure details/);
+  });
 });

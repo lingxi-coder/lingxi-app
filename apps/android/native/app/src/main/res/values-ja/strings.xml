@@ -2810,4 +2810,8 @@
     <string name="teams_usage_cost_unknown">費用不明</string>
     <string name="teams_usage_currency_unknown">通貨不明</string>
     <string name="teams_usage_tokens_fmt">%1$d / %2$d トークン</string>
+    <string name="chat_agent_started_working">作業を開始</string>
+    <string name="chat_agent_finished">完了</string>
+    <string name="chat_tool_group_tasks">タスクの進捗</string>
+    <string name="chat_tool_group_coordination">タスクの連携</string>
 </resources>

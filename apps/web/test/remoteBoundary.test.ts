@@ -22,7 +22,7 @@ test('reuse.ts takes only logic from the Electron renderer: no component, no sty
   const electron = specifiers.filter((specifier) => specifier.startsWith('@lingxi/electron/'));
   assert.ok(electron.length > 0);
   for (const specifier of electron) {
-    assert.ok(!/\/components\/(?!transcriptRows$|transcriptAgentPlacement$)/u.test(specifier), `${specifier} is a component`);
+    assert.ok(!/\/components\/(?!transcriptRows$|transcriptAgentPlacement$|toolPresentation$|agentAvatarArt$)/u.test(specifier), `${specifier} is a component`);
     assert.ok(!/\.(?:tsx|css)$/u.test(specifier), specifier);
     assert.ok(!/\/(?:main|preload)\//u.test(specifier), specifier);
   }

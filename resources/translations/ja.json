@@ -2987,5 +2987,9 @@
   "teams_usage_cost_unknown": "費用不明",
   "teams_usage_currency_unknown": "通貨不明",
   "teams_usage_tokens %lld %lld": "%1$lld / %2$lld トークン",
-  "teams_usage_tokens_fmt": "%1$d / %2$d トークン"
+  "teams_usage_tokens_fmt": "%1$d / %2$d トークン",
+  "chat_agent_started_working": "作業を開始",
+  "chat_agent_finished": "完了",
+  "chat_tool_group_tasks": "タスクの進捗",
+  "chat_tool_group_coordination": "タスクの連携"
 }

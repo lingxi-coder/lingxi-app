@@ -2810,4 +2810,8 @@
     <string name="teams_usage_cost_unknown">cost unknown</string>
     <string name="teams_usage_currency_unknown">currency unknown</string>
     <string name="teams_usage_tokens_fmt">%1$d / %2$d tokens</string>
+    <string name="chat_agent_started_working">started working</string>
+    <string name="chat_agent_finished">finished</string>
+    <string name="chat_tool_group_tasks">Task progress</string>
+    <string name="chat_tool_group_coordination">Task coordination</string>
 </resources>

@@ -62,6 +62,7 @@ internal fun AgentRunTimeline(
     /** Tool-use ids whose result body/diff is expanded — owned by [ChatState]. */
     expandedToolCalls: Set<String> = emptySet(),
     onToggleToolCall: (String) -> Unit = {},
+    agents: List<SessionAgentUi> = emptyList(),
 ) {
     // This card is pinned above the composer, so keep the default footprint to
     // one status row and let the user expand the execution trace on demand.
@@ -198,7 +199,7 @@ internal fun AgentRunTimeline(
                     val tools = activeTools.ifEmpty { state.toolDisplayWindow() }.map { it.toToolCall() }
                     if (tools.isNotEmpty()) {
                         ToolGroupView(TranscriptBlock.Tools(tools, state.tools.first().id),
-                            expandedToolCalls, onToggleToolCall)
+                            expandedToolCalls, onToggleToolCall, agents)
                     }
 
                     state.notices.forEach { notice ->

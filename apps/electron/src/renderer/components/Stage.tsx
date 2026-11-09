@@ -732,7 +732,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           if (item === tailThinking) return null;
           const content = (() => {
           if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} files={item.files} onReview={onReviewFiles ? path => onReviewFiles(item.id, item.files!, path) : undefined} />;
-          if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} launches={item.launches} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
+          if (item.type === 'agents') return <TranscriptAgents key={item.id} id={item.id} open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} agents={item.agents} launches={item.launches} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
           if (item.type === 'narration') {
             if (instructionIds.has(item.id)) return <div className="transcript-run-item" data-run-type="skill-instructions" key={item.id}>
               <LocalAppInstructions id={item.id} text={item.text} name={instructionIds.get(item.id)}

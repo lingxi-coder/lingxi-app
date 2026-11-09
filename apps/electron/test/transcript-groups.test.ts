@@ -47,11 +47,45 @@ test('questions, permissions, plans and agent launches remain individually reach
     assert.equal(transcriptRows(items, false).filter(row => row.type === 'tool-group').length, 2, name);
   }
 });
+
+const taskTool = (id: string, name: string, primary?: string): ToolRunItem => ({
+  ...tool(id), tool: name, view: { verb: name === 'TodoWrite' ? 'todo' : 'generic', icon: 'wrench', label: name, title: name, primary },
+});
+
+test('consecutive task bookkeeping and targeted coordination share one stable group', () => {
+  const tasks = [taskTool('list', 'TaskList'), taskTool('create', 'TaskCreate'), taskTool('update', 'TaskUpdate'), taskTool('todos', 'TodoWrite'), taskTool('discover', 'ToolSearch', '+SendMessage'), taskTool('message', 'SendMessage')];
+  const rows = transcriptRows([...tasks, tool('read'), taskTool('get', 'TaskGet')], false);
+  assert.deepEqual(rows.flatMap((row) => row.type === 'tool-group' ? [row.tools.map((item) => item.id)] : []), [tasks.map((item) => item.id), ['read'], ['get']]);
+  assert.equal(rows[0]?.id, 'tool-group:list');
+  assert.equal(transcriptRows([{ ...tasks[0]!, status: 'running' }], true)[0]?.id, rows[0]?.id);
+  assert.equal(transcriptRows([tasks[0]!, { type: 'narration', id: 'note', text: 'Progress' }, tasks[1]!], false).filter((row) => row.type === 'tool-group').length, 2);
+});
+
+test('free-form or mixed discovery and unrelated MCP endpoints keep their own groups', () => {
+  for (const query of ['find a tool to send a message', 'select:Read,TaskList', '+WebFetch', '+SendMessage,']) {
+    const rows = transcriptRows([taskTool('task', 'TaskList'), taskTool('discover', 'ToolSearch', query), taskTool('update', 'TaskUpdate')], false);
+    assert.equal(rows.filter((row) => row.type === 'tool-group').length, 3, query);
+  }
+  const items = [taskTool('task', 'TaskList'), taskTool('mcp', 'mcp__other__TaskList'), taskTool('launch', 'Task')];
+  assert.equal(transcriptRows(items, false).length, 3);
+});
 function renderGroup(tools: ToolRunItem[], open = false, toolExpanded?: boolean) {
   return renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, React.createElement(ToolGroup, {
     group: { type: 'tool-group', id: 'group', tools }, open, toolOpen: () => toolExpanded, onSetOpen: () => {},
   })));
 }
+
+test('task activity stays one collapsed line while running and exposes unsuccessful call counts', () => {
+  const tools = [taskTool('list', 'TaskList'), { ...taskTool('send', 'SendMessage'), status: 'error' as const }, { ...taskTool('update', 'TaskUpdate'), status: 'running' as const }];
+  const closed = renderGroup(tools);
+  assert.match(closed, /Task coordination · 3 calls · 1 running · 1 unsuccessful call/);
+  assert.match(closed, /data-tool-icon="tasks"/);
+  assert.doesNotMatch(closed, /data-status=|tool-group-calls/);
+  const opened = renderGroup(tools, true);
+  assert.equal((opened.match(/data-status=/g) ?? []).length, 3);
+  assert.match(opened, /Call unsuccessful/);
+  assert.match(renderGroup([taskTool('create', 'TaskCreate'), taskTool('update', 'TaskUpdate')]), /Task progress · 2 calls/);
+});
 test('a lone summary-only tool stays one non-interactive row regardless of group expansion', () => {
   const item: ToolRunItem = {
     type: 'tool', id: 'web', tool: 'WebSearch', status: 'done',

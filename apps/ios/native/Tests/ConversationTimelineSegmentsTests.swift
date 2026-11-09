@@ -8,6 +8,31 @@ import SwiftUI
 /// `ForEach` id, SwiftUI tears the row down and rebuilds it, which moves the
 /// scroll position under the reader.
 final class ConversationTimelineSegmentsTests: XCTestCase {
+    func testTaskCoordinationFoldsWithoutAbsorbingInteractiveTools() {
+        let calls = ["TaskList", "TaskUpdate", "SendMessage", "ToolSearch"]
+        for tool in calls.prefix(3) {
+            XCTAssertEqual(ConversationToolTrace(id: tool, tool: tool, status: .completed).groupingKey, "task-workflow")
+        }
+        for tool in ["Task", "Agent", "Skill", "TaskOutput", "TaskStop", "AskUserQuestion"] {
+            XCTAssertNotEqual(ConversationToolTrace(id: tool, tool: tool, status: .completed).groupingKey, "task-workflow")
+        }
+        XCTAssertEqual(ToolDisplayText.icon(header: nil, tool: "TaskList"), .listChecks)
+        XCTAssertEqual(ToolDisplayText.icon(header: nil, tool: "SendMessage"), .send)
+        XCTAssertEqual(ToolDisplayText.icon(header: nil, tool: "LocalApp"), .localApp)
+    }
+
+    func testAdjacentAnchoredAgentsMergeAndProseKeepsItsBoundary() {
+        let agents = ["a", "b"].map { ConversationAgentSummary(id: $0, name: $0, agentType: "worker", status: "running") }
+        var first = ConversationToolTrace(id: "spawn-a", tool: "Agent", status: .completed)
+        first.spawnedAgentID = "a"
+        var second = ConversationToolTrace(id: "spawn-b", tool: "Agent", status: .completed)
+        second.spawnedAgentID = "b"
+        let group = toolGroup([first, second])
+        let ids = ConversationTimelineView.projectedSegmentIDs(groups: [group], transcriptAgents: agents,
+            transcriptAgentAnchors: ["a": "spawn-a", "b": "spawn-b"])
+        XCTAssertEqual(ids.filter { $0.hasPrefix("agents:") }, ["agents:after:spawn-a"])
+    }
+
     func testSkillPromptRequiresMatchingCompletedToolBody() {
         let body = "# LingXi API guide\n\nFull instructions."
         let trace = ConversationToolTrace(id: "skill", tool: "Skill", status: .completed, skillBody: body)

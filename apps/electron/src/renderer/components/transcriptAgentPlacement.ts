@@ -143,9 +143,12 @@ export function placeTranscriptAgents(inputRows: readonly TranscriptRow[], items
   const result: AgentTranscriptRow[] = [];
   const insert = (id: string | null) => {
     const group = groups.get(id);
-    if (group) result.push({ type: 'agents', id: `agents:${id ?? 'start'}`, agents: group, launches,
-      sourceIds: group.flatMap(agent => mergedByAgent.get(agent.agent_id) ?? []),
-    });
+    if (!group) return;
+    const sourceIds = group.flatMap(agent => mergedByAgent.get(agent.agent_id) ?? []);
+    const previous = result.at(-1);
+    if (previous?.type === 'agents') {
+      result[result.length - 1] = { ...previous, agents: [...previous.agents, ...group], sourceIds: [...previous.sourceIds, ...sourceIds] };
+    } else result.push({ type: 'agents', id: `agents:${id ?? 'start'}`, agents: group, launches, sourceIds });
   };
   insert(null);
   for (const row of rows) {

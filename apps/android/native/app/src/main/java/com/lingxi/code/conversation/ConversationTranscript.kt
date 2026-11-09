@@ -241,6 +241,7 @@ private class MessageBuild(
                     val existing = ref.build.blocks[ref.blockIndex] as MessageContent.Tool
                     ref.build.blocks[ref.blockIndex] = MessageContent.Tool(
                         existing.call.copy(display = display, status = status,
+                            spawnedAgentId = if (!block.isError) spawnResultAgentId(block.tool, block.resultJson) else null,
                             questionAnswers = if (!block.isError) parseQuestionAnswers(block.tool, block.resultJson) else null,
                             localApp = if (!block.isError) parseLocalAppResult(block.tool, block.resultJson) else null,
                             skillBody = if (!block.isError) parseSkillBody(block.tool, block.resultJson) else null,
@@ -259,6 +260,7 @@ private class MessageBuild(
                                 questionAnswers = if (!block.isError) parseQuestionAnswers(block.tool, block.resultJson) else null,
                                 localApp = if (!block.isError) parseLocalAppResult(block.tool, block.resultJson) else null,
                                 skillBody = if (!block.isError) parseSkillBody(block.tool, block.resultJson) else null,
+                                spawnedAgentId = if (!block.isError) spawnResultAgentId(block.tool, block.resultJson) else null,
                                 display = display,
                                 status = status,
                             ),

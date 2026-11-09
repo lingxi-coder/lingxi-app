@@ -938,7 +938,7 @@ class ChatViewModel(
                     state
                 } else {
                     val agent = event.agent.toSessionAgentUi()
-                    state.copy(sessionAgents = state.sessionAgents.filterNot { it.agentId == agent.agentId } + agent)
+                    state.copy(sessionAgents = if (state.sessionAgents.any { it.agentId == agent.agentId }) state.sessionAgents.map { if (it.agentId == agent.agentId) agent else it } else state.sessionAgents + agent)
                 }
             }
             is ClientEvent.TaskStatusChanged -> {

@@ -85,6 +85,7 @@ fun MessageBubble(
     /** Tool-use ids whose result body/diff is expanded — owned by `ChatState`. */
     expandedToolCalls: Set<String> = emptySet(),
     onToggleToolCall: (String) -> Unit = {},
+    agents: List<SessionAgentUi> = emptyList(),
 ) {
     val t = LingXiTheme.palette
     if (message.role == Role.User) {
@@ -203,7 +204,7 @@ fun MessageBubble(
                             when (block) {
                                 is TranscriptBlock.Prose -> PlanAwareText(block.text, onOpenLink = onOpenLink)
                                 is TranscriptBlock.Plan -> PlanDocumentCard(block.markdown, block.writing, onOpenLink)
-                                is TranscriptBlock.Tools -> ToolGroupView(block, expandedToolCalls, onToggleToolCall)
+                                is TranscriptBlock.Tools -> ToolGroupView(block, expandedToolCalls, onToggleToolCall, agents)
                                 is TranscriptBlock.Visualization -> VisualizationCard(block.status, block.reference)
                             }
                         }

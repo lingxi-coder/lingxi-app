@@ -162,9 +162,75 @@ impl Transcript {
     pub fn from_messages(messages: Vec<RenderedMessage>) -> Self {
         let mut transcript = Self::default();
         for message in messages {
-            transcript.push_message(message);
+            transcript.push_replayed_message(message);
         }
+        transcript.flush_active();
         transcript
+    }
+
+    /// Apply the live activity fold rules to restored history without changing
+    /// durable row identities. Visible prose/questions/tools seal the group.
+    fn push_replayed_message(&mut self, message: RenderedMessage) {
+        use crate::history_cell::tool::{activity_fold_key, ActivityEntry, ActivityFoldCell};
+        if let RenderedMessage::IdentifiedTranscriptRow {
+            message,
+            request_id,
+        } = message
+        {
+            self.push_replayed_message(*message);
+            if self.active.is_some() {
+                self.identify_active_row_uuid(request_id);
+            } else {
+                self.identify_latest_committed_row(request_id);
+            }
+            return;
+        }
+        if let RenderedMessage::AssistantToolUse { id, tool, input } = &message {
+            if let Some(key) = activity_fold_key(tool, input) {
+                let same = self
+                    .active
+                    .as_ref()
+                    .and_then(|cell| cell.as_any().downcast_ref::<ActivityFoldCell>())
+                    .is_some_and(|fold| fold.key == key);
+                if !same {
+                    self.flush_active();
+                    self.set_active(Box::new(ActivityFoldCell {
+                        key,
+                        entries: Vec::new(),
+                    }));
+                }
+                self.mutate_active(|cell| {
+                    if let Some(fold) = cell.as_any_mut().downcast_mut::<ActivityFoldCell>() {
+                        fold.entries.push(ActivityEntry {
+                            id: id.to_string(),
+                            tool: tool.clone(),
+                            input: input.clone(),
+                            result: None,
+                        });
+                    }
+                });
+                return;
+            }
+        }
+        if let RenderedMessage::UserToolResult { id, result, .. } = &message {
+            let matched = self
+                .mutate_active(|cell| {
+                    let fold = cell.as_any_mut().downcast_mut::<ActivityFoldCell>()?;
+                    let entry = fold
+                        .entries
+                        .iter_mut()
+                        .find(|entry| entry.id == id.to_string())?;
+                    entry.result = Some(result.clone());
+                    Some(())
+                })
+                .flatten()
+                .is_some();
+            if matched {
+                return;
+            }
+        }
+        self.flush_active();
+        self.push_message(message);
     }
 
     /// Append a finalized cell to the committed history.
@@ -906,6 +972,31 @@ mod tests {
 
     fn assistant_cell(body: &str) -> Box<dyn HistoryCell> {
         Box::new(AssistantTextCell::new(body.to_string()))
+    }
+
+    #[test]
+    fn replay_activity_fold_preserves_each_source_uuid_and_visible_boundaries() {
+        let tools = ["Agent", "Task"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, tool)| RenderedMessage::IdentifiedTranscriptRow {
+                request_id: format!("spawn-row-{index}"),
+                message: Box::new(RenderedMessage::AssistantToolUse {
+                    id: lingxi_core::types::ToolUseId::from(format!("spawn-{index}")),
+                    tool: tool.into(),
+                    input: serde_json::json!({"name":format!("worker-{index}")}),
+                }),
+            })
+            .collect();
+        let transcript = Transcript::from_messages(tools);
+        assert_eq!(transcript.committed_cells().len(), 1);
+        assert_eq!(
+            transcript.row_uuids.get(&0).unwrap(),
+            &vec!["spawn-row-0".to_string(), "spawn-row-1".to_string()]
+        );
+        assert!(transcript.committed_cells()[0]
+            .as_any()
+            .is::<crate::history_cell::tool::ActivityFoldCell>());
     }
 
     #[test]

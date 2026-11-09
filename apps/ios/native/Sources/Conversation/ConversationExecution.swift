@@ -904,12 +904,29 @@ struct ConversationToolTrace: Identifiable, Equatable {
 
 /// Consecutive activity only; nil keys keep interactive and deliverable rows separate.
 extension ConversationToolTrace {
+    static func isTaskProgressTool(_ tool: String) -> Bool {
+        tool.range(of: "^(Task_?(Create|Get|Update|List)|Todo_?Write|List_?Checks|update_plan)$", options: .caseInsensitive) != nil
+    }
+
+    var isTaskWorkflow: Bool {
+        func member(_ value: String) -> Bool {
+            Self.isTaskProgressTool(value) || ["sendmessage", "send_message"].contains(value.lowercased())
+        }
+        if member(tool) { return true }
+        guard tool == "ToolSearch", let primary = header?.primary, !primary.isEmpty else { return false }
+        let targets = primary.replacingOccurrences(of: "^select:\\s*", with: "", options: [.regularExpression, .caseInsensitive])
+            .split(whereSeparator: { $0.isWhitespace || $0 == "," }).map { $0.hasPrefix("+") ? String($0.dropFirst()) : String($0) }
+        return !targets.isEmpty && targets.allSatisfy(member)
+    }
+
     var groupingKey: String? {
         let name = tool.lowercased()
         guard spawnedAgentID == nil, planDocument == nil, questionAnswers == nil, localApp == nil,
               !["agent", "task", "skill", "spawn_agent", "fork_agent", "askuserquestion", "exitplanmode", "enterplanmode", "submitplan"].contains(name),
               !name.contains("permission"),
-              ![ConversationToolVerb.task, .todo, .skill].contains(where: { $0 == header?.verb }) else { return nil }
+              header?.verb != .skill else { return nil }
+        if isTaskWorkflow { return "task-workflow" }
+        if header?.verb == .task || header?.verb == .todo { return nil }
         if name.hasPrefix("mcp") { return tool }
         if let verb = header?.verb, verb != .generic { return String(describing: verb) }
         return tool.isEmpty ? nil : tool

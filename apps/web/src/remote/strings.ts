@@ -9,6 +9,22 @@ import { pickLocaleText, type Locale, type LocalizedText } from '../utils/locale
 const text = (zh: string, en: string): LocalizedText => ({ zh, en });
 
 export const strings = {
+  agentStarted: text('开始工作', 'started working'),
+  agentFinished: text('已完成', 'finished'),
+  agentExecutionEnded: text('执行已结束', 'Execution ended'),
+  agentWithheld: text('报告未交付', 'Report withheld'),
+  agentPending: text('报告待交付', 'Report pending'),
+  agentFlagged: text('报告需检查', 'Report flagged'),
+  localApp: text('本地应用', 'Local app'),
+  groupRead: text('读取文件', 'Read files'),
+  groupSearch: text('搜索', 'Search'),
+  groupShell: text('运行命令', 'Run commands'),
+  groupFetch: text('获取页面', 'Fetch pages'),
+  taskProgress: text('任务进度', 'Task progress'),
+  taskCoordination: text('任务协调', 'Task coordination'),
+  toolCalls: text('{count} 次调用', '{count} calls'),
+  toolRunningCount: text('{count} 项运行中', '{count} running'),
+  toolFailedCount: text('{count} 项未成功', '{count} unsuccessful'),
   // shell
   title: text('远程控制', 'Remote Control'),
   loading: text('正在加载…', 'Loading…'),

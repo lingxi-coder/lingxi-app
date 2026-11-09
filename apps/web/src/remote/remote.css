@@ -131,3 +131,36 @@
 @media (min-width: 720px) {
   .rc-scroll { max-height: calc(100dvh - 260px); }
 }
+
+/* Transcript activity follows Desktop: one quiet line, locally anchored disclosure. */
+.rc-tool { border: 0; background: transparent; }
+.rc-tool-head, .rc-inline-row, .rc-agent-member > summary {
+  display: flex; align-items: center; gap: 9px; width: fit-content; max-width: 100%; min-width: 0;
+  min-height: 28px; padding: 2px 0; border: 0; background: transparent; color: var(--ink-2);
+  font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.rc-tool-title, .rc-inline-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; }
+.rc-inline-state { flex: 0 0 auto; max-width: 55%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rc-inline-arrow, .rc-tool-glyph { flex: 0 0 auto; opacity: .75; }
+.rc-inline-arrow { font-size: 18px; line-height: 1; }
+.rc-inline-members { margin: 2px 0 4px 9px; padding-left: 19px; border-left: 1px solid var(--line); }
+.rc-agent-avatars { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.rc-agent-avatar { display: inline-block; width: 18px; height: 18px; color: #70b86c; font-size: 21px; line-height: 18px; }
+.rc-agent-member > summary { list-style: none; }
+.rc-agent-member > summary::-webkit-details-marker { display: none; }
+.rc-inline-row:focus-visible, .rc-tool-head:focus-visible, .rc-agent-member > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 5px; }
+.rc-inline-row:active, .rc-tool-head:active { opacity: .65; }
+@media (pointer: coarse) { .rc-tool-head, .rc-inline-row, .rc-agent-member > summary { min-height: 44px; } }
+@media (prefers-contrast: more) { .rc-inline-arrow { opacity: 1; } }
+
+.rc-avatar-dark { display: none; }
+:root[data-theme="dark"] .rc-avatar-dark { display: block; }
+:root[data-theme="dark"] .rc-avatar-light { display: none; }
+.rc-tool-head { color: var(--ink-3); }
+.rc-tool-state { flex-shrink: 0; }
+
+.rc-transcript { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.rc-inline-row > .rc-danger { flex: 0 0 auto; white-space: nowrap; }
+.rc-tool-state.rc-danger { color: var(--danger); }
+
+.rc-tool-head:disabled { opacity: 1; }

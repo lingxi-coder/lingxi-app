@@ -13,10 +13,30 @@ class TranscriptToolGroupTest {
     }
 
     @Test fun questionsAndAgentsRemainIndividuallyReachable() {
-        for (name in listOf("Agent", "Skill", "AskUserQuestion", "PermissionRequest")) {
+        for (name in listOf("Skill", "AskUserQuestion", "PermissionRequest")) {
             assertEquals(2, consecutiveToolGroups(listOf(ToolCallUi("a", name), ToolCallUi("b", name))).size)
         }
     }
+    @Test fun agentLaunchesAndTaskCoordinationFoldOnlyWhenAdjacent() {
+        val calls = listOf("Agent", "Task", "Read", "TaskList", "TaskUpdate", "SendMessage", "AskUserQuestion", "TaskOutput")
+            .mapIndexed { index, name -> ToolCallUi(index.toString(), name) }
+        assertEquals(listOf(listOf("0", "1"), listOf("2"), listOf("3", "4", "5"), listOf("6"), listOf("7")),
+            consecutiveToolGroups(calls).map { group -> group.map { it.id } })
+        assertEquals(calls, consecutiveToolGroups(calls).flatten())
+        assertFalse(isTaskProgressTool("Task"))
+        assertFalse(isTaskProgressTool("TaskStop"))
+        assertEquals(com.lingxi.code.components.LXIconName.ListChecks, toolIconName(null, "TaskList"))
+        assertEquals(com.lingxi.code.components.LXIconName.Send, toolIconName(null, "SendMessage"))
+        assertEquals(com.lingxi.code.components.LXIconName.Apps, toolIconName(ToolVerbUi.Generic, "LocalApp"))
+    }
+
+    @Test fun structuredAgentIdentitySupportsBothWireSpellings() {
+        assertEquals("child", spawnResultAgentId("Agent", "{\"agentId\":\"child\"}"))
+        assertEquals("agent:child", spawnResultAgentId("Task", "{\"agent_id\":\"agent:child\"}"))
+        assertNull(spawnResultAgentId("Read", "{\"agentId\":\"child\"}"))
+        assertNull(spawnResultAgentId("Agent", "invalid"))
+    }
+
     private fun tool(id: String, status: AgentToolStatus = AgentToolStatus.Completed) =
         MessageContent.Tool(ToolCallUi(id, "Read", status = status))
 

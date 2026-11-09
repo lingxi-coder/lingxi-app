@@ -315,12 +315,14 @@ export class FriendsStore {
     });
     return { ok: true };
   }
-  /** Ends the friendship and any pending request in both directions; only `unblock` lifts it, and it restores nothing. */
+  /** Ends the friendship and any pending request in both directions; only `unblock` lifts it, and it restores nothing.
+   * The block keeps the person's name (their profile, else the name on the caller's card, as `load` reads it), so the
+   * Blocked list can name people on any device. A repeated block keeps the first. */
   async block(user, peer) {
     const now = new Date(this.clock());
     await this.run(async tx => {
       const c = await this.load(tx, user, peer), team = await this.teamOf(tx, c.friendship);
-      if (!c.blocking) tx.set(this.blockRef(user.uid, peer), { at: now });
+      if (!c.blocking) tx.set(this.blockRef(user.uid, peer), { at: now, ...c.theirs });
       if (['friends', 'pending'].includes(c.friendship?.state)) this.sever(tx, user.uid, peer, team, now);
     });
     return { ok: true };

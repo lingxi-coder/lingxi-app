@@ -1,8 +1,9 @@
 # Friends implementation contract
 
-Status: phase F0 (backend core) is a local source change. Nothing is deployed: the API, rules,
-indexes, Hosting routes and scheduled prune below need the user's explicit approval (see
-[Deployment gates](#deployment-gates)). Clients (F1+) are not part of this contract yet.
+Status: phase F0 (backend core) and the friend-list summaries are source only. Nothing is deployed: the API, rules,
+indexes, Hosting routes, scheduled prune and the two summary triggers below need the user's explicit approval (see
+[Deployment gates](#deployment-gates)). Client behaviour (phases F1+F2) is specified in
+[FRIENDS-CLIENTS.md](FRIENDS-CLIENTS.md).
 
 A friendship is a hidden two-person **pair team** in the Teams stack described in [TEAMS.md](TEAMS.md).
 Friends therefore reuse its membership rules, message mutation protocol, offline caches, push trigger and
@@ -20,8 +21,8 @@ Rules grant no write anywhere below.
 | `handles/{handleLower}` | `{uid}` uniqueness lock, swapped with the profile in one transaction | none |
 | `friendCodes/{sha256(code)}` | `{uid, code, createdAt, revoked}`; the raw `code` field is index-exempt | none |
 | `friendships/{pairKey}` | `{uids, state: pending\|friends\|ended, requester, epoch, teamId?, source, note?, createdAt, updatedAt, endedAt?}`; `pairKey = sha256(a\|b)` with `a < b` | none |
-| `users/{uid}/friends/{other}` | the owner's index: `state: friends\|incoming\|outgoing`, `displayName`, `handle?`, `note?`, and for `friends` also `teamId`, `generation: 1`, `since`; deleted when the relation ends | owner `get`/`list` |
-| `users/{uid}/blocks/{other}` | `{at}` | owner `get`/`list` |
+| `users/{uid}/friends/{other}` | the owner's index: `state: friends\|incoming\|outgoing`, `displayName`, `handle?`, `note?`, and for `friends` also `teamId`, `generation: 1`, `since`, and the chat summary `lastSeq`, `lastMessage`, `lastChangeSeq`, `lastReadSeq` (absent until the first message or read mark; see [Friend list summaries](#friend-list-summaries)); deleted when the relation ends | owner `get`/`list` |
+| `users/{uid}/blocks/{other}` | `{at, displayName, handle?}`: the blocked person's name when the block was made | owner `get`/`list` |
 | `users/{uid}/friendRequests/{requestId}` | idempotency receipt `{digest, otherUid, at}` | none |
 | `friendLimits/{sha256(bucket:uid)}` | sliding window `{sentAt[], expiresAt}`; pruned by the daily scheduled function | none |
 
@@ -29,8 +30,9 @@ Rules grant no write anywhere below.
 pair team and the friendship document change in **one transaction**. The cards are projections that never disagree
 with the friendship. Rules deny every client write, so a forged `state: 'friends'` card cannot exist.
 
-Names are snapshots. Cards, pair team member documents and the conversation record carry the name the user had when
-the relation was made; `profiles/{uid}` is the current one (readable by friends). There is no rename fan-out.
+Names are snapshots. Cards, block entries, pair team member documents and the conversation record carry the name the
+person had when the relation (or the block) was made; `profiles/{uid}` is the current one (readable by friends). There
+is no rename fan-out.
 
 ## Pair team
 
@@ -62,6 +64,51 @@ every Teams API require `state: active` and a current member, so both users lose
 | `POST /v1/teams/messages` `create` conversation | 400 `PAIR_TEAM`, even for `friend_chat`; the backend writes the only conversation |
 | message `mutate`, `sync`, `read`, `list` | unchanged |
 | SharedBots commands | unchanged: a Bot published into a pair team with `usePolicy` `all` is usable by the friend (the F3 precondition) |
+
+## Friend list summaries
+
+A client lists friends with one listener on `users/{uid}/friends`; it needs no listener per friend. For a `friends`
+card the backend copies the pair chat's newest-message pointer and the owner's own read mark onto the card:
+
+| Card field | Value | From |
+| --- | --- | --- |
+| `lastSeq` | sequence of the newest message | `conversation.lastSeq` |
+| `lastMessage` | the pointer whole, exactly as stored: `{id, seq, at, author, preview, recalled?}`; a recalled newest message has `preview: ''` and `recalled: true` | `conversation.lastMessage` |
+| `lastChangeSeq` | the conversation change counter this card has taken (the ordering guard below) | `conversation.lastChangeSeq` |
+| `lastReadSeq` | the owner's read mark | `reads/{owner}.lastReadSeq` |
+
+All four are absent on a new friendship (the card is written whole at each friendship, so none survives into the
+next): absent means no message and nothing read. **Unread is `max(0, lastSeq - lastReadSeq)`**, computed by the client
+from the card. The sender's `lastReadSeq` moves only when that client calls the Teams `read` action (a chat that is open
+with the newest message visible does), so the backend never counts a user's own message as read on their behalf. The
+preview is text the owner can already read in the chat, on a card only the owner can read.
+
+Two Firestore triggers in `(default)` do the copying (`apps/firebase/src/friend-summary.mjs`, wired in `index.mjs` next
+to `onTeamMessage` with the same region `us-central1`, service account `push-api`, 256 MiB and at most 2 instances):
+
+| Function | Fires on | Writes |
+| --- | --- | --- |
+| `onFriendChatUpdated` | update of `teams/{teamId}/conversations/friend_chat` | `lastSeq`, `lastMessage`, `lastChangeSeq` on both members' cards |
+| `onFriendChatRead` | any write of `teams/{teamId}/conversations/friend_chat/reads/{uid}` | `lastReadSeq` on `{uid}`'s own card only |
+
+The conversation id is literal in the trigger path, so a conversation of an ordinary Team never starts a function
+(path patterns cannot match on the `f_` team-id prefix, so a `{conversationId}` wildcard would start one invocation per
+message of every Team). The handlers still require a `teamId` starting `f_`, a team of `kind: 'pair'` and a well-formed
+event (two distinct member uids, whole-number counters), and return before any read otherwise. A message costs one
+invocation (three reads, at most two writes); a read mark costs one (three reads, at most one write).
+
+Events are at-least-once and unordered, and neither function sets `retry`. Each write is a transaction that reads the card
+first, which keeps it correct:
+
+- It writes only while the card is still this friendship: `state: 'friends'` with `teamId` equal to the event's team. After
+  `remove`, `block`, or a re-friend (a new epoch and team id) a late event writes nothing, creates no card, and never
+  reaches the new friendship's cards.
+- A conversation event applies only if its `lastChangeSeq` is greater than the card's, so duplicates and older events are
+  ignored, and `lastSeq` is kept at its maximum besides. Every event carries the whole pointer, so a lost event is healed by
+  the next one.
+- A read mark applies only if it is greater than the card's `lastReadSeq` and its membership `generation` is the card's.
+
+The triggers change nothing else on a card.
 
 ## API
 
@@ -107,9 +154,11 @@ none ──request──▶ pending(requester) ──accept (receiver)──▶ 
   retry; asking again uses a new id.
 - `accept`, a mutual `request` and `redeem` create the pair team (`epoch + 1`), both cards and the friendship in one
   transaction. A repeated accept returns the existing `teamId`.
-- `block` writes `users/{uid}/blocks/{other}` (once; a repeat keeps `at`), ends the friendship or pending request in
-  both directions and deletes the pair team in the same transaction. `unblock` only deletes the block; it restores
-  nothing and either side may ask again.
+- `block` writes `users/{uid}/blocks/{other}` as `{at, displayName, handle?}` (once; a repeat keeps the first entry), ends
+  the friendship or pending request in both directions and deletes the pair team in the same transaction. The name is the
+  person's profile, else the name already on the caller's card for them, else `Member`, as every transition reads it, so
+  a Blocked list can show names on any device. `unblock` only deletes the block; it restores nothing and either side may
+  ask again.
 
 ## Discovery and privacy
 
@@ -184,14 +233,18 @@ profiles, friend codes and friendships are denied too. `firestore.teams.indexes.
 
 Deploying any of this requires explicit approval; F0 deploys nothing.
 
-1. Order: default-database rules and indexes, then Functions (`teamsApi`, `prunePushRegistrations`), then Hosting,
-   then clients.
+1. Order: default-database rules and indexes, then Functions (`teamsApi`, `prunePushRegistrations`, and the two summary
+   triggers `onFriendChatUpdated` and `onFriendChatRead`), then Hosting, then clients.
 2. IAM preflight: `teamsApi` and the scheduled function run as `push-api`. `getUserByEmail` needs Firebase Authentication
    read access for it (for example `roles/firebaseauth.viewer`); without it email lookup fails with a server error
    instead of `NOT_FOUND`. The daily prune now also deletes expired `friendLimits` in `(default)`.
-3. Android and iOS must learn the three routes (`DeepLink.kt`, `PushRoute.kt`, `CanonicalDeepLink`, `PushMessagePolicy`)
-   before this ships: the shared fixture corpus now contains the friend links, so their corpus tests fail until then, and
-   an unknown push route is dropped.
+   The summary triggers run as the same `push-api` as `onTeamMessage`, on the same `(default)` database and region, and
+   write only `users/{uid}/friends` there, as `teamsApi` already does, so they need no IAM beyond it. They are new
+   Firestore (Eventarc) triggers: the first deploy creates them, and the cards fill in from the next message or read mark.
+   Nothing is backfilled: with F0 undeployed no friendship exists yet, so there is nothing to catch up.
+3. Android and iOS learn the three routes (`DeepLink.kt`, `PushRoute.kt`, `CanonicalDeepLink`, `PushMessagePolicy`, with
+   the typed `FriendLink` in both) in the client step; the shared fixture corpus tests pass with them. Until the Friends
+   screens are wired, a friend link or friend push reaches the existing "unavailable" path.
 
 ## Validation
 
@@ -203,8 +256,11 @@ cargo test --locked -p lingxi-deep-links
 ```
 
 `friends.test.mjs` (commands, push copy, handler, config), `friends.emulator.test.mjs` (profiles, discovery, every
-transition including races, pair-team contract, SharedBots in a pair team, push) and `friends.rules.emulator.test.mjs`
-(client access, unfriend closing the chat) are part of the first `test:teams` command.
+transition including races, block names, pair-team contract, SharedBots in a pair team, push),
+`friends.rules.emulator.test.mjs` (client access, unfriend closing the chat) and `friend-summary.emulator.test.mjs`
+(summary create/edit/recall, duplicate and out-of-order events, read marks, unfriend and re-friend, non-pair data) are
+part of the first `test:teams` command. `friend-summary.test.mjs` runs without the emulator: it checks that other team
+and conversation ids cost no read and the trigger wiring (paths, region, service account, no retry).
 
-Not in F0: client UI and native deep-link/push parsing, a friend list/chat screen, sharing Bots with friends,
-account-deletion cleanup of friendships, and rename fan-out.
+Not in F0: client UI (see [FRIENDS-CLIENTS.md](FRIENDS-CLIENTS.md)), sharing Bots with friends, account-deletion
+cleanup of friendships, and rename fan-out.

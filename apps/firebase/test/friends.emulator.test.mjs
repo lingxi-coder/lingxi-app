@@ -733,8 +733,9 @@ test('block: ends the friendship or request both ways, hides each side from the 
   await befriend(bob, alice);
   now += 1000;
   assert.deepEqual(await act(alice, { action: 'block', otherUid: 'bob' }), { ok: true });
-  assert.deepEqual(Object.keys(await data('users/alice/blocks/bob')), ['at']);
+  assert.deepEqual(Object.keys(await data('users/alice/blocks/bob')).sort(), ['at', 'displayName']);
   assert.equal((await data('users/alice/blocks/bob')).at.toMillis(), now);
+  assert.equal((await data('users/alice/blocks/bob')).displayName, 'Bob');
   assert.equal(await consistent(alice, bob), 'ended');
   assert.equal((await data(pairTeamId('alice', 'bob', 1) && `teams/${pairTeamId('alice', 'bob', 1)}`)).state, 'deleted');
   assert.equal((await db.doc('users/bob/blocks/alice').get()).exists, false);
@@ -776,6 +777,47 @@ test('block: ends the friendship or request both ways, hides each side from the 
   await rejects(request(alice, bob), 404, 'NOT_FOUND');
   await act(bob, { action: 'unblock', otherUid: 'alice' });
   assert.equal((await request(alice, bob)).state, 'outgoing');
+});
+
+test('block: the block keeps the person\'s name for the Blocked list — profile first, else the card, else Member — and a repeat keeps the first', options, async () => {
+  for (const user of [alice, bob, carol]) await friends.profile(user);
+  const entry = async other => { const { at, ...rest } = await data(`users/alice/blocks/${other}`); assert.ok(at.toMillis() > 0); return rest; };
+  // A friend: the name and handle their profile has, in the document the owner reads on any device.
+  await act(bob, { action: 'profile', handle: 'Bob_B' });
+  await befriend(alice, bob);
+  await act(alice, { action: 'block', otherUid: 'bob' });
+  assert.deepEqual(await entry('bob'), { displayName: 'Bob', handle: 'Bob_B' });
+  // A repeat, even after a rename, keeps the first entry whole.
+  await act(bob, { action: 'profile', displayName: 'Robert' });
+  await act(alice, { action: 'block', otherUid: 'bob' });
+  assert.deepEqual(await entry('bob'), { displayName: 'Bob', handle: 'Bob_B' });
+  // The profile wins over the name on the card from when the request was made.
+  await request(carol, alice);
+  assert.equal((await data('users/alice/friends/carol')).displayName, 'Carol');
+  await act(carol, { action: 'profile', displayName: 'Caro' });
+  await act(alice, { action: 'block', otherUid: 'carol' });
+  assert.deepEqual(await entry('carol'), { displayName: 'Caro' });
+  // No profile: the card the owner already had names them. Here an incoming request from an account that never opened Friends.
+  const erin = { uid: 'erin', name: 'Erin' };
+  accounts.set(mail(erin), { uid: 'erin', emailVerified: true });
+  await act(erin, { action: 'request', via: 'email', email: mail(alice), requestId: rid() });
+  assert.equal((await db.doc('profiles/erin').get()).exists, false);
+  await act(alice, { action: 'block', otherUid: 'erin' });
+  assert.deepEqual(await entry('erin'), { displayName: 'Erin' });
+  // Neither profile nor card: the same fallback as every other card, and a uid nobody has is accepted as before.
+  await act(alice, { action: 'block', otherUid: 'dave' });
+  await act(alice, { action: 'block', otherUid: 'nobody-here' });
+  assert.deepEqual(await entry('dave'), { displayName: 'Member' });
+  assert.deepEqual(await entry('nobody-here'), { displayName: 'Member' });
+  // The owner reads it; nobody else does.
+  const mine = environment.authenticatedContext('alice').firestore();
+  assert.equal((await assertSucceeds(getDoc(doc(mine, 'users/alice/blocks/bob')))).data().displayName, 'Bob');
+  await assertFails(getDoc(doc(environment.authenticatedContext('bob').firestore(), 'users/alice/blocks/bob')));
+  // Lifting the block removes the entry with its name; blocking again takes the name as it is then.
+  await act(alice, { action: 'unblock', otherUid: 'bob' });
+  assert.equal((await db.doc('users/alice/blocks/bob').get()).exists, false);
+  await act(alice, { action: 'block', otherUid: 'bob' });
+  assert.deepEqual(await entry('bob'), { displayName: 'Robert', handle: 'Bob_B' });
 });
 
 test('pair teams: every Teams action rejects them with PAIR_TEAM, they are never listed or counted, and the id space is reserved', options, async () => {

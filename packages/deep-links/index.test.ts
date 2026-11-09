@@ -58,3 +58,33 @@ test('friend links carry exactly one code or one uid and nothing else', () => {
   assert.throws(() => buildDeepLink({ route: 'friend/add', params: { code, uid } }));
   assert.throws(() => buildDeepLink({ route: 'friend/chat', params: {} }));
 });
+
+test('the Friends client vectors agree with the canonical grammar', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const vectors = JSON.parse(await readFile(new URL('../teams/fixtures/friends-vectors.json', import.meta.url), 'utf8'));
+  const typed = (raw: string) => {
+    let target;
+    try { target = parseDeepLink(raw); } catch { return null; }
+    if (target.route === 'friend/add') return { kind: 'add', code: target.params.code };
+    if (target.route === 'friend/requests') return { kind: 'requests' };
+    if (target.route === 'friend/chat') return { kind: 'chat', uid: target.params.uid };
+    return null;
+  };
+  assert.ok(vectors.links.typed.length >= 25);
+  for (const row of vectors.links.typed) assert.deepEqual(typed(row.url), row.expect, row.url);
+  // A push route is accepted when it is the Teams inbox, the Friends requests, or one friend's chat with an unencoded uid,
+  // and the link it makes is a valid canonical one; a push never carries a friend code.
+  const push = (route: string) => {
+    if (!(route === 'team/inbox' || route === 'friend/requests' || /^friend\/chat\?uid=[A-Za-z0-9_-]{1,128}$/u.test(route))) return null;
+    try { parseDeepLink(`lingxi://${route}`); } catch { return null; }
+    return `lingxi://${route}`;
+  };
+  assert.ok(vectors.links.push.length >= 20);
+  for (const row of vectors.links.push) assert.equal(push(row.route), row.expect, row.route);
+  // Web viewer paths (D17) for the three open links.
+  const viewer = (raw: string) => {
+    const target = typed(raw);
+    return target?.kind === 'add' ? `/friends/add?code=${encodeURIComponent(target.code!)}` : target?.kind === 'requests' ? '/friends' : target?.kind === 'chat' ? `/friends?chat=${encodeURIComponent(target.uid!)}` : null;
+  };
+  for (const row of vectors.links.webViewer) assert.equal(viewer(row.link), row.expect, row.link);
+});

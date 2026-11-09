@@ -140,6 +140,10 @@ INTENTIONAL_IDENTICAL_TO_BASE = {
     ("zh-Hant", "cron_error_detail_fmt"): "%1$s：%2$s",
     ("ja", "cron_error_detail %@ %@"): "%@：%@",
     ("ja", "cron_error_detail_fmt"): "%1$s：%2$s",
+    # Friends: the same two characters in both Chinese variants.
+    ("zh-Hant", "friends_title"): "好友",
+    ("zh-Hant", "friends_request_accept"): "接受",
+    ("zh-Hant", "friends_relation_friends"): "已是好友",
 }
 
 

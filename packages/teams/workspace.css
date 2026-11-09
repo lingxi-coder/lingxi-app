@@ -63,7 +63,12 @@
 .tw-scope, .tw-scope *, .tw-dialog, .tw-dialog * { box-sizing: border-box; }
 .tw-scope { color: var(--tw-fg); font: 13px/1.45 var(--tw-font); min-width: 0; min-height: 0; }
 .tw-scope h2, .tw-scope h3, .tw-scope p, .tw-scope ul, .tw-scope ol, .tw-dialog h2, .tw-dialog p { margin: 0; }
-.tw-scope ul, .tw-scope ol { padding: 0; list-style: none; }
+/* Team chrome lists are bare; Markdown from a Bot keeps the host chat's own list styling (bullets, numbers, indent). */
+.tw-scope ul:not(.tw-md ul), .tw-scope ol:not(.tw-md ol) { padding: 0; list-style: none; }
+/* The log is itself a list, so a Bot's top-level list would otherwise get the nested (circle) marker. */
+.tw-md ul { list-style-type: disc; }
+.tw-md ul ul { list-style-type: circle; }
+.tw-md ul ul ul { list-style-type: square; }
 
 /* ── Controls ── */
 .tw-scope button, .tw-dialog button {

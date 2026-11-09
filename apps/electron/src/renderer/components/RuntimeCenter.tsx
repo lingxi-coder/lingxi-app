@@ -492,7 +492,6 @@ export function TaskDetail({ task, bridge }: { task: TaskRowDto | undefined; bri
 }
 
 function AgentDetail({ agent, bridge }: { agent: SessionAgentSummaryDto | undefined; bridge: UseBridge }) {
-  const t = useT();
   const center = bridge.runtimeCenter;
   const messages = agent ? center.transcripts[agent.agent_id]?.messages : undefined;
   // `Stage` compares `liveItems` by reference to decide whether to recompute its
@@ -500,15 +499,9 @@ function AgentDetail({ agent, bridge }: { agent: SessionAgentSummaryDto | undefi
   // memo — so rebuilding the conversation inline on every render defeated both.
   const conversation = useMemo(() => conversationFromMessages(messages ?? []), [messages]);
   if (!agent) return <EmptyRow>{tr('desktop_runtime_agent_missing')}</EmptyRow>;
-  const latestActivity = agent.latest_activity?.trim();
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ padding: '10px 13px', borderBottom: `0.5px solid ${t.border}`, color: t.text3, fontSize: 10.5 }}>
-        <span style={{ color: statusColor(t, agent.status), fontWeight: 650 }}>{runtimeStatusLabel(agent.status, 'agent')}</span>
-        {agent.model && <span> · {agent.model}</span>}
-        {latestActivity && <span role="status" style={{ display: 'block', marginTop: 4, color: t.dark ? t.text2 : t.text3 }}>{shorten(latestActivity, 150)}</span>}
-      </div>
-      <Stage onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id: `agent:${agent.agent_id}:${id}`, files, path })} liveItems={conversation.items} running={agent.status === 'running'} pendingActivity={latestActivity} sessionKey={`agent:${agent.agent_id}`} emptyMessage={tr('desktop_runtime_agent_waiting')}
+      <Stage onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id: `agent:${agent.agent_id}:${id}`, files, path })} liveItems={conversation.items} running={agent.status === 'running'} sessionKey={`agent:${agent.agent_id}`} emptyMessage={tr('desktop_runtime_agent_waiting')}
         visualizationSessionId={bridge.activeSession?.sessionId.startsWith('pending-new:') ? undefined : bridge.activeSession?.sessionId}
         onVisualizationFollowup={bridge.offerVisualizationFollowup} />
     </div>
@@ -650,7 +643,7 @@ export function RuntimeCenterInspector({ bridge, sideChats }: { bridge: UseBridg
       </>, topbarControls)}
     {motion.present && <aside ref={motion.ref} aria-hidden={!center.inspectorOpen || undefined} id="runtime-inspector" className="runtime-inspector" aria-label={tr('desktop_runtime_inspector')} style={{ display: sideOpen ? 'none' : undefined, position: expanded ? 'absolute' : undefined, inset: expanded ? '0 0 0 0' : undefined, zIndex: expanded ? 46 : undefined, width: expanded ? '100%' : panelWidth, minWidth: expanded ? 0 : Math.min(panelWidth, 320), '--inspector-bg': t.dark ? t.windowBg : t.sidebarPanelBg, '--inspector-surface': t.surface, '--inspector-active': t.surfaceActive, '--inspector-text': t.text, '--inspector-muted': t.text3, '--inspector-border': t.border, background: t.sidebarBg, borderLeft: `0.5px solid ${t.border}` } as CSSProperties}>
       {!expanded && <div className="no-drag runtime-inspector-resize" role="separator" aria-label={tr('desktop_runtime_resize_panel')} aria-orientation="vertical" aria-valuenow={panelWidth} aria-valuemin={320} aria-valuemax={960} tabIndex={0} onKeyDown={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); resize(panelWidth + (e.key === 'ArrowLeft' ? 24 : -24)); } }} onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); }} onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) resize(window.innerWidth - e.clientX); }} onPointerUp={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); }} />}
-      <div id="runtime-inspector-panel" className="runtime-inspector-content" role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : tr('session_details_button')} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
+      <div id="runtime-inspector-panel" className="runtime-inspector-content" data-kind={active?.kind} role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : tr('session_details_button')} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
         {!active && <InspectorTools bridge={bridge} /> }
         {active?.kind === 'turn-review' && <TurnFileReview key={`${active.id}:${active.path ?? ''}`} files={active.files} path={active.path} />}
         {active?.kind === 'section' && <SectionDetail section={active.id} bridge={bridge} />}

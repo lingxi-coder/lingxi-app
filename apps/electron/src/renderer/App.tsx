@@ -648,7 +648,7 @@ export function App() {
             topbar={<>
               {page === 'scheduled' && <ScheduledTasksTopBar />}
               {page === 'apps' && <LocalAppsTopBar onOpenMarket={() => { void window.lingxi?.localApps?.marketBrowse().catch(error => setLocalAppNavigationError(error instanceof Error ? error.message : String(error))); }} />}
-              <div style={{ display: page === 'chat' && sidebarMode === 'home' ? 'contents' : 'none' }}>
+              <div style={{ display: page === 'chat' && (sidebarMode === 'home' || sidebarMode === 'apps') ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
                   app={appChat ? { name: appWorkspace.activeGroup?.name ?? bridge.activeSession!.projectPath.split(/[\\/]+/).at(-1) ?? '', onOpen: showAppLibrary } : undefined}

@@ -45,6 +45,25 @@ mod tests {
         assert!(!opt_in(&["--tools", "TaskOutput"]));
     }
 
+    #[test]
+    fn search_tools_opt_in_matches_319_launch_lists() {
+        fn opt_in(args: &[&str]) -> bool {
+            let mut argv = vec!["lingxi-cli"];
+            argv.extend_from_slice(args);
+            Argv::from_iter(argv).unwrap().search_tools_opt_in()
+        }
+        assert!(!opt_in(&[]));
+        assert!(!opt_in(&["--tools", "default"]));
+        assert!(!opt_in(&["--tools", "Read", "Write"]));
+        for name in ["Glob", "Grep"] {
+            assert!(opt_in(&["--tools", name]));
+            assert!(opt_in(&["--allowedTools", name]));
+        }
+        assert!(opt_in(&["--tools", "Read,Grep"]));
+        assert!(opt_in(&["--allowedTools", "Grep(src/**)"]));
+        assert!(!opt_in(&["--tools", "Grep(src/**)"]));
+    }
+
     // parity 2.1.207: `--permission-mode manual` is ACCEPTED (was hard-rejected
     // by the old fixed value_parser list). `manual` is the CLI alias for
     // `default`; both spellings parse.

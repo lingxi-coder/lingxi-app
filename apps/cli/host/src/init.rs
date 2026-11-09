@@ -1084,6 +1084,7 @@ pub(crate) fn resolve_desktop_config_at(
         __desktop_config.strict_mcp_config = argv.strict_mcp_config;
         __desktop_config.restricted = restricted;
         __desktop_config.restricted_tools = argv.tools.clone();
+        __desktop_config.search_tools_opt_in = argv.search_tools_opt_in();
         // CLI `--exclude-dynamic-system-prompt-sections`: move per-machine env
         // sections out of the cacheable system prompt into the first user message.
         __desktop_config.exclude_dynamic_system_prompt_sections =
@@ -2070,9 +2071,11 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     // `BridgeOutputStream` so the TUI's turn-spawn pump can emit
     // `TurnStarted`/`TurnEnded` on the same channel the orchestrator streams on.
     let turn_tx = bridge_tx.clone();
-    let bridge_output = tui_core::orchestrator_bridge::BridgeOutputStream::new(bridge_tx);
+    let bridge_output = Arc::new(tui_core::orchestrator_bridge::BridgeOutputStream::new(
+        bridge_tx,
+    ));
     bridge_output.set_thinking_display(argv.thinking_display.as_deref());
-    let bridge: Arc<dyn OutputStream> = Arc::new(bridge_output);
+    let bridge: Arc<dyn OutputStream> = bridge_output.clone();
     // (Task 8) Thread the CLI-resolved mode through the interactive TUI path.
     // The guard already ran in `run_cli` (notice already printed there too), so
     // this drops the notice and takes only the mode.
@@ -2218,6 +2221,15 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     let resume_transcript_path = cfg.session_transcript_path.clone();
     let mut runtime = build_cli_runtime_from_config(cfg, bridge, argv).await?;
     bind_tui_permission_gate(&gate, &runtime);
+    if let Some(policy_gate) = &runtime.enforcing_permission_gate {
+        let policy_gate = Arc::downgrade(policy_gate);
+        bridge_output.set_permission_mode_provider(move || {
+            let gate = policy_gate.upgrade()?;
+            let mode = lingxi_core::host::PermissionGate::permission_mode(gate.as_ref())?;
+            crate::permission_mode_preference::remember(&mode);
+            Some(mode)
+        });
+    }
     #[cfg(test)]
     {
         runtime.test_home = test_home;

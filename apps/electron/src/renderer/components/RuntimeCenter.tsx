@@ -436,8 +436,16 @@ function tabIcon(item: RuntimeCenterItemRef): string {
   return 'file';
 }
 
+function inspectorNavigationItem(item: RuntimeCenterItemRef, bridge: UseBridge): RuntimeCenterItemRef {
+  return item.kind === 'agent' && bridge.runtimeCenter.agents[item.id]?.agent_type !== 'side_question'
+    ? { kind: 'section', id: 'agents' } : item;
+}
+
 function InspectorTabs({ bridge, inactive = false, onSelect }: { bridge: UseBridge; inactive?: boolean; onSelect: () => void }) {
   const center = bridge.runtimeCenter;
+  const tabs = center.tabs.map(item => inspectorNavigationItem(item, bridge))
+    .filter((item, index, items) => items.findIndex(other => sameRuntimeCenterItem(item, other)) === index);
+  const selected = center.activeItem && inspectorNavigationItem(center.activeItem, bridge);
   const focusTab = (item: RuntimeCenterItemRef) => {
     const key = runtimeCenterItemKey(item);
     const tabs = document.querySelectorAll<HTMLElement>('[data-runtime-inspector-tab]');
@@ -448,10 +456,10 @@ function InspectorTabs({ bridge, inactive = false, onSelect }: { bridge: UseBrid
     index: number,
   ) => {
     let target: RuntimeCenterItemRef | undefined;
-    if (event.key === 'ArrowLeft') target = center.tabs[(index - 1 + center.tabs.length) % center.tabs.length];
-    if (event.key === 'ArrowRight') target = center.tabs[(index + 1) % center.tabs.length];
-    if (event.key === 'Home') target = center.tabs[0];
-    if (event.key === 'End') target = center.tabs.at(-1);
+    if (event.key === 'ArrowLeft') target = tabs[(index - 1 + tabs.length) % tabs.length];
+    if (event.key === 'ArrowRight') target = tabs[(index + 1) % tabs.length];
+    if (event.key === 'Home') target = tabs[0];
+    if (event.key === 'End') target = tabs.at(-1);
     if (!target) return;
     event.preventDefault();
     onSelect();
@@ -461,13 +469,13 @@ function InspectorTabs({ bridge, inactive = false, onSelect }: { bridge: UseBrid
   return (
     <>
     <div className="runtime-inspector-tabs" role="tablist" aria-label={tr('desktop_runtime_inspector_items')}>
-      {center.tabs.map((item, index) => {
-        const active = !inactive && sameRuntimeCenterItem(item, center.activeItem);
+      {tabs.map((item, index) => {
+        const active = !inactive && sameRuntimeCenterItem(item, selected);
         const key = runtimeCenterItemKey(item);
         return (
           <div key={`${item.kind}:${item.id}`} role="presentation" className="runtime-inspector-tab" data-active={active || undefined}>
-            <button type="button" role="tab" id={`runtime-inspector-tab-${encodeURIComponent(key)}`} aria-controls="runtime-inspector-panel" aria-selected={active} tabIndex={active || (inactive && index === 0) ? 0 : -1} data-runtime-inspector-tab={key} data-runtime-inspector-active={active ? 'true' : undefined} onClick={() => { onSelect(); bridge.openRuntimeItem(item); }} onKeyDown={(event) => selectFromKeyboard(event, index)} className="no-drag runtime-inspector-tab-select">{item.kind === 'agent' ? <AgentAvatar agentId={item.id} size={16} /> : <Icon name={tabIcon(item)} size={16} />}<span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tabLabel(item, bridge)}</span></button>
-            <button type="button" className="no-drag" aria-label={tr('desktop_runtime_close_item', tabLabel(item, bridge))} onClick={() => { bridge.closeRuntimeItem(item); window.requestAnimationFrame(() => (document.querySelector<HTMLElement>('[data-runtime-inspector-active="true"]') ?? document.querySelector<HTMLElement>('.runtime-inspector-landing button') ?? document.querySelector<HTMLElement>('[data-runtime-center-trigger="true"]'))?.focus()); }} style={{ display: 'grid', placeItems: 'center', width: 22, height: 22, marginRight: 2, border: 0, borderRadius: 5, background: 'transparent', color: 'inherit', cursor: 'pointer' }}><Icon name="x" size={11} /></button>
+            <button type="button" role="tab" id={`runtime-inspector-tab-${encodeURIComponent(key)}`} aria-controls="runtime-inspector-panel" aria-selected={active} tabIndex={active || (inactive && index === 0) ? 0 : -1} data-runtime-inspector-tab={key} data-runtime-inspector-active={active ? 'true' : undefined} onClick={() => { onSelect(); bridge.openRuntimeItem(item); }} onKeyDown={(event) => selectFromKeyboard(event, index)} className="no-drag runtime-inspector-tab-select">{item.kind === 'agent' ? <AgentAvatar agentId={item.id} size={16} /> : <Icon name={item.kind === 'section' && item.id === 'agents' ? 'bot' : tabIcon(item)} size={16} />}<span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tabLabel(item, bridge)}</span></button>
+            <button type="button" className="no-drag" aria-label={tr('desktop_runtime_close_item', tabLabel(item, bridge))} onClick={() => { center.tabs.filter(tab => sameRuntimeCenterItem(inspectorNavigationItem(tab, bridge), item)).forEach(tab => bridge.closeRuntimeItem(tab)); window.requestAnimationFrame(() => (document.querySelector<HTMLElement>('[data-runtime-inspector-active="true"]') ?? document.querySelector<HTMLElement>('.runtime-inspector-landing button') ?? document.querySelector<HTMLElement>('[data-runtime-center-trigger="true"]'))?.focus()); }} style={{ display: 'grid', placeItems: 'center', width: 22, height: 22, marginRight: 2, border: 0, borderRadius: 5, background: 'transparent', color: 'inherit', cursor: 'pointer' }}><Icon name="x" size={11} /></button>
           </div>
         );
       })}
@@ -492,6 +500,7 @@ export function TaskDetail({ task, bridge }: { task: TaskRowDto | undefined; bri
 }
 
 function AgentDetail({ agent, bridge }: { agent: SessionAgentSummaryDto | undefined; bridge: UseBridge }) {
+  const t = useT();
   const center = bridge.runtimeCenter;
   const messages = agent ? center.transcripts[agent.agent_id]?.messages : undefined;
   // `Stage` compares `liveItems` by reference to decide whether to recompute its
@@ -499,8 +508,21 @@ function AgentDetail({ agent, bridge }: { agent: SessionAgentSummaryDto | undefi
   // memo — so rebuilding the conversation inline on every render defeated both.
   const conversation = useMemo(() => conversationFromMessages(messages ?? []), [messages]);
   if (!agent) return <EmptyRow>{tr('desktop_runtime_agent_missing')}</EmptyRow>;
+  const task = orderedTasks(bridge.desktop).find(task => task.agent_id === agent.agent_id);
+  const model = bridge.desktop.modelDetails.find(model => model.reference === agent.model || model.model_id === agent.model)?.display_name ?? agent.model;
+  const effort = task?.effort;
+
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+      <header className="runtime-agent-header" style={{ '--agent-header-border': t.border, '--agent-header-muted': t.text3, background: t.transcriptBg } as CSSProperties}>
+        <button type="button" className="runtime-agent-back" aria-label={tr('desktop_back')} title={tr('plugins_detail_agents')} onClick={() => {
+          bridge.openRuntimeItem({ kind: 'section', id: 'agents' });
+          window.requestAnimationFrame(() => document.querySelector<HTMLElement>('#runtime-inspector-panel button')?.focus({ preventScroll: true }));
+        }}><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M19 12H5m7-7-7 7 7 7" /></svg></button>
+        <AgentAvatar agentId={agent.agent_id} size={24} />
+        <strong className="runtime-agent-name" title={agent.name || agent.agent_type}>{agent.name || agent.agent_type}</strong>
+        {model && <span className="runtime-agent-model" title={[model, effort].filter(Boolean).join(' · ')}>{model}{effort && ` · ${effort.charAt(0).toUpperCase()}${effort.slice(1)}`}</span>}
+      </header>
       <Stage onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id: `agent:${agent.agent_id}:${id}`, files, path })} liveItems={conversation.items} running={agent.status === 'running'} sessionKey={`agent:${agent.agent_id}`} emptyMessage={tr('desktop_runtime_agent_waiting')}
         visualizationSessionId={bridge.activeSession?.sessionId.startsWith('pending-new:') ? undefined : bridge.activeSession?.sessionId}
         onVisualizationFollowup={bridge.offerVisualizationFollowup} />
@@ -643,7 +665,7 @@ export function RuntimeCenterInspector({ bridge, sideChats }: { bridge: UseBridg
       </>, topbarControls)}
     {motion.present && <aside ref={motion.ref} aria-hidden={!center.inspectorOpen || undefined} id="runtime-inspector" className="runtime-inspector" aria-label={tr('desktop_runtime_inspector')} style={{ display: sideOpen ? 'none' : undefined, position: expanded ? 'absolute' : undefined, inset: expanded ? '0 0 0 0' : undefined, zIndex: expanded ? 46 : undefined, width: expanded ? '100%' : panelWidth, minWidth: expanded ? 0 : Math.min(panelWidth, 320), '--inspector-bg': t.dark ? t.windowBg : t.sidebarPanelBg, '--inspector-surface': t.surface, '--inspector-active': t.surfaceActive, '--inspector-text': t.text, '--inspector-muted': t.text3, '--inspector-border': t.border, background: t.sidebarBg, borderLeft: `0.5px solid ${t.border}` } as CSSProperties}>
       {!expanded && <div className="no-drag runtime-inspector-resize" role="separator" aria-label={tr('desktop_runtime_resize_panel')} aria-orientation="vertical" aria-valuenow={panelWidth} aria-valuemin={320} aria-valuemax={960} tabIndex={0} onKeyDown={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); resize(panelWidth + (e.key === 'ArrowLeft' ? 24 : -24)); } }} onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); }} onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) resize(window.innerWidth - e.clientX); }} onPointerUp={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); }} />}
-      <div id="runtime-inspector-panel" className="runtime-inspector-content" data-kind={active?.kind} role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : tr('session_details_button')} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
+      <div id="runtime-inspector-panel" className="runtime-inspector-content" data-kind={active?.kind} role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : tr('session_details_button')} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(inspectorNavigationItem(active, bridge)))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
         {!active && <InspectorTools bridge={bridge} /> }
         {active?.kind === 'turn-review' && <TurnFileReview key={`${active.id}:${active.path ?? ''}`} files={active.files} path={active.path} />}
         {active?.kind === 'section' && <SectionDetail section={active.id} bridge={bridge} />}

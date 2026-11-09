@@ -1,12 +1,16 @@
 import { useState } from 'react';
+import { Markdown } from '../remote/markdown';
 import type { TeamsApi } from '../../../../packages/teams';
 import '../../../../packages/teams/styles';
 import { TeamConversationView } from '../../../../packages/teams/TeamConversationView';
 import { TeamDetailsDrawer } from '../../../../packages/teams/TeamDetailsDrawer';
 import { TeamSidebar } from '../../../../packages/teams/TeamSidebar';
-import type { DrawerTab } from '../../../../packages/teams/ui';
+import type { DrawerTab, RenderMarkdown } from '../../../../packages/teams/ui';
 import { useTeamsWorkspace, type UseTeams } from '../../../../packages/teams/useTeamsWorkspace';
 import './teams-web.css';
+
+/** A shared Bot's messages and documents use the Markdown renderer of Web's own chat (`Transcript`): React elements only, links limited to http(s) and mailto. */
+const renderMarkdown: RenderMarkdown = text => <Markdown text={text} />;
 
 interface LayoutProps {
   zh: boolean;
@@ -39,7 +43,7 @@ export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, zh, invit
       </div>
       <div className="teams-web-conversation">
         <button type="button" className="teams-web-back" onClick={() => setPane('list')}>{zh ? '‹ 会话列表' : '‹ Conversations'}</button>
-        <TeamConversationView workspace={workspace} snapshot={snapshot} zh={zh} detailsOpen={drawer.open}
+        <TeamConversationView workspace={workspace} snapshot={snapshot} zh={zh} renderMarkdown={renderMarkdown} detailsOpen={drawer.open}
           onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />
       </div>
       {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} zh={zh} tab={drawer.tab}

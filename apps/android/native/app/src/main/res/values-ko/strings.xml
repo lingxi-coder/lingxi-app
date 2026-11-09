@@ -2804,4 +2804,10 @@
     <string name="teams_task_authorization_required">Maintainer action required</string>
     <string name="teams_error_request_quota">Request limit reached. Try later or contact the maintainer.</string>
     <string name="teams_task_view">View task status</string>
+    <string name="teams_usage_missing">사용량 없음 · 비용 알 수 없음</string>
+    <string name="teams_usage_partial">사용량 불완전</string>
+    <string name="teams_usage_complete">사용량(완전)</string>
+    <string name="teams_usage_cost_unknown">비용 알 수 없음</string>
+    <string name="teams_usage_currency_unknown">통화 알 수 없음</string>
+    <string name="teams_usage_tokens_fmt">%1$d / %2$d 토큰</string>
 </resources>

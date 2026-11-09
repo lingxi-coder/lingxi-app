@@ -2804,4 +2804,10 @@
     <string name="teams_task_authorization_required">Maintainer action required</string>
     <string name="teams_error_request_quota">Request limit reached. Try later or contact the maintainer.</string>
     <string name="teams_task_view">View task status</string>
+    <string name="teams_usage_missing">Missing usage · cost unknown</string>
+    <string name="teams_usage_partial">Partial usage</string>
+    <string name="teams_usage_complete">Complete usage</string>
+    <string name="teams_usage_cost_unknown">cost unknown</string>
+    <string name="teams_usage_currency_unknown">currency unknown</string>
+    <string name="teams_usage_tokens_fmt">%1$d / %2$d tokens</string>
 </resources>

@@ -417,6 +417,29 @@ test('conversation view: header, stream with day and unread dividers, grouped ru
   assert.doesNotMatch(markup, /tw-jump/, 'pinned to the newest message: no jump button');
 });
 
+test('conversation view: only a shared Bot\'s messages go through the host\'s Markdown renderer; people\'s stay plain text', async context => {
+  const { fake, workspace, snapshot } = await open(); context.after(() => workspace.close());
+  const bot = { kind: 'shared_bot' as const, displayName: 'Fixture Bot', sharedBotId: 'assistant-fixture' };
+  fake.threads.set('chan-general', [
+    message(1, { text: '**typed** by a person', author: { kind: 'user', uid: 'bob' }, createdAt: at(0) }),
+    message(2, { text: '## Plan\n- [ ] one', author: bot, createdAt: at(1) }),
+    message(3, { text: '**gone**', author: bot, recalled: true, createdAt: at(2) }),
+    message(4, { text: 'edited **reply**', author: bot, editedAt: at(4), createdAt: at(3) }),
+  ]);
+  workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 4, 'the thread');
+  const calls: string[] = [];
+  const renderMarkdown = (text: string) => { calls.push(text); return createElement('div', { className: 'host-md' }, text); };
+  const markup = html(view(workspace, snapshot(), { renderMarkdown }));
+  assert.deepEqual(calls, ['## Plan\n- [ ] one', 'edited **reply**'], 'the person\'s and the recalled message never reach the renderer');
+  assert.match(markup, /<p class="tw-msg-body">\*\*typed\*\* by a person<\/p>/, 'a person\'s text is a plain paragraph');
+  assert.match(markup, /<div class="tw-msg-body tw-md" data-markdown="true"><div class="host-md">## Plan\n- \[ \] one<\/div><\/div>/);
+  assert.match(markup, /class="tw-edited"> \(edited\)<\/small>/, 'the edited marker stays');
+  assert.match(markup, /<em>Message recalled<\/em>/, 'the recalled marker stays');
+  const plain = html(view(workspace, snapshot()));
+  assert.doesNotMatch(plain, /data-markdown/, 'without a host renderer a Bot message is plain text, as before');
+  assert.match(plain, /<p class="tw-msg-body">## Plan/);
+});
+
 test('conversation view: someone else\'s Bot dm is read-only; a Bot dm needs its Bot; a dm and a group differ in what they ask', async context => {
   const { fake, workspace, snapshot } = await open(fake => {
     fake.conversations.get('team-aaaa')!.push(conversation('others-bot-chat', { kind: 'bot_dm', title: 'Fixture Bot', participants: ['user:bob', `shared_bot:${botCard().sharedBotId}`], lastSeq: 1, lastReadSeq: 1 }));

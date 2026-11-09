@@ -19,10 +19,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
+import com.lingxi.code.conversation.AIText
 import com.lingxi.code.theme.BotAvatar
 
 internal fun teamTaskStateRes(state: String): Int = when (state) {
@@ -37,11 +40,33 @@ internal fun teamTaskStateRes(state: String): Int = when (state) {
     else -> R.string.chat_status_unknown
 }
 
+/** The words of the usage line in the UI language. */
+@Composable
+internal fun rememberTeamUsageStrings(): TeamUsageStrings {
+    val context = LocalContext.current
+    val missing = stringResource(R.string.teams_usage_missing)
+    val partial = stringResource(R.string.teams_usage_partial)
+    val complete = stringResource(R.string.teams_usage_complete)
+    val costUnknown = stringResource(R.string.teams_usage_cost_unknown)
+    val currencyUnknown = stringResource(R.string.teams_usage_currency_unknown)
+    return remember(context, missing, partial, complete, costUnknown, currencyUnknown) {
+        TeamUsageStrings(missing, partial, complete, costUnknown, currencyUnknown) { input, output -> context.getString(R.string.teams_usage_tokens_fmt, input, output) }
+    }
+}
+
+/** Opens a link from a Bot's text: web pages only, everything else is ignored. */
+@Composable
+internal fun rememberTeamBotLinkOpener(): (String) -> Unit {
+    val handler = LocalUriHandler.current
+    return remember(handler) { { link: String -> if (TeamsBotText.allowsLink(link)) runCatching { handler.openUri(link.trim()) } } }
+}
+
 @Composable
 internal fun TeamTaskCard(task: TeamTask, botName: String, onArtifact: (String) -> Unit, onRefresh: (String) -> Unit = {}) {
     Column(Modifier.fillMaxWidth().padding(12.dp).testTag("teams.task.${task.taskId}"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(botName, style = MaterialTheme.typography.titleSmall)
         TextButton(onClick = { onRefresh(task.taskId) }) { Text(stringResource(teamTaskStateRes(task.state)), style = MaterialTheme.typography.bodySmall) }
+        Text(TeamsBotText.usageLine(task.usage, rememberTeamUsageStrings()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.task.usage.${task.taskId}"))
         task.artifactId?.let { id -> TextButton(onClick = { onArtifact(id) }) { Text(stringResource(R.string.teams_artifact_open)) } }
     }
 }
@@ -52,7 +77,7 @@ internal fun TeamArtifactViewer(artifact: TeamArtifact, onClose: () -> Unit) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
             Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(artifact.title, style = MaterialTheme.typography.headlineSmall)
-                androidx.compose.foundation.text.selection.SelectionContainer(Modifier.weight(1f).verticalScroll(rememberScrollState())) { Text(artifact.body) }
+                androidx.compose.foundation.text.selection.SelectionContainer(Modifier.weight(1f).verticalScroll(rememberScrollState())) { AIText(markdown = artifact.body, modifier = Modifier.fillMaxWidth().testTag("teams.artifact.body"), onOpenLink = rememberTeamBotLinkOpener()) }
                 Text("v${artifact.revision} · ${artifact.digest}", style = MaterialTheme.typography.labelSmall)
                 TextButton(onClick = onClose) { Text(stringResource(R.string.common_close)) }
             }

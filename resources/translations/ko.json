@@ -2980,5 +2980,12 @@
   "teams_task_interrupted": "Request interrupted; send a new request",
   "teams_task_authorization_required": "Maintainer action required",
   "teams_error_request_quota": "Request limit reached. Try later or contact the maintainer.",
-  "teams_task_view": "View task status"
+  "teams_task_view": "View task status",
+  "teams_usage_missing": "사용량 없음 · 비용 알 수 없음",
+  "teams_usage_partial": "사용량 불완전",
+  "teams_usage_complete": "사용량(완전)",
+  "teams_usage_cost_unknown": "비용 알 수 없음",
+  "teams_usage_currency_unknown": "통화 알 수 없음",
+  "teams_usage_tokens %lld %lld": "%1$lld / %2$lld 토큰",
+  "teams_usage_tokens_fmt": "%1$d / %2$d 토큰"
 }

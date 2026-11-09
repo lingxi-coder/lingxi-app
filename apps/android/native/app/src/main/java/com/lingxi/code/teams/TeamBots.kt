@@ -17,11 +17,15 @@ internal data class TeamBotCard(val sharedBotId: String, val name: String, val d
             v.getBoolean("ready"), v.getLong("onlineUntil"), v.getJSONObject("usePolicy"), v.getJSONObject("quotas"), v.stringOrNull("instanceId"))
     }
 }
+/** What a Bot run cost, as the host reports it: `missing` carries no figures; the cost only when the host could price it (`costMicros` is millionths of `currency`). */
+internal data class TeamTaskUsage(val status: String, val inputTokens: Long = 0, val outputTokens: Long = 0, val costMicros: Double? = null, val currency: String? = null) {
+    companion object { fun parse(v: JSONObject) = TeamTaskUsage(v.getString("status"), v.optLong("inputTokens"), v.optLong("outputTokens"), if (v.has("costMicros") && !v.isNull("costMicros")) v.getDouble("costMicros") else null, v.stringOrNull("currency")) }
+}
 internal data class TeamTask(val taskId: String, val conversationId: String, val sharedBotId: String, val requester: TeamMemberRef,
-    val state: String, val createdAt: Long, val deadline: Long, val replyId: String?, val artifactId: String?) {
+    val state: String, val createdAt: Long, val deadline: Long, val replyId: String?, val artifactId: String?, val usage: TeamTaskUsage? = null) {
     val terminal get() = state !in setOf("queued", "running")
     companion object { fun parse(v: JSONObject) = TeamTask(v.getString("taskId"), v.getString("conversationId"), v.getString("sharedBotId"),
-        TeamMemberRef.parse(v.getJSONObject("requester")), v.getString("state"), v.getLong("createdAt"), v.getLong("deadline"), v.stringOrNull("replyId"), v.stringOrNull("artifactId")) }
+        TeamMemberRef.parse(v.getJSONObject("requester")), v.getString("state"), v.getLong("createdAt"), v.getLong("deadline"), v.stringOrNull("replyId"), v.stringOrNull("artifactId"), v.optJSONObject("usage")?.let(TeamTaskUsage::parse)) }
 }
 internal data class TeamArtifact(val artifactId: String, val revision: Long, val digest: String, val title: String, val body: String) {
     companion object { fun parse(v: JSONObject) = TeamArtifact(v.getString("artifactId"), v.getLong("revision"), v.getString("digest"), v.getJSONObject("document").getString("title"), v.getJSONObject("document").getString("body")) }

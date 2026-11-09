@@ -154,6 +154,11 @@ struct TeamMessageCell: View {
                 if let quote { quoteLine(quote) }
                 if recalled {
                     Text("teams_message_recalled").italic().foregroundStyle(.secondary)
+                } else if TeamsBotText.rendersMarkdown(authorKind: message.author.kind, recalled: recalled) {
+                    // A shared Bot writes Markdown: the chat's renderer, web links only. Images stay inert.
+                    AIText(markdown: message.text)
+                        .teamBotLinkPolicy()
+                        .accessibilityIdentifier("teams.message.body.\(message.id)")
                 } else {
                     Text(message.text)
                 }

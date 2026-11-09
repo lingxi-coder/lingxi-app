@@ -4,6 +4,16 @@ import SwiftUI
 // the dates of list rows and day separators. The rules themselves (`TeamsListLogic`, `TeamsStreamLogic`)
 // stay Foundation-only and take everything language-dependent as a parameter.
 
+extension TeamsBotText.UsageStrings {
+    static var current: TeamsBotText.UsageStrings {
+        TeamsBotText.UsageStrings(
+            missing: String(localized: "teams_usage_missing"), partial: String(localized: "teams_usage_partial"),
+            complete: String(localized: "teams_usage_complete"), costUnknown: String(localized: "teams_usage_cost_unknown"),
+            currencyUnknown: String(localized: "teams_usage_currency_unknown"),
+            tokens: { String(localized: "teams_usage_tokens \($0) \($1)") })
+    }
+}
+
 extension TeamsListStrings {
     /// The vocabulary of labels and previews in the UI language. The separators are code, not resources:
     /// `、` and `：` when the UI language is Chinese, `, ` and `: ` otherwise (spec §6.1).

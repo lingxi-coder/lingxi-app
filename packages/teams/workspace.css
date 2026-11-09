@@ -211,6 +211,10 @@
 .tw-msg-hover-time { opacity: 0; transition: opacity 0.12s; white-space: nowrap; }
 .tw-msg:hover .tw-msg-hover-time, .tw-msg:focus-within .tw-msg-hover-time { opacity: 1; }
 .tw-msg-body { font-size: 13px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tw-msg-body.tw-md, .tw-artifact .tw-md { white-space: normal; }
+.tw-md { min-width: 0; overflow-wrap: anywhere; }
+.tw-md > :first-child { margin-top: 0; }
+.tw-md > :last-child { margin-bottom: 0; }
 .tw-msg[data-recalled='true'] .tw-msg-body { color: var(--tw-muted); }
 .tw-quote { margin: 2px 0 4px; padding: 2px 10px; border-left: 3px solid var(--tw-line); font-size: 12px; color: var(--tw-muted); max-height: 64px; overflow: hidden; overflow-wrap: anywhere; }
 .tw-quote b { color: var(--tw-fg); font-weight: 600; }

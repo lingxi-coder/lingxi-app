@@ -58,6 +58,9 @@ struct TeamTaskCard: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
+            Text(TeamsBotText.usageLine(task.usage, strings: .current))
+                .font(.caption).foregroundStyle(.secondary)
+                .accessibilityIdentifier("teams.task.usage.\(task.taskId)")
             if let artifactId = task.artifactId {
                 Button("teams_artifact_open", systemImage: "doc.text") {
                     Task { await workspace.openArtifact(artifactId) }
@@ -74,6 +77,15 @@ enum TeamArtifactLinkPolicy {
     static func allows(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return false }
         return url.host?.isEmpty == false
+    }
+}
+
+extension View {
+    /// Text written by a Bot: links open only when they are http(s); everything else is discarded.
+    func teamBotLinkPolicy() -> some View {
+        environment(\.openURL, OpenURLAction { url in
+            TeamArtifactLinkPolicy.allows(url) ? .systemAction : .discarded
+        })
     }
 }
 
@@ -96,9 +108,7 @@ struct TeamArtifactViewer: View {
                 }.frame(maxWidth: .infinity, alignment: .leading).padding()
             }
             .background(theme.windowBg)
-            .environment(\.openURL, OpenURLAction { url in
-                TeamArtifactLinkPolicy.allows(url) ? .systemAction : .discarded
-            })
+            .teamBotLinkPolicy()
             .navigationTitle("teams_artifact_title")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("common_close", action: onClose) } }
         }

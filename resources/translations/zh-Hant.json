@@ -2980,5 +2980,12 @@
   "teams_task_interrupted": "请求中断，请重新发送",
   "teams_task_authorization_required": "维护者需要处理授权",
   "teams_error_request_quota": "请求次数已达上限，请稍后再试或联系维护者。",
-  "teams_task_view": "查看任务状态"
+  "teams_task_view": "查看任务状态",
+  "teams_usage_missing": "用量缺失 · 費用未知",
+  "teams_usage_partial": "用量不完整",
+  "teams_usage_complete": "完整用量",
+  "teams_usage_cost_unknown": "費用未知",
+  "teams_usage_currency_unknown": "幣別未知",
+  "teams_usage_tokens %lld %lld": "%1$lld / %2$lld tokens",
+  "teams_usage_tokens_fmt": "%1$d / %2$d tokens"
 }

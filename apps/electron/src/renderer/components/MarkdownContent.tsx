@@ -29,6 +29,8 @@ interface MarkdownContentProps {
   variant?: 'plan' | 'compact';
   /** Only assistant narration can offer a Bot configuration for review. */
   botProposals?: boolean;
+  /** Text written by someone else's Bot: only http(s) links and in-page anchors stay links; no app-internal mentions, relative paths or mailto. */
+  externalLinksOnly?: boolean;
 }
 
 type MarkdownComponentProps = {
@@ -50,6 +52,7 @@ const safePlugins: PluggableList = [[rehypeSanitize, sanitizeMarkdownHtml(false)
 const trustedPlugins: PluggableList = [rehypeRaw, [rehypeSanitize, sanitizeMarkdownHtml(true)]];
 const InsideMarkdownLink = createContext(false);
 const BotProposalsEnabled = createContext(false);
+const ExternalLinksOnly = createContext(false);
 
 // Keep renderer identities stable so streaming updates preserve mounted DOM and state.
 const components = {
@@ -123,8 +126,9 @@ const components = {
     em: ({ children, node: _node, ...props }: MarkdownComponentProps) => <span {...props} style={{ fontStyle: 'italic' }}>{children}</span>,
     del: ({ children, node: _node, ...props }: MarkdownComponentProps) => <span {...props} className="markdown-del">{children}</span>,
     strong: ({ children, node: _node, ...props }: MarkdownComponentProps) => <span {...props} style={{ fontWeight: 650 }}>{children}</span>,
-    a: ({ href, children, node: _node, ...props }: MarkdownComponentProps) => {
-      const safeHref = href === undefined ? undefined : sanitizeMarkdownHref(href);
+    a: function MarkdownAnchor({ href, children, node: _node, ...props }: MarkdownComponentProps) {
+      const externalOnly = useContext(ExternalLinksOnly);
+      const safeHref = href === undefined ? undefined : sanitizeMarkdownHref(href, externalOnly);
       if (safeHref === undefined) {
         return <span id={props.id} className="markdown-link-disabled">{children}</span>;
       }
@@ -175,7 +179,7 @@ const compactComponents: Components = {
   h6: ({ children }) => <h6 style={compactHeadingStyle}>{children}</h6>,
 };
 
-export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml = false, variant, botProposals = false }: MarkdownContentProps) {
+export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml = false, variant, botProposals = false, externalLinksOnly = false }: MarkdownContentProps) {
   const t = useT();
   const { locale } = useI18n();
   const instanceId = useId();
@@ -190,9 +194,9 @@ export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
       components={variant === 'compact' ? compactComponents : variant === 'plan' ? planComponents : components}
-      urlTransform={(url) => parseContextMentionHref(url) ? url : defaultUrlTransform(url)}
+      urlTransform={(url) => !externalLinksOnly && parseContextMentionHref(url) ? url : defaultUrlTransform(url)}
     />
-  ), [parsed.source, rehypePlugins, variant, locale]);
+  ), [parsed.source, rehypePlugins, variant, locale, externalLinksOnly]);
   const variables = {
     display: 'grid', gap: 10, minWidth: 0,
     '--text': variant === 'compact' ? t.text2 : t.text,
@@ -207,7 +211,7 @@ export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml
 
   return (
     <div className="markdown-content" style={variables}>
-      <BotProposalsEnabled.Provider value={botProposals}>{content}</BotProposalsEnabled.Provider>
+      <ExternalLinksOnly.Provider value={externalLinksOnly}><BotProposalsEnabled.Provider value={botProposals}>{content}</BotProposalsEnabled.Provider></ExternalLinksOnly.Provider>
     </div>
   );
 });

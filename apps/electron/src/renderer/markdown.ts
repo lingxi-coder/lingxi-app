@@ -206,8 +206,18 @@ export const rehypeMarkdownAnchors: Plugin<[string], HtmlRoot> = function (names
   };
 };
 
-/** Keep only trusted URL schemes for rendered links. */
-export function sanitizeMarkdownHref(raw: string): string | undefined {
+/**
+ * Keep only trusted URL schemes for rendered links. With `externalOnly` (text written by someone else's Bot) a link
+ * is an http(s) URL or an in-page `#anchor`: no app mentions that open local files, relative paths or mailto.
+ */
+export function sanitizeMarkdownHref(raw: string, externalOnly = false): string | undefined {
+  if (externalOnly) {
+    if (raw.startsWith('#')) return raw;
+    try {
+      const url = new URL(raw);
+      return url.protocol === 'https:' || url.protocol === 'http:' ? raw : undefined;
+    } catch { return undefined; }
+  }
   if (parseContextMentionHref(raw)) return raw;
   if (/^(#|\/|\.\/|\.{2}\/|\?)/.test(raw)) return raw;
   try {

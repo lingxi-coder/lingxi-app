@@ -13,6 +13,13 @@ export const useIsoLayoutEffect = typeof window === 'undefined' ? useEffect : us
  */
 export type RenderAvatar = (identity: Identity, size: number) => ReactNode;
 
+/**
+ * Lets the host render Markdown with the renderer its own chat uses (Desktop: `MarkdownContent`; Web: the remote
+ * chat's `Markdown`). Shared Bot messages and Bot documents are Markdown; people's messages never are. Without it
+ * they are shown as plain text. The host's renderer must never trust HTML or follow links other than http(s).
+ */
+export type RenderMarkdown = (text: string) => ReactNode;
+
 /** Every entry has at least 4.5:1 contrast against the white initials. */
 export const AVATAR_COLORS = ['#4a5fc1', '#2e7d6b', '#b04a6e', '#8a5a1f', '#6b4fa3', '#2a7aa3', '#9a4b2d', '#4f7a28', '#a1427d', '#5a6b78', '#3f6fb5', '#a8571a'] as const;
 

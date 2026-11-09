@@ -17,11 +17,11 @@ import { tokens } from '../src/renderer/theme/tokens';
 
 (globalThis as { React?: typeof React }).React = React;
 
-const renderMarkdownContent = (text: string, trustedHtml = false): string => withDesktopLocale('en', () => renderToStaticMarkup(
+const renderMarkdownContent = (text: string, trustedHtml = false, externalLinksOnly = false): string => withDesktopLocale('en', () => renderToStaticMarkup(
   React.createElement(
     Theme.Provider,
     { value: tokens(true) },
-    React.createElement(MarkdownContent, { text, trustedHtml }),
+    React.createElement(MarkdownContent, { text, trustedHtml, externalLinksOnly }),
   ),
 ));
 
@@ -143,6 +143,21 @@ test('markdown parser preserves task list source and checkbox state metadata', (
   assert.equal(countMatches(html, 'type="checkbox"'), 2);
 });
 
+test('another person\'s Bot text keeps the chat renderer but links only http(s)', () => {
+  const source = [
+    '## Plan', '', '- [ ] **one** `code`', '', '| a | b |', '| - | - |', '| 1 | 2 |', '',
+    '[web](https://example.com) [mail](mailto:a@example.com) [rel](/etc/hosts) [js](javascript:alert(1))',
+    '[mention](lingxi-mention://file?name=a&target=%2Fetc%2Fpasswd)', '', '```ts\nconst a = 1;\n```',
+  ].join('\n');
+  const html = renderMarkdownContent(source, false, true);
+  assert.match(html, /<h2[^>]*>Plan<\/h2>/); assert.match(html, /markdown-table/); assert.match(html, /type="checkbox"/);
+  assert.match(html, /href="https:\/\/example.com"/);
+  assert.doesNotMatch(html, /href="mailto:|href="\/etc|javascript:|lingxi-mention/);
+  assert.equal(countMatches(html, 'markdown-link-disabled'), 4);
+  // The assistant chat keeps its mention and relative links.
+  assert.match(renderMarkdownContent(source), /href="mailto:a@example.com"/);
+});
+
 test('markdown URL sanitizer keeps safe links and blocks javascript', () => {
   assert.equal(sanitizeMarkdownHref('https://example.com'), 'https://example.com');
   assert.equal(sanitizeMarkdownHref('mailto:test@example.com'), 'mailto:test@example.com');
@@ -151,6 +166,12 @@ test('markdown URL sanitizer keeps safe links and blocks javascript', () => {
   assert.equal(sanitizeMarkdownHref('javascript:alert(1)'), undefined);
   assert.equal(sanitizeMarkdownHref('data:text/html,alert(1)'), undefined);
   assert.equal(sanitizeMarkdownHref('vbscript:alert(1)'), undefined);
+  // Another person's Bot: http(s) and in-page anchors only.
+  assert.equal(sanitizeMarkdownHref('https://example.com', true), 'https://example.com');
+  assert.equal(sanitizeMarkdownHref('http://example.com', true), 'http://example.com');
+  assert.equal(sanitizeMarkdownHref('#section', true), '#section');
+  for (const href of ['mailto:test@example.com', '/relative/path', './x', '../x', '?q=1', 'javascript:alert(1)', 'data:text/html,x', 'lingxi-mention://file?name=a&target=%2Fetc%2Fpasswd'])
+    assert.equal(sanitizeMarkdownHref(href, true), undefined, href);
 });
 
 test('markdown HTML schema includes controlled table/tasklist nodes', () => {

@@ -65,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lingxi.code.R
+import com.lingxi.code.conversation.AIText
 import com.lingxi.code.theme.BotAvatar
 import com.lingxi.code.theme.ConversationLead
 import com.lingxi.code.theme.PersonAvatar
@@ -404,6 +405,7 @@ private fun MessageCell(
                     }
                 }
                 if (message.recalled) Text(stringResource(R.string.teams_message_recalled), style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                else if (TeamsBotText.rendersMarkdown(message.authorKind, message.recalled)) AIText(markdown = message.text, modifier = Modifier.fillMaxWidth().testTag("teams.message.body.${message.id}"), onOpenLink = rememberTeamBotLinkOpener())
                 else Text(message.text, style = MaterialTheme.typography.bodyLarge)
                 if (message.editedAt != null && !message.recalled) Text(stringResource(R.string.teams_message_edited), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 val taskIds = message.taskId?.let { listOf(it) } ?: message.taskIds

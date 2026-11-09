@@ -20,6 +20,16 @@ scenario('Member home requires no model setup and reopens document with Missing 
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount()); assert.match(page.text(), /No model or API key setup/); assert.match(page.text(), /Missing usage · cost unknown/);
   await page.click(page.button('Reopen document')); assert.match(page.text(), /Trip preparation/); assert.match(page.text(), /Pack passports/); await page.click(page.button('Close')); await page.click(page.button('Reopen document')); assert.equal(calls.filter(c => c.action === 'readArtifact').length, 2);
 });
+scenario('The Bot document dialog renders its body through the host Markdown renderer, else as plain text', async context => {
+  const { fake, workspace } = await open(context); fake.conversations.set('team-test', [conversation('test-chat')]);
+  fake.messages = async <T>(command: MessageCommand) => { if (command.action === 'listTasks') return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state: 'completed', createdAt: 1, deadline: 2, artifactId: 'artifact-test' }] } as T; if (command.action === 'readArtifact') return { artifactId: 'artifact-test', revision: 1, digest: 'a'.repeat(64), document: { title: 'Trip preparation', body: '# Pack\n- passports' } } as T; return { bots: fake.bots } as T; };
+  const rendered: string[] = [];
+  const renderMarkdown = (text: string) => { rendered.push(text); return createElement('div', { className: 'host-md' }, 'rendered:' + text); };
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false, renderMarkdown })); context.after(() => page.unmount());
+  await until(() => /Reopen document/.test(page.text()), 'the task');
+  await page.click(page.button('Reopen document'));
+  assert.ok(rendered.length > 0 && rendered.every(text => text === '# Pack\n- passports')); assert.match(page.text(), /rendered:# Pack/);
+});
 scenario('Publication confirms explicit role, native files, membership audience, costs and quotas', async context => {
   const published: unknown[] = [];
   const { workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-new', name: 'Travel', description: '', model: 'Configured model' }], selectSharedFiles: async () => [{ token: 'trusted-token', kind: 'file', name: 'Trip notes.txt', bytes: 18, sha256: 'a'.repeat(64), mediaType: 'text/plain' }], publishLocalBot: async input => { published.push(input); return { sharedBotId: input.sharedBotId, revision: 1 }; } });

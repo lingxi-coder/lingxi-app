@@ -2990,5 +2990,12 @@
   "teams_task_interrupted": "Request interrupted; send a new request",
   "teams_task_authorization_required": "Maintainer action required",
   "teams_error_request_quota": "Request limit reached. Try later or contact the maintainer.",
-  "teams_task_view": "View task status"
+  "teams_task_view": "View task status",
+  "teams_usage_missing": "Missing usage · cost unknown",
+  "teams_usage_partial": "Partial usage",
+  "teams_usage_complete": "Complete usage",
+  "teams_usage_cost_unknown": "cost unknown",
+  "teams_usage_currency_unknown": "currency unknown",
+  "teams_usage_tokens %lld %lld": "%1$lld / %2$lld tokens",
+  "teams_usage_tokens_fmt": "%1$d / %2$d tokens"
 }

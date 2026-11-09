@@ -8,7 +8,7 @@ import { messageErrorText } from './errors.js';
 import { pendingPayload, type TeamConversation, type TeamMessage } from './messages.js';
 import { ArtifactButton, BotRun } from './BotRunCards';
 import { buildStreamRows, formatClock, placeTasks, visibleStart, WINDOW_SIZE } from './stream.js';
-import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useIsoLayoutEffect, type RenderAvatar } from './ui';
+import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useIsoLayoutEffect, type RenderAvatar, type RenderMarkdown } from './ui';
 import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
 
 export interface TeamConversationViewProps {
@@ -19,6 +19,8 @@ export interface TeamConversationViewProps {
   detailsOpen?: boolean;
   onToggleDetails?(): void;
   renderAvatar?: RenderAvatar;
+  /** Renders a shared Bot's messages and documents as Markdown. People's messages stay plain text. */
+  renderMarkdown?: RenderMarkdown;
   /** BCP 47 tag for times and day labels; defaults to `zh-CN` or `en-US` from `zh`. */
   locale?: string;
   /** The current time for "Today" and "Yesterday". Defaults to now. */
@@ -62,7 +64,7 @@ export function TeamConversationView(props: TeamConversationViewProps): ReactEle
   const conversation = snapshot.conversation, model = snapshot.messaging, team = snapshot.team;
   if (!conversation || !model || !team) {
     if (snapshot.loading) return <section className="tw-scope tw-conv tw-conv-empty"><p className="tw-empty-line" role="status">{zh ? '正在加载…' : 'Loading…'}</p></section>;
-    if (team && !snapshot.selectedConversationId && !snapshot.creation) return <MemberHome key={`${snapshot.uid}:${team.id}:${team.generation}`} workspace={props.workspace} snapshot={snapshot} zh={zh} />;
+    if (team && !snapshot.selectedConversationId && !snapshot.creation) return <MemberHome key={`${snapshot.uid}:${team.id}:${team.generation}`} workspace={props.workspace} snapshot={snapshot} zh={zh} renderMarkdown={props.renderMarkdown} />;
     const { title, body } = emptyState(snapshot, zh);
     return <section className="tw-scope tw-conv tw-conv-empty">
       <div className="tw-empty"><h2>{title}</h2><p>{body}</p><p className="tw-hint">{platformNotice(zh)}</p></div>
@@ -85,7 +87,7 @@ function CreationBanner({ workspace, snapshot, zh }: { workspace: TeamsWorkspace
 
 type Pane = TeamConversationViewProps & { conversation: TeamConversation; model: NonNullable<TeamsSnapshot['messaging']>; team: NonNullable<TeamsSnapshot['team']> };
 
-function ConversationPane({ workspace, snapshot, zh, conversation, model, team, detailsOpen, onToggleDetails, renderAvatar, locale, now }: Pane): ReactElement {
+function ConversationPane({ workspace, snapshot, zh, conversation, model, team, detailsOpen, onToggleDetails, renderAvatar, renderMarkdown, locale, now }: Pane): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
   const uid = snapshot.uid, messages = snapshot.messages, tag = locale ?? (zh ? 'zh-CN' : 'en-US');
   const minute = Math.floor((now === undefined ? Date.now() : typeof now === 'number' ? now : now.getTime()) / 60_000);
@@ -128,7 +130,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
   // it has no message to sit under, so it is shown as its own Bot row placed by time among the messages.
   const unanswered = useMemo(() => placeTasks(visible, runs.tasks.filter(task => !task.replyId).reverse(), start > 0), [visible, runs.tasks, start]);
   const taskRow = (task: TeamTaskView) => <TaskRow key={`task:${task.taskId}`} task={task} author={botIdentity(task.sharedBotId)} renderAvatar={renderAvatar}>
-    <div className="tw-embed"><BotRun task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} /></div>
+    <div className="tw-embed"><BotRun task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} renderMarkdown={renderMarkdown} /></div>
   </TaskRow>;
   let afterTask = unanswered.head.length > 0;
   const loadingMessages = !messages.length && conversation.lastSeq > 0;
@@ -225,10 +227,10 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
             const placed = unanswered.after.get(message.id), grouped = row.grouped && !afterTask;
             afterTask = !!placed;
             return <Fragment key={row.key}><MessageItem message={message} grouped={grouped} author={author} mine={mine} owner={message.author.kind === 'shared_bot' ? nameOf(snapshot.bots.find(bot => bot.sharedBotId === (message.author as Extract<TeamMessage['author'], { kind: 'shared_bot' }>).sharedBotId)?.maintainer.uid ?? '') : ''}
-              quote={quoteOf(message)} locale={tag} zh={zh} renderAvatar={renderAvatar}
+              quote={quoteOf(message)} locale={tag} zh={zh} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown}
               onReply={lock ? undefined : answer} onEdit={mine && participant ? edit : undefined} onRecall={mine && participant ? setRecall : undefined}>
-              {message.artifactId && !tasks.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} artifactId={message.artifactId} zh={zh} /> : null}
-              {tasks.map(task => <div className="tw-embed" key={task.taskId}><BotRun task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} /></div>)}
+              {message.artifactId && !tasks.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} artifactId={message.artifactId} zh={zh} renderMarkdown={renderMarkdown} /> : null}
+              {tasks.map(task => <div className="tw-embed" key={task.taskId}><BotRun task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} renderMarkdown={renderMarkdown} /></div>)}
             </MessageItem>{placed?.map(taskRow)}</Fragment>;
           })}
           {unanswered.tail.map(taskRow)}
@@ -280,8 +282,8 @@ function TaskRow({ task, author, renderAvatar, children }: { task: TeamTaskView;
   </li>;
 }
 
-function MessageItem({ message, grouped, author, mine, owner, quote, locale, zh, renderAvatar, onReply, onEdit, onRecall, children }: {
-  message: TeamMessage; grouped: boolean; author: Identity; mine: boolean; owner: string; quote?: { author: string; text: string }; locale: string; zh: boolean; renderAvatar?: RenderAvatar;
+function MessageItem({ message, grouped, author, mine, owner, quote, locale, zh, renderAvatar, renderMarkdown, onReply, onEdit, onRecall, children }: {
+  message: TeamMessage; grouped: boolean; author: Identity; mine: boolean; owner: string; quote?: { author: string; text: string }; locale: string; zh: boolean; renderAvatar?: RenderAvatar; renderMarkdown?: RenderMarkdown;
   onReply?(message: TeamMessage): void; onEdit?(message: TeamMessage): void; onRecall?(message: TeamMessage): void; children?: ReactNode;
 }): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
@@ -289,6 +291,8 @@ function MessageItem({ message, grouped, author, mine, owner, quote, locale, zh,
   const full = message.createdAt ? new Date(message.createdAt).toLocaleString(locale) : undefined;
   const time = clock ? <time className={grouped ? 'tw-msg-hover-time' : 'tw-msg-time'} dateTime={message.createdAt ?? undefined} title={full}>{clock}</time> : null;
   const acts = !message.recalled && (onReply || onEdit || onRecall);
+  // Only a shared Bot writes Markdown; what a person types is shown exactly as typed.
+  const markdown = message.author.kind === 'shared_bot' && !message.recalled && renderMarkdown !== undefined;
   return <li className="tw-msg" data-grouped={grouped} data-mine={mine} data-kind={author.kind} data-recalled={message.recalled ? 'true' : undefined} data-message-id={message.id} data-message-seq={message.seq}>
     <div className="tw-msg-lead">{grouped ? time : <Avatar identity={author} size={32} render={renderAvatar} />}</div>
     <div className="tw-msg-main">
@@ -299,10 +303,13 @@ function MessageItem({ message, grouped, author, mine, owner, quote, locale, zh,
         {time}
       </div> : null}
       {quote ? <blockquote className="tw-quote">{quote.author ? <b>{quote.author}</b> : null} {quote.text}</blockquote> : null}
-      <p className="tw-msg-body">
+      {markdown ? <div className="tw-msg-body tw-md" data-markdown="true">
+        {renderMarkdown(message.text)}
+        {message.editedAt ? <small className="tw-edited"> ({t('edited', '已编辑')})</small> : null}
+      </div> : <p className="tw-msg-body">
         {message.recalled ? <em>{t('Message recalled', '消息已撤回')}</em> : message.text}
         {message.editedAt && !message.recalled ? <small className="tw-edited"> ({t('edited', '已编辑')})</small> : null}
-      </p>
+      </p>}
       {children}
     </div>
     {acts ? <div className="tw-msg-actions" role="group" aria-label={t('Message actions', '消息操作')}>

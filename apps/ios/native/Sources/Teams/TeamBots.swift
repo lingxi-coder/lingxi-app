@@ -20,6 +20,15 @@ struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
     var selectable: Bool { state == "published" && permitted }
     var avatarId: String { sharedBotId }
 }
+/// What a Bot run cost, as the host reports it. `missing` carries no figures; `partial` and `complete` carry the
+/// token counts, and the cost only when the host could price it (`costMicros` in millionths of `currency`).
+struct TeamTaskUsage: Decodable, Equatable, Sendable {
+    let status: String
+    var inputTokens: Int? = nil
+    var outputTokens: Int? = nil
+    var costMicros: Double? = nil
+    var currency: String? = nil
+}
 struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
     let taskId: String
     let conversationId: String
@@ -30,6 +39,7 @@ struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
     let deadline: Double
     let replyId: String?
     let artifactId: String?
+    var usage: TeamTaskUsage? = nil
     var id: String { taskId }
     var terminal: Bool { state != "queued" && state != "running" }
 }

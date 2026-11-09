@@ -2804,4 +2804,10 @@
     <string name="teams_task_authorization_required">Maintainer action required</string>
     <string name="teams_error_request_quota">Request limit reached. Try later or contact the maintainer.</string>
     <string name="teams_task_view">View task status</string>
+    <string name="teams_usage_missing">使用量なし · 費用不明</string>
+    <string name="teams_usage_partial">使用量が不完全</string>
+    <string name="teams_usage_complete">使用量(完全)</string>
+    <string name="teams_usage_cost_unknown">費用不明</string>
+    <string name="teams_usage_currency_unknown">通貨不明</string>
+    <string name="teams_usage_tokens_fmt">%1$d / %2$d トークン</string>
 </resources>

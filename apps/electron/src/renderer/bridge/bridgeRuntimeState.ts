@@ -172,6 +172,19 @@ export function pendingAskQueueFromBootstrap(snapshot: BootstrapState): AskUserQ
   return snapshot.pendingAskUserQuestions ? [...snapshot.pendingAskUserQuestions] : [];
 }
 
+/** Retire foreground questions without resolving the session's Goal confirmation. */
+export function retireTurnAskUserQuestions(
+  state: Pick<RuntimeState, 'askUserQuestionQueue' | 'resolvedAskUserQuestionIds'>,
+): Pick<RuntimeState, 'askUserQuestionQueue' | 'resolvedAskUserQuestionIds'> {
+  const askUserQuestionQueue: AskUserQuestionRequestDto[] = [];
+  const resolvedAskUserQuestionIds = new Set(state.resolvedAskUserQuestionIds);
+  for (const request of state.askUserQuestionQueue) {
+    if (request.sessionOwned === true) askUserQuestionQueue.push(request);
+    else resolvedAskUserQuestionIds.add(request.request_id);
+  }
+  return { askUserQuestionQueue, resolvedAskUserQuestionIds };
+}
+
 export function canResumePendingSession(
   pending: SessionRef | null,
   workspace: WorkspaceMetadata | undefined,

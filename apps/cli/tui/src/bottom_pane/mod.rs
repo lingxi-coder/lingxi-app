@@ -2749,13 +2749,15 @@ impl ViewStack {
     /// (in-process teammates), never for a pool-spawned one-shot subagent —
     /// so [`PermissionView::is_background`] also checks the real Fusion
     /// marker, `background_owned`. Only the interactive turn's OWN
-    /// unattributed permission ask — and every `AskUserQuestionView`/
-    /// `ComputerAccessView`, which carry no owner signal today — are dropped
-    /// here.
+    /// unattributed permission ask, ordinary `AskUserQuestionView` and
+    /// `ComputerAccessView` are dropped here. Session Goal decisions remain.
     pub fn dismiss_turn_prompts(&mut self) {
         self.views.retain(|view| {
             if let Some(permission) = view.as_any().downcast_ref::<PermissionView>() {
                 return permission.is_background();
+            }
+            if let Some(question) = view.as_any().downcast_ref::<AskUserQuestionView>() {
+                return question.is_session_goal_proposal();
             }
             !view.as_any().is::<AskUserQuestionView>() && !view.as_any().is::<ComputerAccessView>()
         });
@@ -5418,6 +5420,7 @@ mod tests {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         drop(resp_rx);
         p.show_ask_user_question(AskUserQuestionExchange {
+            lifetime: Default::default(),
             questions: vec![tool_api::ask_user_question::AskQuestion {
                 question: "Pick one".into(),
                 header: "Pick".into(),
@@ -5432,6 +5435,30 @@ mod tests {
             "an AskUserQuestion whose asker is gone must not open a dialog"
         );
         assert_eq!(p.view_stack().len(), 0, "and nothing is left on the stack");
+    }
+
+    #[test]
+    fn session_goal_question_survives_turn_cleanup_until_its_owner_unwinds() {
+        let mut p = pane();
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        p.show_ask_user_question(AskUserQuestionExchange {
+            lifetime: tool_api::ask_user_question::AskUserQuestionLifetime::SessionGoalProposal(
+                lingxi_core::host::CancellationToken::new(),
+            ),
+            questions: vec![tool_api::ask_user_question::AskQuestion {
+                question: "tests pass".into(),
+                header: "Goal".into(),
+                options: Vec::new(),
+                multi_select: false,
+            }],
+            timeout_secs: None,
+            resp_tx,
+        });
+        p.dismiss_turn_prompts();
+        assert!(p.view_stack().contains::<AskUserQuestionView>());
+        drop(resp_rx);
+        p.view_stack.drop_abandoned_prompts();
+        assert!(!p.view_stack().contains::<AskUserQuestionView>());
     }
 
     #[test]

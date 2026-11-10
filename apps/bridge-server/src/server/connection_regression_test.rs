@@ -108,6 +108,7 @@ async fn reconnect_cannot_claim_until_old_cleanup_has_finished() {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     question_tx
         .send(AskUserQuestionExchange {
+            lifetime: Default::default(),
             questions: Vec::new(),
             timeout_secs: None,
             resp_tx: response_tx,
@@ -1198,6 +1199,7 @@ async fn unowned_question_publication_during_close_finishes_and_is_joined() {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     question_tx
         .send(AskUserQuestionExchange {
+            lifetime: Default::default(),
             questions: Vec::new(),
             timeout_secs: None,
             resp_tx: response_tx,

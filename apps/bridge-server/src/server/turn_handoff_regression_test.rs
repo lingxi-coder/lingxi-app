@@ -204,6 +204,7 @@ impl TurnDriver for CancelBoundaryDriver {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             self.question_tx
                 .send(AskUserQuestionExchange {
+                    lifetime: Default::default(),
                     questions: Vec::new(),
                     timeout_secs: None,
                     resp_tx,
@@ -574,6 +575,7 @@ impl TurnDriver for WaitingQuestionDriver {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.question_tx
             .send(AskUserQuestionExchange {
+                lifetime: Default::default(),
                 questions: Vec::new(),
                 timeout_secs: None,
                 resp_tx,

@@ -12,6 +12,7 @@ export function desktopFriendsApi(desktop: DesktopFriendsApi, uid: string): Frie
     execute: command => desktop.execute(uid, command),
     watchCards: (next, failed) => desktop.watchCards(uid, next, failed),
     watchBlocks: (next, failed) => desktop.watchBlocks(uid, next, failed),
+    watchOffers: (next, failed) => desktop.watchOffers(uid, next, failed),
     readProfile: friendUid => desktop.readProfile(uid, friendUid),
   };
 }

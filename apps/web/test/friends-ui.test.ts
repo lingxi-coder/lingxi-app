@@ -1,21 +1,22 @@
 import assert from 'node:assert/strict';
 import { after, type TestContext } from 'node:test';
 import { createElement } from 'react';
-import { friendsErrorText } from '../../../packages/teams/errors';
+import { friendsErrorText, offerErrorText } from '../../../packages/teams/errors';
 import type { TeamMember } from '../../../packages/teams';
+import type { MessageCommand } from '../../../packages/teams/messages';
 import type { FriendsSnapshot, FriendsWorkspace } from '../../../packages/teams/friends-workspace';
 import { TeamsWorkspace } from '../../../packages/teams/workspace';
-import { block, card, friendsFixture, pairTeamId, pointer, profile, uid, until, type FakeFriends } from './support/fakeFriends';
-import { FakeTeams, conversation, memoryStorage, message, team } from './support/fakeTeams';
+import { block, card, friendsFixture, offer, pairTeamId, pointer, profile, uid, until, type FakeFriends } from './support/fakeFriends';
+import { FakeTeams, botCard, conversation, memoryStorage, message, team } from './support/fakeTeams';
 import { loadTeamsModule } from './support/loadTeamsModule';
-import { classes, mount, scenario, textOf, withDom } from './support/workspacePage';
+import { classes, mount, reactTestRenderer, scenario, textOf, withDom } from './support/workspacePage';
 
 const { FriendsSidebar } = loadTeamsModule<typeof import('../../../packages/teams/FriendsSidebar')>('FriendsSidebar');
 const { AddFriendView } = loadTeamsModule<typeof import('../../../packages/teams/AddFriendView')>('AddFriendView');
 const { FriendProfileSettings } = loadTeamsModule<typeof import('../../../packages/teams/FriendProfileSettings')>('FriendProfileSettings');
 const { BlockedList } = loadTeamsModule<typeof import('../../../packages/teams/BlockedList')>('BlockedList');
 const { FriendsMain } = loadTeamsModule<typeof import('../../../packages/teams/FriendsMain')>('FriendsMain');
-const { FriendLinkDialog, MemberFriendDialog } = loadTeamsModule<typeof import('../../../packages/teams/friend-dialogs')>('friend-dialogs');
+const { FriendLinkDialog, InviteFriendsDialog, InviteNotice, MemberFriendDialog } = loadTeamsModule<typeof import('../../../packages/teams/friend-dialogs')>('friend-dialogs');
 const { TeamDetailsDrawer } = loadTeamsModule<typeof import('../../../packages/teams/TeamDetailsDrawer')>('TeamDetailsDrawer');
 
 // The fake browser stays for the whole file, so a view that is unmounted after its test still finds its document.
@@ -478,4 +479,379 @@ scenario('the member dialog looks the member up by team and uid and requests thr
   const known = await mount(workspace, view(workspace, MemberFriendDialog, { teamId: 'team-aaaa', member: { uid: 'bob', displayName: 'Bob' }, onClose: () => undefined })); context.after(() => known.unmount());
   await until(() => fake.commands.filter(command => command.action === 'lookup').length === 2, 'the second lookup'); await known.during(() => undefined);
   assert.ok(known.text().includes('Already friends'));
+});
+
+// ── Team invitations (D27, D30) ──
+
+const HOUR = 3_600_000, DAY = 24 * HOUR;
+const rowsOf = (page: { oneByLabel(label: string): any }, label: string): any[] => page.oneByLabel(label).findAll((node: any) => node.type === 'li');
+const buttonOf = (row: any, text: string) => row.findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === text);
+const buttonsOf = (row: any) => row.findAll((node: any) => node.type === 'button').map(textOf);
+
+scenario('Team invitations sit above the requests: the team, who invited, when it expires, and Join and Decline, or Dismiss once it expired', async context => {
+  const { fake, workspace, snapshot } = friendsFixture(f => {
+    f.cards = [card('bob'), card('erin', { state: 'incoming' })];
+    f.offers = [offer('t-gone', NOW - DAY, { teamName: 'Old Team' }), offer('t-hours', NOW + 5 * HOUR, { teamName: 'Soon Team', fromName: 'Carol' }), offer('t-days', NOW + 3 * DAY - HOUR, { teamName: 'Later Team' })];
+  }, { now: () => NOW });
+  context.after(() => workspace.close());
+  await ready(snapshot);
+  const page = await mount(workspace, view(workspace, FriendsSidebar)); context.after(() => page.unmount());
+  const text = page.text();
+  assert.ok(text.indexOf('Team invitations') >= 0 && text.indexOf('Team invitations') < text.indexOf('Friend requests'), 'the section is above the requests');
+  const rows = rowsOf(page, 'Team invitations');
+  assert.deepEqual(rows.map(row => textOf(row.findAll((node: any) => node.type === 'b')[0])), ['Later Team', 'Soon Team', 'Old Team'], 'the newest first');
+  assert.ok(textOf(rows[0]).includes('Invited by Bob') && textOf(rows[0]).includes('Expires in 3 days'));
+  assert.ok(textOf(rows[1]).includes('Invited by Carol') && textOf(rows[1]).includes('Expires in 5 hours'));
+  assert.ok(textOf(rows[2]).includes('Expired') && !textOf(rows[2]).includes('Expires'));
+  assert.deepEqual(buttonsOf(rows[0]), ['Join', 'Decline']); assert.deepEqual(buttonsOf(rows[2]), ['Dismiss'], 'an expired offer cannot be accepted');
+  assert.equal(page.byClass('tw-team-mark').length, 3, 'each row has the team\'s mark');
+  assert.equal(fake.commands.length, 0, 'showing offers sends nothing');
+});
+
+scenario('Join says so once and leaves the row to the listener; a failure is told under its row and Join stays; Decline and Dismiss send one decline', async context => {
+  const { fake, workspace, snapshot } = friendsFixture(f => {
+    f.cards = [card('bob')];
+    f.offers = [offer('t-1', NOW + 2 * DAY, { teamName: 'Alpha' }), offer('t-2', NOW + DAY, { teamName: 'Beta' }), offer('t-3', NOW - HOUR, { teamName: 'Gamma' })];
+  }, { now: () => NOW });
+  context.after(() => workspace.close());
+  await ready(snapshot);
+  const page = await mount(workspace, view(workspace, FriendsSidebar)); context.after(() => page.unmount());
+  const row = (name: string) => rowsOf(page, 'Team invitations').find(item => textOf(item).includes(name))!;
+
+  fake.fail('acceptOffer', 'TEAM_LIMIT');
+  await page.click(buttonOf(row('Alpha'), 'Join'));
+  assert.ok(textOf(row('Alpha')).includes(offerErrorText('acceptOffer', 'TEAM_LIMIT', false)), 'told under the row that failed');
+  assert.ok(!textOf(row('Beta')).includes(offerErrorText('acceptOffer', 'TEAM_LIMIT', false)));
+  assert.equal(buttonOf(row('Alpha'), 'Join').props.disabled, false, 'the offer is kept: Join stays available');
+  assert.ok(!page.text().includes('You joined'));
+  fake.fail('acceptOffer', 'OFFER_UNAVAILABLE');
+  await page.click(buttonOf(row('Alpha'), 'Join'));
+  assert.ok(textOf(row('Alpha')).includes('This invitation is no longer available.'));
+
+  fake.replies.delete('acceptOffer');
+  await page.click(buttonOf(row('Alpha'), 'Join'));
+  assert.ok(page.text().includes('You joined “Alpha”')); assert.equal(rowsOf(page, 'Team invitations').length, 3, 'the row goes through the listener');
+  fake.emitOffers([offer('t-2', NOW + DAY, { teamName: 'Beta' }), offer('t-3', NOW - HOUR, { teamName: 'Gamma' })]); await page.during(() => undefined);
+  assert.equal(rowsOf(page, 'Team invitations').length, 2);
+  const joins = fake.executed('acceptOffer') as { offerId: string; requestId: string }[];
+  assert.deepEqual(joins.map(command => command.offerId), ['t-1', 't-1', 't-1']);
+  assert.equal(joins[0]!.requestId === joins[1]!.requestId, false, 'a definitive answer ended the id');
+
+  await page.click(buttonOf(row('Beta'), 'Decline')); await page.click(buttonOf(row('Gamma'), 'Dismiss'));
+  assert.deepEqual(fake.executed('declineOffer'), [{ action: 'declineOffer', offerId: 't-2' }, { action: 'declineOffer', offerId: 't-3' }]);
+  fake.emitOffers([]); await page.during(() => undefined);
+  assert.ok(!page.has('Join') && !page.text().includes('Team invitations'), 'no offers, no section');
+});
+
+scenario('invitations alone are not an empty Friends list; 20 rows show at a time', async context => {
+  const many = Array.from({ length: 25 }, (_, index) => offer(`t${String(index).padStart(2, '0')}`, NOW + DAY + index * HOUR, { teamName: `Team ${index}` }));
+  const { fake, workspace, snapshot } = friendsFixture(f => { f.offers = many; }, { now: () => NOW });
+  context.after(() => workspace.close());
+  await ready(snapshot);
+  const page = await mount(workspace, view(workspace, FriendsSidebar)); context.after(() => page.unmount());
+  assert.ok(!page.text().includes('No friends yet'), 'there is something to show');
+  assert.equal(rowsOf(page, 'Team invitations').length, 20); assert.ok(page.has('Show all (25)'));
+  await page.click(page.button('Show all (25)'));
+  assert.equal(rowsOf(page, 'Team invitations').length, 25);
+  fake.emitOffers([]); await page.during(() => undefined);
+  assert.ok(page.text().includes('No friends yet'), 'no friends, no requests and no invitations is the empty state');
+});
+
+scenario('showing the Friends root works the badge out against the clock again, and an expiry reaches the rows by itself (D28)', async context => {
+  let clock = NOW;
+  const { workspace, snapshot } = friendsFixture(f => { f.cards = [card('bob')]; f.offers = [offer('t-1', NOW + HOUR, { teamName: 'Alpha' })]; }, { now: () => clock });
+  context.after(() => workspace.close());
+  await ready(snapshot);
+  const page = await mount(workspace, view(workspace, FriendsSidebar)); context.after(() => page.unmount());
+  assert.equal(snapshot().badge, 1); assert.ok(textOf(rowsOf(page, 'Team invitations')[0]).includes('Expires in 1 hour'));
+  clock = NOW + 2 * HOUR;
+  workspace.recount(); await page.during(() => undefined);
+  assert.equal(snapshot().badge, 0); assert.deepEqual(buttonsOf(rowsOf(page, 'Team invitations')[0]), ['Dismiss']);
+});
+
+// ── The friendship's Bots (D21, D22, D25) ──
+
+/** A Bot DM created through the fake is confirmed at once: the directory gets it and every listener of the pair team is told. */
+const confirmBotDms = (teams: FakeTeams) => {
+  const base = teams.messages;
+  teams.messages = async <T>(command: MessageCommand) => {
+    if (command.action === 'createConversation') {
+      const { teamId, payload } = command;
+      teams.conversations.set(teamId, [...(teams.conversations.get(teamId) ?? []), conversation(payload.conversationId, { kind: 'bot_dm', title: payload.title, participants: ['user:alice', ...payload.sharedBotIds.map(id => `shared_bot:${id}`)] })]);
+      for (const watch of teams.open(teamId)) teams.deliver(watch);
+    }
+    return base<T>(command);
+  };
+};
+const botsChat = async (context: TestContext, setup: (teams: FakeTeams) => void = () => {}) => {
+  const fixture = friendsFixture((fake, teams) => { chatSetup(fake, teams); confirmBotDms(teams); setup(teams); });
+  context.after(() => fixture.workspace.close());
+  await ready(fixture.snapshot);
+  fixture.workspace.openChat('bob');
+  const page = await mount(fixture.workspace, view(fixture.workspace, FriendsMain)); context.after(() => page.unmount());
+  await until(() => !!fixture.snapshot().chat?.workspace?.getSnapshot().conversation, 'the chat'); await page.during(() => undefined);
+  const pair = () => fixture.snapshot().chat!.workspace!;
+  return { ...fixture, page, pair, panel: () => page.oneByClass('tw-friends-bots') };
+};
+
+scenario('the Bots action opens the friendship\'s Bots over the chat: Teams cards without an audience or quota, the note, and no sharing on Web (D21)', async context => {
+  const { page, pair, panel, teams } = await botsChat(context, t => { t.bots = [botCard({ name: 'Bob Helper', description: 'Answers about trips', maintainer: { uid: 'bob', generation: 1 } })]; });
+  await until(() => pair().getSnapshot().botsLoaded, 'the Bot cards');
+  assert.equal(page.byClass('tw-friends-bots').length, 0, 'closed until asked for');
+  const opener = () => page.byLabel('Shared Bots').find(node => node.type === 'button')!;
+  assert.equal(opener().props['aria-expanded'], false);
+  await page.click(opener());
+  assert.equal(opener().props['aria-expanded'], true);
+  const text = textOf(panel());
+  for (const expected of ['Shared Bots', 'Bob Helper', 'Answers about trips', 'Maintainer: Bob', 'Ready', 'Message assistant',
+    'A Bot runs on its owner’s Desktop. The owner can read every conversation with it.', 'To share one of your Bots with this friend, open LingXi Desktop.']) assert.ok(text.includes(expected), expected);
+  for (const absent of ['Daily requests', 'All current and future members', 'Find Bots in the market', 'Team assistants', 'Publish a Desktop assistant', 'Stop sharing', 'Pause']) assert.ok(!text.includes(absent), absent);
+  assert.equal(teams.commands.filter(command => command.action === 'listSharedBots').length, 1, 'the cards came from the chat\'s own workspace');
+  await page.click(page.byLabel('Close').find(node => node.type === 'button')!);
+  assert.equal(page.byClass('tw-friends-bots').length, 0);
+});
+
+scenario('with no Bots the panel says so, and a Bot list that could not be read is not taken for an empty one', async context => {
+  const { page, pair, teams } = await botsChat(context);
+  await until(() => pair().getSnapshot().botsLoaded, 'the Bot cards');
+  await page.click(page.oneByLabel('Shared Bots'));
+  assert.ok(page.text().includes('No Bots are shared in this chat yet.')); assert.ok(page.text().includes('A Bot runs on its owner’s Desktop.'), 'the note is always there');
+  await page.click(page.byLabel('Close').find(node => node.type === 'button')!);
+  teams.messages = async () => { throw new Error('SERVICE_UNAVAILABLE'); };
+  await page.during(() => pair().refreshBots());
+  await page.click(page.oneByLabel('Shared Bots'));
+  assert.ok(page.text().includes('Bot availability could not be verified.')); assert.ok(!page.text().includes('No Bots are shared in this chat yet.'));
+  assert.ok(!page.text().includes('This chat is no longer available.'), 'a failure that is not the end of the friendship leaves the chat alone');
+});
+
+scenario('Message opens a Bot DM in the plain Teams view with a way back; the friend\'s header and menu belong to the friend chat alone (D22)', async context => {
+  const { page, pair, teams } = await botsChat(context, t => { t.bots = [botCard({ name: 'Bob Helper', maintainer: { uid: 'bob', generation: 1 } })]; });
+  await until(() => pair().getSnapshot().botsLoaded, 'the Bot cards');
+  assert.equal(page.byLabel('Back').length, 0, 'the friend chat has no Back'); assert.equal(page.byLabel('More').length, 1);
+  await page.click(page.oneByLabel('Shared Bots'));
+  await page.click(page.button('Message assistant'));
+  await until(() => pair().getSnapshot().conversation?.kind === 'bot_dm', 'the Bot DM'); await page.during(() => undefined);
+  const created = teams.commands.find(command => command.action === 'createConversation')!;
+  assert.ok(created.action === 'createConversation' && created.teamId === pairTeamId('bob') && created.payload.kind === 'bot_dm' && created.payload.sharedBotIds[0] === 'assistant-fixture');
+  assert.equal(page.byClass('tw-friends-bots').length, 0, 'the panel closed');
+  assert.equal(page.byLabel('Back').length, 1); assert.equal(page.byLabel('More').length, 0, 'no friend menu in a Bot DM');
+  assert.ok(!page.text().includes('@bobby'), 'nor the friend\'s header');
+  assert.equal(page.find(node => node.type === 'textarea').length, 1, 'the composer is the Teams composer');
+  assert.equal(page.byLabel('Shared Bots').length, 0, 'the Bots action is the friend chat\'s');
+  await page.click(page.oneByLabel('Back'));
+  assert.equal(pair().getSnapshot().selectedConversationId, 'friend_chat');
+  assert.ok(page.text().includes('@bobby')); assert.equal(page.byLabel('Back').length, 0);
+  // Message again finds the Bot DM that is there and creates no second one.
+  await page.click(page.oneByLabel('Shared Bots')); await page.click(page.button('Message assistant'));
+  await until(() => pair().getSnapshot().conversation?.kind === 'bot_dm', 'the same Bot DM');
+  assert.equal(teams.commands.filter(command => command.action === 'createConversation').length, 1);
+});
+
+scenario('a Bot DM that is being created shows its banner with a way back instead of "unavailable", and a failed creation can be discarded', async context => {
+  let attempts = 0;
+  const { page, pair } = await botsChat(context, t => {
+    t.bots = [botCard({ name: 'Bob Helper', maintainer: { uid: 'bob', generation: 1 } })];
+    const base = t.messages;
+    t.messages = async <U>(command: MessageCommand) => { if (command.action === 'createConversation') { attempts++; throw new Error('CONVERSATION_REJECTED'); } return base<U>(command); };
+  });
+  await until(() => pair().getSnapshot().botsLoaded, 'the Bot cards');
+  await page.click(page.oneByLabel('Shared Bots')); await page.click(page.button('Message assistant'));
+  await until(() => !!pair().getSnapshot().creation?.error, 'the rejected creation'); await page.during(() => undefined);
+  assert.ok(!page.text().includes('This chat is no longer available.')); assert.ok(page.text().includes('Creating conversation…'));
+  assert.equal(attempts, 1);
+  await page.click(page.button('Back'));
+  assert.equal(pair().getSnapshot().selectedConversationId, 'friend_chat'); assert.ok(page.text().includes('@bobby'));
+});
+
+scenario('every Bot command that finds the friendship over ends the whole friend area, an open Bots panel included (D25)', async context => {
+  for (const code of ['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'CONVERSATION_REQUIRED']) {
+    const { page, pair, teams } = await botsChat(context, t => { t.bots = [botCard({ name: 'Bob Helper', maintainer: { uid: 'bob', generation: 1 } })]; });
+    await until(() => pair().getSnapshot().botsLoaded, 'the Bot cards');
+    await page.click(page.oneByLabel('Shared Bots'));
+    assert.equal(page.byClass('tw-friends-bots').length, 1);
+    teams.messages = async () => { throw new Error(code); };
+    await page.click(page.button('Message assistant'));
+    await until(() => page.text().includes('This chat is no longer available.'), `the end (${code})`);
+    assert.equal(page.byClass('tw-friends-bots').length, 0, 'the panel is gone with the chat'); assert.equal(page.byLabel('Shared Bots').length, 0);
+    await page.click(page.button('Back'));
+  }
+  const { page, pair, teams } = await botsChat(context, t => { t.bots = [botCard()]; });
+  await until(() => pair().getSnapshot().botsLoaded, 'the Bot cards');
+  teams.messages = async () => { throw new Error('MEMBERSHIP_REQUIRED'); };
+  await page.during(() => pair().refreshBots());
+  assert.ok(page.text().includes('This chat is no longer available.'), 'listing the Bots ends it too');
+});
+
+scenario('Stop sharing: your own published Bot, behind a confirmation, as pauseSharedBot with the revision; a friendship that ended meanwhile ends the chat', async context => {
+  const mine = botCard({ sharedBotId: 'my-helper-bot', name: 'My Helper', instanceId: 'local-1', maintainer: { uid, generation: 1 }, revision: 3 });
+  const { page, pair, panel, teams } = await botsChat(context, t => { t.bots = [mine, botCard({ name: 'Bob Helper', maintainer: { uid: 'bob', generation: 1 } })]; });
+  await until(() => pair().getSnapshot().botsLoaded, 'the Bot cards');
+  await page.click(page.oneByLabel('Shared Bots'));
+  assert.equal(page.find(node => node.type === 'button' && textOf(node) === 'Stop sharing').length, 1, 'only on the viewer\'s own Bot');
+  await page.click(page.button('Stop sharing'));
+  const dialog = () => dialogs(page)[0]!;
+  assert.ok(textOf(dialog()).includes('New Bot requests will stop. Existing conversation history remains.'));
+  assert.equal(teams.commands.some(command => command.action === 'pauseSharedBot'), false, 'asking is not doing');
+  await page.click(buttonOf(dialog(), 'Cancel'));
+  assert.equal(dialogs(page).length, 0); assert.equal(teams.commands.some(command => command.action === 'pauseSharedBot'), false);
+
+  teams.bots = [botCard({ name: 'Bob Helper', maintainer: { uid: 'bob', generation: 1 } }), { ...mine, state: 'paused', revision: 4 }];
+  await page.click(page.button('Stop sharing')); await page.click(buttonOf(dialog(), 'Stop sharing'));
+  const pause = teams.commands.find(command => command.action === 'pauseSharedBot')!;
+  assert.ok(pause.action === 'pauseSharedBot' && pause.teamId === pairTeamId('bob') && pause.generation === 1 && pause.payload.sharedBotId === 'my-helper-bot' && pause.payload.expectedRevision === 3);
+  assert.equal(dialogs(page).length, 0);
+  await until(() => pair().getSnapshot().bots.some(bot => bot.state === 'paused'), 'the Bot cards after stopping'); await page.during(() => undefined);
+  assert.ok(textOf(panel()).includes('Paused'), 'the row shows the Teams paused state'); assert.equal(page.find(node => node.type === 'button' && textOf(node) === 'Stop sharing').length, 0);
+
+  teams.bots = [{ ...mine, state: 'published' }];
+  await page.during(() => pair().refreshBots());
+  const original = teams.messages;
+  teams.messages = async <T>(command: MessageCommand) => { if (command.action === 'pauseSharedBot') throw new Error('MEMBERSHIP_REQUIRED'); return original<T>(command); };
+  await page.click(page.button('Stop sharing')); await page.click(buttonOf(dialog(), 'Stop sharing'));
+  await until(() => page.text().includes('This chat is no longer available.'), 'the end');
+});
+
+// ── Invite friends (D26, D30) ──
+
+const inviteSetup = (f: FakeFriends) => {
+  f.cards = [card('bob'), card('carol'), card('dave', { handle: 'dave_d' }), card('erin', { state: 'incoming' }), card('finn', { state: 'outgoing' }), card('zed', { lastSeq: 1, lastMessage: pointer(1) })];
+};
+const invitePage = async (context: TestContext, setup: (fake: FakeFriends) => void = inviteSetup, more: Record<string, unknown> = {}) => {
+  const fixture = friendsFixture(setup);
+  context.after(() => fixture.workspace.close());
+  if (!fixture.fake.quiet) await ready(fixture.snapshot);
+  const result = { closed: undefined as string[] | undefined, refreshed: 0 };
+  const members = [{ uid }, { uid: 'bob' }];
+  const page = await mount(fixture.workspace, view(fixture.workspace, InviteFriendsDialog, {
+    team: { id: 'team-aaaa', name: 'Crew' }, members, refreshMembers: () => { result.refreshed++; }, onClose: (names: string[]) => { result.closed = names; }, ...more,
+  }));
+  context.after(() => page.unmount());
+  const rows = (): any[] => page.byLabel('Friends')[0]?.findAll((node: any) => node.type === 'li') ?? [];
+  const row = (name: string) => rows().find(item => textOf(item.findAll((node: any) => node.type === 'b')[0]) === name)!;
+  return { ...fixture, page, result, rows, row, names: () => rows().map(item => textOf(item.findAll((node: any) => node.type === 'b')[0])) };
+};
+
+scenario('Invite friends lists the friends who are not in the team, in the Friends order, and never a request; the filter narrows it', async context => {
+  const { page, names } = await invitePage(context);
+  const dialog = () => dialogs(page)[0]!;
+  assert.ok(textOf(dialog()).includes('Invite friends to “Crew”'));
+  assert.deepEqual(names(), ['Zed', 'Carol', 'Dave'], 'newest message first, then by name; Bob is a member and the requests are not friends');
+  assert.ok(textOf(dialog()).includes('@dave_d'));
+  assert.ok(textOf(dialog()).includes('Your friend gets an invitation they can accept or decline. They see the team’s name and your name, and nothing else is shared until they join. Invitations expire after 7 days.'));
+  const filter = page.oneByLabel('Search friends');
+  await page.type(filter, 'DAV'); assert.deepEqual(names(), ['Dave']);
+  await page.type(filter, '@dave_d'); assert.deepEqual(names(), ['Dave']);
+  await page.type(filter, 'carol'); assert.deepEqual(names(), ['Carol']);
+  await page.type(filter, 'erin'); assert.deepEqual(names(), [], 'a request is not listed even when it matches');
+  assert.ok(page.text().includes('No matching friends'));
+  await page.type(filter, ''); assert.equal(names().length, 3);
+});
+
+scenario('nobody to invite says so, and the list waits for the friends or says it could not load them', async context => {
+  const none = await invitePage(context, f => { f.cards = [card('bob'), card('erin', { state: 'incoming' })]; });
+  assert.ok(none.page.text().includes('No friends to invite. Friends who are already in this team are not listed.'));
+  assert.equal(none.rows().length, 0);
+
+  const loading = await invitePage(context, f => { f.quiet = true; });
+  assert.ok(loading.page.text().includes('Loading friends…'));
+  loading.fake.failCards('SERVICE_UNAVAILABLE'); await loading.page.during(() => undefined);
+  assert.ok(loading.page.text().includes("Couldn't load your friends. Check your connection and try again."));
+  loading.fake.quiet = false;
+  await loading.page.click(loading.page.button('Retry'));
+  await until(() => !loading.snapshot().loading, 'the retry'); await loading.page.during(() => undefined);
+  assert.ok(loading.page.text().includes('No friends to invite.'));
+});
+
+scenario('Invite sends an offer for that row, which then says Invited until the dialog closes; closing reports who was invited', async context => {
+  const { fake, page, row, result } = await invitePage(context);
+  const invite = (name: string) => buttonOf(row(name), 'Invite');
+  await page.click(invite('Carol'));
+  const [sent] = fake.executed('offerTeam') as { teamId: string; friendUid: string; requestId: string }[];
+  assert.deepEqual([sent!.teamId, sent!.friendUid], ['team-aaaa', 'carol']); assert.ok(sent!.requestId);
+  assert.deepEqual(buttonsOf(row('Carol')), ['Invited']); assert.equal(buttonOf(row('Carol'), 'Invited').props.disabled, true);
+  assert.deepEqual(buttonsOf(row('Dave')), ['Invite']); assert.equal(invite('Dave').props.disabled, false, 'the others are not disabled by it');
+  await page.click(invite('Dave'));
+  assert.equal(result.closed, undefined, 'the dialog stays open for more');
+  await page.click(page.button('Close'));
+  assert.deepEqual(result.closed, ['Carol', 'Dave']);
+});
+
+scenario('a failed Invite is told under its row and can be tried again; an unknown outcome is retried with the same request id', async context => {
+  const { fake, page, row } = await invitePage(context);
+  fake.fail('offerTeam', 'OFFER_LIMIT');
+  await page.click(buttonOf(row('Carol'), 'Invite'));
+  assert.ok(textOf(row('Carol')).includes(offerErrorText('offerTeam', 'OFFER_LIMIT', false))); assert.ok(!textOf(row('Dave')).includes('20 invitations'));
+  assert.deepEqual(buttonsOf(row('Carol')), ['Invite'], 'not invited');
+  fake.fail('offerTeam', 'SERVICE_UNAVAILABLE', 503);
+  await page.click(buttonOf(row('Dave'), 'Invite')); await page.click(buttonOf(row('Dave'), 'Invite'));
+  const [, first, second] = fake.executed('offerTeam') as { requestId: string }[];
+  assert.equal(first!.requestId, second!.requestId);
+  assert.ok(textOf(row('Dave')).includes(offerErrorText('offerTeam', 'SERVICE_UNAVAILABLE', false)));
+  fake.replies.delete('offerTeam');
+  await page.click(buttonOf(row('Dave'), 'Invite'));
+  assert.deepEqual(buttonsOf(row('Dave')), ['Invited']); assert.ok(!textOf(row('Dave')).includes(offerErrorText('offerTeam', 'SERVICE_UNAVAILABLE', false)));
+});
+
+scenario('ALREADY_MEMBER drops the row and has the host refresh its members; FRIEND_REQUIRED leaves the list through the cards listener; both are still told', async context => {
+  const { fake, page, row, names, result } = await invitePage(context);
+  fake.fail('offerTeam', 'ALREADY_MEMBER');
+  await page.click(buttonOf(row('Carol'), 'Invite'));
+  assert.deepEqual(names(), ['Zed', 'Dave']); assert.equal(result.refreshed, 1);
+  assert.ok(page.text().includes('They are already in this team.'), 'the row is gone but what happened is not silent');
+
+  fake.fail('offerTeam', 'FRIEND_REQUIRED');
+  await page.click(buttonOf(row('Dave'), 'Invite'));
+  assert.ok(textOf(row('Dave')).includes('You can only invite people who are still your friends.'));
+  fake.emitCards(fake.cards.filter(value => value.uid !== 'dave')); await page.during(() => undefined);
+  assert.deepEqual(names(), ['Zed']); assert.ok(page.text().includes('You can only invite people who are still your friends.'));
+  assert.equal(result.refreshed, 1, 'only ALREADY_MEMBER means the member list is stale');
+});
+
+scenario('the member list the host holds decides who is offered, and a person who joins meanwhile leaves the list', async context => {
+  const { page, names, workspace } = await invitePage(context);
+  assert.deepEqual(names(), ['Zed', 'Carol', 'Dave']);
+  await page.unmount();
+  const grown = await mount(workspace, view(workspace, InviteFriendsDialog, { team: { id: 'team-aaaa', name: 'Crew' }, members: [{ uid }, { uid: 'bob' }, { uid: 'carol' }], refreshMembers() {}, onClose() {} }));
+  context.after(() => grown.unmount());
+  assert.deepEqual(rowsOf(grown, 'Friends').map(item => textOf(item.findAll((node: any) => node.type === 'b')[0])), ['Zed', 'Dave']);
+});
+
+scenario('the notice after the picker names who was invited, in the person\'s language, and goes away by itself', async context => {
+  const { create, act } = reactTestRenderer();
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  let done = 0, tree: any;
+  const invited = ['Carol', 'Dave'];
+  const notice = (zh: boolean, onDone: () => void) => createElement(InviteNotice as never, { names: invited, zh, onDone } as never);
+  await act(() => { tree = create(notice(false, () => { done++; })); });
+  const text = () => textOf({ children: [].concat(tree.toJSON()).map(function walk(node: any): any { return typeof node === 'string' ? node : { children: (node.children ?? []).map(walk) }; }) });
+  assert.equal(text(), 'Invitation sent to Carol, Dave');
+  context.mock.timers.tick(3000);
+  await act(() => { tree.update(notice(true, () => { done += 10; })); });
+  assert.equal(text(), '已向 Carol、Dave 发送邀请');
+  context.mock.timers.tick(2999); assert.equal(done, 0, 'a new callback does not restart the six seconds');
+  context.mock.timers.tick(1); assert.equal(done, 10, 'and the newest callback is the one called');
+  await act(() => { tree.unmount(); });
+});
+
+scenario('the Invites tab has the Invite friends button for an owner or an admin only, and only when the host offers it', async context => {
+  const roles: [string, boolean][] = [['owner', true], ['admin', true], ['member', false]];
+  for (const [role, offered] of roles) {
+    const teamsFake = new FakeTeams();
+    teamsFake.teams = [team('team-aaaa', { role: role as 'owner' })];
+    const workspace = new TeamsWorkspace(teamsFake.api, uid, { storage: memoryStorage, environment: new EventTarget(), refreshDelay: 5 });
+    context.after(() => workspace.close());
+    await until(() => workspace.getSnapshot().detail?.members.length === 3, 'the team');
+    let invited = 0;
+    const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, zh: false, tab: 'invites', onTabChange() {}, onClose() {}, onInviteFriends: () => { invited++; } } as never));
+    context.after(() => page.unmount());
+    const button = page.find(node => node.type === 'button' && textOf(node) === 'Invite friends');
+    assert.equal(button.length, offered ? 1 : 0, role);
+    if (offered) {
+      assert.ok(page.text().indexOf('Invite friends') < page.text().indexOf('Create invite link'), 'above Create invite link');
+      await page.click(button[0]!); assert.equal(invited, 1);
+    }
+    const without = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, zh: false, tab: 'invites', onTabChange() {}, onClose() {} } as never));
+    context.after(() => without.unmount());
+    assert.equal(without.find(node => node.type === 'button' && textOf(node) === 'Invite friends').length, 0, `${role}: a host that has no Friends offers nothing`);
+  }
 });

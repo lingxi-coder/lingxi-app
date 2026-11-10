@@ -1,7 +1,7 @@
 import type { TeamMember, TeamsApi } from './index.js';
 import {
-  badgeCount, compareBlocks, confirmBody, definitive, FRIEND_CHAT, lookupBody, newRequestId,
-  type BlockEntry, type FriendCard, type FriendProfile, type FriendsApi, type FriendsCommand, type FriendsResult, type LookupResult, type Proof,
+  badgeCount, compareBlocks, compareOffers, confirmBody, definitive, FRIEND_CHAT, lookupBody, newRequestId, nextOfferExpiry,
+  type BlockEntry, type FriendCard, type FriendProfile, type FriendsApi, type FriendsCommand, type FriendsResult, type LookupResult, type Proof, type TeamOffer,
 } from './friends.js';
 import { TeamsWorkspace, type TeamsWorkspaceOptions } from './workspace.js';
 
@@ -38,7 +38,11 @@ export interface FriendsSnapshot {
   readonly blocks: BlockEntry[];
   readonly blocksLoading: boolean;
   readonly blocksError: string;
-  /** D14: incoming requests plus the unread of the friends. Render it with `badgeText`. */
+  /** `users/{uid}/teamOffers` (D27): live offers before expired ones, the newest first. Empty while the listener has not answered and after it failed. */
+  readonly offers: readonly TeamOffer[];
+  /** The clock (epoch milliseconds) the offers' state and the badge were worked out against: an offer is live while its `expiresAt` is after this. */
+  readonly now: number;
+  /** D14, D28: incoming requests, the unread of the friends and the live offers. Render it with `badgeText`. */
   readonly badge: number;
   /** In memory only (D2). Absent until `GET /v1/friends/profile` answered. */
   readonly profile: FriendProfile | undefined;
@@ -52,6 +56,8 @@ export interface FriendsSnapshot {
 export interface FriendsWorkspaceOptions {
   /** Options for each friend chat's pair-pinned {@link TeamsWorkspace} (command storage, environment). */
   chat?: Omit<TeamsWorkspaceOptions, 'pair'>;
+  /** The clock for offer expiry (D27, D28), in epoch milliseconds. Defaults to `Date.now`. */
+  now?: () => number;
 }
 
 export type ProfileChanges = Omit<Extract<FriendsCommand, { action: 'profile' }>, 'action'>;
@@ -64,8 +70,8 @@ const codeOf = (error: unknown): string => error instanceof Error && /^[A-Z][A-Z
 interface Chat extends FriendChat { teamId?: string; generation?: number; names?: string }
 
 /**
- * Everything the Friends views need from one signed-in account: the two owner-only listeners of D2 (and nothing per friend),
- * the profile, the page being shown, the open chat's pair-pinned {@link TeamsWorkspace}, and the actions of D3 to D15.
+ * Everything the Friends views need from one signed-in account: the three owner-only listeners of D2 (and nothing per friend),
+ * the profile, the page being shown, the open chat's pair-pinned {@link TeamsWorkspace}, and the actions of D3 to D15 and D26 to D30.
  * No React: `useSyncExternalStore(workspace.subscribe, workspace.getSnapshot)`. Actions resolve an error code, empty on
  * success, so a view can put the message under the control that failed. The workspace is closed on sign-out or a change
  * of account, which is all that D19 asks for: nothing here is kept on disk.
@@ -86,6 +92,9 @@ export class FriendsWorkspace {
   private blocks: BlockEntry[] = [];
   private blocksLoaded = false;
   private blocksError = '';
+  private offers: TeamOffer[] = [];
+  // D28: wakes the workspace when the earliest live offer expires, because the badge is a function of the clock.
+  private expiry: ReturnType<typeof setTimeout> | undefined;
   private profile: FriendProfile | undefined;
   private profileLoading = false;
   private profileError = '';
@@ -97,6 +106,8 @@ export class FriendsWorkspace {
   private readonly names = new Map<string, { displayName?: string; handle?: string }>();
   // D18: the id of the confirmation in flight, kept only to retry the same one after an unknown outcome.
   private attempt: { key: string; id: string } | undefined;
+  // D18, D30: the same for an offer action. Several can be in flight side by side, so these are kept by the request they belong to.
+  private readonly requests = new Map<string, string>();
 
   constructor(readonly api: FriendsApi, readonly teams: TeamsApi, readonly uid: string, private readonly options: FriendsWorkspaceOptions = {}) {
     this.current = this.build();
@@ -139,6 +150,9 @@ export class FriendsWorkspace {
 
   /** Show the root and ask its Requests section to scroll into view. */
   readonly showRequests = (): void => { this.requestsFocus++; this.show('home'); };
+
+  /** The Friends view was shown (D28): work the badge and the offers' state out against the clock again. */
+  readonly recount = (): void => this.publish();
 
   /**
    * Open a friend's chat. With `joined` (the friendship was just made) the friend's card is awaited; otherwise a
@@ -216,6 +230,27 @@ export class FriendsWorkspace {
     return '';
   };
 
+  /**
+   * D26: offer the team to a friend, always as a member. The request id is minted at the first tap and kept only
+   * until the outcome is known (D18). The sender is never told whether the friend joined.
+   */
+  readonly offerTeam = async (teamId: string, friendUid: string): Promise<string> => {
+    const outcome = await this.request(`offerTeam ${teamId} ${friendUid}`, requestId => ({ action: 'offerTeam', teamId, friendUid, requestId }));
+    return 'error' in outcome ? outcome.error : '';
+  };
+
+  /** D27: join the team of an offer (its id is the team id). The Teams list follows from its own listener. */
+  readonly acceptOffer = async (teamId: string): Promise<string> => {
+    const outcome = await this.request(`acceptOffer ${teamId}`, requestId => ({ action: 'acceptOffer', offerId: teamId, requestId }));
+    return 'error' in outcome ? outcome.error : '';
+  };
+
+  /** D27: decline a live offer or dismiss an expired one. It has no request id, so it is safe to repeat. */
+  readonly declineOffer = async (teamId: string): Promise<string> => {
+    const outcome = await this.call({ action: 'declineOffer', offerId: teamId });
+    return 'error' in outcome ? outcome.error : '';
+  };
+
   /** D11: one `profile` action with only the changed fields. */
   readonly saveProfile = async (changes: ProfileChanges): Promise<string> => {
     const outcome = await this.call({ action: 'profile', ...changes });
@@ -236,10 +271,11 @@ export class FriendsWorkspace {
     this.settle();
   };
 
-  /** Stops both listeners and the open chat. The workspace is unusable afterwards. */
+  /** Stops the listeners and the open chat. The workspace is unusable afterwards. */
   close(): void {
     if (this.closed) return;
     this.closed = true; this.watching++; this.profileRun++;
+    clearTimeout(this.expiry);
     for (const stop of this.stops.splice(0)) stop();
     this.dropChat();
     this.listeners.clear();
@@ -255,16 +291,28 @@ export class FriendsWorkspace {
     } catch (error) { return { error: codeOf(error) }; }
   }
 
+  /** An offer action: `make` gets the request id of the request `key` names, which is kept for a retry only while its outcome is unknown. */
+  private async request<C extends FriendsCommand>(key: string, make: (requestId: string) => C): Promise<{ value: FriendsResult<C> } | { error: string }> {
+    const requestId = this.requests.get(key) ?? newRequestId();
+    this.requests.set(key, requestId);
+    const outcome = await this.call(make(requestId));
+    if (!('error' in outcome) || definitive(outcome.error)) this.requests.delete(key);
+    return outcome;
+  }
+
   private watch(): void {
     for (const stop of this.stops.splice(0)) stop();
     const run = ++this.watching;
-    this.loaded = false; this.loadError = ''; this.blocksLoaded = false; this.blocksError = '';
+    this.loaded = false; this.loadError = ''; this.blocksLoaded = false; this.blocksError = ''; this.offers = [];
     const current = () => !this.closed && run === this.watching;
     this.stops.push(
       this.api.watchCards(cards => { if (!current()) return; this.raw = cards; this.loaded = true; this.loadError = ''; this.settle(); },
         code => { if (current()) { this.loaded = true; this.loadError = code; this.publish(); } }),
       this.api.watchBlocks(blocks => { if (!current()) return; this.blocks = [...blocks].sort(compareBlocks); this.blocksLoaded = true; this.blocksError = ''; this.publish(); },
         code => { if (current()) { this.blocksLoaded = true; this.blocksError = code; this.publish(); } }),
+      // D27: a failed offers listener shows and counts nothing; the next `retry` restarts it with the others.
+      this.api.watchOffers(offers => { if (!current()) return; this.offers = offers; this.publish(); },
+        () => { if (current()) { this.offers = []; this.publish(); } }),
     );
   }
 
@@ -315,14 +363,19 @@ export class FriendsWorkspace {
   private publish(): void {
     if (this.closed) return;
     this.current = this.build();
+    clearTimeout(this.expiry);
+    const next = nextOfferExpiry(this.offers, this.current.now);
+    // A timer cannot wait longer than a signed 32-bit number of milliseconds; the wake-up before the offer's expiry just looks again.
+    this.expiry = next === undefined ? undefined : setTimeout(this.recount, Math.min(next - this.current.now, 2 ** 31 - 1));
     for (const listener of [...this.listeners]) listener();
   }
 
   private build(): FriendsSnapshot {
-    const chat = this.chat;
+    const chat = this.chat, now = (this.options.now ?? Date.now)();
     return {
       uid: this.uid, page: this.page, loading: !this.loaded, loadError: this.loadError, cards: this.cards, blocks: this.blocks,
-      blocksLoading: !this.blocksLoaded, blocksError: this.blocksError, badge: badgeCount(this.cards),
+      blocksLoading: !this.blocksLoaded, blocksError: this.blocksError, offers: [...this.offers].sort(compareOffers(now)), now,
+      badge: badgeCount(this.cards, this.offers, now),
       profile: this.profile, profileLoading: this.profileLoading, profileError: this.profileError,
       chat: chat && { uid: chat.uid, name: chat.name, handle: chat.handle, workspace: chat.workspace, ended: chat.ended, joined: chat.joined },
       requestsFocus: this.requestsFocus,

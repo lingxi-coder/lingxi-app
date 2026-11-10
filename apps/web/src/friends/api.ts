@@ -1,11 +1,11 @@
 import { collection, doc, getDoc, onSnapshot, type Firestore } from 'firebase/firestore';
 import { getAuth, type User } from 'firebase/auth';
-import { friendsTransport, type BlockEntry, type FriendCard, type FriendProfile, type FriendsApi, type FriendsCommand } from '../../../../packages/teams/friends';
-import { firestoreBlock, firestoreFriendCard, firestoreFriendName } from '../../../../packages/teams/firestore.js';
+import { friendsTransport, type BlockEntry, type FriendCard, type FriendProfile, type FriendsApi, type FriendsCommand, type TeamOffer } from '../../../../packages/teams/friends';
+import { firestoreBlock, firestoreFriendCard, firestoreFriendName, firestoreTeamOffer } from '../../../../packages/teams/firestore.js';
 
 /**
- * The Friends API of a signed-in Web account: HTTP with its ID token, the two owner-only listeners of
- * `users/{uid}/friends` and `users/{uid}/blocks` on the page's Firestore, and one-shot reads of a friend's profile.
+ * The Friends API of a signed-in Web account: HTTP with its ID token, the three owner-only listeners of `users/{uid}/friends`,
+ * `users/{uid}/blocks` and `users/{uid}/teamOffers` on the page's Firestore, and one-shot reads of a friend's profile.
  * Nothing runs for another account: a call or snapshot after the account changed or `close()` is dropped.
  */
 export function webFriendsApi(user: User, db: Firestore, currentUid: () => string | undefined = () => getAuth(db.app).currentUser?.uid): FriendsApi & { close(): void } {
@@ -32,6 +32,7 @@ export function webFriendsApi(user: User, db: Firestore, currentUid: () => strin
     execute: <C extends FriendsCommand>(command: C) => checked('', command),
     watchCards: (next, failed) => watch<FriendCard>('friends', firestoreFriendCard, next, failed),
     watchBlocks: (next, failed) => watch<BlockEntry>('blocks', firestoreBlock, next, failed),
+    watchOffers: (next, failed) => watch<TeamOffer>('teamOffers', firestoreTeamOffer, next, failed),
     async readProfile(uid) {
       if (!live() || !/^[A-Za-z0-9_-]{1,128}$/u.test(uid)) return null;
       return firestoreFriendName((await getDoc(doc(db, 'profiles', uid))).data());

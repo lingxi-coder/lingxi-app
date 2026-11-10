@@ -1,5 +1,5 @@
 import type { DocumentData, Firestore, FirestoreError } from 'firebase/firestore';
-import type { BlockEntry, FriendCard } from './friends.js';
+import type { BlockEntry, FriendCard, TeamOffer } from './friends.js';
 import type { MessageScope, MessageSnapshot, TeamConversation, TeamMessage } from './messages.js';
 
 function timestamp(value: unknown): string | null {
@@ -54,6 +54,16 @@ export function firestoreFriendCard(uid: string, value: DocumentData): FriendCar
 /** `users/{uid}/blocks/{other}` -> entry. The name may be missing on an entry made before names were kept. */
 export function firestoreBlock(uid: string, value: DocumentData): BlockEntry {
   return defined({ uid, at: millis(value.at), displayName: typeof value.displayName === 'string' ? value.displayName : '', handle: nonEmpty(value.handle) });
+}
+
+/**
+ * `users/{uid}/teamOffers/{teamId}` -> offer with `expiresAt` in epoch milliseconds, or `undefined` for a document without the four
+ * strings or a readable `expiresAt` (D27): one bad offer never fails the list. The document id is the team id.
+ */
+export function firestoreTeamOffer(id: string, value: DocumentData): TeamOffer | undefined {
+  const { teamId, teamName, fromUid, fromName } = value, expires = timestamp(value.expiresAt);
+  if (![teamId, teamName, fromUid, fromName].every(field => typeof field === 'string') || !expires) return undefined;
+  return { teamId: id, teamName, fromUid, fromName, role: 'member', expiresAt: Date.parse(expires) };
 }
 
 /** `profiles/{uid}` -> the two fields a friend can change (D10), or `null` when the profile cannot be read. */

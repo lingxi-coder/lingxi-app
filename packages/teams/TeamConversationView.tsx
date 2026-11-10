@@ -13,7 +13,7 @@ import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type
 
 /**
  * A friend chat (D9) is this view on a pair team: the header is the friend, there is no details button or platform chip, there are no
- * Bot runs, and the chat marks itself read while its newest message is in view.
+ * Bot runs, and the chat marks itself read while its newest message is in view. A Bot DM of a friendship (D22) is the plain Teams view.
  */
 export interface FriendHeader {
   uid: string; name: string; handle?: string;
@@ -36,6 +36,8 @@ export interface TeamConversationViewProps {
   /** The current time for "Today" and "Yesterday". Defaults to now. */
   now?: number | Date;
   friend?: FriendHeader;
+  /** A Back button at the start of the header: a friendship's Bot DM returns to the friend chat (D22). */
+  onBack?(): void;
 }
 
 /** The second line of the header: who is in the conversation, or whether its Bot is reachable. */
@@ -85,7 +87,7 @@ export function TeamConversationView(props: TeamConversationViewProps): ReactEle
   return <ConversationPane key={`${snapshot.uid}:${team.id}:${team.generation}:${conversation.id}`} {...props} conversation={conversation} model={model} team={team} />;
 }
 
-function CreationBanner({ workspace, snapshot, zh }: { workspace: TeamsWorkspace; snapshot: TeamsSnapshot; zh: boolean }): ReactElement | null {
+export function CreationBanner({ workspace, snapshot, zh }: { workspace: TeamsWorkspace; snapshot: TeamsSnapshot; zh: boolean }): ReactElement | null {
   const creation = snapshot.creation, model = snapshot.messaging;
   if (!creation || !model) return null;
   const t = (en: string, cn: string) => zh ? cn : en;
@@ -98,7 +100,7 @@ function CreationBanner({ workspace, snapshot, zh }: { workspace: TeamsWorkspace
 
 type Pane = TeamConversationViewProps & { conversation: TeamConversation; model: NonNullable<TeamsSnapshot['messaging']>; team: NonNullable<TeamsSnapshot['team']> };
 
-function ConversationPane({ workspace, snapshot, zh, conversation, model, team, detailsOpen, onToggleDetails, renderAvatar, renderMarkdown, locale, now, friend }: Pane): ReactElement {
+function ConversationPane({ workspace, snapshot, zh, conversation, model, team, detailsOpen, onToggleDetails, renderAvatar, renderMarkdown, locale, now, friend, onBack }: Pane): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
   const uid = snapshot.uid, messages = snapshot.messages, tag = locale ?? (zh ? 'zh-CN' : 'en-US');
   const minute = Math.floor((now === undefined ? Date.now() : typeof now === 'number' ? now : now.getTime()) / 60_000);
@@ -211,6 +213,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
 
   return <section className="tw-scope tw-conv" aria-label={label}>
     <header className="tw-conv-head">
+      {onBack ? <button type="button" className="tw-icon-btn" aria-label={t('Back', '返回')} title={t('Back', '返回')} onClick={onBack}><Icon name="chevronLeft" /></button> : null}
       {friend ? <Avatar identity={{ kind: 'user', id: friend.uid, name: friend.name }} size={32} render={renderAvatar} />
         : <ConversationLead conversation={conversation} label={label} snapshot={snapshot} zh={zh} size={32} render={renderAvatar} />}
       <div className="tw-conv-title">

@@ -57,8 +57,10 @@ test('a profile, an action and a friend\'s profile are the service\'s, for the a
   const { invoke, calls, fail } = install();
   assert.deepEqual(await invoke({ type: 'profile', uid: 'alice' }), { value: { ok: true } });
   assert.deepEqual(await invoke({ type: 'execute', uid: 'alice', command: { action: 'accept', otherUid: 'bob' } }), { value: { ok: true } });
+  assert.deepEqual(await invoke({ type: 'execute', uid: 'alice', command: { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'bob', requestId: 'request-id-1' } }), { value: { ok: true } });
   assert.deepEqual(await invoke({ type: 'readProfile', uid: 'alice', friendUid: 'bob' }), { value: { ok: true } });
-  assert.deepEqual(calls, [['profile', 'alice'], ['execute', 'alice', { action: 'accept', otherUid: 'bob' }], ['readProfile', 'alice', 'bob']]);
+  assert.deepEqual(calls, [['profile', 'alice'], ['execute', 'alice', { action: 'accept', otherUid: 'bob' }],
+    ['execute', 'alice', { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'bob', requestId: 'request-id-1' }], ['readProfile', 'alice', 'bob']]);
   calls.length = 0;
   for (const input of [{ type: 'execute', uid: 'alice' }, { type: 'execute', uid: 'alice', command: 'accept' }, { type: 'readProfile', uid: 'alice', friendUid: 7 }, { type: 'delete', uid: 'alice' }, { uid: 'alice' }]) {
     assert.deepEqual(await invoke(input), { error: 'INVALID_INPUT' }, JSON.stringify(input));
@@ -75,13 +77,15 @@ test('a profile, an action and a friend\'s profile are the service\'s, for the a
 test('a watch is leased to the window that asked, validated, and released with it or by name', async () => {
   const { invoke, calls, windows } = install();
   for (const leaseId of [undefined, 'short', 'has space!', 'x'.repeat(65)]) assert.deepEqual(await invoke({ type: 'watch', uid: 'alice', collection: 'friends', leaseId }), { error: 'INVALID_INPUT' }, String(leaseId));
-  for (const collection of [undefined, 'teams', 'profiles', 'friends/bob']) assert.deepEqual(await invoke({ type: 'watch', uid: 'alice', collection, leaseId: 'lease-0001' }), { error: 'INVALID_INPUT' }, String(collection));
+  for (const collection of [undefined, 'teams', 'profiles', 'friends/bob', 'teamOffer', 'users/alice/teamOffers']) assert.deepEqual(await invoke({ type: 'watch', uid: 'alice', collection, leaseId: 'lease-0001' }), { error: 'INVALID_INPUT' }, String(collection));
   assert.deepEqual(calls, []);
 
   await invoke({ type: 'watch', uid: 'alice', collection: 'friends', leaseId: 'lease-0001' });
   await invoke({ type: 'watch', uid: 'alice', collection: 'blocks', leaseId: 'lease-0002' });
+  await invoke({ type: 'watch', uid: 'alice', collection: 'teamOffers', leaseId: 'lease-0003' });
   await invoke({ type: 'unwatch', uid: 'alice', leaseId: 'lease-0001' });
-  assert.deepEqual(calls, [['watch', '7:lease-0001:', 'alice', 'friends'], ['watch', '7:lease-0002:', 'alice', 'blocks'], ['releaseWatches', '7:lease-0001:']]);
+  assert.deepEqual(calls, [['watch', '7:lease-0001:', 'alice', 'friends'], ['watch', '7:lease-0002:', 'alice', 'blocks'], ['watch', '7:lease-0003:', 'alice', 'teamOffers'],
+    ['releaseWatches', '7:lease-0001:']]);
 
   calls.length = 0;
   windows[0]!.webContents.emit('did-start-navigation', {}, 'https://example.com', true, true);

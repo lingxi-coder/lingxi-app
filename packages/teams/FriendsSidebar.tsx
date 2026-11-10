@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import { friendsErrorText } from './errors.js';
-import { matchesFilter, friendCollator, sectionCards, SECTION_ROWS, unreadOf, type FriendCard } from './friends.js';
+import { friendsErrorText, offerErrorText } from './errors.js';
+import { matchesFilter, friendCollator, offerExpiry, sectionCards, SECTION_ROWS, unreadOf, type FriendCard, type OfferAction, type TeamOffer } from './friends.js';
 import type { FriendsSnapshot, FriendsWorkspace } from './friends-workspace.js';
 import { formatListTime } from './stream.js';
-import { Avatar, Icon, PopupMenu, UnreadBadge, type MenuItem, type RenderAvatar } from './ui';
+import { Avatar, Icon, PopupMenu, TeamMark, UnreadBadge, useDocumentShown, type MenuItem, type RenderAvatar } from './ui';
 import { pointerPreview } from './workspace.js';
 
 /** What every Friends view takes. */
@@ -23,8 +23,8 @@ export interface FriendsSidebarProps extends FriendsViewProps {
 }
 
 /**
- * The Friends root (D3): the header with Add friend and the more menu, the name banner, the requests (D4), the filter and the
- * friends in last-activity order (D5). A friend opens its chat; the two screens behind the menu and Add friend are pages of the workspace.
+ * The Friends root (D3): the header with Add friend and the more menu, the name banner, the team invitations (D27), the requests (D4),
+ * the filter and the friends in last-activity order (D5). A friend opens its chat; the two screens behind the menu and Add friend are pages of the workspace.
  */
 export function FriendsSidebar({ workspace, snapshot, zh, renderAvatar, locale, now }: FriendsSidebarProps): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
@@ -39,7 +39,10 @@ export function FriendsSidebar({ workspace, snapshot, zh, renderAvatar, locale, 
   const friends = useMemo(() => sections.friends.filter(card => matchesFilter(card, query)), [sections.friends, query]);
   const requests = sections.received.length + sections.sent.length;
   const searching = query.trim() !== '';
+  const shown = useDocumentShown();
 
+  // D28: the badge and the offers' state follow the clock, so they are worked out again whenever the view is shown.
+  useEffect(() => { if (shown) workspace.recount(); }, [shown, workspace]);
   useEffect(() => {
     if (snapshot.requestsFocus) requestsRef.current?.scrollIntoView?.({ block: 'start' });
   }, [snapshot.requestsFocus]);
@@ -53,7 +56,7 @@ export function FriendsSidebar({ workspace, snapshot, zh, renderAvatar, locale, 
     { id: 'profile', label: t('Profile settings', '个人资料设置'), onSelect: () => workspace.show('profile') },
     { id: 'blocked', label: t('Blocked people', '已屏蔽的人'), onSelect: () => workspace.show('blocked') },
   ];
-  const empty = !snapshot.loading && !snapshot.loadError && !snapshot.cards.length;
+  const empty = !snapshot.loading && !snapshot.loadError && !snapshot.cards.length && !snapshot.offers.length;
 
   return <nav className="tw-scope tw-sidebar" aria-label={t('Friends', '好友')}>
     <header className="tw-sidebar-head">
@@ -84,7 +87,12 @@ export function FriendsSidebar({ workspace, snapshot, zh, renderAvatar, locale, 
         <div className="tw-empty-actions"><button type="button" className="tw-primary" onClick={() => workspace.show('add')}>{t('Add friend', '添加好友')}</button></div>
       </div>
       : <div className="tw-sections">
-        {requests ? <section ref={requestsRef} className="tw-section" aria-labelledby="tw-friends-requests">
+        {snapshot.offers.length ? <section ref={requestsRef} className="tw-section" aria-labelledby="tw-friends-offers">
+          <div className="tw-section-head"><h3 id="tw-friends-offers">{t('Team invitations', '团队邀请')}</h3></div>
+          <Offers offers={snapshot.offers} now={snapshot.now} tag={tag} workspace={workspace} zh={zh}
+            onJoined={name => setNotice(t(`You joined “${name}”`, `你已加入“${name}”`))} />
+        </section> : null}
+        {requests ? <section ref={snapshot.offers.length ? undefined : requestsRef} className="tw-section" aria-labelledby="tw-friends-requests">
           <div className="tw-section-head"><h3 id="tw-friends-requests">{t('Friend requests', '好友请求')}</h3></div>
           <Requests title={t('Received', '收到的请求')} cards={sections.received} kind="received" workspace={workspace} zh={zh} renderAvatar={renderAvatar}
             onAccepted={name => setNotice(t(`You and ${name} are now friends`, `你和 ${name} 已成为好友`))} />
@@ -157,5 +165,50 @@ function Requests({ title, cards, kind, workspace, zh, renderAvatar, onAccepted 
       </li>)}
     </ul>
     {!all && cards.length > SECTION_ROWS ? <button type="button" className="tw-link tw-more" onClick={() => setAll(true)}>{t(`Show all (${cards.length})`, `显示全部（${cards.length}）`)}</button> : null}
+  </div>;
+}
+
+/**
+ * The team invitations (D27): at most 20 rows, then "Show all (n)". Join and Decline for a live offer, Dismiss for an expired one; a row is
+ * disabled while one of its actions runs, and what a failed action says (D30) stays under the row.
+ */
+function Offers({ offers, now, tag, workspace, zh, onJoined }: {
+  offers: readonly TeamOffer[]; now: number; tag: string; workspace: FriendsWorkspace; zh: boolean; onJoined(teamName: string): void;
+}): ReactElement {
+  const t = (en: string, cn: string) => zh ? cn : en;
+  const [all, setAll] = useState(false);
+  const [busy, setBusy] = useState<string>();
+  const [failed, setFailed] = useState<{ teamId: string; action: OfferAction; code: string }>();
+  const shown = all ? offers : offers.slice(0, SECTION_ROWS);
+  const act = async (offer: TeamOffer, action: 'acceptOffer' | 'declineOffer') => {
+    setBusy(offer.teamId); setFailed(undefined);
+    const code = await (action === 'acceptOffer' ? workspace.acceptOffer(offer.teamId) : workspace.declineOffer(offer.teamId));
+    setBusy(undefined);
+    if (code) setFailed({ teamId: offer.teamId, action, code }); else if (action === 'acceptOffer') onJoined(offer.teamName);
+  };
+  const relative = useMemo(() => new Intl.RelativeTimeFormat(tag, { numeric: 'always' }), [tag]);
+  return <div className="tw-friends-requests">
+    <ul className="tw-people" aria-label={t('Team invitations', '团队邀请')}>
+      {shown.map(offer => {
+        const expiry = offerExpiry(offer.expiresAt, now);
+        const when = expiry.state === 'live' ? relative.format(expiry.value, expiry.unit) : '';
+        return <li key={offer.teamId} className="tw-request" aria-busy={busy === offer.teamId}>
+          <TeamMark id={offer.teamId} name={offer.teamName} />
+          <div className="tw-person-text">
+            <b>{offer.teamName}</b>
+            <small>{t(`Invited by ${offer.fromName}`, `邀请人：${offer.fromName}`)}</small>
+            <small>{expiry.state === 'live' ? t(`Expires ${when}`, `${when} 到期`) : t('Expired', '已过期')}</small>
+            {failed?.teamId === offer.teamId ? <small role="alert" className="tw-error">{offerErrorText(failed.action, failed.code, zh)}</small> : null}
+          </div>
+          <div className="tw-person-actions">
+            {expiry.state === 'live' ? <>
+              <button type="button" className="tw-primary" disabled={busy === offer.teamId} onClick={() => void act(offer, 'acceptOffer')}>{t('Join', '加入')}</button>
+              <button type="button" disabled={busy === offer.teamId} onClick={() => void act(offer, 'declineOffer')}>{t('Decline', '拒绝')}</button>
+            </> : <button type="button" disabled={busy === offer.teamId} onClick={() => void act(offer, 'declineOffer')}>{t('Dismiss', '移除')}</button>}
+          </div>
+        </li>;
+      })}
+    </ul>
+    {!all && offers.length > SECTION_ROWS ? <button type="button" className="tw-link tw-more" onClick={() => setAll(true)}>{t(`Show all (${offers.length})`, `显示全部（${offers.length}）`)}</button> : null}
   </div>;
 }

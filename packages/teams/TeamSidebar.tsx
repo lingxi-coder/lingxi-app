@@ -4,7 +4,7 @@ import type { TeamConversation } from './messages.js';
 import { NewBotDmDialog, NewConversationDialog } from './NewConversationDialog';
 import { formatListTime } from './stream.js';
 import { CreateTeamDialog, JoinTeamDialog } from './team-dialogs';
-import { avatarColor, ConversationLead, Icon, initials, platformNotice, PopupMenu, rovingIndex, UnreadBadge, type DrawerTab, type MenuItem, type RenderAvatar } from './ui';
+import { ConversationLead, Icon, platformNotice, PopupMenu, rovingIndex, TeamMark, UnreadBadge, type DrawerTab, type MenuItem, type RenderAvatar } from './ui';
 import { conversationLabel, conversationPreview, groupConversations, unreadCount, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
 
 /** Rows shown per section before "Show more". The open conversation is always shown. */
@@ -198,11 +198,6 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
     {dialog?.kind === 'direct' ? <NewConversationDialog workspace={workspace} snapshot={snapshot} zh={zh} mode="direct" renderAvatar={renderAvatar} onClose={() => setDialog(null)} /> : null}
     {dialog?.kind === 'botDm' ? <NewBotDmDialog workspace={workspace} snapshot={snapshot} zh={zh} renderAvatar={renderAvatar} onClose={() => setDialog(null)} /> : null}
   </nav>;
-}
-
-/** A team's square mark: its initials on a color that stays the same for the team. */
-function TeamMark({ id, name }: { id: string; name: string }): ReactElement {
-  return <span className="tw-team-mark" aria-hidden="true" style={{ background: avatarColor(id) }}>{initials(name)}</span>;
 }
 
 function ConversationRow({ conversation, snapshot, zh, renderAvatar, selected, tabStop, locale, now, authorName, menuOpen, onMenu, onFocusRow, onSelect, onMarkRead, onOpenDetails }: {

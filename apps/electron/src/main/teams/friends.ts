@@ -1,16 +1,17 @@
 import { EventEmitter } from 'node:events';
-import { firestoreBlock, firestoreFriendCard, firestoreFriendName } from '../../../../../packages/teams/firestore';
-import { friendsTransport, type BlockEntry, type FriendCard, type FriendProfile, type FriendsCommand, type FriendsResult } from '../../../../../packages/teams/friends';
+import { firestoreBlock, firestoreFriendCard, firestoreFriendName, firestoreTeamOffer } from '../../../../../packages/teams/firestore';
+import { friendsTransport, type BlockEntry, type FriendCard, type FriendProfile, type FriendsCommand, type FriendsResult, type TeamOffer } from '../../../../../packages/teams/friends';
 import type { Account, TeamsService } from './service.js';
 
-const ACTIONS = new Set(['profile', 'lookup', 'request', 'redeem', 'accept', 'decline', 'cancel', 'remove', 'block', 'unblock', 'rotateCode', 'revokeCode']);
-/** The two collections the renderer may watch: `users/{uid}/friends` and `users/{uid}/blocks`. */
-export type FriendsCollection = 'friends' | 'blocks';
+const ACTIONS = new Set(['profile', 'lookup', 'request', 'redeem', 'accept', 'decline', 'cancel', 'remove', 'block', 'unblock', 'rotateCode', 'revokeCode',
+  'offerTeam', 'acceptOffer', 'declineOffer']);
+/** The three collections the renderer may watch: `users/{uid}/friends`, `users/{uid}/blocks` and `users/{uid}/teamOffers`. */
+export type FriendsCollection = 'friends' | 'blocks' | 'teamOffers';
 
 /**
- * Friends in the main process: the HTTP actions and the two owner-only listeners of D2, bound to the signed-in account. Every call
+ * Friends in the main process: the HTTP actions and the three owner-only listeners of D2 and D28, bound to the signed-in account. Every call
  * names the account it is for and fails with `INVALID_SESSION` once another account is signed in. The listeners run in the
- * Teams service's Firestore session; the renderer receives plain cards and blocks, never the SDK, a credential or a document.
+ * Teams service's Firestore session; the renderer receives plain cards, blocks and offers, never the SDK, a credential or a document.
  */
 export class FriendsService {
   private readonly events = new EventEmitter();
@@ -27,7 +28,7 @@ export class FriendsService {
     this.stopAccount = account.onChanged(() => this.syncAccount());
   }
 
-  onRows(callback: (event: { leaseId: string; rows: FriendCard[] | BlockEntry[] }) => void): () => void { this.events.on('rows', callback); return () => { this.events.off('rows', callback); }; }
+  onRows(callback: (event: { leaseId: string; rows: FriendCard[] | BlockEntry[] | TeamOffer[] }) => void): () => void { this.events.on('rows', callback); return () => { this.events.off('rows', callback); }; }
   onFailed(callback: (event: { leaseId: string; code: string }) => void): () => void { this.events.on('failed', callback); return () => { this.events.off('failed', callback); }; }
 
   profile(expectedUid: string): Promise<FriendProfile> { return this.request(expectedUid, '/profile'); }
@@ -60,9 +61,11 @@ export class FriendsService {
       this.syncAccount();
       if (epoch !== this.epoch || this.leases.get(leaseId) !== lease) return;
       const current = () => epoch === this.epoch && this.leases.get(leaseId) === lease;
-      const rows = (docs: { id: string; data(): Record<string, unknown> }[]) => collection === 'friends'
-        ? docs.flatMap(row => firestoreFriendCard(row.id, row.data()) ?? [])
-        : docs.map(row => firestoreBlock(row.id, row.data()));
+      const rows = (docs: { id: string; data(): Record<string, unknown> }[]) => {
+        if (collection === 'friends') return docs.flatMap(row => firestoreFriendCard(row.id, row.data()) ?? []);
+        if (collection === 'blocks') return docs.map(row => firestoreBlock(row.id, row.data()));
+        return docs.flatMap(row => firestoreTeamOffer(row.id, row.data()) ?? []);
+      };
       this.stops.set(leaseId, sdk.onSnapshot(sdk.collection(db, 'users', expectedUid, collection), snapshot => {
         if (current()) this.events.emit('rows', { leaseId, rows: rows(snapshot.docs) });
       }, () => {

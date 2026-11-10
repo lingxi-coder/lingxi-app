@@ -262,9 +262,9 @@ test('a fromCache snapshot reaches listeners but never revokes the host; an acco
  uid='other';epoch++;notify();assert.equal(revokes,1);
 });
 
-const seedDelivery=async(f:ReturnType<typeof fixture>,deadlineAt:number,deploymentId?:string)=>{
+const seedDelivery=async(f:ReturnType<typeof fixture>,deadlineAt:number,deploymentId?:string,team=teamId)=>{
  const b=(await f.privateStore.bindings('owner'))[0]!,payload={deploymentId:deploymentId??b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:'permit0001',inputGrantIds:b.grantIds};
- const intent={schemaVersion:1 as const,scope:{teamId,sharedBotId,conversationId,sessionEpoch:b.sessionEpoch},teamId,generation:1,taskId:'task00001',deadlineAt,commandId:'delivery001',payload};
+ const intent={schemaVersion:1 as const,scope:{teamId:team,sharedBotId,conversationId,sessionEpoch:b.sessionEpoch},teamId:team,generation:1,taskId:'task00001',deadlineAt,commandId:'delivery001',payload};
  await f.privateStore.saveExecution('owner',intent);
  await f.privateStore.saveDelivery('owner',{...intent,payload:{...payload,outcome:'failed',text:'Failed',finishedAt:deadlineAt-1,outputAudience:{mode:'published_inputs'},usage:{status:'missing'}}});
 };
@@ -458,6 +458,44 @@ test('a transient 401 on discovery leaves a running task alone, a definitive ref
  f.mock.service.hostMessages=async(c,command)=>{if(command.action==='listSharedBots'&&failure)throw failure;return original(c,command);};
  await wakeAndIdle(f);assert.equal(runs[0]!.signal.aborted,false);
  failure=new TeamsApiError('MEMBERSHIP_REQUIRED',403);await wakeAndIdle(f);assert.equal(runs[0]!.signal.aborted,true);
+});
+// D24: a friendship's team (`f_` + 40 hex) is never in `list()`, and the server decides whether the friendship still stands.
+const pairTeam=`f_${'ab12'.repeat(10)}`;
+const sentTo=(f:ReturnType<typeof fixture>,action:string,team:string)=>f.mock.commands.filter(c=>c.action===action&&c.teamId===team);
+// The friendship is over for the server: every command of the team is answered 403 MEMBERSHIP_REQUIRED. The actions that reach it are returned.
+const endFriendship=(f:ReturnType<typeof fixture>,team=pairTeam)=>{const original=f.mock.service.hostMessages.bind(f.mock.service),reached:string[]=[];
+ f.mock.service.hostMessages=async(c,command)=>{if(command.teamId===team){reached.push(command.action as string);throw new TeamsApiError('MEMBERSHIP_REQUIRED',403);}return original(c,command);};return reached;};
+test('a friendship team is discovered although list() never has it; an ordinary team missing from list() is still skipped',async t=>{
+ const pair=fixture(t),ordinary=fixture(t);
+ await pair.connector.publishLocalBot('owner',{...pair.input,teamId:pairTeam});pair.connector.revoke();await settle(()=>sentTo(pair,'listHostTasks',pairTeam).length>=1);await pair.connector.idle();
+ for(const action of ['listSharedBots','activateDeployment','heartbeatDeployment','listHostTasks'])assert.ok(sentTo(pair,action,pairTeam).length>=1,action);
+ assert.ok(pair.mock.commands.every(c=>c.generation===1&&c.teamId===pairTeam));
+ // The fake's list() answers for team00001 only.
+ await ordinary.connector.publishLocalBot('owner',{...ordinary.input,teamId:'team00002'});const before=ordinary.mock.commands.length;let listed=0;const list=ordinary.mock.service.list;ordinary.mock.service.list=async uid=>{listed++;return list(uid);};
+ ordinary.connector.revoke();await ordinary.connector.idle();assert.ok(listed>=1);assert.equal(ordinary.mock.commands.length,before);
+});
+test('a friendship team that answers MEMBERSHIP_REQUIRED stops its binding and is sent nothing more until revoke(), which asks again',async t=>{
+ const runs:TeamHostProcessOptions[]=[],events:Array<[string,any]>=[];const f=fixture(t,hold(runs));(f.connector as any).options.diagnostics=(event:string,details:any)=>events.push([event,details]);
+ await f.connector.publishLocalBot('owner',{...f.input,teamId:pairTeam});f.mock.tasks.push(queued());f.mock.wake();await settle(()=>runs.length===1);const stored=await f.privateStore.bindings('owner');
+ const reached=endFriendship(f);await wakeAndIdle(f);await settle(()=>runs[0]!.signal.aborted);await new Promise(r=>setTimeout(r,60));await f.connector.idle();
+ assert.ok(reached.length>=1);assert.ok(events.some(([event,d])=>event==='team_task_aborted'&&d.reason==='BINDING_STOPPED'));
+ const calls=reached.length;for(let pass=0;pass<3;pass++)await wakeAndIdle(f);f.mock.flicker();await f.connector.idle();assert.equal(reached.length,calls);
+ assert.deepEqual(await f.privateStore.bindings('owner'),stored,'the binding stays, as for a team the person left');
+ f.connector.revoke();await settle(()=>reached.length>calls);
+});
+test('a result waiting for a finished friendship is dropped at once, not retried until its deadline',async t=>{
+ const events:Array<[string,any]>=[];const f=fixture(t);(f.connector as any).options.diagnostics=(event:string,details:any)=>events.push([event,details]);
+ await f.connector.publishLocalBot('owner',{...f.input,teamId:pairTeam});await f.connector.idle();await seedDelivery(f,Date.now()+60000,undefined,pairTeam);
+ const reached=endFriendship(f);await wakeAndIdle(f);
+ assert.deepEqual(await pendingFiles(f),[0,0]);assert.deepEqual(events.filter(([event])=>event==='team_task_delivery_rejected'),[['team_task_delivery_rejected',{taskId:'task00001',code:'MEMBERSHIP_REQUIRED'}]]);
+ assert.ok(!reached.includes('completeTask'),'the team was already known to be over');
+});
+test('a pending publication of a finished friendship is not replayed on every pass',async t=>{
+ const f=fixture(t),original=f.mock.service.hostMessages.bind(f.mock.service);
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='publishSharedBot')throw new TeamsApiError('SERVICE_UNAVAILABLE',503);return original(c,command);};
+ await assert.rejects(f.connector.publishLocalBot('owner',{...f.input,teamId:pairTeam}),/SERVICE_UNAVAILABLE/);assert.equal((await f.privateStore.publications('owner')).length,1);
+ f.mock.service.hostMessages=original;const reached=endFriendship(f);await wakeAndIdle(f);assert.deepEqual(reached,['listSharedBots']);
+ for(let pass=0;pass<3;pass++)await wakeAndIdle(f);assert.deepEqual(reached,['listSharedBots']);
 });
 test('a worker frame survives one transient failure of authorize or read_chat, and the task completes',async t=>{
  let frames=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};

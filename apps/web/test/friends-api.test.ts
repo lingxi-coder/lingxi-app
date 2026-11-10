@@ -3,7 +3,7 @@ import test from 'node:test';
 import type { User } from 'firebase/auth';
 import type { Firestore } from 'firebase/firestore';
 import { TeamsApiError } from '../../../packages/teams';
-import { firestoreBlock, firestoreFriendCard, firestoreFriendName } from '../../../packages/teams/firestore';
+import { firestoreBlock, firestoreFriendCard, firestoreFriendName, firestoreTeamOffer } from '../../../packages/teams/firestore';
 import { friendsTransport } from '../../../packages/teams/friends';
 import { webFriendsApi } from '../src/friends/api';
 import { pairTeamId } from './support/fakeFriends';
@@ -64,6 +64,7 @@ test('the Web adapter does nothing for another account: not before the token, no
   assert.equal(requests, 1, 'a closed adapter sends nothing');
   assert.throws(() => slow.watchCards(() => {}, () => {}), /INVALID_SESSION/u);
   assert.throws(() => slow.watchBlocks(() => {}, () => {}), /INVALID_SESSION/u);
+  assert.throws(() => slow.watchOffers(() => {}, () => {}), /INVALID_SESSION/u);
   assert.equal(await slow.readProfile('bob'), null);
 });
 
@@ -106,4 +107,15 @@ test('a block keeps the name it was made with, and a profile gives only what a f
   assert.deepEqual(firestoreFriendName({ displayName: 'Bob B', handle: 'bobby', email: 'b@example.com', findByEmail: true }), { displayName: 'Bob B', handle: 'bobby' });
   assert.deepEqual(firestoreFriendName({ displayName: 3, handle: '' }), {});
   assert.equal(firestoreFriendName(undefined), null);
+});
+
+test('an offer becomes plain values with the expiry in milliseconds and nothing else of the document; one that is not whole is left out', () => {
+  const stored = { teamId: 'team-alpha', teamName: 'Launch crew', fromUid: 'bob', fromName: 'Bob', role: 'member', expiresAt: at(8000), secret: 'never read' };
+  assert.deepEqual(firestoreTeamOffer('team-alpha', stored), { teamId: 'team-alpha', teamName: 'Launch crew', fromUid: 'bob', fromName: 'Bob', role: 'member', expiresAt: 8000 });
+  assert.equal(firestoreTeamOffer('team-alpha', { ...stored, role: 'admin' })!.role, 'member', 'an offer is only ever for a member');
+  assert.equal(firestoreTeamOffer('team-id', { ...stored, teamId: 'other' })!.teamId, 'team-id', 'the document id is the team');
+  assert.equal(firestoreTeamOffer('team-alpha', { ...stored, expiresAt: at(-1000) })!.expiresAt, -1000, 'an expired offer is still an offer: the workspace decides');
+  for (const broken of [{ ...stored, teamName: undefined }, { ...stored, fromName: 7 }, { ...stored, fromUid: null }, { ...stored, teamId: undefined }, { ...stored, expiresAt: undefined }, { ...stored, expiresAt: 8000 }, {}]) {
+    assert.equal(firestoreTeamOffer('team-alpha', broken), undefined, JSON.stringify(broken));
+  }
 });

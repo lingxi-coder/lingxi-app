@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEve
 import { messageErrorText, teamsErrorText } from './errors.js';
 import type { TeamCommand, TeamMember, TeamRole } from './index.js';
 import { BotDirectory } from './BotDirectory';
+import { canInviteFriends } from './friends.js';
 import { Avatar, Dialog, Icon, platformNotice, rovingIndex, type DrawerTab, type RenderAvatar } from './ui';
 import type { TeamsSnapshot, TeamsWorkspace } from './workspace.js';
 
@@ -46,6 +47,8 @@ export interface TeamDetailsDrawerProps {
   locale?: string;
   /** Without it members have no Add friend action (D15). The host looks the person up and shows the result. */
   onAddFriend?(member: TeamMember): void;
+  /** Without it the Invites tab has no Invite friends button (D26). The host shows the picker. Only an owner or an admin sees the tab. */
+  onInviteFriends?(): void;
 }
 
 interface Confirmation { command: TeamCommand; title: string; confirm: string }
@@ -54,7 +57,7 @@ interface Confirmation { command: TeamCommand; title: string; confirm: string }
  * The right column: the open team's members, invitations and Bots. Leaving or deleting the team is
  * at the top, behind a confirmation. The left edge is a resize handle (280 to 480 pixels); Escape closes.
  */
-export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, width: controlledWidth, defaultWidth, onWidthChange, onClose, renderAvatar, locale, onAddFriend }: TeamDetailsDrawerProps): ReactElement | null {
+export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, width: controlledWidth, defaultWidth, onWidthChange, onClose, renderAvatar, locale, onAddFriend, onInviteFriends }: TeamDetailsDrawerProps): ReactElement | null {
   const t = (en: string, cn: string) => zh ? cn : en;
   const tag = locale ?? (zh ? 'zh-CN' : 'en-US');
   const id = useId();
@@ -174,6 +177,7 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
       </ul>;
     }
     return <div className="tw-invites">
+      {onInviteFriends && canInviteFriends(team.role) ? <button type="button" onClick={onInviteFriends}>{t('Invite friends', '邀请好友')}</button> : null}
       <form className="tw-form" onSubmit={event => { event.preventDefault(); void workspace.execute({ action: 'invite', teamId: team.id, requestId: crypto.randomUUID(), role: team.role === 'owner' ? inviteRole : 'member', maxUses: uses, ttlSeconds: ttl }); }}>
         <label>{t('Role', '加入角色')}
           <select value={team.role === 'owner' ? inviteRole : 'member'} disabled={team.role !== 'owner'} onChange={event => setInviteRole(event.target.value as 'member' | 'admin')}>

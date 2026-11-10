@@ -1,4 +1,4 @@
-import { TeamsApiError } from './index.js';
+import { TeamsApiError, type TeamRole } from './index.js';
 import type { TeamConversation } from './messages.js';
 
 // ─── Wire and card types (docs/FRIENDS-CLIENTS.md, appendix A) ──────────────
@@ -17,6 +17,8 @@ export interface FriendCard {
 }
 /** `users/{uid}/blocks/{other}`; `at` in epoch milliseconds. The name is the one the person had when blocked. */
 export interface BlockEntry { uid: string; at: number; displayName: string; handle?: string }
+/** `users/{uid}/teamOffers/{teamId}` as plain values: `expiresAt` in epoch milliseconds, `teamId` the document id. The names are snapshots from offer time. */
+export interface TeamOffer { teamId: string; teamName: string; fromUid: string; fromName: string; role: 'member'; expiresAt: number }
 export interface FriendProfile { uid: string; displayName: string; handle?: string; findByHandle: boolean; findByEmail: boolean; friendCode: { code: string; link: string } | null }
 export interface LookupResult { uid: string; displayName: string; handle?: string; relation: Relation }
 
@@ -28,7 +30,10 @@ export type FriendsCommand =
   | { action: 'request'; via: 'team'; teamId: string; uid: string; requestId: string; note?: string }
   | { action: 'redeem'; code: string; requestId: string }
   | { action: 'accept' | 'decline' | 'cancel' | 'remove' | 'block' | 'unblock'; otherUid: string }
-  | { action: 'rotateCode' | 'revokeCode' };
+  | { action: 'rotateCode' | 'revokeCode' }
+  | { action: 'offerTeam'; teamId: string; friendUid: string; requestId: string }
+  | { action: 'acceptOffer'; offerId: string; requestId: string }
+  | { action: 'declineOffer'; offerId: string };
 interface Ok { ok: true }
 export interface FriendsResults {
   profile: FriendProfile; lookup: LookupResult;
@@ -37,11 +42,15 @@ export interface FriendsResults {
   accept: { state: 'friends'; teamId: string };
   decline: Ok; cancel: Ok; remove: Ok; block: Ok; unblock: Ok;
   rotateCode: { code: string; link: string }; revokeCode: Ok;
+  /** `offerId` is the team id, opaque to clients; `expiresAt` an ISO time. */
+  offerTeam: { offerId: string; expiresAt: string };
+  acceptOffer: { teamId: string; generation: number; alreadyMember: boolean };
+  declineOffer: Ok;
 }
 export type FriendsResult<C extends FriendsCommand> = FriendsResults[C['action']];
 
 /**
- * What the Friends views need from an account: HTTP actions and the two owner-only listeners. Web talks to
+ * What the Friends views need from an account: HTTP actions and the three owner-only listeners. Web talks to
  * Firebase itself; Desktop's main process owns both and the renderer reaches them over IPC.
  */
 export interface FriendsApi {
@@ -51,6 +60,8 @@ export interface FriendsApi {
   /** The whole `users/{uid}/friends` collection on every change. `failed` (an error code) ends the watch. Returns the stop function. */
   watchCards(next: (cards: FriendCard[]) => void, failed: (code: string) => void): () => void;
   watchBlocks(next: (blocks: BlockEntry[]) => void, failed: (code: string) => void): () => void;
+  /** The whole `users/{uid}/teamOffers` collection on every change (D27); a document that is not a readable offer is skipped. */
+  watchOffers(next: (offers: TeamOffer[]) => void, failed: (code: string) => void): () => void;
   /** One-shot read of a friend's `profiles/{uid}` (D10). Resolves `null` when it cannot be read. */
   readProfile(uid: string): Promise<{ displayName?: string; handle?: string } | null>;
 }
@@ -60,6 +71,7 @@ export interface DesktopFriendsApi {
   execute<C extends FriendsCommand>(uid: string, command: C): Promise<FriendsResult<C>>;
   watchCards(uid: string, next: (cards: FriendCard[]) => void, failed: (code: string) => void): () => void;
   watchBlocks(uid: string, next: (blocks: BlockEntry[]) => void, failed: (code: string) => void): () => void;
+  watchOffers(uid: string, next: (offers: TeamOffer[]) => void, failed: (code: string) => void): () => void;
   readProfile(uid: string, friendUid: string): Promise<{ displayName?: string; handle?: string } | null>;
 }
 
@@ -145,11 +157,39 @@ export function matchesFilter(card: Pick<FriendCard, 'displayName' | 'handle'>, 
 
 /** `max(0, lastSeq - lastReadSeq)`; a missing counter is 0 and `lastChangeSeq` never counts. */
 export const unreadOf = (card: Pick<FriendCard, 'lastSeq' | 'lastReadSeq'>): number => Math.max(0, (card.lastSeq ?? 0) - (card.lastReadSeq ?? 0));
-/** Incoming requests plus the unread of the friends cards. `unread` lets a host count an open chat as read. */
-export const badgeCount = (cards: readonly Pick<FriendCard, 'state' | 'lastSeq' | 'lastReadSeq'>[], unread: (card: Pick<FriendCard, 'lastSeq' | 'lastReadSeq'>) => number = unreadOf): number =>
-  cards.reduce((sum, card) => sum + (card.state === 'incoming' ? 1 : card.state === 'friends' ? unread(card) : 0), 0);
+/** Incoming requests, the unread of the friends cards and the live team offers (D28). `unread` lets a host count an open chat as read. */
+export const badgeCount = (cards: readonly Pick<FriendCard, 'state' | 'lastSeq' | 'lastReadSeq'>[], offers: readonly Pick<TeamOffer, 'expiresAt'>[], nowMs: number,
+  unread: (card: Pick<FriendCard, 'lastSeq' | 'lastReadSeq'>) => number = unreadOf): number =>
+  cards.reduce((sum, card) => sum + (card.state === 'incoming' ? 1 : card.state === 'friends' ? unread(card) : 0), 0) + offers.filter(offer => offerLive(offer, nowMs)).length;
 /** Nothing at 0, the number up to 99, `99+` from 100. */
 export const badgeText = (count: number): string | null => count <= 0 ? null : count > BADGE_CAP ? `${BADGE_CAP}+` : String(count);
+
+// ─── Team offers (D26 to D28) ───────────────────────────────────────────────
+
+const HOUR = 3_600_000, DAY = 24 * HOUR;
+/** An offer is live strictly before its expiry, as on the server. */
+export const offerLive = (offer: Pick<TeamOffer, 'expiresAt'>, nowMs: number): boolean => offer.expiresAt > nowMs;
+/** The time left for the expiry line (D27): up to and including 24 hours it rounds up to whole hours, beyond that to whole days. */
+export type OfferExpiry = { state: 'live'; unit: 'hour' | 'day'; value: number } | { state: 'expired' };
+export function offerExpiry(expiresAtMs: number, nowMs: number): OfferExpiry {
+  const left = expiresAtMs - nowMs;
+  if (left <= 0) return { state: 'expired' };
+  return left <= DAY ? { state: 'live', unit: 'hour', value: Math.ceil(left / HOUR) } : { state: 'live', unit: 'day', value: Math.ceil(left / DAY) };
+}
+/** Live before expired, each the newest (the later expiry) first, then by team id. */
+export const compareOffers = (nowMs: number) => (a: Pick<TeamOffer, 'teamId' | 'expiresAt'>, b: Pick<TeamOffer, 'teamId' | 'expiresAt'>): number =>
+  Number(offerLive(b, nowMs)) - Number(offerLive(a, nowMs)) || b.expiresAt - a.expiresAt || byUid(a.teamId, b.teamId);
+/** The earliest expiry still ahead, when the badge changes by itself (D28); undefined when no offer is live. */
+export const nextOfferExpiry = (offers: readonly Pick<TeamOffer, 'expiresAt'>[], nowMs: number): number | undefined =>
+  offers.reduce<number | undefined>((next, offer) => offerLive(offer, nowMs) && (next === undefined || offer.expiresAt < next) ? offer.expiresAt : next, undefined);
+
+/** Only a team's owner or admin can invite friends, whatever the member count (D26); a full team answers `MEMBER_LIMIT`. */
+export const canInviteFriends = (role: TeamRole): boolean => role === 'owner' || role === 'admin';
+/** The invite picker's list (D26): friends who are not members, in the Friends order, narrowed by the filter. Requests are never listed. */
+export const invitePicker = <T extends FriendCard>(cards: readonly T[], memberUids: Iterable<string>, query: string, collator: Intl.Collator): T[] => {
+  const members = new Set(memberUids);
+  return cards.filter(card => card.state === 'friends' && !members.has(card.uid) && matchesFilter(card, query)).sort(compareFriends(collator));
+};
 
 // ─── One field, three kinds (D6, D7) ────────────────────────────────────────
 
@@ -217,6 +257,26 @@ const ERROR_KEYS = new Map([
   ['MEMBERSHIP_REQUIRED', 'friends_chat_unavailable'], ['STALE_MEMBERSHIP', 'friends_chat_unavailable'], ['CONVERSATION_REQUIRED', 'friends_chat_unavailable'],
 ]);
 export const friendsErrorKey = (code: string): string => ERROR_KEYS.get(code) ?? 'friends_error_generic';
+export type OfferAction = 'offerTeam' | 'acceptOffer' | 'declineOffer';
+// D30: the action's own codes first, then the codes every offer action shares. `friendsErrorKey` would read MEMBERSHIP_REQUIRED and
+// STALE_MEMBERSHIP as an ended chat, which they are not here.
+const OFFER_KEYS: Record<OfferAction, Map<string, string>> = {
+  offerTeam: new Map([
+    ['FRIEND_REQUIRED', 'friends_error_friend_required'], ['ALREADY_MEMBER', 'friends_error_already_member'], ['OFFER_LIMIT', 'friends_error_offer_limit'],
+    ['MEMBER_LIMIT', 'friends_error_member_limit'], ['ROLE_REQUIRED', 'friends_error_offer_role'], ['MEMBERSHIP_REQUIRED', 'friends_error_offer_team_gone'],
+    ['RATE_LIMITED', 'friends_error_rate_limited'],
+  ]),
+  acceptOffer: new Map([
+    ['MEMBER_LIMIT', 'friends_error_member_limit'], ['OFFER_UNAVAILABLE', 'friends_error_offer_unavailable'], ['STALE_MEMBERSHIP', 'friends_error_offer_unavailable'],
+    ['TEAM_LIMIT', 'friends_error_team_limit'],
+  ]),
+  declineOffer: new Map(),
+};
+const OFFER_COMMON = new Map([
+  ['SIGN_IN_REQUIRED', 'friends_error_session'], ['INVALID_SESSION', 'friends_error_session'], ['SERVICE_UNAVAILABLE', 'friends_error_network'],
+  ['INVALID_INPUT', 'friends_error_invalid_input'], ['INVALID_JSON', 'friends_error_invalid_input'],
+]);
+export const offerErrorKey = (action: OfferAction, code: string): string => OFFER_KEYS[action].get(code) ?? OFFER_COMMON.get(code) ?? 'friends_error_generic';
 /** The chat's ended-friendship codes (D9). */
 export const chatEnded = (code: string): boolean => friendsErrorKey(code) === 'friends_chat_unavailable';
 /** A request is retried with the same id only when its outcome is unknown: no answer, a timeout, or SERVICE_UNAVAILABLE. */

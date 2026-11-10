@@ -11,7 +11,7 @@ const en = canonical('en'), zh = canonical('zh-Hans');
 const normal = (text: string) => text.replace(/\$\{[^}]*\}|%1\$[sd]|%lld|%@/gu, '%1$s');
 const known = new Set(Object.keys(en).filter(key => typeof en[key] === 'string' && typeof zh[key] === 'string').map(key => JSON.stringify([normal(en[key] as string), normal(zh[key] as string)])));
 
-const views = ['AddFriendView', 'BlockedList', 'FriendChatView', 'FriendProfileSettings', 'FriendsMain', 'FriendsSidebar', 'friend-dialogs'];
+const views = ['AddFriendView', 'BlockedList', 'FriendBotsPanel', 'FriendChatView', 'FriendProfileSettings', 'FriendsMain', 'FriendsSidebar', 'friend-dialogs'];
 const literal = String.raw`(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|` + '`((?:[^`\\\\]|\\\\.)*)`)';
 const call = new RegExp(String.raw`\bt\(\s*${literal}\s*,\s*${literal}\s*\)`, 'gu');
 const unescape = (text: string) => text.replace(/\\(['"`\\])/gu, '$1');
@@ -26,6 +26,6 @@ test('every inline English and Chinese pair of the Friends views is a pair of th
       if (!known.has(JSON.stringify([normal(english), normal(chinese)]))) stray.push(`${view}: ${english} | ${chinese}`);
     }
   }
-  assert.ok(pairs >= 95, `the pattern found ${pairs} pairs; it has stopped matching the views`);
+  assert.ok(pairs >= 130, `the pattern found ${pairs} pairs; it has stopped matching the views`);
   assert.deepEqual(stray, [], 'words that exist only in a view are words the other clients will not say');
 });

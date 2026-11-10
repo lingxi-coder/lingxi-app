@@ -388,8 +388,8 @@ function subscribe<T>(channel: string, callback: (payload: T) => void): Unsubscr
   return () => ipcRenderer.removeListener(channel, listener);
 }
 
-/** One of the account's two Friends collections, as plain rows on every change; a failed watch is reported once and is over. */
-function watchFriends<T>(uid: string, collection: 'friends' | 'blocks', next: (rows: T[]) => void, failed: (code: string) => void): Unsubscribe {
+/** One of the account's three Friends collections, as plain rows on every change; a failed watch is reported once and is over. */
+function watchFriends<T>(uid: string, collection: 'friends' | 'blocks' | 'teamOffers', next: (rows: T[]) => void, failed: (code: string) => void): Unsubscribe {
   const leaseId = crypto.randomUUID();
   let closed = false;
   const stopRows = subscribe('lingxi:friends:rows', (event: { leaseId: string; rows: T[] }) => { if (event.leaseId === leaseId) next(event.rows); });
@@ -529,6 +529,7 @@ const api: LingxiApi = {
     execute: (uid, command) => friendsRequest({ type: 'execute', uid, command }),
     watchCards: (uid, next, failed) => watchFriends(uid, 'friends', next, failed),
     watchBlocks: (uid, next, failed) => watchFriends(uid, 'blocks', next, failed),
+    watchOffers: (uid, next, failed) => watchFriends(uid, 'teamOffers', next, failed),
     readProfile: (uid, friendUid) => friendsRequest({ type: 'readProfile', uid, friendUid }),
   },
   scheduled: {

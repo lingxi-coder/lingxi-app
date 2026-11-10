@@ -1,4 +1,4 @@
-import type { BlockEntry, FriendCard, FriendProfile, FriendsApi, FriendsCommand, FriendsResult, LookupResult } from '../../../../packages/teams/friends';
+import type { BlockEntry, FriendCard, FriendProfile, FriendsApi, FriendsCommand, FriendsResult, LookupResult, TeamOffer } from '../../../../packages/teams/friends';
 import { TeamsApiError } from '../../../../packages/teams';
 import { FriendsWorkspace, type FriendsSnapshot, type FriendsWorkspaceOptions } from '../../../../packages/teams/friends-workspace';
 import { FakeTeams, memoryStorage, uid } from './fakeTeams';
@@ -14,6 +14,8 @@ export function card(id: string, more: Partial<FriendCard> = {}): FriendCard {
   return { uid: id, state, displayName: NAME(id), since: Date.UTC(2026, 10, 1), ...(state === 'friends' ? { teamId: pairTeamId(id), generation: 1 } : {}), ...more };
 }
 export const block = (id: string, at: number, more: Partial<BlockEntry> = {}): BlockEntry => ({ uid: id, at, displayName: NAME(id), ...more });
+/** An offer of team `teamId` from `from`, as `users/{uid}/teamOffers/{teamId}` holds it. */
+export const offer = (teamId: string, expiresAt: number, more: Partial<TeamOffer> = {}): TeamOffer => ({ teamId, teamName: `Team ${teamId}`, fromUid: 'bob', fromName: 'Bob', role: 'member', expiresAt, ...more });
 export const profile = (more: Partial<FriendProfile> = {}): FriendProfile => ({
   uid, displayName: 'Alice', handle: 'alice_w', findByHandle: true, findByEmail: false,
   friendCode: { code: 'a'.repeat(32), link: `https://lingxios.net/open/friend/add?code=${'a'.repeat(32)}` }, ...more,
@@ -24,10 +26,11 @@ export const pointer = (seq: number, more: Partial<NonNullable<FriendCard['lastM
 
 interface Watch<Row> { next(rows: Row[]): void; failed(code: string): void; open: boolean }
 
-/** A scriptable `FriendsApi`: both listeners are tracked so a test can prove they were released, and every command is recorded. */
+/** A scriptable `FriendsApi`: the three listeners are tracked so a test can prove they were released, and every command is recorded. */
 export class FakeFriends {
   cards: FriendCard[] = [];
   blocks: BlockEntry[] = [];
+  offers: TeamOffer[] = [];
   profile = profile();
   /** Per action, what the server answers; an `Error` is thrown, a function is called with the command. */
   replies = new Map<string, unknown>();
@@ -38,7 +41,8 @@ export class FakeFriends {
   names = new Map<string, { displayName?: string; handle?: string } | null>();
   readonly cardWatches: Watch<FriendCard>[] = [];
   readonly blockWatches: Watch<BlockEntry>[] = [];
-  /** Hold both listeners back: a test delivers the first snapshot itself. */
+  readonly offerWatches: Watch<TeamOffer>[] = [];
+  /** Hold the listeners back: a test delivers the first snapshot itself. */
   quiet = false;
 
   readonly api: FriendsApi = {
@@ -56,6 +60,7 @@ export class FakeFriends {
     },
     watchCards: (next, failed) => this.watch(this.cardWatches, next, failed, () => this.cards),
     watchBlocks: (next, failed) => this.watch(this.blockWatches, next, failed, () => this.blocks),
+    watchOffers: (next, failed) => this.watch(this.offerWatches, next, failed, () => this.offers),
     readProfile: async friend => { this.readProfiles.push(friend); return this.names.get(friend) ?? null; },
   };
 
@@ -71,6 +76,8 @@ export class FakeFriends {
       case 'redeem': return { state: 'friends', uid: 'other', teamId: pairTeamId('other') };
       case 'accept': return { state: 'friends', teamId: pairTeamId(command.otherUid) };
       case 'rotateCode': return { code: 'b'.repeat(32), link: `https://lingxios.net/open/friend/add?code=${'b'.repeat(32)}` };
+      case 'offerTeam': return { offerId: command.teamId, expiresAt: new Date(Date.UTC(2026, 10, 9)).toISOString() };
+      case 'acceptOffer': return { teamId: command.offerId, generation: 1, alreadyMember: false };
       case 'profile': return { ...this.profile, ...command };
       default: return { ok: true };
     }
@@ -86,8 +93,10 @@ export class FakeFriends {
   emitBlocks(rows: BlockEntry[] = this.blocks): void { this.blocks = rows; for (const watch of this.blockWatches) if (watch.open) watch.next(structuredClone(rows)); }
   failCards(code = 'SERVICE_UNAVAILABLE'): void { for (const watch of this.cardWatches) if (watch.open) watch.failed(code); }
   failBlocks(code = 'SERVICE_UNAVAILABLE'): void { for (const watch of this.blockWatches) if (watch.open) watch.failed(code); }
-  get open(): { cards: number; blocks: number } {
-    return { cards: this.cardWatches.filter(watch => watch.open).length, blocks: this.blockWatches.filter(watch => watch.open).length };
+  emitOffers(rows: TeamOffer[] = this.offers): void { this.offers = rows; for (const watch of this.offerWatches) if (watch.open) watch.next(structuredClone(rows)); }
+  failOffers(code = 'SERVICE_UNAVAILABLE'): void { for (const watch of this.offerWatches) if (watch.open) watch.failed(code); }
+  get open(): { cards: number; blocks: number; offers: number } {
+    return { cards: this.cardWatches.filter(watch => watch.open).length, blocks: this.blockWatches.filter(watch => watch.open).length, offers: this.offerWatches.filter(watch => watch.open).length };
   }
   executed(action: FriendsCommand['action']): FriendsCommand[] { return this.commands.filter(command => command.action === action); }
 }

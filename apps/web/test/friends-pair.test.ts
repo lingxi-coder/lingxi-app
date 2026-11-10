@@ -4,7 +4,7 @@ import { FRIEND_CHAT } from '../../../packages/teams/friends';
 import type { MessageMutation } from '../../../packages/teams/messages';
 import { TeamsWorkspace, type TeamsSnapshot } from '../../../packages/teams/workspace';
 import { pairTeamId } from './support/fakeFriends';
-import { FakeTeams, conversation, memoryStorage, members, message, team, uid, until } from './support/fakeTeams';
+import { FakeTeams, botCard, conversation, memoryStorage, members, message, team, uid, until } from './support/fakeTeams';
 
 // A friend chat is the Teams workspace pinned to the pair team (D9): same messages, none of the Team around it.
 const id = pairTeamId('bob');
@@ -18,7 +18,7 @@ function pair(setup: (fake: FakeTeams) => void = () => {}) {
   return { fake, workspace, snapshot: (): TeamsSnapshot => workspace.getSnapshot() };
 }
 
-test('a pair workspace is ready at once, opens its one conversation, and never lists, loads detail, or fetches Bot cards', async context => {
+test('a pair workspace is ready at once, opens its one conversation, never lists or loads detail, and fetches the friendship\'s Bot cards (D21)', async context => {
   const { fake, workspace, snapshot } = pair(); context.after(() => workspace.close());
   assert.equal(snapshot().loading, false, 'the team and its two people are given, not fetched');
   assert.equal(snapshot().selectedTeamId, id); assert.equal(snapshot().team?.name, 'Bob'); assert.deepEqual(snapshot().directory.map(value => value.uid), ['alice', 'bob']);
@@ -27,8 +27,10 @@ test('a pair workspace is ready at once, opens its one conversation, and never l
   await workspace.refresh();
   assert.equal(fake.listCalls, 0); assert.deepEqual(fake.detailCalls, []);
   assert.equal(fake.changed.size, 0, 'nothing follows the membership of a team that is not listed');
-  assert.deepEqual(fake.commands.filter(command => !['read', 'mutate', 'create'].includes(command.action)), [], 'no Bot cards, no tasks');
-  assert.deepEqual(snapshot().bots, []);
+  const asked = fake.commands.filter(command => !['read', 'mutate', 'create'].includes(command.action));
+  assert.deepEqual(asked.map(command => command.action), ['listSharedBots'], 'the Bot cards, and no tasks');
+  assert.deepEqual([asked[0]!.teamId, asked[0]!.generation], [id, 1], 'of the pair team');
+  assert.deepEqual(snapshot().bots, []); assert.equal(snapshot().botsLoaded, true); assert.equal(snapshot().botsError, '');
   assert.ok(fake.watches.every(watch => watch.scope.teamId === id && watch.scope.generation === 1));
 });
 
@@ -72,4 +74,46 @@ test('closing releases the pair team\'s listeners', async () => {
   await until(() => snapshot().messages.length === 2 && fake.openWatches > 0, 'the thread');
   workspace.close();
   assert.equal(fake.openWatches, 0);
+});
+
+// ── The friendship's Bots (D21, D22, D25) ──
+
+test('the Bot cards are the pair team\'s: the friend\'s and the viewer\'s own, with the failure code kept for the chat to read', async context => {
+  const friendsBot = botCard({ maintainer: { uid: 'bob', generation: 1 } });
+  const { fake, workspace, snapshot } = pair(f => { f.bots = [friendsBot, botCard({ sharedBotId: 'mine', maintainer: { uid: 'alice', generation: 1 }, state: 'paused' })]; });
+  context.after(() => workspace.close());
+  await until(() => snapshot().botsLoaded, 'the Bot cards');
+  assert.deepEqual(snapshot().bots.map(bot => bot.sharedBotId), ['assistant-fixture', 'mine']); assert.equal(snapshot().botsUnverified, false); assert.equal(snapshot().botsError, '');
+
+  fake.messages = async () => { throw new Error('MEMBERSHIP_REQUIRED'); };
+  await workspace.refreshBots();
+  assert.equal(snapshot().botsUnverified, true); assert.equal(snapshot().botsError, 'MEMBERSHIP_REQUIRED', 'the code the chat reads an ended friendship from');
+  assert.deepEqual(snapshot().bots.map(bot => bot.sharedBotId), [], 'what could not be verified is not shown');
+});
+
+test('Message opens the viewer\'s Bot DM on the pair team: a new one as createConversation bot_dm, the existing one when there is one, and Back selects the friend chat', async context => {
+  const card = botCard({ maintainer: { uid: 'bob', generation: 1 } });
+  const { fake, workspace, snapshot } = pair(f => { f.bots = [card]; });
+  context.after(() => workspace.close());
+  await until(() => snapshot().botsLoaded && snapshot().conversation?.id === FRIEND_CHAT, 'the chat and its Bots');
+  assert.equal(await workspace.openBotDm(card), true);
+  await until(() => fake.commands.some(command => command.action === 'createConversation'), 'the creation');
+  const created = fake.commands.find(command => command.action === 'createConversation')!;
+  assert.ok(created.action === 'createConversation');
+  assert.deepEqual([created.teamId, created.generation], [id, 1]);
+  assert.deepEqual({ ...created.payload, conversationId: '' }, { conversationId: '', kind: 'bot_dm', title: card.name, participantUids: [uid], sharedBotIds: [card.sharedBotId] });
+  assert.equal(snapshot().selectedConversationId, created.payload.conversationId, 'the new Bot DM is shown while it is confirmed');
+
+  // The server confirms it: the directory has the Bot DM beside the friend chat.
+  fake.conversations.set(id, [...fake.conversations.get(id)!, conversation(created.payload.conversationId, { kind: 'bot_dm', title: card.name, participants: ['user:alice', `shared_bot:${card.sharedBotId}`] })]);
+  for (const watch of fake.open(id)) fake.deliver(watch);
+  await until(() => snapshot().conversation?.id === created.payload.conversationId, 'the Bot DM');
+  workspace.selectConversation(FRIEND_CHAT);
+  await until(() => snapshot().conversation?.id === FRIEND_CHAT, 'the way back');
+  assert.equal(await workspace.openBotDm(card), true);
+  assert.equal(snapshot().selectedConversationId, created.payload.conversationId, 'the same Bot DM again');
+  assert.equal(fake.commands.filter(command => command.action === 'createConversation').length, 1, 'and no second one');
+
+  assert.equal(await workspace.openBotDm({ ...card, permitted: false }), false); assert.equal(snapshot().actionError, 'BOT_USE_REQUIRED');
+  await assert.rejects(workspace.startBotDm({ ...card, state: 'paused' }), /BOT_USE_REQUIRED/);
 });

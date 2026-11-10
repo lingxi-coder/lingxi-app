@@ -189,6 +189,8 @@ export interface TeamsSnapshot {
   readonly botsLoaded: boolean;
   /** The Bot list could not be fetched, so Bot availability is unknown. */
   readonly botsUnverified: boolean;
+  /** Code of the failed Bot list read behind `botsUnverified`; empty otherwise. A friend chat reads an ended friendship from it (D25). */
+  readonly botsError: string;
   /** Unread messages per team. The selected team counts its open directory, others a directory-only listener. */
   readonly unreadByTeam: Readonly<Record<string, number>>;
   readonly totalUnread: number;
@@ -206,8 +208,8 @@ export interface TeamsWorkspaceOptions {
   /** Teams (other than the selected one) that get a directory-only unread listener. */
   maxWatchedTeams?: number;
   /**
-   * A friend chat (D9): the workspace is pinned to this pair team and its one conversation, opened directly. It never
-   * lists teams, loads team detail or fetches Bot cards; `team` and the two-person `members` stand in for them.
+   * A friend chat (D9): the workspace is pinned to this pair team and its `conversationId`, opened directly. It never
+   * lists teams or loads team detail; `team` and the two-person `members` stand in for them. It does fetch Bot cards (D21).
    */
   pair?: { team: TeamSummary; members: TeamMember[]; conversationId: string };
 }
@@ -225,7 +227,7 @@ class BotCards {
   private running = false;
   private again = false;
   private deadline: ReturnType<typeof setTimeout> | undefined;
-  constructor(private readonly api: TeamsApi, private readonly scope: MessageScope, private readonly apply: (bots: SharedBotCard[] | undefined) => void) {}
+  constructor(private readonly api: TeamsApi, private readonly scope: MessageScope, private readonly apply: (bots: SharedBotCard[] | undefined, error?: string) => void) {}
   readonly refresh = async (): Promise<void> => {
     if (this.closed) return;
     if (this.running) { this.again = true; return; }
@@ -237,7 +239,7 @@ class BotCards {
         const expirations = result.bots.filter(bot => bot.ready && bot.onlineUntil && bot.onlineUntil > Date.now()).map(bot => bot.onlineUntil!);
         if (expirations.length) this.deadline = setTimeout(() => void this.refresh(), Math.max(1, Math.min(...expirations) - Date.now()));
       }
-    } catch { if (!this.closed) this.apply(undefined); }
+    } catch (error) { if (!this.closed) this.apply(undefined, codeOf(error)); }
     finally { this.running = false; if (this.again && !this.closed) { this.again = false; void this.refresh(); } }
   };
   close(): void { this.closed = true; clearTimeout(this.deadline); }
@@ -291,6 +293,7 @@ export class TeamsWorkspace {
   private bots: SharedBotCard[] = EMPTY_BOTS;
   private botsLoaded = false;
   private botsUnverified = false;
+  private botsError = '';
   private readonly conversationByTeam = new Map<string, string>();
   private readonly drafts = new Map<string, string>();
   // Unread of the other teams: one directory-only listener each (`watchMessages` with no conversation).
@@ -530,16 +533,16 @@ export class TeamsWorkspace {
     const focus = () => { void messaging.refresh(); if (this.error) void this.refresh(); };
     this.environment?.addEventListener('online', online); this.environment?.addEventListener('focus', focus);
     this.releaseMessaging = () => { stop(); messaging.close(); this.environment?.removeEventListener('online', online); this.environment?.removeEventListener('focus', focus); };
-    const botCards = this.pair ? undefined : new BotCards(this.api, scope, bots => {
+    const botCards = new BotCards(this.api, scope, (bots, error = '') => {
       if (this.botCards !== botCards) return;
-      this.bots = bots ?? EMPTY_BOTS; this.botsUnverified = !bots; this.botsLoaded = this.botsLoaded || !!bots; this.publish();
+      this.bots = bots ?? EMPTY_BOTS; this.botsUnverified = !bots; this.botsError = bots ? '' : error; this.botsLoaded = this.botsLoaded || !!bots; this.publish();
     });
     this.messaging = messaging; this.messagingTeam = team; this.botCards = botCards;
-    this.bots = EMPTY_BOTS; this.botsLoaded = false; this.botsUnverified = false; this.actionError = '';
+    this.bots = EMPTY_BOTS; this.botsLoaded = false; this.botsUnverified = false; this.botsError = ''; this.actionError = '';
     void messaging.start().catch(() => { if (this.messaging === messaging) { this.actionError = 'STORAGE_FAILED'; this.publish(); } });
     const remembered = this.conversationByTeam.get(team.id);
     if (remembered) messaging.select(remembered);
-    void botCards?.refresh();
+    void botCards.refresh();
   }
 
   private closeMessaging(): void {
@@ -551,7 +554,7 @@ export class TeamsWorkspace {
     this.releaseMessaging?.();
     this.botCards?.close();
     this.releaseMessaging = undefined; this.botCards = undefined; this.messaging = undefined; this.messagingTeam = undefined;
-    this.bots = EMPTY_BOTS; this.botsLoaded = false; this.botsUnverified = false;
+    this.bots = EMPTY_BOTS; this.botsLoaded = false; this.botsUnverified = false; this.botsError = '';
   }
 
   /** Keep one directory-only listener per other team, up to the limit; the selected team uses its controller. */
@@ -617,7 +620,7 @@ export class TeamsWorkspace {
       messages: model?.state.threads[selected]?.messages ?? EMPTY_MESSAGES,
       pending: this.outboxFor.value, creation: model?.state.creation, offline: model?.offline ?? false,
       messagingConnecting: model?.connecting ?? !!this.selection, messagingError: model?.error ?? '',
-      bots: this.bots, botsLoaded: this.botsLoaded, botsUnverified: this.botsUnverified,
+      bots: this.bots, botsLoaded: this.botsLoaded, botsUnverified: this.botsUnverified, botsError: this.botsError,
       unreadByTeam, totalUnread: Object.values(unreadByTeam).reduce((sum, value) => sum + value, 0),
     };
   }

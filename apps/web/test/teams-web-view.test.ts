@@ -3,6 +3,7 @@ import { type TestContext } from 'node:test';
 import { createElement } from 'react';
 import type { TeamsApi } from '../../../packages/teams';
 import { TeamsWorkspace, type TeamsSnapshot } from '../../../packages/teams/workspace';
+import { FakeFriends, card } from './support/fakeFriends';
 import { FakeTeams, botCard, conversation, memoryStorage, message, team, until, uid } from './support/fakeTeams';
 import { loadTeamsModule } from './support/loadTeamsModule';
 import { mount, reactTestRenderer, scenario, settle, textOf, withDom } from './support/workspacePage';
@@ -74,6 +75,42 @@ scenario('layout: an invitation from a link opens the join dialog once and joins
   assert.equal(page.find(node => node.type === 'input')[0].props.value, code, 'the code is filled in for the person to confirm');
   const waiting = await mount(workspace, () => createElement(TeamsWorkspaceLayout, { teams: { workspace: undefined, snapshot: undefined, signedIn: true }, zh: true } as never)); context.after(() => waiting.unmount());
   assert.match(waiting.text(), /正在加载/); assert.equal(waiting.byClass('teams-web-body').length, 0);
+});
+
+scenario('layout: an owner invites friends from the Invites tab; the Friends workspace lives only while the picker is open and the sender is told once afterwards (D26)', async context => {
+  const { fake, workspace } = await open(context);
+  const friends = new FakeFriends(); friends.cards = [card('bob'), card('carol'), card('dave')];
+  const page = await mount(workspace, layout(workspace, { friends: friends.api })); context.after(() => page.unmount());
+  await page.click(page.oneByClass('tw-switcher'));
+  await page.click(page.find(node => node.props.role === 'menuitem' && textOf(node) === 'Team members & settings')[0]);
+  await page.click(page.find(node => node.props.role === 'tab' && textOf(node) === 'Invites')[0]);
+  assert.deepEqual(friends.open, { cards: 0, blocks: 0, offers: 0 }, 'the Teams page runs no Friends listener');
+  await page.click(page.button('Invite friends'));
+  await until(() => friends.open.cards === 1 && friends.open.offers === 1, 'the picker\'s Friends workspace'); await page.during(() => undefined);
+  const dialog = () => page.find(node => node.type === 'dialog')[0]!;
+  assert.match(textOf(dialog()), /Invite friends to “Acme”/);
+  const names = () => dialog().findAll((node: any) => node.type === 'b').map(textOf);
+  assert.deepEqual(names(), ['Carol', 'Dave'], 'Bob is a member of the team the page holds');
+
+  const listCalls = fake.listCalls;
+  friends.fail('offerTeam', 'ALREADY_MEMBER');
+  await page.click(dialog().findAll((node: any) => node.type === 'button' && textOf(node) === 'Invite')[0]);
+  assert.deepEqual(names(), ['Dave'], 'Carol turned out to be a member'); await until(() => fake.listCalls > listCalls, 'the member list to be read again');
+  friends.replies.delete('offerTeam');
+  await page.click(dialog().findAll((node: any) => node.type === 'button' && textOf(node) === 'Invite')[0]);
+  assert.deepEqual(friends.executed('offerTeam').map(command => [(command as { teamId: string }).teamId, (command as { friendUid: string }).friendUid]), [['team-aaaa', 'carol'], ['team-aaaa', 'dave']]);
+  await page.click(page.button('Close'));
+  assert.equal(page.find(node => node.type === 'dialog').length, 0); assert.deepEqual(friends.open, { cards: 0, blocks: 0, offers: 0 }, 'closing the picker closes the Friends workspace');
+  assert.match(page.text(), /Invitation sent to Dave/); assert.doesNotMatch(page.text(), /Invitation sent to Carol/, 'only who was invited');
+});
+
+scenario('layout: without a Friends API the Invites tab has no Invite friends button', async context => {
+  const { workspace } = await open(context);
+  const page = await mount(workspace, layout(workspace)); context.after(() => page.unmount());
+  await page.click(page.oneByClass('tw-switcher'));
+  await page.click(page.find(node => node.props.role === 'menuitem' && textOf(node) === 'Team members & settings')[0]);
+  await page.click(page.find(node => node.props.role === 'tab' && textOf(node) === 'Invites')[0]);
+  assert.equal(page.find(node => node.type === 'button' && textOf(node) === 'Invite friends').length, 0); assert.match(page.text(), /Create invite link/);
 });
 
 scenario('useTeamsWorkspace opens a workspace for an account and releases it when the account, the API or the page goes', async context => {

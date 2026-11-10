@@ -50,10 +50,16 @@ test('the profile and every action go to /v1/friends with the account\'s token a
   await service.profile('alice');
   await service.execute('alice', { action: 'lookup', handle: 'sam' });
   await service.execute('alice', { action: 'request', via: 'handle', handle: 'sam', requestId: 'request-id-1', note: 'hi' });
+  await service.execute('alice', { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'bob', requestId: 'request-id-2' });
+  await service.execute('alice', { action: 'acceptOffer', offerId: 'team-alpha', requestId: 'request-id-3' });
+  await service.execute('alice', { action: 'declineOffer', offerId: 'team-beta' });
   assert.deepEqual(calls, [
     { url: 'https://lingxios.net/v1/friends/profile', method: 'GET', authorization: 'Bearer synthetic-token' },
     { url: 'https://lingxios.net/v1/friends', method: 'POST', authorization: 'Bearer synthetic-token', body: { action: 'lookup', handle: 'sam' } },
     { url: 'https://lingxios.net/v1/friends', method: 'POST', authorization: 'Bearer synthetic-token', body: { action: 'request', via: 'handle', handle: 'sam', requestId: 'request-id-1', note: 'hi' } },
+    { url: 'https://lingxios.net/v1/friends', method: 'POST', authorization: 'Bearer synthetic-token', body: { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'bob', requestId: 'request-id-2' } },
+    { url: 'https://lingxios.net/v1/friends', method: 'POST', authorization: 'Bearer synthetic-token', body: { action: 'acceptOffer', offerId: 'team-alpha', requestId: 'request-id-3' } },
+    { url: 'https://lingxios.net/v1/friends', method: 'POST', authorization: 'Bearer synthetic-token', body: { action: 'declineOffer', offerId: 'team-beta' } },
   ]);
 });
 
@@ -61,7 +67,7 @@ test('an action the service does not know is refused before anything is sent, an
   let sent = 0, answer = Response.json({ error: { code: 'HANDLE_TAKEN' } }, { status: 409 });
   context.mock.method(globalThis, 'fetch', async () => { sent++; return answer; });
   const { service } = fixture(context);
-  for (const action of ['delete', 'teams', '', 'toString']) await assert.rejects(service.execute('alice', { action } as never), /INVALID_INPUT/u, action);
+  for (const action of ['delete', 'teams', '', 'toString', 'offer', 'offerTeams', 'acceptOffers']) await assert.rejects(service.execute('alice', { action } as never), /INVALID_INPUT/u, action);
   await assert.rejects(service.execute('alice', undefined as never), /INVALID_INPUT/u);
   assert.equal(sent, 0);
   await assert.rejects(service.execute('alice', { action: 'profile', handle: 'taken' }), /^Error: HANDLE_TAKEN$/u);
@@ -120,6 +126,25 @@ test('watching: the cards and the blocks of the account arrive as plain values, 
   ]);
 });
 
+test('watching: the team offers of the account arrive as plain values with the expiry in milliseconds, an offer that breaks the contract is left out', async context => {
+  const { service, listeners, rows } = fixture(context);
+  await service.watch('1:offers:', 'alice', 'teamOffers');
+  assert.deepEqual(listeners.map(listener => listener.path), ['users/alice/teamOffers']);
+  const offer = (id: string, more: Record<string, unknown> = {}): Doc => ({ id, data: () => ({ teamId: id, teamName: 'Launch crew', fromUid: 'bob', fromName: 'Bob', role: 'member', expiresAt: stamp(8000), ...more }) });
+  listeners[0]!.next({ docs: [
+    offer('team-alpha'),
+    offer('team-beta', { teamName: 'Second crew', expiresAt: stamp(1000), secret: 'never leaves the main process' }),
+    offer('team-gamma', { teamName: undefined }),
+    offer('team-delta', { fromName: 7 }),
+    offer('team-epsilon', { expiresAt: 8000 }),
+    offer('team-zeta', { expiresAt: undefined }),
+  ] });
+  assert.deepEqual(rows, [{ leaseId: '1:offers:', rows: [
+    { teamId: 'team-alpha', teamName: 'Launch crew', fromUid: 'bob', fromName: 'Bob', role: 'member', expiresAt: 8000 },
+    { teamId: 'team-beta', teamName: 'Second crew', fromUid: 'bob', fromName: 'Bob', role: 'member', expiresAt: 1000 },
+  ] }], 'an expired offer is still a row: the workspace decides what it is');
+});
+
 test('a watch that fails is reported once and is over; rows after it are not sent', async context => {
   const { service, listeners, rows, failed } = fixture(context);
   await service.watch('1:cards:', 'alice', 'friends');
@@ -154,10 +179,11 @@ test('another account ends every watch and tells each lease, so no rows of the f
   const { service, listeners, rows, failed, signIn } = fixture(context);
   await service.watch('1:cards:', 'alice', 'friends');
   await service.watch('1:blocks:', 'alice', 'blocks');
+  await service.watch('1:offers:', 'alice', 'teamOffers');
   signIn('bob');
-  assert.deepEqual(listeners.map(listener => listener.stopped), [true, true]);
-  assert.deepEqual(failed.map(event => event.code), ['INVALID_SESSION', 'INVALID_SESSION']);
-  assert.deepEqual(failed.map(event => event.leaseId).sort(), ['1:blocks:', '1:cards:']);
+  assert.deepEqual(listeners.map(listener => listener.stopped), [true, true, true]);
+  assert.deepEqual(failed.map(event => event.code), ['INVALID_SESSION', 'INVALID_SESSION', 'INVALID_SESSION']);
+  assert.deepEqual(failed.map(event => event.leaseId).sort(), ['1:blocks:', '1:cards:', '1:offers:']);
   listeners[0]!.next({ docs: [card('stale')] });
   assert.deepEqual(rows, []);
   await assert.rejects(service.watch('2:cards:', 'alice', 'friends'), /INVALID_SESSION/u, 'the old account cannot watch');

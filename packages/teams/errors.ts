@@ -1,4 +1,4 @@
-import { friendsErrorKey } from './friends.js';
+import { friendsErrorKey, offerErrorKey, type OfferAction } from './friends.js';
 
 /** User-facing text for Teams error codes. Shared by the workspace views; codes stay language-neutral until shown. */
 
@@ -82,8 +82,25 @@ const friends: Record<string, [string, string]> = {
   friends_error_generic: ['Something went wrong. Try again.', '出了点问题，请重试。'],
   friends_chat_unavailable: ['This chat is no longer available.', '此聊天已不可用。'],
 };
+/** The offer keys of D30, by the key `offerErrorKey` gives. */
+const offers: Record<string, [string, string]> = {
+  friends_error_friend_required: ['You can only invite people who are still your friends.', '只能邀请仍是你好友的人。'],
+  friends_error_already_member: ['They are already in this team.', '对方已在此团队中。'],
+  friends_error_offer_limit: ['They already have 20 invitations waiting. Try again later.', '对方已有 20 个待处理的邀请，请稍后再试。'],
+  friends_error_member_limit: ['This team has reached 200 members.', '团队已达到 200 人上限。'],
+  friends_error_team_limit: ['You can join up to 20 teams. Leave one to accept this invitation.', '最多可加入 20 个团队。请先退出一个团队再接受邀请。'],
+  friends_error_offer_role: ['Only a team owner or admin can invite friends.', '只有团队所有者或管理员可以邀请好友。'],
+  friends_error_offer_team_gone: ['You are no longer a member of this team.', '你已不在此团队中。'],
+  friends_error_offer_unavailable: ['This invitation is no longer available.', '此邀请已失效。'],
+};
 
 /** Friends errors (D18): shown under the control that failed. Unknown codes read as the generic failure. */
 export function friendsErrorText(code: string, zh: boolean): string {
   return friends[friendsErrorKey(code)]![zh ? 1 : 0];
+}
+
+/** Offer errors (D30): the three offer actions have their own table, which shares the common texts of the friends errors. */
+export function offerErrorText(action: OfferAction, code: string, zh: boolean): string {
+  const key = offerErrorKey(action, code);
+  return (offers[key] ?? friends[key]!)[zh ? 1 : 0];
 }

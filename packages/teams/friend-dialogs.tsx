@@ -1,10 +1,10 @@
-import { useEffect, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { LookupCard, nowFriends, requestSentTo } from './AddFriendView';
-import { friendsErrorText } from './errors.js';
-import type { LookupResult, Proof } from './friends.js';
+import { friendsErrorText, offerErrorText } from './errors.js';
+import { friendCollator, invitePicker, type LookupResult, type Proof } from './friends.js';
 import type { FriendsWorkspace } from './friends-workspace.js';
-import type { TeamMember } from './index.js';
-import { Dialog, type RenderAvatar } from './ui';
+import type { TeamMember, TeamSummary } from './index.js';
+import { Avatar, Dialog, type RenderAvatar } from './ui';
 
 /** Runs one lookup when the dialog opens. `undefined` while it runs. */
 function useLookup(workspace: FriendsWorkspace, proof: Proof): { result: LookupResult } | { error: string } | undefined {
@@ -76,4 +76,83 @@ export function MemberFriendDialog({ workspace, zh, teamId, member, renderAvatar
       <div className="tw-dialog-actions"><button type="button" data-autofocus={done ? '' : undefined} onClick={onClose}>{done ? t('Close', '关闭') : t('Cancel', '取消')}</button></div>
     </div>
   </Dialog>;
+}
+
+/**
+ * D26: invite friends to a team. The list is the friends who are not in the team, in the Friends order, narrowed by the filter; Invite
+ * sends an offer for that row and the row then says `Invited` until the dialog closes. Closing reports the names invited, for the
+ * one-shot {@link InviteNotice}: nothing is stored, because the sender cannot read offers.
+ */
+export function InviteFriendsDialog({ workspace, zh, team, members, locale, renderAvatar, refreshMembers, onClose }: {
+  workspace: FriendsWorkspace; zh: boolean; team: Pick<TeamSummary, 'id' | 'name'>; members: readonly Pick<TeamMember, 'uid'>[]; locale?: string; renderAvatar?: RenderAvatar;
+  /** A friend turned out to be a member already (`ALREADY_MEMBER`): the team's member list is stale. */
+  refreshMembers(): void;
+  onClose(invited: string[]): void;
+}): ReactElement {
+  const t = (en: string, cn: string) => zh ? cn : en;
+  const snapshot = useSyncExternalStore(workspace.subscribe, workspace.getSnapshot);
+  const tag = locale ?? (zh ? 'zh-CN' : 'en-US');
+  const collator = useMemo(() => friendCollator(tag), [tag]);
+  const [query, setQuery] = useState('');
+  const [busy, setBusy] = useState<string[]>([]);
+  const [sent, setSent] = useState<{ uid: string; name: string }[]>([]);
+  // People the server says are members already: out of the list even before the team's member list catches up.
+  const [joined, setJoined] = useState<string[]>([]);
+  const [failed, setFailed] = useState<{ uid: string; code: string }>();
+  const list = useMemo(() => invitePicker(snapshot.cards, [...members.map(member => member.uid), ...joined], query, collator), [snapshot.cards, members, joined, query, collator]);
+  const invite = async (uid: string, name: string) => {
+    setBusy(old => [...old, uid]); setFailed(undefined);
+    const code = await workspace.offerTeam(team.id, uid);
+    setBusy(old => old.filter(value => value !== uid));
+    if (!code) setSent(old => [...old, { uid, name }]);
+    else {
+      setFailed({ uid, code });
+      if (code === 'ALREADY_MEMBER') { setJoined(old => [...old, uid]); refreshMembers(); }
+    }
+  };
+  const close = () => onClose(sent.map(value => value.name));
+  return <Dialog title={t(`Invite friends to “${team.name}”`, `邀请好友加入“${team.name}”`)} onClose={close}>
+    <div className="tw-form">
+      <input type="search" data-autofocus className="tw-friends-filter" aria-label={t('Search friends', '搜索好友')} placeholder={t('Search friends', '搜索好友')}
+        value={query} onChange={event => setQuery(event.target.value)} />
+      {snapshot.loading ? <p className="tw-hint" role="status">{t('Loading friends…', '正在加载好友…')}</p>
+        : snapshot.loadError ? <div className="tw-empty-actions">
+          <p role="alert" className="tw-error">{t("Couldn't load your friends. Check your connection and try again.", '无法加载好友，请检查网络后重试。')}</p>
+          <button type="button" onClick={workspace.retry}>{t('Retry', '重试')}</button>
+        </div>
+        : !list.length ? <p className="tw-hint" role="status">{query.trim() ? t('No matching friends', '没有匹配的好友') : t('No friends to invite. Friends who are already in this team are not listed.', '没有可邀请的好友。已在此团队中的好友不会显示。')}</p>
+        : <ul className="tw-people tw-invite-picker" aria-label={t('Friends', '好友')}>
+          {list.map(card => {
+            const done = sent.some(value => value.uid === card.uid), running = busy.includes(card.uid);
+            return <li key={card.uid} aria-busy={running}>
+              <Avatar identity={{ kind: 'user', id: card.uid, name: card.displayName }} size={32} render={renderAvatar} />
+              <div className="tw-person-text">
+                <b>{card.displayName}</b>
+                {card.handle ? <small>@{card.handle}</small> : null}
+                {failed?.uid === card.uid ? <small role="alert" className="tw-error">{offerErrorText('offerTeam', failed.code, zh)}</small> : null}
+              </div>
+              <div className="tw-person-actions">
+                <button type="button" disabled={running || done} onClick={() => void invite(card.uid, card.displayName)}>{done ? t('Invited', '已邀请') : t('Invite', '邀请')}</button>
+              </div>
+            </li>;
+          })}
+        </ul>}
+      {failed && !list.some(card => card.uid === failed.uid) ? <p role="alert" className="tw-error">{offerErrorText('offerTeam', failed.code, zh)}</p> : null}
+      <p className="tw-hint">{t('Your friend gets an invitation they can accept or decline. They see the team’s name and your name, and nothing else is shared until they join. Invitations expire after 7 days.', '好友会收到一份可接受或拒绝的邀请，只会看到团队名称和你的名称，加入之前不会共享其他任何内容。邀请 7 天后过期。')}</p>
+      <div className="tw-dialog-actions"><button type="button" onClick={close}>{t('Close', '关闭')}</button></div>
+    </div>
+  </Dialog>;
+}
+
+/** D26: what the person invited, once, after the picker closed. It goes away by itself, like the other notices of the Friends views. */
+export function InviteNotice({ names, zh, onDone }: { names: string[]; zh: boolean; onDone(): void }): ReactElement {
+  const t = (en: string, cn: string) => zh ? cn : en;
+  const done = useRef(onDone);
+  done.current = onDone;
+  useEffect(() => {
+    const timer = setTimeout(() => done.current(), 6000);
+    return () => clearTimeout(timer);
+  }, [names]);
+  const who = names.join(zh ? '、' : ', ');
+  return <p className="tw-banner" role="status">{t(`Invitation sent to ${who}`, `已向 ${who} 发送邀请`)}</p>;
 }

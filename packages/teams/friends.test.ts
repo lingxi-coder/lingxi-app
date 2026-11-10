@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { parseDeepLink } from '../deep-links/index';
-import { friendsErrorText } from './errors';
+import { friendsErrorText, offerErrorText } from './errors';
 import {
-  badgeCount, badgeText, BADGE_CAP, chatEnded, classifyQuery, compareCards, compareFriends, compareRequests, confirmBody, definitive, FRIEND_CHAT, friendCodeOf, friendCollator,
-  friendLink, friendsErrorKey, handleValid, lookupBody, matchesFilter, NAME_MAX, nameValid, newRequestId, NOTE_MAX, noteValid, relationAction, SECTION_ROWS, sectionCards, unreadOf,
-  type FriendCard, type Proof,
+  badgeCount, badgeText, BADGE_CAP, canInviteFriends, chatEnded, classifyQuery, compareCards, compareFriends, compareOffers, compareRequests, confirmBody, definitive, FRIEND_CHAT,
+  friendCodeOf, friendCollator, friendLink, friendsErrorKey, handleValid, invitePicker, lookupBody, matchesFilter, NAME_MAX, nameValid, newRequestId, nextOfferExpiry, NOTE_MAX,
+  noteValid, offerErrorKey, offerExpiry, offerLive, relationAction, SECTION_ROWS, sectionCards, unreadOf,
+  type FriendCard, type OfferAction, type Proof, type TeamOffer,
 } from './friends';
 
 // The shared vectors every client loads and none adjusts (docs/FRIENDS-CLIENTS.md, section 5).
@@ -82,11 +83,11 @@ test('unread: max(0, lastSeq - lastReadSeq), a missing counter is 0', () => {
 
 test('badge: incoming plus unread, nothing at 0, 99+ from 100', () => {
   for (const row of vectors.badge) {
-    assert.equal(badgeCount(row.cards), row.expectCount, row.note);
+    assert.equal(badgeCount(row.cards, [], vectors.offers.nowMs), row.expectCount, row.note);
     assert.equal(badgeText(row.expectCount), row.expectText, row.note);
   }
   // An open chat counted as read (D13) leaves the other cards alone.
-  assert.equal(badgeCount([{ state: 'incoming' }, { state: 'friends', lastSeq: 5 }, { state: 'friends', lastSeq: 3 }], value => value.lastSeq === 5 ? 0 : unreadOf(value)), 4);
+  assert.equal(badgeCount([{ state: 'incoming' }, { state: 'friends', lastSeq: 5 }, { state: 'friends', lastSeq: 3 }], [], vectors.offers.nowMs, value => value.lastSeq === 5 ? 0 : unreadOf(value)), 4);
 });
 
 test('relationAction: one action per relation', () => {
@@ -140,4 +141,82 @@ test('links.typed: only a parsed friend route is a destination', () => {
   const typed = (url: string) => { try { return friendLink(parseDeepLink(url)); } catch { return null; } };
   assert.ok(vectors.links.typed.length >= 25);
   for (const row of vectors.links.typed) assert.deepEqual(typed(row.url), row.expect, row.url);
+});
+
+// ─── Team offers (F4, D26 to D30) ───────────────────────────────────────────
+
+const { nowMs } = vectors.offers;
+const offer = (teamId: string, expiresAt: number): TeamOffer => ({ teamId, teamName: teamId, fromUid: 'friend', fromName: 'Friend', role: 'member', expiresAt });
+
+test('limits: the offer figures the texts and the server share', () => {
+  const { limits } = vectors;
+  assert.deepEqual([limits.offerTtlDays, limits.offerGraceDays, limits.offerLimit, limits.teamMemberLimit, limits.userTeamLimit], [7, 7, 20, 200, 20]);
+  const en = strings('en');
+  assert.match(en.friends_invite_disclosure!, new RegExp(`${limits.offerTtlDays} days`, 'u'));
+  assert.match(en.friends_error_offer_limit!, new RegExp(`${limits.offerLimit} invitations`, 'u'));
+  assert.match(en.friends_error_member_limit!, new RegExp(`${limits.teamMemberLimit} members`, 'u'));
+  assert.match(en.friends_error_team_limit!, new RegExp(`${limits.userTeamLimit} teams`, 'u'));
+});
+
+test('offers.expiry: hours up to 24 hours, then days, both rounded up; a strict comparison', () => {
+  assert.ok(vectors.offers.expiry.length >= 18);
+  for (const row of vectors.offers.expiry) {
+    assert.deepEqual(offerExpiry(row.expiresAtMs, nowMs), row.expect, row.note);
+    assert.equal(offerLive(offer('t', row.expiresAtMs), nowMs), row.expect.state === 'live', row.note);
+  }
+});
+
+test('offers.sort: live before expired, the later expiry first, then the team id', () => {
+  const { input, expect } = vectors.offers.sort;
+  const ids = (offers: TeamOffer[]) => offers.map(value => value.teamId);
+  assert.deepEqual(ids(input.map((row: { teamId: string; expiresAtMs: number }) => offer(row.teamId, row.expiresAtMs)).sort(compareOffers(nowMs))), expect);
+});
+
+test('offers.badge: live offers add to requests and unread; nothing expired counts', () => {
+  assert.ok(vectors.offers.badge.length >= 10);
+  for (const row of vectors.offers.badge) {
+    const count = badgeCount(row.cards, row.offers.map((expiresAt: number) => ({ expiresAt })), nowMs);
+    assert.equal(count, row.expectCount, row.note);
+    assert.equal(badgeText(count), row.expectText, row.note);
+  }
+});
+
+test('nextOfferExpiry: the earliest live expiry, none without a live offer', () => {
+  assert.equal(nextOfferExpiry([], nowMs), undefined);
+  assert.equal(nextOfferExpiry([offer('a', nowMs - 1), offer('b', nowMs)], nowMs), undefined);
+  assert.equal(nextOfferExpiry([offer('a', nowMs + 5000), offer('b', nowMs + 1), offer('c', nowMs - 9), offer('d', nowMs + 9000)], nowMs), nowMs + 1);
+});
+
+test('offers.picker: friends outside the team in the Friends order, narrowed by the filter', () => {
+  const { cards, cases } = vectors.offers.picker;
+  assert.ok(cases.length >= 13);
+  for (const locale of locales) {
+    const collator = friendCollator(locale);
+    for (const row of cases) assert.deepEqual(uids(invitePicker((row.cards ?? cards).map(card), row.members, row.query, collator)), row.expect, `${locale} ${row.note}`);
+  }
+  // The list never changes the cards it was given.
+  const given = cards.map(card);
+  invitePicker(given, ['me'], '', friendCollator('en-US'));
+  assert.deepEqual(uids(given), cards.map((value: { uid: string }) => value.uid));
+});
+
+test('offers.entry: only an owner or an admin, whatever the member count', () => {
+  assert.ok(vectors.offers.entry.length >= 5);
+  for (const row of vectors.offers.entry) assert.equal(canInviteFriends(row.role), row.expect, `${row.role} ${row.memberCount}`);
+});
+
+test('offers.errors: the action\'s key, else the common one, else generic; the English and Chinese texts', () => {
+  assert.ok(vectors.offers.errors.length >= 33);
+  const en = strings('en'), zh = strings('zh-Hans');
+  for (const row of vectors.offers.errors) {
+    const label = `${row.action} ${row.code}`;
+    assert.equal(offerErrorKey(row.action as OfferAction, row.code), row.key, label);
+    assert.equal(definitive(row.code), row.definitive, label);
+    assert.equal(offerErrorText(row.action as OfferAction, row.code, false), en[row.key], label);
+    assert.equal(offerErrorText(row.action as OfferAction, row.code, true), zh[row.key], label);
+  }
+  // D30: the chat's ended-friendship reading must not leak into the offer actions.
+  assert.equal(friendsErrorKey('MEMBERSHIP_REQUIRED'), 'friends_chat_unavailable');
+  assert.notEqual(offerErrorKey('offerTeam', 'MEMBERSHIP_REQUIRED'), 'friends_chat_unavailable');
+  assert.notEqual(offerErrorKey('acceptOffer', 'STALE_MEMBERSHIP'), 'friends_chat_unavailable');
 });

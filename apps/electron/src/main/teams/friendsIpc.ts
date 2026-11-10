@@ -1,7 +1,7 @@
 import { ipcMain, type BrowserWindow } from 'electron';
 import type { FriendsService } from './friends.js';
 
-/** `lingxi:friends`: the Friends actions, profile reads and the two watches, each bound to the account the renderer names. */
+/** `lingxi:friends`: the Friends actions, profile reads and the three watches, each bound to the account the renderer names. */
 export function installFriendsIpc(service: FriendsService, windows: () => readonly BrowserWindow[]): () => void {
   const channel = 'lingxi:friends';
   const senders = new Map<number, () => void>();
@@ -19,7 +19,7 @@ export function installFriendsIpc(service: FriendsService, windows: () => readon
           const prefix = `${event.sender.id}:`;
           const lease = `${prefix}${command.leaseId}:`;
           if (command.type === 'unwatch') { service.releaseWatches(lease); break; }
-          if (command.collection !== 'friends' && command.collection !== 'blocks') throw new Error('INVALID_INPUT');
+          if (command.collection !== 'friends' && command.collection !== 'blocks' && command.collection !== 'teamOffers') throw new Error('INVALID_INPUT');
           if (!senders.has(event.sender.id)) {
             const sender = event.sender, senderId = sender.id;
             // A window that goes away, or loads another page, leaves no watch behind.

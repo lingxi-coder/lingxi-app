@@ -38,7 +38,15 @@ const friendsButton = (html: string) => /<button[^>]*desktop-rail-friends[^>]*>[
 
 test('the rail badge is the vectors\' count in the rail\'s own rule: nothing at 0, the number up to 99, 99+ from 100', () => {
   assert.ok(vectors.badge.length >= 8);
-  for (const row of vectors.badge) assert.equal(unreadBadgeText(badgeCount(row.cards)), row.expectText ?? '', row.note);
+  for (const row of vectors.badge) assert.equal(unreadBadgeText(badgeCount(row.cards, [], vectors.offers.nowMs)), row.expectText ?? '', row.note);
+});
+
+test('team invitations that are still live count on the rail badge too, and an expired one does not (D28)', () => {
+  assert.ok(vectors.offers.badge.length >= 10);
+  for (const row of vectors.offers.badge) {
+    const offers = row.offers.map((expiresAt: number) => ({ expiresAt }));
+    assert.equal(unreadBadgeText(badgeCount(row.cards, offers, vectors.offers.nowMs)), row.expectText ?? '', row.note);
+  }
 });
 
 test('the Friends button sits after Teams and before Apps, is named with the exact count, and carries the capped digits', () => {

@@ -17,11 +17,12 @@ const projectId = 'demo-lingxi-teams-t0';
 const enabled = !!process.env.FIRESTORE_EMULATOR_HOST && !!process.env.FIREBASE_AUTH_EMULATOR_HOST;
 
 // The main process's view of Friends on the real SDK session, the real HTTP handler and the real rules.
-test('friends main: cards and blocks reach the renderer from the real session, actions run through the real backend, and another account ends it all', { skip: !enabled, timeout: 60_000 }, async context => {
+test('friends main: cards, blocks and team offers reach the renderer from the real session, actions run through the real backend, and another account ends it all', { skip: !enabled, timeout: 60_000 }, async context => {
   const app = initializeApp({ projectId }, 'friends-main-sdk'), admin = getFirestore(app);
   const friends = new FriendsStore(admin, Date.now, { auth: getAuth(app) });
   // The account's token is its uid: the handler's verifier stands in for Firebase Auth, which the session below goes through for real.
-  const handle = createTeamsHandler({ store: new TeamsStore(admin), friends, verifyToken: async (token: string) => ({ uid: token }), createCustomToken: (uid: string) => getAuth(app).createCustomToken(uid) });
+  const teamsStore = new TeamsStore(admin);
+  const handle = createTeamsHandler({ store: teamsStore, friends, verifyToken: async (token: string) => ({ uid: token }), createCustomToken: (uid: string) => getAuth(app).createCustomToken(uid) });
   const [host, firestorePort] = process.env.FIRESTORE_EMULATOR_HOST!.split(':');
   const [, authPort] = process.env.FIREBASE_AUTH_EMULATOR_HOST!.split(':');
   assert.ok(['127.0.0.1', 'localhost'].includes(host!));
@@ -42,9 +43,9 @@ test('friends main: cards and blocks reach the renderer from the real session, a
     while (!condition()) { if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`); await new Promise(resolve => setTimeout(resolve, 20)); }
   };
   try {
-    await service.watch('1:cards:', alice, 'friends'); await service.watch('1:blocks:', alice, 'blocks');
-    await until(() => latest('1:cards:') !== undefined && latest('1:blocks:') !== undefined, 'the first snapshots');
-    assert.deepEqual(latest('1:cards:'), []); assert.deepEqual(latest('1:blocks:'), []);
+    await service.watch('1:cards:', alice, 'friends'); await service.watch('1:blocks:', alice, 'blocks'); await service.watch('1:offers:', alice, 'teamOffers');
+    await until(() => latest('1:cards:') !== undefined && latest('1:blocks:') !== undefined && latest('1:offers:') !== undefined, 'the first snapshots');
+    assert.deepEqual(latest('1:cards:'), []); assert.deepEqual(latest('1:blocks:'), []); assert.deepEqual(latest('1:offers:'), []);
 
     // A friend link redeemed through the main process: the card arrives as plain values with the Timestamp in milliseconds.
     assert.equal((await service.profile(alice)).displayName, 'Member');
@@ -66,6 +67,29 @@ test('friends main: cards and blocks reach the renderer from the real session, a
     await friends.profile({ uid: stranger, name: 'Stranger' });
     await assert.rejects(service.readProfile(alice, stranger), /permission/iu);
 
+    // F4: two offers and an old one still listed arrive as rows with the expiry in milliseconds. Accepting joins the team through the real
+    // backend, declining (or dismissing an expired offer) deletes the document, and an offer that is gone answers OFFER_UNAVAILABLE.
+    const sender = { uid: bob, name: 'Bob' }, stale = Date.now() - 3_600_000;
+    for (const [teamId, name] of [['main-offer-team', 'Launch crew'], ['main-offer-two', 'Second crew']]) {
+      await teamsStore.execute(sender, { action: 'create', teamId, name });
+      await friends.execute(sender, { action: 'offerTeam', teamId, friendUid: alice, requestId: `main-${teamId}` });
+    }
+    await admin.doc(`users/${alice}/teamOffers/main-offer-old`).set({ teamId: 'main-offer-old', teamName: 'Old crew', fromUid: bob, fromName: 'Bob', role: 'member', expiresAt: Timestamp.fromMillis(stale) });
+    await until(() => latest('1:offers:')?.length === 3, 'the offers');
+    const offers = latest('1:offers:')!, launch = offers.find(offer => offer.teamId === 'main-offer-team')!;
+    assert.deepEqual([launch.teamName, launch.fromUid, launch.fromName, launch.role], ['Launch crew', bob, 'Robert', 'member'], 'the sender\'s name as it is now');
+    assert.ok(Number.isInteger(launch.expiresAt) && Math.abs(launch.expiresAt - (Date.now() + 7 * 24 * 3_600_000)) < 5 * 60_000);
+    assert.equal(offers.find(offer => offer.teamId === 'main-offer-old')!.expiresAt, stale);
+    const joined = await service.execute(alice, { action: 'acceptOffer', offerId: 'main-offer-team', requestId: 'main-accept-01' });
+    assert.deepEqual([joined.teamId, joined.alreadyMember], ['main-offer-team', false]); assert.ok(joined.generation >= 1);
+    assert.equal((await admin.doc(`teams/main-offer-team/members/${alice}`).get()).data()?.role, 'member');
+    await until(() => latest('1:offers:')?.length === 2, 'the accepted offer to go');
+    assert.deepEqual(await service.execute(alice, { action: 'declineOffer', offerId: 'main-offer-two' }), { ok: true });
+    assert.deepEqual(await service.execute(alice, { action: 'declineOffer', offerId: 'main-offer-old' }), { ok: true });
+    await until(() => latest('1:offers:')?.length === 0, 'the declined offers to go');
+    await assert.rejects(service.execute(alice, { action: 'acceptOffer', offerId: 'main-offer-two', requestId: 'main-accept-02' }), /OFFER_UNAVAILABLE/u, 'the backend\'s refusal arrives as its code');
+    assert.equal((await admin.doc(`teams/main-offer-two/members/${alice}`).get()).exists, false);
+
     // Blocking: the card goes; the block entry keeps the name and username the person has at that moment (D12).
     await service.execute(alice, { action: 'block', otherUid: bob });
     await until(() => latest('1:cards:')?.length === 0 && latest('1:blocks:')?.length === 1, 'the block');
@@ -76,7 +100,7 @@ test('friends main: cards and blocks reach the renderer from the real session, a
 
     // D19: another account ends every watch and tells each lease; nothing of the first account is delivered afterwards.
     uid = stranger; changed?.();
-    assert.deepEqual(failed.map(event => event.code).sort(), ['INVALID_SESSION', 'INVALID_SESSION']);
+    assert.deepEqual(failed.map(event => event.code).sort(), ['INVALID_SESSION', 'INVALID_SESSION', 'INVALID_SESSION']);
     const delivered = rows.length;
     await admin.doc(`users/${alice}/friends/after-switch`).set({ state: 'incoming', displayName: 'Late', since: Timestamp.now() });
     await new Promise(resolve => setTimeout(resolve, 300));

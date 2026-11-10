@@ -16,7 +16,7 @@ const noSubscription = (): (() => void) => () => undefined;
 const noSnapshot = (): FriendsSnapshot | undefined => undefined;
 
 /**
- * The Friends workspace for an account, opened with the account and closed (both listeners and the open chat released) when
+ * The Friends workspace for an account, opened with the account and closed (the listeners and the open chat released) when
  * the account or an api changes, on sign-out, or when the component unmounts. `options` are read when it is opened.
  * `teams` is the same account's Teams API, which carries the chat's messages.
  */

@@ -97,19 +97,19 @@ scenario('a tab that denies storage still opens the link from the address bar, o
   assert.deepEqual(fixture.friends.commands, [{ action: 'lookup', code }]);
 });
 
-scenario('a signed-in page runs the two listeners, reports the badge of D14 and clears it when it goes', async context => {
+scenario('a signed-in page runs the three listeners, reports the badge of D14 and clears it when it goes', async context => {
   const persistent = store(), fixture = pageFixture(), tab = browserTabs(context, persistent);
   fixture.friends.cards = [card('dave', { state: 'incoming' }), card('bob', { lastSeq: 4, lastReadSeq: 1, lastMessage: pointer(4) })];
   tab('', '/friends');
   const page = await open(fixture.Page, { route: '/friends' });
   await page.act(async () => { fixture.signIn(); await settle(); });
   await until(() => page.badges.includes('4'), 'the badge');
-  assert.deepEqual(fixture.friends.open, { cards: 1, blocks: 1 });
+  assert.deepEqual(fixture.friends.open, { cards: 1, blocks: 1, offers: 1 });
   assert.ok(page.text().includes('Bob') && page.text().includes('Friend requests'));
   fixture.friends.emitCards([card('bob', { lastSeq: 4, lastReadSeq: 4 })]);
   await until(() => page.badges.at(-1) === null, 'the badge to clear');
   await page.act(async () => page.tree.unmount());
-  assert.deepEqual(fixture.friends.open, { cards: 0, blocks: 0 }, 'leaving the page releases both listeners');
+  assert.deepEqual(fixture.friends.open, { cards: 0, blocks: 0, offers: 0 }, 'leaving the page releases the listeners');
   assert.equal(page.badges.at(-1), null);
 });
 

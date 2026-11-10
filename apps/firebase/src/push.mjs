@@ -295,6 +295,8 @@ export const FRIEND_COPY = {
   request: { zh: '想添加你为好友', en: 'wants to add you as a friend' },
   accepted: { zh: '已接受你的好友请求', en: 'accepted your friend request' },
   linked: { zh: '已通过你的好友链接成为好友', en: 'is now your friend' },
+  // The team's name is user-authored text, so a push never carries it: the offer itself is read in the app.
+  offer: { zh: '邀请你加入团队', en: 'invited you to join a team' },
 };
 // Internal Team/Friends triggers only. `route` (a deep-link path, query included), `kind` and `copy` default to the Team inbox.
 export async function sendTeamPush(store, messaging, input, allowed, clock = Date.now) {

@@ -32,7 +32,8 @@ export class TeamsError extends Error {
 const fail = (status, code) => { throw new TeamsError(status, code); };
 const active = team => team?.state === 'active';
 const pair = team => team?.kind === 'pair';
-const manager = member => ['owner', 'admin'].includes(member?.role);
+/** Owners and admins manage a team: they invite, and a friend's team offer (docs/FRIENDS.md) needs one. */
+export const manager = member => ['owner', 'admin'].includes(member?.role);
 /** A friendship is a hidden two-person `kind: 'pair'` team (docs/FRIENDS.md). Its id space is reserved, so no client can occupy one. */
 export const PAIR_PREFIX = 'f_';
 export const PAIR_CONVERSATION_ID = 'friend_chat';
@@ -65,6 +66,27 @@ export function endTeam(tx, ref, members, now) {
   // Keep the team/epochs as a tombstone. A concurrent join cannot resurrect it.
   tx.update(ref, { state: 'deleted', memberCount: 0, deletedAt: now, updatedAt: now });
   for (const member of members) tx.delete(member);
+}
+
+/** Admits `user` to an ordinary team in the caller's transaction. The caller has done its own authorization (an invite
+ * link, or a friend's team offer) and all its reads; `team` and `epoch` are the snapshots of the team and of the user's
+ * membership epoch. Every way into a team ends here, so the member limit, the team limit, the new generation and the
+ * writes (epoch, member, the user's team index, the member count, the membership signal, the user's offer of this team)
+ * cannot differ between them. Returns the new generation. */
+export async function admitMember(tx, db, { team, epoch, user, role, now }) {
+  if (team.data().memberCount >= TEAM_MEMBER_LIMIT) fail(409, 'MEMBER_LIMIT');
+  const memberships = await tx.get(db.collection(`users/${user.uid}/teams`).limit(USER_TEAM_LIMIT));
+  if (memberships.size >= USER_TEAM_LIMIT) fail(409, 'TEAM_LIMIT');
+  const generation = (epoch.data()?.generation ?? 0) + 1;
+  if (!Number.isSafeInteger(generation)) fail(409, 'GENERATION_LIMIT');
+  tx.set(epoch.ref, { generation });
+  tx.create(team.ref.collection('members').doc(user.uid), { ...profile(user), role, generation, joinedAt: now, lastActiveAt: now });
+  tx.create(db.doc(`users/${user.uid}/teams/${team.id}`), { role, generation, joinedAt: now });
+  tx.update(team.ref, { memberCount: team.data().memberCount + 1, updatedAt: now });
+  tx.set(team.ref.collection('signals').doc('membership'), { updatedAt: FieldValue.serverTimestamp() });
+  // However they got in, a friend's open offer of this team is answered (a delete of an absent document is a no-op).
+  tx.delete(db.doc(`users/${user.uid}/teamOffers/${team.id}`));
+  return generation;
 }
 
 /** All membership changes read the team document, so join/delete/remove serialize. */
@@ -141,18 +163,9 @@ export class TeamsStore {
           return { teamId: tid, generation: member.data().generation, alreadyMember: true };
         }
         if (!v || v.revoked || millis(v.expiresAt) <= this.clock() || v.uses >= v.maxUses) fail(409, 'INVITE_UNAVAILABLE');
-        if (team.data().memberCount >= TEAM_MEMBER_LIMIT) fail(409, 'MEMBER_LIMIT');
-        const memberships = await tx.get(this.db.collection(`users/${user.uid}/teams`).limit(USER_TEAM_LIMIT));
-        if (memberships.size >= USER_TEAM_LIMIT) fail(409, 'TEAM_LIMIT');
-        const next = (epoch.data()?.generation ?? 0) + 1;
-        if (!Number.isSafeInteger(next)) fail(409, 'GENERATION_LIMIT');
-        tx.set(epochRef, { generation: next });
+        const next = await admitMember(tx, this.db, { team, epoch, user, role: v.role, now });
         tx.create(receiptRef, { teamId: tid, inviteId: invitationId, generation: next });
-        tx.create(memberRef, { ...profile(user), role: v.role, generation: next, joinedAt: now, lastActiveAt: now });
-        tx.create(this.index(user.uid, tid), { role: v.role, generation: next, joinedAt: now });
-        tx.update(ref, { memberCount: team.data().memberCount + 1, updatedAt: now });
         tx.update(invitationRef, { uses: v.uses + 1 });
-        tx.set(ref.collection('signals').doc('membership'), { updatedAt: FieldValue.serverTimestamp() });
         return { teamId: tid, generation: next, alreadyMember: false };
       });
     }

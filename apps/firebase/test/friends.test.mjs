@@ -3,7 +3,7 @@ import test from 'node:test';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
-import { FriendsError, FriendsStore, friendLink, friendNotifier, pairKey, pairTeamId } from '../src/friends.mjs';
+import { FriendsError, FriendsStore, OFFER_GRACE_MS, OFFER_LIMIT, OFFER_TTL_MS, friendLink, friendNotifier, pairKey, pairTeamId } from '../src/friends.mjs';
 import { FRIEND_COPY, sendTeamPush } from '../src/push.mjs';
 import { TeamsError, createTeamsHandler } from '../src/teams.mjs';
 import { conversationRecord } from '../src/team-conversations.mjs';
@@ -43,6 +43,18 @@ test('friends: strict commands reject unknown fields, malformed identities and a
     { action: 'request', requestId: 'req-00001', via: 'email', email: 'bob@example.com', note: ' ' }, { action: 'request', requestId: 'req-00001', via: 'email', email: 'bob@example.com', note: 'x'.repeat(201) },
     { action: 'accept' }, { action: 'accept', otherUid: '' }, { action: 'decline', otherUid: 'bob', extra: 1 }, { action: 'redeem', code }, { action: 'redeem', code: 'short', requestId: 'req-00001' },
     { action: 'remove', otherUid: 'x'.repeat(129) }, { action: 'block', otherUid: 'bad\u0000uid' }, { action: 'rotateCode', extra: true }, { action: 'revokeCode', code },
+    // Team offers: every id is required and well formed, and nothing else (no role, note or uid under another name) is accepted.
+    { action: 'offerTeam', teamId: 'team-0001', friendUid: 'bob' }, { action: 'offerTeam', friendUid: 'bob', requestId: 'req-00001' },
+    { action: 'offerTeam', teamId: 'team-0001', requestId: 'req-00001' }, { action: 'offerTeam', teamId: 'short', friendUid: 'bob', requestId: 'req-00001' },
+    { action: 'offerTeam', teamId: 'team/0001', friendUid: 'bob', requestId: 'req-00001' }, { action: 'offerTeam', teamId: 'team-0001', friendUid: 'a|b', requestId: 'req-00001' },
+    { action: 'offerTeam', teamId: 'team-0001', friendUid: '', requestId: 'req-00001' }, { action: 'offerTeam', teamId: 'team-0001', friendUid: 'bob', requestId: 'short' },
+    { action: 'offerTeam', teamId: 'team-0001', friendUid: 'bob', requestId: 'req-00001', role: 'admin' }, { action: 'offerTeam', teamId: 'team-0001', friendUid: 'bob', requestId: 'req-00001', note: 'hi' },
+    { action: 'offerTeam', teamId: 'team-0001', otherUid: 'bob', requestId: 'req-00001' },
+    { action: 'acceptOffer', offerId: 'team-0001' }, { action: 'acceptOffer', requestId: 'req-00001' }, { action: 'acceptOffer', offerId: 'x/y-0001', requestId: 'req-00001' },
+    { action: 'acceptOffer', offerId: 'short', requestId: 'req-00001' }, { action: 'acceptOffer', offerId: 'team-0001', requestId: 'short' },
+    { action: 'acceptOffer', offerId: 'team-0001', requestId: 'req-00001', teamId: 'team-0001' },
+    { action: 'declineOffer' }, { action: 'declineOffer', offerId: 'short' }, { action: 'declineOffer', offerId: 'team-0001', requestId: 'req-00001' },
+    { action: 'declineOffer', otherUid: 'bob' },
   ];
   for (const value of invalid) await assert.rejects(store.execute(caller, value), z.ZodError, JSON.stringify(value));
   await assert.rejects(store.execute({ uid: 'a|b' }, { action: 'rotateCode' }), z.ZodError);
@@ -54,6 +66,14 @@ test('friends: a request is valid with exactly one of the three proofs lookup ta
   for (const proof of [{ via: 'handle', handle: 'Bob_B' }, { via: 'email', email: ' Bob@Example.COM ' }, { via: 'team', teamId: 'team-0001', uid: 'bob' }]) {
     await assert.rejects(store.execute(caller, { action: 'request', requestId: 'req-00001', note: ' hi ', ...proof }), { message: 'reached the database' }, JSON.stringify(proof));
   }
+});
+
+test('friends: the offer actions are valid with exactly their fields, and an offer to oneself is refused before any read', async () => {
+  const store = new FriendsStore({ doc() { throw new Error('reached the database'); }, runTransaction() { throw new Error('reached the database'); } });
+  for (const value of [{ action: 'offerTeam', teamId: 'team-0001', friendUid: 'bob', requestId: 'req-00001' }, { action: 'acceptOffer', offerId: 'team-0001', requestId: 'req-00001' },
+    { action: 'declineOffer', offerId: 'team-0001' }]) await assert.rejects(store.execute(caller, value), { message: 'reached the database' }, value.action);
+  await assert.rejects(store.execute(caller, { action: 'offerTeam', teamId: 'team-0001', friendUid: 'alice', requestId: 'req-00001' }), { status: 400, code: 'INVALID_INPUT' });
+  assert.deepEqual([OFFER_TTL_MS, OFFER_GRACE_MS, OFFER_LIMIT], [7 * 24 * 3600 * 1000, 7 * 24 * 3600 * 1000, 20]);
 });
 
 test('friends: a handle is looked up case-folded and an email trimmed and lower-cased', async () => {
@@ -130,6 +150,31 @@ test('friend push: generic localized copy, the friend route, no note text, and o
   assert.ok(Buffer.byteLength(blank.sent[0].android.collapseKey) <= 64);
 });
 
+test('friend push: a team offer announces the sender, never the team, opens the requests list and is sent only while the offer exists', async () => {
+  const offer = { kind: 'offer', to: 'alice', from: 'bob', name: 'Bob', offerId: 'team-0001', key: 'pair:request-9' };
+  const live = pushWorld({ cards: { 'users/alice/teamOffers/team-0001': { teamId: 'team-0001', teamName: 'Secret Project', fromUid: 'bob', fromName: 'Bob', role: 'member' } } });
+  await live.notify(offer);
+  assert.equal(live.sent.length, 1);
+  const [message] = live.sent;
+  assert.deepEqual([message.data.route, message.data.kind, message.data.title, message.data.body, message.data.recipientUid],
+    ['friend/requests', 'friend_offer', 'Bob', FRIEND_COPY.offer.en, 'alice']);
+  assert.ok(!JSON.stringify(message).includes('Secret Project'), 'the team name is user-authored text and stays out of the push');
+  assert.equal(message.apns.payload.aps.alert.body, 'invited you to join a team');
+  const zh = pushWorld({ locale: 'zh-Hans', cards: { 'users/alice/teamOffers/team-0001': { teamId: 'team-0001' } } });
+  await zh.notify(offer);
+  assert.equal(zh.sent[0].data.body, '邀请你加入团队');
+  // The offer was declined, accepted or removed with the friendship before the push was built: nothing is sent. A friend card does not stand in for it.
+  const gone = pushWorld({ cards: { 'users/alice/friends/bob': { state: 'friends' } } });
+  await gone.notify(offer);
+  assert.equal(gone.sent.length, 0);
+  // Another team's offer or another request is another push.
+  await live.notify({ ...offer, offerId: 'team-0002' });
+  assert.equal(live.sent.length, 1);
+  await live.notify({ ...offer, key: 'pair:request-10' });
+  assert.equal(live.sent.length, 2);
+  assert.notEqual(live.sent[0].data.notificationId, live.sent[1].data.notificationId);
+});
+
 test('Team push defaults are unchanged and a Friends push overrides route, kind and copy only', async () => {
   const plain = pushWorld(), custom = pushWorld({ locale: 'zh-CN' });
   await sendTeamPush(plain.pushStore, { async send(value) { plain.sent.push(value); } }, { uid: 'alice', title: 'Author', notificationId: 'n1', collapseKey: 'team:c' }, async () => true, () => plain.now);
@@ -198,4 +243,7 @@ test('friends: Hosting sends the Friends API to teamsApi ahead of the catalog ca
   assert.deepEqual(Object.fromEntries(page.headers.map(header => [header.key, header.value])), { 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' });
   const indexes = JSON.parse(readFileSync(new URL('../../../infra/firebase/firestore.teams.indexes.json', import.meta.url), 'utf8'));
   assert.ok(indexes.fieldOverrides.some(item => item.collectionGroup === 'friendCodes' && item.fieldPath === 'code' && item.indexes.length === 0));
+  // The scheduled prune of expired team offers is a collection group query on `expiresAt`, which needs that scope enabled.
+  const offers = indexes.fieldOverrides.find(item => item.collectionGroup === 'teamOffers' && item.fieldPath === 'expiresAt');
+  assert.deepEqual(offers.indexes.map(index => [index.order, index.queryScope]).sort(), [['ASCENDING', 'COLLECTION'], ['ASCENDING', 'COLLECTION_GROUP']]);
 });

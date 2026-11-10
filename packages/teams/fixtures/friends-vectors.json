@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "about": "Shared test vectors for the Friends clients, section 5 of docs/FRIENDS-CLIENTS.md (decisions D5, D6, D7, D11, D13, D14, D16, D17, D18). Every client loads this file and no row may be adjusted per platform. The rows were produced by a reference implementation of the spec and checked against a second, independent one; the link rows also agree with packages/deep-links parseDeepLink.",
+    "about": "Shared test vectors for the Friends clients, section 5 of docs/FRIENDS-CLIENTS.md (decisions D5, D6, D7, D11, D13, D14, D16, D17, D18, and for F4 D26, D27, D28, D30). Every client loads this file and no row may be adjusted per platform. The rows were produced by a reference implementation of the spec and checked against a second, independent one; the link rows also agree with packages/deep-links parseDeepLink.",
     "uid": "me",
     "encoding": {
       "unit×count": "lengthRule rows: the string `unit` repeated `count` times. Lengths are UTF-16 code units, as the server counts them (an emoji is 2).",
@@ -11,7 +11,14 @@
       "badge": "`cards` is the whole collection, each card reduced to the fields that matter. expectCount = incoming cards + the unread of the friends cards; outgoing cards add nothing. expectText is the tab-badge text: null at 0, the number up to 99, 99+ from 100.",
       "query.expect": "kind is handle | email | code | invalid. lookup is the body of the first call; confirm is the body of the call after the person confirms (request carries a requestId minted at that moment; redeem carries one too).",
       "links.typed.expect": "null for a link that is invalid or is not a Friends route.",
-      "links.push.expect": "The lingxi:// link a notification tap opens, or null when the push route is not accepted."
+      "links.push.expect": "The lingxi:// link a notification tap opens, or null when the push route is not accepted.",
+      "offers.nowMs": "The clock of every `offers` row, epoch milliseconds. Offers are compared with it, never with the device clock, so the rows do not age.",
+      "offers.expiry": "remaining = expiresAtMs - nowMs. remaining <= 0: {state: expired} (the row shows friends_offer_expired and Dismiss; the comparison is strict, as on the server). 0 < remaining <= 24 hours: {state: live, unit: hour, value: ceil(remaining / 3600000)}, 1 to 24. More than 24 hours: {state: live, unit: day, value: ceil(remaining / 86400000)}, 2 to 7. unit and value go to the platform's relative-time formatter in the future direction (\"in 3 days\") and the result is the %@ of friends_offer_expires; that text is the platform's own and is not in the vectors. An offer expired for longer than offerGraceDays is still `expired` here: the server deletes it on its next daily prune and the listener then removes the row.",
+      "offers.sort": "Rows are shuffled on purpose; `expect` lists teamIds in display order. Live offers (expiresAtMs > nowMs) before expired ones; within each group the larger expiresAtMs first (the newest offer, because an offer lives a fixed time); then teamId compared as text by code unit (so team_10 comes before team_9).",
+      "offers.badge": "Like `badge`, plus `offers`, the expiresAtMs of every offer the person holds. expectCount = the count of `badge` for `cards` + the number of offers with expiresAtMs > nowMs. Expired offers and outgoing requests add nothing. expectText is the tab-badge text as in `badge`.",
+      "offers.picker": "The Invite friends list of D26. `cards` is the whole users/{uid}/friends collection (reduced, shuffled; names are ASCII letters as in sort.friends); a case may carry its own `cards`. `members` are the uids already in the team (the person included), `query` is the filter text. expect = the uids to list, in order: the cards whose state is friends and whose uid is not in members, in the Friends order of sort.friends, then only those matching `query` by the rule of the `filter` section (an empty query matches all).",
+      "offers.entry": "Whether the team details offer Invite friends (D26): only to an owner or an admin, whatever the member count (a full team still shows it; the server answers MEMBER_LIMIT).",
+      "offers.errors": "The string key for an error code of offerTeam, acceptOffer or declineOffer (D30). The key is the action's own row when it has one, else the common row (session, network, invalid input, rate limit), else friends_error_generic. These actions never use `errors`: its MEMBERSHIP_REQUIRED and STALE_MEMBERSHIP rows mean \"the chat ended\" and would be wrong here. definitive is false only for SERVICE_UNAVAILABLE, as in `errors`."
     }
   },
   "limits": {
@@ -26,7 +33,12 @@
     "codeLength": 32,
     "sectionRows": 20,
     "badgeCap": 99,
-    "chatConversationId": "friend_chat"
+    "chatConversationId": "friend_chat",
+    "offerTtlDays": 7,
+    "offerGraceDays": 7,
+    "offerLimit": 20,
+    "teamMemberLimit": 200,
+    "userTeamLimit": 20
   },
   "requestId": {
     "valid": [
@@ -1547,6 +1559,862 @@
       {
         "link": "https://lingxios.net/open/team/inbox",
         "expect": null
+      }
+    ]
+  },
+  "offers": {
+    "nowMs": 1762000000000,
+    "expiry": [
+      {
+        "note": "just sent: exactly 7 days left",
+        "expiresAtMs": 1762604800000,
+        "expect": {
+          "state": "live",
+          "unit": "day",
+          "value": 7
+        }
+      },
+      {
+        "note": "an hour after it was sent: 6 days 23 hours left still reads 7 days",
+        "expiresAtMs": 1762601200000,
+        "expect": {
+          "state": "live",
+          "unit": "day",
+          "value": 7
+        }
+      },
+      {
+        "note": "6 days and 1 ms left",
+        "expiresAtMs": 1762518400001,
+        "expect": {
+          "state": "live",
+          "unit": "day",
+          "value": 7
+        }
+      },
+      {
+        "note": "exactly 6 days left",
+        "expiresAtMs": 1762518400000,
+        "expect": {
+          "state": "live",
+          "unit": "day",
+          "value": 6
+        }
+      },
+      {
+        "note": "2 days and 1 hour left rounds up to 3 days",
+        "expiresAtMs": 1762176400000,
+        "expect": {
+          "state": "live",
+          "unit": "day",
+          "value": 3
+        }
+      },
+      {
+        "note": "exactly 2 days left",
+        "expiresAtMs": 1762172800000,
+        "expect": {
+          "state": "live",
+          "unit": "day",
+          "value": 2
+        }
+      },
+      {
+        "note": "1 day and 1 ms left is 2 days",
+        "expiresAtMs": 1762086400001,
+        "expect": {
+          "state": "live",
+          "unit": "day",
+          "value": 2
+        }
+      },
+      {
+        "note": "exactly 24 hours left switches to hours",
+        "expiresAtMs": 1762086400000,
+        "expect": {
+          "state": "live",
+          "unit": "hour",
+          "value": 24
+        }
+      },
+      {
+        "note": "23 hours 30 minutes left rounds up to 24 hours",
+        "expiresAtMs": 1762084600000,
+        "expect": {
+          "state": "live",
+          "unit": "hour",
+          "value": 24
+        }
+      },
+      {
+        "note": "5 hours left",
+        "expiresAtMs": 1762018000000,
+        "expect": {
+          "state": "live",
+          "unit": "hour",
+          "value": 5
+        }
+      },
+      {
+        "note": "90 minutes left rounds up to 2 hours",
+        "expiresAtMs": 1762005400000,
+        "expect": {
+          "state": "live",
+          "unit": "hour",
+          "value": 2
+        }
+      },
+      {
+        "note": "exactly 1 hour left",
+        "expiresAtMs": 1762003600000,
+        "expect": {
+          "state": "live",
+          "unit": "hour",
+          "value": 1
+        }
+      },
+      {
+        "note": "1 minute left is still 1 hour",
+        "expiresAtMs": 1762000060000,
+        "expect": {
+          "state": "live",
+          "unit": "hour",
+          "value": 1
+        }
+      },
+      {
+        "note": "1 ms left is still live",
+        "expiresAtMs": 1762000000001,
+        "expect": {
+          "state": "live",
+          "unit": "hour",
+          "value": 1
+        }
+      },
+      {
+        "note": "expires exactly now: expired (strict comparison, as on the server)",
+        "expiresAtMs": 1762000000000,
+        "expect": {
+          "state": "expired"
+        }
+      },
+      {
+        "note": "expired 1 ms ago",
+        "expiresAtMs": 1761999999999,
+        "expect": {
+          "state": "expired"
+        }
+      },
+      {
+        "note": "expired 3 days ago: still listed, dismissable",
+        "expiresAtMs": 1761740800000,
+        "expect": {
+          "state": "expired"
+        }
+      },
+      {
+        "note": "expired 7 days and 1 ms ago: past the server grace, still shown as expired until the prune deletes it",
+        "expiresAtMs": 1761395199999,
+        "expect": {
+          "state": "expired"
+        }
+      }
+    ],
+    "sort": {
+      "input": [
+        {
+          "teamId": "team-zeta",
+          "expiresAtMs": 1762000000001
+        },
+        {
+          "teamId": "team_9",
+          "expiresAtMs": 1761913600000
+        },
+        {
+          "teamId": "team-delta",
+          "expiresAtMs": 1762518400000
+        },
+        {
+          "teamId": "team-gamma",
+          "expiresAtMs": 1761740800000
+        },
+        {
+          "teamId": "team-alpha",
+          "expiresAtMs": 1762172800000
+        },
+        {
+          "teamId": "team-omega",
+          "expiresAtMs": 1762000000000
+        },
+        {
+          "teamId": "team_10",
+          "expiresAtMs": 1761913600000
+        },
+        {
+          "teamId": "team-beta",
+          "expiresAtMs": 1762518400000
+        }
+      ],
+      "expect": [
+        "team-beta",
+        "team-delta",
+        "team-alpha",
+        "team-zeta",
+        "team-omega",
+        "team_10",
+        "team_9",
+        "team-gamma"
+      ]
+    },
+    "badge": [
+      {
+        "note": "nothing",
+        "cards": [],
+        "offers": [],
+        "expectCount": 0,
+        "expectText": null
+      },
+      {
+        "note": "live offers only",
+        "cards": [],
+        "offers": [
+          1762086400000,
+          1762172800000
+        ],
+        "expectCount": 2,
+        "expectText": "2"
+      },
+      {
+        "note": "an expired offer adds nothing",
+        "cards": [],
+        "offers": [
+          1761913600000
+        ],
+        "expectCount": 0,
+        "expectText": null
+      },
+      {
+        "note": "an offer that expires exactly now adds nothing",
+        "cards": [],
+        "offers": [
+          1762000000000
+        ],
+        "expectCount": 0,
+        "expectText": null
+      },
+      {
+        "note": "one millisecond left still counts",
+        "cards": [],
+        "offers": [
+          1762000000001
+        ],
+        "expectCount": 1,
+        "expectText": "1"
+      },
+      {
+        "note": "outgoing requests add nothing, a live offer does",
+        "cards": [
+          {
+            "state": "outgoing"
+          },
+          {
+            "state": "outgoing"
+          }
+        ],
+        "offers": [
+          1762086400000
+        ],
+        "expectCount": 1,
+        "expectText": "1"
+      },
+      {
+        "note": "adds up with requests and unread: 2 + (3 + 0 + 1) + 3 live; the expired one adds nothing",
+        "cards": [
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "outgoing"
+          },
+          {
+            "state": "friends",
+            "lastSeq": 3
+          },
+          {
+            "state": "friends",
+            "lastSeq": 2,
+            "lastReadSeq": 2
+          },
+          {
+            "state": "friends",
+            "lastSeq": 5,
+            "lastReadSeq": 4
+          }
+        ],
+        "offers": [
+          1762086400000,
+          1762259200000,
+          1762518400000,
+          1761827200000
+        ],
+        "expectCount": 9,
+        "expectText": "9"
+      },
+      {
+        "note": "cap: 5 + 120 + 2 shows 99+",
+        "cards": [
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "friends",
+            "lastSeq": 120
+          }
+        ],
+        "offers": [
+          1762086400000,
+          1762172800000
+        ],
+        "expectCount": 127,
+        "expectText": "99+"
+      },
+      {
+        "note": "exactly 99: 9 + 85 + 5",
+        "cards": [
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "friends",
+            "lastSeq": 85
+          }
+        ],
+        "offers": [
+          1762003600000,
+          1762007200000,
+          1762010800000,
+          1762014400000,
+          1762018000000
+        ],
+        "expectCount": 99,
+        "expectText": "99"
+      },
+      {
+        "note": "100: 9 + 85 + 6 shows 99+",
+        "cards": [
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "incoming"
+          },
+          {
+            "state": "friends",
+            "lastSeq": 85
+          }
+        ],
+        "offers": [
+          1762003600000,
+          1762007200000,
+          1762010800000,
+          1762014400000,
+          1762018000000,
+          1762021600000
+        ],
+        "expectCount": 100,
+        "expectText": "99+"
+      }
+    ],
+    "picker": {
+      "cards": [
+        {
+          "uid": "n03",
+          "state": "incoming",
+          "displayName": "Carol"
+        },
+        {
+          "uid": "n01",
+          "state": "friends",
+          "displayName": "bob"
+        },
+        {
+          "uid": "a02",
+          "state": "friends",
+          "displayName": "Mia",
+          "lastAtMs": 1762000005000
+        },
+        {
+          "uid": "n05",
+          "state": "friends",
+          "displayName": "alice"
+        },
+        {
+          "uid": "n04",
+          "state": "outgoing",
+          "displayName": "Dave"
+        },
+        {
+          "uid": "a01",
+          "state": "friends",
+          "displayName": "Zed",
+          "lastAtMs": 1762000009000
+        },
+        {
+          "uid": "n06",
+          "state": "friends",
+          "displayName": "Eve",
+          "handle": "eve"
+        },
+        {
+          "uid": "n02",
+          "state": "friends",
+          "displayName": "Alice",
+          "handle": "alice_w"
+        }
+      ],
+      "cases": [
+        {
+          "note": "a team of one: every friend in the Friends order (newest message first, then by name, then uid); requests are not listed",
+          "members": [
+            "me"
+          ],
+          "query": "",
+          "expect": [
+            "a01",
+            "a02",
+            "n02",
+            "n05",
+            "n01",
+            "n06"
+          ]
+        },
+        {
+          "note": "members are not listed",
+          "members": [
+            "me",
+            "n01",
+            "a02"
+          ],
+          "query": "",
+          "expect": [
+            "a01",
+            "n02",
+            "n05",
+            "n06"
+          ]
+        },
+        {
+          "note": "a member who is not a friend changes nothing",
+          "members": [
+            "me",
+            "stranger"
+          ],
+          "query": "",
+          "expect": [
+            "a01",
+            "a02",
+            "n02",
+            "n05",
+            "n01",
+            "n06"
+          ]
+        },
+        {
+          "note": "everyone is already in the team: empty (friends_invite_empty)",
+          "members": [
+            "me",
+            "a01",
+            "a02",
+            "n01",
+            "n02",
+            "n05",
+            "n06"
+          ],
+          "query": "",
+          "expect": []
+        },
+        {
+          "note": "only requests, no friends: empty",
+          "members": [
+            "me"
+          ],
+          "query": "",
+          "cards": [
+            {
+              "uid": "n03",
+              "state": "incoming",
+              "displayName": "Carol"
+            },
+            {
+              "uid": "n04",
+              "state": "outgoing",
+              "displayName": "Dave"
+            }
+          ],
+          "expect": []
+        },
+        {
+          "note": "the filter narrows the list",
+          "members": [
+            "me"
+          ],
+          "query": "ali",
+          "expect": [
+            "n02",
+            "n05"
+          ]
+        },
+        {
+          "note": "the filter ignores case",
+          "members": [
+            "me"
+          ],
+          "query": "ALI",
+          "expect": [
+            "n02",
+            "n05"
+          ]
+        },
+        {
+          "note": "a leading @ matches the handle",
+          "members": [
+            "me"
+          ],
+          "query": "@alice_w",
+          "expect": [
+            "n02"
+          ]
+        },
+        {
+          "note": "the filter matches a name or a handle",
+          "members": [
+            "me"
+          ],
+          "query": "eve",
+          "expect": [
+            "n06"
+          ]
+        },
+        {
+          "note": "a member is not listed even when the filter matches",
+          "members": [
+            "me",
+            "n01"
+          ],
+          "query": "bob",
+          "expect": []
+        },
+        {
+          "note": "a request is never listed even when the filter matches",
+          "members": [
+            "me"
+          ],
+          "query": "carol",
+          "expect": []
+        },
+        {
+          "note": "an outgoing request is never listed either",
+          "members": [
+            "me"
+          ],
+          "query": "dave",
+          "expect": []
+        },
+        {
+          "note": "nothing matches",
+          "members": [
+            "me"
+          ],
+          "query": "zzz",
+          "expect": []
+        }
+      ]
+    },
+    "entry": [
+      {
+        "role": "owner",
+        "memberCount": 1,
+        "expect": true
+      },
+      {
+        "role": "admin",
+        "memberCount": 1,
+        "expect": true
+      },
+      {
+        "role": "member",
+        "memberCount": 1,
+        "expect": false
+      },
+      {
+        "role": "owner",
+        "memberCount": 200,
+        "expect": true
+      },
+      {
+        "role": "admin",
+        "memberCount": 200,
+        "expect": true
+      }
+    ],
+    "errors": [
+      {
+        "action": "offerTeam",
+        "code": "FRIEND_REQUIRED",
+        "key": "friends_error_friend_required",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "ALREADY_MEMBER",
+        "key": "friends_error_already_member",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "OFFER_LIMIT",
+        "key": "friends_error_offer_limit",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "MEMBER_LIMIT",
+        "key": "friends_error_member_limit",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "ROLE_REQUIRED",
+        "key": "friends_error_offer_role",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "MEMBERSHIP_REQUIRED",
+        "key": "friends_error_offer_team_gone",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "RATE_LIMITED",
+        "key": "friends_error_rate_limited",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "SIGN_IN_REQUIRED",
+        "key": "friends_error_session",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "INVALID_SESSION",
+        "key": "friends_error_session",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "SERVICE_UNAVAILABLE",
+        "key": "friends_error_network",
+        "definitive": false
+      },
+      {
+        "action": "offerTeam",
+        "code": "INVALID_INPUT",
+        "key": "friends_error_invalid_input",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "PAIR_TEAM",
+        "key": "friends_error_generic",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "REQUEST_ID_CONFLICT",
+        "key": "friends_error_generic",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "TEAM_LIMIT",
+        "key": "friends_error_generic",
+        "definitive": true
+      },
+      {
+        "action": "offerTeam",
+        "code": "SOMETHING_NEW",
+        "key": "friends_error_generic",
+        "definitive": true
+      },
+      {
+        "action": "acceptOffer",
+        "code": "OFFER_UNAVAILABLE",
+        "key": "friends_error_offer_unavailable",
+        "definitive": true
+      },
+      {
+        "action": "acceptOffer",
+        "code": "STALE_MEMBERSHIP",
+        "key": "friends_error_offer_unavailable",
+        "definitive": true
+      },
+      {
+        "action": "acceptOffer",
+        "code": "MEMBER_LIMIT",
+        "key": "friends_error_member_limit",
+        "definitive": true
+      },
+      {
+        "action": "acceptOffer",
+        "code": "TEAM_LIMIT",
+        "key": "friends_error_team_limit",
+        "definitive": true
+      },
+      {
+        "action": "acceptOffer",
+        "code": "SIGN_IN_REQUIRED",
+        "key": "friends_error_session",
+        "definitive": true
+      },
+      {
+        "action": "acceptOffer",
+        "code": "INVALID_SESSION",
+        "key": "friends_error_session",
+        "definitive": true
+      },
+      {
+        "action": "acceptOffer",
+        "code": "SERVICE_UNAVAILABLE",
+        "key": "friends_error_network",
+        "definitive": false
+      },
+      {
+        "action": "acceptOffer",
+        "code": "INVALID_INPUT",
+        "key": "friends_error_invalid_input",
+        "definitive": true
+      },
+      {
+        "action": "acceptOffer",
+        "code": "REQUEST_ID_CONFLICT",
+        "key": "friends_error_generic",
+        "definitive": true
+      },
+      {
+        "action": "acceptOffer",
+        "code": "MEMBERSHIP_REQUIRED",
+        "key": "friends_error_generic",
+        "definitive": true
+      },
+      {
+        "action": "acceptOffer",
+        "code": "FRIEND_REQUIRED",
+        "key": "friends_error_generic",
+        "definitive": true
+      },
+      {
+        "action": "acceptOffer",
+        "code": "SOMETHING_NEW",
+        "key": "friends_error_generic",
+        "definitive": true
+      },
+      {
+        "action": "declineOffer",
+        "code": "SIGN_IN_REQUIRED",
+        "key": "friends_error_session",
+        "definitive": true
+      },
+      {
+        "action": "declineOffer",
+        "code": "INVALID_SESSION",
+        "key": "friends_error_session",
+        "definitive": true
+      },
+      {
+        "action": "declineOffer",
+        "code": "SERVICE_UNAVAILABLE",
+        "key": "friends_error_network",
+        "definitive": false
+      },
+      {
+        "action": "declineOffer",
+        "code": "INVALID_INPUT",
+        "key": "friends_error_invalid_input",
+        "definitive": true
+      },
+      {
+        "action": "declineOffer",
+        "code": "OFFER_UNAVAILABLE",
+        "key": "friends_error_generic",
+        "definitive": true
+      },
+      {
+        "action": "declineOffer",
+        "code": "SOMETHING_NEW",
+        "key": "friends_error_generic",
+        "definitive": true
       }
     ]
   }

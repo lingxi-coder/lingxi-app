@@ -1,14 +1,14 @@
 # Friends implementation contract
 
-Status: phase F0 (backend core) and the friend-list summaries are source only. Nothing is deployed: the API, rules,
-indexes, Hosting routes, scheduled prune and the two summary triggers below need the user's explicit approval (see
-[Deployment gates](#deployment-gates)). Client behaviour (phases F1+F2) is specified in
-[FRIENDS-CLIENTS.md](FRIENDS-CLIENTS.md).
+Status: phase F0 (backend core), the friend-list summaries and phases F3 (Bots in a friendship) and F4 (team offers) are
+source only. Nothing is deployed: the API, rules, indexes, Hosting routes, scheduled prune and the two summary triggers
+below need the user's explicit approval (see [Deployment gates](#deployment-gates)). Client behaviour (phases F1 to F4)
+is specified in [FRIENDS-CLIENTS.md](FRIENDS-CLIENTS.md).
 
 A friendship is a hidden two-person **pair team** in the Teams stack described in [TEAMS.md](TEAMS.md).
 Friends therefore reuse its membership rules, message mutation protocol, offline caches, push trigger and
-SharedBots; this document only adds what is new: profiles, discovery, requests, the pair team lifecycle
-and the places where the Teams contract treats `kind: 'pair'` differently.
+SharedBots; this document only adds what is new: profiles, discovery, requests, the pair team lifecycle,
+the places where the Teams contract treats `kind: 'pair'` differently, and offers of an ordinary team to a friend.
 
 ## Data
 
@@ -23,7 +23,9 @@ Rules grant no write anywhere below.
 | `friendships/{pairKey}` | `{uids, state: pending\|friends\|ended, requester, epoch, teamId?, source, note?, createdAt, updatedAt, endedAt?}`; `pairKey = sha256(a\|b)` with `a < b` | none |
 | `users/{uid}/friends/{other}` | the owner's index: `state: friends\|incoming\|outgoing`, `displayName`, `handle?`, `note?`, and for `friends` also `teamId`, `generation: 1`, `since`, and the chat summary `lastSeq`, `lastMessage`, `lastChangeSeq`, `lastReadSeq` (absent until the first message or read mark; see [Friend list summaries](#friend-list-summaries)); deleted when the relation ends | owner `get`/`list` |
 | `users/{uid}/blocks/{other}` | `{at, displayName, handle?}`: the blocked person's name when the block was made | owner `get`/`list` |
-| `users/{uid}/friendRequests/{requestId}` | idempotency receipt `{digest, otherUid, at}` | none |
+| `users/{uid}/teamOffers/{teamId}` | a friend's offer of a team to the owner: `{teamId, teamName, fromUid, fromName, role: 'member', expiresAt}` (names are snapshots); the document id is the team id, so there is one offer per (team, friend); see [Team offers](#team-offers-f4) | owner `get`/`list` |
+| `users/{uid}/friendRequests/{requestId}` | idempotency receipt `{digest, otherUid, at}` of `request`, `redeem` and `offerTeam` (an offer's receipt also holds `offerId` and `expiresAt`) | none |
+| `users/{uid}/teamJoinRequests/{requestId}` | the Teams receipt of a join: `{teamId, inviteId, generation}` for an invite link, `{teamId, offerId, generation}` for `acceptOffer` | none |
 | `friendLimits/{sha256(bucket:uid)}` | sliding window `{sentAt[], expiresAt}`; pruned by the daily scheduled function | none |
 
 `friendships/{pairKey}` serializes every transition between two users, and the `users/{uid}/friends` cards, the
@@ -63,7 +65,46 @@ every Teams API require `state: active` and a current member, so both users lose
 | `join` with an invite that points at a pair team | 400 `PAIR_TEAM` |
 | `POST /v1/teams/messages` `create` conversation | 400 `PAIR_TEAM`, even for `friend_chat`; the backend writes the only conversation |
 | message `mutate`, `sync`, `read`, `list` | unchanged |
-| SharedBots commands | unchanged: a Bot published into a pair team with `usePolicy` `all` is usable by the friend (the F3 precondition) |
+| SharedBots commands | unchanged, except that `createConversation` accepts only `kind: 'bot_dm'` (400 `PAIR_TEAM` for `group` and `channel`); see [Shared Bots in a friendship](#shared-bots-in-a-friendship-f3) |
+| `offerTeam` naming a pair team | 400 `PAIR_TEAM` after the membership check |
+
+## Shared Bots in a friendship (F3)
+
+A friendship is a Team of two, so the SharedBots execution contract ([TEAMS.md](TEAMS.md)) applies unchanged and F3 adds no
+endpoint and no data. `friends.emulator.test.mjs` ("shared Bots in a friendship") drives the whole path in the emulator.
+What it means in a pair team:
+
+| Step | Behaviour |
+| --- | --- |
+| publish | `publishSharedBot` by either friend (the maintainer), normally with `usePolicy: {mode: 'all'}`: the audience is the two members at that moment. `listed` with the other friend works the same. Quotas apply as in a Team (`team`, `member`, `bot` requests per UTC day). |
+| list | `listSharedBots` by either member returns the Bots they may use; the maintainer also sees their own (with `instanceId`, and with `state: 'paused'` after a pause). `permitted` and `ready` are as in a Team. A non-member gets 403 `MEMBERSHIP_REQUIRED`. |
+| conversations | `createConversation` accepts only `kind: 'bot_dm'` in a pair team; `group` and `channel` are 400 `PAIR_TEAM` (a friendship holds its friend chat and one Bot DM per Bot). The readers of a Bot DM are the requesting friend **and the Bot's maintainer**: the maintainer can read what the friend asks their Bot, the same disclosure as in a Team, which the clients show in the Bots panel and in the publication review ([FRIENDS-CLIENTS.md](FRIENDS-CLIENTS.md) D21, D23). |
+| submit and host | `submit`, `listHostTasks`, `startTask`, `completeTask` and `readArtifact` are unchanged. The maintainer's Desktop is the host and answers in the Bot DM as the Bot. |
+| stop sharing | `pauseSharedBot` is the client's "stop sharing": the Bot leaves the friend's list, `submit` is 403 `BOT_USE_REQUIRED`, the history stays readable to both, and publishing again (the next revision) restores it. |
+| unfriend | `remove` and `block` delete the pair team, so every command above answers 403 `MEMBERSHIP_REQUIRED` for both friends (the host's included) and the rules close the Bot DMs together with the friend chat. A new friendship is a new team: no Bot and no conversation come back. |
+
+**Push route for a Bot DM (decided).** A message in a Bot DM of a pair team (the friend's question, delivered to the
+maintainer, or the Bot's answer, delivered to the friend) uses the existing pair route `friend/chat?uid=<sender>`, kind
+`friend_message` and the generic copy; for the Bot's answer the sender is the Bot's maintainer and the title is the Bot's
+name. No route and no parameter are added: the deep-link grammar, `fixtures.json` and the TypeScript, Rust, Android and iOS
+parsers are unchanged. A tap opens the friend chat with that friend, where the Bots entry
+([FRIENDS-CLIENTS.md](FRIENDS-CLIENTS.md) D21) is one tap from the Bot DM. A `conversation` parameter would loosen a strict
+grammar in five parsers to save that tap.
+
+**Summaries are unaffected.** `onFriendChatUpdated` and `onFriendChatRead` fire on the literal `friend_chat` path, and
+their handlers ignore any other conversation of a pair team, so a Bot DM never changes a friend card, its preview, its
+unread count or the Friends badge. A Bot DM has no unread count in v1 (`friend-summary.test.mjs` and the "non-pair data is
+ignored" test of `friend-summary.emulator.test.mjs` cover a `bot_chat_01` event).
+
+**Desktop host discovery (contract for the Desktop client).** `TeamConnector.discover()`
+(`apps/electron/src/main/teams/connector.ts`) runs a binding only if `TeamsService.list(uid)` (`GET /v1/teams`) contains
+its team with the binding's generation. That list never contains a pair team, so a Bot bound to a friendship would be
+skipped on every pass. A binding whose `teamId` starts with `f_` (`PAIR_PREFIX`, a reserved id space, so no ordinary team
+can match it) therefore skips that check, with generation 1, and the server decides: every host command already checks the
+current team and member. When the friendship has ended, the next command is a definitive 403 `MEMBERSHIP_REQUIRED`; the
+connector stops the binding as it does for any definitive 4xx (aborts its runs, drops its heartbeat) and also keeps it in an
+in-memory `ended` set until `revoke()` (sign-out or account change), so the five-second discovery loop does not call a dead
+team again. Nothing is written to the private store. A new friendship has a new team id and needs a new publication.
 
 ## Friend list summaries
 
@@ -127,11 +168,15 @@ before the catalog rewrite.
 | `redeem` | `{code, requestId}` | `{state: 'friends', uid, teamId}` |
 | `remove`, `block`, `unblock` | `{otherUid}` | `{ok: true}` |
 | `rotateCode`, `revokeCode` | `{}` | `{code, link}`, `{ok: true}` |
+| `offerTeam` | `{teamId, friendUid, requestId}` | `{offerId, expiresAt}` (ISO time) |
+| `acceptOffer` | `{offerId, requestId}` | `{teamId, generation, alreadyMember}` |
+| `declineOffer` | `{offerId}` | `{ok: true}` |
 
 Errors: the Teams handler's own (401 `SIGN_IN_REQUIRED`/`INVALID_SESSION`, 403 `ORIGIN_NOT_ALLOWED`, 413) plus 400
 `INVALID_INPUT`, 404 `NOT_FOUND` (uniform, see below), 404 `REQUEST_UNAVAILABLE` (`accept` with nothing to accept), 409
 `HANDLE_TAKEN`, `REQUEST_ID_CONFLICT`, `STALE_REQUEST`, `FRIEND_LIMIT`, `REQUEST_LIMIT`, 429 `RATE_LIMITED`, and 503
-`SERVICE_UNAVAILABLE` (email lookup without an Auth client).
+`SERVICE_UNAVAILABLE` (email lookup without an Auth client). The offer actions add the codes of
+[Team offers](#team-offers-f4).
 
 ## States and idempotency
 
@@ -159,6 +204,68 @@ none ──request──▶ pending(requester) ──accept (receiver)──▶ 
   person's profile, else the name already on the caller's card for them, else `Member`, as every transition reads it, so
   a Blocked list can show names on any device. `unblock` only deletes the block; it restores nothing and either side may
   ask again.
+
+## Team offers (F4)
+
+A manager of an ordinary team invites a friend without a link. `offerTeam` writes an **offer** into the friend's own
+`users/{friendUid}/teamOffers/{teamId}`; the friend sees it in Friends and accepts or declines. An offer holds no secret
+and grants nothing: until `acceptOffer`, the friend is not a member, cannot read the team, and the team does not know of
+them. The document is `{teamId, teamName, fromUid, fromName, role: 'member', expiresAt}`: the team's and the sender's
+names as they were when the offer was made, and the role the friend will join with (always `member`; promoting stays a
+Team action).
+
+| Action | Rules |
+| --- | --- |
+| `offerTeam {teamId, friendUid, requestId}` | The caller is a current **owner or admin** of the team, which is ordinary (not a pair team) and active, and has room (`memberCount` below `TEAM_MEMBER_LIMIT`). `friendUid` is a current friend (never blocked: a block ends the friendship) and not yet a member. The friend holds fewer than 20 live offers, unless this one refreshes a live offer. It writes the offer, replacing an earlier one for the same team and friend, and the receipt. Result `{offerId, expiresAt}` (`offerId` is the document id, today the team id; clients treat it as opaque). |
+| `acceptOffer {offerId, requestId}` | The caller's own offer exists and has not expired; its team is active and ordinary; its sender (`fromUid`) is still a manager of it and still the caller's friend. Then the friend joins through the same core as an invite link (`admitMember` in `teams.mjs`: the new membership generation, `users/{uid}/teams`, the member count, the membership signal, `TEAM_MEMBER_LIMIT`, `USER_TEAM_LIMIT`), and the offer is deleted. Result `{teamId, generation, alreadyMember}`, as `join`. |
+| `declineOffer {offerId}` | Deletes the caller's own offer. A missing offer is a harmless repeat (`{ok: true}`). It also dismisses an expired offer. |
+
+Life cycle:
+
+- **One live offer per (team, friend).** A repeat refreshes the same document: a new 7-day expiry, and `fromUid` and
+  `fromName` become the new sender's (any manager of the team may offer). A repeat while the offer is live is silent;
+  only a new offer or one that had expired pushes (see [Push](#push-and-deep-links)), so repeating cannot be used to nag.
+- **TTL.** An offer lives 7 days (`OFFER_TTL_MS`, as long as the longest invite link). It then stays listed as expired for
+  7 more days (`OFFER_GRACE_MS`), so the friend can see it lapsed and dismiss it; the daily scheduled function deletes it
+  after that (a collection-group query on `expiresAt`, which needs the index override below). An expired offer cannot be
+  accepted.
+- **Cap.** At most 20 live offers per recipient (`OFFER_LIMIT`; expired offers do not count). Expired and live offers
+  together stay below about 40 documents per friend.
+- **Gone with the friendship.** `remove` and `block` delete, in the friendship's transaction, every offer the two friends
+  sent each other (offers whose `fromUid` is one and whose owner is the other). An offer another manager refreshed belongs to
+  that manager's friendship and stays. Because `offerTeam` reads the friendship document, an offer and an unfriend
+  serialize.
+- **Gone with the join.** Whichever way a friend joins a team (`acceptOffer` or an invite link), `admitMember` deletes
+  their offer of it.
+- **Stale offers.** Deleting or restructuring a team does not scan offers. An offer whose team was deleted, or whose
+  sender was demoted, removed or left, stays listed until the friend accepts (the attempt deletes it and answers 404
+  `OFFER_UNAVAILABLE`, uniform for every such cause), declines it, or the prune removes it. A refusal the friend can
+  fix keeps the offer: 409 `MEMBER_LIMIT` (the team is full), 409 `TEAM_LIMIT` (the friend is in 20 teams).
+- **Idempotency.** `offerTeam` stores a receipt in `users/{caller}/friendRequests/{requestId}` bound to the payload
+  digest: the same id and payload replays the first result (even if the offer has since been answered), another payload
+  is `REQUEST_ID_CONFLICT`. `acceptOffer` uses `users/{caller}/teamJoinRequests/{requestId}` as a link join does: a replay
+  answers `alreadyMember: true` while the membership still has that generation, otherwise `STALE_MEMBERSHIP`; the same id
+  for another offer or for an invite link is `REQUEST_ID_CONFLICT`. Two simultaneous accepts end in one membership.
+- **Rate limit.** `offerTeam` spends the same 30 per 10 minutes as `request` and `redeem`, refused calls included.
+- **Privacy.** The sender can neither read the offer nor learn whether it was seen, accepted or declined (the new member
+  shows in the team's member list). The friend sees only the two snapshotted names. User-authored text (team name, sender
+  name) is never in the push.
+
+Errors of the three actions, besides the Teams handler's own and 400 `INVALID_INPUT` (a malformed or extra field, or an
+offer to oneself) and 429 `RATE_LIMITED`:
+
+| Code | Status | When |
+| --- | --- | --- |
+| `MEMBERSHIP_REQUIRED` | 403 | `offerTeam`: the team does not exist, is deleted, or the caller is not a member |
+| `ROLE_REQUIRED` | 403 | `offerTeam`: the caller is a plain member |
+| `PAIR_TEAM` | 400 | `offerTeam` naming a pair team |
+| `FRIEND_REQUIRED` | 403 | `offerTeam`: the target is not a current friend (a stranger, a pending request, a blocked or unknown uid are one answer) |
+| `ALREADY_MEMBER` | 409 | `offerTeam`: the friend is already in the team |
+| `MEMBER_LIMIT` | 409 | `offerTeam` and `acceptOffer`: the team has 200 members |
+| `OFFER_LIMIT` | 409 | `offerTeam`: the friend holds 20 live offers |
+| `OFFER_UNAVAILABLE` | 404 | `acceptOffer`: no such offer, or it can no longer be honoured (expired, team gone, sender no longer a manager or a friend) |
+| `TEAM_LIMIT` | 409 | `acceptOffer`: the friend is in 20 teams |
+| `REQUEST_ID_CONFLICT`, `STALE_MEMBERSHIP` | 409 | a reused `requestId` for another payload; `acceptOffer` replay after the friend left again |
 
 ## Discovery and privacy
 
@@ -198,6 +305,8 @@ requests per user (`REQUEST_LIMIT`; incoming requests are not capped, the receiv
 characters. `lookup` is limited to 30 per rolling 10 minutes per user; `request` and `redeem` (which push to the other
 user, and resolve a proof) share a separate 30 per 10 minutes, so discovery through `request` is limited too. Misses
 count, a refused call is not recorded, and a window closes by itself (`friendLimits` documents are also pruned daily).
+`offerTeam` shares the `request` window. A friend holds at most 20 live team offers (`OFFER_LIMIT`); an offer lives 7 days
+and stays listed as expired for 7 more (`OFFER_TTL_MS`, `OFFER_GRACE_MS`).
 
 ## Push and deep links
 
@@ -209,9 +318,11 @@ Push stays generic and the title is the other person's name: no message, note, o
 | incoming request | `friend/requests` | `friend_request` | 想添加你为好友 / wants to add you as a friend |
 | request accepted | `friend/requests` | `friend_accepted` | 已接受你的好友请求 / accepted your friend request |
 | friend link redeemed | `friend/requests` | `friend_linked` | 已通过你的好友链接成为好友 / is now your friend |
+| team offer (new, or after it expired) | `friend/requests` | `friend_offer` | 邀请你加入团队 / invited you to join a team |
 
 Team pushes keep `team/inbox` and `team_message`. Friends pushes are best effort: a provider or notifier failure never fails
-the command, and a request push is skipped if the card it announces has already gone. Pair-team message pushes reuse
+the command, and a request or offer push is skipped if the card or offer it announces has already gone. An offer push names
+the sender (the title) and never the team. A repeat of a live offer and a replay of a receipt send nothing. Pair-team message pushes reuse
 the existing `onTeamMessage` trigger and its membership/generation re-check.
 
 Deep-link grammar (`packages/deep-links`, mirrored in `packages/deep-links-rs`, shared `fixtures.json`):
@@ -223,10 +334,12 @@ Deep-link grammar (`packages/deep-links`, mirrored in `packages/deep-links-rs`, 
 
 ## Rules, indexes, routing
 
-`infra/firebase/firestore.default.rules` adds `get`/`list` for the owner on `users/{uid}/friends` and `users/{uid}/blocks`,
+`infra/firebase/firestore.default.rules` adds `get`/`list` for the owner on `users/{uid}/friends`, `users/{uid}/blocks` and
+`users/{uid}/teamOffers` (the sender cannot read the offer they made),
 and `get` on `profiles/{uid}` for the owner or for a user whose own card for it has `state == 'friends'`. Everything else
 in this document, and every client write, has no rule and is denied; collection and collection-group queries on
-profiles, friend codes and friendships are denied too. `firestore.teams.indexes.json` exempts `friendCodes.code`.
+profiles, friend codes and friendships are denied too. `firestore.teams.indexes.json` exempts `friendCodes.code` and
+enables `teamOffers.expiresAt` for collection and collection-group queries (the daily prune of expired offers).
 `firebase.json` adds the two Hosting rewrites and the link-page headers.
 
 ## Deployment gates
@@ -234,10 +347,12 @@ profiles, friend codes and friendships are denied too. `firestore.teams.indexes.
 Deploying any of this requires explicit approval; F0 deploys nothing.
 
 1. Order: default-database rules and indexes, then Functions (`teamsApi`, `prunePushRegistrations`, and the two summary
-   triggers `onFriendChatUpdated` and `onFriendChatRead`), then Hosting, then clients.
+   triggers `onFriendChatUpdated` and `onFriendChatRead`), then Hosting, then clients. The `teamOffers.expiresAt`
+   collection-group index must be built before the new `prunePushRegistrations`: without it the offer sweep fails with
+   `FAILED_PRECONDITION` (the `friendLimits` sweep before it still runs).
 2. IAM preflight: `teamsApi` and the scheduled function run as `push-api`. `getUserByEmail` needs Firebase Authentication
    read access for it (for example `roles/firebaseauth.viewer`); without it email lookup fails with a server error
-   instead of `NOT_FOUND`. The daily prune now also deletes expired `friendLimits` in `(default)`.
+   instead of `NOT_FOUND`. The daily prune now also deletes expired `friendLimits` and offers expired for 7 days in `(default)`.
    The summary triggers run as the same `push-api` as `onTeamMessage`, on the same `(default)` database and region, and
    write only `users/{uid}/friends` there, as `teamsApi` already does, so they need no IAM beyond it. They are new
    Firestore (Eventarc) triggers: the first deploy creates them, and the cards fill in from the next message or read mark.
@@ -255,12 +370,14 @@ node --import ./packages/bridge-client/node_modules/tsx/dist/loader.mjs --test p
 cargo test --locked -p lingxi-deep-links
 ```
 
-`friends.test.mjs` (commands, push copy, handler, config), `friends.emulator.test.mjs` (profiles, discovery, every
-transition including races, block names, pair-team contract, SharedBots in a pair team, push),
-`friends.rules.emulator.test.mjs` (client access, unfriend closing the chat) and `friend-summary.emulator.test.mjs`
+`friends.test.mjs` (commands including the three offer actions, push copy, handler, config, the index override),
+`friends.emulator.test.mjs` (profiles, discovery, every transition including races, block names, pair-team contract, shared
+Bots in a friendship from publish to unfriend, the offer actions with their refusals, limits, races, cleanup and prune,
+push), `friends.rules.emulator.test.mjs` (client access, offers, unfriend closing the chat; the join refactor is covered by
+`teams.members.emulator.test.mjs`) and `friend-summary.emulator.test.mjs`
 (summary create/edit/recall, duplicate and out-of-order events, read marks, unfriend and re-friend, non-pair data) are
 part of the first `test:teams` command. `friend-summary.test.mjs` runs without the emulator: it checks that other team
 and conversation ids cost no read and the trigger wiring (paths, region, service account, no retry).
 
-Not in F0: client UI (see [FRIENDS-CLIENTS.md](FRIENDS-CLIENTS.md)), sharing Bots with friends, account-deletion
-cleanup of friendships, and rename fan-out.
+Not built: client UI (see [FRIENDS-CLIENTS.md](FRIENDS-CLIENTS.md)), account-deletion cleanup of friendships and offers,
+cleanup of offers when their team is deleted, and rename fan-out.

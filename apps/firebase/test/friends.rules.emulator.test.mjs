@@ -7,7 +7,7 @@ import { deleteApp, initializeApp } from 'firebase-admin/app';
 import { getFirestore as adminFirestore } from 'firebase-admin/firestore';
 import { collection, collectionGroup, deleteDoc, doc, getDoc, getDocs, query, serverTimestamp, setDoc, updateDoc, where, writeBatch } from 'firebase/firestore';
 import { FriendsStore, pairKey, pairTeamId } from '../src/friends.mjs';
-import { PAIR_CONVERSATION_ID } from '../src/teams.mjs';
+import { PAIR_CONVERSATION_ID, TeamsStore } from '../src/teams.mjs';
 import { messagePreview } from '../src/team-message-preview.mjs';
 
 const projectId = 'demo-lingxi-teams-t0';
@@ -124,6 +124,41 @@ test('friends rules: a profile opens only for its owner and for a friend whose c
   await act(bob, { action: 'block', otherUid: 'alice' });
   await assertFails(read('bob', 'alice')); await assertFails(read('alice', 'bob'));
   await assertSucceeds(read('alice', 'alice'));
+});
+
+test('friends rules: a team offer is readable only by its recipient, grants no access to the team, and no client — not even the recipient — can write one', options, async () => {
+  await befriend(bob, alice); await friends.profile(carol);
+  await new TeamsStore(admin).execute(alice, { action: 'create', teamId: 'team-alpha', name: 'Alpha' });
+  await act(alice, { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'bob', requestId: rid() });
+  const path = 'users/bob/teamOffers/team-alpha', mine = user('bob');
+  const offer = (await assertSucceeds(getDoc(doc(mine, path)))).data();
+  assert.deepEqual([offer.teamId, offer.teamName, offer.fromUid, offer.fromName, offer.role], ['team-alpha', 'Alpha', 'alice', 'Alice', 'member']);
+  assert.deepEqual((await assertSucceeds(getDocs(collection(mine, 'users/bob/teamOffers')))).docs.map(item => item.id), ['team-alpha']);
+  // The sender, a stranger and a signed-out client see nothing: the sender cannot even read the offer they made.
+  for (const other of [user('alice'), user('carol'), anonymous()]) {
+    await assertFails(getDoc(doc(other, path)));
+    await assertFails(getDocs(collection(other, 'users/bob/teamOffers')));
+  }
+  // No query shape reaches everyone's offers.
+  await assertFails(getDocs(collectionGroup(mine, 'teamOffers')));
+  await assertFails(getDocs(query(collectionGroup(mine, 'teamOffers'), where('expiresAt', '>', new Date(0)))));
+  await assertFails(getDocs(query(collectionGroup(user('alice'), 'teamOffers'), where('fromUid', '==', 'alice'))));
+  // An offer grants nothing: the friend still cannot read the team, its members or its conversations.
+  await assertFails(getDoc(doc(mine, 'teams/team-alpha')));
+  await assertFails(getDocs(collection(mine, 'teams/team-alpha/members')));
+  // Offers are the backend's: the recipient cannot make, change, extend or delete one, and nobody can plant one for another user.
+  const later = new Date(Date.now() + 1e10);
+  // Each attempt starts only when it is awaited: clients of different users run in parallel and an early refusal must not go unobserved.
+  const attempts = [() => setDoc(doc(mine, path), { ...offer, role: 'admin' }), () => updateDoc(doc(mine, path), { role: 'admin' }), () => updateDoc(doc(mine, path), { expiresAt: later }), () => deleteDoc(doc(mine, path)),
+    () => setDoc(doc(mine, 'users/bob/teamOffers/team-forged'), { teamId: 'team-forged', teamName: 'Forged', fromUid: 'alice', fromName: 'Alice', role: 'admin', expiresAt: later }),
+    () => setDoc(doc(user('alice'), 'users/bob/teamOffers/team-alpha'), { teamId: 'team-alpha' }), () => setDoc(doc(user('carol'), 'users/bob/teamOffers/team-evil'), { teamId: 'team-evil' }),
+    () => deleteDoc(doc(user('alice'), path))];
+  for (const attempt of attempts) await assertFails(attempt());
+  assert.equal((await admin.doc(path).get()).data().role, 'member');
+  assert.deepEqual((await admin.collection('users/bob/teamOffers').get()).docs.map(item => item.id), ['team-alpha']);
+  // Ending the friendship takes the offer away, and the recipient's list is empty again.
+  await act(alice, { action: 'remove', otherUid: 'bob' });
+  assert.equal((await assertSucceeds(getDocs(collection(mine, 'users/bob/teamOffers')))).size, 0);
 });
 
 test('friends rules: handles, friend codes, friendships, limits and request receipts have no client access at all', options, async () => {

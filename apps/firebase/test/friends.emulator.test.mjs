@@ -7,8 +7,8 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { assertFails, assertSucceeds, initializeTestEnvironment } from '@firebase/rules-unit-testing';
 import { collection, doc, getDoc, getDocs } from 'firebase/firestore';
 import { z } from 'zod';
-import { FRIEND_LIMIT, FriendsStore, LOOKUP_LIMIT, LOOKUP_WINDOW_MS, OUTGOING_LIMIT, friendNotifier, pairKey, pairTeamId } from '../src/friends.mjs';
-import { PAIR_CONVERSATION_ID, TeamsStore, USER_TEAM_LIMIT, createTeamsHandler } from '../src/teams.mjs';
+import { FRIEND_LIMIT, FriendsStore, LOOKUP_LIMIT, LOOKUP_WINDOW_MS, OFFER_GRACE_MS, OFFER_LIMIT, OFFER_TTL_MS, OUTGOING_LIMIT, friendNotifier, pairKey, pairTeamId } from '../src/friends.mjs';
+import { PAIR_CONVERSATION_ID, TEAM_MEMBER_LIMIT, TeamsStore, USER_TEAM_LIMIT, createTeamsHandler } from '../src/teams.mjs';
 import { TeamMessagesStore } from '../src/team-messages.mjs';
 import { SharedBotsStore } from '../src/shared-bots.mjs';
 import { createTeamConversation } from '../src/team-conversations.mjs';
@@ -820,6 +820,340 @@ test('block: the block keeps the person\'s name for the Blocked list — profile
   assert.deepEqual(await entry('bob'), { displayName: 'Robert', handle: 'Bob_B' });
 });
 
+// ─── Team offers (F4) ───────────────────────────────────────────────────────────────────────────────────────────────
+const DAY = 24 * 3600 * 1000;
+const offerOf = (from, teamId, to, extra = {}) => act(from, { action: 'offerTeam', teamId, friendUid: to.uid, requestId: rid(), ...extra });
+const accepts = (to, offerId, extra = {}) => act(to, { action: 'acceptOffer', offerId, requestId: rid(), ...extra });
+const makeTeam = (owner, teamId, name = 'Alpha') => teams.execute(owner, { action: 'create', teamId, name });
+const offersOf = uid => ids(`users/${uid}/teamOffers`);
+const offerPushes = () => events.filter(event => event.kind === 'offer');
+// Joins `member` to `teamId` through an invite link from `owner`.
+async function admit(owner, member, teamId, role = 'member') {
+  const { code } = await teams.execute(owner, { action: 'invite', teamId, requestId: rid(), role, maxUses: 5, ttlSeconds: 3600 });
+  return teams.execute(member, { action: 'join', code, requestId: rid() });
+}
+
+test('offerTeam: a manager offers a team as one document in the friend\'s own collection — one push, a replay-safe receipt, and a repeat refreshes instead of adding', options, async () => {
+  await befriend(bob, alice); await makeTeam(alice, 'team-alpha');
+  const requestId = rid(), command = { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'bob', requestId };
+  const first = await act(alice, command);
+  assert.deepEqual(first, { offerId: 'team-alpha', expiresAt: new Date(now + OFFER_TTL_MS).toISOString() });
+  const stored = await data('users/bob/teamOffers/team-alpha');
+  assert.deepEqual(Object.keys(stored).sort(), ['expiresAt', 'fromName', 'fromUid', 'role', 'teamId', 'teamName']);
+  assert.deepEqual([stored.teamId, stored.teamName, stored.fromUid, stored.fromName, stored.role, stored.expiresAt.toMillis()], ['team-alpha', 'Alpha', 'alice', 'Alice', 'member', now + OFFER_TTL_MS]);
+  assert.deepEqual(await offersOf('alice'), [], 'the sender holds nothing');
+  assert.deepEqual(offerPushes(), [{ kind: 'offer', to: 'bob', from: 'alice', name: 'Alice', offerId: 'team-alpha', key: `${pairKey('alice', 'bob')}:${requestId}` }]);
+  // An offer grants nothing: the friend is not a member and has no team.
+  assert.equal((await db.doc('teams/team-alpha/members/bob').get()).exists, false);
+  assert.deepEqual((await teams.list('bob')).teams, []);
+  const receipt = await data(`users/alice/friendRequests/${requestId}`);
+  assert.deepEqual(Object.keys(receipt).sort(), ['at', 'digest', 'expiresAt', 'offerId', 'otherUid']);
+  assert.deepEqual([receipt.otherUid, receipt.offerId, receipt.expiresAt.toMillis()], ['bob', 'team-alpha', now + OFFER_TTL_MS]);
+  // A replay answers with the first result, writes nothing and pushes nothing, even later; another request under the same id is a conflict.
+  now += 2 * DAY;
+  assert.deepEqual(await act(alice, command), first);
+  assert.equal(offerPushes().length, 1);
+  assert.equal((await data('users/bob/teamOffers/team-alpha')).expiresAt.toMillis(), stored.expiresAt.toMillis());
+  await makeTeam(alice, 'team-beta', 'Beta');
+  await rejects(act(alice, { ...command, teamId: 'team-beta' }), 409, 'REQUEST_ID_CONFLICT');
+  await rejects(act(alice, { ...command, friendUid: 'carol' }), 409, 'REQUEST_ID_CONFLICT');
+  await rejects(act(alice, { action: 'request', via: 'email', email: mail(carol), requestId }), 409, 'REQUEST_ID_CONFLICT');
+  // A new request while the offer is live refreshes it in place (a new expiry, the same document) and stays silent.
+  const refreshed = await offerOf(alice, 'team-alpha', bob);
+  assert.equal(refreshed.expiresAt, new Date(now + OFFER_TTL_MS).toISOString());
+  assert.deepEqual(await offersOf('bob'), ['team-alpha']);
+  assert.equal((await data('users/bob/teamOffers/team-alpha')).expiresAt.toMillis(), now + OFFER_TTL_MS);
+  assert.equal(offerPushes().length, 1);
+  // Once it has expired it is still listed (until pruned); offering again revives the same document and tells the friend again.
+  now += OFFER_TTL_MS + 1;
+  assert.deepEqual(await offersOf('bob'), ['team-alpha']);
+  await offerOf(alice, 'team-alpha', bob);
+  assert.deepEqual(await offersOf('bob'), ['team-alpha']);
+  assert.equal(offerPushes().length, 2);
+  // Another team is another document.
+  await offerOf(alice, 'team-beta', bob);
+  assert.deepEqual(await offersOf('bob'), ['team-alpha', 'team-beta']);
+  assert.equal(offerPushes().length, 3);
+  assert.equal(await consistent(alice, bob), 'friends');
+});
+
+test('offerTeam: only an owner or admin of an ordinary active team may offer, to a current friend who is not a member — each refusal has its own code and writes nothing', options, async () => {
+  await befriend(bob, alice); await linked(carol, bob); await friends.profile(dave);
+  await makeTeam(alice, 'team-alpha'); await admit(alice, bob, 'team-alpha');
+  // A plain member cannot, and neither can a stranger to the team; an admin can.
+  await rejects(offerOf(bob, 'team-alpha', carol), 403, 'ROLE_REQUIRED');
+  await rejects(offerOf(carol, 'team-alpha', bob), 403, 'MEMBERSHIP_REQUIRED');
+  await teams.execute(alice, { action: 'role', teamId: 'team-alpha', uid: 'bob', generation: 1, role: 'admin' });
+  assert.equal((await offerOf(bob, 'team-alpha', carol)).offerId, 'team-alpha');
+  assert.deepEqual(await offersOf('carol'), ['team-alpha']);
+  assert.equal((await data('users/carol/teamOffers/team-alpha')).fromName, 'Bob');
+  // The friend must be a friend: a stranger, a pending request and an unknown account are one answer.
+  await rejects(offerOf(alice, 'team-alpha', dave), 403, 'FRIEND_REQUIRED');
+  await request(dave, alice);
+  await rejects(offerOf(alice, 'team-alpha', dave), 403, 'FRIEND_REQUIRED');
+  await rejects(offerOf(alice, 'team-alpha', { uid: 'nobody-here' }), 403, 'FRIEND_REQUIRED');
+  // A member, a full team, a pair team, a missing and a deleted team, oneself.
+  await rejects(offerOf(alice, 'team-alpha', bob), 409, 'ALREADY_MEMBER');
+  await db.doc('teams/team-alpha').update({ memberCount: TEAM_MEMBER_LIMIT });
+  await rejects(offerOf(bob, 'team-alpha', carol), 409, 'MEMBER_LIMIT');
+  await db.doc('teams/team-alpha').update({ memberCount: 2 });
+  await rejects(offerOf(alice, pairTeamId('alice', 'bob', 1), carol), 400, 'PAIR_TEAM');
+  await rejects(offerOf(carol, pairTeamId('alice', 'bob', 1), bob), 403, 'MEMBERSHIP_REQUIRED');
+  await rejects(offerOf(alice, 'team-missing', carol), 403, 'MEMBERSHIP_REQUIRED');
+  await makeTeam(alice, 'team-gone', 'Gone'); await teams.execute(alice, { action: 'delete', teamId: 'team-gone' });
+  await rejects(offerOf(alice, 'team-gone', carol), 403, 'MEMBERSHIP_REQUIRED');
+  await rejects(act(alice, { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'alice', requestId: rid() }), 400, 'INVALID_INPUT');
+  // A blocked friend is no friend; the block took their offers with it.
+  await act(carol, { action: 'block', otherUid: 'bob' });
+  await rejects(offerOf(bob, 'team-alpha', carol), 403, 'FRIEND_REQUIRED');
+  assert.deepEqual(await offersOf('carol'), []);
+  // Only the two successful offers left a receipt or an offer, and the pair team stayed whole.
+  assert.deepEqual(await offersOf('dave'), []); assert.deepEqual(await offersOf('bob'), []); assert.deepEqual(await offersOf('alice'), []);
+  assert.equal((await db.collection('users/alice/friendRequests').get()).docs.filter(doc => doc.data().offerId).length, 0);
+  assert.equal((await db.collection('users/bob/friendRequests').get()).docs.filter(doc => doc.data().offerId).length, 1);
+  assert.equal(await consistent(alice, bob), 'friends');
+});
+
+test('offerTeam: a friend holds at most 20 live offers (a refresh of a live one still fits, an expired one does not count) and offering spends the request budget', options, async () => {
+  await befriend(bob, alice); await makeTeam(alice, 'team-alpha'); await makeTeam(alice, 'team-beta', 'Beta');
+  // Eighteen offers from other teams are already live; two from this friend fill the last places.
+  const stub = number => ({ teamId: `stub-offer-${number}`, teamName: `Stub ${number}`, fromUid: 'carol', fromName: 'Carol', role: 'member', expiresAt: new Date(now + 30 * DAY) });
+  for (let i = 0; i < OFFER_LIMIT - 2; i++) await db.doc(`users/bob/teamOffers/stub-offer-${i}`).set(stub(i));
+  await offerOf(alice, 'team-alpha', bob);
+  await offerOf(alice, 'team-beta', bob);
+  assert.equal((await offersOf('bob')).length, OFFER_LIMIT);
+  await makeTeam(alice, 'team-gamma', 'Gamma');
+  await rejects(offerOf(alice, 'team-gamma', bob), 409, 'OFFER_LIMIT');
+  assert.equal((await db.doc('users/bob/teamOffers/team-gamma').get()).exists, false);
+  // Refreshing a live offer adds no place.
+  assert.equal((await offerOf(alice, 'team-alpha', bob)).offerId, 'team-alpha');
+  // Declining frees one; an expired offer does not count against the limit, and reviving it needs a free place.
+  await act(bob, { action: 'declineOffer', offerId: 'stub-offer-0' });
+  assert.equal((await offerOf(alice, 'team-gamma', bob)).offerId, 'team-gamma');
+  await db.doc('users/bob/teamOffers/team-alpha').update({ expiresAt: new Date(now - 1000) }); // live: 19
+  assert.equal((await offerOf(alice, 'team-alpha', bob)).offerId, 'team-alpha'); // live: 20 again
+  await db.doc('users/bob/teamOffers/team-beta').update({ expiresAt: new Date(now - 1000) }); // live: 19
+  await db.doc('users/bob/teamOffers/stub-offer-extra').set(stub('extra')); // live: 20
+  await rejects(offerOf(alice, 'team-beta', bob), 409, 'OFFER_LIMIT');
+});
+
+test('offerTeam: offers, requests and redeems share one budget of 30 per 10 minutes, refused offers included', options, async () => {
+  await befriend(bob, alice); await makeTeam(alice, 'team-alpha');
+  for (let i = 0; i < LOOKUP_LIMIT - 1; i++) await rejects(offerOf(alice, 'team-alpha', dave), 403, 'FRIEND_REQUIRED');
+  // Alice has spent 29 of her 30 on refused offers; the friendship was Bob's request and Alice's accept, which costs her nothing.
+  await offerOf(alice, 'team-alpha', bob);
+  await rejects(offerOf(alice, 'team-alpha', bob), 429, 'RATE_LIMITED');
+  await rejects(request(alice, carol), 429, 'RATE_LIMITED');
+  now += LOOKUP_WINDOW_MS + 1;
+  assert.equal((await offerOf(alice, 'team-alpha', bob)).offerId, 'team-alpha');
+});
+
+test('acceptOffer: the friend joins through the same core as an invite link — a new generation, the team index, the member count and the signal — and the offer is gone', options, async () => {
+  await befriend(bob, alice); await makeTeam(alice, 'team-alpha'); await offerOf(alice, 'team-alpha', bob);
+  const requestId = rid(), command = { action: 'acceptOffer', offerId: 'team-alpha', requestId };
+  assert.deepEqual(await act(bob, command), { teamId: 'team-alpha', generation: 1, alreadyMember: false });
+  const member = await data('teams/team-alpha/members/bob');
+  assert.deepEqual([member.displayName, member.role, member.generation], ['Bob', 'member', 1]);
+  assert.deepEqual(await data('teams/team-alpha/membershipEpochs/bob'), { generation: 1 });
+  const index = await data('users/bob/teams/team-alpha');
+  assert.deepEqual([index.role, index.generation], ['member', 1]);
+  assert.equal((await data('teams/team-alpha')).memberCount, 2);
+  assert.ok((await data('teams/team-alpha/signals/membership')).updatedAt);
+  assert.deepEqual(await offersOf('bob'), []);
+  assert.deepEqual(await data(`users/bob/teamJoinRequests/${requestId}`), { teamId: 'team-alpha', offerId: 'team-alpha', generation: 1 });
+  assert.deepEqual((await teams.list('bob')).teams.map(team => [team.id, team.role, team.generation, team.memberCount]), [['team-alpha', 'member', 1, 2]]);
+  // A replay is the same answer and changes nothing; another offer or a link join under the same id conflicts.
+  assert.deepEqual(await act(bob, command), { teamId: 'team-alpha', generation: 1, alreadyMember: true });
+  assert.equal((await data('teams/team-alpha')).memberCount, 2);
+  await rejects(act(bob, { ...command, offerId: 'team-other1' }), 409, 'REQUEST_ID_CONFLICT');
+  const { code } = await teams.execute(alice, { action: 'invite', teamId: 'team-alpha', requestId: 'invite-01', role: 'member', maxUses: 2, ttlSeconds: 3600 });
+  await rejects(teams.execute(bob, { action: 'join', code, requestId }), 409, 'REQUEST_ID_CONFLICT');
+  // After leaving, the old receipt no longer answers for the membership; a new offer joins with the next generation.
+  await teams.execute(bob, { action: 'leave', teamId: 'team-alpha', generation: 1 });
+  await rejects(act(bob, command), 409, 'STALE_MEMBERSHIP');
+  await offerOf(alice, 'team-alpha', bob);
+  assert.deepEqual(await accepts(bob, 'team-alpha'), { teamId: 'team-alpha', generation: 2, alreadyMember: false });
+  assert.equal((await data('teams/team-alpha')).memberCount, 2);
+  assert.equal(await consistent(alice, bob), 'friends');
+});
+
+test('acceptOffer: a refusal the friend can fix keeps the offer — a full team, the 20-team limit — and joining by any other route answers it', options, async () => {
+  await befriend(bob, alice); await makeTeam(alice, 'team-alpha'); await offerOf(alice, 'team-alpha', bob);
+  await db.doc('teams/team-alpha').update({ memberCount: TEAM_MEMBER_LIMIT });
+  await rejects(accepts(bob, 'team-alpha'), 409, 'MEMBER_LIMIT');
+  assert.deepEqual(await offersOf('bob'), ['team-alpha']);
+  await db.doc('teams/team-alpha').update({ memberCount: 1 });
+  for (let i = 0; i < USER_TEAM_LIMIT; i++) await makeTeam(bob, `bobs-team-${String(i).padStart(2, '0')}`, `Bob ${i}`);
+  await rejects(accepts(bob, 'team-alpha'), 409, 'TEAM_LIMIT');
+  assert.deepEqual(await offersOf('bob'), ['team-alpha']);
+  assert.equal((await db.doc('teams/team-alpha/members/bob').get()).exists, false);
+  await teams.execute(bob, { action: 'delete', teamId: 'bobs-team-00' });
+  assert.equal((await accepts(bob, 'team-alpha')).alreadyMember, false);
+  assert.equal((await teams.list('bob')).teams.length, USER_TEAM_LIMIT);
+  // Another route into the team answers the offer: an invite link takes it away, and accepting it afterwards finds nothing.
+  await makeTeam(alice, 'team-beta', 'Beta'); await offerOf(alice, 'team-beta', bob);
+  await teams.execute(bob, { action: 'leave', teamId: 'team-alpha', generation: 1 });
+  assert.deepEqual(await offersOf('bob'), ['team-beta']);
+  await admit(alice, bob, 'team-beta');
+  assert.deepEqual(await offersOf('bob'), []);
+  await rejects(accepts(bob, 'team-beta'), 404, 'OFFER_UNAVAILABLE');
+});
+
+test('acceptOffer: an offer that cannot be honoured any more is deleted and answers OFFER_UNAVAILABLE — expired, team deleted, sender demoted, removed or gone — or is simply gone when declined', options, async () => {
+  await befriend(bob, alice); await linked(carol, bob);
+  const cases = [
+    ['expired', async () => { now += OFFER_TTL_MS; }],
+    ['team deleted', async id => { await teams.execute(alice, { action: 'delete', teamId: id }); }],
+    ['sender demoted', async id => { await teams.execute(alice, { action: 'role', teamId: id, uid: 'carol', generation: 1, role: 'member' }); }],
+    ['sender removed', async id => { await teams.execute(alice, { action: 'remove', teamId: id, uid: 'carol', generation: 1 }); }],
+    ['sender left', async id => { await teams.execute(carol, { action: 'leave', teamId: id, generation: 1 }); }],
+  ];
+  for (const [index, [name, prepare]] of cases.entries()) {
+    const teamId = `stale-team-${index}`;
+    await makeTeam(alice, teamId, `Stale ${index}`); await admit(alice, carol, teamId, 'admin');
+    await offerOf(carol, teamId, bob);
+    await prepare(teamId);
+    const count = (await data(`teams/${teamId}`)).memberCount;
+    await rejects(accepts(bob, teamId), 404, 'OFFER_UNAVAILABLE');
+    assert.deepEqual(await offersOf('bob'), [], name);
+    assert.equal((await db.doc(`teams/${teamId}/members/bob`).get()).exists, false, name);
+    assert.equal((await db.doc(`users/bob/teams/${teamId}`).get()).exists, false, name);
+    assert.equal((await data(`teams/${teamId}`)).memberCount, count, name);
+    await rejects(accepts(bob, teamId), 404, 'OFFER_UNAVAILABLE'); // it is gone for good
+  }
+  // The boundary: an offer is live until its expiry instant and expired from it.
+  await makeTeam(alice, 'edge-team-1', 'Edge'); await offerOf(alice, 'edge-team-1', bob);
+  now += OFFER_TTL_MS - 1;
+  assert.equal((await accepts(bob, 'edge-team-1')).alreadyMember, false);
+  await makeTeam(alice, 'edge-team-2', 'Edge two'); await offerOf(alice, 'edge-team-2', bob);
+  now += OFFER_TTL_MS;
+  await rejects(accepts(bob, 'edge-team-2'), 404, 'OFFER_UNAVAILABLE');
+  // Declining deletes the offer; a repeat, an unknown offer and the sender's own view are harmless or empty.
+  await makeTeam(alice, 'team-alpha'); await offerOf(alice, 'team-alpha', bob);
+  assert.deepEqual(await act(bob, { action: 'declineOffer', offerId: 'team-alpha' }), { ok: true });
+  assert.deepEqual(await act(bob, { action: 'declineOffer', offerId: 'team-alpha' }), { ok: true });
+  assert.deepEqual(await act(bob, { action: 'declineOffer', offerId: 'never-offered' }), { ok: true });
+  await rejects(accepts(bob, 'team-alpha'), 404, 'OFFER_UNAVAILABLE');
+  assert.equal((await db.doc('teams/team-alpha/members/bob').get()).exists, false);
+  // An offer cannot be accepted by anyone but its recipient: Carol has none under that id.
+  await offerOf(alice, 'team-alpha', bob);
+  await rejects(accepts(carol, 'team-alpha'), 404, 'OFFER_UNAVAILABLE');
+  assert.deepEqual(await offersOf('bob'), ['team-alpha']);
+});
+
+test('acceptOffer: a double tap, two taps with different ids, and an accept racing an unfriend each end in one consistent state', options, async () => {
+  await befriend(bob, alice); await makeTeam(alice, 'team-alpha'); await offerOf(alice, 'team-alpha', bob);
+  const same = rid();
+  const taps = await Promise.allSettled([1, 2, 3, 4].map(() => act(bob, { action: 'acceptOffer', offerId: 'team-alpha', requestId: same })));
+  assert.ok(taps.every(tap => tap.status === 'fulfilled'), 'a repeated tap is answered, not refused');
+  assert.equal(taps.filter(tap => tap.value.alreadyMember === false).length, 1);
+  assert.deepEqual([...new Set(taps.map(tap => tap.value.generation))], [1]);
+  assert.equal((await data('teams/team-alpha')).memberCount, 2);
+  await makeTeam(alice, 'team-beta', 'Beta'); await offerOf(alice, 'team-beta', bob);
+  const two = await Promise.allSettled([accepts(bob, 'team-beta'), accepts(bob, 'team-beta')]);
+  assert.equal(two.filter(result => result.status === 'fulfilled').length, 1);
+  for (const result of two) if (result.status === 'rejected') assert.equal(result.reason.code, 'OFFER_UNAVAILABLE');
+  assert.equal((await data('teams/team-beta')).memberCount, 2);
+  // Either the friend joined first and keeps the team, or the offer was gone: never an offer for an ended friendship, never half a membership.
+  await makeTeam(alice, 'team-gamma', 'Gamma'); await offerOf(alice, 'team-gamma', bob);
+  const raced = await Promise.allSettled([accepts(bob, 'team-gamma'), act(alice, { action: 'remove', otherUid: 'bob' })]);
+  assert.equal(raced[1].status, 'fulfilled');
+  if (raced[0].status === 'rejected') assert.equal(raced[0].reason.code, 'OFFER_UNAVAILABLE');
+  assert.deepEqual(await offersOf('bob'), []);
+  assert.equal(await consistent(alice, bob), 'ended');
+  const joined = (await db.doc('teams/team-gamma/members/bob').get()).exists;
+  assert.equal(joined, raced[0].status === 'fulfilled');
+  assert.equal((await db.doc('users/bob/teams/team-gamma').get()).exists, joined);
+  assert.equal((await data('teams/team-gamma')).memberCount, joined ? 2 : 1);
+});
+
+test('remove and block delete the offers between the two friends, in both directions and only theirs — an offer a third friend refreshed stays until that friendship ends too', options, async () => {
+  await befriend(bob, alice); await linked(carol, alice); await linked(carol, bob);
+  await makeTeam(alice, 'alice-team1', 'A1'); await makeTeam(alice, 'alice-team2', 'A2'); await makeTeam(bob, 'bob-team01', 'B1'); await makeTeam(carol, 'carol-team1', 'C1');
+  await admit(alice, carol, 'alice-team1', 'admin');
+  const state = async () => Object.fromEntries(await Promise.all(['alice', 'bob', 'carol'].map(async uid =>
+    [uid, (await db.collection(`users/${uid}/teamOffers`).get()).docs.map(doc => `${doc.id}<-${doc.data().fromUid}`).sort()])));
+  await offerOf(alice, 'alice-team1', bob); await offerOf(alice, 'alice-team2', carol); await offerOf(bob, 'bob-team01', alice);
+  await offerOf(carol, 'carol-team1', alice); await offerOf(carol, 'carol-team1', bob); await offerOf(bob, 'bob-team01', carol);
+  await offerOf(carol, 'alice-team1', bob); // Carol, an admin of Alice's team, refreshes the live offer: it is Carol's now
+  assert.deepEqual(await state(), { alice: ['bob-team01<-bob', 'carol-team1<-carol'], bob: ['alice-team1<-carol', 'carol-team1<-carol'], carol: ['alice-team2<-alice', 'bob-team01<-bob'] });
+  await act(alice, { action: 'remove', otherUid: 'bob' });
+  assert.deepEqual(await state(), { alice: ['carol-team1<-carol'], bob: ['alice-team1<-carol', 'carol-team1<-carol'], carol: ['alice-team2<-alice', 'bob-team01<-bob'] });
+  await act(alice, { action: 'block', otherUid: 'carol' });
+  assert.deepEqual(await state(), { alice: [], bob: ['alice-team1<-carol', 'carol-team1<-carol'], carol: ['bob-team01<-bob'] });
+  await act(bob, { action: 'block', otherUid: 'carol' });
+  assert.deepEqual(await state(), { alice: [], bob: [], carol: [] });
+  // A pending request or a decline owns no offers, so it deletes none.
+  await db.doc('users/dave/teamOffers/dave-offer1').set({ teamId: 'dave-offer1', teamName: 'D', fromUid: 'alice', fromName: 'Alice', role: 'member', expiresAt: new Date(now + DAY) });
+  await request(dave, alice); await act(alice, { action: 'decline', otherUid: 'dave' });
+  assert.deepEqual(await offersOf('dave'), ['dave-offer1']);
+});
+
+test('prune: an offer is deleted a week after it expired — not before, in as many pages as it takes — and the live ones stay', options, async () => {
+  const offer = (expiresAt, fromUid = 'carol') => ({ teamId: 'any-team-01', teamName: 'Any', fromUid, fromName: 'Carol', role: 'member', expiresAt: new Date(expiresAt) });
+  await db.doc('users/bob/teamOffers/live-offer1').set(offer(now + DAY));
+  await db.doc('users/bob/teamOffers/just-expired').set(offer(now - DAY));
+  await db.doc('users/bob/teamOffers/almost-gone').set(offer(now - OFFER_GRACE_MS + 1));
+  await db.doc('users/bob/teamOffers/at-boundary').set(offer(now - OFFER_GRACE_MS));
+  await db.doc('users/alice/teamOffers/long-gone-1').set(offer(now - OFFER_GRACE_MS - 1));
+  const writer = db.bulkWriter();
+  for (let i = 0; i < 230; i++) writer.set(db.doc(`users/user-${i % 23}/teamOffers/old-offer-${i}`), offer(now - 30 * DAY));
+  await writer.close();
+  await db.doc('friendLimits/spent').set({ sentAt: [], expiresAt: new Date(now - 1000) });
+  await friends.prune();
+  assert.deepEqual(await offersOf('bob'), ['almost-gone', 'just-expired', 'live-offer1']);
+  assert.deepEqual(await offersOf('alice'), []);
+  assert.equal((await db.collectionGroup('teamOffers').get()).size, 3);
+  assert.equal((await db.doc('friendLimits/spent').get()).exists, false);
+  // Pruning is idempotent.
+  await friends.prune();
+  assert.equal((await db.collectionGroup('teamOffers').get()).size, 3);
+});
+
+test('push: a team offer notifies the friend once through the real notifier — the sender\'s name, generic text, the requests route, no team name — and a repeat, a decline or a broken provider changes nothing', options, async () => {
+  const sent = [], expiry = { toMillis: () => now + 3600000 };
+  const device = (uid, locale) => ({ id: `device-${uid}`, uid, revision: 1, fcmInstallationId: `fid-${uid}`, expiresAt: expiry, locale, appId: 'com.lingxi.code', platform: 'ios' });
+  const devices = [device('alice', 'en-US'), device('bob', 'zh-CN')];
+  const pushStore = { async active(uid) { return devices.filter(item => item.uid === uid); }, device(id) { return { async get() { return { data: () => devices.find(item => item.id === id) }; } }; } };
+  let broken = false;
+  const live = friendNotifier({ db, pushStore, messaging: { async send(value) { if (broken) throw new Error('provider down'); sent.push(value); } }, clock: () => now });
+  friends = new FriendsStore(db, () => now, { auth, notify: live });
+  await befriend(bob, alice); await makeTeam(alice, 'team-alpha', 'Secret Project'); await makeTeam(alice, 'team-beta', 'Beta');
+  const before = sent.length;
+  await offerOf(alice, 'team-alpha', bob);
+  assert.equal(sent.length, before + 1);
+  const message = sent.at(-1);
+  assert.deepEqual([message.data.recipientUid, message.data.route, message.data.kind, message.data.title, message.data.body], ['bob', 'friend/requests', 'friend_offer', 'Alice', '邀请你加入团队']);
+  assert.ok(!JSON.stringify(message).includes('Secret Project'));
+  await offerOf(alice, 'team-alpha', bob); // a repeat while live
+  assert.equal(sent.length, before + 1);
+  await act(bob, { action: 'declineOffer', offerId: 'team-alpha' });
+  await live({ kind: 'offer', to: 'bob', from: 'alice', name: 'Alice', offerId: 'team-alpha', key: 'late' }); // a late push for a declined offer
+  assert.equal(sent.length, before + 1);
+  broken = true;
+  assert.equal((await offerOf(alice, 'team-beta', bob)).offerId, 'team-beta');
+  assert.deepEqual(await offersOf('bob'), ['team-beta']);
+  friends = new FriendsStore(db, () => now, { auth, notify: async () => { throw new Error('notifier bug'); } });
+  assert.equal((await offerOf(alice, 'team-alpha', bob)).offerId, 'team-alpha');
+});
+
+test('HTTP: team offers use the Friends route and the Teams error shape end to end', options, async () => {
+  const users = { 'token-alice': alice, 'token-bob': bob };
+  const handler = createTeamsHandler({ store: teams, friends, origins: ['https://lingxios.net'], createCustomToken: async () => '',
+    verifyToken: async token => users[token] ?? Promise.reject(new Error('invalid')) });
+  const call = (token, body) => handler(new Request('https://test.invalid/v1/friends', { method: 'POST', headers: { Authorization: `Bearer ${token}`, Origin: 'https://lingxios.net' }, body: JSON.stringify(body) }));
+  const reply = async response => [response.status, await response.json()];
+  await befriend(bob, alice); await makeTeam(alice, 'team-alpha');
+  assert.deepEqual(await reply(await call('token-alice', { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'bob', requestId: 'http-offer-01' })), [200, { offerId: 'team-alpha', expiresAt: new Date(now + OFFER_TTL_MS).toISOString() }]);
+  assert.deepEqual(await reply(await call('token-alice', { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'carol', requestId: 'http-offer-02' })), [403, { error: { code: 'FRIEND_REQUIRED' } }]);
+  assert.deepEqual(await reply(await call('token-bob', { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'alice', requestId: 'http-offer-03' })), [403, { error: { code: 'MEMBERSHIP_REQUIRED' } }]);
+  assert.deepEqual(await reply(await call('token-alice', { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'bob', requestId: 'http-offer-04', role: 'admin' })), [400, { error: { code: 'INVALID_INPUT' } }]);
+  assert.deepEqual(await reply(await call('token-bob', { action: 'acceptOffer', offerId: 'team-alpha', requestId: 'http-accept-1' })), [200, { teamId: 'team-alpha', generation: 1, alreadyMember: false }]);
+  assert.deepEqual(await reply(await call('token-bob', { action: 'acceptOffer', offerId: 'team-alpha', requestId: 'http-accept-2' })), [404, { error: { code: 'OFFER_UNAVAILABLE' } }]);
+  assert.deepEqual(await reply(await call('token-bob', { action: 'declineOffer', offerId: 'team-alpha' })), [200, { ok: true }]);
+  assert.deepEqual(await reply(await call('token-alice', { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'bob', requestId: 'http-offer-05' })), [409, { error: { code: 'ALREADY_MEMBER' } }]);
+});
+
 test('pair teams: every Teams action rejects them with PAIR_TEAM, they are never listed or counted, and the id space is reserved', options, async () => {
   await befriend(bob, alice);
   const teamId = pairTeamId('alice', 'bob', 1);
@@ -872,7 +1206,7 @@ test('pair teams: every Teams action rejects them with PAIR_TEAM, they are never
   assert.equal((await teams.list('bob')).teams.length, USER_TEAM_LIMIT);
 });
 
-test('pair teams: member messaging, read marks and shared Bots work unchanged inside a friendship', options, async () => {
+test('pair teams: member messaging and read marks work unchanged inside a friendship', options, async () => {
   await befriend(bob, alice);
   const teamId = pairTeamId('alice', 'bob', 1), scope = { teamId, generation: 1, conversationId: PAIR_CONVERSATION_ID };
   const mutate = (actor, id, extra = {}) => messages.execute(actor, { action: 'mutate', ...scope, messageId: id, changeId: `c-${id}`, operation: 'create', text: `text ${id}`, ...extra });
@@ -883,26 +1217,87 @@ test('pair teams: member messaging, read marks and shared Bots work unchanged in
   const listed = (await messages.execute(alice, { action: 'list', teamId, generation: 1 })).conversations;
   assert.deepEqual(listed.map(item => [item.id, item.kind, item.lastSeq, item.lastReadSeq]), [[PAIR_CONVERSATION_ID, 'dm', 2, 0]]);
   await rejects(mutate(carol, 'message03'), 403, 'MEMBERSHIP_REQUIRED');
-  // A Bot published into the friendship with use: all reaches the friend (the F3 precondition).
-  const bots = new SharedBotsStore(db, () => now), host = { deploymentId: 'deployment_01', hostId: 'host_0001', accountEpoch: 1 };
-  const command = (actor, action, payload) => bots.execute(actor, { schemaVersion: 1, commandId: `command_${++serial}`, teamId, generation: 1, action, payload });
-  await command(alice, 'publishSharedBot', { sharedBotId: 'sharedbot_01', expectedRevision: 0, name: 'Travel assistant', description: 'Shared notes', usePolicy: { mode: 'all' },
-    deployment: { ...host, sharedBotId: 'sharedbot_01', revision: 1, owner: { uid: 'alice', generation: 1 }, instanceId: 'instance_01', definitionDigest: 'a'.repeat(64),
+});
+
+test('shared Bots in a friendship (F3): published for all, the friend lists it and chats with it, the host answers, pausing stops it, and unfriending ends every part', options, async () => {
+  await befriend(bob, alice);
+  const teamId = pairTeamId('alice', 'bob', 1), bots = new SharedBotsStore(db, () => now), host = { deploymentId: 'deployment_01', hostId: 'host_0001', accountEpoch: 1 };
+  const command = (actor, action, payload, scope = teamId) => bots.execute(actor, { schemaVersion: 1, commandId: `command_${++serial}`, teamId: scope, generation: 1, action, payload });
+  const publication = (expectedRevision = 0) => ({ sharedBotId: 'sharedbot_01', expectedRevision, name: 'Travel assistant', description: 'Shared notes', usePolicy: { mode: 'all' },
+    deployment: { ...host, sharedBotId: 'sharedbot_01', revision: expectedRevision + 1, owner: { uid: 'alice', generation: 1 }, instanceId: 'instance_01', definitionDigest: 'a'.repeat(64),
       capabilitySnapshotDigest: 'b'.repeat(64), executionVersion: 2, capabilities: { durableWait: false, writeOperations: false, delegation: false }, enabled: true },
     inputs: [{ kind: 'persona', resourceId: 'persona_01', revision: 1, digest: 'a'.repeat(64), sourceAudience: { mode: 'team' } }], quotas: { team: 100, member: 20, bot: 100 } });
+  const cardBefore = await data('users/bob/friends/alice');
+  // Publishing for everyone in the friendship reaches the friend; the Bot is usable once the host's heartbeat says it is ready.
+  assert.equal((await command(alice, 'publishSharedBot', publication())).revision, 1);
+  assert.deepEqual((await command(bob, 'listSharedBots', {})).bots.map(bot => [bot.sharedBotId, bot.permitted, bot.ready, bot.maintainer.uid, bot.instanceId]), [['sharedbot_01', true, false, 'alice', undefined]]);
   await command(alice, 'heartbeatDeployment', { ...host, ready: true });
-  const directory = await command(bob, 'listSharedBots', {});
-  assert.deepEqual(directory.bots.map(bot => [bot.sharedBotId, bot.permitted, bot.ready]), [['sharedbot_01', true, true]]);
+  assert.deepEqual((await command(bob, 'listSharedBots', {})).bots.map(bot => [bot.permitted, bot.ready, bot.state]), [[true, true, 'published']]);
+  assert.equal((await command(alice, 'listSharedBots', {})).bots[0].instanceId, 'instance_01', 'only the maintainer sees the instance');
+  await rejects(command(carol, 'listSharedBots', {}), 403, 'MEMBERSHIP_REQUIRED');
+  // A friendship holds Bot DMs and its friend chat, never a group or a channel.
+  for (const actor of [alice, bob]) for (const kind of ['group', 'channel']) {
+    await rejects(command(actor, 'createConversation', { conversationId: `extra_${kind}_${actor.uid}`, kind, title: 'Extra', participantUids: ['alice', 'bob'], sharedBotIds: ['sharedbot_01'] }), 400, 'PAIR_TEAM');
+  }
   const chat = await command(bob, 'createConversation', { conversationId: 'bot_chat_01', kind: 'bot_dm', title: 'Travel', participantUids: ['bob'], sharedBotIds: ['sharedbot_01'] });
-  assert.deepEqual(chat.readers, ['alice', 'bob']);
-  const receipt = await command(bob, 'submit', { conversationId: 'bot_chat_01', messageId: 'pair_message_1', changeId: 'pair_change_01', text: 'What should we pack?', targets: ['sharedbot_01'] });
-  assert.equal(receipt.tasks.length, 1);
+  assert.deepEqual(chat.readers, ['alice', 'bob'], 'the maintainer can read the friend\'s chats with the Bot');
   assert.deepEqual(await ids(`teams/${teamId}/conversations`), ['bot_chat_01', PAIR_CONVERSATION_ID]);
-  await rejects(teams.execute(alice, { action: 'delete', teamId }), 400, 'PAIR_TEAM');
-  // Removing the friend revokes the Bot too: the friend can no longer use or read it.
+  for (const actor of [alice, bob]) assert.deepEqual((await messages.execute(actor, { action: 'list', teamId, generation: 1 })).conversations.map(item => [item.id, item.kind]), [['bot_chat_01', 'bot_dm'], [PAIR_CONVERSATION_ID, 'dm']]);
+  // The friend asks; the maintainer's host picks the task up, runs it and answers in the same conversation.
+  const submitted = await command(bob, 'submit', { conversationId: 'bot_chat_01', messageId: 'pair_message_1', changeId: 'pair_change_01', text: 'What should we pack?', targets: ['sharedbot_01'] });
+  assert.equal(submitted.tasks.length, 1);
+  assert.deepEqual((await command(alice, 'listHostTasks', host)).tasks.map(task => [task.taskId, task.state]), [[submitted.tasks[0].taskId, 'queued']]);
+  const started = await command(alice, 'startTask', { ...host, taskId: submitted.tasks[0].taskId, expectedLastChangeSeq: submitted.changeSeq });
+  assert.equal(started.execute, true);
+  const done = await command(alice, 'completeTask', { ...host, taskId: started.task.taskId, permitId: started.permitId, outcome: 'completed', text: 'Pack your passports.', finishedAt: now,
+    inputGrantIds: started.inputs.map(grant => grant.grantId), outputAudience: { mode: 'published_inputs' }, document: { title: 'Packing list', body: 'Pack your passports.' }, usage: { status: 'missing' } });
+  assert.equal(done.state, 'completed');
+  const chatPath = `teams/${teamId}/conversations/bot_chat_01`;
+  assert.deepEqual((await db.collection(`${chatPath}/messages`).get()).docs.map(item => item.data().author.kind).sort(), ['shared_bot', 'user']);
+  assert.equal((await command(bob, 'readArtifact', { artifactId: done.artifactId })).document.title, 'Packing list');
+  // The friend chat and the friend's card do not move for any of it (the summary triggers watch the literal friend_chat path).
+  const friendChat = await data(`teams/${teamId}/conversations/${PAIR_CONVERSATION_ID}`);
+  assert.deepEqual([friendChat.lastSeq, friendChat.lastMessage], [0, null]);
+  assert.deepEqual(await data('users/bob/friends/alice'), cardBefore);
+  // Push: both directions open the friend chat with the other friend, titled by the author (the Bot's name for its answer).
+  const sent = [], expiry = { toMillis: () => now + 3600000 };
+  const device = uid => ({ id: `device-${uid}`, uid, revision: 1, fcmInstallationId: `fid-${uid}`, expiresAt: expiry, locale: 'en-US', appId: 'com.lingxi.code', platform: 'android' });
+  const devices = [device('alice'), device('bob')];
+  const pushStore = { async active(uid) { return devices.filter(item => item.uid === uid); }, device(id) { return { async get() { return { data: () => devices.find(item => item.id === id) }; } }; } };
+  const push = async messageId => onTeamMessageCreated({ db, pushStore, messaging: { async send(value) { sent.push(value); } }, teamId, conversationId: 'bot_chat_01', messageId,
+    original: (await db.doc(`${chatPath}/messages/${messageId}`).get()).data(), clock: () => now });
+  await push('pair_message_1'); await push(done.replyId);
+  assert.deepEqual(sent.map(value => [value.data.recipientUid, value.data.route, value.data.kind, value.data.title]),
+    [['alice', 'friend/chat?uid=bob', 'friend_message', 'Bob'], ['bob', 'friend/chat?uid=alice', 'friend_message', 'Travel assistant']]);
+  // Client reads follow the Team rules: both friends read the Bot chat, nobody else does.
+  const read = (uid, path) => getDocs(collection(environment.authenticatedContext(uid).firestore(), path));
+  assert.equal((await assertSucceeds(read('bob', `${chatPath}/messages`))).size, 2);
+  assert.equal((await assertSucceeds(read('alice', `${chatPath}/messages`))).size, 2);
+  await assertFails(read('carol', `${chatPath}/messages`));
+  // Stopping the sharing is a pause: the friend no longer sees or uses the Bot, the history stays, and publishing again restores it.
+  assert.equal((await command(alice, 'pauseSharedBot', { sharedBotId: 'sharedbot_01', expectedRevision: 1 })).revision, 2);
+  assert.deepEqual((await command(bob, 'listSharedBots', {})).bots, []);
+  assert.equal((await command(alice, 'listSharedBots', {})).bots[0].state, 'paused');
+  await rejects(command(bob, 'submit', { conversationId: 'bot_chat_01', messageId: 'pair_message_2', changeId: 'pair_change_02', text: 'Still there?', targets: ['sharedbot_01'] }), 403, 'BOT_USE_REQUIRED');
+  assert.equal((await assertSucceeds(read('bob', `${chatPath}/messages`))).size, 2);
+  assert.equal((await command(alice, 'publishSharedBot', publication(2))).revision, 3);
+  await command(alice, 'heartbeatDeployment', { ...host, ready: true });
+  assert.deepEqual((await command(bob, 'listSharedBots', {})).bots.map(bot => [bot.permitted, bot.ready]), [[true, true]]);
+  // Unfriending ends the Bot, its chat and the host's access, for both.
   await act(alice, { action: 'remove', otherUid: 'bob' });
-  await rejects(command(bob, 'listSharedBots', {}), 403, 'MEMBERSHIP_REQUIRED');
-  await rejects(command(bob, 'submit', { conversationId: 'bot_chat_01', messageId: 'pair_message_2', changeId: 'pair_change_02', text: 'More?', targets: ['sharedbot_01'] }), 403, 'MEMBERSHIP_REQUIRED');
+  const again = { conversationId: 'bot_chat_01', messageId: 'pair_message_3', changeId: 'pair_change_03', text: 'More?', targets: ['sharedbot_01'] };
+  for (const [actor, action, payload] of [[bob, 'listSharedBots', {}], [bob, 'submit', again], [alice, 'listSharedBots', {}],
+    [alice, 'heartbeatDeployment', { ...host, ready: true }], [alice, 'listHostTasks', host]]) await rejects(command(actor, action, payload), 403, 'MEMBERSHIP_REQUIRED');
+  for (const uid of ['alice', 'bob']) {
+    await assertFails(read(uid, `${chatPath}/messages`));
+    await assertFails(getDoc(doc(environment.authenticatedContext(uid).firestore(), chatPath)));
+  }
+  // A new friendship is a new team: none of the old Bots or chats come back.
+  await befriend(alice, bob);
+  const fresh = pairTeamId('alice', 'bob', 2);
+  assert.deepEqual((await command(bob, 'listSharedBots', {}, fresh)).bots, []);
+  assert.deepEqual(await ids(`teams/${fresh}/conversations`), [PAIR_CONVERSATION_ID]);
+  await rejects(command(bob, 'submit', again, fresh), 403, 'CONVERSATION_REQUIRED');
 });
 
 test('push: a message in a pair team opens the friend chat with the sender; Team messages keep the Team inbox', options, async () => {

@@ -111,6 +111,20 @@
       "collectionGroup": "friendCodes",
       "fieldPath": "code",
       "indexes": []
+    },
+    {
+      "collectionGroup": "teamOffers",
+      "fieldPath": "expiresAt",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
     }
   ]
 }

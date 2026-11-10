@@ -56,6 +56,8 @@ export class SharedBotsStore {
       const context = { tx, team, self, identity, user, command, now };
       let response;
       if (action === 'createConversation') {
+        // A friendship's pair team (docs/FRIENDS.md) holds its friend chat and one Bot DM per shared Bot, never a group or channel.
+        if (teamDoc.data().kind === 'pair' && p.kind !== 'bot_dm') deny(400, 'PAIR_TEAM');
         const prepared = await prepareSharedConversation(tx, team, identity, p);
         prepared.write(); response = { conversationId: p.conversationId, readers: prepared.record.memberUids };
       }

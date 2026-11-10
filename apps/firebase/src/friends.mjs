@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import { FRIEND_COPY, sendTeamPush } from './push.mjs';
-import { TeamsError, createPairTeam, displayName, endTeam } from './teams.mjs';
+import { TEAM_MEMBER_LIMIT, TeamsError, admitMember, createPairTeam, displayName, endTeam, manager } from './teams.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 // '|' joins the uids hashed into a pair key and a pair team id, so it cannot occur inside one.
@@ -33,6 +33,9 @@ const command = z.discriminatedUnion('action', [
   z.object({ action: z.literal('unblock'), ...other }).strict(),
   z.object({ action: z.literal('rotateCode') }).strict(),
   z.object({ action: z.literal('revokeCode') }).strict(),
+  z.object({ action: z.literal('offerTeam'), teamId: id, friendUid: uid, requestId: id }).strict(),
+  z.object({ action: z.literal('acceptOffer'), offerId: id, requestId: id }).strict(),
+  z.object({ action: z.literal('declineOffer'), offerId: id }).strict(),
 ]);
 const hash = value => createHash('sha256').update(value).digest('hex');
 const sorted = (a, b) => (a < b ? [a, b] : [b, a]);
@@ -40,6 +43,10 @@ export const FRIEND_LIMIT = 500;
 export const OUTGOING_LIMIT = 50;
 export const LOOKUP_LIMIT = 30;
 export const LOOKUP_WINDOW_MS = 10 * 60 * 1000;
+/** A team offer lives 7 days (the longest an invite link may), stays listed as expired for 7 more, and a friend holds at most 20 live ones. */
+export const OFFER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const OFFER_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+export const OFFER_LIMIT = 20;
 export const pairKey = (a, b) => hash(sorted(a, b).join('|'));
 /** A new id for every friendship of the pair (`epoch` counts them), so a deleted pair team is never reused. */
 export const pairTeamId = (a, b, epoch) => `f_${hash([...sorted(a, b), epoch].join('|')).slice(0, 40)}`;
@@ -48,6 +55,9 @@ export class FriendsError extends TeamsError {}
 const fail = (status, code) => { throw new FriendsError(status, code); };
 // Missing, hidden, self and blocked (either way) are indistinguishable to the caller.
 const hidden = () => fail(404, 'NOT_FOUND');
+const millis = value => value?.toMillis?.() ?? Number.NaN;
+/** Nothing besides the cards to delete: a pending request has no pair team and no offers. */
+const NO_TIE = Object.freeze({ team: null, offers: Object.freeze([]) });
 const cardOf = (profile, fallback = 'Member') => ({ displayName: profile?.displayName ?? fallback, ...(profile?.handle ? { handle: profile.handle } : {}) });
 /** Whether a user (`p` is their profile, if they have one) may be found by `via`. The one rule behind `lookup` and `request`.
  * `shared`: the caller and the user are current members of one active team. */
@@ -82,6 +92,9 @@ export class FriendsStore {
     if (input.action === 'redeem') return this.redeem(user, input);
     if (input.action === 'rotateCode') return this.rotateCode(user);
     if (input.action === 'revokeCode') return this.revokeCode(user);
+    if (input.action === 'offerTeam') return this.offerTeam(user, input);
+    if (input.action === 'acceptOffer') return this.acceptOffer(user, input);
+    if (input.action === 'declineOffer') return this.declineOffer(user, input);
     if (input.otherUid === user.uid) fail(400, 'INVALID_INPUT');
     if (input.action === 'unblock') { await this.blockRef(user.uid, input.otherUid).delete(); return { ok: true }; }
     return this[input.action](user, input.otherUid);
@@ -98,9 +111,14 @@ export class FriendsStore {
     });
   }
   async prune() {
-    // A closed window is worthless; the bounded loop repeats the query because deletes shift pages.
+    // A closed window is worthless, and so is an offer that has been expired for OFFER_GRACE_MS.
+    await this.sweep(this.db.collection('friendLimits').where('expiresAt', '<=', new Date(this.clock())));
+    await this.sweep(this.db.collectionGroup('teamOffers').where('expiresAt', '<=', new Date(this.clock() - OFFER_GRACE_MS)));
+  }
+  /** Deletes what `query` matches; the bounded loop repeats the query because deletes shift pages. */
+  async sweep(query) {
     for (let page = 0; page < 20; page++) {
-      const snapshot = await this.db.collection('friendLimits').where('expiresAt', '<=', new Date(this.clock())).limit(100).get();
+      const snapshot = await query.limit(100).get();
       if (snapshot.empty) break;
       const batch = this.db.batch();
       for (const doc of snapshot.docs) batch.delete(doc.ref);
@@ -222,14 +240,23 @@ export class FriendsStore {
     tx.set(this.friendRef(peer, actor), { state: 'friends', ...mine, teamId, generation: 1, since: now, updatedAt: now });
     return teamId;
   }
-  /** Ends a friendship or pending request; a friendship's pair team (`team`, read first) is deleted with it. */
-  sever(tx, a, b, team, now) {
+  /** What a friendship owns besides its two cards, read before `sever` writes: its pair team and the team offers either
+   * friend sent the other. A pending request owns neither. */
+  async tie(tx, a, b, friendship) {
+    if (friendship?.state !== 'friends') return NO_TIE;
+    const team = await tx.get(this.db.doc(`teams/${friendship.teamId}`));
+    const sent = await tx.get(this.db.collection(`users/${b}/teamOffers`).where('fromUid', '==', a));
+    const received = await tx.get(this.db.collection(`users/${a}/teamOffers`).where('fromUid', '==', b));
+    return { team, offers: [...sent.docs, ...received.docs] };
+  }
+  /** Ends a friendship or pending request; the pair team and the offers (`tie`, read first) end with it. */
+  sever(tx, a, b, { team, offers }, now) {
     tx.update(this.pairRef(a, b), { state: 'ended', endedAt: now, updatedAt: now, teamId: FieldValue.delete(), note: FieldValue.delete() });
     tx.delete(this.friendRef(a, b));
     tx.delete(this.friendRef(b, a));
     if (team?.data()?.state === 'active') endTeam(tx, team.ref, [a, b].map(member => team.ref.collection('members').doc(member)), now);
+    for (const offer of offers) tx.delete(offer.ref);
   }
-  teamOf(tx, friendship) { return friendship?.state === 'friends' ? tx.get(this.db.doc(`teams/${friendship.teamId}`)) : null; }
   async tell(event) {
     // A push is a best-effort wake-up. The lists come from Firestore, so a failed one never fails the command.
     try { await this.notify?.(event); } catch { /* ignored */ }
@@ -301,7 +328,7 @@ export class FriendsStore {
   async withdraw(user, peer, requester, now = new Date(this.clock())) {
     await this.run(async tx => {
       const f = (await this.load(tx, user, peer)).friendship;
-      if (f?.state === 'pending' && f.requester === requester) this.sever(tx, user.uid, peer, null, now);
+      if (f?.state === 'pending' && f.requester === requester) this.sever(tx, user.uid, peer, NO_TIE, now);
     });
     return { ok: true };
   }
@@ -310,8 +337,8 @@ export class FriendsStore {
   async remove(user, peer) {
     const now = new Date(this.clock());
     await this.run(async tx => {
-      const f = (await this.load(tx, user, peer)).friendship, team = await this.teamOf(tx, f);
-      if (f?.state === 'friends') this.sever(tx, user.uid, peer, team, now);
+      const f = (await this.load(tx, user, peer)).friendship, tie = await this.tie(tx, user.uid, peer, f);
+      if (f?.state === 'friends') this.sever(tx, user.uid, peer, tie, now);
     });
     return { ok: true };
   }
@@ -321,9 +348,9 @@ export class FriendsStore {
   async block(user, peer) {
     const now = new Date(this.clock());
     await this.run(async tx => {
-      const c = await this.load(tx, user, peer), team = await this.teamOf(tx, c.friendship);
+      const c = await this.load(tx, user, peer), tie = await this.tie(tx, user.uid, peer, c.friendship);
       if (!c.blocking) tx.set(this.blockRef(user.uid, peer), { at: now, ...c.theirs });
-      if (['friends', 'pending'].includes(c.friendship?.state)) this.sever(tx, user.uid, peer, team, now);
+      if (['friends', 'pending'].includes(c.friendship?.state)) this.sever(tx, user.uid, peer, tie, now);
     });
     return { ok: true };
   }
@@ -356,13 +383,91 @@ export class FriendsStore {
     if (event) await this.tell(event);
     return result;
   }
+
+  async liveOffers(tx, owner, now) {
+    return (await tx.get(this.db.collection(`users/${owner}/teamOffers`).where('expiresAt', '>', now).count())).data().count;
+  }
+  /** A manager offers a team to a current friend: one document in the friend's own `teamOffers`, named by the team, so a repeat
+   * refreshes it. It grants nothing and holds no secret; `acceptOffer` checks everything again. Offering needs the caller to
+   * be an owner or admin of an ordinary active team that has room, and a friend (never blocked) who is not a member yet.
+   * Offers push to the friend only when they are new or had expired, so a repeat cannot be used to nag. */
+  async offerTeam(user, input) {
+    const me = user.uid, peer = input.friendUid, now = new Date(this.clock());
+    if (peer === me) fail(400, 'INVALID_INPUT');
+    await this.take(me, 'request');
+    const digest = hash(JSON.stringify(['offerTeam', input.teamId, peer]));
+    const { result, event } = await this.run(async tx => {
+      const receiptRef = this.db.doc(`users/${me}/friendRequests/${input.requestId}`), offerRef = this.db.doc(`users/${peer}/teamOffers/${input.teamId}`);
+      const team = this.db.doc(`teams/${input.teamId}`);
+      const [receipt, teamDoc, self, member, offer] = await tx.getAll(receiptRef, team, team.collection('members').doc(me), team.collection('members').doc(peer), offerRef);
+      if (receipt.exists) {
+        // A replay answers for the offer the first call made, whatever has become of it since.
+        if (receipt.data().digest !== digest) fail(409, 'REQUEST_ID_CONFLICT');
+        return { result: { offerId: input.teamId, expiresAt: receipt.data().expiresAt.toDate().toISOString() } };
+      }
+      const c = await this.load(tx, user, peer);
+      if (teamDoc.data()?.state !== 'active' || !self.exists) fail(403, 'MEMBERSHIP_REQUIRED');
+      if (teamDoc.data().kind === 'pair') fail(400, 'PAIR_TEAM');
+      if (!manager(self.data())) fail(403, 'ROLE_REQUIRED');
+      if (c.friendship?.state !== 'friends' || c.blocked) fail(403, 'FRIEND_REQUIRED');
+      if (member.exists) fail(409, 'ALREADY_MEMBER');
+      if (teamDoc.data().memberCount >= TEAM_MEMBER_LIMIT) fail(409, 'MEMBER_LIMIT');
+      const live = offer.exists && millis(offer.data().expiresAt) > now.getTime();
+      if (!live && (await this.liveOffers(tx, peer, now)) >= OFFER_LIMIT) fail(409, 'OFFER_LIMIT');
+      const expiresAt = new Date(now.getTime() + OFFER_TTL_MS);
+      tx.set(offerRef, { teamId: input.teamId, teamName: teamDoc.data().name, fromUid: me, fromName: c.mine.displayName, role: 'member', expiresAt });
+      tx.create(receiptRef, { digest, otherUid: peer, offerId: input.teamId, expiresAt, at: now });
+      return { result: { offerId: input.teamId, expiresAt: expiresAt.toISOString() },
+        ...(live ? {} : { event: { kind: 'offer', to: peer, from: me, name: c.mine.displayName, offerId: input.teamId, key: `${pairKey(me, peer)}:${input.requestId}` } }) };
+    });
+    if (event) await this.tell(event);
+    return result;
+  }
+  /** The friend joins through the same core as an invite link (`admitMember`: new generation, team index, both limits). An offer
+   * that cannot be honoured any more (expired, the team deleted, the sender no longer a manager or friend) is deleted and
+   * answers OFFER_UNAVAILABLE; a refusal the friend can fix (MEMBER_LIMIT, TEAM_LIMIT) keeps the offer. */
+  async acceptOffer(user, input) {
+    const me = user.uid, now = new Date(this.clock());
+    const outcome = await this.run(async tx => {
+      const offerRef = this.db.doc(`users/${me}/teamOffers/${input.offerId}`), receiptRef = this.db.doc(`users/${me}/teamJoinRequests/${input.requestId}`);
+      const [offer, receipt] = await tx.getAll(offerRef, receiptRef);
+      if (receipt.exists) {
+        const old = receipt.data();
+        if (old.offerId !== input.offerId) fail(409, 'REQUEST_ID_CONFLICT');
+        const member = await tx.get(this.db.doc(`teams/${old.teamId}/members/${me}`));
+        if (!member.exists || member.data().generation !== old.generation) fail(409, 'STALE_MEMBERSHIP');
+        return { teamId: old.teamId, generation: old.generation, alreadyMember: true };
+      }
+      if (!offer.exists) fail(404, 'OFFER_UNAVAILABLE');
+      const o = offer.data(), team = this.db.doc(`teams/${o.teamId}`);
+      const [teamDoc, sender, epoch, friendship] = await tx.getAll(team, team.collection('members').doc(o.fromUid), team.collection('membershipEpochs').doc(me), this.pairRef(me, o.fromUid));
+      const honoured = millis(o.expiresAt) > now.getTime() && teamDoc.data()?.state === 'active' && teamDoc.data().kind !== 'pair'
+        && manager(sender.data()) && friendship.data()?.state === 'friends';
+      if (!honoured) { tx.delete(offerRef); return { gone: true }; }
+      const generation = await admitMember(tx, this.db, { team: teamDoc, epoch, user, role: o.role, now });
+      tx.delete(offerRef);
+      tx.create(receiptRef, { teamId: o.teamId, offerId: input.offerId, generation });
+      return { teamId: o.teamId, generation, alreadyMember: false };
+    });
+    // The deletion above must commit, so the refusal is raised after the transaction instead of inside it.
+    if (outcome.gone) fail(404, 'OFFER_UNAVAILABLE');
+    return outcome;
+  }
+  /** Declining, or dismissing an expired offer, deletes it; one that is no longer there is a harmless repeat. */
+  async declineOffer(user, input) {
+    await this.db.doc(`users/${user.uid}/teamOffers/${input.offerId}`).delete();
+    return { ok: true };
+  }
 }
 
-/** Best-effort push for the people a request or new friendship concerns. The route opens the requests list. It is
- * sent only while the card it announces is still there, so a request that was cancelled meanwhile stays silent. */
+/** Best-effort push for the people a request, a new friendship or a team offer concerns. The route opens the requests list.
+ * It is sent only while the card (or offer) it announces is still there, so one that was withdrawn meanwhile stays silent. */
 export function friendNotifier({ db, pushStore, messaging, clock = Date.now }) {
-  return ({ kind, to, from, name, key }) => sendTeamPush(pushStore, messaging, {
-    uid: to, title: name.trim().slice(0, 80) || 'LingXi', notificationId: hash(JSON.stringify(['friend', kind, key, to])),
-    collapseKey: `friend:${hash(JSON.stringify([key])).slice(0, 32)}`, route: 'friend/requests', kind: `friend_${kind}`, copy: FRIEND_COPY[kind],
-  }, async () => (await db.doc(`users/${to}/friends/${from}`).get()).data()?.state === (kind === 'request' ? 'incoming' : 'friends'), clock);
+  const announced = async ({ kind, to, from, offerId }) => kind === 'offer'
+    ? (await db.doc(`users/${to}/teamOffers/${offerId}`).get()).data() !== undefined
+    : (await db.doc(`users/${to}/friends/${from}`).get()).data()?.state === (kind === 'request' ? 'incoming' : 'friends');
+  return event => sendTeamPush(pushStore, messaging, {
+    uid: event.to, title: event.name.trim().slice(0, 80) || 'LingXi', notificationId: hash(JSON.stringify(['friend', event.kind, event.key, event.to])),
+    collapseKey: `friend:${hash(JSON.stringify([event.key])).slice(0, 32)}`, route: 'friend/requests', kind: `friend_${event.kind}`, copy: FRIEND_COPY[event.kind],
+  }, () => announced(event), clock);
 }

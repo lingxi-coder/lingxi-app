@@ -273,6 +273,7 @@ export class SessionRuntime {
   /** The turn the host ran last, by the id it gave it; the ones the window and devices number are small and their own. */
   private hostTurnId: number | undefined;
   private cancellingTurn = false;
+  private sessionEnded = false;
   private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
   /** Permission requests remain replayable until the engine reports a terminal resolution. */
   private readonly pendingPermissionIds = new Map<number, HostPermissionRequest>();
@@ -1601,8 +1602,8 @@ export class SessionRuntime {
     })();
   }
 
-  /** A foreground terminal cannot settle independent background permission gates. */
-  private clearTurnInteractions(all = false): void {
+  /** A foreground terminal cannot settle independently owned interactions. */
+  private clearTurnInteractions(all = false, questionScope: 'turn' | 'session' = all ? 'session' : 'turn'): void {
     ++this.foregroundInteractionEpoch;
     for (const id of this.pendingPermissionIds.keys()) {
       if (all || !this.backgroundPermissionIds.has(id)) this.clearPendingPermission(id);
@@ -1614,7 +1615,10 @@ export class SessionRuntime {
     }
     this.pendingComputerAccessIds.clear();
     for (const requestId of [...this.pendingAskUserQuestionIds]) {
-      this.clearPendingAskUserQuestion(requestId);
+      if (questionScope === 'session'
+        || this.pendingAskUserQuestionRequests.get(requestId)?.request.sessionOwned !== true) {
+        this.clearPendingAskUserQuestion(requestId);
+      }
     }
     this.notifyRemotePending();
   }
@@ -1797,7 +1801,7 @@ export class SessionRuntime {
         this.activeTurnGeneration = undefined;
         this.activeTurnId = undefined;
         this.cancellingTurn = false;
-        this.clearTurnInteractions();
+        this.clearTurnInteractions(false, 'session');
       }
       this.liveConnectionRecovered = true;
       this.disconnectedForegroundPending = false;
@@ -2683,7 +2687,8 @@ export class SessionRuntime {
         return;
       }
       const resumeOwner = this.currentResumeOwner();
-      if (isTurnOwnedEvent(event) && !this.activeTurn && this.pendingSlashCommands.size === 0 && !resumeOwner && !resumedUsage) {
+      const sessionQuestion = event.type === 'ask_user_question' && event.request.sessionOwned === true && !this.sessionEnded;
+      if (isTurnOwnedEvent(event) && !sessionQuestion && !this.activeTurn && this.pendingSlashCommands.size === 0 && !resumeOwner && !resumedUsage) {
         this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
         return;
       }
@@ -2763,6 +2768,7 @@ export class SessionRuntime {
           this.fail('engine resumed a session in a different mode');
           return;
         }
+        this.sessionEnded = false;
         this.sessionMode = event.mode;
         this.requestAudioSessionContext(client, generation);
         this.sessionHasHistory = true;
@@ -2783,6 +2789,7 @@ export class SessionRuntime {
           this.fail('engine started a session in a different mode');
           return;
         }
+        this.sessionEnded = false;
         this.sessionMode = event.mode;
         this.requestAudioSessionContext(client, generation);
       }
@@ -2844,6 +2851,7 @@ export class SessionRuntime {
         this.activeTurnGeneration = undefined;
         this.activeTurnId = undefined;
         this.cancellingTurn = false;
+        if (event.type === 'session_ended') this.sessionEnded = true;
         this.clearTurnInteractions(event.type === 'session_ended');
       }
       if (event.type === 'session_ended') this.invalidateNativeMediaBinding();
@@ -2874,7 +2882,7 @@ export class SessionRuntime {
         }
       }
       if (event.type === 'ask_user_question') {
-        if (this.cancellingTurn) return;
+        if (event.request.sessionOwned === true ? this.sessionEnded : this.cancellingTurn) return;
         const requestId = event.request.request_id;
         if (
           !this.pendingAskUserQuestionIds.has(requestId)
@@ -3952,7 +3960,7 @@ export class SessionRuntime {
     this.pendingSessionResume = null;
     clearTimeout(pending.timer);
     pending.controller.abort();
-    this.clearTurnInteractions();
+    this.clearTurnInteractions(false, 'session');
     this.notifyActivityChanged();
     pending.resolve();
   }
@@ -3963,7 +3971,7 @@ export class SessionRuntime {
     this.pendingSessionResume = null;
     clearTimeout(pending.timer);
     pending.controller.abort();
-    this.clearTurnInteractions();
+    this.clearTurnInteractions(false, 'session');
     this.notifyActivityChanged();
     pending.reject(error);
   }

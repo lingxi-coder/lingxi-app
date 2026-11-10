@@ -126,6 +126,10 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// through the connection's [`ClientEventSink`] as a side effect.
     async fn run_turn(&self, prompt: Utf16JsonProjection);
     async fn record_prompt_suggestion_submission(&self, _text: &str) {}
+    /// Claim an internal Goal proposal in this connection's owned turn slot.
+    async fn claim_goal_proposal(&self, _id: &str) -> bool {
+        false
+    }
     /// Mounted conversation identity for immutable permission owners.
     async fn current_session_id(&self) -> Option<String> {
         None
@@ -207,7 +211,8 @@ pub trait TurnDriver: Send + Sync + 'static {
             );
             return;
         }
-        let human = inputs.iter().any(|input| !input.is_meta);
+        let human = orchestrator::native_user_message_source::queued_turn_authority()
+            .unwrap_or_else(|| inputs.iter().any(|input| !input.is_meta));
         let prompt = join_source_text(
             &inputs
                 .into_iter()
@@ -399,6 +404,18 @@ impl ClientEventSink for FrameEventSink {
         // filter, otherwise an unowned/terminal request would be dropped while
         // leaving its broker receiver parked until timeout.
         if let ClientEvent::AskUserQuestion { request } = &event {
+            let broker = self
+                .ask_user_question_broker
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .as_ref()
+                .and_then(Weak::upgrade);
+            // Only the internal broker can grant a session Goal lifetime. A
+            // client request id or visible question text is never authority.
+            let session_goal = match broker.as_ref() {
+                Some(broker) => broker.is_live_goal_proposal(request.request_id).await,
+                None => false,
+            };
             let out = self.out.lock().await;
             let mut delivered = false;
             let owner = if self.resume_interactions.accepts_interactions() {
@@ -406,21 +423,22 @@ impl ClientEventSink for FrameEventSink {
             } else {
                 &self.active_turn
             };
-            owner.with_accepted_interaction(|| {
+            let mut publish = || {
                 if self.handshaken.load(Ordering::SeqCst) {
                     if let Some(sink) = out.as_ref() {
                         delivered = sink.send(Frame::Event(event.clone()));
                     }
                 }
-            });
+            };
+            if session_goal {
+                // A nonblocking proposal can first reach the broker after its
+                // proposing turn ended and remains answerable in this session.
+                publish();
+            } else {
+                owner.with_accepted_interaction(publish);
+            }
             drop(out);
             if !delivered {
-                let broker = self
-                    .ask_user_question_broker
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .as_ref()
-                    .and_then(Weak::upgrade);
                 if let Some(broker) = broker {
                     // The broker publishes while its request is IN_FLIGHT.
                     // cancel() waits for publication to finish, so awaiting it
@@ -1058,7 +1076,7 @@ impl TurnInteractions {
             broker.drain().await;
         }
         if let Some(broker) = self.ask_user_question_broker.as_ref() {
-            broker.drain().await;
+            broker.drain_turn().await;
         }
         // Background permissions keep their tool names for later AllowAlways.
         let ids = self
@@ -2484,7 +2502,8 @@ async fn drive_queued_mod_turn(driver: &Arc<dyn TurnDriver>, turn: QueuedModTurn
     } = turn;
     orchestrator::mod_prompt_origin::with_origin(origin, async move {
         if let Some(inputs) = prompt_inputs {
-            let human = inputs.iter().any(|input| !input.is_meta);
+            let human = orchestrator::native_user_message_source::queued_turn_authority()
+                .unwrap_or_else(|| inputs.iter().any(|input| !input.is_meta));
             let run = driver.run_queued_batch(inputs, cancel);
             if human {
                 orchestrator::native_user_message_source::with_source(
@@ -2567,9 +2586,23 @@ async fn drain_main_thread(
             };
             match command {
                 Some(cmd) => {
-                    if cmd.source == QueueSource::PromptInput && cmd.is_slash_command() {
+                    let goal_proposal = cmd.uuid.starts_with("goal-proposal:");
+                    if (cmd.source == QueueSource::PromptInput || goal_proposal)
+                        && cmd.is_slash_command()
+                    {
                         let (generation, cancel) =
                             owned_turn.expect("claimed raw slash command owns a turn");
+                        if goal_proposal && !driver.claim_goal_proposal(&cmd.uuid).await {
+                            finish_turn(active_turn, generation, interactions, turn_handoff).await;
+                            continue;
+                        }
+                        let goal_origin = goal_proposal.then(|| {
+                            serde_json::json!({"kind": if cmd.source == QueueSource::TaskCompletion {
+                                "task-notification"
+                            } else {
+                                "auto-continuation"
+                            }})
+                        });
                         let raw = cmd
                             .text_projection()
                             .cloned()
@@ -2592,8 +2625,39 @@ async fn drain_main_thread(
                                 }
                                 None => None,
                             };
-                            if let Some(turn) = turn {
-                                drive_queued_mod_turn(driver, turn).await;
+                            if let Some(mut turn) = turn {
+                                if let Some(origin) = goal_origin {
+                                    use orchestrator::native_user_message_source::{
+                                        with_queued_turn_authority, with_source,
+                                        NativeUserMessageSource,
+                                    };
+
+                                    turn.origin = origin.clone();
+                                    let source_origin =
+                                        Utf16JsonProjection::from_serde_value(&origin)
+                                            .expect("trusted goal origin is valid JSON");
+                                    if let Some(first) = turn
+                                        .prompt_inputs
+                                        .as_mut()
+                                        .and_then(|inputs| inputs.first_mut())
+                                    {
+                                        first.message_origin = Some(source_origin.clone());
+                                    }
+                                    let native_source = NativeUserMessageSource {
+                                        message_origin: Some(source_origin),
+                                        prompt_source: None,
+                                    };
+                                    with_queued_turn_authority(
+                                        false,
+                                        with_source(
+                                            native_source,
+                                            drive_queued_mod_turn(driver, turn),
+                                        ),
+                                    )
+                                    .await;
+                                } else {
+                                    drive_queued_mod_turn(driver, turn).await;
+                                }
                             }
                             finish_turn(active_turn, generation, interactions, turn_handoff).await;
                         })
@@ -5302,7 +5366,8 @@ impl BridgeConnection {
         };
         let resolved = if self.handshaken.load(Ordering::SeqCst)
             && (self.active_turn.accepts_interactions()
-                || self.resume_interactions.accepts_interactions())
+                || self.resume_interactions.accepts_interactions()
+                || broker.is_live_goal_proposal(request_id).await)
         {
             broker.resolve(request_id, answers.into_projections()).await
         } else {
@@ -5984,6 +6049,10 @@ mod connection_regression_test;
 #[cfg(test)]
 #[path = "server/turn_handoff_regression_test.rs"]
 mod turn_handoff_regression_test;
+
+#[cfg(test)]
+#[path = "server/goal_proposal_lifetime_test.rs"]
+mod goal_proposal_lifetime_test;
 
 #[cfg(test)]
 #[path = "server/permission_owner_regression_test.rs"]
@@ -6804,6 +6873,128 @@ mod tests {
                 result: self.result.clone(),
                 authority_events: Vec::new(),
             })
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_goal_proposal_kickoffs_remain_visible_without_human_authority() {
+        type Captured = (
+            Vec<orchestrator::QueuedPromptInput>,
+            Option<bool>,
+            Option<orchestrator::native_user_message_source::NativeUserMessageSource>,
+            serde_json::Value,
+        );
+        struct GoalDriver {
+            calls: StdMutex<Vec<Captured>>,
+            claims: StdMutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl TurnDriver for GoalDriver {
+            async fn run_turn(&self, _: Utf16JsonProjection) {
+                panic!("Goal kickoff must keep its source-preserving batch");
+            }
+            async fn claim_goal_proposal(&self, id: &str) -> bool {
+                self.claims.lock().unwrap().push(id.to_owned());
+                true
+            }
+            async fn run_queued_batch(
+                &self,
+                inputs: Vec<orchestrator::QueuedPromptInput>,
+                _: CancellationToken,
+            ) {
+                self.calls.lock().unwrap().push((
+                    inputs,
+                    orchestrator::native_user_message_source::queued_turn_authority(),
+                    orchestrator::native_user_message_source::current(),
+                    orchestrator::mod_prompt_origin::current(),
+                ));
+            }
+        }
+
+        for (origin, expected_kind) in [
+            (
+                lingxi_core::session::GoalOrigin::ProposalDirect,
+                "task-notification",
+            ),
+            (
+                lingxi_core::session::GoalOrigin::ProposalApproved,
+                "auto-continuation",
+            ),
+        ] {
+            let recorded = Arc::new(GoalDriver {
+                calls: StdMutex::new(Vec::new()),
+                claims: StdMutex::new(Vec::new()),
+            });
+            let driver: Arc<dyn TurnDriver> = recorded.clone();
+            let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+            let connection = BridgeConnection::new()
+                .bind(gate, driver.clone())
+                .bind_router(Arc::new(StubRouter {
+                    result: lingxi_core::host::SlashDispatchResult::RunAsTurn {
+                        prompt: "native goal kickoff".into(),
+                    },
+                    routed: Arc::new(AtomicBool::new(false)),
+                }));
+            let id = format!("goal-proposal:{expected_kind}");
+            let cancel = CancellationToken::new();
+            connection
+                .queue
+                .enqueue_goal_proposal(
+                    id.clone(),
+                    "/goal tests pass".into(),
+                    origin,
+                    cancel.clone(),
+                )
+                .await;
+            let drain = connection.mod_queue_drain();
+            let interactions = TurnInteractions::default();
+            // A kickoff can be drained inside a predecessor's human scope.
+            // Its own host proof must shadow that ambient source as well.
+            orchestrator::native_user_message_source::with_source(
+                orchestrator::native_user_message_source::human(),
+                drain_main_thread(
+                    &driver,
+                    &connection.queue,
+                    &connection.loop_runtime,
+                    &connection.active_turn,
+                    &interactions,
+                    &connection.queued_prompt_payloads,
+                    &connection.turn_handoff,
+                    Some(&drain),
+                ),
+            )
+            .await;
+            assert_eq!(*recorded.claims.lock().unwrap(), [id]);
+            let calls = recorded.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            let (inputs, authority, source, mod_origin) = &calls[0];
+            assert_eq!(*authority, Some(false));
+            assert_eq!(inputs.len(), 1);
+            assert!(!inputs[0].is_meta, "the confirmed kickoff remains visible");
+            assert_eq!(inputs[0].text.string_at(""), Some("native goal kickoff"));
+            assert_eq!(
+                inputs[0]
+                    .message_origin
+                    .as_ref()
+                    .and_then(|value| value.string_at("/kind")),
+                Some(expected_kind)
+            );
+            assert_eq!(
+                source
+                    .as_ref()
+                    .and_then(|source| source.message_origin.as_ref())
+                    .and_then(|value| value.string_at("/kind")),
+                Some(expected_kind)
+            );
+            assert_eq!(
+                mod_origin.get("kind").and_then(serde_json::Value::as_str),
+                Some(expected_kind)
+            );
+            assert_eq!(
+                orchestrator::native_user_message_source::queued_turn_authority(),
+                None
+            );
+            cancel.cancel();
         }
     }
 

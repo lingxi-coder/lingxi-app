@@ -2992,10 +2992,11 @@ impl ChatWidget {
     /// prompt and surfaces once the keyboard is free.
     pub fn open_ask_user_question(&mut self, exchange: AskUserQuestionExchange) {
         // G006: see `open_permission` — not gated on `accepts_turn_events`.
-        if self
-            .current_turn
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
+        if !exchange.lifetime.is_live_goal_proposal()
+            && self
+                .current_turn
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
         {
             return;
         }
@@ -6400,8 +6401,8 @@ impl ChatWidget {
                 // for every pool spawn (agent/src/handle.rs) sets `false`; a
                 // Fusion panel's ask always has `worker: None` and is
                 // distinguished solely by `background_owned`.
-                // `AskUserQuestion`/`ComputerAccess` exchanges carry no owner
-                // signal today, so they are still cleared unconditionally.
+                // Goal proposals carry a session lifetime and remain pending;
+                // ordinary questions and computer access belong to this turn.
                 // Round-7 finding 4: a preserved background/worker exchange is
                 // still worth keeping ONLY while someone is waiting for it.
                 // `resp_tx.is_closed()` is the one predicate covering every way
@@ -6414,7 +6415,10 @@ impl ChatWidget {
                         (exchange.background_owned || exchange.worker.is_some())
                             && !exchange.resp_tx.is_closed()
                     }
-                    PendingPrompt::AskUserQuestion(_) | PendingPrompt::ComputerAccess(_) => false,
+                    PendingPrompt::AskUserQuestion(exchange) => {
+                        exchange.lifetime.is_live_goal_proposal() && !exchange.resp_tx.is_closed()
+                    }
+                    PendingPrompt::ComputerAccess(_) => false,
                 });
                 self.bottom_pane.dismiss_turn_prompts();
                 ChatOutcome::Continue
@@ -11258,6 +11262,7 @@ mod tests {
         let (resp_tx, resp_rx) = oneshot::channel();
         (
             AskUserQuestionExchange {
+                lifetime: Default::default(),
                 questions: vec![tool_api::ask_user_question::AskQuestion {
                     question: "Pick one?".into(),
                     header: "Choice".into(),

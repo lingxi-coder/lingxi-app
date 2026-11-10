@@ -71,6 +71,7 @@ import {
   reconcilePendingCount,
   recoverLatestNavigationFailure,
   removeRuntimeFromMaps,
+  retireTurnAskUserQuestions,
   seedDesktopFromCache,
   shouldApplyBootstrapSnapshot,
   shouldClearPendingPermissions,
@@ -1042,20 +1043,21 @@ export function useBridge(): UseBridge {
             ? state.permissionQueue.filter((entry) => entry.backgroundOwned === true)
             : [];
           const resolvedPermissionIds = event.type === 'session_ended' ? new Set<number>() : new Set(state.resolvedPermissionIds);
-          const resolvedAskUserQuestionIds = event.type === 'session_ended' ? new Set<number>() : new Set(state.resolvedAskUserQuestionIds);
+          const { askUserQuestionQueue, resolvedAskUserQuestionIds } = event.type === 'turn_ended'
+            ? retireTurnAskUserQuestions(state)
+            : { askUserQuestionQueue: [], resolvedAskUserQuestionIds: new Set<number>() };
           if (event.type === 'turn_ended') {
             for (const entry of state.permissionQueue) {
               if (entry.backgroundOwned !== true) resolvedPermissionIds.add(entry.request_id);
             }
-            for (const entry of state.askUserQuestionQueue) resolvedAskUserQuestionIds.add(entry.request_id);
           }
           next = {
             ...next,
             permissionQueue,
             computerAccessQueue: [],
-            askUserQuestionQueue: [],
-            pendingInteractionsOverride: permissionQueue.length,
-            pendingAskUserQuestionsOverride: 0,
+            askUserQuestionQueue,
+            pendingInteractionsOverride: permissionQueue.length + askUserQuestionQueue.length,
+            pendingAskUserQuestionsOverride: askUserQuestionQueue.length,
             resolvedPermissionIds,
             resolvedAskUserQuestionIds,
             isCancelling: false,
@@ -1602,15 +1604,14 @@ export function useBridge(): UseBridge {
         for (const entry of state.permissionQueue) {
           if (entry.backgroundOwned !== true) resolvedPermissionIds.add(entry.request_id);
         }
-        const resolvedAskUserQuestionIds = new Set(state.resolvedAskUserQuestionIds);
-        for (const entry of state.askUserQuestionQueue) resolvedAskUserQuestionIds.add(entry.request_id);
+        const { askUserQuestionQueue, resolvedAskUserQuestionIds } = retireTurnAskUserQuestions(state);
         return {
           ...state,
           permissionQueue,
           computerAccessQueue: [],
-          askUserQuestionQueue: [],
-          pendingInteractionsOverride: permissionQueue.length,
-          pendingAskUserQuestionsOverride: 0,
+          askUserQuestionQueue,
+          pendingInteractionsOverride: permissionQueue.length + askUserQuestionQueue.length,
+          pendingAskUserQuestionsOverride: askUserQuestionQueue.length,
           resolvedPermissionIds,
           resolvedAskUserQuestionIds,
         };

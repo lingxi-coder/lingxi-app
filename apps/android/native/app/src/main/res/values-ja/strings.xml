@@ -2884,4 +2884,8 @@
     <string name="friends_remove_title_fmt">「%1$s」さんを友だちから削除しますか？</string>
     <string name="friends_block_title_fmt">「%1$s」さんをブロックしますか？</string>
     <string name="friends_since_fmt">%1$s から友だち</string>
+    <string name="chat_agent_started_working">作業を開始</string>
+    <string name="chat_agent_finished">完了</string>
+    <string name="chat_tool_group_tasks">タスクの進捗</string>
+    <string name="chat_tool_group_coordination">タスクの連携</string>
 </resources>

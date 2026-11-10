@@ -2,7 +2,7 @@ import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { LocalAppCard } from './LocalApps';
 import { localAppReference } from '../model/localAppReference';
-import { toolRowPresentation } from './toolPresentation';
+import { isTaskProgressTool, isTaskWorkflowTool, toolRowPresentation } from './toolPresentation';
 /**
  * One tool call in the transcript.
  *
@@ -101,9 +101,13 @@ const SEMANTIC_TOOL_ICONS = {
 
 /** Existing icon vocabulary mapped onto the engine's open-ended tool verbs. */
 export function toolIconName(verb: string, tool?: string, icon?: ToolIconDto): string {
+  if (tool === 'LocalApp' || verb === 'LocalApp') return 'local-app';
+  if (isTaskProgressTool(tool ?? verb)) return 'tasks';
+  if (tool === 'ToolSearch') return 'search';
   // Generic MCP verbs do not distinguish visual/media and messaging tools.
   const identity = (verb.toLowerCase() === 'generic' ? tool?.split('__').at(-1) ?? verb : verb).toLowerCase();
-  if (/(?:^|_)(?:send_message|send_input|message|chat)(?:_|$)/.test(identity)) return 'chat';
+  if (identity === 'sendmessage' || /(?:^|_)send_message(?:_|$)/.test(identity)) return 'send';
+  if (/(?:^|_)(?:send_input|message|chat)(?:_|$)/.test(identity)) return 'chat';
   if (/(?:^|_)(?:view_image|image|images|screenshot)(?:_|$)/.test(identity)) return 'image';
   const isMcp = /^(?:mcp__|mcp[.:/])/i.test(tool ?? verb);
   if (isMcp && (!icon || icon === 'wrench') && verb.toLowerCase() === 'generic') return 'mcp-fallback';
@@ -147,6 +151,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
   const { result } = item;
   const view = toolDisplayHeader(item);
   const permissionRequest = /permission/i.test(`${item.tool} ${view.label} ${view.title}`);
+  const isLocalApp = item.tool === 'LocalApp';
   const skillInstructions = item.view.verb.toLowerCase() === 'skill';
   const expandable = toolHasBody(item);
   const isOpen = open ?? false;
@@ -167,7 +172,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
         <span dir="ltr">{`${view.label}(`}</span>
         {/* LRM-fenced: `direction: rtl` would otherwise send the leading `/` of
             an absolute path to the far right. */}
-        <span className="tool-row-argument" title={view.primary} style={{ ...TITLE_STYLE, direction: /web|fetch/.test(item.view.verb) ? 'ltr' : 'rtl' }}>{ltrAnchored(view.primary)}</span>
+        <span className="tool-row-argument" title={view.primary} style={{ ...TITLE_STYLE, direction: /web|fetch/.test(item.view.verb) || isTaskWorkflowTool(item) || item.tool === 'ToolSearch' ? 'ltr' : 'rtl' }}>{ltrAnchored(view.primary)}</span>
         <span dir="ltr">{`)${view.qualifier ?? ''}`}</span>
       </>
     )
@@ -214,7 +219,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       ? 'x'
       : 'info';
 
-  const showResponse = !(presentation && item.status === 'done' && body !== undefined);
+  const showResponse = !(isLocalApp && item.status !== 'error') && !(presentation && item.status === 'done' && body !== undefined);
   const diffStats = item.status === 'done' && !permissionRequest && diff && ['update', 'create'].includes(view.verb) ? diff : undefined;
   const summary = (
     <span className="tool-call-summary" style={requiresCode ? { flexWrap: 'wrap', overflow: 'visible' } : undefined}>
@@ -306,7 +311,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
     <div
       className="transcript-tool-row"
       data-status={item.status}
-      data-kind={permissionRequest ? 'permission' : undefined}
+      data-kind={permissionRequest ? 'permission' : isLocalApp ? 'local-app' : undefined}
       style={{
         maxWidth: 760,
         display: 'flex', flexDirection: 'column', gap: 4,
@@ -315,6 +320,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
         '--tool-hover-background': t.surfaceHover,
         '--tool-hover-color': t.text,
         '--tool-focus-color': t.text,
+        '--tool-focus-ring': t.accent,
         '--tool-argument-color': t.text4,
         '--tool-state-color': t.accent,
         '--tool-icon-color': item.status === 'error' ? t.danger : permissionRequest ? t.accent : t.text3,
@@ -337,7 +343,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
           keepMounted={item.status !== 'running' && Boolean(modUiSessionId)}
           onToggle={() => onSetOpen(item.id, !isOpen)}
           summary={summary}
-          label={`${presentation ? `${presentation.action} ${presentation.argument}${presentation.qualifier ?? ''}` : view.primary ? `${view.label}(${view.primary})${view.qualifier ?? ''}` : view.title}${!diffStats && summaryResponse ? ` · ${summaryResponse}` : ''}`}
+          label={`${presentation ? `${presentation.action} ${presentation.argument}${presentation.qualifier ?? ''}` : view.primary ? `${view.label}(${view.primary})${view.qualifier ?? ''}` : view.title}${!diffStats && summaryResponse && (!isLocalApp || showResponse) ? ` · ${summaryResponse}` : ''}`}
           buttonClassName="tool-disclosure-trigger"
           buttonStyle={{ width: '100%', maxWidth: '100%', minHeight: permissionRequest ? 40 : 28, margin: 0, padding: '2px 0', borderRadius: 7 }}
           bodyStyle={permissionRequest

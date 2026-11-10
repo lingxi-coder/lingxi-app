@@ -2884,4 +2884,8 @@
     <string name="friends_remove_title_fmt">Remove “%1$s”?</string>
     <string name="friends_block_title_fmt">Block “%1$s”?</string>
     <string name="friends_since_fmt">Friends since %1$s</string>
+    <string name="chat_agent_started_working">started working</string>
+    <string name="chat_agent_finished">finished</string>
+    <string name="chat_tool_group_tasks">Task progress</string>
+    <string name="chat_tool_group_coordination">Task coordination</string>
 </resources>

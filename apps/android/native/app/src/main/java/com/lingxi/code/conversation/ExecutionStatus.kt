@@ -73,3 +73,15 @@ fun SessionAgentUi.reportStatusText(): String? = when (reportDelivery) {
     "delivered" -> stringResource(R.string.chat_agent_report_delivered)
     else -> if (status == "completed") stringResource(R.string.chat_agent_execution_ended) else null
 }
+
+/** Execution outcome and delivery are separate, matching Desktop's transcript. */
+@Composable
+internal fun SessionAgentUi.transcriptStatusText(): String = when {
+    status in listOf("running", "working") -> stringResource(R.string.chat_agent_started_working)
+    reportDelivery in listOf("withheld", "flagged", "pending") -> reportStatusText() ?: status
+    status == "completed" && reportDelivery == "delivered" -> stringResource(R.string.chat_agent_finished)
+    status == "completed" && reportDelivery == null -> stringResource(R.string.chat_agent_execution_ended)
+    status in listOf("failed", "error") -> stringResource(R.string.chat_status_failed)
+    status == "cancelled" -> stringResource(R.string.chat_status_cancelled)
+    else -> status
+}

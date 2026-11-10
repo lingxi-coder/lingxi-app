@@ -3078,5 +3078,9 @@
   "friends_block_title %@": "Block “%@”?",
   "friends_block_title_fmt": "Block “%1$s”?",
   "friends_since %@": "Friends since %@",
-  "friends_since_fmt": "Friends since %1$s"
+  "friends_since_fmt": "Friends since %1$s",
+  "chat_agent_started_working": "started working",
+  "chat_agent_finished": "finished",
+  "chat_tool_group_tasks": "Task progress",
+  "chat_tool_group_coordination": "Task coordination"
 }

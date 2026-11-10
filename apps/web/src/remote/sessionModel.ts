@@ -1,6 +1,8 @@
-import type { ClientEvent, MessageDto } from '@lingxi/bridge-client';
+import type { ClientEvent, MessageDto, SessionAgentSummaryDto } from '@lingxi/bridge-client';
 import type { RemotePromptOrigin, RemoteRecord, RemoteSeqRecord } from '@lingxi/bridge-client/remote';
 import {
+  anchorTranscriptAgents,
+  type AgentAnchors,
   appendUserPrompt,
   conversationFromMessages,
   emptyConversation,
@@ -47,6 +49,8 @@ export interface ExtraRow {
 /** Everything the transcript view needs; replaced (never mutated) on every change. */
 export interface Transcript {
   conversation: ConversationState;
+  agents?: readonly SessionAgentSummaryDto[];
+  agentAnchors?: AgentAnchors;
   promptMeta: ReadonlyMap<string, PromptMeta>;
   extras: readonly ExtraRow[];
   /** Tool calls whose result the desktop cut down before sending. */
@@ -67,6 +71,8 @@ export function emptyTranscript(): Transcript {
  */
 export class TranscriptBuilder {
   private conversation: ConversationState;
+  private agents: SessionAgentSummaryDto[] = [];
+  private agentAnchors: AgentAnchors = new Map();
   private promptMeta = new Map<string, PromptMeta>();
   private extras: ExtraRow[] = [];
   private truncatedTools = new Set<string>();
@@ -109,8 +115,11 @@ export class TranscriptBuilder {
   }
 
   snapshot(): Transcript {
+    this.agentAnchors = anchorTranscriptAgents(this.agentAnchors, this.conversation.items, this.agents);
     return {
       conversation: this.conversation,
+      agents: this.agents,
+      agentAnchors: this.agentAnchors,
       promptMeta: this.promptMeta,
       extras: this.extras,
       truncatedTools: this.truncatedTools,
@@ -123,6 +132,16 @@ export class TranscriptBuilder {
     if (event.type === 'session_started' || event.type === 'session_resumed') return;
     if (truncated && event.type === 'tool_use_result') {
       this.truncatedTools = new Set(this.truncatedTools).add(event.id);
+    }
+    if (event.type === 'session_agent_list') {
+      const current = new Map(event.agents.map(agent => [agent.agent_id, agent]));
+      this.agents = [...new Set([...this.agents.map(agent => agent.agent_id), ...current.keys()])]
+        .flatMap(id => current.has(id) ? [current.get(id)!] : []);
+    }
+    if (event.type === 'session_agent_updated') {
+      const index = this.agents.findIndex(agent => agent.agent_id === event.agent.agent_id);
+      this.agents = index < 0 ? [...this.agents, event.agent]
+        : this.agents.map((agent, i) => i === index ? event.agent : agent);
     }
     this.conversation = reduceEvent(this.conversation, event);
   }

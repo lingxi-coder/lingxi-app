@@ -2884,4 +2884,8 @@
     <string name="friends_remove_title_fmt">“%1$s” 님을 친구에서 삭제할까요?</string>
     <string name="friends_block_title_fmt">“%1$s” 님을 차단할까요?</string>
     <string name="friends_since_fmt">%1$s부터 친구</string>
+    <string name="chat_agent_started_working">작업 시작</string>
+    <string name="chat_agent_finished">완료</string>
+    <string name="chat_tool_group_tasks">작업 진행 상황</string>
+    <string name="chat_tool_group_coordination">작업 조율</string>
 </resources>

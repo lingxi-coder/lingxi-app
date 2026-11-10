@@ -3068,5 +3068,9 @@
   "friends_block_title %@": "“%@” 님을 차단할까요?",
   "friends_block_title_fmt": "“%1$s” 님을 차단할까요?",
   "friends_since %@": "%@부터 친구",
-  "friends_since_fmt": "%1$s부터 친구"
+  "friends_since_fmt": "%1$s부터 친구",
+  "chat_agent_started_working": "작업 시작",
+  "chat_agent_finished": "완료",
+  "chat_tool_group_tasks": "작업 진행 상황",
+  "chat_tool_group_coordination": "작업 조율"
 }

@@ -2884,4 +2884,8 @@
     <string name="friends_remove_title_fmt">刪除好友「%1$s」？</string>
     <string name="friends_block_title_fmt">封鎖「%1$s」？</string>
     <string name="friends_since_fmt">%1$s 起成為好友</string>
+    <string name="chat_agent_started_working">開始工作</string>
+    <string name="chat_agent_finished">已完成</string>
+    <string name="chat_tool_group_tasks">任務進度</string>
+    <string name="chat_tool_group_coordination">任務協調</string>
 </resources>

@@ -21,6 +21,8 @@ import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.DarkMode
+import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.outlined.Checklist
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.outlined.Psychology
@@ -56,7 +58,7 @@ import androidx.compose.ui.unit.dp
 enum class LXIconName {
     Menu, SideChat, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, AudioWave, Paperclip,
     Chevron, Sun, Moon, Check, Pin, Brain, ArrowUp, Folder, Clock, Message,
-    ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share,
+    ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share, ListChecks, Send,
     ArrowRight, Terminal, Lightbulb, Apps, AppBuilder, McpFallback,
     /** The Bots tab: a robot head, distinct from [Sparkle] (which already means "AI" elsewhere). */
     Bot,
@@ -84,6 +86,8 @@ val LXIconName.materialIcon: ImageVector get() = when (this) {
     LXIconName.Chevron -> Icons.Outlined.KeyboardArrowDown
     LXIconName.Sun -> Icons.Outlined.LightMode
     LXIconName.Moon -> Icons.Outlined.DarkMode
+    LXIconName.ListChecks -> Icons.Outlined.Checklist
+    LXIconName.Send -> Icons.AutoMirrored.Outlined.Send
     LXIconName.Check -> Icons.Outlined.Check
     LXIconName.Pin -> Icons.Outlined.PushPin
     LXIconName.Brain -> Icons.Outlined.Psychology

@@ -315,6 +315,7 @@ data class ToolCallUi(
     val localApp: PublishedLocalApp? = null,
     /** Original skill body used to identify the adjacent injected prompt. */
     val skillBody: String? = null,
+    val spawnedAgentId: String? = null,
 )
 
 /** One ordered piece of a settled transcript message. */
@@ -452,3 +453,11 @@ fun PlanTaskDto.toUi(): PlanTaskUi = PlanTaskUi(
     activeForm = activeForm,
     state = state.toUi(),
 )
+
+internal fun spawnResultAgentId(tool: String, json: String): String? {
+    if (!isAgentLaunchTool(tool) && !tool.equals("Skill", ignoreCase = true)) return null
+    return runCatching {
+        val value = org.json.JSONObject(json)
+        listOf("agentId", "agent_id").firstNotNullOfOrNull { key -> (value.opt(key) as? String)?.takeIf(String::isNotBlank) }
+    }.getOrNull()
+}

@@ -326,11 +326,25 @@ impl TuiPermissionGate {
 
         // Step 5: map to decision.
         match response {
+            PermissionResponse::AllowOnce if name == "ExitPlanMode" => PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: vec![exit_plan_mode_update("default")],
+                decision_classification: None,
+            },
             PermissionResponse::AllowOnce => PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),
                 decision_classification: None,
             },
+            PermissionResponse::AllowAlways
+                if name == "ExitPlanMode" && allow_always_offered && auto_mode_prompt.is_none() =>
+            {
+                PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: vec![exit_plan_mode_update("acceptEdits")],
+                    decision_classification: None,
+                }
+            }
             PermissionResponse::AllowAlways if allow_always_offered => PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: selected_persistence
@@ -368,9 +382,58 @@ impl TuiPermissionGate {
     }
 }
 
+/// Approval choices change the session mode, not an ExitPlanMode allow rule.
+fn exit_plan_mode_update(mode: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&serde_json::json!({
+        "type": "setMode",
+        "mode": mode,
+        "destination": "session"
+    }))
+    .expect("a generated permission-mode update is valid JSON")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exit_plan_approval_rows_request_the_mode_they_describe() {
+        for (response, expected) in [
+            (PermissionResponse::AllowOnce, "default"),
+            (PermissionResponse::AllowAlways, "acceptEdits"),
+        ] {
+            let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(1);
+            let rules = Arc::new(Mutex::new(Vec::new()));
+            let gate = Arc::new(TuiPermissionGate::new(event_tx, rules.clone()));
+            let task = tokio::spawn(async move {
+                gate.check_exit_plan_mode("APPROVED PLAN", &PermissionCheckContext::default())
+                    .await
+            });
+            let exchange = event_rx.recv().await.unwrap();
+            assert!(matches!(
+                exchange.request,
+                PermissionRequest::ExitPlanMode { .. }
+            ));
+            exchange.resp_tx.send(response).unwrap();
+            let PermissionOutcome::Allow {
+                permission_updates, ..
+            } = task.await.unwrap()
+            else {
+                panic!("an approval row must return its session mode update");
+            };
+            assert_eq!(permission_updates.len(), 1);
+            assert_eq!(permission_updates[0].string_at("/type"), Some("setMode"));
+            assert_eq!(permission_updates[0].string_at("/mode"), Some(expected));
+            assert_eq!(
+                permission_updates[0].string_at("/destination"),
+                Some("session")
+            );
+            assert!(
+                rules.lock().await.is_empty(),
+                "plan approval is not a tool allow rule"
+            );
+        }
+    }
     use serde_json::json;
 
     fn source_json(value: serde_json::Value) -> Utf16JsonProjection {

@@ -3068,5 +3068,9 @@
   "friends_block_title %@": "「%@」さんをブロックしますか？",
   "friends_block_title_fmt": "「%1$s」さんをブロックしますか？",
   "friends_since %@": "%@ から友だち",
-  "friends_since_fmt": "%1$s から友だち"
+  "friends_since_fmt": "%1$s から友だち",
+  "chat_agent_started_working": "作業を開始",
+  "chat_agent_finished": "完了",
+  "chat_tool_group_tasks": "タスクの進捗",
+  "chat_tool_group_coordination": "タスクの連携"
 }

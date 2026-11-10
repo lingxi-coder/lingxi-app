@@ -42,6 +42,21 @@ pub(crate) fn tool_use_lines(
     verbose: bool,
 ) -> Vec<StyledLine> {
     let derived = tool_display::tool_header(tool, input);
+    if tool == "LocalApp" && !verbose {
+        return vec![StyledLine {
+            spans: vec![dim_span(
+                format!(
+                    "▦ Local app{}",
+                    derived
+                        .primary
+                        .as_ref()
+                        .map(|primary| format!(" {}", truncate(primary, 100)))
+                        .unwrap_or_default()
+                ),
+                theme,
+            )],
+        }];
+    }
     let header_carries_an_argument = derived.primary.is_some();
     let header = StyledLine {
         spans: vec![
@@ -86,6 +101,287 @@ pub(crate) fn tool_use_lines(
         });
     }
     out
+}
+
+/// Presentation-only families. Questions, permissions, skills and unrelated MCP calls
+/// never join a task fold. Discovery joins only for an explicit workflow selection.
+pub(crate) fn activity_fold_key(tool: &str, input: &serde_json::Value) -> Option<&'static str> {
+    let lower = tool.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "agent" | "task" | "spawn_agent" | "fork_agent"
+    ) {
+        return Some("agents");
+    }
+    fn workflow(tool: &str) -> bool {
+        matches!(
+            tool.to_ascii_lowercase().replace('_', "").as_str(),
+            "taskcreate"
+                | "taskget"
+                | "taskupdate"
+                | "tasklist"
+                | "todowrite"
+                | "listchecks"
+                | "updateplan"
+                | "sendmessage"
+        )
+    }
+    if workflow(tool) {
+        return Some("tasks");
+    }
+    if tool == "ToolSearch" {
+        let header = tool_display::tool_header(tool, input);
+        if let Some(primary) = header.primary {
+            let targets = primary
+                .trim()
+                .strip_prefix("select:")
+                .unwrap_or(primary.trim());
+            let names: Vec<_> = targets
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !names.is_empty()
+                && names
+                    .iter()
+                    .all(|name| workflow(name.trim_start_matches('+')))
+            {
+                return Some("tasks");
+            }
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ActivityEntry {
+    pub id: String,
+    pub tool: String,
+    pub input: serde_json::Value,
+    pub result: Option<serde_json::Value>,
+}
+
+/// One active contiguous fold. Ctrl-O exposes every original call/result; the
+/// terminal scrollback receives the group once, when a visible boundary seals it.
+#[derive(Debug, Clone)]
+pub(crate) struct ActivityFoldCell {
+    pub key: &'static str,
+    pub entries: Vec<ActivityEntry>,
+}
+
+impl StyledCell for ActivityFoldCell {
+    fn styled_lines(&self, width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine> {
+        use unicode_width::UnicodeWidthStr;
+        let failed = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.result.as_ref().is_some_and(|result| {
+                    tool_display::result_is_error(result)
+                        || result
+                            .get("report_delivery")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("withheld")
+                })
+            })
+            .count();
+        let running = self
+            .entries
+            .iter()
+            .filter(|entry| entry.result.is_none())
+            .count();
+        let label = if self.key == "agents" {
+            self.entries
+                .iter()
+                .map(|entry| {
+                    entry
+                        .input
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| tool_display::tool_header(&entry.tool, &entry.input).primary)
+                        .unwrap_or_else(|| "Agent".into())
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        } else if self.entries.len() == 1 {
+            tool_display::tool_header(&self.entries[0].tool, &self.entries[0].input).title()
+        } else {
+            let coordination = self.entries.iter().any(|entry| {
+                matches!(
+                    entry.tool.to_ascii_lowercase().replace('_', "").as_str(),
+                    "sendmessage" | "toolsearch"
+                )
+            });
+            format!(
+                "{} · {} calls",
+                if coordination {
+                    "Task coordination"
+                } else {
+                    "Task progress"
+                },
+                self.entries.len()
+            )
+        };
+        let withheld = self.entries.iter().any(|entry| {
+            entry.result.as_ref().is_some_and(|result| {
+                result
+                    .get("report_delivery")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("withheld")
+            })
+        });
+        let pending_report = self.entries.iter().any(|entry| {
+            entry.result.as_ref().is_some_and(|result| {
+                matches!(
+                    result
+                        .get("report_delivery")
+                        .and_then(serde_json::Value::as_str),
+                    Some("pending" | "flagged")
+                )
+            })
+        });
+        let state = if failed > 0 {
+            format!(
+                "{}{}",
+                if withheld {
+                    format!("Needs attention: {failed}")
+                } else {
+                    format!("{failed} unsuccessful")
+                },
+                if running > 0 {
+                    format!(" · {running} running")
+                } else {
+                    String::new()
+                }
+            )
+        } else if self.key == "agents" && pending_report {
+            if self.entries.iter().any(|entry| {
+                entry.result.as_ref().is_some_and(|result| {
+                    result
+                        .get("report_delivery")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("flagged")
+                })
+            }) {
+                "Report flagged".into()
+            } else {
+                "Report pending".into()
+            }
+        } else if self.key == "agents" {
+            let launched = self.entries.iter().any(|entry| {
+                entry.result.as_ref().is_none_or(|result| {
+                    matches!(
+                        result.get("status").and_then(serde_json::Value::as_str),
+                        Some("teammate_spawned" | "async_launched" | "remote_launched")
+                    )
+                })
+            });
+            if launched {
+                "started working".into()
+            } else {
+                "finished".into()
+            }
+        } else if running > 0 {
+            format!("{running} running")
+        } else {
+            String::new()
+        };
+        let marker = if self.key == "agents" && width < 40 {
+            "✳ ".to_owned()
+        } else if self.key == "agents" {
+            "✳ ".repeat(self.entries.len().min(3))
+                + &if self.entries.len() > 3 {
+                    format!("+{} ", self.entries.len() - 3)
+                } else {
+                    String::new()
+                }
+        } else if self.entries.iter().all(|entry| {
+            matches!(
+                entry.tool.to_ascii_lowercase().replace('_', "").as_str(),
+                "sendmessage"
+            )
+        }) {
+            "➤ ".into()
+        } else {
+            "☷ ".into()
+        };
+        // Reserve the status and adjacent arrow before truncating long names.
+        fn fit(text: &str, budget: usize) -> String {
+            use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+            let flat = text.replace(['\n', '\r', '\t'], " ");
+            if flat.width() <= budget {
+                return flat;
+            }
+            let mut out = String::new();
+            let mut used = 0;
+            for c in flat.chars() {
+                let size = c.width().unwrap_or(0);
+                if used + size > budget.saturating_sub(1) {
+                    break;
+                }
+                out.push(c);
+                used += size;
+            }
+            if budget > 0 {
+                out.push('…');
+            }
+            out
+        }
+        let state = fit(&state, width.saturating_sub(marker.width() + 3));
+        let suffix = format!(
+            "{} {}",
+            if state.is_empty() {
+                String::new()
+            } else {
+                format!(" {state}")
+            },
+            if verbose { "⌄" } else { "›" }
+        );
+        let available = width.saturating_sub(marker.width() + suffix.width());
+        let shown = fit(&label, available);
+        let mut spans = vec![dim_span(marker + &shown, theme)];
+        if failed > 0 && state.contains(" · ") {
+            let (failure, pending) = state.split_once(" · ").unwrap();
+            spans.push(StyledSpan::styled(
+                format!(" {failure}"),
+                SpanStyle {
+                    fg: theme.error,
+                    ..SpanStyle::default()
+                },
+            ));
+            spans.push(dim_span(
+                format!(" · {pending} {}", if verbose { "⌄" } else { "›" }),
+                theme,
+            ));
+        } else {
+            spans.push(StyledSpan::styled(
+                suffix,
+                SpanStyle {
+                    fg: if failed > 0 { theme.error } else { theme.dim },
+                    ..SpanStyle::default()
+                },
+            ));
+        }
+        let mut lines = vec![StyledLine { spans }];
+        if verbose {
+            for entry in &self.entries {
+                lines.extend(tool_use_lines(&entry.tool, &entry.input, theme, true));
+                if let Some(result) = &entry.result {
+                    lines.extend(tool_result_lines(
+                        &entry.tool,
+                        Some(&entry.input),
+                        result,
+                        None,
+                        None,
+                        None,
+                        width,
+                        theme,
+                    ));
+                }
+            }
+        }
+        lines
+    }
 }
 
 /// A tool result. Default: a dim `⎿  {summary}` one-liner — the string content
@@ -203,6 +499,27 @@ pub(crate) fn group_tool_use_lines(
     theme: &Theme,
     verbose: bool,
 ) -> Vec<StyledLine> {
+    if !verbose
+        && entries
+            .first()
+            .and_then(|(input, _)| activity_fold_key(tool, input))
+            .is_some()
+    {
+        return ActivityFoldCell {
+            key: activity_fold_key(tool, &entries[0].0).unwrap(),
+            entries: entries
+                .iter()
+                .enumerate()
+                .map(|(i, (input, result))| ActivityEntry {
+                    id: i.to_string(),
+                    tool: tool.to_owned(),
+                    input: input.clone(),
+                    result: Some(result.clone()),
+                })
+                .collect(),
+        }
+        .styled_lines(100, theme, false);
+    }
     if tool == "Agent"
         && entries.iter().any(|(_, result)| {
             result.get("status").and_then(serde_json::Value::as_str) == Some("teammate_spawned")
@@ -615,6 +932,157 @@ mod tests {
         .collect()
     }
 
+    #[test]
+    fn fold_boundaries_and_icons() {
+        use super::activity_fold_key as key;
+        use serde_json::json;
+        for name in ["TaskList", "TaskUpdate", "TodoWrite", "SendMessage"] {
+            assert_eq!(key(name, &json!({})), Some("tasks"));
+        }
+        for name in ["Agent", "Task", "spawn_agent"] {
+            assert_eq!(key(name, &json!({})), Some("agents"));
+        }
+        for name in [
+            "TaskOutput",
+            "TaskStop",
+            "Skill",
+            "AskUserQuestion",
+            "PermissionRequest",
+            "mcp__unrelated__SendMessage",
+        ] {
+            assert_eq!(key(name, &json!({})), None);
+        }
+        assert_eq!(
+            key(
+                "ToolSearch",
+                &json!({"query":"select:TaskList,SendMessage"})
+            ),
+            Some("tasks")
+        );
+        assert_eq!(
+            key("ToolSearch", &json!({"query":"select:TaskList,Read"})),
+            None
+        );
+    }
+    #[test]
+    fn collapsed_agents_and_verbose_details() {
+        use super::{ActivityEntry, ActivityFoldCell};
+        use serde_json::json;
+        let cell = ActivityFoldCell {
+            key: "agents",
+            entries: (0..6)
+                .map(|i| ActivityEntry {
+                    id: i.to_string(),
+                    tool: "Agent".into(),
+                    input: json!({"name":format!("worker-{i}"),"description":"Check code"}),
+                    result: Some(json!({"status":"async_launched"})),
+                })
+                .collect(),
+        };
+        for width in [40, 80, 120] {
+            let lines = cell.styled_lines(width, &Theme::dark(), false);
+            assert_eq!(lines.len(), 1);
+            let text = lines[0]
+                .spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>();
+            assert!(text.contains("+3"));
+            assert!(text.contains("started working"));
+            assert!(text.ends_with("›"));
+            assert!(
+                unicode_width::UnicodeWidthStr::width(text.as_str()) <= width,
+                "{text}"
+            );
+        }
+        let details = cell.styled_lines(80, &Theme::dark(), true);
+        assert!(details.len() > 6);
+        assert!(details
+            .iter()
+            .flat_map(|l| &l.spans)
+            .any(|s| s.text.contains("worker-5")));
+    }
+    #[test]
+    fn mixed_failures_and_cjk_remain_visible() {
+        use super::{ActivityEntry, ActivityFoldCell};
+        use serde_json::json;
+        let cell = ActivityFoldCell {
+            key: "tasks",
+            entries: vec![
+                ActivityEntry {
+                    id: "a".into(),
+                    tool: "TaskList".into(),
+                    input: json!({}),
+                    result: Some(json!({"error":"failure"})),
+                },
+                ActivityEntry {
+                    id: "b".into(),
+                    tool: "SendMessage".into(),
+                    input: json!({}),
+                    result: None,
+                },
+            ],
+        };
+        let text = cell.styled_lines(60, &Theme::dark(), false)[0]
+            .spans
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<String>();
+        assert!(text.contains("1 unsuccessful"), "{text}");
+        assert!(text.contains("1 running"), "{text}");
+    }
+
+    #[test]
+    fn reports_are_not_mistaken_for_delivered_completion() {
+        use super::{ActivityEntry, ActivityFoldCell};
+        use serde_json::json;
+        for delivery in ["withheld", "pending", "flagged"] {
+            let cell = ActivityFoldCell {
+                key: "agents",
+                entries: vec![ActivityEntry {
+                    id: "a".into(),
+                    tool: "Agent".into(),
+                    input: json!({"name":"review"}),
+                    result: Some(json!({"status":"completed","report_delivery":delivery})),
+                }],
+            };
+            let text = cell.styled_lines(80, &Theme::dark(), false)[0]
+                .spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>();
+            assert!(!text.contains("finished"), "{text}");
+            assert!(
+                text.contains(if delivery == "withheld" {
+                    "Needs attention"
+                } else if delivery == "flagged" {
+                    "Report flagged"
+                } else {
+                    "Report pending"
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_app_has_a_compact_application_header_and_preserves_verbose_details() {
+        let input = serde_json::json!({"action":"read", "name":"Family learning space"});
+        let lines = super::tool_use_lines("LocalApp", &input, &Theme::dark(), false);
+        assert_eq!(lines.len(), 1);
+        let text = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<String>();
+        assert!(text.starts_with("▦ Local app"), "{text}");
+        let verbose = super::tool_use_lines("LocalApp", &input, &Theme::dark(), true);
+        assert!(verbose
+            .iter()
+            .flat_map(|line| &line.spans)
+            .any(|span| span.text.contains("Family learning space")));
+    }
+
     fn rata(color: tui_core::render::StyleColor) -> ratatui::style::Color {
         crate::style_adapter::to_ratatui(color)
     }
@@ -985,14 +1453,17 @@ mod tests {
             ],
         );
         assert_eq!(
-            plain(&cell, false),
+            plain(&cell, true),
             vec![
                 format!("{TOOL_MARKER}2 background agents launched (↓ manage)"),
                 "   ├ @reviewer (Explore)".into(),
                 "   └ Agent (Run checks)".into(),
             ]
         );
-        assert_eq!(plain(&cell, true), plain(&cell, false));
+        let collapsed = plain(&cell, false);
+        assert_eq!(collapsed.len(), 1);
+        assert!(collapsed[0].contains("reviewer, named-task"));
+        assert!(collapsed[0].ends_with("started working ›"));
     }
 
     #[test]

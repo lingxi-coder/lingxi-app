@@ -24,7 +24,7 @@ const examples = [
   ['TaskStop', 'kill', 'stop'],
   ['Unknown', 'generic', 'box'],
   ['mcp__unknown__call', 'generic', 'mcp-fallback'],
-  ['mcp__tools__send_message', 'generic', 'chat'],
+  ['mcp__tools__send_message', 'generic', 'send'],
   ['mcp__tools__view_image', 'generic', 'image'],
 ] as const;
 
@@ -62,5 +62,21 @@ test('engine semantic icons select Codex artwork including generic MCP tools', (
     ]) assert.ok(render(node).includes(`data-tool-icon="${expected}"`));
   }
   assert.equal(toolIconName('generic', 'view_image', 'plug'), 'image');
-  assert.equal(toolIconName('generic', 'send_message', 'wrench'), 'chat');
+  assert.equal(toolIconName('generic', 'send_message', 'wrench'), 'send');
+});
+
+test('task bookkeeping uses the checklist even when restored headers carry a generic wrench', () => {
+  for (const name of ['TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'TodoWrite', 'ListChecks', 'update_plan']) {
+    assert.equal(toolIconName('generic', name, 'wrench'), 'tasks', name);
+  }
+  assert.equal(toolIconName('generic', 'ToolSearch', 'wrench'), 'search');
+  assert.equal(toolIconName('generic', 'SendMessage', 'wrench'), 'send');
+  assert.equal(toolIconName('output', 'TaskOutput', 'output'), 'output');
+  assert.equal(toolIconName('kill', 'TaskStop', 'stop'), 'stop');
+});
+
+test('LocalApp uses application artwork without changing unrelated generic tools', () => {
+  assert.equal(toolIconName('generic', 'LocalApp', 'wrench'), 'local-app');
+  assert.equal(toolIconName('LocalApp'), 'local-app');
+  assert.equal(toolIconName('generic', 'mcp__tools__LocalApp', 'wrench'), 'mcp-fallback');
 });

@@ -3068,5 +3068,9 @@
   "friends_block_title %@": "屏蔽“%@”？",
   "friends_block_title_fmt": "屏蔽“%1$s”？",
   "friends_since %@": "%@ 起成为好友",
-  "friends_since_fmt": "%1$s 起成为好友"
+  "friends_since_fmt": "%1$s 起成为好友",
+  "chat_agent_started_working": "开始工作",
+  "chat_agent_finished": "已完成",
+  "chat_tool_group_tasks": "任务进度",
+  "chat_tool_group_coordination": "任务协调"
 }

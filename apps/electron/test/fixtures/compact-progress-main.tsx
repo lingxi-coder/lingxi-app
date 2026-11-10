@@ -16,6 +16,7 @@ import '../../src/renderer/components/TranscriptAgents.css';
 function Fixture() {
   const [state, setState] = useState<ConversationState>(emptyConversation);
   const [mount, setMount] = useState(0);
+  const [agentsOpen, setAgentsOpen] = useState(false);
   const palette = tokens(true);
   Object.assign(window, {
     compactFixture: {
@@ -49,7 +50,7 @@ function Fixture() {
           {state.items.map((item) => item.type === 'compaction'
             ? <CompactionStatus key={item.id} item={item} />
             : null)}
-          <TranscriptAgents agents={[{
+          <TranscriptAgents id="compact-layout-agents" open={agentsOpen} onSetOpen={(_, next) => setAgentsOpen(next)} agents={[{
             agent_id: 'agent:compact-layout', name: 'fork-b24c', agent_type: 'explore', status: 'running', latest_activity: '4 tool uses · 0 tokens',
           }]} />
         </div>

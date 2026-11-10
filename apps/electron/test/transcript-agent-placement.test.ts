@@ -13,6 +13,33 @@ test('restored agents split tool groups at creation, before the answer', () => {
   const anchors = anchorTranscriptAgents(new Map(), items, agents);
   assert.deepEqual(placeTranscriptAgents(transcriptRows(items, false), items, agents, anchors).map(row => row.id), ['agents:spawn-a', 'tool-group:read', 'agents:spawn-b', 'answer']);
 });
+
+test('adjacent agent launches share the first stable row and retain all source identities', () => {
+  const first = tool('spawn-a', 'a');
+  const second = tool('spawn-b', 'b');
+  const items = [message('intro'), first, second, tool('spawn-c', 'c'), message('answer')];
+  const agents = [agent('c'), agent('a'), agent('b')];
+  const rows = placeTranscriptAgents(transcriptRows(items, false), items, agents, anchorTranscriptAgents(new Map(), items, agents));
+  assert.deepEqual(rows.map(row => row.id), ['intro', 'agents:spawn-a', 'answer']);
+  const group = rows[1];
+  assert.ok(group?.type === 'agents');
+  assert.deepEqual(group.agents.map(agent => agent.agent_id), ['a', 'b', 'c']);
+  assert.deepEqual(group.sourceIds, ['spawn-a', 'spawn-b', 'spawn-c']);
+  assert.equal(group.launches.get('a'), first);
+  assert.equal(group.launches.get('b'), second);
+  const before = placeTranscriptAgents(transcriptRows([first], true), [first], [agent('a')], new Map([['a', 'spawn-a']]));
+  assert.equal(before[0]?.id, group.id);
+  assert.equal(items[1], first);
+});
+
+test('prose, tool activity, and turn boundaries keep agent groups separate', () => {
+  for (const boundary of [message('progress'), tool('read'), { type: 'meta' as const, id: 'turn-end', dur: '', tokens: '' }]) {
+    const items = [tool('spawn-a', 'a'), boundary, tool('spawn-b', 'b')];
+    const agents = [agent('a'), agent('b')];
+    const rows = placeTranscriptAgents(transcriptRows(items, false), items, agents, anchorTranscriptAgents(new Map(), items, agents));
+    assert.equal(rows.filter(row => row.type === 'agents').length, 2, boundary.id);
+  }
+});
 test('status changes and subsequent messages retain the first-seen boundary', () => {
   const before = [message('before')];
   const anchors = anchorTranscriptAgents(new Map(), before, [agent('a')]);

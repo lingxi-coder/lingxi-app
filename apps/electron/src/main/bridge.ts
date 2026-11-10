@@ -228,6 +228,7 @@ export class SessionRuntime {
   private recoveryEpoch = 0;
   private recoveryTimer: NodeJS.Timeout | undefined;
   private automaticRecovery: Promise<void> | undefined;
+  private recoveryKind: 'process' | 'transport' | undefined;
   private readonly recoveryAttempts: number[] = [];
   private launchDir: string | null = null;
   private connectionLockfilePath: string | null = null;
@@ -1824,6 +1825,7 @@ export class SessionRuntime {
     ++this.recoveryEpoch;
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
+    this.recoveryKind = undefined;
   }
 
   private managedChildExited(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null, established: boolean): void {
@@ -1865,11 +1867,16 @@ export class SessionRuntime {
     this.scheduleAutomaticRecovery();
   }
 
-  private scheduleAutomaticRecovery(): void {
-    if (this.disposed || !this.desiredRunning || this.recoveryTimer || this.automaticRecovery) return;
+  private scheduleAutomaticRecovery(kind: 'process' | 'transport' = 'process'): void {
+    if (this.disposed || !this.desiredRunning) return;
+    // Process exit supersedes a pending socket reconnect. Transport loss on
+    // its own never authorizes replacing a living or externally owned peer.
+    if (kind === 'process' || this.recoveryKind === undefined) this.recoveryKind = kind;
+    if (this.recoveryTimer || this.automaticRecovery) return;
     const now = Date.now();
     while (this.recoveryAttempts.length && now - this.recoveryAttempts[0] >= 60_000) this.recoveryAttempts.shift();
     if (this.recoveryAttempts.length >= 3) {
+      this.recoveryKind = undefined;
       this.fail('The engine could not recover after three attempts. Restart the engine to try again.');
       return;
     }
@@ -1883,9 +1890,29 @@ export class SessionRuntime {
   }
 
   private beginAutomaticRecovery(epoch: number): Promise<void> {
+    let kind: 'process' | 'transport' = 'process';
     const operation = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+      kind = this.recoveryKind ?? 'process';
+      this.recoveryKind = undefined;
+      if (kind === 'transport' && this.state.status === 'connected') return;
+      // A reconnect advances the client generation, retiring the old socket's
+      // exit watcher. Recheck owned detached peers before every retry so an
+      // exit during a failed handshake still gets exact-source restoration.
+      if (kind === 'transport' && this.adoptedPid && this.adoptedProcessOwned && !this.processIsAlive(this.adoptedPid)) {
+        this.adoptedPid = null;
+        this.adoptedProcessOwned = false;
+        this.managedProcessExited(true);
+        kind = 'process';
+        this.recoveryKind = undefined;
+      }
       this.recoveryAttempts.push(Date.now());
+      if (kind === 'transport') {
+        await this.recoverConnection(true);
+        if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+        await this.restoreDraftSessionModeIfNeeded();
+        return;
+      }
       if ((this.sessionHasHistory || this.ownedSessionResumeRequired) && !this.ownedTranscriptPath) {
         throw new Error('Choose the exact transcript source before recovering this chat.');
       }
@@ -1907,12 +1934,14 @@ export class SessionRuntime {
     this.restartChain = operation;
     void operation.then(() => {
       this.automaticRecovery = undefined;
-      if (epoch === this.recoveryEpoch && this.state.status === 'disconnected') this.scheduleAutomaticRecovery();
+      if (epoch === this.recoveryEpoch && (this.recoveryKind !== undefined || this.state.status === 'disconnected')) {
+        this.scheduleAutomaticRecovery(this.recoveryKind ?? kind);
+      }
     }, (error) => {
       this.automaticRecovery = undefined;
       if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
       this.diagnostics.add('warn', 'host', `automatic engine recovery failed: ${sanitizeDiagnostic(error)}`);
-      this.scheduleAutomaticRecovery();
+      this.scheduleAutomaticRecovery(this.recoveryKind ?? kind);
     });
     return operation;
   }
@@ -2456,6 +2485,7 @@ export class SessionRuntime {
   }
 
   private wireClient(client: BridgeClient, generation: number): void {
+    let connectedBeforeError = false;
     if (generation === this.generation && !this.disposed) {
       this.client = client;
       this.decisionToolBridge?.dispose();
@@ -2940,11 +2970,13 @@ export class SessionRuntime {
     client.on('close', (code, reason) => {
       if (generation === this.generation && client === this.client) this.decisionToolBridge?.dispose();
       if (generation !== this.generation || client !== this.client || this.disposed) return;
+      const wasConnected = this.state.status === 'connected' || connectedBeforeError;
       this.permissionScopeChecks.clear();
       this.nativeMediaClient = undefined;
       this.invalidateNativeMediaBinding();
       void this.teardownAudioGeneration(generation);
       this.setState({ status: 'disconnected', reason: reason || `ws closed (code=${code})` });
+      if (wasConnected && this.connectionLockfilePath) this.scheduleAutomaticRecovery('transport');
       // A living peer is never replaced for a transport-only disconnect.
       const adoptedPid = this.adoptedPid;
       if (adoptedPid && this.adoptedProcessOwned && this.desiredRunning) {
@@ -2966,6 +2998,9 @@ export class SessionRuntime {
     });
     client.on('error', (error) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
+      // WebSocket errors can precede close. Preserve the established state so
+      // the error notification cannot suppress the ensuing reconnect.
+      connectedBeforeError ||= this.state.status === 'connected';
       this.permissionScopeChecks.clear();
       this.nativeMediaClient = undefined;
       this.invalidateNativeMediaBinding();

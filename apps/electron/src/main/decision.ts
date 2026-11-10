@@ -15,7 +15,7 @@ export class DecisionHost {
   private readonly configurationListeners = new Set<() => void>();
   private readonly operations = new Map<string, { owner: number | string; abort: AbortController }>();
   constructor(private readonly options: { userData: string; isPackaged: boolean; resourcesPath: string; broker?: DecisionCredentials;
-    accounts(): Promise<ProviderAccountLaunch | undefined>; changed(snapshot: DecisionSnapshot): void;
+    accounts(accountId: string): Promise<ProviderAccountLaunch | undefined>; changed(snapshot: DecisionSnapshot): void;
     execute?: (envelope: unknown, signal: AbortSignal) => Promise<DecisionResult> }) {
     this.path = join(options.userData, 'decision.json');
   }
@@ -120,7 +120,7 @@ export class DecisionHost {
     const perform = async () => {
       let credential: string | undefined;
       if (config.accountId) {
-        const launch = await this.options.accounts();
+        const launch = await this.options.accounts(config.accountId);
         const account = launch?.providerAccounts.accounts.find(a => a.accountId === config.accountId && a.enabled && a.authKind === 'api_key' && a.executionBindingId === 'openai' && a.providerId === (config.source === 'openai' ? 'openai' : 'typesafe'));
         const grant = account && launch?.providerAccountCredentials[account.accountId];
         if (!account || !grant || grant.identity_generation !== account.identityGeneration || grant.kind.kind !== 'api_key') throw new Error('The selected Decision API account is unavailable');
@@ -137,8 +137,11 @@ export class DecisionHost {
       if (abort.signal.aborted) throw new Error('Decision operation cancelled or timed out');
       return result;
     };
-    try { return await Promise.race([perform(), cancelled]); }
-    finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); abort.signal.removeEventListener('abort', onAbort); this.operations.delete(operationId); }
+    const running = perform();
+    // Cancellation returns promptly, but non-abortable credential work still owns its slot.
+    void running.then(() => this.operations.delete(operationId), () => this.operations.delete(operationId));
+    try { return await Promise.race([running, cancelled]); }
+    finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); abort.signal.removeEventListener('abort', onAbort); }
   }
   private run(envelope: unknown, signal: AbortSignal): Promise<DecisionResult> {
     const input = JSON.stringify(envelope);

@@ -579,7 +579,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   notifier.setPreferences(settings.getPublic().notifications);
   const decisionHost = new DecisionHost({
     userData, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
-    broker: credentialBroker ?? systemDecisionCredentials(userData), accounts: () => providerAccounts?.launch() ?? Promise.resolve(undefined),
+    broker: credentialBroker ?? systemDecisionCredentials(userData), accounts: accountId => providerAccounts?.launchApiKeyAccount(accountId, 'openai', 'openai') ?? Promise.resolve(undefined),
     changed: snapshot => host?.sendToWindows(CH_DECISION_CHANGED, snapshot),
   });
   bridge = new SessionRuntimeManager({

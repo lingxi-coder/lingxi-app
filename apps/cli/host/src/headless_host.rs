@@ -24,6 +24,12 @@ struct CliHeadlessServices {
 
 #[async_trait::async_trait]
 impl HeadlessHostServices for CliHeadlessServices {
+    fn mcp_local_staging_root(&self, session_cwd: &Path) -> Option<std::path::PathBuf> {
+        // This process adapter owns a local workspace. Bind each call to the
+        // session's resolved cwd, including an accepted directory relocation.
+        Some(session_cwd.to_path_buf())
+    }
+
     fn request_identity(&self) -> Option<harness_runtime::desktop::DesktopRequestIdentity> {
         Some(harness_runtime::desktop::DesktopRequestIdentity {
             device_id: migrations::global_config::get_or_create_user_id(),
@@ -356,6 +362,10 @@ fn configure_selected_resume(
     crate::init::install_published_branch(&mut desktop, session_id, captured)?;
     Ok(desktop)
 }
+
+#[cfg(all(test, unix))]
+#[path = "headless_host_mcp_test.rs"]
+mod mcp_consumer_tests;
 
 #[cfg(test)]
 mod tests {

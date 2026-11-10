@@ -78,6 +78,19 @@ export class LocalAppMcpGateway {
       await server.connect(transport);
     }
     session.lastUsed = Date.now();
+    if (request.method === 'GET') {
+      const attached = session;
+      const writeHead = response.writeHead.bind(response);
+      response.writeHead = ((...args: Parameters<ServerResponse['writeHead']>) => {
+        response.writeHead = writeHead;
+        const result = writeHead(...args);
+        // The SDK has installed the notification stream before writing its 200
+        // response. Refresh discovery on each attachment: changes made while the
+        // stream was disconnected cannot otherwise be delivered without a cursor.
+        if (args[0] === 200) void attached.server.sendToolListChanged().catch(() => undefined);
+        return result;
+      }) as ServerResponse['writeHead'];
+    }
     try { await session.transport.handleRequest(request, response, body); }
     finally { if (!session.transport.sessionId || this.closed) await session.server.close(); }
   }

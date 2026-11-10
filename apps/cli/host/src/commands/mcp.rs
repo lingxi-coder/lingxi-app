@@ -582,6 +582,10 @@ impl McpProtocolOutput {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::OutputStream for McpProtocolOutput {
+    fn wants_forwarded_subagent_messages(&self) -> bool {
+        false
+    }
+
     async fn emit_text(&self, _text: &lingxi_core::types::utf16_json::Utf16JsonProjection) {}
 
     async fn emit_tool_call(

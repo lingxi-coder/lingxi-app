@@ -52,7 +52,7 @@ export default function FriendsPage({ locale, route, badge, onBadge }: { locale:
     finally { setBusy(false); }
   };
   const done = () => { clearAddIntent(intentStorage, handled.current); setCode(''); };
-  return <main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><h1>{zh ? '好友' : 'Friends'}{badge ? <b className="teams-web-badge" role="img" aria-label={zh ? `${badge} 条未读` : `${badge} unread`}>{badge}</b> : null}</h1><a href="/teams">{zh ? '团队' : 'Teams'}</a><span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{zh ? '退出登录' : 'Sign out'}</button> : null}</header>
+  return <main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><h1>{zh ? '好友' : 'Friends'}{badge ? <b className="teams-web-badge" role="img" aria-label={zh ? `${badge} 条未读` : `${badge} unread`}>{badge}</b> : null}</h1><a href="/teams">{zh ? '团队' : 'Teams'}</a><a href="/remote">{zh ? '远控' : 'Remote'}</a><span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{zh ? '退出登录' : 'Sign out'}</button> : null}</header>
     {user === undefined ? <p role="status" className="teams-web-note">{zh ? '正在加载…' : 'Loading…'}</p> : user
       ? <SignedIn key={user.uid} user={user} zh={zh} route={route} chat={chat.current} code={code} onCodeHandled={done} onBadge={onBadge} />
       : <SignInCard auth={auth} zh={zh} note={zh ? '请登录灵犀账号以添加好友并聊天。' : 'Sign in to your LingXi account to add friends and chat.'} />}

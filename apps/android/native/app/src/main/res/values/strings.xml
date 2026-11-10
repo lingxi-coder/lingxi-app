@@ -2886,7 +2886,7 @@
     <string name="friends_since_fmt">%1$s 起成为好友</string>
     <string name="friends_section_offers">团队邀请</string>
     <string name="friends_offer_invited_by_fmt">邀请人：%1$s</string>
-    <string name="friends_offer_expires_fmt">%1$s 到期</string>
+    <string name="friends_offer_expires_fmt">%1$s到期</string>
     <string name="friends_offer_expired">已过期</string>
     <string name="friends_offer_join">加入</string>
     <string name="friends_offer_dismiss">移除</string>

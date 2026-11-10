@@ -197,7 +197,7 @@ function Offers({ offers, now, tag, workspace, zh, onJoined }: {
           <div className="tw-person-text">
             <b>{offer.teamName}</b>
             <small>{t(`Invited by ${offer.fromName}`, `邀请人：${offer.fromName}`)}</small>
-            <small>{expiry.state === 'live' ? t(`Expires ${when}`, `${when} 到期`) : t('Expired', '已过期')}</small>
+            <small>{expiry.state === 'live' ? t(`Expires ${when}`, `${when}到期`) : t('Expired', '已过期')}</small>
             {failed?.teamId === offer.teamId ? <small role="alert" className="tw-error">{offerErrorText(failed.action, failed.code, zh)}</small> : null}
           </div>
           <div className="tw-person-actions">

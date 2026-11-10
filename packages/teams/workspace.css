@@ -320,7 +320,7 @@
 .tw-friends-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 700; }
 .tw-friends-more { flex: none; }
 .tw-friends-filter { margin: 6px 8px 4px; }
-.tw-sections > .tw-friends-filter { width: calc(100% - 16px); }
+.tw-sections > .tw-friends-filter { max-width: calc(100% - 16px); }
 .tw-friends-group { margin: 0; padding: 6px 8px 0; font-size: 11px; font-weight: 600; color: var(--tw-muted); }
 .tw-friends-requests .tw-people { padding: 0 8px; }
 .tw-request { align-items: flex-start; }

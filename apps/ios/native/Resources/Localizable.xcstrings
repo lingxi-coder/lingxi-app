@@ -34529,13 +34529,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ 到期"
+            "value": "%@到期"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ 到期"
+            "value": "%@到期"
           }
         },
         "en": {
@@ -34547,7 +34547,7 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ まで有効"
+            "value": "%@まで有効"
           }
         },
         "ko": {
@@ -34563,13 +34563,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%1$s 到期"
+            "value": "%1$s到期"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "%1$s 到期"
+            "value": "%1$s到期"
           }
         },
         "en": {
@@ -34581,7 +34581,7 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "%1$s まで有効"
+            "value": "%1$sまで有効"
           }
         },
         "ko": {

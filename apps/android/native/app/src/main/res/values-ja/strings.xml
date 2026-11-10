@@ -2886,7 +2886,7 @@
     <string name="friends_since_fmt">%1$s から友だち</string>
     <string name="friends_section_offers">チームへの招待</string>
     <string name="friends_offer_invited_by_fmt">%1$s さんからの招待</string>
-    <string name="friends_offer_expires_fmt">%1$s まで有効</string>
+    <string name="friends_offer_expires_fmt">%1$sまで有効</string>
     <string name="friends_offer_expired">期限切れ</string>
     <string name="friends_offer_join">参加</string>
     <string name="friends_offer_dismiss">削除</string>

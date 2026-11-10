@@ -1,10 +1,10 @@
 import UIKit
 import XCTest
 
-/// The four shell tabs as UI tests address them. The app sets the `tab.<name>` accessibility identifier on
+/// The five shell tabs as UI tests address them. The app sets the `tab.<name>` accessibility identifier on
 /// each `Tab`; if the system tab bar does not surface it, the bar's buttons are found by position.
 enum ShellTab: String, CaseIterable {
-    case chats, bots, teams, settings
+    case chats, bots, teams, friends, settings
 
     var identifier: String { "tab.\(rawValue)" }
     var index: Int { Self.allCases.firstIndex(of: self) ?? 0 }
@@ -93,7 +93,7 @@ final class TabNavigationUITests: XCTestCase {
         XCTAssertTrue(app.tabButton(.settings).isSelected)
     }
 
-    func testFourTabsArePresentAndChatsIsSelectedAtLaunch() {
+    func testFiveTabsArePresentAndChatsIsSelectedAtLaunch() {
         for tab in ShellTab.allCases {
             XCTAssertTrue(app.tabButton(tab).waitForExistence(timeout: 10), "\(tab.identifier): \(app.debugDescription)")
         }
@@ -207,14 +207,17 @@ final class TabNavigationUITests: XCTestCase {
         XCTAssertTrue(group.waitForExistence(timeout: 10), "re-tap pops the Settings stack to its root")
     }
 
-    /// Both tabs stay in the bar and keep it on their roots, signed in or not (the screens explain themselves).
-    func testBotsAndTeamsTabsAreReachable() {
+    /// The three tabs stay in the bar and keep it on their roots, signed in or not (the screens explain themselves).
+    func testBotsTeamsAndFriendsTabsAreReachable() {
         app.openBotsTab()
         XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(app.tabBarIsShown, "the Bots root keeps the bar")
         app.selectTab(.teams)
         XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(app.tabBarIsShown, "the Teams root keeps the bar")
+        app.selectTab(.friends)
+        XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.tabBarIsShown, "the Friends root keeps the bar")
     }
 
     // MARK: helpers

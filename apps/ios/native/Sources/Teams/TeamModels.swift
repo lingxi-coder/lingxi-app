@@ -34,6 +34,17 @@ struct TeamDetail: Decodable, Equatable, Sendable {
     let invites: [TeamInvite]
 }
 
+/// The one team of a friend chat (docs/FRIENDS-CLIENTS.md D9): the summary synthesized from a friend's card and the two
+/// people it is made of, so a `TeamsWorkspace` pinned to it needs no `GET /v1/teams` and no team-detail call.
+struct PairTeam: Equatable, Sendable {
+    let team: TeamSummary
+    /// The friend, then the viewer once their profile name is known.
+    let members: [TeamMember]
+    let friendUID: String
+    /// The friend's `@username`, when they have one.
+    let handle: String?
+}
+
 /// What a role may do in a team (Desktop `TeamDetailsDrawer`: `drawerTabs`, `canManageMember`). The server
 /// decides; these rules only decide what is offered.
 enum TeamRoles {

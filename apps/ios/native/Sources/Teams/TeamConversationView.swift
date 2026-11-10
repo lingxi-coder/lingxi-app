@@ -4,6 +4,9 @@ import SwiftUI
 /// phones (the tab bar leaves with it) and the detail pane on wide layouts. The rules are
 /// `TeamsStreamLogic` (rows, grouping, the window), `TeamsComposeLogic` (composer) and `TeamsReadLogic`
 /// (when the app marks the conversation read by itself, decision D12).
+///
+/// Over a workspace pinned to a friendship (`workspace.pair`, docs/FRIENDS-CLIENTS.md D9) it is a friend's chat: the
+/// header is the friend, and the details button and the platform notice are left out. Everything else is the same.
 struct TeamConversationView: View {
     @Environment(TeamsWorkspace.self) private var workspace
     @Environment(\.scenePhase) private var scenePhase
@@ -44,12 +47,12 @@ struct TeamConversationView: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
-        .hidesTabBarWhenPushed(in: .teams)
+        .hidesTabBarWhenPushed(in: workspace.pair == nil ? .teams : .friends)
         // The model is replaced when the team or its membership generation changes; the new one must open this thread.
         .task(id: workspace.messaging.map(ObjectIdentifier.init)) { workspace.openConversation(conversationID) }
         .onAppear {
             if !draftLoaded { draft = workspace.draft(for: conversationID); draftLoaded = true }
-            showNotice = !workspace.platformNoticeShown
+            showNotice = workspace.pair == nil && !workspace.platformNoticeShown
             workspace.markPlatformNoticeShown()
         }
         .onChange(of: draft) { _, value in
@@ -119,10 +122,12 @@ struct TeamConversationView: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("teams.conversation.header")
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { if let onShowDetails { onShowDetails() } else { showDetails = true } } label: { Image(systemName: "info.circle") }
-                    .accessibilityLabel(Text("teams_conversation_details"))
-                    .accessibilityIdentifier("teams.conversation.info")
+            if context.pair == nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { if let onShowDetails { onShowDetails() } else { showDetails = true } } label: { Image(systemName: "info.circle") }
+                        .accessibilityLabel(Text("teams_conversation_details"))
+                        .accessibilityIdentifier("teams.conversation.info")
+                }
             }
             if unread > 0 {
                 ToolbarItem(placement: .topBarTrailing) {

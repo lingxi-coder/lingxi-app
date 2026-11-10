@@ -13,6 +13,8 @@ struct TeamConversationContext {
     let members: [TeamMember]
     let bots: [TeamBotCard]
     let strings: TeamsListStrings
+    /// Set in a friend chat (docs/FRIENDS-CLIENTS.md D9): the friend stands in for the conversation's name.
+    let pair: PairTeam?
 
     /// The viewer may send here (a Bot's owner reading someone else's Bot DM only observes).
     var participant: Bool { conversation.participants.isEmpty || conversation.participants.contains("user:\(uid)") }
@@ -51,8 +53,10 @@ struct TeamConversationContext {
     }
 
     /// The second line of the header (Desktop `conversationSubtitle`): a Bot DM says whether the Bot is reachable
-    /// and whose it is, a dm says what it is, a group or channel how many are in it. `nil` when there is nothing to say.
+    /// and whose it is, a dm says what it is, a group or channel how many are in it; a friend's chat names their `@username`.
+    /// `nil` when there is nothing to say.
     var subtitle: String? {
+        if let pair { return pair.handle.map { "@" + $0 } }
         switch conversation.kind {
         case "bot_dm":
             guard let card = card(forKey: conversation.effectiveSharedBotId) else { return nil }
@@ -78,8 +82,8 @@ struct TeamConversationContext {
         let bots = model.bots
         return TeamConversationContext(
             uid: uid, team: team, model: model, conversation: conversation,
-            label: TeamsListLogic.conversationLabel(conversation, members: members, uid: uid, bots: bots, strings: strings),
-            members: members, bots: bots, strings: strings)
+            label: workspace.pair?.team.name ?? TeamsListLogic.conversationLabel(conversation, members: members, uid: uid, bots: bots, strings: strings),
+            members: members, bots: bots, strings: strings, pair: workspace.pair)
     }
 }
 

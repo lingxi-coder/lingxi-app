@@ -5,6 +5,8 @@ import UIKit
 /// leaving or deleting it. Pushed from the team switcher on phones and a side pane on wide layouts.
 struct TeamDetailsPage: View {
     @Environment(TeamsWorkspace.self) private var workspace
+    @Environment(FriendsWorkspace.self) private var friends
+    @Environment(TabCoordinator.self) private var tabs
     @Environment(\.locale) private var locale
     /// Opens a conversation (a Bot's DM) in the Teams tab.
     let onOpenConversation: (String) -> Void
@@ -41,6 +43,8 @@ struct TeamDetailsPage: View {
     @State private var confirmation: Confirmation?
     @State private var pausing: TeamBotCard?
     @State private var copied = false
+    /// The member whose "Add friend" sheet is open (docs/FRIENDS-CLIENTS.md D15).
+    @State private var befriending: TeamMember?
 
     var body: some View {
         Group {
@@ -52,6 +56,12 @@ struct TeamDetailsPage: View {
         }
         .navigationTitle("teams_team_details")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $befriending) { member in
+            FriendMemberSheet(teamID: workspace.selectedTeamID, memberUID: member.uid) { uid in
+                tabs.friendsRequest = .chat(uid: uid)
+                tabs.select(.friends)
+            }
+        }
         .toolbar {
             if showsClose {
                 ToolbarItem(placement: .cancellationAction) { Button("common_close", action: onClose) }
@@ -183,6 +193,16 @@ struct TeamDetailsPage: View {
                         .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 8)
+                    if member.uid != workspace.uid, friends.uid != nil {
+                        if friends.friend(member.uid) != nil {
+                            Text("friends_relation_friends").font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Button("friends_add") { befriending = member }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .accessibilityIdentifier("teams.member.addfriend.\(member.uid)")
+                        }
+                    }
                     if TeamRoles.canManage(viewerRole: team.role, viewerUID: workspace.uid ?? "", memberUID: member.uid, memberRole: member.role) {
                         Menu {
                             if team.role == "owner" {

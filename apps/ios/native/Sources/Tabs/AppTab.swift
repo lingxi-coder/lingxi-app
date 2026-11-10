@@ -1,15 +1,15 @@
 import Observation
 import SwiftUI
 
-/// The four tabs of the app shell (spec D1): Chats is the chat-first screen with its drawer, unchanged
-/// inside; Bots, Teams and Settings own one `NavigationStack` each.
+/// The five tabs of the app shell (spec D1; Friends: docs/FRIENDS-CLIENTS.md D1): Chats is the chat-first screen
+/// with its drawer, unchanged inside; Bots, Teams, Friends and Settings own one `NavigationStack` each.
 enum AppTab: String, CaseIterable, Hashable, Sendable {
-    case chats, bots, teams, settings
+    case chats, bots, teams, friends, settings
 }
 
 extension EnvironmentValues {
     /// `true` at >= 840 pt (`TabLogic.wideBreakpoint`), measured once by `TabShell` on the window (D3).
-    /// Panes inside the tabs (Bots / Teams / Settings two-pane) read this instead of measuring themselves.
+    /// Panes inside the tabs (Bots / Teams / Friends / Settings two-pane) read this instead of measuring themselves.
     /// The shell draws a rail at this breakpoint and hides the native TabView bar.
     @Entry var isWideLayout = false
 }
@@ -38,6 +38,9 @@ final class TabCoordinator {
     /// The invite code of a `team/join` link; `TeamsTab` consumes it and sets it back to nil. It only
     /// fills the join form: a link never joins by itself.
     var teamsJoinCode: String?
+    /// A `friend/*` link or push; `FriendsTab` consumes it (once someone is signed in) and sets it back to nil. A
+    /// friend link never redeems by itself: `friend/add` only starts the confirmation (D8).
+    var friendsRequest: FriendLink?
     /// Counters a tab root watches: the user tapped the already-selected tab while that tab was
     /// pushed (pop to root) or already at its root (scroll to top).
     private(set) var popToRootRequests: [AppTab: Int] = [:]

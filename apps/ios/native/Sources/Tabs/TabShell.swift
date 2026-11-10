@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// The app shell (spec §2): Chats / Bots / Teams / Settings on the system `TabView`.
+/// The app shell (spec §2): Chats / Bots / Teams / Friends / Settings on the system `TabView`.
 ///
 /// - Below 840 pt: the native bottom tab bar. At 840 pt and above: a 76 pt rail, with the
 ///   system bar hidden so it does not add a second sidebar to Chats.
@@ -20,6 +20,7 @@ struct TabShell<ChatsContent: View, SettingsContent: View>: View {
     @Environment(AppState.self) private var app
     @Environment(BotsBadge.self) private var botsBadge
     @Environment(TeamsWorkspace.self) private var teamsWorkspace
+    @Environment(FriendsWorkspace.self) private var friendsWorkspace
     let navigation: AppNavigationModel
     @ViewBuilder let chats: () -> ChatsContent
     @ViewBuilder let settings: () -> SettingsContent
@@ -107,6 +108,7 @@ struct TabShell<ChatsContent: View, SettingsContent: View>: View {
         case .chats: "tabs_chats"
         case .bots: "remote_bots"
         case .teams: "teams_title"
+        case .friends: "friends_title"
         case .settings: "settings_title_main"
         }
     }
@@ -115,12 +117,19 @@ struct TabShell<ChatsContent: View, SettingsContent: View>: View {
         case .chats: "bubble.left.and.bubble.right"
         case .bots: "cpu"
         case .teams: "person.2"
+        case .friends: "person.crop.circle"
         case .settings: "gearshape"
         }
     }
     private func badge(for tab: AppTab) -> String? {
         guard FirebaseAccount.shared.user != nil else { return nil }
-        return TabLogic.tabBadgeText(tab == .bots ? botsBadge.count : tab == .teams ? teamsWorkspace.totalUnread : 0)
+        let count = switch tab {
+        case .bots: botsBadge.count
+        case .teams: teamsWorkspace.totalUnread
+        case .friends: friendsWorkspace.badge
+        case .chats, .settings: 0
+        }
+        return TabLogic.tabBadgeText(count)
     }
 
     private var selection: Binding<AppTab> {
@@ -134,11 +143,14 @@ struct TabShell<ChatsContent: View, SettingsContent: View>: View {
         let signedIn = FirebaseAccount.shared.user != nil
         let botsWaiting = signedIn ? botsBadge.count : 0
         let teamsUnread = signedIn ? teamsWorkspace.totalUnread : 0
+        let friendsUnread = signedIn ? friendsWorkspace.badge : 0
         let botsBadgeText = TabLogic.tabBadgeText(botsWaiting)
         let teamsBadgeText = TabLogic.tabBadgeText(teamsUnread)
+        let friendsBadgeText = TabLogic.tabBadgeText(friendsUnread)
         // What VoiceOver reads after the tab's name, with the real number (the badge text caps at 99+).
         let botsValue: LocalizedStringKey = botsBadgeText == nil ? "" : "remote_bot_waiting \(botsWaiting)"
         let teamsValue: LocalizedStringKey = teamsBadgeText == nil ? "" : "tabs_badge_unread \(teamsUnread)"
+        let friendsValue: LocalizedStringKey = friendsBadgeText == nil ? "" : "tabs_badge_unread \(friendsUnread)"
         return TabView(selection: selection) {
             Tab("tabs_chats", systemImage: "bubble.left.and.bubble.right", value: AppTab.chats) {
                 chats()
@@ -161,6 +173,14 @@ struct TabShell<ChatsContent: View, SettingsContent: View>: View {
             .badge(teamsBadgeText.map { Text($0) })
             .accessibilityValue(teamsValue)
             .accessibilityIdentifier("tab.teams")
+
+            Tab("friends_title", systemImage: "person.crop.circle", value: AppTab.friends) {
+                FriendsTab()
+                    .toolbar(barVisibility(for: .friends), for: .tabBar)
+            }
+            .badge(friendsBadgeText.map { Text($0) })
+            .accessibilityValue(friendsValue)
+            .accessibilityIdentifier("tab.friends")
 
             Tab("settings_title_main", systemImage: "gearshape", value: AppTab.settings) {
                 settings()

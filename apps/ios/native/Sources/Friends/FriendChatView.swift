@@ -3,13 +3,15 @@ import SwiftUI
 /// A friend's chat (docs/FRIENDS-CLIENTS.md D9, D10): the Team conversation view and message layer, unchanged, over the
 /// `TeamsWorkspace` the Friends workspace pinned to this friendship's pair team. The view leaves out what a Team has
 /// and a friend does not (details, platform notice) by reading `workspace.pair`; this wrapper adds the friend's menu
-/// (View profile, Remove, Block), the notice, and the unavailable state once the friendship has ended.
+/// (View profile, Remove, Block), the Bots button (D21), the notice, and the unavailable state once the friendship has ended.
 struct FriendChatView: View {
     @Environment(FriendsWorkspace.self) private var friends
     @Environment(\.scenePhase) private var scenePhase
     let uid: String
     /// Back to the list: after Remove or Block, and from the unavailable state.
     let onClose: () -> Void
+    /// The Bots button: the Bots of this friendship (D21).
+    let onBots: () -> Void
 
     private enum Pending: Identifiable {
         case remove, block
@@ -40,6 +42,8 @@ struct FriendChatView: View {
             .onAppear {
                 friends.clearActionError()
                 friends.reading(uid, visible: scenePhase == .active)
+                // Back from the Bots or a Bot DM: the workspace selects the friend chat again (D22).
+                friends.chat(for: uid)?.workspace.openConversation(FriendsLogic.chatConversationID)
             }
             .onDisappear { friends.reading(uid, visible: false) }
             .onChange(of: scenePhase) { _, phase in friends.reading(uid, visible: phase == .active) }
@@ -59,7 +63,7 @@ struct FriendChatView: View {
     private var phase: Phase {
         let friend = friends.friend(uid)
         let chat = friends.chat(for: uid)
-        if gone || chat.map(ended) == true { return .unavailable }
+        if gone || chat?.ended == true { return .unavailable }
         if let friend, let chat { return .chat(friend, chat) }
         // The card is there but the chat is not open yet, or the new friendship's card has not arrived.
         return friend != nil || friends.expecting.contains(uid) ? .loading : .unavailable
@@ -72,35 +76,24 @@ struct FriendChatView: View {
             TeamConversationView(conversationID: FriendsLogic.chatConversationID, onGone: { gone = true })
                 .environment(chat.workspace)
                 .id(chat.teamID + ":" + String(chat.generation))
-                .toolbar { menu(friend) }
+                .toolbar { toolbar(friend) }
         case .loading:
-            VStack(spacing: 12) {
-                ProgressView()
-                Text("teams_loading_messages").font(.footnote).foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .navigationBarTitleDisplayMode(.inline)
-            .accessibilityIdentifier("friends.chat.loading")
+            FriendChatLoadingView()
         case .unavailable:
-            TeamsStateView(systemImage: "person.crop.circle.badge.xmark", title: "friends_chat_unavailable") {
-                Button("remote_back", action: onClose)
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("friends.chat.back")
-            }
-            .navigationBarTitleDisplayMode(.inline)
-            .accessibilityIdentifier("friends.chat.unavailable")
+            FriendChatUnavailableView(onClose: onClose)
         }
     }
 
-    /// The friendship ended under the open chat: the pair team no longer has the viewer, or a send was refused for it.
-    private func ended(_ chat: FriendsWorkspace.Chat) -> Bool {
-        chat.workspace.messaging?.revoked == true || FriendsLogic.errorKey(chat.workspace.actionError) == "friends_chat_unavailable"
-    }
-
-    // MARK: Menu and confirmations (D10)
+    // MARK: Bots button and menu (D10, D21)
 
     @ToolbarContentBuilder
-    private func menu(_ friend: FriendCard) -> some ToolbarContent {
+    private func toolbar(_ friend: FriendCard) -> some ToolbarContent {
+        // Always there, with no Bots too, so that a friend can find it (D21).
+        ToolbarItem(placement: .topBarTrailing) {
+            Button(action: onBots) { Image(systemName: "cpu") }
+                .accessibilityLabel(Text("friends_bots_title"))
+                .accessibilityIdentifier("friends.chat.bots")
+        }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Button("friends_menu_view_profile", systemImage: "person.text.rectangle") { viewing = true }
@@ -137,6 +130,36 @@ struct FriendChatView: View {
             }
             FriendsNotice()
         }
+    }
+}
+
+/// The wait for a friend's chat: the card is there but the workspace is not open yet, or the new friendship's card has not arrived.
+/// The chat, the Bots and a Bot DM share it.
+struct FriendChatLoadingView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("teams_loading_messages").font(.footnote).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationBarTitleDisplayMode(.inline)
+        .accessibilityIdentifier("friends.chat.loading")
+    }
+}
+
+/// The end of the friendship under an open screen (D9, D25): the whole friend area, the Bots and a Bot DM included, is replaced by
+/// this and Back, which closes it.
+struct FriendChatUnavailableView: View {
+    let onClose: () -> Void
+
+    var body: some View {
+        TeamsStateView(systemImage: "person.crop.circle.badge.xmark", title: "friends_chat_unavailable") {
+            Button("remote_back", action: onClose)
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("friends.chat.back")
+        }
+        .navigationBarTitleDisplayMode(.inline)
+        .accessibilityIdentifier("friends.chat.unavailable")
     }
 }
 

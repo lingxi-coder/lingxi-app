@@ -1,8 +1,9 @@
 import Foundation
 
 // The Friends rules of docs/FRIENDS-CLIENTS.md (D5 order and filter, D6 relation actions, D7 the one search
-// field, D11 profile form, D13 unread, D14 badge, D18 errors and request ids). Pure: Foundation only, no UI, no
-// Firebase, no clock; the one language-dependent input, the collation locale, is a parameter. Runs in the
+// field, D11 profile form, D13 unread, D14 badge, D18 errors and request ids, and for F4 D26 the invite picker,
+// D27 the team invitations, D28 their badge and D30 their errors). Pure: Foundation only, no UI, no Firebase, no
+// clock; what depends on the language (the collation locale) or on the time (`nowMs`) is a parameter. Runs in the
 // macOS XCTest harness against `packages/teams/fixtures/friends-vectors.json`. Web, Desktop and Android have the
 // same contract (`packages/teams/friends.ts`, `friends/FriendsLogic.kt`).
 
@@ -27,6 +28,23 @@ struct FriendsListSections: Equatable, Sendable {
     var received: [FriendCard]
     var sent: [FriendCard]
     var friends: [FriendCard]
+}
+
+/// The three team-offer actions of `POST /v1/friends` (D30 maps an error code per action).
+enum OfferAction: String, Equatable, Sendable {
+    case offerTeam, acceptOffer, declineOffer
+}
+
+/// How a team invitation reads at a moment (D27): live with its time left as a whole number of hours or days, or expired.
+enum OfferExpiry: Equatable, Sendable {
+    enum Unit: String, Equatable, Sendable {
+        case hour, day
+    }
+
+    /// `friends_offer_expires(x)` with `x` the relative text of `FriendsLogic.relativeExpiry`; Join and Decline.
+    case live(unit: Unit, value: Int)
+    /// `friends_offer_expired`; Dismiss only.
+    case expired
 }
 
 enum FriendsLogic {
@@ -132,6 +150,12 @@ enum FriendsLogic {
             case .friends: total + (card.uid == reading ? 0 : card.unread)
             }
         }
+    }
+
+    /// The same, plus one for every live team invitation (D28): expired ones add nothing. A function of the clock, so the
+    /// caller recomputes it at the earliest live expiry (`earliestLiveExpiry`) and whenever the Friends view is shown.
+    static func badgeCount(_ cards: [FriendCard], offers: [TeamOffer], nowMs: Int64, reading: String? = nil) -> Int {
+        badgeCount(cards, reading: reading) + offers.filter { isLive($0, nowMs: nowMs) }.count
     }
 
     // MARK: Result card (D6)
@@ -262,6 +286,12 @@ enum FriendsLogic {
         code != "SERVICE_UNAVAILABLE"
     }
 
+    /// The codes that end a friend's chat (D9, D25): the card is gone, or the pair team no longer has the viewer. A send, a
+    /// Bot listing, a new Bot DM or stopping a Bot refused with one of them replaces the whole friend area.
+    static func chatEnded(_ code: String) -> Bool {
+        errorKey(code) == "friends_chat_unavailable"
+    }
+
     /// The id of one confirmation (a UUID); never stored.
     static func newRequestID() -> String { UUID().uuidString }
 
@@ -282,6 +312,105 @@ enum FriendsLogic {
         return PairTeam(
             team: TeamSummary(id: teamId, name: card.displayName, memberCount: 2, role: "member", generation: generation),
             members: members, friendUID: card.uid, handle: card.handle)
+    }
+
+    // MARK: Team invitations (D26 to D30)
+
+    private static let hourMs: Int64 = 3_600_000
+    private static let dayMs: Int64 = 86_400_000
+
+    /// Strictly after now is live, as on the server: an offer that expires exactly now is expired.
+    static func isLive(_ offer: TeamOffer, nowMs: Int64) -> Bool {
+        offer.expiresAtMs > nowMs
+    }
+
+    /// What an offer shows at `nowMs` (D27, vectors `offers.expiry`): the time left rounded up to whole hours up to and
+    /// including 24 hours, and to whole days above that (2 to 7), or expired (also past the server's 7-day grace, until its
+    /// daily prune deletes the document and the listener drops the row). The unit and value go to the platform's relative-time
+    /// formatter; the clock is the device's and the server decides.
+    static func offerExpiry(expiresAtMs: Int64, nowMs: Int64) -> OfferExpiry {
+        let remaining = expiresAtMs - nowMs
+        if remaining <= 0 { return .expired }
+        if remaining <= 24 * hourMs { return .live(unit: .hour, value: Int((remaining + hourMs - 1) / hourMs)) }
+        return .live(unit: .day, value: Int((remaining + dayMs - 1) / dayMs))
+    }
+
+    /// The expiry of the offer that lapses first among the live ones: when the one timer of D28 fires. `nil` when none is live.
+    static func earliestLiveExpiry(_ offers: [TeamOffer], nowMs: Int64) -> Int64? {
+        offers.filter { isLive($0, nowMs: nowMs) }.map(\.expiresAtMs).min()
+    }
+
+    /// `x` of `friends_offer_expires(x)`: the platform's relative-time text in the future for a live row's (value, unit), such as
+    /// "in 3 days" (`numeric: always`, so one day is never "tomorrow"). The words are the system's for `locale`.
+    static func relativeExpiry(unit: OfferExpiry.Unit, value: Int, locale: Locale) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = locale
+        formatter.dateTimeStyle = .numeric
+        formatter.unitsStyle = .full
+        return formatter.localizedString(from: unit == .hour ? DateComponents(hour: value) : DateComponents(day: value))
+    }
+
+    /// Live offers before expired ones; within each group the larger `expiresAtMs` first (the newest offer, since an offer lives a
+    /// fixed time); then the team id compared as text by code unit, so `team_10` comes before `team_9`. Negative = `a` first.
+    static func compareOffers(_ a: TeamOffer, _ b: TeamOffer, nowMs: Int64) -> Int {
+        let x = isLive(a, nowMs: nowMs), y = isLive(b, nowMs: nowMs)
+        if x != y { return x ? -1 : 1 }
+        if a.expiresAtMs != b.expiresAtMs { return a.expiresAtMs > b.expiresAtMs ? -1 : 1 }
+        if a.teamId.utf16.elementsEqual(b.teamId.utf16) { return 0 }
+        return a.teamId.utf16.lexicographicallyPrecedes(b.teamId.utf16) ? -1 : 1
+    }
+
+    /// The offers in D27 order.
+    static func sortedOffers(_ offers: [TeamOffer], nowMs: Int64) -> [TeamOffer] {
+        offers.sorted { compareOffers($0, $1, nowMs: nowMs) < 0 }
+    }
+
+    /// The Invite friends list (D26, vectors `offers.picker`): the cards that are friends and not yet in the team, in the Friends
+    /// order of D5, narrowed by the filter rule. Requests are never listed; a person who joined meanwhile is refused with
+    /// `ALREADY_MEMBER`, and the caller drops that row itself.
+    static func invitePicker(_ cards: [FriendCard], memberUIDs: Set<String>, query: String, locale: Locale) -> [FriendCard] {
+        sections(cards, locale: locale).friends.filter { !memberUIDs.contains($0.uid) && matches($0, query: query) }
+    }
+
+    /// Whether Team details offers Invite friends (D26, vectors `offers.entry`): to an owner or an admin whatever the member
+    /// count; a full team still shows it and the server answers `MEMBER_LIMIT`.
+    static func canInviteFriends(role: String) -> Bool {
+        role == "owner" || role == "admin"
+    }
+
+    /// The string key an error code of one of the offer actions shows under the control that failed (D30, vectors
+    /// `offers.errors`). Never `errorKey`: it reads `MEMBERSHIP_REQUIRED` and `STALE_MEMBERSHIP` as "the chat ended". The key is
+    /// the action's own row, else the common row, else `friends_error_generic` (also for a code that belongs to another action).
+    static func offerErrorKey(_ action: OfferAction, _ code: String) -> String {
+        switch (action, code) {
+        case (.offerTeam, "FRIEND_REQUIRED"): "friends_error_friend_required"
+        case (.offerTeam, "ALREADY_MEMBER"): "friends_error_already_member"
+        case (.offerTeam, "OFFER_LIMIT"): "friends_error_offer_limit"
+        case (.offerTeam, "MEMBER_LIMIT"), (.acceptOffer, "MEMBER_LIMIT"): "friends_error_member_limit"
+        case (.offerTeam, "ROLE_REQUIRED"): "friends_error_offer_role"
+        case (.offerTeam, "MEMBERSHIP_REQUIRED"): "friends_error_offer_team_gone"
+        case (.acceptOffer, "OFFER_UNAVAILABLE"), (.acceptOffer, "STALE_MEMBERSHIP"): "friends_error_offer_unavailable"
+        case (.acceptOffer, "TEAM_LIMIT"): "friends_error_team_limit"
+        case (.offerTeam, "RATE_LIMITED"): "friends_error_rate_limited"
+        case (_, "SIGN_IN_REQUIRED"), (_, "INVALID_SESSION"): "friends_error_session"
+        case (_, "SERVICE_UNAVAILABLE"): "friends_error_network"
+        case (_, "INVALID_INPUT"), (_, "INVALID_JSON"): "friends_error_invalid_input"
+        default: "friends_error_generic"
+        }
+    }
+
+    /// The bodies of the three actions (appendix A): the strict backend refuses a field it does not know. `offerTeam` and
+    /// `acceptOffer` carry the `requestId` minted at the tap (D30); `declineOffer` has none and is safe to repeat.
+    static func offerTeamBody(teamID: String, friendUID: String, requestID: String) -> [String: String] {
+        ["action": OfferAction.offerTeam.rawValue, "teamId": teamID, "friendUid": friendUID, "requestId": requestID]
+    }
+
+    static func acceptOfferBody(offerID: String, requestID: String) -> [String: String] {
+        ["action": OfferAction.acceptOffer.rawValue, "offerId": offerID, "requestId": requestID]
+    }
+
+    static func declineOfferBody(offerID: String) -> [String: String] {
+        ["action": OfferAction.declineOffer.rawValue, "offerId": offerID]
     }
 
     // MARK: helpers

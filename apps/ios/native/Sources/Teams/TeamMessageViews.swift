@@ -13,7 +13,8 @@ struct TeamConversationContext {
     let members: [TeamMember]
     let bots: [TeamBotCard]
     let strings: TeamsListStrings
-    /// Set in a friend chat (docs/FRIENDS-CLIENTS.md D9): the friend stands in for the conversation's name.
+    /// Set in a friend chat (docs/FRIENDS-CLIENTS.md D9): the friend stands in for the conversation's name. Only for the friend
+    /// chat itself: a Bot DM on the same pair workspace is an ordinary Bot DM (D22), headed by the Bot.
     let pair: PairTeam?
 
     /// The viewer may send here (a Bot's owner reading someone else's Bot DM only observes).
@@ -80,10 +81,11 @@ struct TeamConversationContext {
         let strings = TeamsListStrings.current
         let members = workspace.directory
         let bots = model.bots
+        let pair = conversationID == FriendsLogic.chatConversationID ? workspace.pair : nil
         return TeamConversationContext(
             uid: uid, team: team, model: model, conversation: conversation,
-            label: workspace.pair?.team.name ?? TeamsListLogic.conversationLabel(conversation, members: members, uid: uid, bots: bots, strings: strings),
-            members: members, bots: bots, strings: strings, pair: workspace.pair)
+            label: pair?.team.name ?? TeamsListLogic.conversationLabel(conversation, members: members, uid: uid, bots: bots, strings: strings),
+            members: members, bots: bots, strings: strings, pair: pair)
     }
 }
 

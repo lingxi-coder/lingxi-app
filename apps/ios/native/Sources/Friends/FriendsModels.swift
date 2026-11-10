@@ -1,7 +1,8 @@
 import Foundation
 
 // The value types of Friends (docs/FRIENDS-CLIENTS.md appendix A): the cards of `users/{uid}/friends`, the
-// entries of `users/{uid}/blocks` and the results of `GET /v1/friends/profile` and `POST /v1/friends`.
+// entries of `users/{uid}/blocks`, the team offers of `users/{uid}/teamOffers` and the results of
+// `GET /v1/friends/profile` and `POST /v1/friends`.
 // Foundation only, so the pure rules (`FriendsLogic`) and their tests run in the macOS XCTest harness. A
 // Firestore `Timestamp` is recognised by the caller's `millis` closure, as in `TeamsPointerParser`.
 
@@ -81,6 +82,28 @@ struct FriendBlock: Equatable, Identifiable, Sendable {
 
     static func parse(uid: String, data: [String: Any], millis: (Any) -> Int64?) -> FriendBlock {
         FriendBlock(uid: uid, atMs: data["at"].flatMap(millis) ?? 0, displayName: JSText.trim(data["displayName"] as? String ?? ""), handle: nonEmpty(data["handle"]))
+    }
+}
+
+/// One document of `users/{uid}/teamOffers`: a friend's offer of an ordinary team to the viewer (D27). The names are
+/// snapshots from the moment the offer was made or last refreshed, shown as plain text.
+struct TeamOffer: Equatable, Identifiable, Sendable {
+    /// The team's id. It is also the document's id, which the answers (`acceptOffer`, `declineOffer`) send as `offerId`.
+    let teamId: String
+    let teamName: String
+    let fromUid: String
+    let fromName: String
+    /// When the offer lapses, epoch milliseconds: strictly after now means live. The role is always `member`.
+    let expiresAtMs: Int64
+
+    var id: String { teamId }
+
+    /// A document of the offers collection, or `nil` when it is not an offer this client can show (no string `teamId`,
+    /// `teamName`, `fromUid` or `fromName`, or an `expiresAt` that is not a timestamp): one bad document never fails the list.
+    static func parse(id: String, data: [String: Any], millis: (Any) -> Int64?) -> TeamOffer? {
+        guard !id.isEmpty, data["teamId"] is String, let teamName = data["teamName"] as? String, let fromUid = data["fromUid"] as? String,
+              let fromName = data["fromName"] as? String, let expiresAtMs = data["expiresAt"].flatMap(millis) else { return nil }
+        return TeamOffer(teamId: id, teamName: teamName, fromUid: fromUid, fromName: fromName, expiresAtMs: expiresAtMs)
     }
 }
 

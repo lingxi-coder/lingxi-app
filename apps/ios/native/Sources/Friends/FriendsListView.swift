@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// The root of the Friends tab (docs/FRIENDS-CLIENTS.md D3, D4): the name banner, the requests, and one row per friend
-/// with the preview, the time and the unread count of its chat. Everything comes from the cards the workspace
-/// listens to; the rules (order, filter, preview) are `FriendsLogic` and `TeamsListLogic`.
+/// The root of the Friends tab (docs/FRIENDS-CLIENTS.md D3, D4, D27): the name banner, the team invitations, the requests,
+/// and one row per friend with the preview, the time and the unread count of its chat. Everything comes from the cards and
+/// the offers the workspace listens to; the rules (order, filter, preview, expiry) are `FriendsLogic` and `TeamsListLogic`.
 struct FriendsListView: View {
     @Environment(FriendsWorkspace.self) private var friends
     @Environment(\.locale) private var locale
@@ -15,18 +15,23 @@ struct FriendsListView: View {
     let onAdd: () -> Void
     let onProfile: () -> Void
     let onBlocked: () -> Void
+    /// A team offer was joined (`friends_offer_joined`, and the Teams list refreshes): the tab does both.
+    let onJoined: (TeamOffer) -> Void
 
     @State private var query = ""
+    @State private var showAllOffers = false
     @State private var showAllReceived = false
     @State private var showAllSent = false
-    /// `friend/requests` was opened: scroll to the requests as soon as there are any.
+    /// `friend/requests` was opened: scroll to the team invitations or the requests as soon as there are any.
     @State private var scrollPending = false
     private static let topID = "friends.list.top"
+    private static let offersID = "friends.list.offers"
     private static let requestsID = "friends.list.requests"
 
     var body: some View {
         let sections = FriendsLogic.sections(friends.list, locale: locale)
         let shown = sections.friends.filter { FriendsLogic.matches($0, query: query) }
+        let offers = friends.sortedOffers
         let strings = TeamsListStrings.current
         return ScrollViewReader { proxy in
             List {
@@ -35,14 +40,16 @@ struct FriendsListView: View {
                     .id(Self.topID)
                     .accessibilityHidden(true)
                 if friends.profile?.displayName == FriendsLogic.placeholderName { namePrompt }
-                if friends.loading {
+                // The empty state also waits for the offers: they are a listener of their own, and an invitation is something to show.
+                if friends.loading || (friends.list.isEmpty && !friends.cardsFailed && !friends.offersAnswered) {
                     HStack { Spacer(); ProgressView(); Spacer() }
                         .listRowSeparator(.hidden)
                         .accessibilityLabel(Text("friends_loading"))
                         .accessibilityIdentifier("friends.loading")
-                } else if friends.list.isEmpty {
+                } else if friends.list.isEmpty && offers.isEmpty {
                     if friends.cardsFailed { failedState } else { emptyState }
                 } else {
+                    teamInvitations(offers)
                     requests(sections)
                     if !sections.friends.isEmpty && shown.isEmpty {
                         TeamsStateView(systemImage: "magnifyingglass", title: "friends_filter_empty")
@@ -62,7 +69,10 @@ struct FriendsListView: View {
                 scrollToRequestsIfReady(proxy)
             }
             .onChange(of: friends.cardsLoaded) { _, _ in scrollToRequestsIfReady(proxy) }
+            .onChange(of: friends.offersAnswered) { _, _ in scrollToRequestsIfReady(proxy) }
             .onChange(of: hasRequests) { _, _ in scrollToRequestsIfReady(proxy) }
+            // The offers are a function of the clock (D28): whenever this view is shown it is read again.
+            .onAppear { friends.refreshClock() }
         }
         .navigationTitle("friends_title")
         .navigationBarTitleDisplayMode(.large)
@@ -86,15 +96,18 @@ struct FriendsListView: View {
         .accessibilityIdentifier("friends.list")
     }
 
-    private var hasRequests: Bool { friends.list.contains { $0.state != .friends } }
+    /// The area `friend/requests` leads to: the team invitations, or else the requests.
+    private var hasRequests: Bool { !friends.offers.isEmpty || friends.list.contains { $0.state != .friends } }
 
-    /// Waits for the requests to arrive; gives up once the cards are in and there are none.
+    /// Waits for the invitations and requests to arrive and scrolls to the first of them (D16); gives up once the cards and the
+    /// offers are in and there are none.
     private func scrollToRequestsIfReady(_ proxy: ScrollViewProxy) {
         guard scrollPending else { return }
         if hasRequests {
             scrollPending = false
-            withAnimation { proxy.scrollTo(Self.requestsID, anchor: .top) }
-        } else if friends.cardsLoaded {
+            let target = friends.offers.isEmpty ? Self.requestsID : Self.offersID
+            withAnimation { proxy.scrollTo(target, anchor: .top) }
+        } else if friends.cardsLoaded && friends.offersAnswered {
             scrollPending = false
         }
     }
@@ -104,7 +117,7 @@ struct FriendsListView: View {
     @ViewBuilder
     private var banners: some View {
         VStack(spacing: 0) {
-            if friends.cardsFailed && !friends.list.isEmpty {
+            if friends.cardsFailed && (!friends.list.isEmpty || !friends.offers.isEmpty) {
                 TeamsBanner(kind: .error, title: "friends_load_error", actionTitle: "common_retry") { friends.reload() }
                     .accessibilityIdentifier("friends.banner.error")
             }
@@ -149,6 +162,32 @@ struct FriendsListView: View {
         .accessibilityIdentifier("friends.empty")
     }
 
+    // MARK: Team invitations (D27)
+
+    /// A section of its own above the requests, with the same twenty-row limit, only when there is at least one offer.
+    @ViewBuilder
+    private func teamInvitations(_ offers: [TeamOffer]) -> some View {
+        if !offers.isEmpty {
+            Text("friends_section_offers")
+                .font(.title3.weight(.semibold))
+                .listRowSeparator(.hidden)
+                .id(Self.offersID)
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("friends.offers")
+            ForEach(rows(offers, expanded: showAllOffers)) { offerRow($0) }
+            showAll(offers.count, expanded: showAllOffers, identifier: "friends.offers.showall") { showAllOffers = true }
+        }
+    }
+
+    private func offerRow(_ offer: TeamOffer) -> some View {
+        FriendOfferRow(
+            offer: offer, expiry: FriendsLogic.offerExpiry(expiresAtMs: offer.expiresAtMs, nowMs: friends.clockMs), locale: locale,
+            busy: friends.isBusy(offer: offer), failure: friends.offerFailures[offer.teamId],
+            onJoin: { Task { if await friends.acceptOffer(offer) { onJoined(offer) } } },
+            onDecline: { Task { await friends.declineOffer(offer) } })
+            .accessibilityIdentifier("friends.offer.\(offer.teamId)")
+    }
+
     // MARK: Requests (D4)
 
     @ViewBuilder
@@ -162,12 +201,12 @@ struct FriendsListView: View {
             if !sections.received.isEmpty {
                 subheading("friends_requests_received")
                 ForEach(rows(sections.received, expanded: showAllReceived)) { requestRow($0) }
-                showAll(sections.received.count, expanded: showAllReceived) { showAllReceived = true }
+                showAll(sections.received.count, expanded: showAllReceived, identifier: "friends.requests.showall") { showAllReceived = true }
             }
             if !sections.sent.isEmpty {
                 subheading("friends_requests_sent")
                 ForEach(rows(sections.sent, expanded: showAllSent)) { requestRow($0) }
-                showAll(sections.sent.count, expanded: showAllSent) { showAllSent = true }
+                showAll(sections.sent.count, expanded: showAllSent, identifier: "friends.requests.showall") { showAllSent = true }
             }
         }
     }
@@ -181,16 +220,16 @@ struct FriendsListView: View {
     }
 
     /// Twenty rows, then a final row that shows the rest (incoming requests are not capped by the backend).
-    private func rows(_ cards: [FriendCard], expanded: Bool) -> [FriendCard] {
-        expanded ? cards : Array(cards.prefix(FriendsLogic.sectionRows))
+    private func rows<Item>(_ items: [Item], expanded: Bool) -> [Item] {
+        expanded ? items : Array(items.prefix(FriendsLogic.sectionRows))
     }
 
     @ViewBuilder
-    private func showAll(_ count: Int, expanded: Bool, action: @escaping () -> Void) -> some View {
+    private func showAll(_ count: Int, expanded: Bool, identifier: String, action: @escaping () -> Void) -> some View {
         if !expanded && count > FriendsLogic.sectionRows {
             Button(action: action) { Text("friends_show_all \(count)") }
                 .buttonStyle(.borderless)
-                .accessibilityIdentifier("friends.requests.showall")
+                .accessibilityIdentifier(identifier)
         }
     }
 
@@ -251,6 +290,64 @@ private struct FriendRow: View {
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// One team invitation (D27): the team's face and name, who invited you, when it lapses, and Join and Decline, or Dismiss once it
+/// has lapsed. The names are the team's and the sender's at the time of the offer, shown as plain text. The row is disabled while
+/// one of its actions is in flight, and a failure shows under it (D30).
+private struct FriendOfferRow: View {
+    let offer: TeamOffer
+    let expiry: OfferExpiry
+    let locale: Locale
+    let busy: Bool
+    let failure: FriendsWorkspace.OfferFailure?
+    let onJoin: () -> Void
+    /// Decline on a live offer, Dismiss on an expired one: both are `declineOffer`.
+    let onDecline: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            TeamAvatar(teamID: offer.teamId, name: offer.teamName, size: 40)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(verbatim: offer.teamName).font(.body.weight(.semibold)).lineLimit(1)
+                Text(verbatim: String(localized: "friends_offer_invited_by \(offer.fromName)")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                expiryLine
+                HStack(spacing: 10) {
+                    switch expiry {
+                    case .live:
+                        Button("friends_offer_join", action: onJoin).buttonStyle(.borderedProminent)
+                            .accessibilityIdentifier("friends.offer.join")
+                        Button("friends_request_decline", action: onDecline).buttonStyle(.bordered)
+                            .accessibilityIdentifier("friends.offer.decline")
+                    case .expired:
+                        Button("friends_offer_dismiss", action: onDecline).buttonStyle(.bordered)
+                            .accessibilityIdentifier("friends.offer.dismiss")
+                    }
+                }
+                .controlSize(.small)
+                .padding(.top, 2)
+                if let failure {
+                    Text(LocalizedStringKey(failure.key)).font(.footnote).foregroundStyle(.red)
+                        .accessibilityIdentifier("friends.offer.error")
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .disabled(busy)
+        .accessibilityElement(children: .contain)
+    }
+
+    /// `friends_offer_expires(x)` with the system's relative time in the future, or `friends_offer_expired`.
+    @ViewBuilder
+    private var expiryLine: some View {
+        switch expiry {
+        case let .live(unit, value):
+            Text(verbatim: String(localized: "friends_offer_expires \(FriendsLogic.relativeExpiry(unit: unit, value: value, locale: locale))"))
+                .font(.caption).foregroundStyle(.secondary)
+        case .expired:
+            Text("friends_offer_expired").font(.caption).foregroundStyle(.secondary)
+        }
     }
 }
 

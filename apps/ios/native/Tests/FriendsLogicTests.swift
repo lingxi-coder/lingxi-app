@@ -2,9 +2,10 @@ import XCTest
 
 @testable import LingxiCode
 
-/// The Friends rules of docs/FRIENDS-CLIENTS.md (D5 order and filter, D6, D7, D11, D13, D14, D18) against the shared
-/// vectors every client loads (`packages/teams/fixtures/friends-vectors.json`). Android runs the same rows in
-/// `FriendsLogicTest`, Web and Desktop in `friends.test.ts`.
+/// The Friends rules of docs/FRIENDS-CLIENTS.md (D5 order and filter, D6, D7, D11, D13, D14, D18, and for F4 the `offers.*`
+/// sections: D26 picker and entry, D27 expiry and order, D28 badge, D30 errors) against the shared vectors every client loads
+/// (`packages/teams/fixtures/friends-vectors.json`). Android runs the same rows in `FriendsLogicTest`, Web and Desktop in
+/// `friends.test.ts`.
 final class FriendsLogicTests: XCTestCase {
     private func strings(_ value: Any?) -> [String] { value as? [String] ?? [] }
 
@@ -275,6 +276,7 @@ final class FriendsLogicTests: XCTestCase {
             let code = try XCTUnwrap(row["code"] as? String)
             XCTAssertEqual(FriendsLogic.errorKey(code), row["key"] as? String, "'\(code)'")
             XCTAssertEqual(FriendsLogic.isDefinitive(code), row["definitive"] as? Bool, "'\(code)'")
+            XCTAssertEqual(FriendsLogic.chatEnded(code), row["key"] as? String == "friends_chat_unavailable", "'\(code)' ends the chat only by that key")
         }
     }
 
@@ -300,5 +302,162 @@ final class FriendsLogicTests: XCTestCase {
         let request = FriendCard(
             uid: "u3", state: .incoming, displayName: "Bo", handle: nil, note: nil, sinceMs: 1, teamId: nil, generation: nil, lastSeq: 0, lastReadSeq: 0, lastMessage: nil)
         XCTAssertNil(FriendsLogic.pairTeam(for: request, me: nil), "only a friend has a pair team")
+    }
+
+    // MARK: F4, team invitations (vectors `offers.*`)
+
+    /// The one clock of every `offers` row: the rows never age.
+    private func offersNowMs() throws -> Int64 {
+        try ms(FriendsVectors.section("offers", "nowMs"))
+    }
+
+    private func ms(_ value: Any?) throws -> Int64 {
+        try XCTUnwrap((value as? NSNumber)?.int64Value, "epoch milliseconds, not \(String(describing: value))")
+    }
+
+    private func offer(_ team: String, _ expiresAtMs: Int64) -> TeamOffer {
+        TeamOffer(teamId: team, teamName: "Team \(team)", fromUid: "u9", fromName: "Zoe", expiresAtMs: expiresAtMs)
+    }
+
+    func testOffersReadTheClockOfTheVectors() throws {
+        XCTAssertEqual(try offersNowMs(), 1_762_000_000_000)
+        let limits = try XCTUnwrap(FriendsVectors.section("limits") as? [String: Any])
+        XCTAssertEqual(limits["offerTtlDays"] as? Int, 7)
+        XCTAssertEqual(limits["offerLimit"] as? Int, 20)
+        XCTAssertEqual(FriendsLogic.sectionRows, 20, "the Team invitations section is cut at the same 20 rows as the requests")
+    }
+
+    func testAnOfferExpiryIsRoundedUpToWholeHoursThenDays() throws {
+        let now = try offersNowMs()
+        let rows = try FriendsVectors.rows("offers", "expiry")
+        XCTAssertEqual(rows.count, 18)
+        for row in rows {
+            let note = row["note"] as? String ?? ""
+            let expect = try XCTUnwrap(row["expect"] as? [String: Any])
+            let wanted: OfferExpiry
+            if expect["state"] as? String == "expired" {
+                wanted = .expired
+            } else {
+                wanted = .live(unit: try XCTUnwrap(OfferExpiry.Unit(rawValue: try XCTUnwrap(expect["unit"] as? String))), value: try XCTUnwrap(expect["value"] as? Int))
+            }
+            XCTAssertEqual(FriendsLogic.offerExpiry(expiresAtMs: try ms(row["expiresAtMs"]), nowMs: now), wanted, note)
+        }
+    }
+
+    func testOffersAreLiveFirstThenNewestThenTeamID() throws {
+        let now = try offersNowMs()
+        let vector = try XCTUnwrap(FriendsVectors.section("offers", "sort") as? [String: Any])
+        let rows = try XCTUnwrap(vector["input"] as? [[String: Any]])
+        XCTAssertEqual(rows.count, 8)
+        let offers = try rows.map { offer(try XCTUnwrap($0["teamId"] as? String), try ms($0["expiresAtMs"])) }
+        XCTAssertEqual(FriendsLogic.sortedOffers(offers, nowMs: now).map(\.teamId), strings(vector["expect"]))
+        XCTAssertEqual(FriendsLogic.sortedOffers(offers.reversed(), nowMs: now).map(\.teamId), strings(vector["expect"]), "the input order decides nothing")
+        // A live offer always expires after an expired one, so the clock never reorders the rows: it only changes what they say.
+        XCTAssertEqual(FriendsLogic.sortedOffers(offers, nowMs: now + 400_000_000).map(\.teamId), strings(vector["expect"]))
+    }
+
+    func testAnOfferThatExpiresExactlyNowIsNotLive() {
+        let now: Int64 = 1_000
+        XCTAssertTrue(FriendsLogic.isLive(offer("a", now + 1), nowMs: now))
+        XCTAssertFalse(FriendsLogic.isLive(offer("a", now), nowMs: now), "the comparison is strict, as on the server")
+        XCTAssertEqual(FriendsLogic.earliestLiveExpiry([offer("a", now), offer("b", now + 9), offer("c", now + 5)], nowMs: now), now + 5, "the timer fires at the first live expiry")
+        XCTAssertNil(FriendsLogic.earliestLiveExpiry([offer("a", now), offer("b", now - 1)], nowMs: now), "nothing live: no timer")
+        XCTAssertNil(FriendsLogic.earliestLiveExpiry([], nowMs: now))
+    }
+
+    func testTheBadgeAlsoCountsLiveOffers() throws {
+        let now = try offersNowMs()
+        let rows = try FriendsVectors.rows("offers", "badge")
+        XCTAssertEqual(rows.count, 10)
+        for row in rows {
+            let note = row["note"] as? String ?? ""
+            var raw = try XCTUnwrap(row["cards"] as? [[String: Any]])
+            for index in raw.indices { raw[index]["uid"] = "u\(index)" }
+            var offers: [TeamOffer] = []
+            for (index, stamp) in try XCTUnwrap(row["offers"] as? [Any]).enumerated() { offers.append(offer("team_\(index)", try ms(stamp))) }
+            let count = FriendsLogic.badgeCount(try cards(raw), offers: offers, nowMs: now)
+            XCTAssertEqual(count, row["expectCount"] as? Int, note)
+            XCTAssertEqual(TabLogic.tabBadgeText(count), row["expectText"] as? String, note)
+        }
+    }
+
+    func testTheOpenChatStillCountsAsReadWithOffers() throws {
+        let cards = try self.cards([["uid": "a", "state": "friends", "lastSeq": 5, "lastReadSeq": 2], ["uid": "c", "state": "incoming"]])
+        let live = [offer("t1", 2_000), offer("t2", 1_500), offer("t3", 500)]
+        XCTAssertEqual(FriendsLogic.badgeCount(cards, offers: live, nowMs: 1_000), 3 + 1 + 2)
+        XCTAssertEqual(FriendsLogic.badgeCount(cards, offers: live, nowMs: 1_000, reading: "a"), 1 + 2, "3 unread of a are shown as read")
+        XCTAssertEqual(FriendsLogic.badgeCount(cards, offers: live, nowMs: 1_600), 3 + 1 + 1, "an offer stops counting when its time comes")
+        XCTAssertEqual(FriendsLogic.badgeCount(cards, offers: [], nowMs: 1_000), FriendsLogic.badgeCount(cards))
+    }
+
+    func testTheInvitePickerListsFriendsWhoAreNotInTheTeam() throws {
+        let section = try XCTUnwrap(FriendsVectors.section("offers", "picker") as? [String: Any])
+        let shared = try cards(try XCTUnwrap(section["cards"] as? [[String: Any]]))
+        let cases = try XCTUnwrap(section["cases"] as? [[String: Any]])
+        XCTAssertEqual(cases.count, 13)
+        for testCase in cases {
+            let input = try (testCase["cards"] as? [[String: Any]]).map { try cards($0) } ?? shared
+            let members = Set(strings(testCase["members"]))
+            let query = try XCTUnwrap(testCase["query"] as? String)
+            for locale in FriendsVectors.locales {
+                let listed = FriendsLogic.invitePicker(input, memberUIDs: members, query: query, locale: locale).map(\.uid)
+                XCTAssertEqual(listed, strings(testCase["expect"]), "'\(query)' in \(locale.identifier): \(testCase["note"] ?? "")")
+            }
+        }
+    }
+
+    func testOnlyAnOwnerOrAnAdminSeesInviteFriends() throws {
+        let rows = try FriendsVectors.rows("offers", "entry")
+        XCTAssertEqual(rows.count, 5)
+        for row in rows {
+            let role = try XCTUnwrap(row["role"] as? String)
+            XCTAssertEqual(FriendsLogic.canInviteFriends(role: role), row["expect"] as? Bool, "\(role) with \(row["memberCount"] ?? "?") members")
+        }
+        XCTAssertFalse(FriendsLogic.canInviteFriends(role: "guest"), "a role it does not know is no manager")
+    }
+
+    func testOfferErrorsAreChosenPerAction() throws {
+        let rows = try FriendsVectors.rows("offers", "errors")
+        XCTAssertEqual(rows.count, 33)
+        for row in rows {
+            let name = try XCTUnwrap(row["action"] as? String)
+            let action = try XCTUnwrap(OfferAction(rawValue: name), name)
+            let code = try XCTUnwrap(row["code"] as? String)
+            XCTAssertEqual(FriendsLogic.offerErrorKey(action, code), row["key"] as? String, "\(name) '\(code)'")
+            XCTAssertEqual(FriendsLogic.isDefinitive(code), row["definitive"] as? Bool, "\(name) '\(code)'")
+        }
+    }
+
+    func testOfferErrorsNeverEndTheChat() {
+        // `errorKey` reads these two as "the chat ended"; for an offer they mean something else (D30).
+        XCTAssertEqual(FriendsLogic.errorKey("MEMBERSHIP_REQUIRED"), "friends_chat_unavailable")
+        XCTAssertEqual(FriendsLogic.offerErrorKey(.offerTeam, "MEMBERSHIP_REQUIRED"), "friends_error_offer_team_gone")
+        XCTAssertEqual(FriendsLogic.offerErrorKey(.acceptOffer, "MEMBERSHIP_REQUIRED"), "friends_error_generic")
+        XCTAssertEqual(FriendsLogic.offerErrorKey(.acceptOffer, "STALE_MEMBERSHIP"), "friends_error_offer_unavailable")
+        XCTAssertEqual(FriendsLogic.offerErrorKey(.offerTeam, "STALE_MEMBERSHIP"), "friends_error_generic")
+        for action in [OfferAction.offerTeam, .acceptOffer, .declineOffer] {
+            XCTAssertEqual(FriendsLogic.offerErrorKey(action, "INVALID_JSON"), "friends_error_invalid_input", "the common row also reads a malformed body")
+            XCTAssertNotEqual(FriendsLogic.offerErrorKey(action, "CONVERSATION_REQUIRED"), "friends_chat_unavailable")
+        }
+        XCTAssertEqual(FriendsLogic.offerErrorKey(.acceptOffer, "RATE_LIMITED"), "friends_error_generic", "only offerTeam is rate limited")
+        XCTAssertEqual(FriendsLogic.offerErrorKey(.declineOffer, "RATE_LIMITED"), "friends_error_generic")
+    }
+
+    func testOfferActionsCarryOnlyTheirFields() {
+        XCTAssertEqual(
+            FriendsLogic.offerTeamBody(teamID: "t1", friendUID: "u2", requestID: "request-0001"),
+            ["action": "offerTeam", "teamId": "t1", "friendUid": "u2", "requestId": "request-0001"])
+        XCTAssertEqual(FriendsLogic.acceptOfferBody(offerID: "t1", requestID: "request-0001"), ["action": "acceptOffer", "offerId": "t1", "requestId": "request-0001"])
+        XCTAssertEqual(FriendsLogic.declineOfferBody(offerID: "t1"), ["action": "declineOffer", "offerId": "t1"], "no request id: it is safe to repeat")
+    }
+
+    func testAnExpiryReadsAsTheSystemsRelativeTimeInTheFuture() {
+        let en = Locale(identifier: "en")
+        XCTAssertEqual(FriendsLogic.relativeExpiry(unit: .day, value: 3, locale: en), "in 3 days")
+        XCTAssertEqual(FriendsLogic.relativeExpiry(unit: .day, value: 7, locale: en), "in 7 days")
+        XCTAssertEqual(FriendsLogic.relativeExpiry(unit: .hour, value: 5, locale: en), "in 5 hours")
+        XCTAssertEqual(FriendsLogic.relativeExpiry(unit: .hour, value: 1, locale: en), "in 1 hour", "numeric always: never a word")
+        XCTAssertEqual(FriendsLogic.relativeExpiry(unit: .hour, value: 24, locale: en), "in 24 hours")
+        XCTAssertFalse(FriendsLogic.relativeExpiry(unit: .day, value: 3, locale: Locale(identifier: "zh-Hans")).isEmpty)
     }
 }

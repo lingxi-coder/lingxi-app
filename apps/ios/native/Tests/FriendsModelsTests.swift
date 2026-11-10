@@ -2,8 +2,8 @@ import XCTest
 
 @testable import LingxiCode
 
-/// How a Firestore card, a block entry and the HTTP results become the app's types (docs/FRIENDS-CLIENTS.md D2, D12,
-/// D13, appendix A). The `Timestamp` of a real document is stood in for by a number of epoch milliseconds.
+/// How a Firestore card, a block entry, a team offer and the HTTP results become the app's types (docs/FRIENDS-CLIENTS.md
+/// D2, D12, D13, D27, appendix A). The `Timestamp` of a real document is stood in for by a number of epoch milliseconds.
 final class FriendsModelsTests: XCTestCase {
     private let millis: (Any) -> Int64? = { ($0 as? NSNumber)?.int64Value }
 
@@ -112,6 +112,38 @@ final class FriendsModelsTests: XCTestCase {
         XCTAssertEqual(bare.displayName, "", "the screen shows Member")
         XCTAssertNil(bare.handle)
         XCTAssertEqual(FriendBlock.parse(uid: "u7", data: ["displayName": "   "], millis: millis).displayName, "")
+    }
+
+    // MARK: team offers
+
+    private func offerData(_ extra: [String: Any] = [:]) -> [String: Any] {
+        var data: [String: Any] = ["teamId": "t1", "teamName": "Book club", "fromUid": "u2", "fromName": "Ann", "role": "member", "expiresAt": 1_762_604_800_000]
+        data.merge(extra) { _, new in new }
+        return data
+    }
+
+    func testAnOfferCarriesTheTeamTheSenderAndTheExpiry() throws {
+        let offer = try XCTUnwrap(TeamOffer.parse(id: "t1", data: offerData(), millis: millis))
+        XCTAssertEqual(offer, TeamOffer(teamId: "t1", teamName: "Book club", fromUid: "u2", fromName: "Ann", expiresAtMs: 1_762_604_800_000), "whole epoch milliseconds, beyond 32 bits")
+        XCTAssertEqual(offer.id, "t1", "the team id is the row's identity and the offerId of its answers")
+        let named = try XCTUnwrap(TeamOffer.parse(id: "t1", data: offerData(["teamName": "", "fromName": ""]), millis: millis))
+        XCTAssertEqual(named.teamName, "", "a name is any string: the document is still an offer")
+    }
+
+    func testADocumentThatIsNotAnOfferIsSkippedAndNeverFailsTheList() {
+        for key in ["teamId", "teamName", "fromUid", "fromName", "expiresAt"] {
+            var broken = offerData()
+            broken.removeValue(forKey: key)
+            XCTAssertNil(TeamOffer.parse(id: "t1", data: broken, millis: millis), "no \(key)")
+        }
+        for key in ["teamId", "teamName", "fromUid", "fromName"] {
+            XCTAssertNil(TeamOffer.parse(id: "t1", data: offerData([key: 5]), millis: millis), "\(key) must be a string")
+        }
+        XCTAssertNil(TeamOffer.parse(id: "t1", data: offerData(["expiresAt": "soon"]), millis: millis), "an expiry that is not a timestamp")
+        XCTAssertNil(TeamOffer.parse(id: "t1", data: offerData(["expiresAt": NSNull()]), millis: millis))
+        XCTAssertNil(TeamOffer.parse(id: "", data: offerData(), millis: millis), "a document without an id")
+        let list = [("t1", offerData()), ("t2", offerData(["teamName": 1])), ("t3", offerData(["teamId": "t3"]))].compactMap { TeamOffer.parse(id: $0.0, data: $0.1, millis: millis) }
+        XCTAssertEqual(list.map(\.teamId), ["t1", "t3"], "one bad document is dropped and the rest survive")
     }
 
     // MARK: HTTP results

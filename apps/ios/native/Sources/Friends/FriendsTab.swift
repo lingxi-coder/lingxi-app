@@ -3,12 +3,28 @@ import SwiftUI
 /// Where a push in the Friends tab goes.
 enum FriendsRoute: Hashable {
     case chat(String)
+    /// The Bots of a friendship (D21), over its chat.
+    case bots(String)
+    /// A Bot DM on the friendship's workspace (D22), over its chat.
+    case botChat(uid: String, conversationID: String)
     case add
     case profile
     case blocked
 
+    /// The friend whose chat workspace the screen needs: it stays open for as long as any screen of the friendship is.
     var chatUID: String? {
-        if case let .chat(uid) = self { uid } else { nil }
+        switch self {
+        case let .chat(uid), let .bots(uid), let .botChat(uid, _): uid
+        case .add, .profile, .blocked: nil
+        }
+    }
+
+    /// The phone's stack for this screen: the Bots and a Bot DM sit over the friend's chat, which Back returns to.
+    var stack: [FriendsRoute] {
+        switch self {
+        case let .bots(uid), let .botChat(uid, _): [.chat(uid), self]
+        case .chat, .add, .profile, .blocked: [self]
+        }
     }
 }
 
@@ -24,19 +40,21 @@ private enum FriendsSheet: Identifiable {
     }
 }
 
-/// The Friends tab (docs/FRIENDS-CLIENTS.md D1, D3): the requests and friends, Add friend, Profile settings, Blocked
-/// people, and a friend's chat. It reads the shell state from the environment: `TabCoordinator` (the `friend/*` link
-/// hand-off, depth, re-tap requests), `AppNavigationModel` (the sign-in jump to Settings/Account, which remembers this
-/// tab as the way back) and the app-level `FriendsWorkspace` (data; started by the app root, never by this tab).
+/// The Friends tab (docs/FRIENDS-CLIENTS.md D1, D3): the team invitations, requests and friends, Add friend, Profile
+/// settings, Blocked people, and a friend's chat with its Bots. It reads the shell state from the environment:
+/// `TabCoordinator` (the `friend/*` link hand-off, depth, re-tap requests), `AppNavigationModel` (the sign-in jump to
+/// Settings/Account, which remembers this tab as the way back), the app-level `FriendsWorkspace` (data; started by the
+/// app root, never by this tab) and the app-level `TeamsWorkspace` (refreshed after a team offer is joined).
 ///
-/// - Phones: one `NavigationStack`: the list, and one pushed screen above it. The tab bar leaves with a push
-///   (`hidesTabBarWhenPushed`).
-/// - Wide layouts (`isWideLayout`): the list and one screen (a chat, Add friend, Profile settings or Blocked people)
-///   side by side inside the tab; the tab bar stays.
+/// - Phones: one `NavigationStack`: the list, and the pushed screens above it (a friend's chat, with its Bots or a Bot DM
+///   over it). The tab bar leaves with a push (`hidesTabBarWhenPushed`).
+/// - Wide layouts (`isWideLayout`): the list and one screen (a chat, its Bots or a Bot DM, Add friend, Profile settings or
+///   Blocked people) side by side inside the tab; the tab bar stays.
 struct FriendsTab: View {
     @Environment(AppNavigationModel.self) private var navigation
     @Environment(TabCoordinator.self) private var tabs
     @Environment(FriendsWorkspace.self) private var friends
+    @Environment(TeamsWorkspace.self) private var teams
     @Environment(\.isWideLayout) private var wide
     @Environment(\.scenePhase) private var scenePhase
 
@@ -119,14 +137,19 @@ struct FriendsTab: View {
     private func list(selected: String) -> some View {
         FriendsListView(
             selectedChat: selected, scrollToTop: scrollToTop, scrollToRequests: scrollToRequests,
-            onOpen: { open(.chat($0)) }, onAdd: { open(.add) }, onProfile: { open(.profile) }, onBlocked: { open(.blocked) })
+            onOpen: { open(.chat($0)) }, onAdd: { open(.add) }, onProfile: { open(.profile) }, onBlocked: { open(.blocked) },
+            onJoined: joined)
     }
 
     @ViewBuilder
     private func destination(_ route: FriendsRoute) -> some View {
         switch route {
         case let .chat(uid):
-            FriendChatView(uid: uid, onClose: close)
+            FriendChatView(uid: uid, onClose: close, onBots: { push(.bots(uid)) })
+        case let .bots(uid):
+            FriendBotsView(uid: uid, onOpenBot: { openBotChat(uid, $0) }, onBack: { open(.chat(uid)) }, onClose: close)
+        case let .botChat(uid, conversationID):
+            FriendBotChatView(uid: uid, conversationID: conversationID, onBack: { open(.chat(uid)) }, onClose: close)
         case .add:
             AddFriendView(onOpenChat: { open(.chat($0)) })
         case .profile:
@@ -164,6 +187,29 @@ struct FriendsTab: View {
         if wide { pane = route } else { path = [route] }
     }
 
+    /// A screen over the friend's chat (its Bots): pushed on phones, the pane's content on wide layouts.
+    private func push(_ route: FriendsRoute) {
+        if wide { pane = route } else { path.append(route) }
+    }
+
+    /// Message on a Bot opens its DM in place of the Bots, so that Back returns to the friend chat (D22).
+    private func openBotChat(_ uid: String, _ conversationID: String) {
+        let route = FriendsRoute.botChat(uid: uid, conversationID: conversationID)
+        if wide {
+            pane = route
+        } else {
+            if case .bots = path.last { path.removeLast() }
+            path.append(route)
+        }
+    }
+
+    /// A team offer was joined (D27): say so once, stay in Friends, and refresh the Teams list as a link join does, so the team appears
+    /// there.
+    private func joined(_ offer: TeamOffer) {
+        friends.show(notice: String(localized: "friends_offer_joined \(offer.teamName)"))
+        teams.scheduleRefresh()
+    }
+
     private func close() {
         if wide { pane = nil } else { path = [] }
     }
@@ -184,7 +230,7 @@ struct FriendsTab: View {
             pane = path.last
             path = []
         } else if !isWide, let current = pane {
-            path = [current]
+            path = current.stack
             pane = nil
         }
         reportDepth()

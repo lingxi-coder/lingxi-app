@@ -45,6 +45,10 @@ struct TeamDetailsPage: View {
     @State private var copied = false
     /// The member whose "Add friend" sheet is open (docs/FRIENDS-CLIENTS.md D15).
     @State private var befriending: TeamMember?
+    /// The Invite friends sheet is open (D26).
+    @State private var inviting = false
+    /// The friends the closed sheet invited, said once under the button (`friends_invite_sent_to`, D26).
+    @State private var invitedNames: [String] = []
 
     var body: some View {
         Group {
@@ -61,6 +65,17 @@ struct TeamDetailsPage: View {
                 tabs.friendsRequest = .chat(uid: uid)
                 tabs.select(.friends)
             }
+        }
+        .sheet(isPresented: $inviting) {
+            if let team = workspace.team {
+                InviteFriendsSheet(teamID: team.id, teamName: team.name) { invitedNames = $0 }
+            }
+        }
+        // The one-shot goes by itself.
+        .task(id: invitedNames) {
+            guard !invitedNames.isEmpty else { return }
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            invitedNames = []
         }
         .toolbar {
             if showsClose {
@@ -238,6 +253,16 @@ struct TeamDetailsPage: View {
     @ViewBuilder
     private func inviteSections(_ team: TeamSummary, _ detail: TeamDetail) -> some View {
         Section {
+            // An owner or an admin invites a friend without a link, whatever the member count (D26); the server answers `MEMBER_LIMIT`.
+            if FriendsLogic.canInviteFriends(role: team.role), friends.uid != nil {
+                Button { inviting = true } label: { Label("friends_invite_action", systemImage: "person.badge.plus") }
+                    .accessibilityIdentifier("teams.invite.friends")
+                ForEach(Array(invitedNames.enumerated()), id: \.offset) { _, name in
+                    Label { Text(verbatim: String(localized: "friends_invite_sent_to \(name)")).font(.footnote) } icon: { Image(systemName: "paperplane") }
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("teams.invite.friends.sent")
+                }
+            }
             if team.role == "owner" {
                 Picker("teams_invite_role", selection: $inviteRole) {
                     Text("teams_member").tag("member")

@@ -8,12 +8,13 @@ import Observation
 /// tab badge works without opening the tab. Created by the app root and injected with `.environment(_:)`. The
 /// no-argument initialiser has no side effects; `start()` is idempotent.
 ///
-/// - Live data is two owner-only Firestore listeners and nothing per friend: `users/{uid}/friends` (requests and
-///   friends, the chat summary included) and `users/{uid}/blocks`. The list, the order, the previews, the unread
-///   counts and the tab badge all come from the cards.
+/// - Live data is three owner-only Firestore listeners and nothing per friend: `users/{uid}/friends` (requests and
+///   friends, the chat summary included), `users/{uid}/blocks` and `users/{uid}/teamOffers` (D2, D27). The list, the
+///   order, the previews, the unread counts and the tab badge all come from the cards and the offers.
 /// - Everything else is HTTP with the Firebase ID token: `GET /v1/friends/profile` and `POST /v1/friends`.
-/// - A friend's chat is the Teams message layer over a `TeamsWorkspace` pinned to the pair team of the card (D9).
-///   At most one is open at a time, and it is stopped as soon as the chat closes.
+/// - A friend's chat is the Teams message layer over a `TeamsWorkspace` pinned to the pair team of the card (D9). Its
+///   Bots (D21 to D23) and a Bot DM run on the same workspace. At most one is open at a time, and it is stopped as
+///   soon as the chat closes.
 /// - On sign-out or an account change everything is cleared and every listener stops (D19); `authority` increases so
 ///   that sheets drop what they were about to confirm. Nothing is written to disk.
 @MainActor @Observable
@@ -24,6 +25,20 @@ final class FriendsWorkspace {
         let teamID: String
         let generation: Int
         let workspace: TeamsWorkspace
+
+        /// The friendship is over (D9, D25): the Teams layer lost the pair team's membership, or a command (a send, listing
+        /// the Bots, a new Bot DM, stopping a Bot) was refused for it. The chat, the Bots and a Bot DM all share it.
+        @MainActor var ended: Bool {
+            workspace.messaging?.revoked == true || FriendsLogic.chatEnded(workspace.actionError)
+        }
+    }
+
+    /// What failed on one row of Team invitations: the action decides the words (D30).
+    struct OfferFailure: Equatable {
+        let action: OfferAction
+        let code: String
+
+        var key: String { FriendsLogic.offerErrorKey(action, code) }
     }
 
     /// The three things a person can do with a request.
@@ -48,6 +63,20 @@ final class FriendsWorkspace {
     private(set) var blocks: [FriendBlock] = []
     private(set) var blocksLoaded = false
     private(set) var blocksFailed = false
+    /// The team offers as the listener delivered them, in no order (`sortedOffers` has the order of D27). Empty after a failure.
+    private(set) var offers: [TeamOffer] = []
+    /// The first snapshot of the offers listener has arrived.
+    private(set) var offersLoaded = false
+    /// The offers listener failed: it shows nothing and counts nothing until the retry of the cards listener starts it again.
+    private(set) var offersFailed = false
+    /// The device clock as the offers last read it, epoch milliseconds. The badge and the offer rows are a function of it
+    /// (a live offer lapses by itself), so it moves when the offers change, when the Friends view is shown, when the app
+    /// comes back, and at the earliest live expiry (D28).
+    private(set) var clockMs = FriendsWorkspace.nowMs()
+    /// Team ids with Join, Decline or Dismiss in flight (the row is disabled).
+    private(set) var offerBusy: Set<String> = []
+    /// Why the last action of an offer row failed, by team id; it goes away with the row, with the next try or with the account.
+    private(set) var offerFailures: [String: OfferFailure] = [:]
     /// The caller's profile and friend link; in memory only, fetched on the first open and on every open of Add friend or
     /// Profile settings.
     private(set) var profile: FriendProfile?
@@ -92,6 +121,12 @@ final class FriendsWorkspace {
     @ObservationIgnored private var authListener: AuthStateDidChangeListenerHandle?
     @ObservationIgnored private var cardsListener: ListenerRegistration?
     @ObservationIgnored private var blocksListener: ListenerRegistration?
+    @ObservationIgnored private var offersListener: ListenerRegistration?
+    /// The one timer of D28: it fires when the earliest live offer lapses.
+    @ObservationIgnored private var expiryTask: Task<Void, Never>?
+    /// The `requestId` of each `acceptOffer` whose outcome is unknown, by team id (D30): reused by the retry, dropped by any verdict,
+    /// never written anywhere.
+    @ObservationIgnored private var offerAttempts: [String: String] = [:]
     /// The unsent text of each friendship's chat by pair team id, kept while the chat is closed (in memory, as the Teams drafts
     /// are). A re-friend gets a new pair team and so a fresh composer.
     @ObservationIgnored private var chatDrafts: [String: TeamComposerDraft] = [:]
@@ -109,6 +144,8 @@ final class FriendsWorkspace {
 
     /// `true` until the first answer for a signed-in account.
     var loading: Bool { uid != nil && !cardsLoaded && !cardsFailed }
+    /// The offers listener has answered, with offers, with none or with a failure.
+    var offersAnswered: Bool { offersLoaded || offersFailed }
     /// The cards with the names D10 learned.
     var list: [FriendCard] {
         cards.map { card in overrides[card.uid].map { card.renamed($0.name, handle: $0.handle) } ?? card }
@@ -120,8 +157,12 @@ final class FriendsWorkspace {
     }
     /// Blocked people, newest first.
     var blockedPeople: [FriendBlock] { FriendsLogic.sortedBlocks(blocks) }
-    /// The Friends tab badge (D14): incoming requests plus the unread of every friend; the chat on screen counts as read.
-    var badge: Int { uid == nil ? 0 : FriendsLogic.badgeCount(cards, reading: readingUID) }
+    /// The Friends tab badge (D14, D28): incoming requests, the unread of every friend and every live team offer; the chat on screen
+    /// counts as read.
+    var badge: Int { uid == nil ? 0 : FriendsLogic.badgeCount(cards, offers: offers, nowMs: clockMs, reading: readingUID) }
+    /// The team offers in the order of D27: live before expired, the newest first, then the team id.
+    var sortedOffers: [TeamOffer] { FriendsLogic.sortedOffers(offers, nowMs: clockMs) }
+    func isBusy(offer: TeamOffer) -> Bool { offerBusy.contains(offer.teamId) }
     /// The unread count a row shows (D13): the card's, except for the chat on screen.
     func unread(of card: FriendCard) -> Int { card.uid == readingUID ? 0 : card.unread }
     func isBusy(_ uid: String) -> Bool { busy.contains(uid) }
@@ -152,15 +193,18 @@ final class FriendsWorkspace {
         uid = nil
     }
 
-    /// D19: the listeners and the open chat stop, and cards, profile, name overrides and notices are forgotten.
+    /// D19: the listeners, the timer and the open chat stop, and cards, offers, profile, name overrides and notices are forgotten.
     private func reset() {
         authority += 1
         cardsListener?.remove(); cardsListener = nil
         blocksListener?.remove(); blocksListener = nil
+        offersListener?.remove(); offersListener = nil
+        expiryTask?.cancel(); expiryTask = nil
         chat?.workspace.stop()
         chat = nil; chatUID = nil; readingUID = nil; chatDrafts = [:]; expecting = []
         cards = []; cardsLoaded = false; cardsFailed = false
         blocks = []; blocksLoaded = false; blocksFailed = false
+        offers = []; offersLoaded = false; offersFailed = false; offerBusy = []; offerFailures = [:]; offerAttempts = [:]
         profile = nil; profileLoading = false; profileError = ""
         overrides = [:]; busy = []; actionError = ""; notice = nil
     }
@@ -175,7 +219,7 @@ final class FriendsWorkspace {
         listen()
     }
 
-    /// Opens the cards and blocks listeners that are not running. The Retry button calls it after a failure.
+    /// Opens the cards, blocks and offers listeners that are not running. The Retry button calls it after a failure.
     private func listen() {
         guard started, let uid else { return }
         let life = lifecycle
@@ -195,14 +239,23 @@ final class FriendsWorkspace {
                     Task { @MainActor in self?.blocksChanged(life: life, blocks: parsed, failed: failed) }
                 }
         }
+        if offersListener == nil {
+            offersListener = db.collection("users").document(uid).collection("teamOffers")
+                .addSnapshotListener(includeMetadataChanges: true) { [weak self] snapshot, error in
+                    let parsed = snapshot.map { Self.offers(in: $0) }
+                    let failed = error != nil
+                    Task { @MainActor in self?.offersChanged(life: life, offers: parsed, failed: failed) }
+                }
+        }
     }
 
-    /// The Retry of `friends_load_error`: both listeners start again.
+    /// The Retry of `friends_load_error`: all three listeners start again (D27).
     func reload() {
         guard started, uid != nil else { return }
         cardsListener?.remove(); cardsListener = nil
         blocksListener?.remove(); blocksListener = nil
-        cardsFailed = false; blocksFailed = false
+        offersListener?.remove(); offersListener = nil
+        cardsFailed = false; blocksFailed = false; offersFailed = false
         listen()
     }
 
@@ -212,6 +265,11 @@ final class FriendsWorkspace {
 
     private nonisolated static func blocks(in snapshot: QuerySnapshot) -> [FriendBlock] {
         snapshot.documents.map { FriendBlock.parse(uid: $0.documentID, data: $0.data(), millis: TeamMessagingModel.milliseconds) }
+    }
+
+    /// The documents that are offers; one that is not never fails the list (D27).
+    private nonisolated static func offers(in snapshot: QuerySnapshot) -> [TeamOffer] {
+        snapshot.documents.compactMap { TeamOffer.parse(id: $0.documentID, data: $0.data(), millis: TeamMessagingModel.milliseconds) }
     }
 
     private func cardsChanged(life: Int, cards new: [FriendCard]?, failed: Bool) {
@@ -234,6 +292,46 @@ final class FriendsWorkspace {
         blocksFailed = false
         blocks = new
         blocksLoaded = true
+    }
+
+    /// A failed offers listener ends that watch, shows nothing and counts nothing (D27); a good snapshot replaces the offers and
+    /// takes the messages of the rows that went with it.
+    private func offersChanged(life: Int, offers new: [TeamOffer]?, failed: Bool) {
+        guard started, life == lifecycle else { return }
+        if failed {
+            offersFailed = true
+            offers = []; offerFailures = [:]
+            refreshClock()
+            return
+        }
+        guard let new else { return }
+        offersFailed = false; offersLoaded = true
+        offers = new
+        let present = Set(new.map(\.teamId))
+        offerFailures = offerFailures.filter { present.contains($0.key) }
+        offerAttempts = offerAttempts.filter { present.contains($0.key) }
+        refreshClock()
+    }
+
+    // MARK: The clock of the offers (D28)
+
+    /// Reads the device clock again and sets the one timer for the earliest live expiry. Called when the offers change, whenever
+    /// the Friends view is shown, when the app comes back and by the timer itself.
+    func refreshClock() {
+        clockMs = Self.nowMs()
+        expiryTask?.cancel(); expiryTask = nil
+        guard started, uid != nil, let next = FriendsLogic.earliestLiveExpiry(offers, nowMs: clockMs) else { return }
+        let life = lifecycle
+        let wait = next - clockMs
+        expiryTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(wait)) } catch { return }
+            guard let self, self.started, self.lifecycle == life else { return }
+            self.refreshClock()
+        }
+    }
+
+    private nonisolated static func nowMs() -> Int64 {
+        Int64((Date().timeIntervalSince1970 * 1000).rounded(.down))
     }
 
     // MARK: Profile (D2, D11)
@@ -318,6 +416,59 @@ final class FriendsWorkspace {
     func show(notice text: String) { notice = text }
     func clearNotice() { notice = nil }
 
+    // MARK: Team offers (D26 to D30)
+
+    /// `offerTeam`: invites a friend to a team without a link (D26). `nil` when it worked, else the failure code, which
+    /// `FriendsLogic.offerErrorKey(.offerTeam, _)` turns into the words under the row. The `requestID` is the Invite friends sheet's
+    /// (`FriendInvites` mints it at the tap and keeps it only for a retry after an unknown outcome).
+    func offerTeam(_ teamID: String, to friendUID: String, requestID: String) async -> String? {
+        guard started, uid != nil else { return Self.code(TeamMessageFailure(code: "INVALID_SESSION")) }
+        do {
+            let _: FriendCommandResult = try await call(body: FriendsLogic.offerTeamBody(teamID: teamID, friendUID: friendUID, requestID: requestID))
+            return nil
+        } catch {
+            return Self.code(error)
+        }
+    }
+
+    /// `acceptOffer`: joins the offered team (D27). `true` when it worked (`alreadyMember`, a replay, is a success). The row is
+    /// disabled meanwhile and a failure shows under it; the listener removes the row. The request id is minted here at the tap and
+    /// kept only to retry after an unknown outcome (D30).
+    func acceptOffer(_ offer: TeamOffer) async -> Bool {
+        guard started, uid != nil, !offerBusy.contains(offer.teamId) else { return false }
+        let life = lifecycle, key = offer.teamId
+        let requestID = offerAttempts[key] ?? FriendsLogic.newRequestID()
+        offerAttempts[key] = requestID
+        offerBusy.insert(key); offerFailures[key] = nil
+        defer { if life == lifecycle { offerBusy.remove(key) } }
+        do {
+            let _: FriendCommandResult = try await call(body: FriendsLogic.acceptOfferBody(offerID: key, requestID: requestID))
+            guard life == lifecycle else { return false }
+            offerAttempts[key] = nil
+            return true
+        } catch {
+            guard life == lifecycle else { return false }
+            let code = Self.code(error)
+            offerFailures[key] = OfferFailure(action: .acceptOffer, code: code)
+            if FriendsLogic.isDefinitive(code) { offerAttempts[key] = nil }
+            return false
+        }
+    }
+
+    /// `declineOffer`: Decline on a live offer and Dismiss on an expired one (D27); no confirmation, and safe to repeat. The
+    /// listener removes the row; a failure shows under it.
+    func declineOffer(_ offer: TeamOffer) async {
+        guard started, uid != nil, !offerBusy.contains(offer.teamId) else { return }
+        let life = lifecycle, key = offer.teamId
+        offerBusy.insert(key); offerFailures[key] = nil
+        defer { if life == lifecycle { offerBusy.remove(key) } }
+        do {
+            let _: FriendCommandResult = try await call(body: FriendsLogic.declineOfferBody(offerID: key))
+        } catch {
+            if life == lifecycle { offerFailures[key] = OfferFailure(action: .declineOffer, code: Self.code(error)) }
+        }
+    }
+
     // MARK: Lookup and confirmation (D6 to D8, D15)
 
     func lookup(_ proof: FriendProof) async throws -> FriendLookupResult {
@@ -360,8 +511,10 @@ final class FriendsWorkspace {
         }
     }
 
-    /// The app came back to the foreground: the open chat retries what is pending (its outbox, a lost listener).
+    /// The app came back to the foreground: the open chat retries what is pending (its outbox, a lost listener), and the offers
+    /// read the clock again.
     func foregrounded() {
+        refreshClock()
         chat?.workspace.foregrounded()
     }
 

@@ -5,6 +5,11 @@ struct TeamBotCardView: View {
     let ownerName: String
     let isOwner: Bool
     let busy: Bool
+    /// The audience line (`teams_bot_use_all`, `teams_bot_use_listed`). A friendship has no audience to choose, so the Bots of a
+    /// friend chat leave it out (docs/FRIENDS-CLIENTS.md D21).
+    var showsAudience = true
+    /// The owner's way to stop it: a Team pauses a Bot (`teams_bot_pause`), a friendship stops sharing it (`friends_share_bot_stop`, D23).
+    var pauseTitle: LocalizedStringKey = "teams_bot_pause"
     let onMessage: () -> Void
     let onPause: () -> Void
 
@@ -21,7 +26,9 @@ struct TeamBotCardView: View {
             if (bot.state == "published") {
                 Label(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued"), systemImage: bot.ready ? "circle.fill" : "moon.zzz")
                     .font(.caption).foregroundStyle(bot.ready ? Color.green : Color.secondary)
-                Text(LocalizedStringKey(bot.usePolicy.mode == "all" ? "teams_bot_use_all" : "teams_bot_use_listed")).font(.caption).foregroundStyle(.secondary)
+                if showsAudience {
+                    Text(LocalizedStringKey(bot.usePolicy.mode == "all" ? "teams_bot_use_all" : "teams_bot_use_listed")).font(.caption).foregroundStyle(.secondary)
+                }
                 if !bot.permitted { Text("teams_bot_not_permitted").font(.caption).foregroundStyle(.orange) }
             } else {
                 Text("teams_bot_disabled").font(.caption.weight(.semibold)).foregroundStyle(.orange)
@@ -32,7 +39,7 @@ struct TeamBotCardView: View {
                     Button("teams_bot_message", action: onMessage).buttonStyle(.borderedProminent)
                 }
                 if isOwner && (bot.state == "published") {
-                    Button("teams_bot_pause", role: .destructive, action: onPause).buttonStyle(.bordered)
+                    Button(pauseTitle, role: .destructive, action: onPause).buttonStyle(.bordered)
                 }
             }
             .controlSize(.small)

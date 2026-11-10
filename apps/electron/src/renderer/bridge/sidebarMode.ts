@@ -3,27 +3,29 @@
 import type { SidebarMode } from '../../shared/settings';
 
 /** The pages of the main area. */
-export type AppPage = 'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams';
+export type AppPage = 'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams' | 'friends';
 
 /**
- * Home shows the chat view; Apps and Teams have their own library pages.
+ * Home shows the chat view; Apps, Teams and Friends have their own library pages.
  * Apps and Bots retain a visible chat belonging to their workspace.
  */
 export function pageForMode(mode: SidebarMode, current: { page: AppPage; botChat: boolean; appChat?: boolean }): AppPage {
   if (mode === 'home') return 'chat';
   if (mode === 'teams') return 'teams';
+  if (mode === 'friends') return 'friends';
   if (mode === 'apps') return current.page === 'chat' && current.appChat ? 'chat' : 'apps';
   return current.page === 'chat' && current.botChat ? 'chat' : 'bots';
 }
 
 /**
  * The mode that goes with the page now on screen, for the few pages that name
- * one: the Apps, Teams and Bots pages select their corresponding workspaces. Every
+ * one: the Apps, Teams, Friends and Bots pages select their corresponding workspaces. Every
  * other page keeps the mode as it is. Bots that cannot run here are not a mode.
  */
 export function reconcileSidebarMode(mode: SidebarMode, page: AppPage, botsAvailable: boolean): SidebarMode {
   if (page === 'apps') return 'apps';
   if (page === 'teams') return 'teams';
+  if (page === 'friends') return 'friends';
   if (page === 'bots') return botsAvailable ? 'bots' : 'home';
   return mode === 'bots' && !botsAvailable ? 'home' : mode;
 }
@@ -85,12 +87,12 @@ export class SidebarModeSync {
 
 /**
  * Follow the settled chat's owner between ordinary projects, Apps and Bots.
- * Teams stays where the owner put it.
+ * Teams and Friends stay where the owner put them.
  */
 export function modeForSettledChat(mode: SidebarMode, page: AppPage, botChat: boolean, appChat = false): SidebarMode {
   if (page !== 'chat') return mode;
   if (appChat) return 'apps';
-  if (mode === 'teams') return mode;
+  if (mode === 'teams' || mode === 'friends') return mode;
   if (botChat) return 'bots';
   if (mode === 'bots' || mode === 'apps') return 'home';
   return mode;

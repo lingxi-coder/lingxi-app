@@ -1,4 +1,5 @@
 import type { DocumentData, Firestore, FirestoreError } from 'firebase/firestore';
+import type { BlockEntry, FriendCard } from './friends.js';
 import type { MessageScope, MessageSnapshot, TeamConversation, TeamMessage } from './messages.js';
 
 function timestamp(value: unknown): string | null {
@@ -30,6 +31,34 @@ export function firestoreLastMessage(value: unknown): TeamConversation['lastMess
   const time = at === null ? null : timestamp(at);
   if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || (at !== null && time === null) || typeof preview !== 'string' || (recalled !== undefined && recalled !== true)) throw invalidData();
   return { id: text(id), seq, at: time, author: pointerAuthor(author), preview, ...(recalled ? { recalled: true } : {}) };
+}
+
+const count = (value: unknown): number | undefined => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+const nonEmpty = (value: unknown): string | undefined => typeof value === 'string' && value ? value : undefined;
+const defined = <T extends object>(fields: T): T => Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as T;
+const millis = (value: unknown): number => { const iso = timestamp(value); return iso ? Date.parse(iso) : 0; };
+
+/**
+ * `users/{uid}/friends/{other}` -> card with plain values, or `undefined` for a document that breaks the contract: one bad card
+ * never fails the list. A `lastMessage` that is not the whole pointer counts as absent; a counter that is not a count, as missing.
+ */
+export function firestoreFriendCard(uid: string, value: DocumentData): FriendCard | undefined {
+  if (!['friends', 'incoming', 'outgoing'].includes(value.state) || typeof value.displayName !== 'string') return undefined;
+  let lastMessage: TeamConversation['lastMessage'];
+  try { lastMessage = firestoreLastMessage(value.lastMessage ?? null); } catch { /* Not the whole pointer: the card has no message. */ }
+  return defined({ uid, state: value.state, displayName: value.displayName, handle: nonEmpty(value.handle), note: nonEmpty(value.note), since: millis(value.since),
+    teamId: nonEmpty(value.teamId), generation: count(value.generation) || undefined, lastSeq: count(value.lastSeq), lastReadSeq: count(value.lastReadSeq),
+    lastChangeSeq: count(value.lastChangeSeq), lastMessage });
+}
+
+/** `users/{uid}/blocks/{other}` -> entry. The name may be missing on an entry made before names were kept. */
+export function firestoreBlock(uid: string, value: DocumentData): BlockEntry {
+  return defined({ uid, at: millis(value.at), displayName: typeof value.displayName === 'string' ? value.displayName : '', handle: nonEmpty(value.handle) });
+}
+
+/** `profiles/{uid}` -> the two fields a friend can change (D10), or `null` when the profile cannot be read. */
+export function firestoreFriendName(value: DocumentData | undefined): { displayName?: string; handle?: string } | null {
+  return value ? defined({ displayName: typeof value.displayName === 'string' ? value.displayName : undefined, handle: nonEmpty(value.handle) }) : null;
 }
 
 export function firestoreMessage(id: string, value: DocumentData): TeamMessage {

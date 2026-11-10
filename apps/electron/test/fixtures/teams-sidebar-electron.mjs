@@ -63,7 +63,7 @@ try {
   assert.equal(await run(`document.querySelector('${railTeams} .desktop-rail-count').getAttribute('aria-hidden')`), 'true', 'the digits are not read out as well');
   assert.equal(await run(`document.querySelector('${railTeams}').title`), 'Teams, 7 unread');
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button')).map(button => button.getAttribute('aria-label'))`),
-    ['Home', 'Bots', 'Teams, 7 unread', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
+    ['Home', 'Bots', 'Teams, 7 unread', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
   result.railBadge = true;
 
   // Teams mode: the workspace's own sidebar, the Teams page beside it, and the mode saved.

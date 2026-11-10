@@ -446,7 +446,7 @@ export function SessionRow({ projectPath, session, active, pinned, opening, stat
   );
 }
 
-export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, teamsUnread = 0, sidebarMode = 'home', localAppProjects = [], onSelectSidebarMode, modePanel, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar, pageSidebarRef }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, teamsUnread = 0, friendsUnread = 0, sidebarMode = 'home', localAppProjects = [], onSelectSidebarMode, modePanel, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar, pageSidebarRef }: {
   bridge: UseBridge;
   activityView?: boolean;
   onToggleActivityView?(): void;
@@ -460,6 +460,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   botsAvailable?: boolean;
   /** Messages not yet read in the Teams the signed-in account is in, all of them; the rail's Teams button shows the number. */
   teamsUnread?: number;
+  /** Incoming friend requests and unread friend messages (D14); the rail's Friends button shows the number. */
+  friendsUnread?: number;
   /** The selected workspace; Scheduled tasks and Review changes retain its sidebar. */
   sidebarMode?: SidebarMode;
   localAppProjects?: readonly string[];
@@ -476,8 +478,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
 }) {
   const t = useT();
   const homePage = sidebarMode === 'home' && !apps && !scheduled && !changes;
-  // Every sidebar mode (Home, Bots, Teams, Apps) narrows its list with the sidebar's search box (`modePanel(mode, search)`); a page that replaces the sidebar has none.
-  const searchable = !apps && !scheduled && !changes;
+  // Every sidebar mode (Home, Bots, Teams, Apps) narrows its list with the sidebar's search box (`modePanel(mode, search)`); a page that replaces the sidebar has none, and Friends has a filter field of its own.
+  const searchable = !apps && !scheduled && !changes && sidebarMode !== 'friends';
   const asideRef = useRef<HTMLElement>(null);
   const railRef = useRef<HTMLElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -548,6 +550,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   // The rail's Teams button says how many messages wait: the number is for the eye, the label for everything else.
   const teamsBadge = unreadBadgeText(teamsUnread);
   const teamsRailLabel = teamsBadge ? tr('desktop_teams_rail_unread', Math.floor(teamsUnread)) : tr('teams_title');
+  const friendsBadge = unreadBadgeText(friendsUnread);
+  const friendsRailLabel = friendsBadge ? tr('desktop_friends_rail_unread', Math.floor(friendsUnread)) : tr('friends_title');
   const activeCatalogRows = visibleSession ? bridge.bootstrap?.projectCatalogs?.[visibleSession.projectPath]?.sessions : undefined;
   const activeRowIndex = activeCatalogRows?.findIndex((row) => row.uuid === visibleSession?.sessionId) ?? -1;
   const revealedSessionKey = !scheduled && visibleSession && activeRowIndex >= 0
@@ -954,6 +958,10 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           <Icon name="users" size={21} stroke={1.7} />
           {teamsBadge && <span className="desktop-rail-count" data-kind="unread" aria-hidden="true">{teamsBadge}</span>}
         </button>
+        <button type="button" className="desktop-rail-button desktop-rail-friends" data-active={!scheduled && !changes && sidebarMode === 'friends' || undefined} aria-label={friendsRailLabel} title={friendsRailLabel} onClick={() => selectMode('friends')}>
+          <Icon name="user" size={21} stroke={1.7} />
+          {friendsBadge && <span className="desktop-rail-count" data-kind="unread" aria-hidden="true">{friendsBadge}</span>}
+        </button>
         <button type="button" className="desktop-rail-button" data-active={!scheduled && !changes && (sidebarMode === 'apps' || (!onSelectSidebarMode && apps)) || undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={() => onSelectSidebarMode ? selectMode('apps') : onOpenApps?.()}><DesktopIcon name="apps" size={20}/></button>
         <span className="desktop-rail-divider" aria-hidden="true" />
         <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-current={scheduled ? 'page' : undefined} aria-label={tr('desktop_chat_scheduled_tasks')} title={tr('desktop_chat_scheduled_tasks')} onClick={onOpenScheduled}><DesktopIcon name="clock" size={20} /></button>
@@ -973,7 +981,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', '--desktop-accent': t.accent } as CSSProperties}
     >
       {scheduled ? <div ref={pageSidebarRef} className="desktop-page-sidebar" /> : <>
-      {searchOpen && <div className="sidebar-search"><DesktopIcon name="search" size={15} /><input ref={searchInputRef} type="search" aria-label={tr('desktop_search_chats_projects')} placeholder={tr('desktop_search_chats_projects')} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label={tr('desktop_close_search')} onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
+      {searchOpen && sidebarMode !== 'friends' && <div className="sidebar-search"><DesktopIcon name="search" size={15} /><input ref={searchInputRef} type="search" aria-label={tr('desktop_search_chats_projects')} placeholder={tr('desktop_search_chats_projects')} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label={tr('desktop_close_search')} onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
 
       {sidebarMode === 'home' && <div style={{ padding: '16px 12px 14px' }}>
         <button

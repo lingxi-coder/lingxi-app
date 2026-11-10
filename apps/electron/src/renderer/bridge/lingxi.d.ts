@@ -4,6 +4,7 @@ import type { LocalAppsApi, LocalAppEditRequest } from '../../shared/localApps';
 import type { ProjectCreationPurpose, ProjectFolderSelection } from '../../shared/projectCreation';
 import type { AccountApi } from '../../shared/account.js';
 import type { DesktopTeamsApi } from '../../../../../packages/teams';
+import type { DesktopFriendsApi } from '../../../../../packages/teams/friends';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type { ScheduledApi } from '../../shared/scheduled';
 import type { RemoteControlApi } from '../../shared/remoteControl';
@@ -191,6 +192,7 @@ export interface LingxiApi {
   isElectron: true;
   account: AccountApi;
   teams: DesktopTeamsApi;
+  friends: DesktopFriendsApi;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
   openSettingsFile(path: string): Promise<void>;

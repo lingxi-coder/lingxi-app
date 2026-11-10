@@ -44,6 +44,8 @@ export interface TeamDetailsDrawerProps {
   onClose(): void;
   renderAvatar?: RenderAvatar;
   locale?: string;
+  /** Without it members have no Add friend action (D15). The host looks the person up and shows the result. */
+  onAddFriend?(member: TeamMember): void;
 }
 
 interface Confirmation { command: TeamCommand; title: string; confirm: string }
@@ -52,7 +54,7 @@ interface Confirmation { command: TeamCommand; title: string; confirm: string }
  * The right column: the open team's members, invitations and Bots. Leaving or deleting the team is
  * at the top, behind a confirmation. The left edge is a resize handle (280 to 480 pixels); Escape closes.
  */
-export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, width: controlledWidth, defaultWidth, onWidthChange, onClose, renderAvatar, locale }: TeamDetailsDrawerProps): ReactElement | null {
+export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, width: controlledWidth, defaultWidth, onWidthChange, onClose, renderAvatar, locale, onAddFriend }: TeamDetailsDrawerProps): ReactElement | null {
   const t = (en: string, cn: string) => zh ? cn : en;
   const tag = locale ?? (zh ? 'zh-CN' : 'en-US');
   const id = useId();
@@ -158,12 +160,15 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
         {members.map(member => <li key={member.uid}>
           <Avatar identity={{ kind: 'user', id: member.uid, name: member.displayName }} size={32} render={renderAvatar} />
           <div className="tw-person-text"><b>{member.displayName}</b><small>{member.uid === uid ? `${t('You', '你')} · ` : ''}{role(member.role)}</small></div>
-          {canManageMember(team.role, uid, member) ? <div className="tw-person-actions">
-            {team.role === 'owner' ? <button type="button" disabled={snapshot.busy}
-              onClick={() => ask({ action: 'role', teamId: team.id, uid: member.uid, generation: member.generation, role: member.role === 'admin' ? 'member' : 'admin' }, t(`Change ${member.displayName}’s role?`, `更改 ${member.displayName} 的角色？`), t('Change role', '更改角色'))}>
-              {member.role === 'admin' ? t('Make member', '设为成员') : t('Make admin', '设为管理员')}</button> : null}
-            <button type="button" className="tw-danger-btn" disabled={snapshot.busy}
-              onClick={() => ask({ action: 'remove', teamId: team.id, uid: member.uid, generation: member.generation }, t(`Remove ${member.displayName}?`, `移除 ${member.displayName}？`), t('Remove', '移除'))}>{t('Remove', '移除')}</button>
+          {onAddFriend && member.uid !== uid || canManageMember(team.role, uid, member) ? <div className="tw-person-actions">
+            {onAddFriend && member.uid !== uid ? <button type="button" onClick={() => onAddFriend(member)}>{t('Add friend', '添加好友')}</button> : null}
+            {canManageMember(team.role, uid, member) ? <>
+              {team.role === 'owner' ? <button type="button" disabled={snapshot.busy}
+                onClick={() => ask({ action: 'role', teamId: team.id, uid: member.uid, generation: member.generation, role: member.role === 'admin' ? 'member' : 'admin' }, t(`Change ${member.displayName}’s role?`, `更改 ${member.displayName} 的角色？`), t('Change role', '更改角色'))}>
+                {member.role === 'admin' ? t('Make member', '设为成员') : t('Make admin', '设为管理员')}</button> : null}
+              <button type="button" className="tw-danger-btn" disabled={snapshot.busy}
+                onClick={() => ask({ action: 'remove', teamId: team.id, uid: member.uid, generation: member.generation }, t(`Remove ${member.displayName}?`, `移除 ${member.displayName}？`), t('Remove', '移除'))}>{t('Remove', '移除')}</button>
+            </> : null}
           </div> : null}
         </li>)}
       </ul>;

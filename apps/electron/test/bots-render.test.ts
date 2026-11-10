@@ -490,23 +490,24 @@ test('the sidebar offers Bots only where the host said they can be used, and onl
   assert.ok(!offered.includes('<span>Apps</span>') && !offered.includes('<span>Scheduled</span>'), 'Home does not repeat Apps or Scheduled from the rail');
 });
 
-test('the rail has the modes Home, Bots, Teams and Apps, then a divider, then the pages', () => {
+test('the rail has the modes Home, Bots, Teams, Friends and Apps, then a divider, then the pages', () => {
   const rail = railOf(render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true })));
   const divider = rail.indexOf('desktop-rail-divider');
   assert.ok(divider > 0);
-  assert.deepEqual(buttonLabels(rail.slice(0, divider)), ['Home', 'Bots', 'Teams', 'Apps']);
+  assert.deepEqual(buttonLabels(rail.slice(0, divider)), ['Home', 'Bots', 'Teams', 'Friends', 'Apps']);
   assert.deepEqual(buttonLabels(rail.slice(divider)), ['Scheduled tasks', 'Review changes', 'Settings']);
 
   const noBots = railOf(render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop })));
-  assert.deepEqual(buttonLabels(noBots.slice(0, noBots.indexOf('desktop-rail-divider'))), ['Home', 'Teams', 'Apps']);
+  assert.deepEqual(buttonLabels(noBots.slice(0, noBots.indexOf('desktop-rail-divider'))), ['Home', 'Teams', 'Friends', 'Apps']);
 });
 
-test('the sidebar mode marks Home, Bots or Teams, Home when none was given, Apps marks itself beside the mode, and Cron replaces the mark of the mode', () => {
+test('the sidebar mode marks Home, Bots, Teams or Friends, Home when none was given, Apps marks itself beside the mode, and Cron replaces the mark of the mode', () => {
   const sidebar = (props: Record<string, unknown> = {}) => render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true, ...props }));
   assert.deepEqual(markedLabels(sidebar()), ['Home']);
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'home' })), ['Home']);
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'bots' })), ['Bots']);
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'teams' })), ['Teams']);
+  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'friends' })), ['Friends']);
 
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'bots', apps: true })), ['Bots', 'Apps']);
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'teams', scheduled: true })), ['Scheduled tasks'], 'Cron owns its sidebar, so the mode is not marked behind it');
@@ -515,7 +516,7 @@ test('the sidebar mode marks Home, Bots or Teams, Home when none was given, Apps
 
 test('the rail buttons of the modes ask for their mode, and Home still opens the chat for a sidebar with no one to keep the mode', () => {
   const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
-  for (const mode of ['home', 'bots', 'teams']) assert.match(source, new RegExp(`onClick=\\{\\(\\) => selectMode\\('${mode}'\\)\\}`), mode);
+  for (const mode of ['home', 'bots', 'teams', 'friends']) assert.match(source, new RegExp(`onClick=\\{\\(\\) => selectMode\\('${mode}'\\)\\}`), mode);
   assert.match(source, /if \(onSelectSidebarMode\) onSelectSidebarMode\(mode\);\s+else if \(mode === 'home'\) onOpenChat\?\.\(\);/);
 });
 
@@ -530,13 +531,13 @@ test('outside Home the sidebar lists what the mode is for, in place of the proje
   assert.match(home, /sidebar-new-chat/);
   assert.match(home, new RegExp(`aria-label="${tr('desktop_projects_sessions')}"`));
 
-  for (const mode of ['bots', 'teams']) {
+  for (const mode of ['bots', 'teams', 'friends']) {
     const html = sidebar(mode);
     assert.match(html, new RegExp(`<div id="mode-panel">panel for ${mode}</div>`));
     assert.ok(!html.includes('sidebar-new-chat'), `${mode}: the actions of Home are not repeated`);
     assert.ok(!html.includes(`aria-label="${tr('desktop_projects_sessions')}"`), `${mode}: nor its projects`);
   }
-  assert.deepEqual(seen, [['bots', ''], ['teams', '']], 'told the mode, and what the search box holds');
+  assert.deepEqual(seen, [['bots', ''], ['teams', ''], ['friends', '']], 'told the mode, and what the search box holds');
 });
 
 test('the sidebar is hidden when the parent says so, and keeps its own state when the parent says nothing', () => {

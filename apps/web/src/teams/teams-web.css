@@ -72,3 +72,7 @@
   .teams-web-body[data-pane='conversation'] .teams-web-sidebar { display: none; }
   .teams-web-back { display: inline-flex; align-items: center; }
 }
+
+/* Friends shares the Teams layout; its chat and pages sit where the conversation does, and the header shows the unread badge (D14). */
+.teams-web-conversation > .tw-friends-chat, .teams-web-conversation > .tw-friends-page { flex: 1 1 0; height: auto; min-height: 0; }
+.teams-web-nav .teams-web-badge { margin-left: 8px; padding: 1px 7px; border-radius: 999px; background: var(--teams-badge-bg); color: var(--teams-badge-fg); font-size: 11px; font-weight: 700; vertical-align: middle; }

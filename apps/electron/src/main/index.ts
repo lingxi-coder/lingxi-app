@@ -22,6 +22,8 @@ import { installCrashReporting } from './crashReporting.js';
 import { AccountService } from './account.js';
 import { TeamsService } from './teams/service.js';
 import { installTeamsIpc } from './teams/ipc.js';
+import { FriendsService } from './teams/friends.js';
+import { installFriendsIpc } from './teams/friendsIpc.js';
 import { TeamConnector } from './teams/connector.js';
 import { TeamPrivateStore } from './teams/privateStore.js';
 import { resolveTeamBinaries } from './teams/process.js';
@@ -787,7 +789,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
   host.attachAccount(account);
   const teamsService = new TeamsService(account, firebaseConfig);
-  stopTeams = installTeamsIpc(teamsService, () => [...mainWindows]);
+  // Friends listens in the Teams service's Firestore session, so it stops first.
+  const stopFriendsIpc = installFriendsIpc(new FriendsService(account, teamsService), () => [...mainWindows]);
+  const stopTeamsIpc = installTeamsIpc(teamsService, () => [...mainWindows]);
+  stopTeams = () => { stopFriendsIpc(); stopTeamsIpc(); };
   // Off unless the user (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns it on.
   const remoteDiagnostics = (level: 'info' | 'warn' | 'error', message: string): void => {
     diagnostics.add(level, 'host', `remote control: ${message}`);

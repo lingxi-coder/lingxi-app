@@ -141,7 +141,7 @@ test('the sidebar mode is Home unless it is one of ours, and the open Bots are u
   assert.equal(parseSettings({ version: 1, projects: [] }).sidebar, undefined, 'and a file the owner never saved a sidebar preference to has no sidebar section');
 
   assert.deepEqual(sidebar({ ...order, mode: 'bots', expandedBots: ['a', 'b'] }), { ...order, mode: 'bots', expandedBots: ['a', 'b'] });
-  for (const mode of ['home', 'bots', 'teams']) assert.equal(sidebar({ ...order, mode })!.mode, mode);
+  for (const mode of ['home', 'bots', 'teams', 'friends']) assert.equal(sidebar({ ...order, mode })!.mode, mode);
 
   for (const mode of ['settings', 'Bots', '', 1, null, {}, []]) assert.equal(sidebar({ ...order, mode })!.mode, 'home', `mode ${JSON.stringify(mode)}`);
   for (const expanded of ['a', 1, null, {}]) assert.ok(!('expandedBots' in sidebar({ ...order, expandedBots: expanded })!), `expandedBots ${JSON.stringify(expanded)}`);

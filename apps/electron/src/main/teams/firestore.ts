@@ -68,4 +68,4 @@ export async function openTeamsFirestoreSession(options: TeamsFirestoreOptions):
   }
 }
 
-export { collection, doc, onSnapshot, query, where } from 'firebase/firestore';
+export { collection, doc, getDoc, onSnapshot, query, where } from 'firebase/firestore';

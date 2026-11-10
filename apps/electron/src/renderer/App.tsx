@@ -16,9 +16,12 @@ import { modeForSettledChat, pageForMode, type AppPage } from './bridge/sidebarM
 import type { SidebarMode } from '../shared/settings';
 import { BotsSidebar } from './components/BotsSidebar';
 import { TeamsSidebar, focusTeamsSidebarSoon } from './components/TeamsSidebar';
+import { FriendsPanel } from './components/FriendsPanel';
 // The Teams workspace's stylesheet (sidebar, page, panel and dialogs), imported once, here, as the package asks. Its rules are scoped to its own classes.
 import '../../../../packages/teams/styles';
 import { useTeams } from './bridge/useTeams';
+import { useFriends } from './bridge/useFriends';
+import { friendLink, type FriendLink } from '../../../../packages/teams/friends';
 import { useTeamsDrawer } from './bridge/useTeamsDrawer';
 import { teamsThemeVariables } from './theme/teamsTheme';
 import type { DrawerTab } from '../../../../packages/teams/ui';
@@ -87,6 +90,8 @@ interface SessionPickerRequest {
 
 // The Teams page loads with its first visit: the conversation and the Bot cards in it are the weight. The sidebar and the workspace behind both are not lazy, so the rail can count unread messages from the start.
 const TeamsMain = lazy(() => import('./components/TeamsMain').then(module => ({ default: module.TeamsMain })));
+// Likewise the Friends page; its sidebar and workspace are not lazy, so the rail can badge requests and unread chats from the start.
+const FriendsPage = lazy(() => import('./components/FriendsPage').then(module => ({ default: module.FriendsPage })));
 
 export function App() {
   const { locale, preference } = useI18n();
@@ -113,6 +118,9 @@ export function App() {
   const [page, setPage] = useState<AppPage>('chat');
   const [teamInvite, setTeamInvite] = useState<string>();
   const handledTeamInvite = useCallback(() => setTeamInvite(undefined), []);
+  // A friend link waits here, in memory only (D8), until the Friends workspace of a signed-in account can take it.
+  const [friendTarget, setFriendTarget] = useState<FriendLink>();
+  const handledFriendCode = useCallback(() => setFriendTarget(undefined), []);
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
   const [sessionPicker, setSessionPicker] = useState<SessionPickerRequest | null>(null);
@@ -250,6 +258,7 @@ export function App() {
   // Teams: one workspace for the window, which the sidebar, the page and the rail's unread count all read.
   const zh = locale.startsWith('zh');
   const teams = useTeams();
+  const friends = useFriends();
   const teamsDrawer = useTeamsDrawer({
     savedWidth: bridge.bootstrap?.settings.sidebar?.teamsDrawerWidth,
     save: (width) => { void bridge.updateSidebarPreferences({ teamsDrawerWidth: width }).catch(() => undefined); },
@@ -282,6 +291,15 @@ export function App() {
   }, [bots.available, botChat, appChat, leaveBots, openPage, page, sessionNavigationBlocked, setSidebarMode]);
   /** Bring Teams forward when its sidebar is shown beside a utility page. */
   const showTeams = useCallback(() => { if (page !== 'teams') openPage('teams'); }, [openPage, page]);
+  /** Likewise Friends. */
+  const showFriends = useCallback(() => { if (page !== 'friends') openPage('friends'); }, [openPage, page]);
+  // A link to the requests or to a friend's chat is carried out as soon as there is a workspace to carry it out in.
+  const { workspace: friendsWorkspace } = friends;
+  useEffect(() => {
+    if (!friendsWorkspace || !friendTarget || friendTarget.kind === 'add') return;
+    if (friendTarget.kind === 'chat') friendsWorkspace.openChat(friendTarget.uid); else friendsWorkspace.showRequests();
+    setFriendTarget(undefined);
+  }, [friendsWorkspace, friendTarget]);
   /** The team menu of the sidebar: the details panel beside the conversation, on a tab when one is asked for. */
   const openTeamDetails = useCallback((tab?: DrawerTab) => { showTeams(); showTeamDetails(tab); }, [showTeams, showTeamDetails]);
   const showChat = useCallback(() => {
@@ -497,8 +515,10 @@ export function App() {
           if (!session) throw new Error(tr('desktop_link_open_project_config'));
           if (!await bridge.openSession(delivery.projectPath, session.uuid, { scope: 'current', transcriptPath: session.path })) throw new Error(tr('desktop_link_project_conversation_error'));
         }
-        // The join dialog opens in the sidebar, which cannot be used while it is hidden.
+        const friend = friendLink(delivery.target);
+        // The join dialog (and the friend dialog likewise) opens in the sidebar, which cannot be used while it is hidden.
         if (route === 'team/join' || route === 'team/inbox') { setTeamInvite(params.code); setPage('teams'); setSidebarCollapsed(false); }
+        else if (friend) { setFriendTarget(friend); setPage('friends'); setSidebarCollapsed(false); }
         else if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
         else if (kind === 'settings') {
           if (!SETTINGS_NAV.some(page => page.id === id)) throw new Error(tr('desktop_link_settings_unavailable'));
@@ -621,6 +641,7 @@ export function App() {
             onOpenApps={showAppLibrary}
             botsAvailable={bots.available}
             teamsUnread={teams.snapshot?.totalUnread ?? 0}
+            friendsUnread={friends.snapshot?.badge ?? 0}
             sidebarMode={sidebarMode}
             localAppProjects={appWorkspace.projectPaths}
             onSelectSidebarMode={selectSidebarMode}
@@ -637,6 +658,9 @@ export function App() {
               : mode === 'bots'
               ? <BotsSidebar bots={bots} sessions={botSessions} bridge={bridge} query={search} chatVisible={page === 'chat'}
                   onOpenChat={showChat} onLeave={leaveBots} onOpenBot={openBot} onCreateBot={createBot} />
+              : mode === 'friends'
+              ? <FriendsPanel friends={friends} zh={zh} locale={locale} initialCode={friendTarget?.kind === 'add' ? friendTarget.code : undefined}
+                  onCodeHandled={handledFriendCode} onShowFriends={showFriends} />
               : <TeamsSidebar teams={teams} zh={zh} query={search} initialInvite={teamInvite} onInviteHandled={handledTeamInvite}
                   onShowTeams={showTeams} onOpenSettings={openTeamDetails} />}
             sidebarCollapsed={sidebarCollapsed}
@@ -672,7 +696,8 @@ export function App() {
           {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
           <ErrorBanner bridge={{ error: localAppNavigationError, clearError: clearLocalAppNavigationError }} presentation={localAppNavigationPresentation} />
           <ErrorBanner bridge={bridge} />
-          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} zh={zh} drawer={teamsDrawer} /></Suspense>}
+          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} zh={zh} drawer={teamsDrawer} /></Suspense>}
+          {page === 'friends' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('friends_loading')}</p>}><FriendsPage friends={friends} zh={zh} locale={locale} /></Suspense>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} onDevelopmentBlocked={() => setLocalAppNavigationError(tr('local_app_development_requires_code'))} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}

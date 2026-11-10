@@ -5,6 +5,17 @@ import { conversationParticipants, type Identity, type TeamsSnapshot } from './w
 /** Layout effects warn on the server; there they are plain effects. */
 export const useIsoLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
+/** Whether the page is visible; true where there is no document. */
+export function useDocumentShown(): boolean {
+  const [shown, setShown] = useState(() => typeof document === 'undefined' || document.visibilityState !== 'hidden');
+  useEffect(() => {
+    const change = () => setShown(document.visibilityState !== 'hidden');
+    document.addEventListener('visibilitychange', change);
+    return () => document.removeEventListener('visibilitychange', change);
+  }, []);
+  return shown;
+}
+
 // ─── Avatars ────────────────────────────────────────────────────────────────
 
 /**

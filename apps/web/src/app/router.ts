@@ -20,6 +20,8 @@ export const appRoutes = [
   '/login/remote',
   '/teams',
   '/teams/join',
+  '/friends',
+  '/friends/add',
 ] as const;
 
 export type AppRoute =
@@ -97,7 +99,7 @@ export function isRemoteRoute(route: string): boolean {
 export type SecurityZone = 'remote' | 'sign-in' | 'site' | 'teams';
 
 export function securityZone(route: string): SecurityZone {
-  if (route === '/teams' || route.startsWith('/teams/')) return 'teams';
+  if (route === '/teams' || route.startsWith('/teams/') || route === '/friends' || route.startsWith('/friends/')) return 'teams';
   if (isRemoteRoute(route)) return 'remote';
   return route === '/login/remote' ? 'sign-in' : 'site';
 }

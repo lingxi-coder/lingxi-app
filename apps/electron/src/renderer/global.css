@@ -138,7 +138,8 @@ body {
 .desktop-rail-settings { margin-top: auto; }
 .desktop-rail-button:disabled { opacity: .45; cursor: default; }
 .desktop-rail-changes,
-.desktop-rail-teams { position: relative; }
+.desktop-rail-teams,
+.desktop-rail-friends { position: relative; }
 .desktop-rail-count {
   position: absolute;
   top: 0;
@@ -254,6 +255,10 @@ body {
 .teams-conversation > .tw-conv { flex: 1 1 0; height: auto; min-height: 0; }
 .teams-page > .tw-drawer { height: auto; }
 .teams-sidebar > .tw-sidebar { flex: 1 1 0; height: auto; min-height: 0; }
+/* Friends: the chat or the page fills the main area, and the list fills the sidebar. */
+.friends-page { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.friends-page > * { flex: 1 1 0; min-height: 0; height: auto; }
+.friends-sidebar > .tw-sidebar { flex: 1 1 0; height: auto; min-height: 0; }
 /* A narrow window has no room for the conversation and the panel side by side (the page is the window less the rail and a sidebar of the usual width):
    the panel then lies over the right edge of the conversation, at the width it has, and leaves the conversation its own. */
 @media (max-width: 1100px) {

@@ -1,3 +1,5 @@
+import { friendsErrorKey } from './friends.js';
+
 /** User-facing text for Teams error codes. Shared by the workspace views; codes stay language-neutral until shown. */
 
 const membership: Record<string, [string, string]> = {
@@ -63,4 +65,25 @@ export function messageErrorText(code: string, zh: boolean): string {
     default:
       return t('Could not sync messages. Check your connection and try again.', '消息同步未完成，请检查网络后重试。');
   }
+}
+
+/** The `en` and `zh-Hans` values of the canonical `friends_error_*` strings, by the key `friendsErrorKey` gives. */
+const friends: Record<string, [string, string]> = {
+  friends_error_not_found: ['No match found. Check the spelling, or ask them for a friend link.', '没有找到匹配的人。请检查拼写，或向对方索取好友链接。'],
+  friends_error_rate_limited: ['Too many lookups or requests. Try again in a few minutes.', '查找或添加过于频繁，请几分钟后再试。'],
+  friends_error_friend_limit: ['You or they have reached the friend limit (500).', '你或对方的好友数量已达上限（500）。'],
+  friends_error_request_limit: ['You have 50 requests waiting. Cancel one first.', '待处理的请求已达 50 个，请先撤销一个。'],
+  friends_error_handle_taken: ['That username is taken.', '该用户名已被占用。'],
+  friends_error_request_unavailable: ['That request is no longer available.', '该请求已不存在。'],
+  friends_error_stale_request: ['Something changed since you started. Look them up again.', '状态已发生变化，请重新查找对方。'],
+  friends_error_session: ['Your session expired. Sign in again.', '登录已过期，请重新登录。'],
+  friends_error_network: ["Can't reach the server. Check your connection and try again.", '无法连接服务器，请检查网络后重试。'],
+  friends_error_invalid_input: ['Check what you entered and try again.', '请检查输入内容后重试。'],
+  friends_error_generic: ['Something went wrong. Try again.', '出了点问题，请重试。'],
+  friends_chat_unavailable: ['This chat is no longer available.', '此聊天已不可用。'],
+};
+
+/** Friends errors (D18): shown under the control that failed. Unknown codes read as the generic failure. */
+export function friendsErrorText(code: string, zh: boolean): string {
+  return friends[friendsErrorKey(code)]![zh ? 1 : 0];
 }

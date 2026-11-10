@@ -1,5 +1,7 @@
 package com.lingxi.code.friends
 
+import android.icu.text.ListFormatter
+import android.icu.text.RelativeDateTimeFormatter
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
@@ -24,6 +26,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
 import kotlinx.coroutines.delay
+import java.util.Locale
 
 /** Test tags of the Friends tab. */
 internal object FriendsTags {
@@ -66,11 +69,32 @@ internal object FriendsTags {
     const val CHAT = "friends.chat"
     const val CHAT_UNAVAILABLE = "friends.chatUnavailable"
     const val CHAT_MENU = "friends.chatMenu"
+    const val OFFERS = "friends.offers"
+    const val BOTS = "friends.bots"
+    const val BOTS_SCREEN = "friends.botsScreen"
+    const val BOTS_STATUS = "friends.botsStatus"
+    const val BOTS_NOTE = "friends.botsNote"
+    const val BOTS_SHARE_HINT = "friends.botsShareHint"
+    const val INVITE_SHEET = "friends.inviteSheet"
+    const val INVITE_FILTER = "friends.inviteFilter"
+    const val INVITE_EMPTY = "friends.inviteEmpty"
+    const val INVITE_FILTER_EMPTY = "friends.inviteFilterEmpty"
+    const val INVITE_DISCLOSURE = "friends.inviteDisclosure"
     fun row(uid: String) = "friends.row.$uid"
     fun accept(uid: String) = "friends.accept.$uid"
     fun decline(uid: String) = "friends.decline.$uid"
     fun cancel(uid: String) = "friends.cancel.$uid"
     fun unblock(uid: String) = "friends.unblock.$uid"
+    fun offer(teamId: String) = "friends.offer.$teamId"
+    fun offerExpiry(teamId: String) = "friends.offerExpiry.$teamId"
+    fun offerJoin(teamId: String) = "friends.offerJoin.$teamId"
+    fun offerDecline(teamId: String) = "friends.offerDecline.$teamId"
+    fun offerDismiss(teamId: String) = "friends.offerDismiss.$teamId"
+    fun bot(sharedBotId: String) = "friends.bot.$sharedBotId"
+    fun botMessage(sharedBotId: String) = "friends.botMessage.$sharedBotId"
+    fun botStop(sharedBotId: String) = "friends.botStop.$sharedBotId"
+    fun invite(uid: String) = "friends.invite.$uid"
+    fun inviteSend(uid: String) = "friends.inviteSend.$uid"
 }
 
 /** An error as the person reads it (D18). */
@@ -87,6 +111,14 @@ internal fun friendsErrorRes(error: FriendsError): Int = when (error) {
     FriendsError.Network -> R.string.friends_error_network
     FriendsError.InvalidInput -> R.string.friends_error_invalid_input
     FriendsError.ChatUnavailable -> R.string.friends_chat_unavailable
+    FriendsError.FriendRequired -> R.string.friends_error_friend_required
+    FriendsError.AlreadyMember -> R.string.friends_error_already_member
+    FriendsError.OfferLimit -> R.string.friends_error_offer_limit
+    FriendsError.MemberLimit -> R.string.friends_error_member_limit
+    FriendsError.TeamLimit -> R.string.friends_error_team_limit
+    FriendsError.OfferRole -> R.string.friends_error_offer_role
+    FriendsError.OfferTeamGone -> R.string.friends_error_offer_team_gone
+    FriendsError.OfferUnavailable -> R.string.friends_error_offer_unavailable
     FriendsError.Generic -> R.string.friends_error_generic
 }
 
@@ -110,14 +142,24 @@ internal fun FriendsPageHeader(title: String, showBack: Boolean, onClose: () -> 
     }
 }
 
-/** A line the Friends tab shows for a few seconds (D4, D7, D16); a tap dismisses it. */
+/** A line the Friends tab shows for a few seconds (D4, D7, D16, D27); a tap dismisses it. */
 @Composable
 internal fun FriendsNoticeBanner(notice: FriendsNotice, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
-    LaunchedEffect(notice) { delay(NOTICE_MS); onDismiss() }
     val text = when (notice) {
         is FriendsNotice.NowFriends -> stringResource(R.string.friends_now_friends_fmt, notice.name)
         FriendsNotice.ChatUnavailable -> stringResource(R.string.friends_chat_unavailable)
+        is FriendsNotice.OfferJoined -> stringResource(R.string.friends_offer_joined_fmt, notice.teamName)
     }
+    FriendsBanner(text, notice, onDismiss, modifier)
+}
+
+/**
+ * The line of [FriendsNoticeBanner] for a one-shot that another tab owns, such as the Teams tab's "invitation sent" (D26). It stays for a few
+ * seconds from the moment [key] changes; a tap dismisses it.
+ */
+@Composable
+internal fun FriendsBanner(text: String, key: Any, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+    LaunchedEffect(key) { delay(NOTICE_MS); onDismiss() }
     Surface(
         onClick = onDismiss, modifier = modifier.padding(16.dp).testTag(FriendsTags.NOTICE),
         shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.inverseSurface, shadowElevation = 4.dp,
@@ -127,5 +169,17 @@ internal fun FriendsNoticeBanner(notice: FriendsNotice, onDismiss: () -> Unit, m
         }
     }
 }
+
+/**
+ * A live offer's time left as the platform reads it in the future (D27): "in 3 days", "in 5 hours", the numeric form of the language's relative-time
+ * text, never "tomorrow". The words come from ICU, so only the UI layer calls this.
+ */
+internal fun offerExpiryText(expiry: OfferExpiry.Live, locale: Locale): String = RelativeDateTimeFormatter.getInstance(locale).format(
+    expiry.value.toDouble(), RelativeDateTimeFormatter.Direction.NEXT,
+    if (expiry.unit == OfferUnit.Hour) RelativeDateTimeFormatter.RelativeUnit.HOURS else RelativeDateTimeFormatter.RelativeUnit.DAYS,
+)
+
+/** Names as a list in the person's language ("Ann, Ben and Cy"; "甲、乙和丙"). */
+internal fun friendNamesText(names: List<String>, locale: Locale): String = ListFormatter.getInstance(locale).format(names)
 
 private const val NOTICE_MS = 5_000L

@@ -71,6 +71,47 @@ internal data class BlockEntry(val uid: String, val atMs: Long, val displayName:
     }
 }
 
+/**
+ * One document of `users/{uid}/teamOffers` (docs/FRIENDS-CLIENTS.md D27, appendix A): a friend's offer of an ordinary team to the owner.
+ * [teamId] is the document id, which is also what `acceptOffer` and `declineOffer` call the offer; [teamName] and [fromName] are
+ * snapshots from when the offer was made; [expiresAtMs] is whole epoch milliseconds. The role is always `member` and is not kept.
+ */
+internal data class TeamOffer(val teamId: String, val teamName: String, val fromUid: String, val fromName: String, val expiresAtMs: Long) {
+    companion object {
+        /**
+         * null for a document that is not a whole offer: one without the four strings (`teamId`, `teamName`, `fromUid`, `fromName`) or without
+         * a readable `expiresAt` is skipped, never failing the list (D27). [millis] turns a Firestore timestamp into epoch milliseconds and
+         * returns null for any other value.
+         */
+        fun fromDocument(id: String, data: Map<String, Any?>, millis: (Any) -> Long?): TeamOffer? {
+            if (id.isEmpty() || data["teamId"] !is String) return null
+            return TeamOffer(
+                id, data["teamName"] as? String ?: return null, data["fromUid"] as? String ?: return null, data["fromName"] as? String ?: return null,
+                data["expiresAt"]?.let(millis) ?: return null,
+            )
+        }
+    }
+}
+
+/** How a live offer's time left reads (D27): [unit] and [value] go to the platform's relative-time formatter, in the future direction. */
+internal enum class OfferUnit { Hour, Day }
+
+/** An offer's display state: strictly after now is live, anything else is expired (the server decides, and keeps an expired offer 7 days more). */
+internal sealed interface OfferExpiry {
+    data object Expired : OfferExpiry
+
+    data class Live(val unit: OfferUnit, val value: Int) : OfferExpiry
+}
+
+/** The three offer actions of `POST /v1/friends` (D26, D27, D30). */
+internal enum class OfferAction(val wire: String) {
+    OfferTeam("offerTeam"), AcceptOffer("acceptOffer"), DeclineOffer("declineOffer");
+
+    companion object {
+        fun of(wire: String): OfferAction = entries.first { it.wire == wire }
+    }
+}
+
 internal data class FriendCode(val code: String, val link: String)
 
 /** The caller's own profile (`GET /v1/friends/profile` and the `profile` action). */
@@ -129,11 +170,56 @@ internal enum class FriendsError(val key: String, val definitive: Boolean = true
     Network("friends_error_network", definitive = false),
     InvalidInput("friends_error_invalid_input"),
     ChatUnavailable("friends_chat_unavailable"),
+
+    // The errors of the offer actions (D30); they only come from [ofOffer].
+    FriendRequired("friends_error_friend_required"),
+    AlreadyMember("friends_error_already_member"),
+    OfferLimit("friends_error_offer_limit"),
+    MemberLimit("friends_error_member_limit"),
+    TeamLimit("friends_error_team_limit"),
+    OfferRole("friends_error_offer_role"),
+    OfferTeamGone("friends_error_offer_team_gone"),
+    OfferUnavailable("friends_error_offer_unavailable"),
     Generic("friends_error_generic");
 
     companion object {
         /** A failed HTTP step: the server's code, else a failure of the transport (no network, a timeout, an answer that is not JSON), which may be retried. */
         fun of(error: Throwable): FriendsError = if (error is TeamMessageFailure) of(error.code) else Network
+
+        /** A failed offer action: the server's code as [ofOffer] reads it, else a failure of the transport, which may be retried with the same request id. */
+        fun ofOffer(action: OfferAction, error: Throwable): FriendsError = if (error is TeamMessageFailure) ofOffer(action, error.code) else Network
+
+        /**
+         * The error of `offerTeam`, `acceptOffer` or `declineOffer` as the person reads it (D30, vector `offers.errors`): the action's own row, else the
+         * common row, else generic. Never [of]: it reads MEMBERSHIP_REQUIRED and STALE_MEMBERSHIP as "the chat ended", which is wrong for an offer.
+         */
+        fun ofOffer(action: OfferAction, code: String): FriendsError {
+            val own = when (action) {
+                OfferAction.OfferTeam -> when (code) {
+                    "FRIEND_REQUIRED" -> FriendRequired
+                    "ALREADY_MEMBER" -> AlreadyMember
+                    "OFFER_LIMIT" -> OfferLimit
+                    "MEMBER_LIMIT" -> MemberLimit
+                    "ROLE_REQUIRED" -> OfferRole
+                    "MEMBERSHIP_REQUIRED" -> OfferTeamGone
+                    "RATE_LIMITED" -> RateLimited
+                    else -> null
+                }
+                OfferAction.AcceptOffer -> when (code) {
+                    "OFFER_UNAVAILABLE", "STALE_MEMBERSHIP" -> OfferUnavailable
+                    "MEMBER_LIMIT" -> MemberLimit
+                    "TEAM_LIMIT" -> TeamLimit
+                    else -> null
+                }
+                OfferAction.DeclineOffer -> null
+            }
+            return own ?: when (code) {
+                "SIGN_IN_REQUIRED", "INVALID_SESSION" -> Session
+                "SERVICE_UNAVAILABLE" -> Network
+                "INVALID_INPUT", "INVALID_JSON" -> InvalidInput
+                else -> Generic
+            }
+        }
 
         fun of(code: String): FriendsError = when (code) {
             "NOT_FOUND" -> NotFound
@@ -280,6 +366,64 @@ internal object FriendsLogic {
 
     /** The tab badge text: nothing at 0, the number up to 99, `99+` from 100. */
     fun badgeText(count: Int): String? = TabLogic.tabBadgeText(count)
+
+    // --- Team offers (F4: D26, D27, D28, D30) ---------------------------------------------------------------
+
+    private const val HOUR_MS = 3_600_000L
+    private const val DAY_MS = 24 * HOUR_MS
+
+    /** An offer is live strictly before it expires, as on the server; one that expires exactly now is not. */
+    fun isLive(offer: TeamOffer, nowMs: Long): Boolean = offer.expiresAtMs > nowMs
+
+    /**
+     * How an offer reads at [nowMs] (D27, vector `offers.expiry`): expired when nothing is left; up to and including 24 hours left, the hours
+     * rounded up (1 to 24); beyond that, the days rounded up (2 to 7). An offer expired for longer than the server's grace is still expired
+     * here until its prune deletes it.
+     */
+    fun offerExpiry(expiresAtMs: Long, nowMs: Long): OfferExpiry {
+        val remaining = expiresAtMs - nowMs
+        return when {
+            remaining <= 0 -> OfferExpiry.Expired
+            remaining <= DAY_MS -> OfferExpiry.Live(OfferUnit.Hour, ceilDivide(remaining, HOUR_MS))
+            else -> OfferExpiry.Live(OfferUnit.Day, ceilDivide(remaining, DAY_MS))
+        }
+    }
+
+    private fun ceilDivide(value: Long, unit: Long): Int = (-Math.floorDiv(-value, unit)).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+
+    /** Live offers before expired ones; within each, the larger expiry first (the newest offer); then the team id as text by code unit (D27, vector `offers.sort`). */
+    fun compareOffers(nowMs: Long): Comparator<TeamOffer> = Comparator { a, b ->
+        val liveA = isLive(a, nowMs)
+        val liveB = isLive(b, nowMs)
+        when {
+            liveA != liveB -> if (liveA) -1 else 1
+            a.expiresAtMs != b.expiresAtMs -> b.expiresAtMs.compareTo(a.expiresAtMs)
+            else -> a.teamId.compareTo(b.teamId)
+        }
+    }
+
+    /** The offers that add to the badge: every live one (D28). */
+    fun liveOffers(offers: List<TeamOffer>, nowMs: Long): Int = offers.count { isLive(it, nowMs) }
+
+    /**
+     * The badge with the offers (D14, D28, vector `offers.badge`): incoming requests, the unread of every friend and every live offer. Expired
+     * offers and outgoing requests add nothing. A function of the clock, so the workspace recomputes it at the earliest live expiry.
+     */
+    fun badgeCount(cards: List<FriendCard>, offers: List<TeamOffer>, nowMs: Long, openChatUid: String? = null): Int =
+        (badgeCount(cards, openChatUid).toLong() + liveOffers(offers, nowMs)).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+
+    /**
+     * Who the Invite friends picker lists (D26, vector `offers.picker`): the friends who are not members of the team, in the Friends order of D5,
+     * narrowed by the filter. Requests are never listed.
+     */
+    fun invitePicker(cards: List<FriendCard>, memberUids: Set<String>, query: String, collator: Collator): List<FriendCard> =
+        cards.filter { it.state == FriendState.Friends && it.uid !in memberUids }.sortedWith(compareFriends(collator)).filter { matchesFilter(it, query) }
+
+    /** Only an owner or an admin invites friends, whatever the member count: a full team still shows it and the server answers MEMBER_LIMIT (D26, vector `offers.entry`). */
+    fun canInviteFriends(role: String): Boolean = role == "owner" || role == "admin"
+
+    /** The string key of an offer action's error (D30, vector `offers.errors`); see [FriendsError.ofOffer]. */
+    fun offerErrorKey(action: OfferAction, code: String): String = FriendsError.ofOffer(action, code).key
 
     // --- One field, three kinds (D7) ------------------------------------------------------------------------
 

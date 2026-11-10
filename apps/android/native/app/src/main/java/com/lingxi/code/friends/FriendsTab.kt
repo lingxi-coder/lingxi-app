@@ -33,6 +33,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lingxi.code.R
 import com.lingxi.code.settings.SettingsRoutes
@@ -42,6 +44,8 @@ import com.lingxi.code.tabs.LocalTabHost
 import com.lingxi.code.tabs.LocalWideLayout
 import com.lingxi.code.tabs.OnTabReselected
 import com.lingxi.code.teams.TeamsMessageState
+import com.lingxi.code.teams.TeamsWorkspace
+import kotlinx.coroutines.delay
 
 /**
  * The Friends tab (docs/FRIENDS-CLIENTS.md D1-D16): the friends list, Add friend, Profile settings, Blocked people and a friend's chat,
@@ -50,11 +54,17 @@ import com.lingxi.code.teams.TeamsMessageState
  *
  * Phone: the list is the root; the other screens are pushed above it (the tab bar hides while one is open). Wide (>= 840 dp): the list
  * on the left, whatever is pushed on the right.
+ *
+ * Joining a Team invitation (D27) stays in Friends: [onTeamJoined] runs once it succeeded and refreshes the Teams list, where the team now
+ * appears, as a link join does; by default that is the process-wide Teams workspace.
  */
 @Composable
-internal fun FriendsTab(request: FriendsRequest?, onRequestHandled: (Long) -> Unit, modifier: Modifier = Modifier, workspaceOverride: FriendsWorkspace? = null) {
+internal fun FriendsTab(
+    request: FriendsRequest?, onRequestHandled: (Long) -> Unit, modifier: Modifier = Modifier, workspaceOverride: FriendsWorkspace? = null, onTeamJoined: (() -> Unit)? = null,
+) {
     val context = LocalContext.current
     val workspace = workspaceOverride ?: remember(context) { FriendsWorkspace.get(context.applicationContext) }
+    val refreshTeams = onTeamJoined ?: { TeamsWorkspace.get(context.applicationContext).teamsModel.refresh() }
     val state by workspace.state.collectAsStateWithLifecycle()
     val link by workspace.link.state.collectAsStateWithLifecycle()
     val search by workspace.search.state.collectAsStateWithLifecycle()
@@ -78,6 +88,10 @@ internal fun FriendsTab(request: FriendsRequest?, onRequestHandled: (Long) -> Un
         if (uid == null) { setStack(emptyList()); workspace.link.clear() }
         else if (state.profile == null) workspace.loadProfile()
     }
+    // The invitations' clock (D28): read when the tab is shown, when the app comes back to the front and once a minute while it stays, so the
+    // time left and the live or expired state of every invitation are right without any document changing.
+    LaunchedEffect(workspace) { while (true) { workspace.refreshClock(); delay(CLOCK_TICK_MS) } }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { workspace.refreshClock() }
 
     // A link or push waits for sign-in and, for a chat, for the first cards snapshot (D16).
     LaunchedEffect(request?.id, uid, state.cardsLoaded) {
@@ -120,7 +134,8 @@ internal fun FriendsTab(request: FriendsRequest?, onRequestHandled: (Long) -> Un
                     state = state, uid = uid, openChatUid = if (wide) chatUid else "", listState = listState, scrollToRequests = scrollToRequests,
                     onOpenChat = ::openChat, onAdd = { openPage("add") }, onProfile = { openPage("profile") }, onBlocked = { openPage("blocked") },
                     onRetry = workspace::retry, onRetryProfile = workspace::loadProfile,
-                    onAccept = workspace::accept, onDecline = workspace::decline, onCancel = workspace::cancel, modifier = m,
+                    onAccept = workspace::accept, onDecline = workspace::decline, onCancel = workspace::cancel,
+                    onJoinOffer = { teamId -> workspace.acceptOffer(teamId, onJoined = refreshTeams) }, onDeclineOffer = workspace::declineOffer, modifier = m,
                 )
             }
             val page: @Composable (String, Modifier) -> Unit = { entry, m ->
@@ -159,3 +174,6 @@ internal fun FriendsTab(request: FriendsRequest?, onRequestHandled: (Long) -> Un
         state.notice?.let { notice -> FriendsNoticeBanner(notice, onDismiss = { workspace.clearNotice(notice) }, modifier = Modifier.align(Alignment.BottomCenter)) }
     }
 }
+
+/** How often the shown tab reads the device clock again (D28), on top of the expiry timer: it keeps "in 5 hours" right on a screen left open. */
+private const val CLOCK_TICK_MS = 60_000L

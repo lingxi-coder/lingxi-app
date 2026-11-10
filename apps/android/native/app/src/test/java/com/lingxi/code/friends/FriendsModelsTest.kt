@@ -98,6 +98,32 @@ class FriendsModelsTest {
         assertEquals(0, card.lastReadSeq)
     }
 
+    // --- team offers (D27) ----------------------------------------------------------------------------------
+
+    private fun offerDocument(vararg extra: Pair<String, Any?>): Map<String, Any?> =
+        mapOf("teamId" to "t1", "teamName" to "Book club", "fromUid" to "u2", "fromName" to "Ann", "role" to "member", "expiresAt" to 1_762_604_800_000L) + extra
+
+    @Test fun anOfferDocumentBecomesAnOfferAndTheDocumentIdIsTheTeamId() {
+        assertEquals(TeamOffer("t1", "Book club", "u2", "Ann", 1_762_604_800_000L), TeamOffer.fromDocument("t1", offerDocument(), millis))
+        assertEquals("t9", TeamOffer.fromDocument("t9", offerDocument(), millis)?.teamId)
+        assertEquals("the role is always member and is not kept", TeamOffer("t1", "Book club", "u2", "Ann", 5L), TeamOffer.fromDocument("t1", offerDocument("role" to "admin", "expiresAt" to 5L), millis))
+    }
+
+    @Test fun anOfferWithoutItsFourStringsAndATimeIsSkippedNeverFailingTheList() {
+        for (key in listOf("teamId", "teamName", "fromUid", "fromName", "expiresAt")) assertNull("$key missing", TeamOffer.fromDocument("t1", offerDocument() - key, millis))
+        for (key in listOf("teamId", "teamName", "fromUid", "fromName")) assertNull("$key as a number", TeamOffer.fromDocument("t1", offerDocument(key to 5L), millis))
+        assertNull("an explicit null time", TeamOffer.fromDocument("t1", offerDocument("expiresAt" to null), millis))
+        assertNull("a time that is not readable", TeamOffer.fromDocument("t1", offerDocument("expiresAt" to "soon"), millis))
+        assertNull("no document id", TeamOffer.fromDocument("", offerDocument(), millis))
+        assertNotNull(TeamOffer.fromDocument("t1", offerDocument("extra" to "ignored"), millis))
+    }
+
+    @Test fun theNamesOfAnOfferAreKeptAsPlainText() {
+        val offer = checkNotNull(TeamOffer.fromDocument("t1", offerDocument("teamName" to "**<b>Club</b>** [x](https://e.example)", "fromName" to "  Ann  "), millis))
+        assertEquals("**<b>Club</b>** [x](https://e.example)", offer.teamName)
+        assertEquals("  Ann  ", offer.fromName)
+    }
+
     // --- blocks ---------------------------------------------------------------------------------------------
 
     @Test fun aBlockEntryKeepsThePersonsName() {

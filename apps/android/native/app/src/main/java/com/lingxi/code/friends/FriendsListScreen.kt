@@ -64,11 +64,13 @@ import com.lingxi.code.teams.listTimeText
 import com.lingxi.code.teams.rememberNowMs
 import com.lingxi.code.teams.rememberTeamsListStrings
 import com.lingxi.code.theme.PersonAvatar
+import com.lingxi.code.theme.TeamTile
 
 /**
- * The Friends root (docs/FRIENDS-CLIENTS.md D3, D4, D5): header, the name banner, the Requests section, the filter and the friends.
- * The phone's root, or the left pane when wide. [openChatUid] is the friend whose chat is open beside it (wide), highlighted and read.
- * A change of [scrollToRequests] brings the Requests section into view (the `friend/requests` link and push).
+ * The Friends root (docs/FRIENDS-CLIENTS.md D3, D4, D5, D27): header, the name banner, the Team invitations and Requests sections, the filter
+ * and the friends. The phone's root, or the left pane when wide. [openChatUid] is the friend whose chat is open beside it (wide), highlighted
+ * and read. A change of [scrollToRequests] brings the top of the requests area into view (the `friend/requests` link and push): the Team
+ * invitations when there are any, else the Requests. An invitation reads as live or expired against [FriendsState.nowMs].
  */
 @Composable
 internal fun FriendsListScreen(
@@ -86,6 +88,8 @@ internal fun FriendsListScreen(
     onAccept: (String) -> Unit,
     onDecline: (String) -> Unit,
     onCancel: (String) -> Unit,
+    onJoinOffer: (String) -> Unit,
+    onDeclineOffer: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val locale = LocalConfiguration.current.locales[0]
@@ -102,6 +106,7 @@ internal fun FriendsListScreen(
     val outgoing = arranged.filter { it.state == FriendState.Outgoing }
     val friends = arranged.filter { it.state == FriendState.Friends }
     val shown = remember(friends, query) { friends.filter { FriendsLogic.matchesFilter(it, query) } }
+    val offers = remember(state.offers, state.nowMs) { state.offers.sortedWith(FriendsLogic.compareOffers(state.nowMs)) }
     val showNameBanner = FriendsLogic.needsName(state.profile)
     val showProfileError = state.profile == null && state.profileOp.error != null
     val showLoadError = state.cardsFailed && state.cardsLoaded
@@ -146,7 +151,7 @@ internal fun FriendsListScreen(
                     Spacer(Modifier.height(12.dp))
                     Text(stringResource(R.string.friends_loading), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                arranged.isEmpty() -> TeamsMessageState(
+                arranged.isEmpty() && offers.isEmpty() -> TeamsMessageState(
                     stringResource(R.string.friends_empty_title), Modifier.testTag(FriendsTags.EMPTY), icon = Icons.Outlined.PersonOutline, body = stringResource(R.string.friends_empty_body),
                     action = { Button(onClick = onAdd) { Text(stringResource(R.string.friends_add)) } },
                 )
@@ -172,6 +177,21 @@ internal fun FriendsListScreen(
                             FriendsErrorText(state.profileOp.error, Modifier.weight(1f))
                             TextButton(onClick = onRetryProfile) { Text(stringResource(R.string.common_retry)) }
                         }
+                    }
+                    if (offers.isNotEmpty()) {
+                        item(key = "offers") {
+                            Text(stringResource(R.string.friends_section_offers), Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp).testTag(FriendsTags.OFFERS), style = MaterialTheme.typography.titleSmall)
+                        }
+                        val all = "offers" in expanded.split(',')
+                        items(if (all) offers else offers.take(FriendsLogic.SECTION_ROWS), key = { "offer-${it.teamId}" }) { offer ->
+                            OfferRow(offer, FriendsLogic.offerExpiry(offer.expiresAtMs, state.nowMs), state.offerOps[offer.teamId], onJoin = { onJoinOffer(offer.teamId) }, onDecline = { onDeclineOffer(offer.teamId) })
+                        }
+                        if (!all && offers.size > FriendsLogic.SECTION_ROWS) item(key = "offers-all") {
+                            TextButton(onClick = { expanded = listOf(expanded, "offers").filter { it.isNotEmpty() }.joinToString(",") }, Modifier.padding(horizontal = 8.dp)) {
+                                Text(stringResource(R.string.friends_show_all_fmt, offers.size))
+                            }
+                        }
+                        item(key = "offers-end") { HorizontalDivider(Modifier.padding(top = 8.dp)) }
                     }
                     if (incoming.isNotEmpty() || outgoing.isNotEmpty()) {
                         item(key = "requests") {
@@ -244,6 +264,42 @@ private fun FriendRow(card: FriendCard, preview: String, time: String, unread: I
                 )
                 if (unread > 0) { Spacer(Modifier.width(8.dp)); UnreadBadge(unread) }
             }
+        }
+    }
+}
+
+/**
+ * A Team invitation (D27): the team's tile, its name, who invited and the time left, as plain text. A live one offers Join and Decline, an expired
+ * one only Dismiss; the row is disabled while one of its actions is in flight, and a failure shows under it.
+ */
+@Composable
+private fun OfferRow(offer: TeamOffer, expiry: OfferExpiry, op: FriendsOp?, onJoin: () -> Unit, onDecline: () -> Unit) {
+    val busy = op?.busy == true
+    val locale = LocalConfiguration.current.locales[0]
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).testTag(FriendsTags.offer(offer.teamId)), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        TeamTile(offer.teamId, offer.teamName, 40.dp)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(offer.teamName, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                stringResource(R.string.friends_offer_invited_by_fmt, offer.fromName.ifEmpty { stringResource(R.string.teams_member) }),
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                when (expiry) {
+                    is OfferExpiry.Live -> stringResource(R.string.friends_offer_expires_fmt, offerExpiryText(expiry, locale))
+                    OfferExpiry.Expired -> stringResource(R.string.friends_offer_expired)
+                },
+                Modifier.testTag(FriendsTags.offerExpiry(offer.teamId)), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (expiry is OfferExpiry.Live) {
+                    Button(onClick = onJoin, enabled = !busy, modifier = Modifier.testTag(FriendsTags.offerJoin(offer.teamId))) { Text(stringResource(R.string.friends_offer_join)) }
+                    TextButton(onClick = onDecline, enabled = !busy, modifier = Modifier.testTag(FriendsTags.offerDecline(offer.teamId))) { Text(stringResource(R.string.friends_request_decline)) }
+                } else {
+                    TextButton(onClick = onDecline, enabled = !busy, modifier = Modifier.testTag(FriendsTags.offerDismiss(offer.teamId))) { Text(stringResource(R.string.friends_offer_dismiss)) }
+                }
+            }
+            op?.error?.let { FriendsErrorText(it) }
         }
     }
 }

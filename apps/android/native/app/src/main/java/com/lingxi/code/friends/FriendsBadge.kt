@@ -5,8 +5,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * The Friends tab badge (docs/FRIENDS-CLIENTS.md D14): incoming requests plus the unread of every friend, from the one cards
- * listener. 0 hides the badge, and a signed-out user always reads 0.
+ * The Friends tab badge (docs/FRIENDS-CLIENTS.md D14, D28): incoming requests plus the unread of every friend, from the one cards
+ * listener, plus every live Team invitation, from the offers listener; an invitation stops counting when it expires, at a timer set for
+ * the earliest live expiry. 0 hides the badge, and a signed-out user always reads 0.
  *
  * It is the app-level [FriendsWorkspace]'s badge. The shell reads it at composition, which is also what starts the workspace,
  * so the badge counts before the Friends tab has ever been opened.

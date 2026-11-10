@@ -1,5 +1,6 @@
 package com.lingxi.code.friends
 
+import com.lingxi.code.R
 import com.lingxi.code.tabs.TabLogic
 import com.lingxi.code.teams.TeamLastMessage
 import com.lingxi.code.teams.TeamMember
@@ -12,6 +13,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 import java.util.Locale
 import java.util.UUID
 
@@ -200,6 +202,126 @@ class FriendsLogicTest {
         assertEquals("a request is not a chat", 8, FriendsLogic.badgeCount(cards, "c"))
         assertEquals(0, FriendsLogic.unreadShown(cards[0], "a"))
         assertEquals(3, FriendsLogic.unreadShown(cards[0], null))
+    }
+
+    // --- F4: Team offers (D26, D27, D28, D30) ----------------------------------------------------------------
+
+    /** The clock of every `offers` row; the rows never read the device clock. */
+    private val offersNow: Long get() = FriendsVectors.obj("offers").getLong("nowMs")
+
+    private fun offer(teamId: String, expiresAtMs: Long) = TeamOffer(teamId, "Team $teamId", "u2", "Ann", expiresAtMs)
+
+    @Test fun anOfferIsLiveStrictlyBeforeItExpiresAndReadsInHoursOrDays() {
+        val rows = FriendsVectors.rows("offers", "expiry")
+        assertEquals(18, rows.size)
+        for (row in rows) {
+            val expect = row.getJSONObject("expect")
+            val expected = when (expect.getString("state")) {
+                "expired" -> OfferExpiry.Expired
+                else -> OfferExpiry.Live(if (expect.getString("unit") == "hour") OfferUnit.Hour else OfferUnit.Day, expect.getInt("value"))
+            }
+            assertEquals(row.optString("note"), expected, FriendsLogic.offerExpiry(row.getLong("expiresAtMs"), offersNow))
+            assertEquals(row.optString("note"), expected != OfferExpiry.Expired, FriendsLogic.isLive(offer("t", row.getLong("expiresAtMs")), offersNow))
+        }
+    }
+
+    @Test fun liveOffersComeFirstThenTheNewestThenTheTeamIdAsText() {
+        val vector = FriendsVectors.obj("offers", "sort")
+        val input = FriendsVectors.rows("offers", "sort", "input").also { assertEquals(8, it.size) }.map { offer(it.getString("teamId"), it.getLong("expiresAtMs")) }
+        assertEquals(FriendsVectors.strings(vector.getJSONArray("expect")), input.sortedWith(FriendsLogic.compareOffers(offersNow)).map { it.teamId })
+        assertEquals("the order does not depend on the order of arrival", FriendsVectors.strings(vector.getJSONArray("expect")), input.reversed().sortedWith(FriendsLogic.compareOffers(offersNow)).map { it.teamId })
+    }
+
+    @Test fun theBadgeAlsoCountsEveryLiveOffer() {
+        val rows = FriendsVectors.rows("offers", "badge")
+        assertEquals(10, rows.size)
+        for (row in rows) {
+            val note = row.optString("note")
+            val array = row.getJSONArray("cards")
+            val cards = (0 until array.length()).map { index -> FriendsVectors.card(array.getJSONObject(index).put("uid", "u$index")) }
+            val times = row.getJSONArray("offers").let { list -> (0 until list.length()).map { list.getLong(it) } }
+            val count = FriendsLogic.badgeCount(cards, times.mapIndexed { index, at -> offer("t$index", at) }, offersNow)
+            assertEquals(note, row.getInt("expectCount"), count)
+            assertEquals(note, row.stringOrNull("expectText"), FriendsLogic.badgeText(count))
+        }
+    }
+
+    @Test fun theBadgeWithOffersStillTreatsTheOpenChatAsRead() {
+        val cards = listOf(JSONObject().put("uid", "a").put("state", "friends").put("lastSeq", 5).put("lastReadSeq", 2), JSONObject().put("uid", "c").put("state", "incoming")).map { FriendsVectors.card(it) }
+        val offers = listOf(offer("live", offersNow + 1), offer("gone", offersNow))
+        assertEquals(1 + 3 + 1, FriendsLogic.badgeCount(cards, offers, offersNow))
+        assertEquals(1 + 0 + 1, FriendsLogic.badgeCount(cards, offers, offersNow, "a"))
+        assertEquals("an offer that expired meanwhile stops counting", 1 + 3, FriendsLogic.badgeCount(cards, offers, offersNow + 1))
+        assertEquals("the plain badge does not know offers", FriendsLogic.badgeCount(cards), FriendsLogic.badgeCount(cards, emptyList(), offersNow))
+    }
+
+    @Test fun thePickerListsTheFriendsWhoAreNotInTheTeam() {
+        val picker = FriendsVectors.obj("offers", "picker")
+        val everyone = FriendsVectors.rows("offers", "picker", "cases").also { assertEquals(13, it.size) }
+        val shared = cards(FriendsVectors.rows("offers", "picker", "cards"))
+        for (case in everyone) {
+            val input = if (case.has("cards")) cards(case.getJSONArray("cards").let { list -> (0 until list.length()).map { list.getJSONObject(it) } }) else shared
+            val members = FriendsVectors.strings(case.getJSONArray("members")).toSet()
+            for (locale in FriendsVectors.locales) {
+                val listed = FriendsLogic.invitePicker(input, members, case.getString("query"), FriendsLogic.friendCollator(locale)).map { it.uid }
+                assertEquals("${locale.toLanguageTag()}: ${case.optString("note")}", FriendsVectors.strings(case.getJSONArray("expect")), listed)
+            }
+        }
+        assertTrue(picker.getJSONArray("cards").length() > 0)
+    }
+
+    @Test fun onlyAnOwnerOrAnAdminInvitesFriends() {
+        val rows = FriendsVectors.rows("offers", "entry")
+        assertEquals(5, rows.size)
+        for (row in rows) assertEquals("${row.getString("role")} of ${row.getInt("memberCount")}", row.getBoolean("expect"), FriendsLogic.canInviteFriends(row.getString("role")))
+        assertFalse("an unknown role is no manager", FriendsLogic.canInviteFriends("guest"))
+    }
+
+    @Test fun offerErrorsHaveTheirOwnKeysAndNeverEndTheChat() {
+        val rows = FriendsVectors.rows("offers", "errors")
+        assertEquals(33, rows.size)
+        for (row in rows) {
+            val action = OfferAction.of(row.getString("action"))
+            val code = row.getString("code")
+            assertEquals("${action.wire} $code", row.getString("key"), FriendsLogic.offerErrorKey(action, code))
+            assertEquals("${action.wire} $code", row.getBoolean("definitive"), FriendsError.ofOffer(action, code).definitive)
+            assertTrue("${action.wire} $code", FriendsError.ofOffer(action, code) != FriendsError.ChatUnavailable)
+        }
+        assertEquals("the chat reading of the same code is not used", FriendsError.ChatUnavailable, FriendsError.of("MEMBERSHIP_REQUIRED"))
+        assertEquals(FriendsError.OfferTeamGone, FriendsError.ofOffer(OfferAction.OfferTeam, "MEMBERSHIP_REQUIRED"))
+    }
+
+    @Test fun everyErrorShowsTheStringItsKeyNames() {
+        for (error in FriendsError.entries) {
+            assertEquals(error.name, R.string::class.java.getField(error.key).getInt(null), friendsErrorRes(error))
+        }
+    }
+
+    @Test fun aFailureOfTheTransportIsANetworkErrorForTheOfferActionsToo() {
+        for (action in OfferAction.entries) {
+            for (failure in listOf<Throwable>(java.io.IOException("offline"), org.json.JSONException("not json"), java.net.SocketTimeoutException())) {
+                assertEquals(FriendsError.Network, FriendsError.ofOffer(action, failure))
+            }
+            assertEquals(FriendsError.Network, FriendsError.ofOffer(action, TeamMessageFailure("SERVICE_UNAVAILABLE")))
+        }
+        assertEquals(FriendsError.OfferUnavailable, FriendsError.ofOffer(OfferAction.AcceptOffer, TeamMessageFailure("OFFER_UNAVAILABLE")))
+        assertEquals("a code of another action is generic", FriendsError.Generic, FriendsError.ofOffer(OfferAction.DeclineOffer, TeamMessageFailure("OFFER_UNAVAILABLE")))
+        assertEquals(listOf("offerTeam", "acceptOffer", "declineOffer"), OfferAction.entries.map { it.wire })
+    }
+
+    @Test fun theOfferStringsCarryTheVectorLimits() {
+        val limits = FriendsVectors.obj("limits")
+        val values = generateSequence(File(checkNotNull(System.getProperty("user.dir")))) { it.parentFile }
+            .map { File(it, "src/main/res") }.first { it.isDirectory }
+        for (folder in listOf("values", "values-en")) {
+            val xml = File(values, "$folder/strings.xml").readText()
+            fun number(value: Int) = Regex("(?<!\\d)$value(?!\\d)")
+            fun text(key: String) = Regex("<string name=\"$key\">(.*?)</string>", RegexOption.DOT_MATCHES_ALL).find(xml)?.groupValues?.get(1) ?: error("$folder has no $key")
+            assertTrue("$folder offer limit", number(limits.getInt("offerLimit")).containsMatchIn(text("friends_error_offer_limit")))
+            assertTrue("$folder member limit", number(limits.getInt("teamMemberLimit")).containsMatchIn(text("friends_error_member_limit")))
+            assertTrue("$folder team limit", number(limits.getInt("userTeamLimit")).containsMatchIn(text("friends_error_team_limit")))
+            assertTrue("$folder offer lifetime", number(limits.getInt("offerTtlDays")).containsMatchIn(text("friends_invite_disclosure")))
+        }
     }
 
     // --- D6, D7 -----------------------------------------------------------------------------------------------

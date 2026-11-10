@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -37,11 +38,20 @@ internal sealed interface FriendsNotice {
     data class NowFriends(val name: String) : FriendsNotice
     /** A link or a push named a chat that is not a current friend's (D16). */
     data object ChatUnavailable : FriendsNotice
+
+    /** A Team invitation was accepted (D27); shown once in Friends, which stays where it is. */
+    data class OfferJoined(val teamName: String) : FriendsNotice
 }
 
 /**
- * Everything the Friends screens read. [cards] and [blocks] are what the two Firestore listeners last delivered (unordered: the screens
- * sort with the collator of their UI language); everything else is memory only and starts over with every account (D19).
+ * One row of the Invite friends picker (D26): the call in flight, the error it ended with, or [sentTo], the friend's name, once the offer went
+ * out. The mark lasts until the picker closes: the sender can never read an offer, so nothing else knows it was made.
+ */
+internal data class InviteRow(val busy: Boolean = false, val error: FriendsError? = null, val sentTo: String? = null)
+
+/**
+ * Everything the Friends screens read. [cards], [blocks] and [offers] are what the three Firestore listeners last delivered (unordered: the
+ * screens sort with the collator of their UI language and the clock); everything else is memory only and starts over with every account (D19).
  */
 internal data class FriendsState(
     val uid: String? = null,
@@ -51,6 +61,14 @@ internal data class FriendsState(
     val blocks: List<BlockEntry> = emptyList(),
     val blocksLoaded: Boolean = false,
     val blocksFailed: Boolean = false,
+    /** The Team invitations (D27). A failed offers listener ends that watch and leaves nothing here: it shows nothing and counts nothing. */
+    val offers: List<TeamOffer> = emptyList(),
+    val offersFailed: Boolean = false,
+    /**
+     * The device clock the Team invitations are read against (D27, D28): read at sign-in, with every offers snapshot, at the earliest live expiry
+     * and whenever the Friends view is shown, never on its own. The badge and the Team invitations section both read it.
+     */
+    val nowMs: Long = 0L,
     val profile: FriendProfile? = null,
     /** `GET /v1/friends/profile`. */
     val profileOp: FriendsOp = FriendsOp(),
@@ -60,6 +78,10 @@ internal data class FriendsState(
     val linkOp: FriendsOp = FriendsOp(),
     /** The row actions (accept, decline, cancel, remove, block, unblock) in flight or failed, by the other person's uid. */
     val rowOps: Map<String, FriendsOp> = emptyMap(),
+    /** The Team invitation row actions (join, decline, dismiss) in flight or failed, by team id (D27). */
+    val offerOps: Map<String, FriendsOp> = emptyMap(),
+    /** The Invite friends picker's rows by the friend's uid, in the order they were invited (D26). Empty while no picker is open. */
+    val invites: Map<String, InviteRow> = emptyMap(),
     val names: Map<String, FriendName> = emptyMap(),
     val notice: FriendsNotice? = null,
     /** The friend whose chat is open and in front (D13): its unread shows as 0 in the list and the badge. */
@@ -83,22 +105,24 @@ internal data class FriendsState(
  * The app-level Friends workspace: one per process, started by the first read of [FriendsBadge.count] (the shell reads it at
  * composition) and kept for the life of the process; an account change tears everything down (D19).
  *
- * Live data is the two owner-only listeners of D2, `users/{uid}/friends` and `users/{uid}/blocks`, and nothing per friend. Everything
- * else is HTTP with the Firebase ID token through [TeamHttp] (`GET /v1/friends/profile`, `POST /v1/friends`) and one `get` of
- * `profiles/{uid}` per name refresh. Chat data is not here: a chat runs on its own pair-pinned `TeamsWorkspace` (D9).
+ * Live data is the three owner-only listeners of D2, `users/{uid}/friends`, `users/{uid}/blocks` and `users/{uid}/teamOffers`, and nothing
+ * per friend. Everything else is HTTP with the Firebase ID token through [TeamHttp] (`GET /v1/friends/profile`, `POST /v1/friends`) and one
+ * `get` of `profiles/{uid}` per name refresh. Chat data is not here: a chat runs on its own pair-pinned `TeamsWorkspace` (D9). [clock] is
+ * the device clock the offers' expiry is read against (D27).
  */
 internal class FriendsWorkspace(
     private val scope: CoroutineScope,
     private val auth: FirebaseAuth,
     private val db: FirebaseFirestore,
     private val apiRoot: String = TEAMS_API_ROOT,
+    private val clock: () -> Long = System::currentTimeMillis,
     private val http: suspend (url: String, token: String, body: JSONObject?) -> JSONObject = TeamHttp::request,
 ) {
     private val mutable = MutableStateFlow(FriendsState())
     val state: StateFlow<FriendsState> = mutable.asStateFlow()
 
-    /** The Friends tab badge (D14): incoming requests plus the unread of every friend; 0 while signed out. */
-    val badge: StateFlow<Int> = mutable.map { FriendsLogic.badgeCount(it.cards, it.openChatUid) }.stateIn(scope, SharingStarted.Eagerly, 0)
+    /** The Friends tab badge (D14, D28): incoming requests, the unread of every friend and every live team offer; 0 while signed out. */
+    val badge: StateFlow<Int> = mutable.map { FriendsLogic.badgeCount(it.cards, it.offers, it.nowMs, it.openChatUid) }.stateIn(scope, SharingStarted.Eagerly, 0)
 
     /** The Add friend screen's lookup, a friend link opened from outside, and a Team member's Add friend (D6, D8, D15). */
     val search = newLookup()
@@ -111,6 +135,12 @@ internal class FriendsWorkspace(
     private var session: CoroutineScope = newSession()
     private var epoch = 0L
     private var started = false
+    /** The one timer of the badge: it fires at the earliest live expiry (D28). */
+    private var expiry: Job? = null
+    /** The request ids of `offerTeam` and `acceptOffer` calls whose outcome is unknown, by what they were minted for; reused only to retry that call (D18, D30). Memory only. */
+    private val attempts = mutableMapOf<String, String>()
+    /** Counts the pickers closed: an invite that finishes after its picker closed leaves no mark behind (D26). */
+    private var pickers = 0
 
     fun start() {
         if (started) return
@@ -127,13 +157,14 @@ internal class FriendsWorkspace(
         if (uid == mutable.value.uid) return
         epoch++
         session.cancel(); session = newSession()
+        expiry = null; attempts.clear()
         listeners.values.forEach { it.remove() }; listeners.clear()
         search.clear(); link.clear(); member.clear()
-        mutable.value = FriendsState(uid = uid)
-        if (uid != null) { listenCards(uid); listenBlocks(uid) }
+        mutable.value = FriendsState(uid = uid, nowMs = clock())
+        if (uid != null) { listenCards(uid); listenBlocks(uid); listenOffers(uid) }
     }
 
-    // --- the two listeners (D2) -------------------------------------------------------------------------
+    // --- the three listeners (D2) -----------------------------------------------------------------------
 
     private fun listenCards(uid: String) {
         listeners.remove(CARDS)?.remove()
@@ -163,12 +194,50 @@ internal class FriendsWorkspace(
         }
     }
 
-    /** The list's and the blocked screen's Retry: a listener that ended with an error starts again. */
+    /**
+     * The Team invitations (D27). A document that is not a whole offer is skipped; a failed listener ends that watch, shows nothing and counts
+     * nothing until [retry]. Every snapshot also moves the badge's clock and its timer, since a new offer may expire earlier than the last one.
+     */
+    private fun listenOffers(uid: String) {
+        listeners.remove(OFFERS)?.remove()
+        val expected = epoch
+        mutable.update { it.copy(offersFailed = false) }
+        listeners[OFFERS] = db.collection("users").document(uid).collection("teamOffers").addSnapshotListener { snapshot, error ->
+            if (expected != epoch) return@addSnapshotListener
+            if (error != null || snapshot == null) {
+                mutable.update { it.copy(offers = emptyList(), offersFailed = true, offerOps = emptyMap()) }
+            } else {
+                val offers = snapshot.documents.mapNotNull { document -> document.data?.let { TeamOffer.fromDocument(document.id, it, ::firestoreMillis) } }
+                mutable.update { state ->
+                    val ids = offers.map { it.teamId }.toSet()
+                    state.copy(offers = offers, offersFailed = false, offerOps = state.offerOps.filterKeys { it in ids })
+                }
+            }
+            refreshClock()
+        }
+    }
+
+    /** The list's and the blocked screen's Retry: a listener that ended with an error starts again, and so does a failed offers watch (D27). */
     fun retry() {
         val current = mutable.value
         val uid = current.uid ?: return
         if (current.cardsFailed) listenCards(uid)
         if (current.blocksFailed) listenBlocks(uid)
+        if (current.offersFailed) listenOffers(uid)
+    }
+
+    // --- the clock of the badge (D28) -------------------------------------------------------------------------
+
+    /**
+     * Reads the device clock again and sets the one timer for the earliest live expiry: an offer that expires changes the badge without any
+     * document changing. Also run whenever the Friends view is shown, which covers a device that slept through a timer.
+     */
+    fun refreshClock() {
+        val now = clock()
+        mutable.update { it.copy(nowMs = now) }
+        expiry?.cancel(); expiry = null
+        val next = mutable.value.offers.map { it.expiresAtMs }.filter { it > now }.minOrNull() ?: return
+        expiry = session.launch { delay(next - now); expiry = null; refreshClock() }
     }
 
     // --- HTTP ---------------------------------------------------------------------------------------------
@@ -284,6 +353,98 @@ internal class FriendsWorkspace(
         }
     }
 
+    // --- team offers: the invitations I got and the ones I send (D26, D27, D30) --------------------------------------
+
+    /**
+     * Joins the team of an invitation (D27). The offer must look live: one that looks expired is never sent, and the server decides the rest
+     * (OFFER_UNAVAILABLE means it deleted the offer, and the listener drops the row). The request id is minted at the tap and reused only to retry
+     * after an unknown outcome (D18, D30). [onJoined] runs on success, with the replay of an earlier join (`alreadyMember`) counting as one:
+     * the Friends tab refreshes the Teams list there, as a link join does.
+     */
+    fun acceptOffer(teamId: String, onJoined: () -> Unit = {}) {
+        val current = mutable.value
+        val offer = current.offers.firstOrNull { it.teamId == teamId } ?: return
+        if (current.uid == null || current.offerOps[teamId]?.busy == true || FriendsLogic.offerExpiry(offer.expiresAtMs, clock()) == OfferExpiry.Expired) return
+        val attempt = "accept:$teamId"
+        val requestId = attempts.getOrPut(attempt) { FriendsLogic.newRequestId() }
+        setOfferOp(teamId, FriendsOp(busy = true))
+        session.launch {
+            try {
+                post(mapOf("action" to OfferAction.AcceptOffer.wire, "offerId" to teamId, "requestId" to requestId))
+                attempts.remove(attempt)
+                mutable.update { it.copy(offerOps = it.offerOps - teamId, notice = FriendsNotice.OfferJoined(offer.teamName)) }
+                onJoined()
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                val failure = FriendsError.ofOffer(OfferAction.AcceptOffer, error)
+                if (failure.definitive) attempts.remove(attempt)
+                setOfferOp(teamId, FriendsOp(error = failure))
+            }
+        }
+    }
+
+    /** Declines an invitation, or dismisses an expired one (D27): no confirmation and no request id, and safe to repeat. The listener drops the row. */
+    fun declineOffer(teamId: String) {
+        val current = mutable.value
+        if (current.uid == null || current.offers.none { it.teamId == teamId } || current.offerOps[teamId]?.busy == true) return
+        setOfferOp(teamId, FriendsOp(busy = true))
+        session.launch {
+            try {
+                post(mapOf("action" to OfferAction.DeclineOffer.wire, "offerId" to teamId))
+                mutable.update { it.copy(offerOps = it.offerOps - teamId) }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { setOfferOp(teamId, FriendsOp(error = FriendsError.ofOffer(OfferAction.DeclineOffer, error))) }
+        }
+    }
+
+    /** A row's state is only kept while its offer is there: one the listener already dropped needs no error of its own. */
+    private fun setOfferOp(teamId: String, op: FriendsOp) {
+        mutable.update { if (it.offers.any { offer -> offer.teamId == teamId }) it.copy(offerOps = it.offerOps + (teamId to op)) else it }
+    }
+
+    /**
+     * Invites one friend of the picker to [teamId] (D26): always as a member, with no message. The row is disabled while the call runs and, once
+     * it went out, shows "invited" until the picker closes ([closeInvites]). The request id is minted at the tap and reused only to retry after an
+     * unknown outcome (D18, D30). ALREADY_MEMBER means the person joined meanwhile: [onAlreadyMember] refreshes the member list, and the picker
+     * drops the row itself.
+     */
+    fun offerTeam(teamId: String, friendUid: String, onAlreadyMember: () -> Unit = {}) {
+        val current = mutable.value
+        val name = current.friendCard(friendUid)?.displayName ?: return
+        if (current.uid == null || current.invites[friendUid]?.let { it.busy || it.sentTo != null } == true) return
+        val attempt = "offer:$teamId:$friendUid"
+        val requestId = attempts.getOrPut(attempt) { FriendsLogic.newRequestId() }
+        val picker = pickers
+        fun mark(row: InviteRow) { if (picker == pickers) mutable.update { it.copy(invites = it.invites + (friendUid to row)) } }
+        mark(InviteRow(busy = true))
+        session.launch {
+            try {
+                post(mapOf("action" to OfferAction.OfferTeam.wire, "teamId" to teamId, "friendUid" to friendUid, "requestId" to requestId))
+                attempts.remove(attempt)
+                mark(InviteRow(sentTo = name))
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                val failure = FriendsError.ofOffer(OfferAction.OfferTeam, error)
+                if (failure.definitive) attempts.remove(attempt)
+                mark(InviteRow(error = failure))
+                if (failure == FriendsError.AlreadyMember) onAlreadyMember()
+            }
+        }
+    }
+
+    /**
+     * The Invite friends picker closed (D26): its marks and request ids go. Returns the names of the friends invited meanwhile, in the order they
+     * were invited, for the one-shot "invitation sent" the Teams tab shows; nothing else remembers them, because the sender can never read an
+     * offer. Opening the picker again lists them again: inviting again refreshes the same offer.
+     */
+    fun closeInvites(): List<String> {
+        pickers++
+        attempts.keys.removeAll { it.startsWith("offer:") }
+        val sent = mutable.value.invites.values.mapNotNull { it.sentTo }
+        mutable.update { it.copy(invites = emptyMap()) }
+        return sent
+    }
+
     // --- names (D10) and the open chat (D13) ----------------------------------------------------------------
 
     /**
@@ -312,6 +473,7 @@ internal class FriendsWorkspace(
     companion object {
         private const val CARDS = "friends"
         private const val BLOCKS = "blocks"
+        private const val OFFERS = "teamOffers"
         private const val CARD_WAIT_MS = 8_000L
 
         @Volatile private var instance: FriendsWorkspace? = null

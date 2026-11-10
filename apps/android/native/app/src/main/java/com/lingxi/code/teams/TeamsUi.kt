@@ -71,6 +71,7 @@ internal object TeamsTags {
     const val COMPOSER_LOCK = "teams.composerLock"
     const val ASK_BOT = "teams.askBot"
     const val SHEET = "teams.sheet"
+    const val INVITE_FRIENDS = "teams.inviteFriends"
     fun section(id: String) = "teams.section.$id"
     fun row(id: String) = "teams.row.$id"
     fun message(id: String) = "teams.message.$id"

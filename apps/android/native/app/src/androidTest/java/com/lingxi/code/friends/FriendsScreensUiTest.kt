@@ -44,9 +44,15 @@ import com.lingxi.code.tabs.AppTab
 import com.lingxi.code.tabs.FriendsRequest
 import com.lingxi.code.tabs.LocalTabHost
 import com.lingxi.code.tabs.TabHost
+import com.lingxi.code.teams.TeamBotCard
 import com.lingxi.code.teams.TeamLastMessage
+import com.lingxi.code.teams.TeamMember
+import com.lingxi.code.teams.TeamMemberRef
+import com.lingxi.code.teams.TeamMessagingState
+import com.lingxi.code.teams.TeamsTags
 import com.lingxi.code.testing.finishComposeFixture
 import com.lingxi.code.theme.LingXiTheme
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -56,8 +62,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * The Friends screens on a device (docs/FRIENDS-CLIENTS.md D3 to D8, D11, D12): the list, Add friend, the friend-link dialog, Profile
- * settings and Blocked people are driven with hand-made state and callbacks, so no Firebase project or account is needed. The signed-out
+ * The Friends screens on a device (docs/FRIENDS-CLIENTS.md D3 to D8, D11, D12, D21, D23, D26, D27): the list with its Team invitations, Add
+ * friend, the friend-link dialog, Profile settings, Blocked people, the friendship's Bots and the Invite friends sheet are driven with
+ * hand-made state and callbacks, so no Firebase project or account is needed. The signed-out
  * gate of the tab runs against the real default app and is skipped when someone is signed in on the device. The rules behind the
  * screens (order, filter, unread, badge, query kinds, relation actions, errors) run on the JVM in `FriendsLogicTest` against the shared
  * vectors; the workspace and the lookup flow in `FriendsWorkspaceTest` and `FriendLookupTest`.
@@ -125,6 +132,7 @@ class FriendsScreensUiTest {
                 onOpenChat = { events += "chat:$it" }, onAdd = { events += "add" }, onProfile = { events += "profile" }, onBlocked = { events += "blocked" },
                 onRetry = { events += "retry" }, onRetryProfile = { events += "retryProfile" },
                 onAccept = { events += "accept:$it" }, onDecline = { events += "decline:$it" }, onCancel = { events += "cancel:$it" },
+                onJoinOffer = { events += "join:$it" }, onDeclineOffer = { events += "declineOffer:$it" },
             )
         }
     }
@@ -807,6 +815,269 @@ class FriendsScreensUiTest {
         rule.onNodeWithText(text(R.string.friends_chat_unavailable)).assertIsDisplayed()
         assertTrue("it stays for a while: $events", events.isEmpty())
         rule.waitUntil(timeoutMillis = 10_000) { "dismiss" in events }
+    }
+
+    // --- Team invitations (D27, D28) --------------------------------------------------------------------------------
+
+    private val clock = 1_762_000_000_000L
+    private val hour = 3_600_000L
+    private val day = 24 * hour
+    private fun offer(teamId: String, teamName: String = "Crew $teamId", from: String = "Ann", inMs: Long) = TeamOffer(teamId, teamName, "u2", from, clock + inMs)
+    private fun withOffers(vararg offers: TeamOffer, cards: List<FriendCard> = emptyList()) = loaded(*cards.toTypedArray()).copy(offers = offers.toList(), nowMs = clock)
+    private fun expires(unit: OfferUnit, value: Int) =
+        text(R.string.friends_offer_expires_fmt, offerExpiryText(OfferExpiry.Live(unit, value), rule.activity.resources.configuration.locales[0]))
+
+    @Test fun teamInvitationsComeAboveTheRequestsNewestFirstAndSayWhoInvitedAndWhenItExpires() {
+        showList(
+            withOffers(
+                offer("t2", "Chess", "Bo", inMs = 5 * hour), offer("old", "Old club", "Cy", inMs = -hour), offer("t1", "Book club", "Ann", inMs = 3 * day - hour),
+                cards = listOf(request("i1", FriendState.Incoming, "Ivy"), friend("f_cy", "Cy")),
+            ),
+        )
+        val order = listOf(
+            FriendsTags.OFFERS, FriendsTags.offer("t1"), FriendsTags.offer("t2"), FriendsTags.offer("old"), FriendsTags.REQUESTS, FriendsTags.row("i1"), FriendsTags.row("f_cy"),
+        )
+        order.forEach { rule.onNodeWithTag(it).assertIsDisplayed() }
+        val tops = order.map(::top)
+        assertEquals("sections are not in the expected order: $tops", tops.sorted(), tops)
+        rule.onNodeWithText(text(R.string.friends_section_offers)).assertIsDisplayed()
+        rule.onNodeWithTag(FriendsTags.offer("t1")).assert(
+            hasAnyDescendant(hasText("Book club")) and hasAnyDescendant(hasText(text(R.string.friends_offer_invited_by_fmt, "Ann"))),
+        )
+        rule.onNodeWithTag(FriendsTags.offerExpiry("t1")).assert(hasText(expires(OfferUnit.Day, 3)))
+        rule.onNodeWithTag(FriendsTags.offerExpiry("t2")).assert(hasText(expires(OfferUnit.Hour, 5)))
+        rule.onNodeWithTag(FriendsTags.offerExpiry("old")).assert(hasText(text(R.string.friends_offer_expired)))
+    }
+
+    @Test fun joinAndDeclineAnswerALiveInvitationAndItNeverOffersDismiss() {
+        showList(withOffers(offer("t1", inMs = day)))
+        rule.onNodeWithTag(FriendsTags.offerDismiss("t1")).assertDoesNotExist()
+        rule.onNodeWithTag(FriendsTags.offerJoin("t1")).assert(hasText(text(R.string.friends_offer_join))).performClick()
+        rule.onNodeWithTag(FriendsTags.offerDecline("t1")).assert(hasText(text(R.string.friends_request_decline))).performClick()
+        assertEquals(listOf("join:t1", "declineOffer:t1"), events)
+    }
+
+    @Test fun anExpiredInvitationOffersOnlyDismiss() {
+        showList(withOffers(offer("old", inMs = -1), offer("edge", inMs = 0)))
+        for (id in listOf("old", "edge")) {
+            rule.onNodeWithTag(FriendsTags.offerJoin(id)).assertDoesNotExist()
+            rule.onNodeWithTag(FriendsTags.offerDecline(id)).assertDoesNotExist()
+            rule.onNodeWithTag(FriendsTags.offerExpiry(id)).assert(hasText(text(R.string.friends_offer_expired)))
+            rule.onNodeWithTag(FriendsTags.offerDismiss(id)).assert(hasText(text(R.string.friends_offer_dismiss))).performClick()
+        }
+        assertEquals(listOf("declineOffer:old", "declineOffer:edge"), events)
+    }
+
+    @Test fun anInvitationTurnsExpiredWhenTheClockPassesItAndJoinGoesAway() {
+        showList(withOffers(offer("t1", inMs = hour)))
+        rule.onNodeWithTag(FriendsTags.offerJoin("t1")).assertIsDisplayed()
+        update { state = state.copy(nowMs = clock + hour) }
+        rule.onNodeWithTag(FriendsTags.offerJoin("t1")).assertDoesNotExist()
+        rule.onNodeWithTag(FriendsTags.offerDismiss("t1")).assertIsDisplayed()
+    }
+
+    @Test fun anInvitationWithACallInFlightIsDisabledAndAFailedOneShowsItsOfferText() {
+        showList(
+            withOffers(offer("t1", inMs = day), offer("t2", inMs = 2 * day), offer("old", inMs = -hour))
+                .copy(offerOps = mapOf("t1" to FriendsOp(busy = true), "t2" to FriendsOp(error = FriendsError.TeamLimit), "old" to FriendsOp(busy = true))),
+        )
+        rule.onNodeWithTag(FriendsTags.offerJoin("t1")).assertIsNotEnabled()
+        rule.onNodeWithTag(FriendsTags.offerDecline("t1")).assertIsNotEnabled()
+        rule.onNodeWithTag(FriendsTags.offerDismiss("old")).assertIsNotEnabled()
+        rule.onNodeWithTag(FriendsTags.offerJoin("t2")).assertIsEnabled()
+        rule.onNodeWithText(text(R.string.friends_error_team_limit)).assertIsDisplayed()
+    }
+
+    @Test fun onlyInvitationsIsNotTheEmptyStateAndNoInvitationsShowNoSection() {
+        showList(withOffers(offer("t1", inMs = day)))
+        rule.onNodeWithTag(FriendsTags.EMPTY).assertDoesNotExist()
+        rule.onNodeWithTag(FriendsTags.OFFERS).assertIsDisplayed()
+        update { state = loaded(friend("a", "Ann")) }
+        rule.onNodeWithTag(FriendsTags.OFFERS).assertDoesNotExist()
+        update { state = loaded() }
+        rule.onNodeWithTag(FriendsTags.EMPTY).assertIsDisplayed()
+    }
+
+    @Test fun moreThanTwentyInvitationsEndWithShowAllWhichExpandsThem() {
+        val many = (1..23).map { offer("t%02d".format(it), inMs = day - it * hour) }
+        showList(withOffers(*many.toTypedArray()), height = 8000.dp)
+        val showAll = text(R.string.friends_show_all_fmt, 23)
+        (1..20).forEach { rule.onNodeWithTag(FriendsTags.offer("t%02d".format(it))).assertExists() }
+        rule.onNodeWithTag(FriendsTags.offer("t21")).assertDoesNotExist()
+        rule.onNodeWithText(showAll).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag(FriendsTags.offer("t23")).assertExists()
+        rule.onNodeWithText(showAll).assertDoesNotExist()
+    }
+
+    @Test fun aJoinedInvitationIsAnnouncedByTeamName() {
+        show { FriendsNoticeBanner(FriendsNotice.OfferJoined("Book club"), onDismiss = { events += "dismiss" }) }
+        rule.onNodeWithText(text(R.string.friends_offer_joined_fmt, "Book club")).assertIsDisplayed()
+        rule.onNodeWithTag(FriendsTags.NOTICE).performClick()
+        assertTrue("a tap dismisses it: $events", "dismiss" in events)
+    }
+
+    @Test fun theInvitedFriendsAreAnnouncedAsAListInThePersonsLanguage() {
+        val locale = rule.activity.resources.configuration.locales[0]
+        show { FriendsBanner(text(R.string.friends_invite_sent_to_fmt, friendNamesText(listOf("Ann", "Bo"), locale)), "key", onDismiss = { events += "dismiss" }) }
+        rule.onNodeWithTag(FriendsTags.NOTICE).assert(hasText(text(R.string.friends_invite_sent_to_fmt, friendNamesText(listOf("Ann", "Bo"), locale))))
+        assertTrue(friendNamesText(listOf("Ann", "Bo"), locale).let { "Ann" in it && "Bo" in it })
+    }
+
+    // --- Invite friends (D26) -----------------------------------------------------------------------------------------
+
+    private fun showInvite(initial: FriendsState, members: Set<String> = setOf(uid)) {
+        state = initial
+        show {
+            InviteFriendsSheet(
+                teamName = "Crew", state = state, memberUids = members, onInvite = { events += "invite:$it" }, onDismiss = { events += "dismiss" },
+            )
+        }
+    }
+
+    private fun friendsForInvite() = loaded(
+        friend("f_bob", "Bob", at = base, lastSeq = 1), friend("f_ann", "Ann", handle = "ann_w", at = base + hour, lastSeq = 1), friend("f_dee", "dee"), friend("f_cy", "Cy"),
+        request("i1", FriendState.Incoming, "Ivy"), request("o1", FriendState.Outgoing, "Oz"),
+    )
+
+    @Test fun theInvitePickerListsTheFriendsWhoAreNotMembersInTheFriendsOrderUnderTheTeamTitle() {
+        showInvite(friendsForInvite(), members = setOf(uid, "f_bob"))
+        rule.onNodeWithTag(FriendsTags.INVITE_SHEET).assertIsDisplayed()
+        rule.onNodeWithText(text(R.string.friends_invite_title_fmt, "Crew")).assertIsDisplayed()
+        rule.onNodeWithTag(FriendsTags.INVITE_FILTER).assertIsDisplayed()
+        rule.onNodeWithTag(FriendsTags.INVITE_DISCLOSURE).assert(hasText(text(R.string.friends_invite_disclosure)))
+        val order = listOf(FriendsTags.invite("f_ann"), FriendsTags.invite("f_cy"), FriendsTags.invite("f_dee"))
+        order.forEach { rule.onNodeWithTag(it).assertIsDisplayed() }
+        val tops = order.map(::top)
+        assertEquals("rows are not in the expected order: $tops", tops.sorted(), tops)
+        for (excluded in listOf("f_bob", "i1", "o1")) rule.onNodeWithTag(FriendsTags.invite(excluded)).assertDoesNotExist()
+        rule.onNodeWithTag(FriendsTags.invite("f_ann")).assert(hasAnyDescendant(hasText("Ann")) and hasAnyDescendant(hasText("@ann_w")))
+        rule.onNodeWithTag(FriendsTags.inviteSend("f_ann")).assert(hasText(text(R.string.friends_invite_send))).assertIsEnabled().performClick()
+        assertEquals(listOf("invite:f_ann"), events)
+    }
+
+    @Test fun anInviteInFlightOrDoneDisablesItsRowAndAFailureShowsUnderIt() {
+        showInvite(
+            friendsForInvite().copy(
+                invites = mapOf(
+                    "f_ann" to InviteRow(busy = true), "f_cy" to InviteRow(sentTo = "Cy"), "f_dee" to InviteRow(error = FriendsError.OfferLimit),
+                ),
+            ),
+        )
+        rule.onNodeWithTag(FriendsTags.inviteSend("f_ann")).assertIsNotEnabled()
+        rule.onNodeWithTag(FriendsTags.inviteSend("f_cy")).assert(hasText(text(R.string.friends_invite_sent))).assertIsNotEnabled()
+        rule.onNodeWithTag(FriendsTags.inviteSend("f_dee")).assert(hasText(text(R.string.friends_invite_send))).assertIsEnabled()
+        rule.onNodeWithText(text(R.string.friends_error_offer_limit)).assertIsDisplayed()
+    }
+
+    @Test fun aFriendWhoIsAlreadyInTheTeamLeavesTheListAtOnce() {
+        showInvite(friendsForInvite().copy(invites = mapOf("f_ann" to InviteRow(error = FriendsError.AlreadyMember))))
+        rule.onNodeWithTag(FriendsTags.invite("f_ann")).assertDoesNotExist()
+        rule.onNodeWithTag(FriendsTags.invite("f_cy")).assertIsDisplayed()
+    }
+
+    @Test fun theFilterNarrowsThePickerAndTheTwoEmptyStatesDiffer() {
+        showInvite(friendsForInvite())
+        rule.onNodeWithTag(FriendsTags.INVITE_FILTER).performTextInput("an")
+        rule.waitForIdle()
+        rule.onNodeWithTag(FriendsTags.invite("f_ann")).assertIsDisplayed()
+        rule.onNodeWithTag(FriendsTags.invite("f_cy")).assertDoesNotExist()
+        rule.onNodeWithTag(FriendsTags.INVITE_FILTER).performTextReplacement("zzz")
+        rule.waitForIdle()
+        rule.onNodeWithTag(FriendsTags.INVITE_FILTER_EMPTY).assert(hasText(text(R.string.friends_filter_empty)))
+        rule.onNodeWithTag(FriendsTags.INVITE_EMPTY).assertDoesNotExist()
+        rule.onNodeWithTag(FriendsTags.INVITE_DISCLOSURE).assertIsDisplayed()
+    }
+
+    @Test fun withNoFriendToInviteThePickerSaysSoAndCloseLeavesIt() {
+        showInvite(loaded(request("i1", FriendState.Incoming, "Ivy")))
+        rule.onNodeWithTag(FriendsTags.INVITE_EMPTY).assert(hasText(text(R.string.friends_invite_empty)))
+        rule.onNodeWithTag(FriendsTags.INVITE_DISCLOSURE).assertIsDisplayed()
+        rule.onNodeWithText(text(R.string.common_close)).performClick()
+        assertEquals(listOf("dismiss"), events)
+    }
+
+    // --- The friendship's Bots (D21, D23) ---------------------------------------------------------------------------
+
+    private val ann = TeamMember("u9", "Ann", "member", 1)
+    private val friendBot = TeamBotCard("sharedbot_helper", "Helper", "Answers questions", TeamMemberRef("u9", 1), 3, "published", true, true, 0, JSONObject().put("mode", "all"), JSONObject(), null)
+    private val ownBot = TeamBotCard("sharedbot_mine", "Mine", "", TeamMemberRef(uid, 1), 2, "published", true, false, 0, JSONObject().put("mode", "all"), JSONObject(), null)
+
+    private fun showBots(
+        bots: List<TeamBotCard>, loaded: Boolean = true, failed: Boolean = false, offline: Boolean = false, members: List<TeamMember> = listOf(ann, TeamMember(uid, "Me", "member", 1)),
+    ) {
+        show {
+            FriendBotsScreen(
+                messaging = TeamMessagingState(bots = bots, botsLoaded = loaded, botsFailed = failed, offline = offline, directoryReady = true), members = members, uid = uid, generation = 1,
+                showBack = true, onBack = { events += "back" }, onMessage = { events += "message:$it" }, onStop = { events += "stop:${it.sharedBotId}" }, onReconnect = { events += "reconnect" },
+            )
+        }
+    }
+
+    @Test fun theBotsPageListsEachBotWithItsMaintainerAndNoAudienceThenTheNoteAndTheShareHint() {
+        showBots(listOf(friendBot, ownBot))
+        rule.onNodeWithText(text(R.string.friends_bots_title)).assertIsDisplayed()
+        rule.onNodeWithTag(FriendsTags.bot(friendBot.sharedBotId)).assert(
+            hasAnyDescendant(hasText("Helper")) and hasAnyDescendant(hasText("Answers questions")) and hasAnyDescendant(hasText(text(R.string.teams_bot_owner_fmt, "Ann"), substring = true)),
+        )
+        rule.onNodeWithTag(FriendsTags.bot(ownBot.sharedBotId)).assert(hasAnyDescendant(hasText(text(R.string.teams_bot_owner_fmt, "Me"), substring = true)))
+        rule.onNodeWithText(text(R.string.teams_bot_use_all)).assertDoesNotExist()
+        rule.onNodeWithText(text(R.string.teams_bot_use_listed)).assertDoesNotExist()
+        rule.onNodeWithTag(FriendsTags.BOTS_NOTE).assert(hasText(text(R.string.friends_bots_note)))
+        rule.onNodeWithTag(FriendsTags.BOTS_SHARE_HINT).assert(hasText(text(R.string.friends_bots_share_hint)))
+        rule.onNodeWithTag(FriendsTags.BACK).performClick()
+        assertEquals(listOf("back"), events)
+    }
+
+    @Test fun messageOpensABotDmOnlyForAUsableBotAndAnUnpermittedOneCannotBeMessaged() {
+        showBots(listOf(friendBot, friendBot.copy(sharedBotId = "sharedbot_nope", name = "Nope", permitted = false)))
+        rule.onNodeWithTag(FriendsTags.botMessage(friendBot.sharedBotId)).assert(hasText(text(R.string.teams_bot_message))).assertIsEnabled().performClick()
+        assertEquals(listOf("message:sharedbot_helper"), events)
+        rule.onNodeWithTag(FriendsTags.botMessage("sharedbot_nope")).assertIsNotEnabled()
+        rule.onNodeWithTag(FriendsTags.bot("sharedbot_nope")).assert(hasAnyDescendant(hasText(text(R.string.teams_bot_not_permitted))))
+    }
+
+    @Test fun withoutAConnectionBotsCannotBeMessagedOrStoppedAndReconnectIsOffered() {
+        showBots(listOf(friendBot, ownBot), offline = true)
+        rule.onNodeWithTag(TeamsTags.OFFLINE).assertIsDisplayed()
+        rule.onNodeWithTag(FriendsTags.botMessage(friendBot.sharedBotId)).assertIsNotEnabled()
+        rule.onNodeWithTag(FriendsTags.botStop(ownBot.sharedBotId)).assertIsNotEnabled()
+        rule.onNodeWithText(text(R.string.mcp_reconnect)).performClick()
+        assertEquals(listOf("reconnect"), events)
+    }
+
+    @Test fun stopSharingIsOnTheOwnPublishedBotOnlyAndAsksBeforeItPauses() {
+        showBots(listOf(friendBot, ownBot, ownBot.copy(sharedBotId = "sharedbot_old", name = "Old", state = "paused")))
+        rule.onNodeWithTag(FriendsTags.botStop(friendBot.sharedBotId)).assertDoesNotExist()
+        rule.onNodeWithTag(FriendsTags.botStop("sharedbot_old")).assertDoesNotExist()
+        rule.onNodeWithTag(FriendsTags.botMessage("sharedbot_old")).assertIsNotEnabled()
+        rule.onNodeWithTag(FriendsTags.botStop(ownBot.sharedBotId)).assert(hasText(text(R.string.friends_share_bot_stop))).performClick()
+        rule.onNode(inDialog(text(R.string.teams_bot_unbind_detail))).assertIsDisplayed()
+        rule.onNode(inDialog(text(R.string.common_cancel))).performClick()
+        rule.waitForIdle()
+        assertTrue("a cancel stops nothing: $events", events.isEmpty())
+        rule.onNodeWithTag(FriendsTags.botStop(ownBot.sharedBotId)).performClick()
+        rule.onNode(inDialog(text(R.string.friends_share_bot_stop)) and hasClickAction()).performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("stop:sharedbot_mine"), events)
+    }
+
+    @Test fun theBotsPageSaysLoadingWhileTheReadIsOutAndAlwaysKeepsTheNoteAndTheHintUnderIt() {
+        showBots(emptyList(), loaded = false)
+        rule.onNodeWithTag(FriendsTags.BOTS_STATUS).assert(hasText(text(R.string.teams_bots_loading)))
+        rule.onNodeWithTag(FriendsTags.BOTS_NOTE).assertIsDisplayed()
+        rule.onNodeWithTag(FriendsTags.BOTS_SHARE_HINT).assertIsDisplayed()
+    }
+
+    @Test fun aFailedBotsReadSaysItCouldNotBeVerified() {
+        showBots(emptyList(), failed = true)
+        rule.onNodeWithTag(FriendsTags.BOTS_STATUS).assert(hasText(text(R.string.teams_bots_unverified)))
+    }
+
+    @Test fun anEmptyBotsReadSaysNoBotsAreSharedYet() {
+        showBots(emptyList())
+        rule.onNodeWithTag(FriendsTags.BOTS_STATUS).assert(hasText(text(R.string.friends_bots_none)))
+        rule.onNodeWithTag(FriendsTags.BOTS_SHARE_HINT).assertIsDisplayed()
     }
 
     // --- The tab against the real default app ------------------------------------------------------------------------

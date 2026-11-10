@@ -25,20 +25,22 @@ import org.junit.Test
 import org.mockito.Mockito.*
 
 /**
- * The app-level Friends workspace (docs/FRIENDS-CLIENTS.md D2, D4, D10, D11, D13, D14, D19) over mocked Firebase and a fake HTTP function:
- * the two owner-only listeners and nothing else, the badge they feed, the calls behind each button, and the teardown on an account change.
+ * The app-level Friends workspace (docs/FRIENDS-CLIENTS.md D2, D4, D10, D11, D13, D14, D19, D26 to D28, D30) over mocked Firebase and a fake HTTP
+ * function: the three owner-only listeners and nothing else, the badge they feed (with a clock the tests move), the calls behind each button,
+ * and the teardown on an account change.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class FriendsWorkspaceTest {
     private data class Request(val url: String, val token: String, val body: Map<String, Any?>?)
 
-    private class Harness(scope: CoroutineScope) {
+    private class Harness(scope: CoroutineScope, clock: () -> Long) {
         val auth: FirebaseAuth = mock(FirebaseAuth::class.java)
         val db: FirebaseFirestore = mock(FirebaseFirestore::class.java, RETURNS_DEEP_STUBS)
         lateinit var authListener: FirebaseAuth.AuthStateListener
         val cardListeners = mutableMapOf<String, EventListener<QuerySnapshot>>()
         val blockListeners = mutableMapOf<String, EventListener<QuerySnapshot>>()
-        /** In the order they were made: cards then blocks for each account. */
+        val offerListeners = mutableMapOf<String, EventListener<QuerySnapshot>>()
+        /** In the order they were made: cards, blocks, then offers for each account. */
         val registrations = mutableListOf<ListenerRegistration>()
         val requests = mutableListOf<Request>()
         var reply: suspend (Request) -> JSONObject = { JSONObject() }
@@ -48,7 +50,7 @@ class FriendsWorkspaceTest {
         init {
             doAnswer { authListener = it.getArgument(0); null }.`when`(auth).addAuthStateListener(anyAuthListener())
             signIn(UID)
-            workspace = FriendsWorkspace(scope, auth, db, "https://api.test") { url, token, body ->
+            workspace = FriendsWorkspace(scope, auth, db, "https://api.test", clock) { url, token, body ->
                 val request = Request(url, token, body?.asMap())
                 requests += request
                 reply(request)
@@ -62,7 +64,7 @@ class FriendsWorkspaceTest {
             doReturn("token-$uid").`when`(token).token
             doReturn(Tasks.forResult(token)).`when`(user).getIdToken(false)
             doReturn(user).`when`(auth).currentUser
-            for ((name, store) in listOf("friends" to cardListeners, "blocks" to blockListeners)) {
+            for ((name, store) in listOf("friends" to cardListeners, "blocks" to blockListeners, "teamOffers" to offerListeners)) {
                 val registration = mock(ListenerRegistration::class.java)
                 registrations += registration
                 val collection = db.collection("users").document(uid).collection(name)
@@ -74,6 +76,7 @@ class FriendsWorkspaceTest {
         fun authChanged() = authListener.onAuthStateChanged(auth)
         fun cards(snapshot: QuerySnapshot, uid: String = UID) = cardListeners.getValue(uid).onEvent(snapshot, null)
         fun blocks(snapshot: QuerySnapshot, uid: String = UID) = blockListeners.getValue(uid).onEvent(snapshot, null)
+        fun offers(snapshot: QuerySnapshot, uid: String = UID) = offerListeners.getValue(uid).onEvent(snapshot, null)
 
         /** What `profiles/{uid}` holds for a friend. */
         fun profile(friendUid: String, displayName: String?, handle: String? = null) {
@@ -91,7 +94,8 @@ class FriendsWorkspaceTest {
         }
     }
 
-    private fun TestScope.started(): Harness = Harness(backgroundScope).also { it.workspace.start(); runCurrent() }
+    /** The clock of the workspace is the test's virtual time on top of [NOW], plus whatever [skew] says the device clock jumped. */
+    private fun TestScope.started(skew: () -> Long = { 0L }): Harness = Harness(backgroundScope) { NOW + testScheduler.currentTime + skew() }.also { it.workspace.start(); runCurrent() }
 
     // --- documents --------------------------------------------------------------------------------------------
 
@@ -126,12 +130,14 @@ class FriendsWorkspaceTest {
             json.put("friendCode", code?.let { JSONObject().put("code", it).put("link", "https://lingxios.net/open/friend/add?code=$it") } ?: JSONObject.NULL)
         }
 
-    // --- the two listeners (D2) -------------------------------------------------------------------------------
+    // --- the three listeners (D2) -----------------------------------------------------------------------------
 
-    @Test fun startAttachesTheTwoOwnerListenersAndNothingPerFriend() = runTest {
+    @Test fun startAttachesTheThreeOwnerListenersAndNothingPerFriend() = runTest {
         val h = started()
         assertEquals(setOf(UID), h.cardListeners.keys)
         assertEquals(setOf(UID), h.blockListeners.keys)
+        assertEquals(setOf(UID), h.offerListeners.keys)
+        assertEquals(3, h.registrations.size)
         assertEquals(UID, h.state.uid)
         h.cards(snapshot("u2" to friendDoc("Ann"), "u3" to friendDoc("Bo")))
         runCurrent()
@@ -224,14 +230,15 @@ class FriendsWorkspaceTest {
         h.signOut()
         h.authChanged()
         runCurrent()
-        assertEquals(FriendsState(), h.state)
+        assertEquals(FriendsState(nowMs = NOW), h.state)
         verify(h.registrations[0]).remove()
         verify(h.registrations[1]).remove()
+        verify(h.registrations[2]).remove()
         assertEquals(LookupState(), h.workspace.search.state.value)
         assertEquals(0, h.workspace.badge.value)
         stale.onEvent(snapshot("u2" to friendDoc()), null)
         runCurrent()
-        assertEquals("a snapshot of the old account is ignored", FriendsState(), h.state)
+        assertEquals("a snapshot of the old account is ignored", FriendsState(nowMs = NOW), h.state)
     }
 
     @Test fun anotherAccountStartsFromNothing() = runTest {
@@ -264,7 +271,7 @@ class FriendsWorkspaceTest {
     }
 
     @Test fun signedOutThereIsNothingToListenTo() = runTest {
-        val h = Harness(backgroundScope)
+        val h = Harness(backgroundScope) { NOW }
         h.signOut()
         h.workspace.start()
         runCurrent()
@@ -586,8 +593,464 @@ class FriendsWorkspaceTest {
         assertNull(h.state.notice)
     }
 
+    // --- team offers: the listener, the badge and its clock (D27, D28) ----------------------------------------------
+
+    /** `users/{uid}/teamOffers/{teamId}`: the offer a friend made of an ordinary team; [expiresAtMs] is whole epoch milliseconds. */
+    private fun offerDoc(teamName: String = "Book club", fromName: String = "Ann", expiresAtMs: Long): Map<String, Any?> = mapOf(
+        "teamName" to teamName, "fromUid" to "u2", "fromName" to fromName, "role" to "member",
+        "expiresAt" to Timestamp(expiresAtMs / 1000, ((expiresAtMs % 1000) * 1_000_000).toInt()),
+    ) + mapOf("teamId" to "")
+
+    private fun offerSnapshot(vararg offers: Pair<String, Map<String, Any?>>) =
+        snapshot(*offers.map { (id, doc) -> id to (doc + ("teamId" to id)) }.toTypedArray())
+
+    @Test fun theOffersListenerFeedsTheOffersAndSkipsADocumentThatIsNotWhole() = runTest {
+        val h = started()
+        assertTrue(h.state.offers.isEmpty())
+        h.offers(offerSnapshot(
+            "t1" to offerDoc(expiresAtMs = NOW + 3_600_000), "t2" to offerDoc("Chess", "Bo", NOW + 7_200_000),
+            "bad" to mapOf("teamName" to "X", "teamId" to "bad", "fromUid" to "u2", "fromName" to "Ann"),
+        ))
+        runCurrent()
+        assertEquals(listOf(TeamOffer("t1", "Book club", "u2", "Ann", NOW + 3_600_000), TeamOffer("t2", "Chess", "u2", "Bo", NOW + 7_200_000)), h.state.offers)
+        assertFalse(h.state.offersFailed)
+        verify(h.db, never()).collection("teams")
+    }
+
+    @Test fun theBadgeCountsEveryLiveOfferBesideRequestsAndUnread() = runTest {
+        val h = started()
+        h.cards(snapshot("u3" to requestDoc("incoming", "Bo"), "u2" to friendDoc("Ann", lastSeq = 3, lastRead = 1)))
+        h.offers(offerSnapshot("t1" to offerDoc(expiresAtMs = NOW + 1_000), "t2" to offerDoc(expiresAtMs = NOW - 1), "t3" to offerDoc(expiresAtMs = NOW), "t4" to offerDoc(expiresAtMs = NOW + 86_400_000)))
+        runCurrent()
+        assertEquals("1 request + 2 unread + 2 live offers; an offer that expired and one that expires now add nothing", 5, h.workspace.badge.value)
+        h.workspace.chatOpened("u2")
+        runCurrent()
+        assertEquals(3, h.workspace.badge.value)
+    }
+
+    @Test fun aTimerDropsEachOfferFromTheBadgeAtItsExpiry() = runTest {
+        val h = started()
+        h.offers(offerSnapshot("t1" to offerDoc(expiresAtMs = NOW + 60_000), "t2" to offerDoc(expiresAtMs = NOW + 180_000), "t3" to offerDoc(expiresAtMs = NOW - 5)))
+        runCurrent()
+        assertEquals(2, h.workspace.badge.value)
+        advanceTimeBy(59_999)
+        runCurrent()
+        assertEquals(2, h.workspace.badge.value)
+        assertEquals("nothing read the clock before the timer", NOW, h.state.nowMs)
+        advanceTimeBy(2)
+        runCurrent()
+        assertEquals("the earliest offer expired with no document changing", 1, h.workspace.badge.value)
+        assertEquals("the timer read the clock at the expiry", NOW + 60_000, h.state.nowMs)
+        advanceTimeBy(120_000)
+        runCurrent()
+        assertEquals(0, h.workspace.badge.value)
+        assertEquals("the offers themselves stay until the server prunes them", 3, h.state.offers.size)
+    }
+
+    @Test fun aNewSnapshotMovesTheTimerToTheNewEarliestExpiry() = runTest {
+        val h = started()
+        h.offers(offerSnapshot("t1" to offerDoc(expiresAtMs = NOW + 120_000)))
+        runCurrent()
+        assertEquals(1, h.workspace.badge.value)
+        h.offers(offerSnapshot("t1" to offerDoc(expiresAtMs = NOW + 120_000), "t2" to offerDoc(expiresAtMs = NOW + 30_000)))
+        runCurrent()
+        assertEquals(2, h.workspace.badge.value)
+        advanceTimeBy(30_001)
+        runCurrent()
+        assertEquals(1, h.workspace.badge.value)
+        h.offers(offerSnapshot())
+        runCurrent()
+        assertEquals("no offer, no timer", 0, h.workspace.badge.value)
+        advanceTimeBy(500_000)
+        runCurrent()
+        assertEquals(0, h.workspace.badge.value)
+    }
+
+    @Test fun showingTheViewReadsTheClockAgain() = runTest {
+        var skew = 0L
+        val h = started { skew }
+        h.offers(offerSnapshot("t1" to offerDoc(expiresAtMs = NOW + 60_000), "t2" to offerDoc(expiresAtMs = NOW + 600_000)))
+        runCurrent()
+        assertEquals(2, h.workspace.badge.value)
+        skew = 120_000
+        runCurrent()
+        assertEquals("the clock moved but nothing read it", 2, h.workspace.badge.value)
+        h.workspace.refreshClock()
+        runCurrent()
+        assertEquals(1, h.workspace.badge.value)
+        assertEquals(NOW + 120_000, h.state.nowMs)
+    }
+
+    @Test fun aFailedOffersListenerShowsAndCountsNothingAndRetryRestartsOnlyIt() = runTest {
+        val h = started()
+        h.cards(snapshot("u2" to friendDoc()))
+        h.offers(offerSnapshot("t1" to offerDoc(expiresAtMs = NOW + 60_000)))
+        runCurrent()
+        assertEquals(1, h.workspace.badge.value)
+        val cardsListener = h.cardListeners.getValue(UID)
+        val first = h.offerListeners.getValue(UID)
+        first.onEvent(null, FirebaseFirestoreException("denied", FirebaseFirestoreException.Code.PERMISSION_DENIED))
+        runCurrent()
+        assertTrue(h.state.offersFailed)
+        assertTrue("it ends that watch and shows nothing", h.state.offers.isEmpty())
+        assertEquals(0, h.workspace.badge.value)
+        assertFalse(h.state.cardsFailed)
+        h.workspace.retry()
+        runCurrent()
+        verify(h.registrations[2]).remove()
+        assertNotSame("a new offers listener", first, h.offerListeners.getValue(UID))
+        assertSame("the cards listener was fine and is left alone", cardsListener, h.cardListeners.getValue(UID))
+        assertFalse(h.state.offersFailed)
+        h.offers(offerSnapshot("t1" to offerDoc(expiresAtMs = NOW + 60_000)))
+        runCurrent()
+        assertEquals(1, h.workspace.badge.value)
+    }
+
+    @Test fun anAccountChangeDropsTheOffersTheTimerAndEveryRequestId() = runTest {
+        val h = started()
+        h.cards(snapshot("u2" to friendDoc("Ann")))
+        h.offers(offerSnapshot("t1" to offerDoc(expiresAtMs = NOW + 60_000)))
+        h.reply = { throw TeamMessageFailure("SERVICE_UNAVAILABLE") }
+        h.workspace.acceptOffer("t1")
+        h.workspace.offerTeam("t9", "u2")
+        runCurrent()
+        val before = h.requests.map { it.body?.get("requestId") }
+        assertEquals(2, before.size)
+        h.signIn("u9")
+        h.authChanged()
+        runCurrent()
+        assertTrue(h.state.offers.isEmpty() && h.state.offerOps.isEmpty() && h.state.invites.isEmpty())
+        verify(h.registrations[2]).remove()
+        advanceTimeBy(120_000)
+        runCurrent()
+        assertEquals("the old account's timer is gone", 0, h.workspace.badge.value)
+        h.offers(offerSnapshot("t1" to offerDoc(expiresAtMs = NOW + 600_000)), "u9")
+        h.cards(snapshot("u2" to friendDoc("Ann")), "u9")
+        runCurrent()
+        h.reply = { JSONObject().put("teamId", "t1").put("generation", 1).put("alreadyMember", false) }
+        h.workspace.acceptOffer("t1")
+        runCurrent()
+        assertTrue("a new account mints new request ids", h.requests.last().body?.get("requestId") !in before)
+    }
+
+    // --- team offers: join, decline and dismiss (D27, D30) ----------------------------------------------------------
+
+    private fun joinedJson(alreadyMember: Boolean = false) = JSONObject().put("teamId", "t1").put("generation", 2).put("alreadyMember", alreadyMember)
+
+    private fun TestScope.withOffers(): Harness = started().also { h ->
+        h.offers(offerSnapshot("t1" to offerDoc(expiresAtMs = NOW + 3_600_000), "old" to offerDoc("Old club", "Cy", NOW - 1_000)))
+        runCurrent()
+    }
+
+    @Test fun joiningCallsAcceptOfferWithARequestIdAndAnnouncesTheTeamOnce() = runTest {
+        val h = withOffers()
+        val gate = CompletableDeferred<JSONObject>()
+        h.reply = { gate.await() }
+        var joined = 0
+        h.workspace.acceptOffer("t1") { joined++ }
+        h.workspace.acceptOffer("t1") { joined++ }
+        runCurrent()
+        val request = h.requests.single()
+        assertEquals("https://api.test/v1/friends", request.url)
+        assertEquals("token-$UID", request.token)
+        assertEquals(setOf("action", "offerId", "requestId"), request.body?.keys)
+        assertEquals("acceptOffer", request.body?.get("action"))
+        assertEquals("t1", request.body?.get("offerId"))
+        assertTrue(FriendsLogic.isRequestId(request.body?.get("requestId") as String))
+        assertEquals("the row is disabled while it runs", FriendsOp(busy = true), h.state.offerOps["t1"])
+        assertNull(h.state.notice)
+        gate.complete(joinedJson())
+        runCurrent()
+        assertEquals(1, joined)
+        assertTrue(h.state.offerOps.isEmpty())
+        assertEquals(FriendsNotice.OfferJoined("Book club"), h.state.notice)
+        assertEquals("the row goes through the listener", 2, h.state.offers.size)
+    }
+
+    @Test fun aReplayOfAnEarlierJoinIsASuccess() = runTest {
+        val h = withOffers()
+        h.reply = { joinedJson(alreadyMember = true) }
+        var joined = 0
+        h.workspace.acceptOffer("t1") { joined++ }
+        runCurrent()
+        assertEquals(1, joined)
+        assertEquals(FriendsNotice.OfferJoined("Book club"), h.state.notice)
+        assertTrue(h.state.offerOps.isEmpty())
+    }
+
+    @Test fun anOfferThatLooksExpiredIsNeverSent() = runTest {
+        val h = withOffers()
+        h.reply = { joinedJson() }
+        h.workspace.acceptOffer("old")
+        h.workspace.acceptOffer("nobody")
+        runCurrent()
+        assertTrue(h.requests.isEmpty())
+        h.offers(offerSnapshot("edge" to offerDoc(expiresAtMs = NOW), "near" to offerDoc(expiresAtMs = NOW + 1)))
+        runCurrent()
+        h.workspace.acceptOffer("edge")
+        runCurrent()
+        assertTrue("one that expires exactly now is expired", h.requests.isEmpty())
+        h.workspace.acceptOffer("near")
+        runCurrent()
+        assertEquals("near", h.requests.single().body?.get("offerId"))
+    }
+
+    @Test fun aJoinKeepsItsRequestIdOnlyAfterAnUnknownOutcome() = runTest {
+        val h = withOffers()
+        h.reply = { throw TeamMessageFailure("SERVICE_UNAVAILABLE") }
+        h.workspace.acceptOffer("t1")
+        runCurrent()
+        assertEquals(FriendsOp(error = FriendsError.Network), h.state.offerOps["t1"])
+        h.workspace.acceptOffer("t1")
+        runCurrent()
+        val first = h.requests[0].body?.get("requestId")
+        assertEquals("an unknown outcome is retried with the same id", first, h.requests[1].body?.get("requestId"))
+        h.reply = { throw TeamMessageFailure("MEMBER_LIMIT") }
+        h.workspace.acceptOffer("t1")
+        runCurrent()
+        assertEquals("the retry still carries it", first, h.requests[2].body?.get("requestId"))
+        assertEquals(FriendsOp(error = FriendsError.MemberLimit), h.state.offerOps["t1"])
+        h.reply = { joinedJson() }
+        h.workspace.acceptOffer("t1")
+        runCurrent()
+        assertNotEquals("a definite answer drops the id: the next tap is a new request", first, h.requests[3].body?.get("requestId"))
+        assertEquals(FriendsNotice.OfferJoined("Book club"), h.state.notice)
+        assertTrue("a new attempt starts without the old error", h.state.offerOps.isEmpty())
+    }
+
+    @Test fun aJoinThatFailsKeepsTheOfferAndShowsTheOfferTextUnderTheRow() = runTest {
+        val h = withOffers()
+        for ((code, error) in listOf("TEAM_LIMIT" to FriendsError.TeamLimit, "MEMBER_LIMIT" to FriendsError.MemberLimit, "STALE_MEMBERSHIP" to FriendsError.OfferUnavailable, "MEMBERSHIP_REQUIRED" to FriendsError.Generic)) {
+            h.reply = { throw TeamMessageFailure(code) }
+            h.workspace.acceptOffer("t1")
+            runCurrent()
+            assertEquals(code, FriendsOp(error = error), h.state.offerOps["t1"])
+            assertNull("no notice for a failure", h.state.notice)
+        }
+        assertEquals("Join stays available: the offer is still there", 2, h.state.offers.size)
+        assertTrue("not read as the end of a chat", h.state.offerOps.values.none { it.error == FriendsError.ChatUnavailable })
+    }
+
+    @Test fun anOfferTheServerDeletedLeavesWithItsRowAndItsError() = runTest {
+        val h = withOffers()
+        h.reply = { throw TeamMessageFailure("OFFER_UNAVAILABLE") }
+        h.workspace.acceptOffer("t1")
+        runCurrent()
+        assertEquals(FriendsOp(error = FriendsError.OfferUnavailable), h.state.offerOps["t1"])
+        h.offers(offerSnapshot("old" to offerDoc("Old club", "Cy", NOW - 1_000)))
+        runCurrent()
+        assertEquals(listOf("old"), h.state.offers.map { it.teamId })
+        assertTrue("the error went with the row", h.state.offerOps.isEmpty())
+        h.reply = { throw TeamMessageFailure("OFFER_UNAVAILABLE") }
+        h.workspace.declineOffer("t1")
+        runCurrent()
+        assertTrue("nothing to hang an error on", h.state.offerOps.isEmpty() && h.requests.size == 1)
+    }
+
+    @Test fun anAnswerThatArrivesAfterTheRowWentLeavesNoError() = runTest {
+        val h = withOffers()
+        val gate = CompletableDeferred<JSONObject>()
+        h.reply = { gate.await() }
+        h.workspace.acceptOffer("t1")
+        runCurrent()
+        h.offers(offerSnapshot("old" to offerDoc("Old club", "Cy", NOW - 1_000)))
+        runCurrent()
+        gate.completeExceptionally(TeamMessageFailure("OFFER_UNAVAILABLE"))
+        runCurrent()
+        assertTrue(h.state.offerOps.isEmpty())
+    }
+
+    @Test fun decliningAndDismissingCallDeclineOfferWithNoRequestId() = runTest {
+        val h = withOffers()
+        h.reply = { JSONObject().put("ok", true) }
+        h.workspace.declineOffer("t1")
+        h.workspace.declineOffer("old")
+        h.workspace.declineOffer("nobody")
+        runCurrent()
+        assertEquals(
+            listOf(mapOf("action" to "declineOffer", "offerId" to "t1"), mapOf("action" to "declineOffer", "offerId" to "old")),
+            h.requests.map { it.body },
+        )
+        assertTrue(h.state.offerOps.isEmpty())
+        assertNull("declining announces nothing", h.state.notice)
+        assertEquals("the listener removes the rows", 2, h.state.offers.size)
+    }
+
+    @Test fun aDeclineIsDisabledWhileItRunsFailsWithTheCommonRowsAndCanBeRepeated() = runTest {
+        val h = withOffers()
+        val gate = CompletableDeferred<JSONObject>()
+        h.reply = { gate.await() }
+        h.workspace.declineOffer("t1")
+        h.workspace.declineOffer("t1")
+        h.workspace.acceptOffer("t1")
+        runCurrent()
+        assertEquals("one call, and a busy row sends nothing else", 1, h.requests.size)
+        assertEquals(FriendsOp(busy = true), h.state.offerOps["t1"])
+        gate.completeExceptionally(TeamMessageFailure("SERVICE_UNAVAILABLE"))
+        runCurrent()
+        assertEquals(FriendsOp(error = FriendsError.Network), h.state.offerOps["t1"])
+        h.reply = { throw TeamMessageFailure("OFFER_UNAVAILABLE") }
+        h.workspace.declineOffer("t1")
+        runCurrent()
+        assertEquals("a code of another action is generic", FriendsOp(error = FriendsError.Generic), h.state.offerOps["t1"])
+        h.reply = { JSONObject().put("ok", true) }
+        h.workspace.declineOffer("t1")
+        runCurrent()
+        assertTrue(h.state.offerOps.isEmpty())
+        assertEquals("the busy taps sent nothing", 3, h.requests.size)
+    }
+
+    @Test fun offerActionsNeedAnAccount() = runTest {
+        val h = Harness(backgroundScope) { NOW }
+        h.signOut()
+        h.workspace.start()
+        runCurrent()
+        h.workspace.acceptOffer("t1")
+        h.workspace.declineOffer("t1")
+        h.workspace.offerTeam("t1", "u2")
+        runCurrent()
+        assertTrue(h.requests.isEmpty())
+    }
+
+    // --- team offers: inviting friends (D26, D30) -------------------------------------------------------------------
+
+    private fun TestScope.withFriends(): Harness = started().also { h ->
+        h.cards(snapshot("u2" to friendDoc("Ann"), "u3" to friendDoc("Bo"), "u4" to requestDoc("incoming", "Cy")))
+        runCurrent()
+    }
+
+    @Test fun invitingSendsOfferTeamAndMarksTheRowUntilThePickerCloses() = runTest {
+        val h = withFriends()
+        val gate = CompletableDeferred<JSONObject>()
+        h.reply = { gate.await() }
+        h.workspace.offerTeam("t1", "u2")
+        h.workspace.offerTeam("t1", "u2")
+        runCurrent()
+        val request = h.requests.single()
+        assertEquals(setOf("action", "teamId", "friendUid", "requestId"), request.body?.keys)
+        assertEquals("offerTeam", request.body?.get("action"))
+        assertEquals("t1", request.body?.get("teamId"))
+        assertEquals("u2", request.body?.get("friendUid"))
+        assertTrue(FriendsLogic.isRequestId(request.body?.get("requestId") as String))
+        assertEquals("disabled while it runs", InviteRow(busy = true), h.state.invites["u2"])
+        gate.complete(JSONObject().put("ok", true))
+        runCurrent()
+        assertEquals(InviteRow(sentTo = "Ann"), h.state.invites["u2"])
+        h.workspace.offerTeam("t1", "u2")
+        runCurrent()
+        assertEquals("an invited row stays disabled", 1, h.requests.size)
+        h.reply = { JSONObject().put("ok", true) }
+        h.workspace.offerTeam("t1", "u3")
+        runCurrent()
+        assertEquals("the friends invited meanwhile, in the order they were invited", listOf("Ann", "Bo"), h.workspace.closeInvites())
+        assertTrue(h.state.invites.isEmpty())
+        assertNull("the one-shot belongs to the Teams tab, not to the Friends notice", h.state.notice)
+        assertEquals("nothing is left to announce twice", emptyList<String>(), h.workspace.closeInvites())
+    }
+
+    @Test fun anInviteUsesTheNameTheFriendHasNow() = runTest {
+        val h = withFriends()
+        h.profile("u2", "Ann Lee", "annlee")
+        h.workspace.refreshName("u2")
+        runCurrent()
+        h.reply = { JSONObject().put("ok", true) }
+        h.workspace.offerTeam("t1", "u2")
+        runCurrent()
+        assertEquals(listOf("Ann Lee"), h.workspace.closeInvites())
+    }
+
+    @Test fun onlyAFriendIsInvited() = runTest {
+        val h = withFriends()
+        h.reply = { JSONObject().put("ok", true) }
+        h.workspace.offerTeam("t1", "u4")
+        h.workspace.offerTeam("t1", "stranger")
+        runCurrent()
+        assertTrue(h.requests.isEmpty() && h.state.invites.isEmpty())
+    }
+
+    @Test fun anInviteKeepsItsRequestIdOnlyAfterAnUnknownOutcome() = runTest {
+        val h = withFriends()
+        h.reply = { throw TeamMessageFailure("SERVICE_UNAVAILABLE") }
+        h.workspace.offerTeam("t1", "u2")
+        runCurrent()
+        assertEquals(InviteRow(error = FriendsError.Network), h.state.invites["u2"])
+        h.workspace.offerTeam("t1", "u2")
+        runCurrent()
+        val first = h.requests[0].body?.get("requestId")
+        assertEquals(first, h.requests[1].body?.get("requestId"))
+        h.reply = { throw TeamMessageFailure("OFFER_LIMIT") }
+        h.workspace.offerTeam("t1", "u2")
+        runCurrent()
+        assertEquals(first, h.requests[2].body?.get("requestId"))
+        assertEquals(InviteRow(error = FriendsError.OfferLimit), h.state.invites["u2"])
+        h.reply = { JSONObject().put("ok", true) }
+        h.workspace.offerTeam("t1", "u2")
+        runCurrent()
+        assertNotEquals("a definite answer drops the id", first, h.requests[3].body?.get("requestId"))
+        assertEquals(InviteRow(sentTo = "Ann"), h.state.invites["u2"])
+        assertEquals("another team is another request", "t2", run { h.workspace.closeInvites(); h.workspace.offerTeam("t2", "u3"); runCurrent(); h.requests.last().body?.get("teamId") })
+    }
+
+    @Test fun inviteErrorsShowUnderTheRowWithTheOfferTexts() = runTest {
+        val h = withFriends()
+        for ((code, error) in listOf(
+            "FRIEND_REQUIRED" to FriendsError.FriendRequired, "MEMBER_LIMIT" to FriendsError.MemberLimit, "ROLE_REQUIRED" to FriendsError.OfferRole,
+            "MEMBERSHIP_REQUIRED" to FriendsError.OfferTeamGone, "RATE_LIMITED" to FriendsError.RateLimited, "TEAM_LIMIT" to FriendsError.Generic,
+        )) {
+            h.reply = { throw TeamMessageFailure(code) }
+            h.workspace.offerTeam("t1", "u2")
+            runCurrent()
+            assertEquals(code, InviteRow(error = error), h.state.invites["u2"])
+        }
+        assertTrue("nothing was announced", h.workspace.closeInvites().isEmpty())
+    }
+
+    @Test fun anInviteToSomeoneAlreadyInTheTeamAsksForTheMemberListOnce() = runTest {
+        val h = withFriends()
+        h.reply = { throw TeamMessageFailure("ALREADY_MEMBER") }
+        var refreshed = 0
+        h.workspace.offerTeam("t1", "u2") { refreshed++ }
+        runCurrent()
+        assertEquals(1, refreshed)
+        assertEquals(InviteRow(error = FriendsError.AlreadyMember), h.state.invites["u2"])
+        h.reply = { throw TeamMessageFailure("OFFER_LIMIT") }
+        h.workspace.offerTeam("t1", "u3") { refreshed++ }
+        runCurrent()
+        assertEquals("only ALREADY_MEMBER refreshes the members", 1, refreshed)
+    }
+
+    @Test fun aPickerClosedWhileAnInviteRunsLeavesNoMarkBehind() = runTest {
+        val h = withFriends()
+        val gate = CompletableDeferred<JSONObject>()
+        h.reply = { gate.await() }
+        h.workspace.offerTeam("t1", "u2")
+        runCurrent()
+        assertTrue("an invite that has not gone out is not announced", h.workspace.closeInvites().isEmpty())
+        gate.complete(JSONObject().put("ok", true))
+        runCurrent()
+        assertTrue("the next picker starts clean", h.state.invites.isEmpty())
+        h.reply = { JSONObject().put("ok", true) }
+        h.workspace.offerTeam("t1", "u2")
+        runCurrent()
+        assertEquals(2, h.requests.size)
+        assertEquals(InviteRow(sentTo = "Ann"), h.state.invites["u2"])
+    }
+
+    @Test fun closingThePickerForgetsTheRequestIdsOfAnUnknownOutcome() = runTest {
+        val h = withFriends()
+        h.reply = { throw TeamMessageFailure("SERVICE_UNAVAILABLE") }
+        h.workspace.offerTeam("t1", "u2")
+        runCurrent()
+        h.workspace.closeInvites()
+        h.workspace.offerTeam("t1", "u2")
+        runCurrent()
+        assertNotEquals(h.requests[0].body?.get("requestId"), h.requests[1].body?.get("requestId"))
+    }
+
     private companion object {
         const val UID = "u1"
+        /** The device clock of the offer tests: the vectors' clock, whole epoch milliseconds. */
+        const val NOW = 1_762_000_000_000L
         fun JSONObject.asMap(): Map<String, Any?> = keys().asSequence().associateWith { opt(it) }
         fun <T> anyListener(): EventListener<T> = any<EventListener<T>>() ?: EventListener { _, _ -> }
         fun anyAuthListener(): FirebaseAuth.AuthStateListener = any<FirebaseAuth.AuthStateListener>() ?: FirebaseAuth.AuthStateListener { }

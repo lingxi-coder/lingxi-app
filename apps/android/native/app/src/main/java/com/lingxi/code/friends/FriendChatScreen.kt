@@ -1,5 +1,6 @@
 package com.lingxi.code.friends
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +39,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lingxi.code.R
+import com.lingxi.code.components.LXIconName
+import com.lingxi.code.components.materialIcon
 import com.lingxi.code.teams.FriendChatHeader
 import com.lingxi.code.teams.PairTeam
 import com.lingxi.code.teams.TeamConversationScreen
@@ -47,13 +50,16 @@ import com.lingxi.code.teams.TeamsSheet
 import com.lingxi.code.teams.TeamsState
 import com.lingxi.code.teams.TeamsWorkspace
 import com.lingxi.code.teams.formatDate
+import com.lingxi.code.teams.messageBot
 import com.lingxi.code.theme.PersonAvatar
 import java.time.ZoneId
 
 /**
  * A friend's chat (docs/FRIENDS-CLIENTS.md D9, D10): the Team conversation screen over a [TeamsWorkspace] pinned to the friendship's
- * pair team, with the friend in the header and no list, details, members, invites or Bot picker. The friendship ending (the card goes
- * away, or the Teams layer reports the membership gone) replaces the whole chat with "no longer available" and a Back action.
+ * pair team, with the friend in the header and no list, details, members or invites. The Bots action of the header (D21) opens the friendship's
+ * Bots, and Message there opens a Bot DM (D22), on the same workspace, with Back returning to the chat. The friendship ending (the card goes
+ * away, or the Teams layer reports the membership gone, whichever of the three views is open) replaces the whole area with "no longer
+ * available" and a Back action (D25).
  */
 @Composable
 internal fun FriendChatScreen(
@@ -97,11 +103,19 @@ private fun FriendChat(
     }
     val messaging by chat.messaging.collectAsStateWithLifecycle()
 
-    // While the chat is open and in front it counts as read in the list and the badge (D13); the name is refreshed once per open (D10).
+    // What the area shows (D21, D22): the chat itself (empty), its Bots ("bots") or one Bot DM ("dm:<conversationId>"). One pinned workspace serves
+    // all three, so a Bot command the server refuses because the friendship ended revokes the messaging of all of them at once (D25), and Back from
+    // the Bots or from a Bot DM returns to the chat.
+    var view by rememberSaveable(friendUid) { mutableStateOf("") }
+    val inChat = view.isEmpty()
+    BackHandler(enabled = !inChat && !messaging.revoked) { view = "" }
+
+    // While the chat is open and in front it counts as read in the list and the badge (D13), which the Bots and a Bot DM do not; the name is
+    // refreshed once per open (D10).
     val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
     val foreground = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
-    DisposableEffect(friendUid, foreground) {
-        if (foreground) workspace.chatOpened(friendUid)
+    DisposableEffect(friendUid, foreground, inChat) {
+        if (foreground && inChat) workspace.chatOpened(friendUid)
         onDispose { workspace.chatClosed(friendUid) }
     }
     LaunchedEffect(friendUid) { workspace.refreshName(friendUid) }
@@ -113,14 +127,28 @@ private fun FriendChat(
         ChatUnavailable(showBack, onBack, modifier)
         return
     }
-    Box(modifier.fillMaxSize().testTag(FriendsTags.CHAT)) {
-        TeamConversationScreen(
-            workspace = chat, uid = uid, team = summary, teams = teams, messaging = messaging,
-            conversationId = FriendsLogic.CHAT_CONVERSATION_ID, showBack = showBack, onBack = onBack,
-            friend = FriendChatHeader(friendUid, card.displayName, card.handle) {
-                FriendMenu(onProfile = { dialog = "profile" }, onRemove = { dialog = "remove" }, onBlock = { dialog = "block" })
-            },
+    when {
+        view == "bots" -> FriendBotsScreen(
+            messaging = messaging, members = teams.detail?.members.orEmpty(), uid = uid, generation = pair.generation, showBack = showBack, onBack = { view = "" },
+            onMessage = { sharedBotId -> messageBot(chat, messaging, uid, sharedBotId) { view = "dm:$it" } },
+            onStop = { bot -> chat.messagingModel.pause(bot) }, onReconnect = chat::reconnect, modifier = modifier,
         )
+        view.startsWith("dm:") -> TeamConversationScreen(
+            workspace = chat, uid = uid, team = summary, teams = teams, messaging = messaging,
+            conversationId = view.removePrefix("dm:"), showBack = true, onBack = { view = "" }, modifier = modifier,
+        )
+        else -> Box(modifier.fillMaxSize().testTag(FriendsTags.CHAT)) {
+            TeamConversationScreen(
+                workspace = chat, uid = uid, team = summary, teams = teams, messaging = messaging,
+                conversationId = FriendsLogic.CHAT_CONVERSATION_ID, showBack = showBack, onBack = onBack,
+                friend = FriendChatHeader(friendUid, card.displayName, card.handle) {
+                    IconButton(onClick = { view = "bots" }, modifier = Modifier.testTag(FriendsTags.BOTS)) {
+                        Icon(LXIconName.Bot.materialIcon, stringResource(R.string.friends_bots_title))
+                    }
+                    FriendMenu(onProfile = { dialog = "profile" }, onRemove = { dialog = "remove" }, onBlock = { dialog = "block" })
+                },
+            )
+        }
     }
     when (dialog) {
         "profile" -> FriendProfileSheet(card) { dialog = "" }

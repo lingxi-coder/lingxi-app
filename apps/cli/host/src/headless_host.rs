@@ -20,15 +20,10 @@ pub(crate) fn process_stderr() -> Output {
 struct CliHeadlessServices {
     background_forker: Arc<crate::bg_session_forker::CliBgSessionForker>,
     auto_connect_ide: bool,
-    mcp_operator_owned_server_names: Vec<mcp::McpServerName>,
 }
 
 #[async_trait::async_trait]
 impl HeadlessHostServices for CliHeadlessServices {
-    fn mcp_operator_owned_server_names(&self) -> Vec<mcp::McpServerName> {
-        self.mcp_operator_owned_server_names.clone()
-    }
-
     fn mcp_local_staging_root(&self, session_cwd: &Path) -> Option<std::path::PathBuf> {
         // This process adapter owns a local workspace. Bind each call to the
         // session's resolved cwd, including an accepted directory relocation.
@@ -277,12 +272,6 @@ pub(crate) async fn run(argv: &Argv, mut permission_mode: permission::Permission
     let services = Arc::new(CliHeadlessServices {
         background_forker,
         auto_connect_ide: argv.ide,
-        mcp_operator_owned_server_names: desktop
-            .cli_mcp_servers
-            .iter()
-            .filter(|config| config.metadata.cli_owned)
-            .map(|config| config.authored_name())
-            .collect(),
     });
     #[cfg(unix)]
     let io = match crate::headless_process_io::open() {
@@ -373,6 +362,10 @@ fn configure_selected_resume(
     crate::init::install_published_branch(&mut desktop, session_id, captured)?;
     Ok(desktop)
 }
+
+#[cfg(all(test, unix))]
+#[path = "headless_host_mcp_test.rs"]
+mod mcp_consumer_tests;
 
 #[cfg(test)]
 mod tests {

@@ -15,6 +15,28 @@ class DeepLinkInboxTest {
         assertNull(inbox.next(independent.copy(blockingSurfaceOpen = true)))
     }
 
+    @Test fun `Friends links are independent of the workspace and the session but keep the foreground and editing gates`() {
+        val code = "aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-"
+        val links = listOf("lingxi://friend/requests", "lingxi://friend/chat?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e", "lingxi://friend/add?code=$code")
+        val independent = DeepLinkReadiness(foreground = true, onboardingComplete = true, sourceBound = false, engineBusy = true, blockingSurfaceOpen = false)
+        for (raw in links) {
+            val inbox = DeepLinkInbox(SavedStateHandle())
+            assertTrue(raw, inbox.enqueue(raw))
+            assertEquals("never queued behind a session: $raw", raw, inbox.next(independent))
+            assertNull(inbox.next(independent.copy(foreground = false)))
+            assertNull(inbox.next(independent.copy(onboardingComplete = false)))
+            assertNull(inbox.next(independent.copy(blockingSurfaceOpen = true)))
+        }
+    }
+
+    @Test fun `a Friends look-alike is not independent`() {
+        val inbox = DeepLinkInbox(SavedStateHandle())
+        val raw = "lingxi://session/friend?mode=chat"
+        assertTrue(inbox.enqueue(raw))
+        val bound = DeepLinkReadiness(foreground = true, onboardingComplete = true, sourceBound = false, engineBusy = false, blockingSurfaceOpen = false)
+        assertNull("an ordinary link still waits for a bound source", inbox.next(bound))
+    }
+
     @Test fun `rotation never redelivers consumed intent but a new process restore intent and explicit warm repeat are handled`() {
         val saved = SavedStateHandle()
         val first = DeepLinkInbox(saved)

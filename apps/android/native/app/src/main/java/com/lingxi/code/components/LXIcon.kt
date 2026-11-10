@@ -43,6 +43,7 @@ import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.Construction
 import androidx.compose.material.icons.outlined.Groups
+import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
@@ -61,6 +62,8 @@ enum class LXIconName {
     Bot,
     /** The Teams tab: a group of people ([Link], which the old Teams drawer row used, is not one). */
     Users,
+    /** The Friends tab: one person, as [Users] is a group. */
+    User,
 }
 
 /** Shared semantic names resolve to Android's Material icon family. */
@@ -105,6 +108,7 @@ val LXIconName.materialIcon: ImageVector get() = when (this) {
     LXIconName.ArrowRight -> Icons.AutoMirrored.Outlined.ArrowForward
     LXIconName.Bot -> Icons.Outlined.SmartToy
     LXIconName.Users -> Icons.Outlined.Groups
+    LXIconName.User -> Icons.Outlined.Person
 }
 
 @Suppress("UNUSED_PARAMETER")

@@ -99,12 +99,19 @@ internal object TeamsListLogic {
     }
 
     /** One line for the newest message: label for none / recalled / non-text, "You" prefix, author prefix in groups and channels. */
-    fun conversationPreview(conversation: TeamMessageConversation, uid: String, strings: TeamsListStrings, author: (TeamLastMessage) -> String): String {
-        val last = conversation.lastMessage ?: return strings.noMessages
+    fun conversationPreview(conversation: TeamMessageConversation, uid: String, strings: TeamsListStrings, author: (TeamLastMessage) -> String): String =
+        pointerPreview(conversation.lastMessage, uid, strings, author.takeIf { conversation.kind == "group" || conversation.kind == "channel" })
+
+    /**
+     * The message part of a preview, which a Friends row prints from the pointer on its card (docs/FRIENDS-CLIENTS.md D3): [author] names
+     * someone else's message only where the caller wants a prefix (groups and channels); the viewer's own always reads "You".
+     */
+    fun pointerPreview(last: TeamLastMessage?, uid: String, strings: TeamsListStrings, author: ((TeamLastMessage) -> String)? = null): String {
+        if (last == null) return strings.noMessages
         val mine = last.authorKind == "user" && last.authorUid == uid
         val prefix = when {
             mine -> strings.you + strings.authorSeparator
-            conversation.kind == "group" || conversation.kind == "channel" -> author(last) + strings.authorSeparator
+            author != null -> author(last) + strings.authorSeparator
             else -> ""
         }
         if (last.recalled) return prefix + strings.recalled

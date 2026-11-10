@@ -88,14 +88,20 @@ private sealed interface StreamItem {
 }
 
 /**
+ * The Friends variant of the conversation header (docs/FRIENDS-CLIENTS.md D9): the friend stands in for the conversation's lead and
+ * title, and [menu] for the details and mark-read actions, which a pair team's single conversation does not have.
+ */
+internal class FriendChatHeader(val uid: String, val name: String, val handle: String?, val menu: @Composable () -> Unit)
+
+/**
  * The conversation screen (SPEC-mobile-team-bot-ui section 6.3): header, banners, the grouped stream with date separators and
  * the new-messages divider, run and question cards, local pending commands, scroll rules, the pill, automatic mark-read (D12)
- * and the composer. Pushed above the list on phones, the centre pane when wide.
+ * and the composer. Pushed above the list on phones, the centre pane when wide. A [friend] turns it into a friend's chat.
  */
 @Composable
 internal fun TeamConversationScreen(
     workspace: TeamsWorkspace, uid: String, team: TeamSummary, teams: TeamsState, messaging: TeamMessagingState,
-    conversationId: String, showBack: Boolean, onBack: () -> Unit, modifier: Modifier = Modifier,
+    conversationId: String, showBack: Boolean, onBack: () -> Unit, modifier: Modifier = Modifier, friend: FriendChatHeader? = null,
 ) {
     DisposableEffect(conversationId) {
         workspace.openConversation(conversationId)
@@ -107,7 +113,7 @@ internal fun TeamConversationScreen(
     val members = teams.detail?.members.orEmpty()
     val strings = rememberTeamsListStrings()
     val bots = messaging.bots
-    val label = conversation?.let { TeamsListLogic.conversationLabel(it, members, uid, bots, strings) }.orEmpty()
+    val label = friend?.name ?: conversation?.let { TeamsListLogic.conversationLabel(it, members, uid, bots, strings) }.orEmpty()
     var showDetails by rememberSaveable(conversationId) { mutableStateOf(false) }
     var recalling by remember(conversationId) { mutableStateOf<TeamMessage?>(null) }
     val online = !messaging.offline
@@ -121,7 +127,15 @@ internal fun TeamConversationScreen(
         Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (showBack) IconButton(onClick = onBack, modifier = Modifier.testTag(TeamsTags.BACK)) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.remote_back)) }
             else Spacer(Modifier.width(12.dp))
-            if (conversation != null) {
+            if (friend != null) {
+                PersonAvatar(friend.uid, friend.name, 32.dp)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    friend.handle?.let { Text("@$it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                }
+                friend.menu()
+            } else if (conversation != null) {
                 ConversationLead(conversation, members, bots, uid, strings, 32.dp, label)
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {

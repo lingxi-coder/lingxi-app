@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.staticCompositionLocalOf
+import com.lingxi.code.friends.FriendLink
 import com.lingxi.code.settings.SettingsRoutes
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
@@ -14,11 +15,12 @@ import kotlinx.coroutines.flow.emptyFlow
  * slice that needs more asks for it here instead of editing the shell.
  */
 
-/** The four top-level destinations of the app shell. [key] is stable: it names the saved state and the test tags. */
+/** The five top-level destinations of the app shell. [key] is stable: it names the saved state and the test tags. */
 enum class AppTab(val key: String) {
     Chats("chats"),
     Bots("bots"),
     Teams("teams"),
+    Friends("friends"),
     Settings("settings");
 
     companion object {
@@ -42,6 +44,9 @@ interface TabHost {
 
     /** Pushed screens above [tab]'s root; 0 = on the root. The bar is only shown on roots. */
     fun reportDepth(tab: AppTab, depth: Int)
+
+    /** Select Friends and act on [link] there once: confirm an Add, show the Requests, or open a friend's chat. */
+    fun requestFriends(link: FriendLink)
 }
 
 val LocalTabHost = staticCompositionLocalOf<TabHost> { error("TabHost not provided") }
@@ -51,6 +56,9 @@ data class SettingsJump(val id: Long, val route: String, val origin: AppTab?)
 
 /** A request to open a computer, or one of its sessions, in the Bots tab; consumed once through `onRequestHandled(id)`. */
 data class BotsRequest(val id: Long, val hostId: String, val sessionId: String?)
+
+/** A request to act on a Friends link in the Friends tab; consumed once through `onFriendsRequestHandled(id)`. */
+data class FriendsRequest(val id: Long, val link: FriendLink)
 
 /** The user tapped the already selected tab; [depth] is how many screens were pushed on it at that moment. */
 data class TabReselect(val tab: AppTab, val depth: Int)

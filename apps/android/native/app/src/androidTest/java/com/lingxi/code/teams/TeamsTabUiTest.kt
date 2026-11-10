@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.firebase.auth.FirebaseAuth
 import com.lingxi.code.R
+import com.lingxi.code.friends.FriendLink
 import com.lingxi.code.settings.SettingsRoutes
 import com.lingxi.code.tabs.AppTab
 import com.lingxi.code.tabs.LocalTabHost
@@ -315,6 +316,7 @@ class TeamsTabUiTest {
         override fun select(tab: AppTab) { calls += "select:${tab.key}" }
         override fun openSettings(route: String, origin: AppTab?) { calls += "settings:$route:${origin?.key}" }
         override fun reportDepth(tab: AppTab, depth: Int) { calls += "depth:${tab.key}:$depth" }
+        override fun requestFriends(link: FriendLink) { calls += "friends:$link" }
     }
 
     private fun showTab(host: RecordingHost, joinCode: String?) {

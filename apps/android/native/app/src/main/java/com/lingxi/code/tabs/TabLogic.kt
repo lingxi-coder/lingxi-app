@@ -8,6 +8,7 @@ internal enum class LinkTarget(val key: String) {
     Chats("chats"),
     Bots("bots"),
     Teams("teams"),
+    Friends("friends"),
     Settings("settings"),
     Stay("stay"),
     None("none");
@@ -18,6 +19,7 @@ internal enum class LinkTarget(val key: String) {
             Chats -> AppTab.Chats
             Bots -> AppTab.Bots
             Teams -> AppTab.Teams
+            Friends -> AppTab.Friends
             Settings -> AppTab.Settings
             Stay, None -> null
         }
@@ -55,6 +57,7 @@ internal object TabLogic {
         "session", "new", "project", "apps", "market", "runtime", "terminal", "cron" -> LinkTarget.Chats
         "remote" -> LinkTarget.Bots
         "team" -> LinkTarget.Teams
+        "friend" -> LinkTarget.Friends
         "settings", "provider", "extensions" -> LinkTarget.Settings
         "import" -> LinkTarget.Stay
         else -> LinkTarget.None

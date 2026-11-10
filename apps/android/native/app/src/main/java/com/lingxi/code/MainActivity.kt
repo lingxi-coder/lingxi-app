@@ -327,6 +327,7 @@ class MainActivity : ComponentActivity() {
                         link.route in setOf("team/join", "team/inbox") -> tabState.requestTeams(link.params["code"])
                         parts.first() == "remote" -> com.lingxi.code.remote.RemoteRoute.fromLink(link)
                             ?.let { tabState.requestBots(it.hostId, it.sessionId) } ?: run { handled = false }
+                        parts.first() == "friend" -> com.lingxi.code.friends.FriendLink.from(link)?.let(tabState::requestFriends) ?: run { handled = false }
                         link.params["workspace"] != null && parts.first() in setOf("settings", "provider", "extensions", "terminal") && preparedNativeLink != link -> { requestedFeatureLink = link; awaitingFeature = true }
                         // Chats routes, including the scheduled-task pages (decision D14), are RootScreen's.
                         parts.first() in setOf("session", "new", "project", "apps", "market", "runtime", "import", "cron") -> {

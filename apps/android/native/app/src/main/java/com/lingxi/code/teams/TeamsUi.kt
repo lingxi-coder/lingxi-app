@@ -75,6 +75,7 @@ internal object TeamsTags {
     fun row(id: String) = "teams.row.$id"
     fun message(id: String) = "teams.message.$id"
     fun runCard(trigger: String) = "teams.run.$trigger"
+    fun addFriend(uid: String) = "teams.addFriend.$uid"
 }
 
 /** The words of the conversation list, from resources for the UI language (the two separators are code constants). */
@@ -161,7 +162,7 @@ internal fun dayLabelText(kind: DayKind, atMs: Long): String {
     }
 }
 
-private fun formatDate(atMs: Long, zone: ZoneId, locale: Locale, skeleton: String): String =
+internal fun formatDate(atMs: Long, zone: ZoneId, locale: Locale, skeleton: String): String =
     DateTimeFormatter.ofPattern(DateFormat.getBestDateTimePattern(locale, skeleton), locale).withZone(zone).format(Instant.ofEpochMilli(atMs))
 
 /** "Offline · saved messages" with the reason and a Reconnect action. */

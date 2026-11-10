@@ -9,6 +9,7 @@ import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import com.lingxi.code.friends.FriendLink
 import com.lingxi.code.settings.SettingsRoutes
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
@@ -97,7 +98,7 @@ class TabShellState(selected: AppTab = AppTab.Chats, settingsOrigin: AppTab? = n
         selected = origin ?: AppTab.Chats
     }
 
-    // --- Bots and Teams ---------------------------------------------------------------------
+    // --- Bots, Teams and Friends ------------------------------------------------------------
 
     var botsRequest: BotsRequest? by mutableStateOf(null)
         private set
@@ -123,6 +124,19 @@ class TabShellState(selected: AppTab = AppTab.Chats, settingsOrigin: AppTab? = n
 
     fun onTeamsJoinCodeHandled() {
         teamsJoinCode = null
+    }
+
+    /** The pending Friends link, kept in memory only: a friend-link code is never written to disk (D8). */
+    var friendsRequest: FriendsRequest? by mutableStateOf(null)
+        private set
+
+    override fun requestFriends(link: FriendLink) {
+        friendsRequest = FriendsRequest(nextId(), link)
+        selected = AppTab.Friends
+    }
+
+    fun onFriendsRequestHandled(id: Long) {
+        if (friendsRequest?.id == id) friendsRequest = null
     }
 
     // --- TabHost ----------------------------------------------------------------------------

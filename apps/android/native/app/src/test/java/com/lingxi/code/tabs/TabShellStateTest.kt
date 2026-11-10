@@ -1,6 +1,7 @@
 package com.lingxi.code.tabs
 
 import androidx.compose.runtime.saveable.SaverScope
+import com.lingxi.code.friends.FriendLink
 import com.lingxi.code.settings.SettingsRoutes
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
@@ -29,6 +30,7 @@ class TabShellStateTest {
         val routes: List<() -> Unit> = listOf(
             { state.requestBots("host", null) },
             { state.requestTeams(null) },
+            { state.requestFriends(FriendLink.Requests) },
             { state.openSettings(SettingsRoutes.ACCOUNT, AppTab.Chats) },
             { state.closeSettings() },
             { state.onTabClick(AppTab.Teams) },
@@ -49,6 +51,7 @@ class TabShellStateTest {
         assertNull(state.settingsJump)
         assertNull(state.botsRequest)
         assertNull(state.teamsJoinCode)
+        assertNull(state.friendsRequest)
         assertFalse(state.chatsDrawerOpen)
         assertFalse(state.chatsFullScreenOverlay)
     }
@@ -224,6 +227,37 @@ class TabShellStateTest {
         state.requestTeams(null)
         assertEquals(AppTab.Teams, state.selected)
         assertNull(state.teamsJoinCode)
+    }
+
+    @Test
+    fun aFriendsRequestSelectsFriendsAndIsConsumedOnce() {
+        val state = TabShellState()
+
+        state.requestFriends(FriendLink.Add("aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-"))
+        assertEquals(AppTab.Friends, state.selected)
+        val first = state.friendsRequest!!
+        assertEquals(FriendLink.Add("aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-"), first.link)
+
+        state.requestFriends(FriendLink.Chat("u2"))
+        val second = state.friendsRequest!!
+        assertNotEquals(first.id, second.id)
+
+        // Handling the older request leaves the newer one pending.
+        state.onFriendsRequestHandled(first.id)
+        assertEquals(second, state.friendsRequest)
+        state.onFriendsRequestHandled(second.id)
+        assertNull(state.friendsRequest)
+    }
+
+    @Test
+    fun aFriendsRequestIsNeverSavedAndAFriendLinkCodeNeverReachesDisk() {
+        val state = TabShellState()
+        state.requestFriends(FriendLink.Add("aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-"))
+
+        // Only the selected tab and the Settings origin are saved (D8: a pending friend link lives in memory only).
+        val saved = with(TabShellState.Saver) { SaverScope { true }.save(state) }.toString()
+        assertEquals("[friends, ]", saved)
+        assertFalse(saved.contains("aB0_"))
     }
 
     // --- taps -------------------------------------------------------------------------------

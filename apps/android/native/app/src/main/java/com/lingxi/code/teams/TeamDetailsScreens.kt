@@ -41,6 +41,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -60,7 +61,7 @@ import java.util.UUID
 @Composable
 internal fun TeamDetailsScreen(
     workspace: TeamsWorkspace, uid: String, team: TeamSummary, teams: TeamsState, messaging: TeamMessagingState, showBack: Boolean,
-    onClose: () -> Unit, onMessageBot: (String) -> Unit, modifier: Modifier = Modifier,
+    friendUids: Set<String>, onAddFriend: (TeamMember) -> Unit, onClose: () -> Unit, onMessageBot: (String) -> Unit, modifier: Modifier = Modifier,
 ) {
     val detail = teams.detail?.takeIf { it.team.id == team.id }
     val current = detail?.team ?: team
@@ -95,7 +96,7 @@ internal fun TeamDetailsScreen(
         }
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             when (segments[selected]) {
-                R.string.teams_members -> membersSection(detail, current, uid, busy) { confirmation = it }
+                R.string.teams_members -> membersSection(detail, current, uid, busy, friendUids, onAddFriend) { confirmation = it }
                 R.string.teams_invites -> invitesSection(detail, current, teams, busy, model)
                 else -> botsSection(messaging, detail, uid, onMessageBot, workspace)
             }
@@ -126,13 +127,20 @@ internal fun TeamDetailsScreen(
     }
 }
 
-private fun androidx.compose.foundation.lazy.LazyListScope.membersSection(detail: TeamDetail?, team: TeamSummary, uid: String, busy: Boolean, confirm: (Pair<Int, Map<String, Any>>) -> Unit) {
+private fun androidx.compose.foundation.lazy.LazyListScope.membersSection(
+    detail: TeamDetail?, team: TeamSummary, uid: String, busy: Boolean, friendUids: Set<String>, onAddFriend: (TeamMember) -> Unit, confirm: (Pair<Int, Map<String, Any>>) -> Unit,
+) {
     items(detail?.members.orEmpty(), key = { "member-${it.uid}" }) { member ->
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             PersonAvatar(member.uid, member.displayName, 40.dp)
             Column(Modifier.weight(1f)) {
                 Text(member.displayName.ifEmpty { stringResource(R.string.teams_member) }, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 AssistChip(onClick = {}, enabled = false, label = { Text(teamRoleLabel(member.role)) })
+                // Add friend (docs/FRIENDS-CLIENTS.md D15): every other person; Bots are not members here.
+                if (member.uid != uid) {
+                    if (member.uid in friendUids) Text(stringResource(R.string.friends_relation_friends), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    else TextButton(onClick = { onAddFriend(member) }, modifier = Modifier.testTag(TeamsTags.addFriend(member.uid))) { Text(stringResource(R.string.friends_add)) }
+                }
             }
             if (member.uid != uid && member.role != "owner" && (team.role == "owner" || (team.role == "admin" && member.role == "member"))) {
                 if (team.role == "owner") TextButton(enabled = !busy, onClick = { confirm(R.string.teams_confirm_change to mapOf("action" to "role", "teamId" to team.id, "uid" to member.uid, "generation" to member.generation, "role" to if (member.role == "admin") "member" else "admin")) }) {

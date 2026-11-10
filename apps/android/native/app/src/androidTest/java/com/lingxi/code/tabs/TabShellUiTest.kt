@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
@@ -49,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lingxi.code.R
 import com.lingxi.code.components.UiTags
+import com.lingxi.code.friends.FriendLink
 import com.lingxi.code.settings.SettingsRoutes
 import com.lingxi.code.theme.LingXiTheme
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -86,6 +88,7 @@ class TabShellUiTest {
     private val log = mutableListOf<String>()
     private val botsBadge = MutableStateFlow(0)
     private val teamsBadge = MutableStateFlow(0)
+    private val friendsBadge = MutableStateFlow(0)
     private var widthDp by mutableStateOf(PHONE_WIDTH)
     private var overlayOpen by mutableStateOf(false)
 
@@ -112,8 +115,10 @@ class TabShellUiTest {
                             settings = { StandInTab(AppTab.Settings, it, log) },
                             bots = { StandInTab(AppTab.Bots, it, log) },
                             teams = { StandInTab(AppTab.Teams, it, log) },
+                            friends = { StandInTab(AppTab.Friends, it, log) },
                             botsBadge = botsBadge,
                             teamsBadge = teamsBadge,
+                            friendsBadge = friendsBadge,
                         )
                     }
                 }
@@ -166,14 +171,16 @@ class TabShellUiTest {
     // --- the bar ----------------------------------------------------------------------------
 
     @Test
-    fun phone_showsTheBarWithFourTabsAndSwitchesBetweenThem() {
+    fun phone_showsTheBarWithFiveTabsAndSwitchesBetweenThem() {
         launch()
 
         assertBarShown()
+        assertEquals(listOf("chats", "bots", "teams", "friends", "settings"), AppTab.entries.map { it.key })
         AppTab.entries.forEach { rule.onNodeWithTag(UiTags.tab(it.key)).assertIsDisplayed() }
+        rule.onNodeWithTag(UiTags.tab("friends")).assertTextContains(rule.activity.getString(R.string.friends_title))
         assertSelected(AppTab.Chats)
 
-        for (tab in listOf(AppTab.Bots, AppTab.Teams, AppTab.Settings, AppTab.Chats)) {
+        for (tab in listOf(AppTab.Bots, AppTab.Teams, AppTab.Friends, AppTab.Settings, AppTab.Chats)) {
             tap(tab)
             assertSelected(tab)
             assertBarShown()
@@ -236,20 +243,34 @@ class TabShellUiTest {
     }
 
     @Test
-    fun badgesCountWaitingBotsAndUnreadTeamsCappedAt99() {
+    fun badgesCountWaitingBotsAndUnreadTeamsAndFriendsCappedAt99() {
         launch()
         val bots = rule.activity.getString(R.string.remote_bot_waiting_fmt, 3)
         val teams = rule.activity.getString(R.string.tabs_badge_unread_fmt, 120)
+        val friends = rule.activity.getString(R.string.tabs_badge_unread_fmt, 7)
 
-        rule.runOnUiThread { botsBadge.value = 3; teamsBadge.value = 120 }
+        rule.runOnUiThread { botsBadge.value = 3; teamsBadge.value = 120; friendsBadge.value = 7 }
         rule.waitForIdle()
         rule.onNodeWithTag(UiTags.tab("bots")).assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, bots))
         rule.onNodeWithTag(UiTags.tab("teams")).assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, teams))
+        // The Friends tab announces requests plus unread (D14); the other two counts do not leak into it.
+        rule.onNodeWithTag(UiTags.tab("friends")).assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, friends))
+        // Chats and Settings never badge.
+        rule.onNodeWithTag(UiTags.tab("chats")).assert(!SemanticsMatcher.keyIsDefined(SemanticsProperties.StateDescription))
+        rule.onNodeWithTag(UiTags.tab("settings")).assert(!SemanticsMatcher.keyIsDefined(SemanticsProperties.StateDescription))
 
-        rule.runOnUiThread { botsBadge.value = 0; teamsBadge.value = 0 }
+        // The full count is announced, so a count past the cap is not cut to "99+" for the screen reader.
+        rule.runOnUiThread { friendsBadge.value = 105 }
         rule.waitForIdle()
-        rule.onNodeWithTag(UiTags.tab("bots")).assert(!SemanticsMatcher.keyIsDefined(SemanticsProperties.StateDescription))
-        rule.onNodeWithTag(UiTags.tab("teams")).assert(!SemanticsMatcher.keyIsDefined(SemanticsProperties.StateDescription))
+        rule.onNodeWithTag(UiTags.tab("friends")).assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, rule.activity.getString(R.string.tabs_badge_unread_fmt, 105)),
+        )
+
+        rule.runOnUiThread { botsBadge.value = 0; teamsBadge.value = 0; friendsBadge.value = 0 }
+        rule.waitForIdle()
+        for (key in listOf("bots", "teams", "friends")) {
+            rule.onNodeWithTag(UiTags.tab(key)).assert(!SemanticsMatcher.keyIsDefined(SemanticsProperties.StateDescription))
+        }
     }
 
     @Test
@@ -465,7 +486,7 @@ class TabShellUiTest {
     }
 
     @Test
-    fun requestsForBotsAndTeamsSelectTheirTabs() {
+    fun requestsForBotsTeamsAndFriendsSelectTheirTabs() {
         launch()
 
         rule.runOnUiThread { state.requestBots("host-1", "session-9") }
@@ -479,6 +500,56 @@ class TabShellUiTest {
         rule.waitForIdle()
         assertSelected(AppTab.Teams)
         assertEquals("CODE42", rule.runOnUiThread { state.teamsJoinCode })
+
+        rule.runOnUiThread { state.requestFriends(FriendLink.Add("abc123")) }
+        rule.waitForIdle()
+        assertSelected(AppTab.Friends)
+        val friends = rule.runOnUiThread { state.friendsRequest }
+        assertEquals(FriendLink.Add("abc123"), friends?.link)
+
+        // Handling answers by id: a stale id leaves a newer request alone, the matching one clears it.
+        rule.runOnUiThread { state.onFriendsRequestHandled(friends!!.id + 1) }
+        assertNotNull(rule.runOnUiThread { state.friendsRequest })
+        rule.runOnUiThread { state.onFriendsRequestHandled(friends!!.id) }
+        assertNull(rule.runOnUiThread { state.friendsRequest })
+
+        // A Friends link is selected like the others from any tab, and each kind of link keeps its own payload.
+        tap(AppTab.Chats)
+        rule.runOnUiThread { state.requestFriends(FriendLink.Chat("u2")) }
+        rule.waitForIdle()
+        assertSelected(AppTab.Friends)
+        assertEquals(FriendLink.Chat("u2"), rule.runOnUiThread { state.friendsRequest }?.link)
+        rule.runOnUiThread { state.requestFriends(FriendLink.Requests) }
+        assertEquals(FriendLink.Requests, rule.runOnUiThread { state.friendsRequest }?.link)
+    }
+
+    @Test
+    fun friendsKeepsItsOwnStackAndBackLeavesItLikeTheOtherTabs() {
+        launch()
+        tap(AppTab.Friends)
+        rule.onNodeWithTag("body.friends").assertIsDisplayed()
+        rule.onNodeWithTag("friends.push").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("friends.depth").assertTextEquals("depth=1")
+        assertNoBar()
+
+        // Another tab selected by a link (the bar is hidden on a pushed screen), then back to Friends.
+        rule.runOnUiThread { state.select(AppTab.Teams) }
+        rule.waitForIdle()
+        assertBarShown()
+        tap(AppTab.Friends)
+        rule.onNodeWithTag("friends.depth").assertTextEquals("depth=1")
+
+        pressBack()
+        rule.onNodeWithTag("friends.depth").assertTextEquals("depth=0")
+        assertSelected(AppTab.Friends)
+        assertEquals(listOf("friends.pop"), log)
+
+        // On its root a re-tap scrolls to the top, and Back goes to Chats.
+        tap(AppTab.Friends)
+        assertEquals(listOf("friends.pop", "friends.top"), log)
+        pressBack()
+        assertSelected(AppTab.Chats)
     }
 
     // --- the wide layout --------------------------------------------------------------------
@@ -489,9 +560,13 @@ class TabShellUiTest {
 
         rule.onNodeWithTag(UiTags.TABS_RAIL).assertIsDisplayed()
         rule.onNodeWithTag(UiTags.TABS_BAR).assertDoesNotExist()
+        AppTab.entries.forEach { rule.onNodeWithTag(UiTags.tab(it.key)).assertIsDisplayed() }
         tap(AppTab.Bots)
         assertSelected(AppTab.Bots)
         rule.onNodeWithTag("bots.wide").assertTextEquals("wide=true")
+        tap(AppTab.Friends)
+        assertSelected(AppTab.Friends)
+        rule.onNodeWithTag("friends.wide").assertTextEquals("wide=true")
     }
 
     @Test

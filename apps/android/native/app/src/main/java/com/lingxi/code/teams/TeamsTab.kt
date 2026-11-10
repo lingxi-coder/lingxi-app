@@ -39,6 +39,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lingxi.code.R
+import com.lingxi.code.friends.FriendLink
+import com.lingxi.code.friends.FriendMemberSheet
+import com.lingxi.code.friends.FriendOutcome
+import com.lingxi.code.friends.FriendProof
+import com.lingxi.code.friends.FriendsWorkspace
+import com.lingxi.code.friends.FriendState
 import com.lingxi.code.settings.SettingsRoutes
 import com.lingxi.code.tabs.AppTab
 import com.lingxi.code.tabs.LocalTabHost
@@ -67,6 +73,11 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     val wide = LocalWideLayout.current
     val listState = rememberLazyListState()
     var scrollTop by remember { mutableIntStateOf(0) }
+    // Add friend on a member (D15) is the Friends workspace's own lookup; the friends there are who shows "Friends" instead of the action.
+    val friends = remember(context) { FriendsWorkspace.get(context.applicationContext) }
+    val friendsState by friends.state.collectAsStateWithLifecycle()
+    val memberLookup by friends.member.state.collectAsStateWithLifecycle()
+    val friendUids = remember(friendsState.cards) { friendsState.cards.filter { it.state == FriendState.Friends }.map { it.uid }.toSet() }
 
     // The pushed screens, newest last: "c:<conversationId>" or "details". Saved as text so it survives the tab leaving composition.
     var stackText by rememberSaveable { mutableStateOf("") }
@@ -82,6 +93,11 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
         if (joinCode != null && uid != null) { joinPrefill = joinCode; sheet = "join"; onJoinCodeHandled() }
     }
     LaunchedEffect(uid) { if (uid == null) { stackText = ""; sheet = "" } }
+    // A friendship made from a member row (a mutual request) opens the chat in the Friends tab.
+    LaunchedEffect(memberLookup.outcome) {
+        val outcome = memberLookup.outcome
+        if (outcome is FriendOutcome.NowFriends) { sheet = ""; friends.member.clear(); host.requestFriends(FriendLink.Chat(outcome.uid)) }
+    }
     val depth = stack.size
     LaunchedEffect(depth) { host.reportDepth(AppTab.Teams, depth) }
     BackHandler(enabled = stack.isNotEmpty()) { setStack(stack.dropLast(1)) }
@@ -135,6 +151,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 val details: @Composable (Modifier) -> Unit = { m ->
                     TeamDetailsScreen(
                         workspace = workspace, uid = uid, team = team, teams = teams, messaging = messaging, showBack = !wide,
+                        friendUids = friendUids, onAddFriend = { member -> friends.member.lookup(FriendProof.Team(team.id, member.uid)); sheet = "addFriend" },
                         onClose = { setStack(stack.filterNot { it == "details" }) },
                         onMessageBot = { key -> messageBot(workspace, messaging, uid, key) { openConversation(it) } }, modifier = m,
                     )
@@ -174,6 +191,11 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 prefill = joinPrefill, busy = teams.busy, error = teams.error,
                 onSubmit = { code -> workspace.teamsModel.execute(mapOf("action" to "join", "code" to code, "requestId" to UUID.randomUUID().toString())) { sheet = ""; joinPrefill = ""; setStack(emptyList()) } },
                 onDismiss = dismiss,
+            )
+            sheet == "addFriend" && memberLookup.proof != null -> FriendMemberSheet(
+                lookup = memberLookup, onConfirm = { note -> friends.member.confirm(note) },
+                onOpenChat = { friendUid -> sheet = ""; friends.member.clear(); host.requestFriends(FriendLink.Chat(friendUid)) },
+                onDismiss = { sheet = ""; friends.member.clear() },
             )
             sheet == "newMessage" || sheet == "newChannel" || sheet == "newBot" -> NewConversationSheet(
                 mode = sheet, uid = uid, members = teams.detail?.members.orEmpty(), messaging = messaging,

@@ -34,7 +34,8 @@ class AskUserQuestionSummaryUiTest {
                     com.lingxi.code.bindings.client.AskOptionDto(answer.toClientTextDto(), "双向音频与打断".toClientTextDto(), null),
                     com.lingxi.code.bindings.client.AskOptionDto(revisedAnswer.toClientTextDto(), "先完成基础能力".toClientTextDto(), null),
                 ), false)),
-            timeoutSecs = null)
+            timeoutSecs = null,
+            sessionOwned = false)
         rule.setContent {
             LingXiTheme(darkTheme = false) {
                 AskUserQuestionCard(request, { _, answers -> submitted = answers }, {})

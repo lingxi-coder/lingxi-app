@@ -481,10 +481,17 @@ export class DesktopProviderAccounts {
     if (this.closing) return Promise.reject(new Error('Provider accounts are shutting down.'));
     return this.track(this.loadForRuntime());
   }
-  private async loadForRuntime(): Promise<ProviderAccountLaunch> {
-    const providerAccounts = await this.snapshot();
+  /** Load one saved API-key binding without probing or refreshing other accounts. */
+  launchApiKeyAccount(accountId: string, providerId: string, executionBindingId: string): Promise<ProviderAccountLaunch> {
+    if (this.closing) return Promise.reject(new Error('Provider accounts are shutting down.'));
+    return this.track(this.loadForRuntime({ accountId, providerId, executionBindingId }));
+  }
+  private async loadForRuntime(selected?: Pick<ProviderAccountMetadata, 'accountId' | 'providerId' | 'executionBindingId'>): Promise<ProviderAccountLaunch> {
+    const providerAccounts = selected ? await this.options.registry({ action: 'list', expectedRevision: 0 }) : await this.snapshot();
     const providerAccountCredentials: Record<string, RuntimeProviderAccountCredential> = Object.create(null);
-    for (const account of providerAccounts.accounts.filter(a => a.enabled)) {
+    const eligible = (account: ProviderAccountMetadata) => account.enabled && (!selected || account.accountId === selected.accountId
+      && account.providerId === selected.providerId && account.executionBindingId === selected.executionBindingId && account.authKind === 'api_key');
+    for (const account of providerAccounts.accounts.filter(eligible)) {
       if (providerAccounts.health.find(h => h.accountId === account.accountId)?.reason === 'credential_update_pending') {
         this.options.onCredentialDiagnostic?.({ accountId: account.accountId, identityGeneration: account.identityGeneration, stage: 'snapshot', outcome: 'skipped', healthReason: 'credential_update_pending' });
         continue;
@@ -494,6 +501,15 @@ export class DesktopProviderAccounts {
       try {
         const load = async (lockHeld: boolean) => {
           const reference = account.credentialRef.secretRef;
+          if (selected) {
+            stage = 'identity';
+            const latest = await this.options.registry({ action: 'list', expectedRevision: 0 });
+            const current = latest.accounts.find(a => a.accountId === account.accountId);
+            if (latest.storeScope !== providerAccounts.storeScope || !current || !eligible(current)
+              || current.identityGeneration !== account.identityGeneration || current.credentialRef.secretRef !== reference) {
+              throw new Error('Provider account changed while loading credentials.');
+            }
+          }
           stage = 'pending_check';
           if (await this.options.broker.resolve(`${reference}.mutation`) || await this.options.tokens.hasPendingCommit(reference)) throw new Error('Credential commit is pending.');
           stage = 'broker_read';
@@ -503,6 +519,7 @@ export class DesktopProviderAccounts {
           let stored = parseStoredCredential(raw);
           stage = 'identity';
           if (stored.identity_generation !== account.identityGeneration) throw new Error('Credential identity changed. Reconnect this account.');
+          if (selected && stored.kind.kind !== 'api_key') throw new Error('The selected account no longer has an API key.');
           if (stored.kind.kind === 'oauth') {
             stage = 'token_refresh';
             const session = await this.options.tokens.current(reference, lockHeld);
@@ -549,6 +566,6 @@ export class DesktopProviderAccounts {
         this.options.onCredentialDiagnostic?.({ accountId: account.accountId, identityGeneration: account.identityGeneration, stage, outcome: 'failed', ...(code ? { code } : {}), ...(health?.reason ? { healthReason: health.reason } : {}) });
       }
     }
-    return { providerAccounts, providerAccountCredentials, providerAccountHome: await this.options.accountHome?.() };
+    return { providerAccounts, providerAccountCredentials, providerAccountHome: selected ? undefined : await this.options.accountHome?.() };
   }
 }

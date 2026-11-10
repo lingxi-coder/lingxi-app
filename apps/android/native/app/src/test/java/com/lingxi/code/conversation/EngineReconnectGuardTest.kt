@@ -13,7 +13,7 @@ class EngineReconnectGuardTest {
 
     @Test fun permissionAndQuestionsBlockEvenWithoutStreaming() {
         assertTrue(idle.blocksEngineReconnect(hasPendingPermission = true))
-        assertTrue(idle.copy(pendingQuestions = listOf(AskUserQuestionRequestDto(1uL, emptyList(), null)))
+        assertTrue(idle.copy(pendingQuestions = listOf(AskUserQuestionRequestDto(1uL, emptyList(), null, false)))
             .blocksEngineReconnect(hasPendingPermission = false))
         assertFalse(idle.blocksEngineReconnect(hasPendingPermission = false))
     }

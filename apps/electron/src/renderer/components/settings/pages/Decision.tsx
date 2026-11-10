@@ -1,5 +1,5 @@
 import './Decision.css';
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { desktopHost } from '../../../bridge/bridgeConnection';
 import { useI18n } from '../../../i18n/useI18n';
 import { useT } from '../../../theme/ThemeContext';
@@ -7,6 +7,7 @@ import { Card } from '../rows';
 import { inputStyle, ghostButtonStyle } from './ghostButton';
 import type { DecisionConfiguration, DecisionInput, DecisionQuestion, DecisionResult, DecisionSnapshot } from '../../../../shared/decision';
 import type { ProviderAccountMetadata } from '../../../../shared/providerAccounts';
+import { assertDecisionImageSelectionBudget, assertDecisionInputBudget } from '../../../../shared/decisionInputBudget';
 
 const defaults: Record<DecisionConfiguration['source'], DecisionConfiguration> = {
   openai: { source: 'openai', protocol: 'openai_decisions', endpoint: 'https://api.openai.com/v1/decisions', model: 'gpt-6-luna' },
@@ -45,6 +46,8 @@ export function Decision() {
   const [state, setState] = useState(''); const [json, setJson] = useState(false);
   const [questions, setQuestions] = useState<QuestionDraft[]>([{ id: 'answer', type: 'binary', instructions: '', criteria: '' }]);
   const alive = useRef(false); const operation = useRef<string | null>(null); const busy = useRef(false);
+  const imageSelection = useRef<AbortController | null>(null);
+  const resultJson = useMemo(() => result ? JSON.stringify(result, null, 2) : '', [result]);
   const accept = (next: DecisionSnapshot) => { setSnapshot(next); setRevision(next.revision); setDraft(next.configuration ?? { ...defaults.openai }); setKey(''); setClearKey(false); };
   const reload = async () => {
     try { const next = await desktopHost()?.decision?.snapshot(); if (alive.current && next) { accept(next); setError(''); } }
@@ -55,7 +58,7 @@ export function Decision() {
     void reload();
     void api?.providerAccounts?.snapshot().then(next => { if (alive.current) setAccounts(next.accounts); }).catch(() => undefined);
     const off = api?.decision?.onChanged(next => { if (alive.current) { setSnapshot(next); setResult(null); } });
-    return () => { alive.current = false; off?.(); if (operation.current) void api?.decision?.cancel(operation.current); };
+    return () => { alive.current = false; imageSelection.current?.abort(); off?.(); if (operation.current) void api?.decision?.cancel(operation.current); };
   }, []);
   const save = async (disable = false) => {
     const api = desktopHost()?.decision; if (!api || busy.current) return;
@@ -67,20 +70,43 @@ export function Decision() {
   const evaluate = async () => {
     const api = desktopHost()?.decision; if (!api || operation.current) return;
     const id = crypto.randomUUID(); operation.current = id; setRunning(true); setError(''); setResult(null);
-    try { const input = buildDecisionInput(state, json, questions); const next = await api.evaluate(id, { ...input, images: images.map(({ data_url }) => ({ data_url })) }); if (alive.current && operation.current === id) setResult(next); }
+    try {
+      const input = { ...buildDecisionInput(state, json, questions), images: images.map(({ data_url }) => ({ data_url })) };
+      assertDecisionInputBudget(input);
+      const next = await api.evaluate(id, input);
+      if (alive.current && operation.current === id) setResult(next);
+    }
     catch (e) { if (alive.current && operation.current === id) setError(e instanceof Error ? e.message : String(e)); }
     finally { if (operation.current === id) { operation.current = null; if (alive.current) setRunning(false); } }
   };
   const chooseImages = async (files: FileList | null) => {
+    imageSelection.current?.abort();
+    const selection = new AbortController(); imageSelection.current = selection;
     try {
       const selected = Array.from(files ?? []);
-      if (selected.length > 8 || selected.some(file => !['image/png', 'image/jpeg'].includes(file.type) || file.size > 8 * 1024 * 1024)) throw new Error('Choose up to eight PNG/JPEG images, each under 8 MiB');
+      let input: { state: unknown; questions: unknown };
+      try { input = buildDecisionInput(state, json, questions); }
+      catch { input = { state, questions }; } // Image selection also works while the form is incomplete.
+      assertDecisionImageSelectionBudget(selected, input);
       const next = await Promise.all(selected.map(file => new Promise<{ name: string; data_url: string }>((resolve, reject) => {
-        const reader = new FileReader(); reader.onload = () => resolve({ name: file.name, data_url: String(reader.result) }); reader.onerror = () => reject(new Error('Could not read image')); reader.readAsDataURL(file);
+        const reader = new FileReader();
+        const cleanup = () => { selection.signal.removeEventListener('abort', cancel); reader.onload = null; reader.onerror = null; reader.onabort = null; };
+        const cancel = () => { reader.abort(); cleanup(); reject(new Error('Image selection cancelled')); };
+        reader.onload = () => { cleanup(); resolve({ name: file.name, data_url: String(reader.result) }); };
+        reader.onerror = () => { cleanup(); reject(new Error('Could not read image')); };
+        reader.onabort = () => { cleanup(); reject(new Error('Image selection cancelled')); };
+        selection.signal.addEventListener('abort', cancel, { once: true });
+        if (selection.signal.aborted) { cancel(); return; }
+        try { reader.readAsDataURL(file); } catch (error) { cleanup(); reject(error); }
       })));
-      if (alive.current) setImages(next);
-    } catch (e) { if (alive.current) setError(e instanceof Error ? e.message : String(e)); }
+      if (alive.current && imageSelection.current === selection && !selection.signal.aborted) { setImages(next); setError(''); }
+    } catch (e) {
+      const report = !selection.signal.aborted;
+      selection.abort();
+      if (alive.current && imageSelection.current === selection && report) setError(e instanceof Error ? e.message : String(e));
+    } finally { if (imageSelection.current === selection) imageSelection.current = null; }
   };
+  const clearImages = () => { imageSelection.current?.abort(); imageSelection.current = null; setImages([]); };
   const updateQuestion = (index: number, patch: Partial<QuestionDraft>) => setQuestions(current => current.map((q, i) => i === index ? { ...q, ...patch } : q));
   const field = { ...inputStyle(t), width: '100%', boxSizing: 'border-box' as const };
   const button = ghostButtonStyle(t);
@@ -107,7 +133,7 @@ export function Decision() {
       <label><input type="checkbox" checked={json} onChange={e => setJson(e.target.checked)} /> JSON</label>
       <label>{tr('decision_input')}<textarea style={{ ...field, minHeight: 100 }} value={state} onChange={e => setState(e.target.value)} /></label>
       <label>{tr('decision_images')}<input type="file" accept="image/png,image/jpeg" multiple onChange={e => void chooseImages(e.target.files)} /></label>
-      {images.length ? <div>{images.map(image => <span key={image.name} style={{ marginRight: 8 }}>{image.name}</span>)}<button style={button} onClick={() => setImages([])}>{tr('decision_clear_images')}</button></div> : null}
+      {images.length ? <div>{images.map(image => <span key={image.name} style={{ marginRight: 8 }}>{image.name}</span>)}<button style={button} onClick={clearImages}>{tr('decision_clear_images')}</button></div> : null}
       {questions.map((q, i) => <fieldset key={i} style={{ border: `1px solid ${t.border}`, borderRadius: 8, display: 'grid', gap: 10, padding: 14 }}>
         <legend>{tr('decision_question')} {i + 1}</legend>
         <label>{tr('decision_name')}<input style={field} value={q.id} onChange={e => updateQuestion(i, { id: e.target.value })} /></label>
@@ -120,7 +146,7 @@ export function Decision() {
         <button style={button} disabled={running || !snapshot?.configuration || saving} onClick={() => void evaluate()}>{running ? tr('decision_running') : tr('decision_run')}</button>
         {running ? <button style={button} onClick={() => { if (operation.current) void desktopHost()?.decision.cancel(operation.current); }}>{tr('decision_cancel')}</button> : null}
       </div>
-      {result ? <div aria-live="polite"><p>{result.actual_model ?? tr('decision_not_reported')} · {result.elapsed_ms} ms</p><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 12 }}>{JSON.stringify(result, null, 2)}</pre></div> : null}
+      {result ? <div aria-live="polite"><p>{result.actual_model ?? tr('decision_not_reported')} · {result.elapsed_ms} ms</p><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 12 }}>{resultJson}</pre></div> : null}
     </div></Card>
   </article>;
 }

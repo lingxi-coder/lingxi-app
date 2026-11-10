@@ -615,6 +615,10 @@ impl BridgeOutputStream {
 
 #[async_trait]
 impl OutputStream for BridgeOutputStream {
+    fn wants_forwarded_subagent_messages(&self) -> bool {
+        false
+    }
+
     async fn emit_assistant_message_identity(&self, message_id: &lingxi_core::types::MessageId) {
         let _ = self.tx.send(TurnEvent::MessageIdentity(*message_id));
     }

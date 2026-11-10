@@ -39,7 +39,7 @@ import XCTest
                 multiSelect: false
             )]
         ) -> AskUserQuestionRequestDto {
-            AskUserQuestionRequestDto(requestId: id, questions: questions, timeoutSecs: nil)
+            AskUserQuestionRequestDto(requestId: id, questions: questions, timeoutSecs: nil, sessionOwned: false)
         }
 
         /// The broker replays a still-pending question after a foreground

@@ -133,6 +133,8 @@ export interface AskUserQuestionRequestDto {
   request_id: number;
   questions: AskQuestionDto[];
   timeout_secs?: number;
+  /** Output-only engine hint for Goal confirmations that outlive a foreground turn. */
+  sessionOwned?: boolean;
 }
 
 /** Reply for {@link RunSlashCommand} (commands.rs `CommandResultDto`). */

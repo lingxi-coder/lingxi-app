@@ -100,6 +100,22 @@ impl MsgQueueMidTurnInput {
 
 #[async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTurnInput {
+    fn supports_goal_proposals(&self) -> bool {
+        true
+    }
+    async fn enqueue_goal_proposal(
+        &self,
+        id: String,
+        body: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        origin: lingxi_core::session::GoalOrigin,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        self.queue
+            .enqueue_goal_proposal(id, body, origin, cancel)
+            .await;
+        Ok(())
+    }
+
     fn supports_goal_retries(&self) -> bool {
         true
     }
@@ -1146,6 +1162,10 @@ impl OrchestratorTurnDriver {
 
 #[async_trait]
 impl TurnDriver for OrchestratorTurnDriver {
+    async fn claim_goal_proposal(&self, id: &str) -> bool {
+        self.orchestrator.claim_goal_proposal(id).await
+    }
+
     async fn current_session_id(&self) -> Option<String> {
         Some(
             self.orchestrator
@@ -1314,7 +1334,8 @@ impl TurnDriver for OrchestratorTurnDriver {
         inputs: Vec<orchestrator::QueuedPromptInput>,
         cancel: CancellationToken,
     ) {
-        let human = inputs.iter().any(|input| !input.is_meta);
+        let human = orchestrator::native_user_message_source::queued_turn_authority()
+            .unwrap_or_else(|| inputs.iter().any(|input| !input.is_meta));
         self.announce_engine_initiated_turn().await;
         let run = self.drive_turn_with_inputs(
             Utf16JsonProjection::from(""),

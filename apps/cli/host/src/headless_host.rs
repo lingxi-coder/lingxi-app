@@ -20,10 +20,21 @@ pub(crate) fn process_stderr() -> Output {
 struct CliHeadlessServices {
     background_forker: Arc<crate::bg_session_forker::CliBgSessionForker>,
     auto_connect_ide: bool,
+    mcp_operator_owned_server_names: Vec<mcp::McpServerName>,
 }
 
 #[async_trait::async_trait]
 impl HeadlessHostServices for CliHeadlessServices {
+    fn mcp_operator_owned_server_names(&self) -> Vec<mcp::McpServerName> {
+        self.mcp_operator_owned_server_names.clone()
+    }
+
+    fn mcp_local_staging_root(&self, session_cwd: &Path) -> Option<std::path::PathBuf> {
+        // This process adapter owns a local workspace. Bind each call to the
+        // session's resolved cwd, including an accepted directory relocation.
+        Some(session_cwd.to_path_buf())
+    }
+
     fn request_identity(&self) -> Option<harness_runtime::desktop::DesktopRequestIdentity> {
         Some(harness_runtime::desktop::DesktopRequestIdentity {
             device_id: migrations::global_config::get_or_create_user_id(),
@@ -266,6 +277,12 @@ pub(crate) async fn run(argv: &Argv, mut permission_mode: permission::Permission
     let services = Arc::new(CliHeadlessServices {
         background_forker,
         auto_connect_ide: argv.ide,
+        mcp_operator_owned_server_names: desktop
+            .cli_mcp_servers
+            .iter()
+            .filter(|config| config.metadata.cli_owned)
+            .map(|config| config.authored_name())
+            .collect(),
     });
     #[cfg(unix)]
     let io = match crate::headless_process_io::open() {

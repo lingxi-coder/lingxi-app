@@ -1221,5 +1221,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     record('started');
     try { await dispose(); record('completed'); }
     catch (error) { record('failed'); throw error; }
-  })).finally(() => app.quit());
+  })).finally(async () => {
+    try { await shutdownDiagnostics?.flush(); }
+    finally { app.quit(); }
+  });
   });

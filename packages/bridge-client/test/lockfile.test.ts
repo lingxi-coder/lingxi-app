@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { discoverLatestLockfile, readLockfile, type LockfileBody } from '../src/lockfile.js';
+import { discoverLatestLockfile, discoverLatestLockfileAsync, readLockfile, readLockfileAsync, type LockfileBody } from '../src/lockfile.js';
 import { CLIENT_PROTOCOL_VERSION } from '../src/protocol.js';
 import { versionCompatible } from '../src/version.js';
 
@@ -87,6 +87,33 @@ test('discoverLatestLockfile ignores .tmp shadows', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('asynchronous lockfile capture and bounded discovery preserve synchronous selection and validation', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'bridge-async-lock-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (let index = 0; index < 70; index++) {
+    const path = writeLock(dir, 40000 + index, `token-${index}`);
+    const time = Date.now() / 1000 - 100 + index;
+    utimesSync(path, time, time);
+  }
+  const expected = discoverLatestLockfile(dir)!;
+  assert.deepEqual(await discoverLatestLockfileAsync(dir), expected);
+  assert.deepEqual(await readLockfileAsync(expected.path), readLockfile(expected.path));
+  const oldToken = await readLockfileAsync(expected.path);
+  writeLock(dir, expected.port, 'rotated-token');
+  assert.equal(oldToken.body.authToken, 'token-69', 'a capture must stay stable while the discovery file changes');
+  assert.equal((await readLockfileAsync(expected.path)).body.authToken, 'rotated-token', 'a later attempt must capture fresh credentials');
+  const malformed = join(dir, 'invalid.json');
+  writeFileSync(malformed, '{}');
+  await assert.rejects(readLockfileAsync(malformed), /not <port>\.lock/);
+  const broken = join(dir, '50000.lock');
+  writeFileSync(broken, '{}');
+  const newest = Date.now() / 1000 + 10;
+  utimesSync(broken, newest, newest);
+  assert.equal(discoverLatestLockfile(dir), null);
+  assert.equal(await discoverLatestLockfileAsync(dir), null, 'do not silently adopt a different older endpoint after the newest lockfile fails validation');
+  assert.equal(await discoverLatestLockfileAsync(join(dir, 'missing')), null);
 });
 
 test('client DTO protocol version tracks the source contract major', () => {

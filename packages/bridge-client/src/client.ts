@@ -76,7 +76,9 @@ import {
 } from './validation.js';
 import {
   discoverLatestLockfile,
+  discoverLatestLockfileAsync,
   readLockfile,
+  readLockfileAsync,
   type Lockfile,
 } from './lockfile.js';
 import { versionCompatible } from './version.js';
@@ -218,10 +220,11 @@ export class BridgeClient extends EventEmitter {
   private connectionGeneration = 0;
 
   /** Buffered inbound events + parked async-iterator waiters. */
-  private readonly eventQueue: ClientEvent[] = [];
+  private eventQueue: ClientEvent[] = [];
   private readonly eventWaiters: QueueWaiter[] = [];
-  private readonly eventStreams = new Set<symbol>();
+  private eventStreams = new Set<symbol>();
   private streamClosed = false;
+  private streamGeneration = 0;
 
   /** Pending `Frame::Response` correlators keyed by request id. */
   private readonly pendingResponses = new Map<
@@ -360,6 +363,16 @@ export class BridgeClient extends EventEmitter {
     return found;
   }
 
+  async resolveLockfileAsync(): Promise<Lockfile> {
+    if (this.opts.lockfilePath) return readLockfileAsync(this.opts.lockfilePath);
+    const found = await discoverLatestLockfileAsync(this.opts.lockfileDir);
+    if (!found) {
+      const where = this.opts.lockfileDir ?? '~/.lingxi/bridge';
+      throw new Error(`no bridge lockfile found under ${where}`);
+    }
+    return found;
+  }
+
   /** The discovered/parsed lockfile (available after {@link connect}). */
   get discoveredLockfile(): Lockfile | null {
     return this.lockfile;
@@ -377,10 +390,13 @@ export class BridgeClient extends EventEmitter {
    * verify version compatibility. Resolves once the {@link ServerHello} is
    * accepted; rejects on auth failure, transport error, or version mismatch.
    */
-  async connect(): Promise<ServerHello> {
+  async connect(capturedLockfile?: Lockfile): Promise<ServerHello> {
     const generation = ++this.connectionGeneration;
+    // This capture belongs only to this connection attempt. Later connects
+    // discover afresh rather than reusing an earlier token or process identity.
+    const captured = capturedLockfile && structuredClone(capturedLockfile);
     try {
-      return await this.connectInternal(generation);
+      return await this.connectInternal(generation, captured);
     } catch (error) {
       if (generation !== this.connectionGeneration) throw error;
       this.closeStream();
@@ -390,8 +406,12 @@ export class BridgeClient extends EventEmitter {
     }
   }
 
-  private async connectInternal(generation: number): Promise<ServerHello> {
-    const lockfile = this.resolveLockfile();
+  private async connectInternal(generation: number, capturedLockfile?: Lockfile): Promise<ServerHello> {
+    if (capturedLockfile && this.opts.lockfilePath && capturedLockfile.path !== this.opts.lockfilePath) {
+      throw new Error('Captured bridge lockfile belongs to a different connection endpoint.');
+    }
+    const lockfile = capturedLockfile ?? await this.resolveLockfileAsync();
+    if (generation !== this.connectionGeneration) throw new Error('Bridge connection was replaced while discovering its endpoint.');
     this.lockfile = lockfile;
 
     const host = this.opts.host ?? '127.0.0.1';
@@ -401,6 +421,15 @@ export class BridgeClient extends EventEmitter {
       headers: { [AUTH_HEADER_NAME]: lockfile.body.authToken },
       maxPayload: MAX_BRIDGE_FRAME_BYTES,
     });
+    if (this.streamClosed) {
+      // Old iterators keep their closed feed and any remaining backlog. The
+      // replacement gets independent ownership, including after an old socket
+      // closes while asynchronous discovery is pending.
+      ++this.streamGeneration;
+      this.eventQueue = [];
+      this.eventStreams = new Set();
+      this.streamClosed = false;
+    }
     this.ws = ws;
 
     await new Promise<void>((resolve, reject) => {
@@ -924,8 +953,8 @@ export class BridgeClient extends EventEmitter {
     // A delayed close from a previous connection cannot close the replacement's
     // stream or reject its requests and media commands.
     if (socket !== this.ws) return;
-    this.emit('close', code, reason);
     this.closeStream();
+    this.emit('close', code, reason);
   }
 
   // ── Async event stream ──────────────────────────────────────────────────────
@@ -962,27 +991,30 @@ export class BridgeClient extends EventEmitter {
   events(): AsyncIterableIterator<ClientEvent> {
     const self = this;
     const owner = Symbol('bridge event stream');
+    const generation = this.streamGeneration;
+    const queue = this.eventQueue;
+    const streams = this.eventStreams;
     let returned = false;
-    self.eventStreams.add(owner);
+    streams.add(owner);
     const unsubscribe = () => {
       returned = true;
-      self.eventStreams.delete(owner);
+      streams.delete(owner);
       for (let index = self.eventWaiters.length - 1; index >= 0; index -= 1) {
         if (self.eventWaiters[index].owner === owner) {
           const [waiter] = self.eventWaiters.splice(index, 1);
           waiter.resolve({ value: undefined, done: true });
         }
       }
-      if (self.eventStreams.size === 0) self.eventQueue.length = 0;
+      if (streams.size === 0) queue.length = 0;
     };
     const iterator: AsyncIterableIterator<ClientEvent> = {
       next(): Promise<IteratorResult<ClientEvent>> {
         if (returned) return Promise.resolve({ value: undefined, done: true });
-        const buffered = self.eventQueue.shift();
+        const buffered = queue.shift();
         if (buffered !== undefined) {
           return Promise.resolve({ value: buffered, done: false });
         }
-        if (self.streamClosed) {
+        if (generation !== self.streamGeneration || self.streamClosed) {
           unsubscribe();
           return Promise.resolve({ value: undefined, done: true });
         }
@@ -1005,6 +1037,7 @@ export class BridgeClient extends EventEmitter {
 
   /** Close the WebSocket connection. */
   close(): void {
+    ++this.connectionGeneration;
     if (!this.ws) this.closeStream();
     this.ws?.close();
   }

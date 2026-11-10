@@ -453,6 +453,17 @@ pub trait CommandRouter: Send + Sync + 'static {
     /// turn path lives on [`crate::server::TurnDriver`]).
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>);
 
+    /// Compact with the connection's cooperative cancellation owner. Once the
+    /// engine enters its irreversible commit phase it must finish before this
+    /// future returns, even when the connection has gone away.
+    async fn force_compact_with_cancel(
+        &self,
+        _cancellation: CancellationToken,
+        sink: Arc<dyn ClientEventSink>,
+    ) {
+        self.route(ClientCommand::ForceCompact, sink).await;
+    }
+
     /// Product-only correlated read: existing protocol events form one atomic
     /// response rather than interleaving with live background status pushes.
     /// The caller fences outbound delivery through this read. Implementations
@@ -2371,6 +2382,38 @@ impl CommandRouter for EngineCommandRouter {
         Ok(events)
     }
 
+    async fn force_compact_with_cancel(
+        &self,
+        cancellation: CancellationToken,
+        sink: Arc<dyn ClientEventSink>,
+    ) {
+        match self
+            .handle
+            .force_compact_with_instructions_and_cancel(None, cancellation)
+            .await
+        {
+            Ok(summary) => {
+                sink.emit(ClientEvent::CompactionCompleted {
+                    messages_before: summary.messages_before,
+                    messages_after: summary.messages_after,
+                    bytes_saved: summary.bytes_saved,
+                    summary: client::protocol::text::ClientTextDto::from_projection(
+                        &summary.summary,
+                    )
+                    .expect("compaction summary is text"),
+                })
+                .await;
+            }
+            Err(e) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Internal,
+                    message: format!("force_compact failed: {e}").into(),
+                })
+                .await;
+            }
+        }
+    }
+
     async fn dispatch_slash(
         &self,
         raw: Utf16JsonProjection,
@@ -3298,27 +3341,10 @@ impl CommandRouter for EngineCommandRouter {
             }
 
             // ── Compaction ───────────────────────────────────────────────────
-            ClientCommand::ForceCompact => match self.handle.force_compact().await {
-                Ok(summary) => {
-                    sink.emit(ClientEvent::CompactionCompleted {
-                        messages_before: summary.messages_before,
-                        messages_after: summary.messages_after,
-                        bytes_saved: summary.bytes_saved,
-                        summary: client::protocol::text::ClientTextDto::from_projection(
-                            &summary.summary,
-                        )
-                        .expect("compaction summary is text"),
-                    })
+            ClientCommand::ForceCompact => {
+                self.force_compact_with_cancel(CancellationToken::new(), sink)
                     .await;
-                }
-                Err(e) => {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Internal,
-                        message: format!("force_compact failed: {e}").into(),
-                    })
-                    .await;
-                }
-            },
+            }
 
             // ── Session control ──────────────────────────────────────────────
             ClientCommand::ClearSession => {

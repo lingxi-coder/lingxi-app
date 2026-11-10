@@ -1,8 +1,8 @@
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import type { RuntimeProviderAccountCredential } from './provider-accounts.js';
 import { createHash } from 'node:crypto';
-import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { basename, isAbsolute, join, normalize, resolve } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 
 import { parseTelemetryEndpoint } from './telemetryPolicy.js';
@@ -21,6 +21,7 @@ import { parseNotificationPreferences } from '../shared/notificationPreferences.
 import type { NotificationPreferences } from '../shared/notificationPreferences.js';
 import { isPermissionModeId } from '../shared/permission.js';
 import type { SessionCatalogScope } from '../shared/sessionWorkspace.js';
+import { DiagnosticFileWriter } from './diagnostic-writer.js';
 
 export { SETTINGS_VERSION } from '../shared/settings.js';
 export type {
@@ -908,8 +909,11 @@ function diagnosticTail(filePath: string): string[] {
 
 export class DiagnosticBuffer {
   private readonly entries: DiagnosticEntry[] = [];
+  private oldestEntry = 0;
+  private readonly liveWriter: DiagnosticFileWriter | undefined;
+  private readonly errorWriter: DiagnosticFileWriter | undefined;
 
-  constructor(private readonly filePath?: string) {
+  constructor(filePath?: string) {
     if (!filePath) return;
     try {
       for (const line of diagnosticTail(filePath)) {
@@ -931,62 +935,32 @@ export class DiagnosticBuffer {
     } catch {
       // Missing, corrupt, or unreadable logs start with a clean bounded buffer.
     }
+    this.liveWriter = new DiagnosticFileWriter(filePath, 'live', MAX_DIAGNOSTICS, this.entries.map(entry => `${JSON.stringify(entry)}\n`));
+    this.errorWriter = new DiagnosticFileWriter(`${filePath}.errors`, 'errors');
   }
 
   add(level: DiagnosticEntry['level'], source: DiagnosticEntry['source'], input: unknown, secrets: readonly string[] = []): void {
     const entry = { timestamp: new Date().toISOString(), level, source, message: sanitizeDiagnostic(input, secrets) };
-    this.entries.push(entry);
-    // Keep failures independently of the busy 200-entry live diagnostics buffer.
-    if (this.filePath && level !== 'info') {
-      try {
-        const errorsPath = `${this.filePath}.errors`;
-        mkdirSync(dirname(errorsPath), { recursive: true, mode: 0o700 });
-        if (existsSync(errorsPath) && statSync(errorsPath).size >= 2_000_000) {
-          renameSync(errorsPath, `${errorsPath}.1`);
-        }
-        appendFileSync(errorsPath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-      } catch {
-        // Logging must not interrupt the session, including on a full disk.
-      }
+    if (this.entries.length < MAX_DIAGNOSTICS) this.entries.push(entry);
+    else {
+      this.entries[this.oldestEntry] = entry;
+      this.oldestEntry = (this.oldestEntry + 1) % MAX_DIAGNOSTICS;
     }
-    if (this.entries.length > MAX_DIAGNOSTICS) this.entries.splice(0, this.entries.length - MAX_DIAGNOSTICS);
-    this.appendLive(entry);
+    if (!this.liveWriter) return;
+    const line = `${JSON.stringify(entry)}\n`;
+    this.liveWriter.add(line);
+    // Keep failures independently of the busy 200-entry live diagnostics buffer.
+    if (level !== 'info') this.errorWriter?.add(line);
   }
 
   snapshot(): DiagnosticEntry[] {
-    return this.entries.map((entry) => ({ ...entry }));
+    return Array.from({ length: this.entries.length }, (_, index) => ({
+      ...this.entries[(this.oldestEntry + index) % this.entries.length]!,
+    }));
   }
 
-  /** Append one line. Rewrite the ring only after the live file reaches 2 MiB, so the loader still sees the tail. */
-  private appendLive(entry: DiagnosticEntry): void {
-    if (!this.filePath) return;
-    try {
-      mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
-      if (existsSync(this.filePath) && statSync(this.filePath).size >= 2_000_000) {
-        renameSync(this.filePath, `${this.filePath}.1`);
-        this.persist();
-        return;
-      }
-      appendFileSync(this.filePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-      if (statSync(this.filePath).size >= 2_000_000) {
-        renameSync(this.filePath, `${this.filePath}.1`);
-        this.persist();
-      }
-    } catch {
-      // Diagnostics must never destabilize the desktop host.
-    }
-  }
-
-  private persist(): void {
-    if (!this.filePath) return;
-    try {
-      mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
-      const temporary = `${this.filePath}.tmp`;
-      const body = this.entries.map((entry) => JSON.stringify(entry)).join('\n');
-      writeFileSync(temporary, body ? `${body}\n` : '', { mode: 0o600 });
-      renameSync(temporary, this.filePath);
-    } catch {
-      // Diagnostics must never destabilize the desktop host.
-    }
+  /** Drain queued file writes after shutdown producers have stopped. */
+  async flush(): Promise<void> {
+    await Promise.all([this.liveWriter?.flush(), this.errorWriter?.flush()]);
   }
 }

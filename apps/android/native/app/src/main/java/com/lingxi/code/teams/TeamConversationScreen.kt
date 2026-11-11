@@ -161,7 +161,7 @@ internal fun TeamConversationScreen(
         when {
             conversation == null && creation != null -> PendingConversation(creation, onDiscard = { workspace.messagingModel.discardCreation(); onBack() }, modifier = Modifier.weight(1f))
             conversation == null -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(28.dp)) }
-            else -> ConversationBody(workspace, uid, team, teams, messaging, conversation, label, members, strings, online, onRecall = { recalling = it }, modifier = Modifier.weight(1f))
+            else -> ConversationBody(workspace, uid, team, teams, messaging, conversation, label, members, strings, online, onRecall = { recalling = it }, modifier = Modifier.weight(1f), disclosure = friend == null)
         }
     }
 
@@ -213,6 +213,7 @@ private fun PendingConversation(creation: JSONObject, onDiscard: () -> Unit, mod
 private fun ConversationBody(
     workspace: TeamsWorkspace, uid: String, team: TeamSummary, teams: TeamsState, messaging: TeamMessagingState, conversation: TeamMessageConversation,
     label: String, members: List<TeamMember>, strings: TeamsListStrings, online: Boolean, onRecall: (TeamMessage) -> Unit, modifier: Modifier,
+    disclosure: Boolean = true,
 ) {
     val conversationId = conversation.id
     val cache = messaging.cache
@@ -237,9 +238,10 @@ private fun ConversationBody(
     val rows = remember(streamMessages, start, effectiveAnchor, uid, minute) { TeamsStreamLogic.buildStreamRows(streamMessages.drop(start), effectiveAnchor, uid, minute, zone) }
     val byId = remember(messages) { messages.associateBy { it.id } }
     val outbox = cache?.outbox.orEmpty().filter { (it.optJSONObject("payload") ?: it).optString("conversationId") == conversationId }
-    val stream: List<StreamItem> = remember(rows, byId, outbox, start) {
+    val stream: List<StreamItem> = remember(rows, byId, outbox, start, disclosure) {
         buildList {
-            add(if (start > 0) StreamItem.Earlier else StreamItem.Notice)
+            // A friend chat omits the Teams disclosure, as on iOS and Web.
+            if (start > 0) add(StreamItem.Earlier) else if (disclosure) add(StreamItem.Notice)
             for (row in rows) when (row) {
                 is StreamRow.Date -> add(StreamItem.Day(row))
                 StreamRow.Unread -> add(StreamItem.NewMessages)

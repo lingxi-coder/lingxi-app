@@ -28,6 +28,8 @@ export function applicationMenuTemplate(
       { label: nativeTr('native_bots'), accelerator: 'CommandOrControl+2', enabled: botsAvailability(platform).available, click: () => dispatch('bots') },
       { label: nativeTr('native_teams'), accelerator: 'CommandOrControl+3', click: () => dispatch('teams') },
       { label: nativeTr('native_apps'), accelerator: 'CommandOrControl+4', click: () => dispatch('apps') },
+      // Friends came after Apps had ⌘4, so it takes the next number and the next place.
+      { label: nativeTr('native_friends'), accelerator: 'CommandOrControl+5', click: () => dispatch('friends') },
       { type: 'separator' },
       // The window alone knows whether the sidebar is shown, so one item stands for both Show and Hide.
       { label: nativeTr('native_toggle_sidebar'), accelerator: platform === 'darwin' ? 'Control+Command+S' : 'Control+Alt+S', click: () => dispatch('toggle-sidebar') },

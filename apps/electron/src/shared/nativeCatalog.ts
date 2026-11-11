@@ -9,6 +9,7 @@ const rows: Record<string, readonly [string, string, string, string, string]> = 
   home: ['首页', '首頁', 'Home', 'ホーム', '홈'],
   bots: ['Bot', 'Bot', 'Bots', 'Bot', 'Bot'],
   teams: ['团队', '團隊', 'Teams', 'チーム', '팀'],
+  friends: ['好友', '好友', 'Friends', '友だち', '친구'],
   toggle_sidebar: ['显示/隐藏侧栏', '顯示/隱藏側欄', 'Show/Hide Sidebar', 'サイドバーを表示/非表示', '사이드바 표시/숨기기'],
   team_details: ['显示/隐藏团队详情', '顯示/隱藏團隊詳情', 'Show/Hide Team Details', 'チームの詳細を表示/非表示', '팀 세부정보 표시/숨기기'],
   trust_title: ['信任目录', '信任目錄', 'Trust directory', 'ディレクトリを信頼', '디렉터리 신뢰'],

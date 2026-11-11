@@ -35,10 +35,11 @@ test('the View menu picks what the sidebar lists and shows or hides it, each ite
   const actions: string[] = [];
   const view = viewItems(applicationMenuTemplate('darwin', action => actions.push(action), false));
   const labelled = (label: string) => view.find(item => item.label === label)!;
-  assert.deepEqual(['Home', 'Bots', 'Teams'].map(label => labelled(label).accelerator), ['CommandOrControl+1', 'CommandOrControl+2', 'CommandOrControl+3']);
+  assert.deepEqual(['Home', 'Bots', 'Teams', 'Apps', 'Friends'].map(label => labelled(label).accelerator), ['CommandOrControl+1', 'CommandOrControl+2', 'CommandOrControl+3', 'CommandOrControl+4', 'CommandOrControl+5']);
   assert.equal(labelled('Show/Hide Sidebar').accelerator, 'Control+Command+S');
-  for (const label of ['Home', 'Bots', 'Teams', 'Show/Hide Sidebar']) (labelled(label).click as () => void)();
-  assert.deepEqual(actions, ['home', 'bots', 'teams', 'toggle-sidebar']);
+  for (const label of ['Home', 'Bots', 'Teams', 'Friends', 'Show/Hide Sidebar']) (labelled(label).click as () => void)();
+  assert.deepEqual(actions, ['home', 'bots', 'teams', 'friends', 'toggle-sidebar']);
+  assert.ok(view.findIndex(item => item.label === 'Friends') < view.findIndex(item => item.label === 'Show/Hide Sidebar'), 'Friends is one of the modes');
   assert.ok(view.findIndex(item => item.label === 'Teams') < view.findIndex(item => item.label === 'Show/Hide Sidebar'), 'the modes come before the sidebar toggle');
 });
 
@@ -101,7 +102,7 @@ test('no two items of the View menu share an accelerator, the DevTools role of t
 });
 
 test('the new View items are named in all five languages', () => {
-  for (const key of ['native_home', 'native_bots', 'native_teams', 'native_toggle_sidebar', 'native_team_details']) {
+  for (const key of ['native_home', 'native_bots', 'native_teams', 'native_friends', 'native_toggle_sidebar', 'native_team_details']) {
     for (const locale of ['zh-Hans', 'zh-Hant', 'en', 'ja', 'ko']) assert.ok(nativeCatalog[key]?.[locale]?.trim(), `${key} ${locale}`);
   }
 });

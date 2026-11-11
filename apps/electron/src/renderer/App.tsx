@@ -469,7 +469,7 @@ export function App() {
       setPage('chat');
       setActivityView(!activityView);
       bridge.setRuntimeCenterOverviewOpen(!activityView);
-    } else if ((action === 'home' || action === 'bots' || action === 'teams' || action === 'apps') && !settingsRoute) {
+    } else if ((action === 'home' || action === 'bots' || action === 'teams' || action === 'friends' || action === 'apps') && !settingsRoute) {
       // Bots is ignored where Bots cannot run: the menu shows that item dimmed.
       // A key brought the person to Teams, so the keyboard comes along: to the open conversation in the sidebar, unless it is in Teams already.
       selectSidebarMode(action, action === 'teams' ? () => { if (!document.activeElement?.closest('.teams-sidebar, .teams-page')) focusTeamsSidebarSoon(); } : undefined);

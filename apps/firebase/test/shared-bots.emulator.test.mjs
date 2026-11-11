@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
 import { initializeApp, deleteApp } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { createHash } from 'node:crypto';
+import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { TeamsStore, createTeamsHandler } from '../src/teams.mjs';
 import { SharedBotsStore } from '../src/shared-bots.mjs';
 import { onTeamMessageCreated } from '../src/team-message-push.mjs';
@@ -251,4 +252,352 @@ test('execution 2: prior-source edit after preparation refuses start and edit du
   const response = await execute('completeTask', result(started, { text: 'PRIVATE-DERIVED-OLD-DETAIL' })); assert.equal(response.state, 'failed');
   assert.ok(!(await chatRef().get()).data().lastMessage.preview.includes('PRIVATE-DERIVED'));
   assert.equal(response.artifactId, null);
+});
+
+// ---- M2 / Q02: durable human waits, continue permits and cancellation ----
+const checkpoint = 'd'.repeat(64);
+const taskRef = id => db.doc(`teams/${teamId}/tasks/${id}`);
+const taskData = async id => (await taskRef(id).get()).data();
+const waitData = async id => (await db.doc(`teams/${teamId}/waits/${id}`).get()).data();
+const lockRefFor = (chat = conversationId) => db.collection(`teams/${teamId}/chatExecutionLocks`).doc(createHash('sha256')
+  .update(JSON.stringify(['sharedbot_01', chat])).digest('hex'));
+const messageCount = async () => (await chatRef().collection('messages').get()).size;
+const enableWait = () => db.doc(`teams/${teamId}/deployments/${host.deploymentId}`).update({ 'capabilities.durableWait': true });
+const heartbeat = () => execute('heartbeatDeployment', { ...host, ready: true });
+const pausePayload = (started, override = {}) => ({ ...host, taskId: started.task.taskId, permitId: started.permitId, waitId: 'wait_0001',
+  kind: 'human_input', question: 'Which city are you travelling to?', requestDigest: 'c'.repeat(64), checkpointDigest: checkpoint,
+  pausedAt: now, expiresInMs: 3600000, dispatchedRequests: 2, inputGrantIds: started.inputs.map(g => g.grantId),
+  outputAudience: { mode: 'published_inputs' }, ...override });
+const answerPayload = (n = ++serial, override = {}) => ({ conversationId, waitId: 'wait_0001', messageId: `answer_${n}`, changeId: `answerchg_${n}`, text: 'Lisbon', ...override });
+const continuePayload = (taskId, override = {}) => ({ ...host, taskId, expectedEpoch: 1, checkpointDigest: checkpoint, reason: 'answer', dispatchedRequests: 3, ...override });
+// Running task, paused after `activeMs` of work.
+async function paused({ activeMs = 60000, wait = {} } = {}) {
+  await enableWait();
+  const started = await start(); now += activeMs;
+  const response = await execute('pauseTask', pausePayload(started, wait));
+  return { started, response, taskId: started.task.taskId };
+}
+const asContinued = (started, granted) => ({ task: started.task, permitId: granted.permitId, inputs: granted.inputs });
+
+test('wait: pause invalidates the permit and publishes one question with a durable wait record', options, async () => {
+  const { started, response, taskId } = await paused({ activeMs: 60000 });
+  assert.equal(response.state, 'waiting'); assert.equal(response.waitId, 'wait_0001'); assert.equal(response.expiresAt, now + 3600000);
+  await assert.rejects(execute('validateTask', { ...host, taskId, permitId: started.permitId, expectedLastChangeSeq: 0 }), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  await assert.rejects(execute('completeTask', result(started)), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  const question = (await chatRef().collection('messages').doc(response.messageId).get()).data(), submitted = await taskData(taskId);
+  assert.equal(question.text, 'Which city are you travelling to?'); assert.equal(question.waitId, 'wait_0001'); assert.equal(question.taskId, taskId);
+  assert.equal(question.replyTo, submitted.messageId); assert.equal(question.author.kind, 'shared_bot');
+  assert.equal(question.seq, 2); assert.equal((await chatRef().get()).data().lastMessage.id, response.messageId);
+  const { pauseDigest, ...wait } = await waitData('wait_0001');
+  assert.match(pauseDigest, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(wait, { schemaVersion: 1, waitId: 'wait_0001', taskId, conversationId, sharedBotId: 'sharedbot_01', kind: 'human_input',
+    recipient: { uid: member.uid, generation: 1 }, requestDigest: 'c'.repeat(64), checkpointDigest: checkpoint, messageId: response.messageId,
+    createdAt: now, expiresAt: now + 3600000, state: 'pending' });
+  assert.equal(submitted.state, 'waiting'); assert.equal(submitted.deadline, now + 3600000); assert.equal(submitted.activeSpentMs, 60000);
+  assert.equal(submitted.physicalDispatchesSpent, 2); assert.equal(submitted.currentWaitId, 'wait_0001'); assert.equal(submitted.checkpointDigest, checkpoint);
+  assert.deepEqual((await lockRefFor().get()).data(), { taskId, until: now + 3600000 });
+  const view = await execute('getTask', { taskId }, member);
+  assert.deepEqual({ state: view.state, epoch: view.epoch, activeSpentMs: view.activeSpentMs, wait: view.wait },
+    { state: 'waiting', epoch: 1, activeSpentMs: 60000, wait: { waitId: 'wait_0001', kind: 'human_input', recipient: { uid: member.uid, generation: 1 }, expiresAt: now + 3600000, messageId: response.messageId } });
+  assert.equal((await execute('listHostTasks', host)).tasks.length, 0);
+  now += 3600000; assert.equal((await execute('getTask', { taskId }, member)).state, 'expired');
+  assert.equal((await execute('getTask', { taskId }, member)).wait, undefined);
+});
+test('wait: a 30 minute wait is not charged; the answer grants epoch 2 and completion succeeds', options, async () => {
+  const { started, taskId } = await paused({ activeMs: 60000 });
+  now += 30 * 60000;
+  const answered = await execute('answerWait', answerPayload(), member);
+  assert.equal(answered.taskId, taskId);
+  const queued = await taskData(taskId);
+  assert.equal(queued.state, 'queued'); assert.equal(queued.deadline, now + 300000);
+  assert.deepEqual(queued.resume, { waitId: 'wait_0001', answerMessageId: answered.messageId, answerSeq: 3 });
+  assert.deepEqual((await lockRefFor().get()).data(), { taskId, until: now + 300000 });
+  const resolved = await waitData('wait_0001');
+  assert.deepEqual([resolved.state, resolved.responseMessageId, resolved.responseSeq, resolved.resolvedAt], ['resolved', answered.messageId, 3, now]);
+  const listed = (await execute('listHostTasks', host)).tasks.find(task => task.taskId === taskId);
+  assert.equal(listed.epoch, 1); assert.deepEqual(listed.resume, queued.resume);
+  await heartbeat();
+  assert.equal((await execute('startTask', { ...host, taskId })).execute, false);
+  const granted = await execute('continueTask', continuePayload(taskId, { dispatchedRequests: 3 }));
+  assert.equal(granted.execute, true); assert.equal(granted.epoch, 2); assert.equal(granted.remainingActiveMs, 240000);
+  assert.equal(granted.physicalDispatchesSpent, 3); assert.deepEqual(granted.wait, { waitId: 'wait_0001', answerMessageId: answered.messageId, answerSeq: 3 });
+  assert.equal(granted.task.state, 'running'); assert.equal(granted.task.epoch, 2); assert.equal(granted.messageId, queued.messageId);
+  assert.equal(granted.messageSeq, 1); assert.equal(granted.deployment.deploymentId, host.deploymentId); assert.equal(granted.inputs.length, 2);
+  const running = await taskData(taskId);
+  assert.equal(running.activeSpentMs, 60000); assert.equal(running.deadline, now + 240000); assert.equal(running.resume, undefined);
+  assert.equal(running.attemptStartedAt, now); assert.deepEqual((await lockRefFor().get()).data(), { taskId, until: now + 240000 });
+  await assert.rejects(execute('completeTask', result(started)), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  const done = await execute('completeTask', result(asContinued(started, granted)));
+  assert.equal(done.state, 'completed'); assert.equal((await lockRefFor().get()).exists, false);
+});
+test('wait: concurrent continue yields exactly one grant and the granted call never replays', options, async () => {
+  const { taskId } = await paused(); await execute('answerWait', answerPayload(), member); await heartbeat();
+  const commands = Array.from({ length: 8 }, () => command('continueTask', continuePayload(taskId)));
+  const values = await Promise.all(commands.map(value => store.execute(owner, value)));
+  assert.equal(values.filter(value => value.execute).length, 1);
+  const index = values.findIndex(value => value.execute);
+  assert.deepEqual(await store.execute(owner, commands[index]), { execute: false, taskId });
+  assert.equal((await taskData(taskId)).epoch, 2);
+});
+test('wait: recovery continue replaces the permit without moving the absolute deadline', options, async () => {
+  const started = await start(), taskId = started.task.taskId, deadline = started.task.deadline;
+  assert.equal(deadline, now + 300000); assert.equal(started.task.epoch, 1);
+  now += 10000; await heartbeat();
+  const granted = await execute('continueTask', continuePayload(taskId, { reason: 'recovery', checkpointDigest: 'e'.repeat(64), dispatchedRequests: 1 }));
+  assert.equal(granted.execute, true); assert.equal(granted.epoch, 2); assert.equal(granted.wait, undefined);
+  assert.equal(granted.remainingActiveMs, deadline - now);
+  const recovered = await taskData(taskId);
+  assert.equal(recovered.deadline, deadline); assert.equal(recovered.activeSpentMs, 10000); assert.equal(recovered.checkpointDigest, 'e'.repeat(64));
+  assert.deepEqual((await lockRefFor().get()).data(), { taskId, until: deadline });
+  await assert.rejects(execute('completeTask', result(started)), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  await assert.rejects(execute('validateTask', { ...host, taskId, permitId: started.permitId, expectedLastChangeSeq: 0 }), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  // A stale epoch is refused; past the deadline nothing is granted.
+  assert.equal((await execute('continueTask', continuePayload(taskId, { reason: 'recovery' }))).execute, false);
+  now = deadline; await heartbeat();
+  assert.deepEqual(await execute('continueTask', continuePayload(taskId, { reason: 'recovery', expectedEpoch: 2 })), { execute: false, taskId });
+  assert.equal((await execute('getTask', { taskId }, member)).state, 'interrupted');
+  assert.equal((await taskData(taskId)).state, 'running');
+});
+test('wait: recovery after the recorded host changed is refused', options, async () => {
+  const started = await start(), taskId = started.task.taskId;
+  await taskRef(taskId).update({ hostId: 'host_other' }); await heartbeat();
+  assert.equal((await execute('continueTask', continuePayload(taskId, { reason: 'recovery' }))).execute, false);
+  assert.equal((await taskData(taskId)).epoch, 1);
+});
+test('wait: exhausted active budget fails the task and releases the lock', options, async () => {
+  const { taskId } = await paused({ activeMs: 299500 });
+  assert.equal((await taskData(taskId)).activeSpentMs, 299500);
+  await execute('answerWait', answerPayload(), member); await heartbeat();
+  assert.deepEqual(await execute('continueTask', continuePayload(taskId)), { execute: false, taskId, state: 'failed' });
+  assert.equal((await taskData(taskId)).state, 'failed'); assert.equal((await lockRefFor().get()).exists, false);
+  assert.equal((await execute('getTask', { taskId }, member)).state, 'failed');
+});
+test('wait: continue checks checkpoint, epoch, cancellation, revocation and ordering', options, async () => {
+  const { taskId } = await paused(); await execute('answerWait', answerPayload(), member); await heartbeat();
+  await assert.rejects(execute('continueTask', continuePayload(taskId, { checkpointDigest: 'f'.repeat(64) })), { code: 'CHECKPOINT_MISMATCH' });
+  assert.equal((await execute('continueTask', continuePayload(taskId, { expectedEpoch: 2 }))).execute, false);
+  // The recovery reason applies only to a running attempt.
+  assert.equal((await execute('continueTask', continuePayload(taskId, { reason: 'recovery' }))).execute, false);
+  await chatRef().update({ executionPolicy: { revision: 1, targets: [] } });
+  await assert.rejects(execute('continueTask', continuePayload(taskId)), { code: 'TASK_REVOKED' });
+  await chatRef().update({ executionPolicy: FieldValue.delete() });
+  await lockRefFor().set({ taskId: 'someone_else', until: now + 60000 });
+  assert.equal((await execute('continueTask', continuePayload(taskId))).execute, false);
+  await lockRefFor().set({ taskId, until: now + 60000 });
+  assert.equal((await execute('continueTask', continuePayload(taskId))).execute, true);
+});
+test('wait: an answer window that lapsed expires the queued task instead of granting', options, async () => {
+  const { taskId } = await paused(); await execute('answerWait', answerPayload(), member);
+  now += 300000; await heartbeat();
+  assert.equal((await execute('continueTask', continuePayload(taskId))).execute, false);
+  assert.equal((await taskData(taskId)).state, 'expired');
+});
+for (const operation of ['edit', 'recall']) {
+  test(`wait: an answer ${operation === 'edit' ? 'edited' : 'recalled'} before continue is SOURCE_CHANGED`, options, async () => {
+    const { TeamMessagesStore } = await import('../src/team-messages.mjs');
+    const { taskId } = await paused(), answered = await execute('answerWait', answerPayload(), member); await heartbeat();
+    await new TeamMessagesStore(db, () => now).execute(member, { action: 'mutate', teamId, generation: 1, conversationId,
+      messageId: answered.messageId, changeId: `mutate_${operation}`, operation, text: operation === 'edit' ? 'Porto' : '' });
+    await assert.rejects(execute('continueTask', continuePayload(taskId)), { code: 'SOURCE_CHANGED' });
+    assert.equal((await taskData(taskId)).state, 'queued'); assert.equal((await taskData(taskId)).epoch, 1);
+  });
+}
+test('wait: answerWait authorization and closure refusals', options, async () => {
+  const { taskId } = await paused();
+  const addOther = () => chatRef().update({ memberUids: ['member', 'other', 'owner'], participants: ['user:member', 'user:other', 'shared_bot:sharedbot_01'] });
+  const restore = async () => (await chatRef().get()).data();
+  const before = await restore();
+  // A Team member outside the Chat, and a Chat participant who is not the recipient.
+  await assert.rejects(execute('answerWait', answerPayload(), other), { code: 'CONVERSATION_REQUIRED' });
+  await addOther();
+  await assert.rejects(execute('answerWait', answerPayload(), other), { code: 'WAIT_RECIPIENT_REQUIRED' });
+  await chatRef().update({ memberUids: before.memberUids, participants: before.participants });
+  // Same UID with a new membership generation is not the recorded recipient.
+  await db.doc(`teams/${teamId}/members/${member.uid}`).update({ generation: 2 });
+  await assert.rejects(store.execute(member, { ...command('answerWait', answerPayload()), generation: 2 }), { code: 'WAIT_RECIPIENT_REQUIRED' });
+  await db.doc(`teams/${teamId}/members/${member.uid}`).update({ generation: 1 });
+  // The recipient who left the Chat cannot answer.
+  await chatRef().update({ memberUids: ['owner'], participants: ['shared_bot:sharedbot_01'] });
+  await assert.rejects(execute('answerWait', answerPayload(), member), { code: 'CONVERSATION_REQUIRED' });
+  await chatRef().update({ memberUids: before.memberUids, participants: before.participants });
+  await assert.rejects(execute('answerWait', answerPayload(undefined, { waitId: 'wait_unknown' }), member), { code: 'WAIT_REQUIRED' });
+  await assert.rejects(execute('answerWait', answerPayload(undefined, { messageId: 'bot_answer_1' }), member), { code: 'INVALID_INPUT' });
+  assert.equal(await messageCount(), 2); assert.equal((await taskData(taskId)).state, 'waiting');
+  // Closed waits: expired, answered once, cancelled.
+  now += 3600000;
+  await assert.rejects(execute('answerWait', answerPayload(), member), { code: 'WAIT_CLOSED' });
+});
+test('wait: second answer, replay and message-id reuse', options, async () => {
+  await paused();
+  const payload = answerPayload(), first = await execute('answerWait', payload, member);
+  assert.deepEqual(await execute('answerWait', payload, member, 'replay_command_01'), first);
+  assert.deepEqual(await execute('answerWait', payload, member), first);
+  assert.equal(await messageCount(), 3);
+  await assert.rejects(execute('answerWait', { ...payload, text: 'Porto' }, member), { code: 'MESSAGE_ID_CONFLICT' });
+  await assert.rejects(execute('answerWait', answerPayload(), member), { code: 'WAIT_CLOSED' });
+  assert.equal(await messageCount(), 3);
+  const answer = (await chatRef().collection('messages').doc(first.messageId).get()).data();
+  assert.equal(answer.replyTo.startsWith('bot_'), true); assert.equal(answer.waitId, 'wait_0001'); assert.equal(answer.sourceTaskId, first.taskId);
+  assert.equal(answer.author.uid, member.uid); assert.equal(answer.taskIds, undefined); assert.equal(answer.mentions, undefined);
+});
+test('wait: answerWait after cancel is closed', options, async () => {
+  const { taskId } = await paused();
+  assert.deepEqual(await execute('cancelTask', { taskId }, member), { taskId, state: 'cancelled' });
+  await assert.rejects(execute('answerWait', answerPayload(), member), { code: 'WAIT_CLOSED' });
+  assert.equal((await waitData('wait_0001')).state, 'revoked');
+});
+test('wait: answerWait consumes no quota, creates no task and never admits a mentioning answer', options, async () => {
+  await paused();
+  const quotas = async () => JSON.stringify((await db.collection(`teams/${teamId}/requestQuotas`).get()).docs.map(doc => [doc.id, doc.data()]).sort());
+  const tasksBefore = (await db.collection(`teams/${teamId}/tasks`).get()).size, usedBefore = await quotas();
+  await db.doc(`teams/${teamId}/sharedBots/sharedbot_01`).update({ quotas: { team: 1, member: 1, bot: 1 } });
+  await execute('answerWait', answerPayload(undefined, { text: '@Travel assistant Lisbon please' }), member);
+  assert.equal((await db.collection(`teams/${teamId}/tasks`).get()).size, tasksBefore);
+  assert.equal(await quotas(), usedBefore);
+});
+test('wait: pause requires the durable-wait capability and a matching live permit', options, async () => {
+  const started = await start(), taskId = started.task.taskId;
+  await assert.rejects(execute('pauseTask', pausePayload(started)), { code: 'DURABLE_WAIT_UNSUPPORTED' });
+  await enableWait();
+  await assert.rejects(execute('pauseTask', pausePayload(started, { permitId: 'wrong_permit_01' })), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  await assert.rejects(execute('pauseTask', pausePayload(started, { pausedAt: now + 1 })), { code: 'TASK_EXPIRED' });
+  await assert.rejects(execute('pauseTask', pausePayload(started, { pausedAt: started.task.deadline + 1 })), { code: 'TASK_EXPIRED' });
+  await assert.rejects(execute('pauseTask', pausePayload(started, { expiresInMs: 59999 })));
+  await assert.rejects(execute('pauseTask', pausePayload(started, { question: 'x'.repeat(2001) })));
+  assert.equal((await taskData(taskId)).state, 'running'); assert.equal(await messageCount(), 1);
+  assert.equal((await db.collection(`teams/${teamId}/waits`).get()).size, 0);
+});
+test('wait: pause behind a failing audience gate behaves like a refused result and publishes no question', options, async () => {
+  await enableWait();
+  const started = await start(), taskId = started.task.taskId;
+  const refused = await execute('pauseTask', pausePayload(started, { outputAudience: { mode: 'owner' }, question: 'PRIVATE-QUESTION-DO-NOT-SHARE' }));
+  assert.deepEqual(refused, { taskId, state: 'authorization_required', waitId: 'wait_0001', messageId: null, expiresAt: null });
+  assert.equal((await db.collection(`teams/${teamId}/waits`).get()).size, 0);
+  const messages = (await chatRef().collection('messages').get()).docs.map(doc => doc.data());
+  assert.equal(messages.length, 2); assert.ok(!JSON.stringify(messages).includes('PRIVATE-QUESTION'));
+  assert.ok(!(await chatRef().get()).data().lastMessage.preview.includes('PRIVATE'));
+  assert.equal((await taskData(taskId)).state, 'authorization_required'); assert.equal((await lockRefFor().get()).exists, false);
+  assert.deepEqual(await execute('pauseTask', pausePayload(started, { outputAudience: { mode: 'owner' }, question: 'PRIVATE-QUESTION-DO-NOT-SHARE' })), refused);
+  assert.equal((await messageCount()), 2);
+});
+test('wait: pause with an extra Chat reader outside the input audience is refused', options, async () => {
+  await enableWait();
+  const started = await start(), ref = db.doc(`teams/${teamId}/sharedBots/sharedbot_01`), bot = (await ref.get()).data();
+  await ref.update({ grants: bot.grants.map(g => ({ ...g, usePolicy: { mode: 'listed', members: [{ uid: member.uid, generation: 1 }] } })) });
+  await chatRef().update({ memberUids: [member.uid, other.uid] });
+  const refused = await execute('pauseTask', pausePayload(started));
+  assert.equal(refused.state, 'authorization_required'); assert.equal((await db.collection(`teams/${teamId}/waits`).get()).size, 0);
+});
+test('wait: pause replay returns the same response and a conflicting wait is rejected', options, async () => {
+  const { started, response } = await paused();
+  const again = await execute('pauseTask', pausePayload(started, { pausedAt: now - 0 }));
+  assert.deepEqual(again, response); assert.equal(await messageCount(), 2);
+  assert.equal((await db.collection(`teams/${teamId}/waits`).get()).size, 1);
+  await assert.rejects(execute('pauseTask', pausePayload(started, { question: 'A different question?' })), { code: 'WAIT_CONFLICT' });
+  await assert.rejects(execute('pauseTask', pausePayload(started, { checkpointDigest: 'f'.repeat(64) })), { code: 'WAIT_CONFLICT' });
+  assert.equal(await messageCount(), 2); assert.equal((await waitData('wait_0001')).checkpointDigest, checkpoint);
+});
+test('wait: cancel by requester, maintainer and a bystander in every task state', options, async () => {
+  const submitOne = async () => (await execute('submit', submit(), member)).tasks[0].taskId;
+  // queued
+  const queued = await submitOne();
+  await assert.rejects(execute('cancelTask', { taskId: queued }, other), { code: 'TASK_CANCEL_FORBIDDEN' });
+  assert.deepEqual(await execute('cancelTask', { taskId: queued }, member), { taskId: queued, state: 'cancelled' });
+  assert.equal((await taskData(queued)).state, 'cancelled');
+  await assert.rejects(execute('cancelTask', { taskId: queued }, owner), { code: 'TASK_FINISHED' });
+  assert.equal((await execute('startTask', { ...host, taskId: queued })).execute, false);
+  assert.equal((await execute('listHostTasks', host)).tasks.length, 0);
+  await assert.rejects(execute('cancelTask', { taskId: 'task_missing_01' }, member), { code: 'TASK_REQUIRED' });
+  // queued, cancelled by the maintainer
+  const byOwner = await submitOne();
+  assert.deepEqual(await execute('cancelTask', { taskId: byOwner }, owner), { taskId: byOwner, state: 'cancelled' });
+  // running: flag, idempotent, validate refuses, one completion ends cancelled with no output
+  const running = await start(), id = running.task.taskId;
+  await assert.rejects(execute('cancelTask', { taskId: id }, other), { code: 'TASK_CANCEL_FORBIDDEN' });
+  now += 1000;
+  assert.deepEqual(await execute('cancelTask', { taskId: id }, owner), { taskId: id, state: 'running' });
+  const flagged = (await taskData(id)).cancelRequestedAt; now += 1000;
+  assert.deepEqual(await execute('cancelTask', { taskId: id }, member), { taskId: id, state: 'running' });
+  assert.equal((await taskData(id)).cancelRequestedAt, flagged);
+  assert.equal((await execute('getTask', { taskId: id }, member)).cancelRequestedAt, flagged);
+  await assert.rejects(execute('validateTask', { ...host, taskId: id, permitId: running.permitId, expectedLastChangeSeq: 0 }), { code: 'TASK_CANCELLED' });
+  const messages = await messageCount();
+  const payload = result(running, { usage: { status: 'complete', inputTokens: 5, outputTokens: 7 } });
+  const done = await execute('completeTask', payload);
+  assert.deepEqual(done, { taskId: id, state: 'cancelled', replyId: null, artifactId: null });
+  const ended = await taskData(id);
+  assert.equal(ended.state, 'cancelled'); assert.deepEqual(ended.usage, payload.usage); assert.ok(ended.resultDigest);
+  assert.equal(await messageCount(), messages); assert.equal((await db.collection(`teams/${teamId}/artifacts`).get()).size, 0);
+  assert.equal((await lockRefFor().get()).exists, false);
+  assert.deepEqual(await execute('completeTask', payload), done);
+  await assert.rejects(execute('completeTask', { ...payload, text: 'different' }), { code: 'TASK_RESULT_CONFLICT' });
+  await assert.rejects(execute('cancelTask', { taskId: id }, owner), { code: 'TASK_FINISHED' });
+  // waiting, then a bystander, then the maintainer
+  await enableWait();
+  const second = await start(), waiting = second.task.taskId; now += 1000;
+  await execute('pauseTask', pausePayload(second));
+  await assert.rejects(execute('cancelTask', { taskId: waiting }, other), { code: 'TASK_CANCEL_FORBIDDEN' });
+  assert.deepEqual(await execute('cancelTask', { taskId: waiting }, owner), { taskId: waiting, state: 'cancelled' });
+  assert.equal((await waitData('wait_0001')).state, 'revoked'); assert.equal((await lockRefFor().get()).exists, false);
+  assert.equal((await execute('continueTask', continuePayload(waiting))).execute, false);
+  // terminal (completed)
+  const third = await start(), finished = await execute('completeTask', result(third));
+  assert.equal(finished.state, 'completed');
+  for (const actor of [member, owner, other]) await assert.rejects(execute('cancelTask', { taskId: third.task.taskId }, actor),
+    actor === other ? { code: 'TASK_CANCEL_FORBIDDEN' } : { code: 'TASK_FINISHED' });
+});
+test('wait: a cancelled running task refuses continue and pause', options, async () => {
+  await enableWait();
+  const started = await start(), taskId = started.task.taskId;
+  await execute('cancelTask', { taskId }, member);
+  await assert.rejects(execute('pauseTask', pausePayload(started)), { code: 'TASK_CANCELLED' });
+  assert.equal((await execute('continueTask', continuePayload(taskId, { reason: 'recovery' }))).execute, false);
+  // The host never closed the run: past the deadline it reads as cancelled, not interrupted.
+  now = started.task.deadline + 1;
+  assert.equal((await execute('getTask', { taskId }, member)).state, 'cancelled');
+  await assert.rejects(execute('cancelTask', { taskId }, member), { code: 'TASK_FINISHED' });
+});
+test('wait: another member request during a wait stays queued, then starts after the first task finishes', options, async () => {
+  await enableWait();
+  const group = 'chat_group01', groupRef = db.doc(`teams/${teamId}/conversations/${group}`);
+  await execute('createConversation', { conversationId: group, kind: 'group', title: 'Group', participantUids: [member.uid, other.uid], sharedBotIds: ['sharedbot_01'] }, member);
+  const send = (actor, n) => execute('submit', { conversationId: group, messageId: `group_msg_${n}`, changeId: `group_chg_${n}`, text: 'Hello', targets: ['sharedbot_01'] }, actor);
+  const watermark = async () => (await groupRef.get()).data().lastChangeSeq;
+  const first = await send(member, 1), firstId = first.tasks[0].taskId;
+  const started = await execute('startTask', { ...host, taskId: firstId, expectedLastChangeSeq: await watermark() });
+  now += 5000;
+  const wait = await execute('pauseTask', pausePayload(started, { expiresInMs: 3600000 }));
+  const second = await send(other, 2), secondId = second.tasks[0].taskId;
+  assert.equal((await taskData(secondId)).deadline, wait.expiresAt + 300000);
+  now += 20 * 60000; await heartbeat();
+  assert.equal((await execute('startTask', { ...host, taskId: secondId, expectedLastChangeSeq: await watermark() })).execute, false);
+  assert.equal((await execute('getTask', { taskId: secondId }, other)).state, 'queued');
+  await execute('answerWait', answerPayload(undefined, { conversationId: group }), member);
+  assert.equal((await execute('startTask', { ...host, taskId: secondId, expectedLastChangeSeq: await watermark() })).execute, false);
+  const granted = await execute('continueTask', continuePayload(firstId));
+  assert.equal(granted.execute, true);
+  assert.equal((await execute('startTask', { ...host, taskId: secondId, expectedLastChangeSeq: await watermark() })).execute, false);
+  const completion = { ...host, taskId: firstId, permitId: granted.permitId, outcome: 'completed', text: 'Done', finishedAt: now,
+    inputGrantIds: granted.inputs.map(g => g.grantId), outputAudience: { mode: 'published_inputs' }, usage: { status: 'missing' } };
+  assert.equal((await execute('completeTask', completion)).state, 'completed');
+  const next = await execute('startTask', { ...host, taskId: secondId, expectedLastChangeSeq: await watermark() });
+  assert.equal(next.execute, true); assert.equal(next.task.epoch, 1);
+});
+test('wait: a request queued behind a running task also outlives the running lock', options, async () => {
+  const running = await start();
+  const second = await execute('submit', submit(), member);
+  assert.equal((await taskData(second.tasks[0].taskId)).deadline, running.task.deadline + 300000);
+});
+test('wait: start sets the running phase deadline and refuses a task that already ran', options, async () => {
+  const receipt = await execute('submit', submit(), member), taskId = receipt.tasks[0].taskId;
+  const queued = await taskData(taskId);
+  assert.deepEqual([queued.epoch, queued.attemptStartedAt, queued.activeBudgetMs, queued.activeSpentMs, queued.physicalDispatchesSpent, queued.deadline],
+    [0, 0, 300000, 0, 0, now + 300000]);
+  now += 120000; await heartbeat();
+  const started = await execute('startTask', { ...host, taskId });
+  assert.equal(started.task.deadline, now + 300000); assert.equal(started.task.epoch, 1);
+  const running = await taskData(taskId);
+  assert.equal(running.attemptStartedAt, now); assert.deepEqual((await lockRefFor().get()).data(), { taskId, until: now + 300000 });
+  await taskRef(taskId).update({ state: 'queued' });
+  assert.equal((await execute('startTask', { ...host, taskId })).execute, false);
 });

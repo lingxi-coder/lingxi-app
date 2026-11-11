@@ -9,11 +9,15 @@ export interface SharedBotCard {
   permitted: boolean; ready: boolean; onlineUntil: number; usePolicy: UsePolicy;
   quotas: RequestQuotas; instanceId?: string;
 }
-export type TaskState = 'queued' | 'running' | 'completed' | 'failed' | 'expired' | 'interrupted' | 'authorization_required' | 'revoked';
+export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'expired' | 'interrupted' | 'authorization_required' | 'revoked' | 'cancelled';
 export type TaskUsage = { status: 'missing' } | { status: 'partial' | 'complete'; inputTokens: number; outputTokens: number; costMicros?: number; currency?: string };
+/** The human question a waiting task is blocked on; present only while `state` is `waiting`. */
+export interface TaskWait { waitId: string; kind: 'human_input'; recipient: MemberRef; expiresAt: number; messageId: string }
 export interface TeamTaskView {
   taskId: string; conversationId: string; sharedBotId: string; requester: MemberRef;
-  state: TaskState; createdAt: number; deadline: number; replyId?: string; artifactId?: string; usage?: TaskUsage;
+  /** `deadline` ends the current phase: pick-up limit while queued, running budget while running, wait expiry while waiting. */
+  state: TaskState; createdAt: number; deadline: number; epoch: number; activeSpentMs: number; cancelRequestedAt?: number;
+  wait?: TaskWait; replyId?: string; artifactId?: string; usage?: TaskUsage;
 }
 export interface TeamArtifact { artifactId: string; revision: number; digest: string; document: { title: string; body: string } }
 export interface ExecutionScope { teamId: string; generation: number }
@@ -22,6 +26,8 @@ export interface MemberExecutionPayloads {
   createConversation: { conversationId: string; kind: 'bot_dm' | 'group' | 'channel'; title: string; participantUids: string[]; sharedBotIds: string[] };
   submit: { conversationId: string; messageId: string; changeId: string; text: string; targets: string[]; replyTo?: string };
   pauseSharedBot: { sharedBotId: string; expectedRevision: number };
+  answerWait: { conversationId: string; waitId: string; messageId: string; changeId: string; text: string };
+  cancelTask: { taskId: string };
   getTask: { taskId: string };
   listTasks: { conversationId?: string; after?: string };
   readArtifact: { artifactId: string };

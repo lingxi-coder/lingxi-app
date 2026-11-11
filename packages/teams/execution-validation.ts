@@ -16,6 +16,8 @@ const payloads: Record<string, Check> = {
   createConversation: shape({ conversationId: id, kind: v => ['bot_dm', 'group', 'channel'].includes(String(v)), title: v => typeof v === 'string' && v.trim().length >= 1 && v.trim().length <= 120, participantUids: list(uid, 1, 200), sharedBotIds: list(id, 1, 8) }),
   submit: shape({ conversationId: id, messageId: id, changeId: id, text: v => typeof v === 'string' && v.length >= 1 && new TextEncoder().encode(v).length <= 8192, targets: list(id, 1, 8), replyTo: optional(id) }),
   pauseSharedBot: shape({ sharedBotId: id, expectedRevision: positive }),
+  answerWait: shape({ conversationId: id, waitId: id, messageId: id, changeId: id, text: v => typeof v === 'string' && v.length >= 1 && new TextEncoder().encode(v).length <= 8192 }),
+  cancelTask: shape({ taskId: id }),
   getTask: shape({ taskId: id }),
   listTasks: shape({ conversationId: optional(id), after: optional(id) }),
   readArtifact: shape({ artifactId: id }),

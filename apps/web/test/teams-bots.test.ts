@@ -2,7 +2,7 @@ import vectors from '../../../packages/teams/contracts/execution-vectors.json';
 import { isMemberExecutionCommand } from '../../../packages/teams/execution-validation';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { executionCommand, sharedBotUsable } from '../../../packages/teams/execution';
+import { executionCommand, sharedBotUsable, type TeamTaskView } from '../../../packages/teams/execution';
 import { TeamMessaging, pendingPayload, projectionKey } from '../../../packages/teams/messages';
 import type { MessageCommand, PendingCommands } from '../../../packages/teams/messages';
 import { FakeTeams, botCard, conversation, memoryStorage, until } from './support/fakeTeams';
@@ -87,4 +87,21 @@ test('IndexedDB upgrade deletes only the retired command store and preserves unr
   Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: factory }); context.after(() => { if (before) Object.defineProperty(globalThis, 'indexedDB', before); else Reflect.deleteProperty(globalThis, 'indexedDB'); });
   assert.equal(await indexedDbCommandStorage().load('account-team-generation'), undefined);
   assert.deepEqual(opened, [['lingxi-team-messages', 3]]); assert.deepEqual(deleted, ['projections']); assert.deepEqual([...stores], ['protected-sentinel', 'commands-v2']);
+});
+test('durable wait member commands are strict and host-only commands are not member commands', () => {
+  const answer = { conversationId: 'chat_0001', waitId: 'wait_0001', messageId: 'message_0002', changeId: 'change_0002', text: 'Lisbon' };
+  assert.deepEqual(executionCommand(scope, 'answerWait', answer, 'command001'), { schemaVersion: 1, commandId: 'command001', ...scope, action: 'answerWait', payload: answer });
+  assert.deepEqual(executionCommand(scope, 'cancelTask', { taskId: 'task_0001' }, 'command002').payload, { taskId: 'task_0001' });
+  assert.throws(() => executionCommand(scope, 'answerWait', { ...answer, text: '' }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'answerWait', { ...answer, text: 'x'.repeat(8193) }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'answerWait', { ...answer, extra: 1 } as never, 'command001'));
+  assert.throws(() => executionCommand(scope, 'cancelTask', { taskId: 'short' }, 'command001'));
+  for (const action of ['pauseTask', 'continueTask', 'startTask', 'completeTask']) {
+    assert.equal(isMemberExecutionCommand({ schemaVersion: 1, commandId: 'command001', ...scope, action, payload: { taskId: 'task_0001' } }), false, action);
+  }
+  const view: TeamTaskView = { taskId: 'task_0001', conversationId: 'chat_0001', sharedBotId: 'sharedbot_01', requester: { uid: 'alice', generation: 1 },
+    state: 'waiting', createdAt: 1, deadline: 2, epoch: 1, activeSpentMs: 1000,
+    wait: { waitId: 'wait_0001', kind: 'human_input', recipient: { uid: 'alice', generation: 1 }, expiresAt: 2, messageId: 'bot_message' } };
+  const cancelled: TeamTaskView = { ...view, state: 'cancelled', cancelRequestedAt: 3, wait: undefined };
+  assert.equal(view.wait?.kind, 'human_input'); assert.equal(cancelled.state, 'cancelled');
 });

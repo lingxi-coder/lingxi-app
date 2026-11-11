@@ -60,6 +60,12 @@ internal object TeamExecutionContract {
             "listSharedBots" -> shape(emptySet())
             "getTask" -> { shape(setOf("taskId")); requireId("taskId") }
             "readArtifact" -> { shape(setOf("artifactId")); requireId("artifactId") }
+            "cancelTask" -> { shape(setOf("taskId")); requireId("taskId") }
+            "answerWait" -> {
+                shape(setOf("conversationId", "waitId", "messageId", "changeId", "text"))
+                listOf("conversationId", "waitId", "messageId", "changeId").forEach(::requireId)
+                val text = p.opt("text") as? String ?: fail(); if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 8192) fail()
+            }
             "listTasks" -> { shape(emptySet(), setOf("conversationId", "after")); p.keysSet().forEach(::requireId) }
             "pauseSharedBot" -> { shape(setOf("sharedBotId", "expectedRevision")); requireId("sharedBotId"); if (!integer(p.opt("expectedRevision"), 1)) fail() }
             "setConversationPolicy" -> { shape(setOf("conversationId", "expectedRevision", "targets")); requireId("conversationId"); ids("targets", 0); if (!integer(p.opt("expectedRevision"), 0)) fail() }

@@ -210,10 +210,26 @@ test('teams: text limit is UTF-8 bytes and read watermarks never move backwards'
 test('teams: unimplemented App, task, invite and epoch writes remain denied', options, async () => {
   const alice = user('alice');
   for (const path of ['appGrants/example_alice', 'appOpens/example01', 'tasks/example01', 'invites/example01', 'membershipEpochs/alice',
-    'sharedBots/example01', 'deployments/example01', 'executionReceipts/example01', 'requestQuotas/example01', 'chatExecutionLocks/example01', 'artifacts/example01']) {
+    'sharedBots/example01', 'deployments/example01', 'executionReceipts/example01', 'requestQuotas/example01', 'chatExecutionLocks/example01', 'artifacts/example01', 'waits/example01']) {
     await assertFails(setDoc(ref(alice, path), { uid: 'alice' }));
     await assertFails(getDoc(ref(alice, path)));
   }
+});
+test('teams: durable wait records are server-only, even for the recipient and the Bot maintainer', options, async () => {
+  const wait = { schemaVersion: 1, waitId: 'wait_0001', taskId: 'task_0001', conversationId: 'bot-chat', sharedBotId, kind: 'human_input',
+    recipient: { uid: 'alice', generation: 1 }, state: 'pending', expiresAt: Date.now() + 60000 };
+  await admin.doc('teams/team-test/waits/wait_0001').set(wait);
+  for (const uid of ['alice', 'bob', 'owner']) {
+    const db = user(uid);
+    await assertFails(getDoc(ref(db, 'waits/wait_0001')));
+    await assertFails(getDocs(collection(db, 'teams/team-test/waits')));
+    await assertFails(getDocs(query(collection(db, 'teams/team-test/waits'), where('recipient.uid', '==', uid))));
+    await assertFails(setDoc(ref(db, 'waits/wait_0002'), wait));
+    await assertFails(updateDoc(ref(db, 'waits/wait_0001'), { state: 'resolved' }));
+    await assertFails(deleteDoc(ref(db, 'waits/wait_0001')));
+  }
+  assert.equal((await admin.doc('teams/team-test/waits/wait_0001').get()).data().state, 'pending');
+  assert.equal((await admin.doc('teams/team-test/waits/wait_0002').get()).exists, false);
 });
 test('teams: both configured non-Team rule files compile and deny client access', options, async () => {
   const config = JSON.parse(readFileSync(new URL('../../../firebase.json', import.meta.url), 'utf8'));

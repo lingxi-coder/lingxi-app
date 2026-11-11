@@ -16,11 +16,14 @@ test('new identities reject owner-host keys and compatibility fields', () => {
   assert.throws(() => sharedBotRecord.parse({ ...bot, executionProtocol: 'v1' }));
   assert.throws(() => sharedBotRecord.parse({ ...bot, usePolicy: { mode: 'listed', members: [bot.maintainer, bot.maintainer] } }));
 });
-test('M1 deployment accepts only execution 2 and disables later execution capabilities', () => {
+test('deployment accepts only execution 2, a boolean durable-wait capability and no later capabilities', () => {
   const deployment = { deploymentId: 'deployment_01', sharedBotId: bot.sharedBotId, revision: 1, hostId: 'host_0001', owner: bot.maintainer, instanceId: 'instance_01', definitionDigest: 'a'.repeat(64), capabilitySnapshotDigest: 'b'.repeat(64), executionVersion: 2, capabilities: { durableWait: false, writeOperations: false, delegation: false }, accountEpoch: 1, enabled: true };
   deploymentRecord.parse(deployment);
   assert.throws(() => deploymentRecord.parse({ ...deployment, executionVersion: 1 }));
-  assert.throws(() => deploymentRecord.parse({ ...deployment, capabilities: { ...deployment.capabilities, durableWait: true } }));
+  deploymentRecord.parse({ ...deployment, capabilities: { ...deployment.capabilities, durableWait: true } });
+  assert.throws(() => deploymentRecord.parse({ ...deployment, capabilities: { ...deployment.capabilities, durableWait: 'yes' } }));
+  assert.throws(() => deploymentRecord.parse({ ...deployment, capabilities: { ...deployment.capabilities, writeOperations: true } }));
+  assert.throws(() => deploymentRecord.parse({ ...deployment, capabilities: { ...deployment.capabilities, delegation: true } }));
 });
 test('admission identity is stable per message and target with unambiguous framing', () => {
   assert.equal(admissionId('message_0001', 'sharedbot_01'), admissionId('message_0001', 'sharedbot_01'));

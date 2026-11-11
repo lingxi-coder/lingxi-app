@@ -21,6 +21,12 @@ export const publishedInput = z.object({
   ]),
 }).strict();
 const quota = z.number().int().min(1).max(10000);
+// Results lacking explicit provenance remain owner-only and cannot enter a shared Chat.
+const outputAudience = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('owner') }).strict(),
+  z.object({ mode: z.literal('published_inputs') }).strict(),
+]);
+const grantIds = z.array(executionId).max(50).refine(unique);
 const payloads = {
   createConversation: z.object({ ...thread, kind: z.enum(['bot_dm', 'group', 'channel']),
     title: z.string().trim().min(1).max(120), participantUids: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/u)).min(1).max(200).refine(unique),
@@ -46,12 +52,7 @@ const payloads = {
   validateTask: z.object({ ...host, ...task, permitId: executionId, expectedLastChangeSeq: cursor }).strict(),
   completeTask: z.object({ ...host, ...task, permitId: executionId,
     outcome: z.enum(['completed', 'failed']), text, finishedAt: cursor,
-    inputGrantIds: z.array(executionId).max(50).refine(unique),
-    // Results lacking explicit provenance remain owner-only and cannot enter a shared Chat.
-    outputAudience: z.discriminatedUnion('mode', [
-      z.object({ mode: z.literal('owner') }).strict(),
-      z.object({ mode: z.literal('published_inputs') }).strict(),
-    ]),
+    inputGrantIds: grantIds, outputAudience,
     document: z.object({ title: z.string().trim().min(1).max(120), body: z.string().min(1)
       .refine(value => Buffer.byteLength(value, 'utf8') <= 256 * 1024) }).strict().optional(),
     usage: z.discriminatedUnion('status', [
@@ -60,6 +61,15 @@ const payloads = {
         costMicros: cursor.optional(), currency: z.string().length(3).optional() }).strict(),
     ]),
   }).strict(),
+  pauseTask: z.object({ ...host, ...task, permitId: executionId, waitId: executionId, kind: z.literal('human_input'),
+    question: z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 2000),
+    requestDigest: digest, checkpointDigest: digest, pausedAt: cursor,
+    expiresInMs: z.number().int().min(60000).max(86400000), dispatchedRequests: cursor,
+    inputGrantIds: grantIds, outputAudience }).strict(),
+  continueTask: z.object({ ...host, ...task, expectedEpoch: positive, checkpointDigest: digest,
+    reason: z.enum(['answer', 'recovery']), dispatchedRequests: cursor }).strict(),
+  answerWait: z.object({ ...thread, waitId: executionId, messageId: executionId, changeId: executionId, text }).strict(),
+  cancelTask: z.object(task).strict(),
   getTask: z.object(task).strict(),
   listTasks: z.object({ conversationId: executionId.optional(), after: executionId.optional() }).strict(),
   readArtifact: z.object({ artifactId: executionId }).strict(),

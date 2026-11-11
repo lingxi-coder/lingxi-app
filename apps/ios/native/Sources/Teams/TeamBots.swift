@@ -89,6 +89,11 @@ enum TeamExecutionContract {
         case "listSharedBots": try shape([])
         case "getTask": try shape(["taskId"]); try id("taskId")
         case "readArtifact": try shape(["artifactId"]); try id("artifactId")
+        case "cancelTask": try shape(["taskId"]); try id("taskId")
+        case "answerWait":
+            try shape(["conversationId", "waitId", "messageId", "changeId", "text"])
+            for key in ["conversationId", "waitId", "messageId", "changeId"] { try id(key) }
+            guard let text = payload["text"] as? String, !text.isEmpty, text.utf8.count <= 8192 else { try fail() }
         case "listTasks":
             try shape([], ["conversationId", "after"])
             for key in payload.keys { try id(key) }

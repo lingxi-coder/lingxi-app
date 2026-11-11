@@ -22,7 +22,7 @@ export function ArtifactButton({ api, scope, artifactId, zh, renderMarkdown }: {
 }
 export function BotRun({ task, api, scope, zh, renderMarkdown }: { task: TeamTaskView; api: TeamsApi; scope: ExecutionScope; zh: boolean; renderMarkdown?: RenderMarkdown }) {
   const labels: Record<TeamTaskView['state'], [string, string]> = {
-    queued: ['Queued', '已排队'], running: ['Processing', '处理中'], completed: ['Completed', '已完成'], failed: ['Failed', '失败'], expired: ['Expired', '已过期'], interrupted: ['Interrupted', '已中断'], authorization_required: ['Authorization required', '需要授权'], revoked: ['Access revoked', '授权已撤销'],
+    queued: ['Queued', '已排队'], running: ['Processing', '处理中'], completed: ['Completed', '已完成'], failed: ['Failed', '失败'], expired: ['Expired', '已过期'], interrupted: ['Interrupted', '已中断'], authorization_required: ['Authorization required', '需要授权'], revoked: ['Access revoked', '授权已撤销'], waiting: ['Waiting for a reply', '等待回复'], cancelled: ['Cancelled', '已取消'],
   };
   return <section className="team-bot-run" aria-label={zh ? '任务状态' : 'Task status'}><p role="status">{labels[task.state][zh ? 1 : 0]}</p><p className="teams-hint">{usageText(task.usage, zh)}</p>{task.artifactId ? <ArtifactButton api={api} scope={scope} artifactId={task.artifactId} zh={zh} renderMarkdown={renderMarkdown} /> : null}</section>;
 }

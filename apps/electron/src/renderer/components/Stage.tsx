@@ -2,6 +2,8 @@ import { tr } from '../i18n/locale';
 import { crossSessionMessage } from './messageOrigin';
 import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
+import { transcriptRowGap, useTranscriptWindow } from './useTranscriptWindow';
+import './TranscriptWindow.css';
 import { PlanPreview, PlanDocument } from './PlanDocument';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
@@ -190,6 +192,8 @@ interface NativeToolGroupSiteProps {
   group: TranscriptToolGroup;
   expanded: boolean;
   stateToken: object;
+  /** Plan content/handlers can change without changing a tool's native props. */
+  contentToken?: object;
   children: ReactNode;
 }
 
@@ -212,6 +216,7 @@ const NativeToolGroupSite = memo(function NativeToolGroupSite({
   && previous.group.id === next.group.id
   && previous.expanded === next.expanded
   && previous.stateToken === next.stateToken
+  && previous.contentToken === next.contentToken
   && previous.group.tools.length === next.group.tools.length
   && previous.group.tools.every((tool, index) => tool === next.group.tools[index]));
 
@@ -375,6 +380,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
    */
   const followTail = useRef(true);
   const locatedMessage = useRef<string | null>(null);
+  const revealInFlight = useRef<string | null>(null);
   const [atTail, setAtTail] = useState(true);
   /** A pointer is down inside the transcript, so layout drift must not move it. */
   const pointerHeld = useRef(false);
@@ -411,7 +417,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
   const [collapse, setCollapse] = useState(() => collapseInitial(sessionKey));
   // Derived during render — no effect, so the very first paint of a new
   // session is already clean rather than clean one frame later.
-  const visible = collapseFor(collapse, sessionKey);
+  const visible = useMemo(() => collapseFor(collapse, sessionKey), [collapse, sessionKey]);
   // The setter must not change identity (a per-row arrow function would defeat
   // the rows' React.memo), so the live session key reaches it through a ref.
   const sessionRef = useRef(sessionKey);
@@ -456,6 +462,10 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
 
   const lastRow = rows.at(-1);
   const tailThinking = lastRow?.type === 'thinking' ? lastRow : undefined;
+  const presentationRows = useMemo(() => rows.filter(item => item !== tailThinking
+    && item.type !== 'audio' && (item.type !== 'meta' || Boolean(item.files?.length))), [rows, tailThinking]);
+  const windowing = useTranscriptWindow({ rows: presentationRows, sessionKey, viewport: stageRef, feed: feedRef, following: followTail });
+  const planContentToken = useMemo(() => ({ submittedPlans, onOpenPlan }), [submittedPlans, onOpenPlan]);
 
   const newestPromptId = useMemo(() => {
     // `liveItems`, NOT the fold-filtered `items`: a closed `/loop` fold hides
@@ -508,13 +518,10 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
     const feed = feedRef.current;
     if (!node || !feed) return;
     if (followTail.current) { anchor.current = null; return; }
-    const rows = feed.children;
-    // Rows paint in order, so their top edges are monotonic: find the first one
-    // still crossing the fold instead of walking the whole transcript. The
-    // jump control is the last child and sticks to the viewport, so it is never
-    // the row the reader is reading.
+    const rows = Array.from(feed.children).filter(row => row.classList.contains('transcript-row'));
+    // Only mounted message rows can anchor the reader. Spacers, headings and
+    // the sticky jump control never become an apparent historical message.
     let high = rows.length - 1;
-    if (high >= 0 && (rows[high] as HTMLElement).dataset.stageControl !== undefined) high -= 1;
     const containerTop = node.getBoundingClientRect().top;
     let low = 0;
     let first = -1;
@@ -556,42 +563,29 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
     held.offset = target.getBoundingClientRect().top - node.getBoundingClientRect().top;
   }, []);
 
-  /**
-   * Re-engage the tail. Reached only from an explicit intent — the reader sends
-   * a prompt, opens a session, or presses the control — never from a timer. An
-   * idle reader who scrolled up is reading, not waiting to be moved back.
-   */
-  useLayoutEffect(() => {
-    if (!messageTarget) { locatedMessage.current = null; return; }
-    if (locatedMessage.current === `${sessionKey}:${messageTarget}`) return;
-    const source = liveItems.find(item => transcriptRowUuids(item).includes(messageTarget));
-    if (source) {
-      const owner = foldOwners(liveItems, foldedItemIds).get(source.id);
-      if (owner && collapseOpen(visible, sessionKey, owner) !== true) { setOpen(owner, true); return; }
-      const rendered = items.find(item => item.id === source.id);
-      if (rendered?.type === 'narration' && narrationShouldCollapse(rendered) && !(collapseOpen(visible, sessionKey, rendered.id) ?? narrationDefaultOpen(rendered))) { setOpen(rendered.id, true); return; }
-    }
-    const nodes = feedRef.current?.querySelectorAll<HTMLElement>('[data-message-uuids]');
-    const target = Array.from(nodes ?? []).find(node => node.dataset.messageUuids?.split(' ').includes(messageTarget));
-    if (!target) { onMessageLocated?.(false); return; }
-    locatedMessage.current = `${sessionKey}:${messageTarget}`;
-    followTail.current = false;
-    setAtTail(false);
-    anchor.current = null;
-    target.scrollIntoView({ block: 'center' });
-    onMessageLocated?.(true);
-  }, [messageTarget, sessionKey, rows, items, liveItems, foldedItemIds, visible, setOpen, onMessageLocated]);
-
   const armTail = useCallback(() => {
     followTail.current = true;
     setAtTail(true);
     anchor.current = null;
     snapMutedUntil.current = 0;
-    // The re-render this triggers would snap through `syncTail` anyway, but an
-    // explicit action must not be blocked by a gesture flag that is still set.
+    // An explicit action must not be blocked by a lingering gesture flag.
     const node = stageRef.current;
     if (node) node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
   }, []);
+
+  // Initialize the new session and prompt BEFORE locating a requested message.
+  // That request then owns the viewport, including any commits needed to open
+  // a fold or mount an offscreen window; later effects must not re-arm the tail.
+  useLayoutEffect(() => {
+    if (scrollSession.current === sessionKey) return;
+    scrollSession.current = sessionKey;
+    compensatedScroll.current = null;
+    followTail.current = true;
+    setAtTail(true);
+    anchor.current = null;
+    revealInFlight.current = null;
+    lastPromptId.current = newestPromptId;
+  }, [sessionKey, newestPromptId]);
 
   useLayoutEffect(() => {
     if (!newestPromptId || newestPromptId === lastPromptId.current) return;
@@ -600,21 +594,50 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
   }, [newestPromptId, armTail]);
 
   useLayoutEffect(() => {
-    if (scrollSession.current !== sessionKey) {
-      scrollSession.current = sessionKey;
-      compensatedScroll.current = null;
-      followTail.current = true;
-      setAtTail(true);
+    if (!messageTarget) { locatedMessage.current = null; revealInFlight.current = null; return; }
+    const requestKey = `${sessionKey}:${messageTarget}`;
+    if (locatedMessage.current === requestKey) { revealInFlight.current = null; return; }
+    revealInFlight.current = requestKey;
+    const source = liveItems.find(item => transcriptRowUuids(item).includes(messageTarget));
+    if (source) {
+      followTail.current = false;
+      setAtTail(false);
       anchor.current = null;
-      // Item ids restart at `i1` in every session, so a stale id could match the
-      // new session's prompt and swallow the re-arm for the reader's own send.
-      lastPromptId.current = newestPromptId;
-    } else if (!followTail.current && !pointerHeld.current) {
+      const owner = foldOwners(liveItems, foldedItemIds).get(source.id);
+      if (owner && collapseOpen(visible, sessionKey, owner) !== true) { setOpen(owner, true); return; }
+      const rendered = items.find(item => item.id === source.id);
+      if (rendered?.type === 'narration' && narrationShouldCollapse(rendered) && !(collapseOpen(visible, sessionKey, rendered.id) ?? narrationDefaultOpen(rendered))) { setOpen(rendered.id, true); return; }
+      const row = presentationRows.find(row => row.id === source.id || (row.type === 'tool-group' && row.tools.some(tool => tool.id === source.id)) || (row.type === 'agents' && row.sourceIds.includes(source.id)));
+      if (row) {
+        if (windowing.reveal(row.id)) return;
+      }
+    }
+    const nodes = feedRef.current?.querySelectorAll<HTMLElement>('[data-message-uuids]');
+    const target = Array.from(nodes ?? []).find(node => node.dataset.messageUuids?.split(' ').includes(messageTarget));
+    if (!target) { revealInFlight.current = null; onMessageLocated?.(false); return; }
+    locatedMessage.current = requestKey;
+    revealInFlight.current = null;
+    followTail.current = false;
+    setAtTail(false);
+    anchor.current = null;
+    target.scrollIntoView({ block: 'center' });
+    onMessageLocated?.(true);
+  }, [messageTarget, sessionKey, rows, items, liveItems, foldedItemIds, visible, setOpen, onMessageLocated, presentationRows, windowing.reveal, windowing.start, windowing.end]);
+
+  useLayoutEffect(() => {
+    // A requested window is not mounted until the next commit. Refreshing from
+    // the old scroll offset here would overwrite that window with the old tail.
+    if (revealInFlight.current) return;
+    if (!followTail.current && !pointerHeld.current) {
       // A detached reader owns the viewport: whatever changed above them moves
       // the scroll offset, not the content under their eyes.
       restoreAnchor();
     }
     syncTail();
+    // Recompute measured coverage AFTER restoring the reading position. Width
+    // changes can invalidate offscreen height estimates; selecting a window at
+    // the old scroll offset first would unmount the very row we need to restore.
+    windowing.refresh();
     if (!anchor.current) captureAnchor();
   });
   useLayoutEffect(() => {
@@ -648,7 +671,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
   }, [captureAnchor, measureFollow, restoreAnchor, syncTail]);
 
   return (
-    <div ref={stageRef} className={activityView ? "desktop-stage activity-view" : "desktop-stage"} tabIndex={-1} onPointerDown={() => { pointerHeld.current = true; }} onWheel={() => {
+    <div ref={stageRef} className={activityView ? "desktop-stage activity-view" : "desktop-stage"} tabIndex={windowing.enabled ? 0 : -1} onPointerDown={() => { pointerHeld.current = true; }} onWheel={() => {
       // Arrives before the scroll it causes, and in either direction: the
       // reader is driving, so no layout change may move the viewport under them
       // until the gesture has settled.
@@ -671,11 +694,14 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
       if (stageRef.current?.scrollTop === compensatedScroll.current) return;
       compensatedScroll.current = null;
       measureFollow();
+      windowing.refresh();
       captureAnchor();
     }} style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto', paddingInlineStart: 'var(--conversation-gutter, 24px)', paddingInlineEnd: 'calc(var(--conversation-gutter, 24px) + var(--runtime-summary-scroll-overhang, 0px))', background: t.transcriptBg, position: 'relative' }}>
       <div
         ref={feedRef}
         className="desktop-stage-feed"
+        data-windowed={windowing.enabled || undefined}
+        role={windowing.enabled ? 'list' : undefined}
         style={{
           width: '100%', maxWidth: 'var(--conversation-width, 860px)', margin: '0 auto',
           padding: '36px 0 20px',
@@ -726,13 +752,14 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           silently reassigns every row's collapse state the moment an item is
           inserted, which is exactly what a streaming transcript does.
         */}
-        {rows.map((item) => {
+        {windowing.enabled && <div ref={windowing.beforeRef} className="transcript-window-spacer" aria-hidden="true" style={{ height: windowing.before }} />}
+        {presentationRows.slice(windowing.start, windowing.end).map((item, mountedIndex) => {
           // The persistent slot renders the tail. An empty wrapper here would
           // break the sibling spacing when that status appears or disappears.
           if (item === tailThinking) return null;
           const content = (() => {
           if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} files={item.files} onReview={onReviewFiles ? path => onReviewFiles(item.id, item.files!, path) : undefined} />;
-          if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} launches={item.launches} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
+          if (item.type === 'agents') return <TranscriptAgents key={item.id} id={item.id} open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} agents={item.agents} launches={item.launches} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
           if (item.type === 'narration') {
             if (instructionIds.has(item.id)) return <div className="transcript-run-item" data-run-type="skill-instructions" key={item.id}>
               <LocalAppInstructions id={item.id} text={item.text} name={instructionIds.get(item.id)}
@@ -814,7 +841,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
             const expanded = collapseOpen(visible, sessionKey, item.id) ?? false;
             return <div className="transcript-run-item" data-run-type="tool" key={item.id}>
               <NativeToolGroupSite sessionId={modUiSessionId} group={item}
-                expanded={expanded} stateToken={visible}>
+                expanded={expanded} stateToken={visible} contentToken={planContentToken}>
                 {groupContent}
               </NativeToolGroupSite>
             </div>;
@@ -825,10 +852,10 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
               toolOpen={(id) => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} />;
             if (item.tools.length < 2) return <div className="transcript-run-item" data-run-type="tool" key={item.id}>{groupContent}</div>;
             return <div className="transcript-run-item" data-run-type="tool" key={item.id}>
-              <ModUiParentSite sessionId={modUiSessionId} surface="desktop" component="ToolGroup"
-                instanceId={`tool-group:${item.id}`} props={nativeToolGroupProps(item, expanded)} engineFallback={groupContent}>
+              <NativeToolGroupSite sessionId={modUiSessionId} group={item}
+                expanded={expanded} stateToken={visible}>
                 {groupContent}
-              </ModUiParentSite>
+              </NativeToolGroupSite>
             </div>;
           }
           if (item.type === 'command') {
@@ -881,8 +908,14 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
             return source ? transcriptRowUuids(source) : [];
           }))];
           const uuid = messageTarget && uuids.includes(messageTarget) ? messageTarget : uuids[0];
-          return <div className="transcript-row" data-row-type={item.type} data-message-role={item.type === 'narration' ? item.role : undefined} key={item.id} data-message-uuid={uuid} data-message-uuids={uuids.length ? uuids.join(' ') : undefined} style={uuid && uuid === messageTarget ? { outline: `2px solid ${t.text3}`, outlineOffset: 4, borderRadius: 8 } : undefined}>{content}</div>;
+          const index = windowing.start + mountedIndex;
+          return <div className="transcript-row" data-row-type={item.type} data-message-role={item.type === 'narration' ? item.role : undefined} key={item.id} data-transcript-id={windowing.enabled ? item.id : undefined} data-transcript-index={windowing.enabled ? index : undefined}
+            role={windowing.enabled ? 'listitem' : undefined} aria-posinset={windowing.enabled ? index + 1 : undefined} aria-setsize={windowing.enabled ? presentationRows.length : undefined}
+            data-message-uuid={uuid} data-message-uuids={uuids.length ? uuids.join(' ') : undefined}
+            style={{ ...(windowing.enabled && mountedIndex === 0 ? { marginTop: `${transcriptRowGap(presentationRows[index - 1], item)}rem` } : {}),
+              ...(uuid && uuid === messageTarget ? { outline: `2px solid ${t.text3}`, outlineOffset: 4, borderRadius: 8 } : {}) }}>{content}</div>;
         })}
+        {windowing.enabled && <div className="transcript-window-spacer" aria-hidden="true" style={{ height: windowing.after }} />}
 
         {/* Keep the tail slot mounted even when thinking yields to another activity. */}
         {(rows.length > 0 || running) && (
@@ -890,7 +923,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
             data-run-type={tailThinking ? 'thinking' : undefined}
             aria-hidden={!tailThinking}
             role={tailThinking ? 'status' : undefined}
-            style={{ visibility: tailThinking ? 'visible' : 'hidden' }}>
+            style={{ visibility: tailThinking ? 'visible' : 'hidden', ...(windowing.enabled ? { marginTop: `${transcriptRowGap(presentationRows.at(-1), { type: 'thinking', id: 'thinking:slot' })}rem` } : {}) }}>
             {tailThinking ? apiRetry ? <ApiRetryNotice retry={apiRetry} /> : <ThinkingLabel text={tailThinking.text} /> : null}
           </div>
         )}

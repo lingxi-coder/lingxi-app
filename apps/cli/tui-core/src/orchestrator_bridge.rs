@@ -587,6 +587,7 @@ pub struct BridgeOutputStream {
     tx: UnboundedSender<TurnEvent>,
     heartbeats: Arc<CoalescedToolHeartbeats>,
     omit_thinking: AtomicBool,
+    permission_mode_provider: std::sync::OnceLock<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
 }
 
 impl BridgeOutputStream {
@@ -598,12 +599,26 @@ impl BridgeOutputStream {
             tx,
             heartbeats: Arc::new(CoalescedToolHeartbeats::default()),
             omit_thinking: AtomicBool::new(false),
+            permission_mode_provider: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Bind after runtime construction; report the enforcing gate's accepted
+    /// mode after plan tools, rather than deriving it from their display text.
+    pub fn set_permission_mode_provider(
+        &self,
+        provider: impl Fn() -> Option<String> + Send + Sync + 'static,
+    ) {
+        let _ = self.permission_mode_provider.set(Arc::new(provider));
     }
 }
 
 #[async_trait]
 impl OutputStream for BridgeOutputStream {
+    fn wants_forwarded_subagent_messages(&self) -> bool {
+        false
+    }
+
     async fn emit_assistant_message_identity(&self, message_id: &lingxi_core::types::MessageId) {
         let _ = self.tx.send(TurnEvent::MessageIdentity(*message_id));
     }
@@ -900,6 +915,11 @@ impl OutputStream for BridgeOutputStream {
             tool: tool.to_string(),
             result,
         });
+        if matches!(tool, "EnterPlanMode" | "ExitPlanMode") {
+            if let Some(mode) = self.permission_mode_provider.get().and_then(|read| read()) {
+                let _ = self.tx.send(TurnEvent::PermissionModeChanged(mode));
+            }
+        }
     }
 
     async fn emit_compaction_started(&self) {
@@ -1430,6 +1450,30 @@ mod tests {
         assert_eq!(shown["nested"]["values"][1], "�");
         assert_eq!(shown["model_content"], "summary�tail");
         assert_eq!(result.to_json_string().unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn plan_tool_result_reports_the_live_gate_mode_to_the_composer() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        bridge.set_permission_mode_provider(|| Some("acceptEdits".into()));
+        bridge
+            .emit_tool_result(
+                &lingxi_core::types::ToolUseId::new(),
+                "ExitPlanMode",
+                &Utf16JsonProjection::from("Approved"),
+                &Utf16JsonProjection::parse(r#"{"isAgent":false}"#).unwrap(),
+                None,
+            )
+            .await;
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::ToolUseResult { .. }
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::PermissionModeChanged(mode) if mode == "acceptEdits"
+        ));
     }
 
     #[tokio::test]

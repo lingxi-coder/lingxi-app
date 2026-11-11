@@ -14,13 +14,24 @@ struct PushInstallationIdentity: Codable, Equatable {
 }
 
 enum PushMessagePolicy {
-    /// Remote notifications open only validated RC or Teams inbox routes.
+    /// Remote notifications open only validated RC, Teams inbox or Friends routes.
     static func remoteControlAction(_ info: [AnyHashable: Any], uid: String?, enabled: Bool, now: Date = Date()) -> LingxiAppAction? {
         guard accepts(info, uid: uid, enabled: enabled, now: now),
               let route = info["route"] as? String,
-              (route == "team/inbox" || route.range(of: "^remote/[A-Za-z0-9_-]{22}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$", options: .regularExpression) != nil),
-              let target = CanonicalDeepLink.parse("lingxi://" + route) else { return nil }
+              let target = link(forRoute: route) else { return nil }
         return .canonical(target)
+    }
+
+    /// The link a notification route opens, or nil when a push may not open it. Besides the Teams inbox and a
+    /// Remote Control session, a push may open the Friends requests and one friend's chat
+    /// (`friend/chat?uid=<sender>`, the uid never percent-encoded); it never carries a friend code (`friend/add`).
+    static func link(forRoute route: String) -> CanonicalDeepLink? {
+        let remote = "^remote/[A-Za-z0-9_-]{22}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+        let friendChat = #"^friend/chat\?uid=[A-Za-z0-9_-]{1,128}$"#
+        guard route == "team/inbox" || route == "friend/requests"
+                || route.range(of: friendChat, options: .regularExpression) != nil
+                || route.range(of: remote, options: .regularExpression) != nil else { return nil }
+        return CanonicalDeepLink.parse("lingxi://" + route)
     }
 
     static func isRemote(_ info: [AnyHashable: Any]) -> Bool {

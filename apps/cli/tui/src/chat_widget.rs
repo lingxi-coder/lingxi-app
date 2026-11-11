@@ -620,6 +620,7 @@ pub struct ChatWidget {
     /// The open client-side read/search fold (design doc §4). Lives in the
     /// transcript's active slot while streaming; committed once on a breaker.
     collapse_group: Option<tui_core::collapse::CollapseGroup>,
+    activity_fold: Option<crate::history_cell::tool::ActivityFoldCell>,
     /// The first folded tool-use id — the committed variant's `group_id`.
     collapse_group_id: Option<lingxi_core::types::ToolUseId>,
     /// Tool-use ids currently absorbed by the open fold — a collapsible result
@@ -814,6 +815,7 @@ impl ChatWidget {
             pending_terminal_sequences: Vec::new(),
             tool_inputs: std::collections::HashMap::new(),
             collapse_group: None,
+            activity_fold: None,
             collapse_group_id: None,
             collapse_ids: std::collections::HashSet::new(),
             collapse_fullscreen: false,
@@ -1477,7 +1479,21 @@ impl ChatWidget {
 
     /// Seal the open fold: drop the live active cell and commit the finalized
     /// (is_active = false) collapsed variant. No-op when no fold is open.
+    fn finalize_activity_fold(&mut self) {
+        if let Some(fold) = self.activity_fold.take() {
+            self.transcript.set_active(Box::new(fold));
+            self.transcript.flush_active();
+        }
+    }
+
+    fn render_activity_fold(&mut self) {
+        if let Some(fold) = &self.activity_fold {
+            self.transcript.set_active(Box::new(fold.clone()));
+        }
+    }
+
     fn finalize_collapse_group(&mut self) {
+        self.finalize_activity_fold();
         let Some(group) = self.collapse_group.take() else {
             return;
         };
@@ -1512,6 +1528,9 @@ impl ChatWidget {
     /// active transcript cell. Tool rows retain independent UUIDs, so the
     /// group disappears only after every member row was reported superseded.
     fn clear_removed_collapse_group(&mut self) {
+        if self.transcript.active_cell().is_none() {
+            self.activity_fold = None;
+        }
         if self.collapse_group.is_none() || self.transcript.active_cell().is_some() {
             return;
         }
@@ -1721,7 +1740,7 @@ impl ChatWidget {
                 if continuation.is_some() {
                     self.finalize_collapse_group();
                     self.flush_or_discard_active();
-                } else if self.collapse_group.is_none() {
+                } else if self.collapse_group.is_none() && self.activity_fold.is_none() {
                     self.flush_or_discard_active();
                 }
 
@@ -1729,7 +1748,7 @@ impl ChatWidget {
                 // retain that active group until its next visible text/tool
                 // event decides whether it continues. Otherwise open a row
                 // placeholder for this block's incoming text.
-                if self.collapse_group.is_none() {
+                if self.collapse_group.is_none() && self.activity_fold.is_none() {
                     let seed = continuation
                         .as_ref()
                         .filter(|(_, display)| *display)
@@ -1743,7 +1762,7 @@ impl ChatWidget {
                 }
                 self.active_assistant_block_key = Some(block_key);
                 if let Some(uuid) = self.assistant_block_uuids.get(&block_key).cloned() {
-                    if self.collapse_group.is_some() {
+                    if self.collapse_group.is_some() || self.activity_fold.is_some() {
                         self.transcript.identify_active_row_uuid(uuid);
                     } else {
                         self.transcript.identify_active_row(uuid);
@@ -1757,7 +1776,7 @@ impl ChatWidget {
                 self.assistant_block_uuids
                     .insert(block_key, message_uuid.clone());
                 if self.active_assistant_block_key == Some(block_key) {
-                    if self.collapse_group.is_some() {
+                    if self.collapse_group.is_some() || self.activity_fold.is_some() {
                         self.transcript.identify_active_row_uuid(message_uuid);
                     } else {
                         self.transcript.identify_active_row(message_uuid);
@@ -1809,7 +1828,9 @@ impl ChatWidget {
                 self.active_assistant_block_key = None;
             }
             TurnEvent::MessageIdentity(id) => {
-                self.flush_or_discard_active();
+                if self.activity_fold.is_none() {
+                    self.flush_or_discard_active();
+                }
                 self.transcript.identify_assistant_response(id);
                 if let Some(block_key) = self.active_assistant_block_key.take() {
                     self.assistant_block_uuids.remove(&block_key);
@@ -1916,6 +1937,38 @@ impl ChatWidget {
                 // into one active cell and every tool call was invisible.
                 // Remember the input so the paired result can render the
                 // Edit/Write diff (see `ToolUseResult`).
+                if let Some(key) = crate::history_cell::tool::activity_fold_key(&tool, &input) {
+                    if self
+                        .activity_fold
+                        .as_ref()
+                        .is_some_and(|fold| fold.key != key)
+                    {
+                        self.finalize_activity_fold();
+                    }
+                    if self.activity_fold.is_none() {
+                        self.finalize_collapse_group();
+                        self.flush_or_discard_active();
+                        self.activity_fold = Some(crate::history_cell::tool::ActivityFoldCell {
+                            key,
+                            entries: Vec::new(),
+                        });
+                    }
+                    self.tool_inputs.insert(id.clone(), input.clone());
+                    if let Some(fold) = &mut self.activity_fold {
+                        fold.entries.push(crate::history_cell::tool::ActivityEntry {
+                            id: id.to_string(),
+                            tool,
+                            input,
+                            result: None,
+                        });
+                    }
+                    if let Some(uuid) = block_uuid {
+                        self.transcript.identify_active_row_uuid(uuid);
+                    }
+                    self.render_activity_fold();
+                    self.apply_focus_refresh(focus_refresh);
+                    return;
+                }
                 // Collapsed read/search fold (client-side streaming accumulator,
                 // design doc §4): a collapsible use is absorbed into the active
                 // fold instead of committing its own ●/⎿ cells.
@@ -1997,6 +2050,17 @@ impl ChatWidget {
                     self.activity = None;
                     self.active_tool_id = None;
                     self.active_tool_elapsed_ms = None;
+                }
+                if let Some(entry) = self.activity_fold.as_mut().and_then(|fold| {
+                    fold.entries
+                        .iter_mut()
+                        .find(|entry| entry.id == id.to_string())
+                }) {
+                    entry.result = Some(result);
+                    self.tool_inputs.remove(&id);
+                    self.render_activity_fold();
+                    self.apply_focus_refresh(focus_refresh);
+                    return;
                 }
                 // A result for a folded use is absorbed (keeps the fold active);
                 // any other result breaks a still-open fold.
@@ -2928,10 +2992,11 @@ impl ChatWidget {
     /// prompt and surfaces once the keyboard is free.
     pub fn open_ask_user_question(&mut self, exchange: AskUserQuestionExchange) {
         // G006: see `open_permission` — not gated on `accepts_turn_events`.
-        if self
-            .current_turn
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
+        if !exchange.lifetime.is_live_goal_proposal()
+            && self
+                .current_turn
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
         {
             return;
         }
@@ -6336,8 +6401,8 @@ impl ChatWidget {
                 // for every pool spawn (agent/src/handle.rs) sets `false`; a
                 // Fusion panel's ask always has `worker: None` and is
                 // distinguished solely by `background_owned`.
-                // `AskUserQuestion`/`ComputerAccess` exchanges carry no owner
-                // signal today, so they are still cleared unconditionally.
+                // Goal proposals carry a session lifetime and remain pending;
+                // ordinary questions and computer access belong to this turn.
                 // Round-7 finding 4: a preserved background/worker exchange is
                 // still worth keeping ONLY while someone is waiting for it.
                 // `resp_tx.is_closed()` is the one predicate covering every way
@@ -6350,7 +6415,10 @@ impl ChatWidget {
                         (exchange.background_owned || exchange.worker.is_some())
                             && !exchange.resp_tx.is_closed()
                     }
-                    PendingPrompt::AskUserQuestion(_) | PendingPrompt::ComputerAccess(_) => false,
+                    PendingPrompt::AskUserQuestion(exchange) => {
+                        exchange.lifetime.is_live_goal_proposal() && !exchange.resp_tx.is_closed()
+                    }
+                    PendingPrompt::ComputerAccess(_) => false,
                 });
                 self.bottom_pane.dismiss_turn_prompts();
                 ChatOutcome::Continue
@@ -11194,6 +11262,7 @@ mod tests {
         let (resp_tx, resp_rx) = oneshot::channel();
         (
             AskUserQuestionExchange {
+                lifetime: Default::default(),
                 questions: vec![tool_api::ask_user_question::AskQuestion {
                     question: "Pick one?".into(),
                     header: "Choice".into(),
@@ -11289,6 +11358,36 @@ mod tests {
     /// A tool call with NO preamble text (the common agentic case) renders the
     /// tool-use + result cells and does NOT leave a stray empty assistant
     /// placeholder — the `TurnStarted` empty cell is discarded, not committed.
+    #[test]
+    fn activity_fold_keeps_task_results_and_seals_on_prose() {
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        for (index, tool) in ["TaskList", "SendMessage"].into_iter().enumerate() {
+            let id = lingxi_core::types::ToolUseId::from(format!("activity-{index}"));
+            widget.apply_turn_event(TurnEvent::ToolUseStart {
+                id: id.clone(),
+                tool: tool.into(),
+                input: serde_json::json!({}),
+            });
+            widget.apply_turn_event(TurnEvent::ToolUseResult {
+                id,
+                tool: tool.into(),
+                result: serde_json::json!({"ok":true}),
+            });
+        }
+        assert_eq!(widget.activity_fold.as_ref().unwrap().entries.len(), 2);
+        assert!(widget.transcript.active_cell().is_some());
+        widget.apply_turn_event(TurnEvent::TextDelta("Visible boundary".into()));
+        assert!(widget.activity_fold.is_none());
+        assert!(widget
+            .transcript
+            .committed_cells()
+            .iter()
+            .any(|cell| cell
+                .as_any()
+                .is::<crate::history_cell::tool::ActivityFoldCell>()));
+    }
+
     #[test]
     fn tool_first_turn_renders_tool_cells_without_empty_placeholder() {
         use crate::history_cell::tool::{ToolResultCell, ToolUseCell};

@@ -31,6 +31,9 @@ stated four-client checks.
   gateway. The app owner approves access, expiry and Agent scope. Mobile uses the
   resolved system browser by default and retains the existing opening choices.
 - No billing or always-on host is added.
+- Friendships reuse this stack as hidden two-person `kind: 'pair'` teams, which this
+  contract's Team list, limits, administration and conversation creation treat
+  specially; see [FRIENDS.md](FRIENDS.md).
 
 ## Trusted conversation membership (T1/T2)
 

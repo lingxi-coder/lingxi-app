@@ -128,8 +128,13 @@ export function defaultConversationTitle(uids: readonly string[], members: reado
 export function conversationPreview(conversation: TeamConversation, uid: string, zh: boolean, author?: (message: NonNullable<TeamConversation['lastMessage']>) => string): string {
   const last = conversation.lastMessage;
   if (!last) return zh ? '暂无消息' : 'No messages yet';
+  return pointerPreview(last, uid, zh, conversation.kind === 'group' || conversation.kind === 'channel' ? author : undefined);
+}
+
+/** The message part of {@link conversationPreview}: a Friends row prints the same text from the card's `lastMessage`. */
+export function pointerPreview(last: NonNullable<TeamConversation['lastMessage']>, uid: string, zh: boolean, author?: (message: NonNullable<TeamConversation['lastMessage']>) => string): string {
   const mine = last.author.kind === 'user' && last.author.uid === uid;
-  const prefix = mine ? (zh ? '你：' : 'You: ') : (conversation.kind === 'group' || conversation.kind === 'channel') && author ? `${author(last)}${zh ? '：' : ': '}` : '';
+  const prefix = mine ? (zh ? '你：' : 'You: ') : author ? `${author(last)}${zh ? '：' : ': '}` : '';
   if (last.recalled) return `${prefix}${zh ? '消息已撤回' : 'Message recalled'}`;
   return `${prefix}${last.preview || (zh ? '[非文本消息]' : '[Non-text message]')}`;
 }
@@ -184,6 +189,8 @@ export interface TeamsSnapshot {
   readonly botsLoaded: boolean;
   /** The Bot list could not be fetched, so Bot availability is unknown. */
   readonly botsUnverified: boolean;
+  /** Code of the failed Bot list read behind `botsUnverified`; empty otherwise. A friend chat reads an ended friendship from it (D25). */
+  readonly botsError: string;
   /** Unread messages per team. The selected team counts its open directory, others a directory-only listener. */
   readonly unreadByTeam: Readonly<Record<string, number>>;
   readonly totalUnread: number;
@@ -200,6 +207,11 @@ export interface TeamsWorkspaceOptions {
   refreshDelay?: number;
   /** Teams (other than the selected one) that get a directory-only unread listener. */
   maxWatchedTeams?: number;
+  /**
+   * A friend chat (D9): the workspace is pinned to this pair team and its `conversationId`, opened directly. It never
+   * lists teams or loads team detail; `team` and the two-person `members` stand in for them. It does fetch Bot cards (D21).
+   */
+  pair?: { team: TeamSummary; members: TeamMember[]; conversationId: string };
 }
 
 const EMPTY_MEMBERS: TeamMember[] = [], EMPTY_BOTS: SharedBotCard[] = [], EMPTY_CONVERSATIONS: TeamConversation[] = [], EMPTY_MESSAGES: TeamMessage[] = [];
@@ -215,7 +227,7 @@ class BotCards {
   private running = false;
   private again = false;
   private deadline: ReturnType<typeof setTimeout> | undefined;
-  constructor(private readonly api: TeamsApi, private readonly scope: MessageScope, private readonly apply: (bots: SharedBotCard[] | undefined) => void) {}
+  constructor(private readonly api: TeamsApi, private readonly scope: MessageScope, private readonly apply: (bots: SharedBotCard[] | undefined, error?: string) => void) {}
   readonly refresh = async (): Promise<void> => {
     if (this.closed) return;
     if (this.running) { this.again = true; return; }
@@ -227,7 +239,7 @@ class BotCards {
         const expirations = result.bots.filter(bot => bot.ready && bot.onlineUntil && bot.onlineUntil > Date.now()).map(bot => bot.onlineUntil!);
         if (expirations.length) this.deadline = setTimeout(() => void this.refresh(), Math.max(1, Math.min(...expirations) - Date.now()));
       }
-    } catch { if (!this.closed) this.apply(undefined); }
+    } catch (error) { if (!this.closed) this.apply(undefined, codeOf(error)); }
     finally { this.running = false; if (this.again && !this.closed) { this.again = false; void this.refresh(); } }
   };
   close(): void { this.closed = true; clearTimeout(this.deadline); }
@@ -252,6 +264,7 @@ export class TeamsWorkspace {
   private readonly environment: Pick<EventTarget, 'addEventListener' | 'removeEventListener'> | undefined;
   private readonly refreshDelay: number;
   private readonly maxWatchedTeams: number;
+  private readonly pair: TeamsWorkspaceOptions['pair'];
   private initialTeamId: string;
   private readonly stops: (() => void)[] = [];
   private closed = false;
@@ -280,6 +293,7 @@ export class TeamsWorkspace {
   private bots: SharedBotCard[] = EMPTY_BOTS;
   private botsLoaded = false;
   private botsUnverified = false;
+  private botsError = '';
   private readonly conversationByTeam = new Map<string, string>();
   private readonly drafts = new Map<string, string>();
   // Unread of the other teams: one directory-only listener each (`watchMessages` with no conversation).
@@ -293,12 +307,26 @@ export class TeamsWorkspace {
     this.refreshDelay = options.refreshDelay ?? 80;
     this.maxWatchedTeams = options.maxWatchedTeams ?? 20;
     this.initialTeamId = options.initialTeamId ?? '';
+    this.pair = options.pair;
+    if (this.pair) {
+      const { team, members, conversationId } = this.pair;
+      this.teams = [team]; this.selection = team.id; this.listed = true;
+      this.directories.set(team.id, members); this.conversationByTeam.set(team.id, conversationId);
+      this.openMessaging(team);
+    }
     this.current = this.build();
-    this.stops.push(api.onChanged(event => this.changed(event)));
+    if (!this.pair) this.stops.push(api.onChanged(event => this.changed(event)));
     // Held for the workspace's whole life: the Web adapter stops every message listener when its last callback leaves.
     this.stops.push(api.onMessagesChanged(signal => { if (!signal || signal.bots) void this.botCards?.refresh(); }));
     void this.refresh();
   }
+
+  /** A friend chat's two-person directory changed (a name was refreshed). */
+  readonly setPairMembers = (members: TeamMember[]): void => {
+    if (!this.pair || this.closed) return;
+    this.directories.set(this.pair.team.id, members);
+    this.publish();
+  };
 
   // ── Reading ──
 
@@ -314,7 +342,7 @@ export class TeamsWorkspace {
 
   /** Refetch the team list and the selected team's detail. The newest request wins. */
   readonly refresh = async (): Promise<void> => {
-    if (this.closed) return;
+    if (this.closed || this.pair) return;
     const request = ++this.epoch, teamId = this.selection;
     this.refreshing++;
     try {
@@ -505,12 +533,12 @@ export class TeamsWorkspace {
     const focus = () => { void messaging.refresh(); if (this.error) void this.refresh(); };
     this.environment?.addEventListener('online', online); this.environment?.addEventListener('focus', focus);
     this.releaseMessaging = () => { stop(); messaging.close(); this.environment?.removeEventListener('online', online); this.environment?.removeEventListener('focus', focus); };
-    const botCards = new BotCards(this.api, scope, bots => {
+    const botCards = new BotCards(this.api, scope, (bots, error = '') => {
       if (this.botCards !== botCards) return;
-      this.bots = bots ?? EMPTY_BOTS; this.botsUnverified = !bots; this.botsLoaded = this.botsLoaded || !!bots; this.publish();
+      this.bots = bots ?? EMPTY_BOTS; this.botsUnverified = !bots; this.botsError = bots ? '' : error; this.botsLoaded = this.botsLoaded || !!bots; this.publish();
     });
     this.messaging = messaging; this.messagingTeam = team; this.botCards = botCards;
-    this.bots = EMPTY_BOTS; this.botsLoaded = false; this.botsUnverified = false; this.actionError = '';
+    this.bots = EMPTY_BOTS; this.botsLoaded = false; this.botsUnverified = false; this.botsError = ''; this.actionError = '';
     void messaging.start().catch(() => { if (this.messaging === messaging) { this.actionError = 'STORAGE_FAILED'; this.publish(); } });
     const remembered = this.conversationByTeam.get(team.id);
     if (remembered) messaging.select(remembered);
@@ -526,7 +554,7 @@ export class TeamsWorkspace {
     this.releaseMessaging?.();
     this.botCards?.close();
     this.releaseMessaging = undefined; this.botCards = undefined; this.messaging = undefined; this.messagingTeam = undefined;
-    this.bots = EMPTY_BOTS; this.botsLoaded = false; this.botsUnverified = false;
+    this.bots = EMPTY_BOTS; this.botsLoaded = false; this.botsUnverified = false; this.botsError = '';
   }
 
   /** Keep one directory-only listener per other team, up to the limit; the selected team uses its controller. */
@@ -592,7 +620,7 @@ export class TeamsWorkspace {
       messages: model?.state.threads[selected]?.messages ?? EMPTY_MESSAGES,
       pending: this.outboxFor.value, creation: model?.state.creation, offline: model?.offline ?? false,
       messagingConnecting: model?.connecting ?? !!this.selection, messagingError: model?.error ?? '',
-      bots: this.bots, botsLoaded: this.botsLoaded, botsUnverified: this.botsUnverified,
+      bots: this.bots, botsLoaded: this.botsLoaded, botsUnverified: this.botsUnverified, botsError: this.botsError,
       unreadByTeam, totalUnread: Object.values(unreadByTeam).reduce((sum, value) => sum + value, 0),
     };
   }

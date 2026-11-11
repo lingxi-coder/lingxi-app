@@ -236,8 +236,8 @@ test('an idle teammate transcript does not show active thinking', () => {
     },
   };
   const html = render(React.createElement(RuntimeCenterInspector, { bridge }));
-  assert.ok(html.includes('>idle</span>'));
-  assert.ok(html.includes('Waiting for a message'));
+  assert.ok(!html.includes('>idle</span>'));
+  assert.ok(!html.includes('Waiting for a message'));
   assert.ok(!html.includes('Thinking'));
 });
 
@@ -277,13 +277,13 @@ function renderAgentActivity(status: string, activity?: string, withTranscript =
   return render(React.createElement(RuntimeCenterInspector, { bridge }));
 }
 
-test('subagent progress and retry activity replace generic thinking without ending the run', () => {
+test('subagent progress and retry metadata stay out of the transcript while the run keeps thinking', () => {
   for (const activity of ['3 tool uses · 1200 tokens', 'Retrying (attempt 2): model response stalled']) {
     const html = renderAgentActivity('running', activity);
-    assert.ok(html.includes(activity));
-    assert.ok(html.includes('>running</span>'));
+    assert.ok(!html.includes(activity));
+    assert.ok(!html.includes('>running</span>'));
     assert.ok(html.includes('Review these changes.'));
-    assert.ok(!html.includes('Thinking'));
+    assert.ok(html.includes('Thinking'));
     assert.ok(html.includes('role="status"'));
   }
 });
@@ -296,16 +296,17 @@ test('subagent with no meaningful activity retains the generic thinking fallback
 
 test('retry before the first transcript message does not display welcome or waiting copy', () => {
   const html = renderAgentActivity('running', 'Retrying (attempt 2): first response timeout', false);
-  assert.ok(html.includes('Retrying (attempt 2): first response timeout'));
-  assert.ok(!html.includes('Thinking'));
+  assert.ok(!html.includes('Retrying (attempt 2): first response timeout'));
+  assert.ok(html.includes('Thinking'));
   assert.ok(!html.includes('Waiting for the agent'));
   assert.ok(!html.includes('Turn intent into working code'));
 });
 
-test('interrupted subagent shows its failure reason without an active thinking indicator', () => {
+test('interrupted subagent omits header status and keeps its transcript without active thinking', () => {
   const html = renderAgentActivity('failed', 'Interrupted when the engine stopped.');
-  assert.ok(html.includes('>failed</span>'));
-  assert.ok(html.includes('Interrupted when the engine stopped.'));
+  assert.ok(!html.includes('>failed</span>'));
+  assert.ok(!html.includes('Interrupted when the engine stopped.'));
+  assert.ok(html.includes('Review these changes.'));
   assert.ok(!html.includes('Thinking'));
 });
 

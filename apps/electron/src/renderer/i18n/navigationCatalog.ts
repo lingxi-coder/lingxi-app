@@ -489,6 +489,13 @@ export const navigationCatalog: Record<string, Record<string, string>> = {
     "ja": "目標",
     "ko": "목표"
   },
+  "desktop_friends_rail_unread": {
+    "zh-Hans": "好友，%1$d 条未读",
+    "zh-Hant": "好友，%1$d 則未讀",
+    "en": "Friends, %1$d unread",
+    "ja": "友だち、未読 %1$d 件",
+    "ko": "친구, 읽지 않음 %1$d개"
+  },
   "desktop_teams_rail_unread": {
     "zh-Hans": "团队，%1$d 条未读",
     "zh-Hant": "團隊，%1$d 則未讀",

@@ -126,6 +126,10 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// through the connection's [`ClientEventSink`] as a side effect.
     async fn run_turn(&self, prompt: Utf16JsonProjection);
     async fn record_prompt_suggestion_submission(&self, _text: &str) {}
+    /// Claim an internal Goal proposal in this connection's owned turn slot.
+    async fn claim_goal_proposal(&self, _id: &str) -> bool {
+        false
+    }
     /// Mounted conversation identity for immutable permission owners.
     async fn current_session_id(&self) -> Option<String> {
         None
@@ -207,7 +211,8 @@ pub trait TurnDriver: Send + Sync + 'static {
             );
             return;
         }
-        let human = inputs.iter().any(|input| !input.is_meta);
+        let human = orchestrator::native_user_message_source::queued_turn_authority()
+            .unwrap_or_else(|| inputs.iter().any(|input| !input.is_meta));
         let prompt = join_source_text(
             &inputs
                 .into_iter()
@@ -399,6 +404,18 @@ impl ClientEventSink for FrameEventSink {
         // filter, otherwise an unowned/terminal request would be dropped while
         // leaving its broker receiver parked until timeout.
         if let ClientEvent::AskUserQuestion { request } = &event {
+            let broker = self
+                .ask_user_question_broker
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .as_ref()
+                .and_then(Weak::upgrade);
+            // Only the internal broker can grant a session Goal lifetime. A
+            // client request id or visible question text is never authority.
+            let session_goal = match broker.as_ref() {
+                Some(broker) => broker.is_live_goal_proposal(request.request_id).await,
+                None => false,
+            };
             let out = self.out.lock().await;
             let mut delivered = false;
             let owner = if self.resume_interactions.accepts_interactions() {
@@ -406,21 +423,22 @@ impl ClientEventSink for FrameEventSink {
             } else {
                 &self.active_turn
             };
-            owner.with_accepted_interaction(|| {
+            let mut publish = || {
                 if self.handshaken.load(Ordering::SeqCst) {
                     if let Some(sink) = out.as_ref() {
                         delivered = sink.send(Frame::Event(event.clone()));
                     }
                 }
-            });
+            };
+            if session_goal {
+                // A nonblocking proposal can first reach the broker after its
+                // proposing turn ended and remains answerable in this session.
+                publish();
+            } else {
+                owner.with_accepted_interaction(publish);
+            }
             drop(out);
             if !delivered {
-                let broker = self
-                    .ask_user_question_broker
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .as_ref()
-                    .and_then(Weak::upgrade);
                 if let Some(broker) = broker {
                     // The broker publishes while its request is IN_FLIGHT.
                     // cancel() waits for publication to finish, so awaiting it
@@ -776,6 +794,9 @@ pub struct BridgeConnection {
     /// True while a session transition owns `turn_handoff` and may await a
     /// plugin command queued by its own session.start hook.
     transition_active: Arc<AtomicBool>,
+    /// Manual compact work may be cancelled before commit, but must drain once
+    /// the engine has begun its irreversible transcript/state transition.
+    compact_work: Arc<CompactWork>,
     /// Connection-owned active turn identity and cancellation token. Keeping
     /// this outside the spawned driver closes the race where Cancel arrives
     /// after SendPrompt but before the driver registers with msgqueue.
@@ -827,6 +848,91 @@ impl Default for MetadataWork {
 }
 
 struct MetadataWorkGuard(Arc<MetadataWork>);
+
+#[derive(Default)]
+struct CompactWorkState {
+    closed: bool,
+    owners: HashMap<uuid::Uuid, CancellationToken>,
+}
+
+struct CompactWork {
+    state: StdMutex<CompactWorkState>,
+    changed: tokio::sync::watch::Sender<usize>,
+}
+
+impl Default for CompactWork {
+    fn default() -> Self {
+        let (changed, _) = tokio::sync::watch::channel(0);
+        Self {
+            state: StdMutex::new(CompactWorkState::default()),
+            changed,
+        }
+    }
+}
+
+struct CompactWorkGuard {
+    work: Arc<CompactWork>,
+    id: uuid::Uuid,
+}
+
+impl CompactWork {
+    fn begin(self: &Arc<Self>, cancellation: CancellationToken) -> Option<CompactWorkGuard> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.closed {
+            cancellation.cancel();
+            return None;
+        }
+        let id = uuid::Uuid::new_v4();
+        state.owners.insert(id, cancellation);
+        self.changed.send_replace(state.owners.len());
+        Some(CompactWorkGuard {
+            work: self.clone(),
+            id,
+        })
+    }
+
+    fn reopen(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .closed = false;
+    }
+
+    fn cancel(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.closed = true;
+        for cancellation in state.owners.values() {
+            cancellation.cancel();
+        }
+    }
+
+    async fn drain(&self) {
+        let mut changed = self.changed.subscribe();
+        while *changed.borrow_and_update() != 0 {
+            if changed.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+impl Drop for CompactWorkGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .work
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.owners.remove(&self.id);
+        self.work.changed.send_replace(state.owners.len());
+    }
+}
 
 impl MetadataWork {
     fn begin(self: &Arc<Self>) -> Option<MetadataWorkGuard> {
@@ -1058,7 +1164,7 @@ impl TurnInteractions {
             broker.drain().await;
         }
         if let Some(broker) = self.ask_user_question_broker.as_ref() {
-            broker.drain().await;
+            broker.drain_turn().await;
         }
         // Background permissions keep their tool names for later AllowAlways.
         let ids = self
@@ -1722,6 +1828,7 @@ struct ModQueueDrain {
     driver: Option<Arc<dyn TurnDriver>>,
     loop_runtime: Arc<tool_cron::LoopRuntime>,
     transition_active: Arc<AtomicBool>,
+    compact_work: Arc<CompactWork>,
 }
 
 struct BridgeSlashOwnerContext {
@@ -1923,6 +2030,20 @@ async fn dispatch_queued_bridge_slash(
     let is_compact = parsed.as_ref().is_some_and(|parsed| {
         crate::router::source_text_eq_ascii_ignore_case(&parsed.name, "compact")
     });
+    let _compact_work = if is_compact {
+        let Some(work) = mod_drain.compact_work.begin(cancellation.clone()) else {
+            emit_slash_terminal_failure(
+                mod_drain.events.as_ref(),
+                turn_id,
+                "Compaction canceled.".into(),
+            )
+            .await;
+            return None;
+        };
+        Some(work)
+    } else {
+        None
+    };
     let changes_session = parsed.as_ref().is_some_and(|parsed| {
         ["clear", "new", "reset"]
             .iter()
@@ -2484,7 +2605,8 @@ async fn drive_queued_mod_turn(driver: &Arc<dyn TurnDriver>, turn: QueuedModTurn
     } = turn;
     orchestrator::mod_prompt_origin::with_origin(origin, async move {
         if let Some(inputs) = prompt_inputs {
-            let human = inputs.iter().any(|input| !input.is_meta);
+            let human = orchestrator::native_user_message_source::queued_turn_authority()
+                .unwrap_or_else(|| inputs.iter().any(|input| !input.is_meta));
             let run = driver.run_queued_batch(inputs, cancel);
             if human {
                 orchestrator::native_user_message_source::with_source(
@@ -2567,9 +2689,23 @@ async fn drain_main_thread(
             };
             match command {
                 Some(cmd) => {
-                    if cmd.source == QueueSource::PromptInput && cmd.is_slash_command() {
+                    let goal_proposal = cmd.uuid.starts_with("goal-proposal:");
+                    if (cmd.source == QueueSource::PromptInput || goal_proposal)
+                        && cmd.is_slash_command()
+                    {
                         let (generation, cancel) =
                             owned_turn.expect("claimed raw slash command owns a turn");
+                        if goal_proposal && !driver.claim_goal_proposal(&cmd.uuid).await {
+                            finish_turn(active_turn, generation, interactions, turn_handoff).await;
+                            continue;
+                        }
+                        let goal_origin = goal_proposal.then(|| {
+                            serde_json::json!({"kind": if cmd.source == QueueSource::TaskCompletion {
+                                "task-notification"
+                            } else {
+                                "auto-continuation"
+                            }})
+                        });
                         let raw = cmd
                             .text_projection()
                             .cloned()
@@ -2592,8 +2728,39 @@ async fn drain_main_thread(
                                 }
                                 None => None,
                             };
-                            if let Some(turn) = turn {
-                                drive_queued_mod_turn(driver, turn).await;
+                            if let Some(mut turn) = turn {
+                                if let Some(origin) = goal_origin {
+                                    use orchestrator::native_user_message_source::{
+                                        with_queued_turn_authority, with_source,
+                                        NativeUserMessageSource,
+                                    };
+
+                                    turn.origin = origin.clone();
+                                    let source_origin =
+                                        Utf16JsonProjection::from_serde_value(&origin)
+                                            .expect("trusted goal origin is valid JSON");
+                                    if let Some(first) = turn
+                                        .prompt_inputs
+                                        .as_mut()
+                                        .and_then(|inputs| inputs.first_mut())
+                                    {
+                                        first.message_origin = Some(source_origin.clone());
+                                    }
+                                    let native_source = NativeUserMessageSource {
+                                        message_origin: Some(source_origin),
+                                        prompt_source: None,
+                                    };
+                                    with_queued_turn_authority(
+                                        false,
+                                        with_source(
+                                            native_source,
+                                            drive_queued_mod_turn(driver, turn),
+                                        ),
+                                    )
+                                    .await;
+                                } else {
+                                    drive_queued_mod_turn(driver, turn).await;
+                                }
                             }
                             finish_turn(active_turn, generation, interactions, turn_handoff).await;
                         })
@@ -2952,6 +3119,7 @@ impl BridgeConnection {
             turn_running: Arc::new(AtomicBool::new(false)),
             turn_handoff: Arc::new(tokio::sync::Mutex::new(())),
             transition_active: Arc::new(AtomicBool::new(false)),
+            compact_work: Arc::new(CompactWork::default()),
             active_turn: ActiveTurnControl::default(),
             resume_interactions: ActiveTurnControl::default(),
             active_turn_task: Arc::new(StdMutex::new(None)),
@@ -3577,6 +3745,7 @@ impl BridgeConnection {
             driver: self.driver.clone(),
             loop_runtime: self.loop_runtime.clone(),
             transition_active: self.transition_active.clone(),
+            compact_work: self.compact_work.clone(),
         }
     }
 
@@ -3631,6 +3800,7 @@ impl BridgeConnection {
                     receipts: HashMap::new(),
                 };
                 *cell = Some(out.clone());
+                self.compact_work.reopen();
                 true
             }
         }
@@ -4286,7 +4456,7 @@ impl BridgeConnection {
             // while no turn owns the event stream. Its completion must bypass
             // the late-turn filter; automatic in-turn compaction continues to
             // flow through `FrameEventSink` and remains owner-scoped.
-            command @ ClientCommand::ForceCompact => {
+            ClientCommand::ForceCompact => {
                 let _handoff = self.turn_handoff.lock().await;
                 // Do not queue on the orchestrator's turn gate in this input
                 // loop: its owner may need a permission reply from this socket.
@@ -4300,8 +4470,14 @@ impl BridgeConnection {
                     return;
                 }
                 let _transition = TransitionScope::begin(&self.transition_active);
+                let cancellation = CancellationToken::new();
+                let Some(_compact_work) = self.compact_work.begin(cancellation.clone()) else {
+                    return;
+                };
                 if let Some(router) = self.router.clone() {
-                    router.route(command, self.unscoped_event_sink()).await;
+                    router
+                        .force_compact_with_cancel(cancellation, self.unscoped_event_sink())
+                        .await;
                 } else {
                     tracing::debug!(
                         "bridge-server: force compact not routed (no CommandRouter bound)"
@@ -5302,7 +5478,8 @@ impl BridgeConnection {
         };
         let resolved = if self.handshaken.load(Ordering::SeqCst)
             && (self.active_turn.accepts_interactions()
-                || self.resume_interactions.accepts_interactions())
+                || self.resume_interactions.accepts_interactions()
+                || broker.is_live_goal_proposal(request_id).await)
         {
             broker.resolve(request_id, answers.into_projections()).await
         } else {
@@ -5739,6 +5916,19 @@ impl FramePump for BridgeConnection {
     }
 
     async fn on_transport_disconnected(&self, sink: FrameSink) {
+        // An unclaimed socket may have its hello parked behind the current
+        // owner's compact drain. The endpoint joins that callback only after
+        // this notification returns, so it must not queue for admission behind
+        // its own unpolled hello. The active owner is checked again below.
+        if self
+            .out
+            .lock()
+            .await
+            .as_ref()
+            .is_none_or(|current| !current.same_channel(&sink))
+        {
+            return;
+        }
         let _admission = self.connection_admission.lock().await;
         let active = self.out.lock().await;
         if active
@@ -5756,6 +5946,7 @@ impl FramePump for BridgeConnection {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = SessionMetadataReceipts::default();
         self.resume_interactions.cancel(None);
+        self.compact_work.cancel();
         if let Some(rpc) = self.media_service_rpc.as_ref() {
             rpc.begin_close();
         }
@@ -5833,6 +6024,7 @@ impl BridgeConnection {
         // must be able to reacquire it. Those events cannot reach a new socket.
         self.handshaken.store(false, Ordering::SeqCst);
         self.handshake_refused.store(false, Ordering::SeqCst);
+        self.compact_work.cancel();
         *self
             .metadata_receipts
             .lock()
@@ -5840,6 +6032,10 @@ impl BridgeConnection {
         self.cron_requests.disconnected().await;
         *active = None;
         drop(active);
+        // Slash compact runs on the owned task. Cancel its summary, then let
+        // an already-started commit finish before the generic task abort or
+        // any connection-owned resources are retired.
+        self.compact_work.drain().await;
         {
             let _lifecycle = self.ui_lifecycle_gate.lock().await;
             let attached = std::mem::take(&mut *self.ui_attached_clients.lock().await);
@@ -5986,6 +6182,10 @@ mod connection_regression_test;
 mod turn_handoff_regression_test;
 
 #[cfg(test)]
+#[path = "server/goal_proposal_lifetime_test.rs"]
+mod goal_proposal_lifetime_test;
+
+#[cfg(test)]
 #[path = "server/permission_owner_regression_test.rs"]
 mod permission_owner_regression_test;
 
@@ -6020,8 +6220,9 @@ mod tests {
         batchable_prompt_snapshot, deserialize_source, drain_main_thread,
         fail_pending_mod_calls_on_refusal, is_owned_turn_event, run_queued_mod_command,
         serialize_source, text_object_projection, ActiveTurnControl, BridgeConnection,
-        BridgeModCommandQueue, ModQueueDrain, ModQueueEnqueuePause, PendingModCommands,
-        PendingModPrompts, TurnDriver, TurnInteractions, UnscopedFrameEventSink,
+        BridgeModCommandQueue, CompactWork, ModQueueDrain, ModQueueEnqueuePause,
+        PendingModCommands, PendingModPrompts, TurnDriver, TurnInteractions,
+        UnscopedFrameEventSink,
     };
 
     struct NoTurn;
@@ -6807,6 +7008,128 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn queued_goal_proposal_kickoffs_remain_visible_without_human_authority() {
+        type Captured = (
+            Vec<orchestrator::QueuedPromptInput>,
+            Option<bool>,
+            Option<orchestrator::native_user_message_source::NativeUserMessageSource>,
+            serde_json::Value,
+        );
+        struct GoalDriver {
+            calls: StdMutex<Vec<Captured>>,
+            claims: StdMutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl TurnDriver for GoalDriver {
+            async fn run_turn(&self, _: Utf16JsonProjection) {
+                panic!("Goal kickoff must keep its source-preserving batch");
+            }
+            async fn claim_goal_proposal(&self, id: &str) -> bool {
+                self.claims.lock().unwrap().push(id.to_owned());
+                true
+            }
+            async fn run_queued_batch(
+                &self,
+                inputs: Vec<orchestrator::QueuedPromptInput>,
+                _: CancellationToken,
+            ) {
+                self.calls.lock().unwrap().push((
+                    inputs,
+                    orchestrator::native_user_message_source::queued_turn_authority(),
+                    orchestrator::native_user_message_source::current(),
+                    orchestrator::mod_prompt_origin::current(),
+                ));
+            }
+        }
+
+        for (origin, expected_kind) in [
+            (
+                lingxi_core::session::GoalOrigin::ProposalDirect,
+                "task-notification",
+            ),
+            (
+                lingxi_core::session::GoalOrigin::ProposalApproved,
+                "auto-continuation",
+            ),
+        ] {
+            let recorded = Arc::new(GoalDriver {
+                calls: StdMutex::new(Vec::new()),
+                claims: StdMutex::new(Vec::new()),
+            });
+            let driver: Arc<dyn TurnDriver> = recorded.clone();
+            let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+            let connection = BridgeConnection::new()
+                .bind(gate, driver.clone())
+                .bind_router(Arc::new(StubRouter {
+                    result: lingxi_core::host::SlashDispatchResult::RunAsTurn {
+                        prompt: "native goal kickoff".into(),
+                    },
+                    routed: Arc::new(AtomicBool::new(false)),
+                }));
+            let id = format!("goal-proposal:{expected_kind}");
+            let cancel = CancellationToken::new();
+            connection
+                .queue
+                .enqueue_goal_proposal(
+                    id.clone(),
+                    "/goal tests pass".into(),
+                    origin,
+                    cancel.clone(),
+                )
+                .await;
+            let drain = connection.mod_queue_drain();
+            let interactions = TurnInteractions::default();
+            // A kickoff can be drained inside a predecessor's human scope.
+            // Its own host proof must shadow that ambient source as well.
+            orchestrator::native_user_message_source::with_source(
+                orchestrator::native_user_message_source::human(),
+                drain_main_thread(
+                    &driver,
+                    &connection.queue,
+                    &connection.loop_runtime,
+                    &connection.active_turn,
+                    &interactions,
+                    &connection.queued_prompt_payloads,
+                    &connection.turn_handoff,
+                    Some(&drain),
+                ),
+            )
+            .await;
+            assert_eq!(*recorded.claims.lock().unwrap(), [id]);
+            let calls = recorded.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            let (inputs, authority, source, mod_origin) = &calls[0];
+            assert_eq!(*authority, Some(false));
+            assert_eq!(inputs.len(), 1);
+            assert!(!inputs[0].is_meta, "the confirmed kickoff remains visible");
+            assert_eq!(inputs[0].text.string_at(""), Some("native goal kickoff"));
+            assert_eq!(
+                inputs[0]
+                    .message_origin
+                    .as_ref()
+                    .and_then(|value| value.string_at("/kind")),
+                Some(expected_kind)
+            );
+            assert_eq!(
+                source
+                    .as_ref()
+                    .and_then(|source| source.message_origin.as_ref())
+                    .and_then(|value| value.string_at("/kind")),
+                Some(expected_kind)
+            );
+            assert_eq!(
+                mod_origin.get("kind").and_then(serde_json::Value::as_str),
+                Some(expected_kind)
+            );
+            assert_eq!(
+                orchestrator::native_user_message_source::queued_turn_authority(),
+                None
+            );
+            cancel.cancel();
+        }
+    }
+
     struct CountingSlashRouter {
         calls: Arc<AtomicUsize>,
         raw: Arc<StdMutex<Option<Utf16JsonProjection>>>,
@@ -7325,6 +7648,7 @@ mod tests {
             driver: None,
             loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
             transition_active: Arc::new(AtomicBool::new(false)),
+            compact_work: Arc::new(CompactWork::default()),
         }
     }
 
@@ -7619,6 +7943,7 @@ mod tests {
             driver: None,
             loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
             transition_active: Arc::new(AtomicBool::new(false)),
+            compact_work: Arc::new(CompactWork::default()),
         };
         let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
             captured: Arc::new(Mutex::new(None)),

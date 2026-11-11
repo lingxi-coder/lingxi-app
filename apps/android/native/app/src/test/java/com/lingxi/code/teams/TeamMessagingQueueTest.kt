@@ -91,6 +91,45 @@ class TeamMessagingQueueTest {
         }
     }
 
+    /**
+     * docs/FRIENDS-CLIENTS.md D25: a friend's chat is a messaging model pinned to the pair team, and its Bots page and Bot DMs run on the same
+     * model. A Bot command the server refuses because the membership or the conversation is gone (listing the Bots, creating or sending in a Bot
+     * DM, pausing) revokes the whole model, which is what ends the chat; any other failure leaves it alone.
+     */
+    @Test fun aBotCommandRefusedBecauseTheChatEndedRevokesTheWholeMessaging() = runBlocking {
+        for (code in listOf("MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "CONVERSATION_REQUIRED")) {
+            for (command in listOf("pauseSharedBot", "createConversation", "submit", "listSharedBots")) {
+                Harness(bot = true).use { h ->
+                    h.start()
+                    assertFalse("$command $code: not revoked before", h.model.state.value.revoked)
+                    h.fail[command] = code
+                    withContext(h.dispatcher) {
+                        when (command) {
+                            "createConversation" -> h.model.create("bot_dm", "Helper", emptyList(), "newconv_01", listOf(BOT)) { }
+                            "submit" -> h.model.queue("create", "Ask the shared assistant")
+                            else -> h.model.pause(ownBotCard())
+                        }
+                    }
+                    eventually { h.model.state.value.revoked }
+                    assertEquals("$command $code", "MEMBERSHIP_REQUIRED", h.model.state.value.error)
+                }
+            }
+        }
+    }
+
+    @Test fun aBotCommandThatFailsForAnotherReasonLeavesTheChatAlone() = runBlocking {
+        for (code in listOf("SERVICE_UNAVAILABLE", "BOT_USE_REQUIRED", "RATE_LIMITED")) {
+            Harness(bot = true).use { h ->
+                h.start()
+                h.fail["pauseSharedBot"] = code
+                withContext(h.dispatcher) { h.model.pause(ownBotCard()) }
+                eventually { h.model.state.value.error == code }
+                delay(200)
+                assertFalse(code, h.model.state.value.revoked)
+            }
+        }
+    }
+
     private class Harness(private val bot: Boolean = false) : AutoCloseable {
         val directory = Files.createTempDirectory("team-public-queue-").toFile()
         val storage = TeamCommandStorage(directory)
@@ -106,6 +145,8 @@ class TeamMessagingQueueTest {
         private lateinit var messageListener: EventListener<QuerySnapshot>
         val sent = CopyOnWriteArrayList<JSONObject>()
         val durableBeforeAck = AtomicBoolean(false)
+        /** An action the server refuses with HTTP 403 and this error code, set by a test after the model has started. */
+        val fail = java.util.concurrent.ConcurrentHashMap<String, String>()
         private val server = ServerSocket(0, 0, InetAddress.getByName("127.0.0.1"))
         private val httpThreads = Executors.newSingleThreadExecutor()
         val model: TeamMessagingModel
@@ -138,7 +179,8 @@ class TeamMessagingQueueTest {
                     if (header.startsWith("Content-Length:", ignoreCase = true)) length = header.substringAfter(':').trim().toInt()
                 }
                 val input = JSONObject(String(stream.readNBytes(length), Charsets.UTF_8))
-                val result = when (input.getString("action")) {
+                val refusal = fail[input.getString("action")]
+                val result = if (refusal != null) JSONObject().put("error", JSONObject().put("code", refusal)) else when (input.getString("action")) {
                     "listSharedBots" -> JSONObject().put("bots", JSONArray().also { if (bot) it.put(botCard()) })
                     "listTasks" -> JSONObject().put("tasks", JSONArray()).put("next", JSONObject.NULL)
                     "mutate", "submit" -> {
@@ -149,11 +191,12 @@ class TeamMessagingQueueTest {
                         sent += input
                         JSONObject().put("ok", true)
                     }
+                    "pauseSharedBot", "createConversation" -> JSONObject().put("ok", true)
                     else -> error("Unexpected public queue request")
                 }
                 val bytes = result.toString().toByteArray()
                 socket.getOutputStream().use { output ->
-                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())
+                    output.write("HTTP/1.1 ${if (refusal != null) "403 Forbidden" else "200 OK"}\r\nContent-Type: application/json\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())
                     output.write(bytes); output.flush()
                 }
             } } catch (error: SocketException) { if (!server.isClosed) throw error } }
@@ -206,6 +249,8 @@ class TeamMessagingQueueTest {
         private fun anyMetadata() = eq(MetadataChanges.INCLUDE) ?: MetadataChanges.INCLUDE
         private fun <T> anyListener(): EventListener<T> = any<EventListener<T>>() ?: EventListener { _, _ -> }
         private fun anyAuthListener(): FirebaseAuth.AuthStateListener = any<FirebaseAuth.AuthStateListener>() ?: FirebaseAuth.AuthStateListener { }
+        /** The Bot the model's own member maintains in this generation, which is the only kind it may pause. */
+        private fun ownBotCard() = TeamBotCard.parse(JSONObject(botCard().toString()).put("maintainer", JSONObject().put("uid", MEMBER).put("generation", GENERATION)))
         private fun botCard() = JSONObject("""{"sharedBotId":"sharedbot_01","name":"Helper","description":"","maintainer":{"uid":"owner_test","generation":1},"revision":1,"state":"published","permitted":true,"ready":false,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":100,"member":10,"bot":50}}""")
     }
 }

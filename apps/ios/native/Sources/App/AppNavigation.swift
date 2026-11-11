@@ -136,12 +136,12 @@ final class AppNavigationModel {
     var settingsOpen: Bool { tabs.selected == .settings }
 
     /// Pushed screens above `tab`'s root (§2.2). Chats and Settings are answered from the stacks this
-    /// model owns, so the answer is current in the same update as the push itself; Bots and Teams report.
+    /// model owns, so the answer is current in the same update as the push itself; Bots, Teams and Friends report.
     func depth(of tab: AppTab) -> Int {
         switch tab {
         case .chats: path.count
         case .settings: settingsPath.count
-        case .bots, .teams: tabs.depth[tab] ?? 0
+        case .bots, .teams, .friends: tabs.depth[tab] ?? 0
         }
     }
 
@@ -266,7 +266,7 @@ final class AppNavigationModel {
             if !path.isEmpty { path.removeAll() }
         case .settings:
             if settingsPath.isEmpty { tabs.requestScrollToTop(.settings) } else { resetSettings() }
-        case .bots, .teams:
+        case .bots, .teams, .friends:
             tabs.reselect(tab)
         }
     }

@@ -21,6 +21,8 @@ import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.DarkMode
+import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.outlined.Checklist
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.outlined.Psychology
@@ -43,6 +45,7 @@ import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.Construction
 import androidx.compose.material.icons.outlined.Groups
+import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
@@ -55,12 +58,14 @@ import androidx.compose.ui.unit.dp
 enum class LXIconName {
     Menu, SideChat, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, AudioWave, Paperclip,
     Chevron, Sun, Moon, Check, Pin, Brain, ArrowUp, Folder, Clock, Message,
-    ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share,
+    ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share, ListChecks, Send,
     ArrowRight, Terminal, Lightbulb, Apps, AppBuilder, McpFallback,
     /** The Bots tab: a robot head, distinct from [Sparkle] (which already means "AI" elsewhere). */
     Bot,
     /** The Teams tab: a group of people ([Link], which the old Teams drawer row used, is not one). */
     Users,
+    /** The Friends tab: one person, as [Users] is a group. */
+    User,
 }
 
 /** Shared semantic names resolve to Android's Material icon family. */
@@ -81,6 +86,8 @@ val LXIconName.materialIcon: ImageVector get() = when (this) {
     LXIconName.Chevron -> Icons.Outlined.KeyboardArrowDown
     LXIconName.Sun -> Icons.Outlined.LightMode
     LXIconName.Moon -> Icons.Outlined.DarkMode
+    LXIconName.ListChecks -> Icons.Outlined.Checklist
+    LXIconName.Send -> Icons.AutoMirrored.Outlined.Send
     LXIconName.Check -> Icons.Outlined.Check
     LXIconName.Pin -> Icons.Outlined.PushPin
     LXIconName.Brain -> Icons.Outlined.Psychology
@@ -105,6 +112,7 @@ val LXIconName.materialIcon: ImageVector get() = when (this) {
     LXIconName.ArrowRight -> Icons.AutoMirrored.Outlined.ArrowForward
     LXIconName.Bot -> Icons.Outlined.SmartToy
     LXIconName.Users -> Icons.Outlined.Groups
+    LXIconName.User -> Icons.Outlined.Person
 }
 
 @Suppress("UNUSED_PARAMETER")

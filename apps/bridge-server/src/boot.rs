@@ -118,6 +118,14 @@ impl Drop for BootMediaAttachmentGuard {
 #[path = "boot/workspace_resume_tests.rs"]
 mod workspace_resume_tests;
 
+#[path = "catalog_worker.rs"]
+mod catalog_worker;
+
+/// Serve bounded metadata requests without resolving providers or building an engine.
+pub async fn run_session_catalog_worker() -> Result<(), String> {
+    catalog_worker::run(tokio::io::stdin(), tokio::io::stdout()).await
+}
+
 /// Env override for the API base URL (mirrors `apps/cli`'s `resolve_api_base`).
 pub const API_BASE_ENV: &str = "LINGXI_API_BASE_URL";
 /// The canonical Anthropic endpoint used when [`API_BASE_ENV`] is unset.
@@ -1894,6 +1902,17 @@ async fn list_sessions_json_from_with_scope(
 ) -> Result<String, String> {
     let fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(HostFileSystem::new(cwd.to_path_buf()));
+    list_sessions_json_using_fs(cwd, lingxi_home, session_id, scope, fs, None).await
+}
+
+async fn list_sessions_json_using_fs(
+    cwd: &Path,
+    lingxi_home: &Path,
+    session_id: Option<&str>,
+    scope: Option<session::jsonl::SessionDiscoveryScope>,
+    fs: Arc<dyn lingxi_core::host::FileSystem>,
+    mut empty_markers: Option<&mut catalog_worker::EmptyMarkerCache>,
+) -> Result<String, String> {
     let raw_session_id = session_id;
     let session_id = session_id
         .map(|raw| {
@@ -1999,14 +2018,18 @@ async fn list_sessions_json_from_with_scope(
     let mut sessions = Vec::with_capacity(catalog.sessions.len());
     for row in catalog.sessions {
         let empty_session = if row.message_count == 0 {
-            session::jsonl::JsonlReader::new(row.path.clone(), fs.clone())
-                .read_routed()
-                .await
-                .ok()
-                .is_some_and(|loaded| {
-                    loaded.messages_in_order.is_empty()
-                        && loaded.mobile_empty_sessions.contains(&row.uuid.to_string())
-                })
+            if let Some(cache) = empty_markers.as_deref_mut() {
+                cache.is_empty(&row, fs.clone()).await
+            } else {
+                session::jsonl::JsonlReader::new(row.path.clone(), fs.clone())
+                    .read_routed()
+                    .await
+                    .ok()
+                    .is_some_and(|loaded| {
+                        loaded.messages_in_order.is_empty()
+                            && loaded.mobile_empty_sessions.contains(&row.uuid.to_string())
+                    })
+            }
         } else {
             false
         };

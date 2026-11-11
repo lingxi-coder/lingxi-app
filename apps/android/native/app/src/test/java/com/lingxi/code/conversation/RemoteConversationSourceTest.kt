@@ -395,7 +395,7 @@ class RemoteConversationSourceTest {
         val invalid = listOf(
             valid.copy(controls = controls),
             valid.copy(outgoing = listOf(RemoteOutgoingPromptFfi("id", "text", emptyList(), RemoteOutgoingStatusFfi.SENDING, null, null))),
-            valid.copy(pending = pending.copy(questions = listOf(AskUserQuestionRequestDto(1uL, emptyList(), null)))),
+            valid.copy(pending = pending.copy(questions = listOf(AskUserQuestionRequestDto(1uL, emptyList(), null, false)))),
             valid.copy(pending = pending.copy(computerAccess = listOf(
                 ComputerAccessRequestDto(1uL, "reason", emptyList(), AccessTierDto.READ, false, false, false, null)))),
             valid.copy(turn = valid.turn.copy(running = true)),

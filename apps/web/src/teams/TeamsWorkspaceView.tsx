@@ -1,12 +1,16 @@
 import { useState } from 'react';
 import { Markdown } from '../remote/markdown';
-import type { TeamsApi } from '../../../../packages/teams';
+import type { TeamMember, TeamsApi } from '../../../../packages/teams';
+import { InviteNotice } from '../../../../packages/teams/friend-dialogs';
+import type { FriendsApi } from '../../../../packages/teams/friends';
 import '../../../../packages/teams/styles';
 import { TeamConversationView } from '../../../../packages/teams/TeamConversationView';
 import { TeamDetailsDrawer } from '../../../../packages/teams/TeamDetailsDrawer';
 import { TeamSidebar } from '../../../../packages/teams/TeamSidebar';
 import type { DrawerTab, RenderMarkdown } from '../../../../packages/teams/ui';
 import { useTeamsWorkspace, type UseTeams } from '../../../../packages/teams/useTeamsWorkspace';
+import { InviteFriends } from '../friends/InviteFriends';
+import { MemberFriend } from '../friends/MemberFriend';
 import './teams-web.css';
 
 /** A shared Bot's messages and documents use the Markdown renderer of Web's own chat (`Transcript`): React elements only, links limited to http(s) and mailto. */
@@ -18,6 +22,8 @@ interface LayoutProps {
   invite?: string;
   onInviteHandled?(): void;
   onInviteResolved?(): void;
+  /** Without it members have no Add friend action (D15) and owners and admins no Invite friends action (D26). */
+  friends?: FriendsApi;
 }
 
 /** The Teams workspace of a signed-in account, opened with it and closed when the account or the page goes. */
@@ -31,8 +37,11 @@ export function TeamsWorkspaceView({ api, uid, ...layout }: LayoutProps & { api:
  * on the right. Under 760px wide only one of the sidebar and the conversation is shown at a time. Wrap it in
  * `.teams-web`, which sets the workspace's colors from the site's theme.
  */
-export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, zh, invite, onInviteHandled, onInviteResolved }: LayoutProps & { teams: UseTeams }) {
+export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, zh, invite, onInviteHandled, onInviteResolved, friends }: LayoutProps & { teams: UseTeams }) {
   const [drawer, setDrawer] = useState<{ open: boolean; tab: DrawerTab }>({ open: false, tab: 'members' });
+  const [adding, setAdding] = useState<TeamMember>();
+  const [inviting, setInviting] = useState(false);
+  const [invited, setInvited] = useState<string[]>();
   const [pane, setPane] = useState<'list' | 'conversation'>();
   if (!workspace || !snapshot) return <p role="status" className="teams-web-note">{zh ? '正在加载…' : 'Loading…'}</p>;
   return (
@@ -43,11 +52,15 @@ export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, zh, invit
       </div>
       <div className="teams-web-conversation">
         <button type="button" className="teams-web-back" onClick={() => setPane('list')}>{zh ? '‹ 会话列表' : '‹ Conversations'}</button>
+        {invited ? <InviteNotice names={invited} zh={zh} onDone={() => setInvited(undefined)} /> : null}
         <TeamConversationView workspace={workspace} snapshot={snapshot} zh={zh} renderMarkdown={renderMarkdown} detailsOpen={drawer.open}
           onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />
       </div>
       {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} zh={zh} tab={drawer.tab}
-        onTabChange={tab => setDrawer(current => ({ ...current, tab }))} onClose={() => setDrawer(current => ({ ...current, open: false }))} /> : null}
+        onTabChange={tab => setDrawer(current => ({ ...current, tab }))} onClose={() => setDrawer(current => ({ ...current, open: false }))} onAddFriend={friends ? setAdding : undefined} onInviteFriends={friends ? () => setInviting(true) : undefined} /> : null}
+      {adding && friends && snapshot.team ? <MemberFriend friends={friends} teams={workspace.api} uid={snapshot.uid} teamId={snapshot.team.id} member={adding} zh={zh} onClose={() => setAdding(undefined)} /> : null}
+      {inviting && friends && snapshot.team ? <InviteFriends friends={friends} teams={workspace.api} uid={snapshot.uid} team={snapshot.team} members={snapshot.directory} zh={zh}
+        refreshMembers={() => void workspace.refresh()} onClose={names => { setInviting(false); setInvited(names.length ? names : undefined); }} /> : null}
     </div>
   );
 }

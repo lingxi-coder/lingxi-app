@@ -800,7 +800,7 @@ private fun MessageList(
                             modifier = Modifier.fillMaxWidth().height(minOf(maxHeight, 360.dp)))
                     }
                     is ChatRenderItem.Tools -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
-                        ToolGroupView(TranscriptBlock.Tools(item.calls, item.anchor), state.expandedToolCalls, stableOnToggleToolCall)
+                        ToolGroupView(TranscriptBlock.Tools(item.calls, item.anchor), state.expandedToolCalls, stableOnToggleToolCall, state.sessionAgents)
                     }
                     is ChatRenderItem.SkillInstructions -> SkillInstructionsView(
                         name = item.name, text = item.message.text,
@@ -819,12 +819,14 @@ private fun MessageList(
                             onOpenLink = stableOnOpenLink,
                             expandedToolCalls = state.expandedToolCalls,
                             onToggleToolCall = stableOnToggleToolCall,
+                            agents = state.sessionAgents,
                         )
                     }
                     is ChatRenderItem.AgentRun -> AgentRunTimeline(
                         state = item.run,
                         expandedToolCalls = state.expandedToolCalls,
                         onToggleToolCall = stableOnToggleToolCall,
+                        agents = state.sessionAgents,
                     )
                     is ChatRenderItem.Shell -> ShellToolCard(
                         state = item.shell,

@@ -7,6 +7,28 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use session::session_path;
 
+#[test]
+fn fresh_session_id_rejects_internal_display_prefix_before_runtime() {
+    let home = tempfile::tempdir().unwrap();
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .env("LINGXI_CONFIG_DIR", home.path())
+        .args([
+            "--bare",
+            "-p",
+            "noop",
+            "--session-id",
+            "sess:11111111-1111-4111-8111-111111111111",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::eq(""))
+        .stderr(predicate::eq(
+            "Error: Invalid session ID. Must be a valid UUID.\n",
+        ));
+    assert!(!home.path().join("projects").exists());
+}
+
 /// Byte-parity with claude-code/commander: every usage error (unknown flag,
 /// invalid choice, missing arg, cross-flag gate) exits 1, NOT the BSD
 /// `EX_USAGE` 2. Flipped 2026-06-25 (ARGV_ERROR 2 → 1).

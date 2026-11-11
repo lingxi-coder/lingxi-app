@@ -37,7 +37,7 @@ function removalFixture(t: TestContext) {
       throw new Error('removing an empty or shared project scope must not start an engine');
     },
   };
-  const catalog = new ProjectSessionCatalog();
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false });
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog, ipc as any);
   const scheduledErrors: unknown[] = [];
   host.attachScheduled(new ScheduledTaskService(settings, bridge as any, catalog, () => false, (error) => scheduledErrors.push(error)));
@@ -60,12 +60,12 @@ function removalFixture(t: TestContext) {
     activeProjects,
     scheduledErrors,
     remove: (path: unknown) => Promise.resolve(remove({ sender, senderFrame: frame }, path)) as Promise<BootstrapState>,
-    project: (name: string) => {
+    project: async (name: string) => {
       const path = join(root, name);
       mkdirSync(path);
       writeFileSync(join(path, 'keep.txt'), name);
       settings.addProject(path);
-      settings.conversationSpaces.addProject(path, 'chat');
+      await settings.conversationSpaces.addProject(path, 'chat');
       return path;
     },
   };
@@ -74,8 +74,8 @@ function removalFixture(t: TestContext) {
 for (const targetRegistered of [false, true]) {
   test(`project removal uses the stored path after it becomes a symlink (${targetRegistered ? 'registered' : 'unregistered'} target)`, { skip: process.platform === 'win32' }, async (t) => {
     const fixture = removalFixture(t);
-    const project = fixture.project('project');
-    const unrelated = fixture.project('unrelated');
+    const project = await fixture.project('project');
+    const unrelated = await fixture.project('unrelated');
     const target = join(fixture.root, 'moved-project');
     renameSync(project, target);
     symlinkSync(target, project, 'dir');
@@ -112,8 +112,8 @@ for (const targetRegistered of [false, true]) {
 for (const state of ['moved', 'missing', 'broken symlink'] as const) {
   test(`project removal accepts a stored ${state} path without recreating or deleting files`, { skip: state === 'broken symlink' && process.platform === 'win32' }, async (t) => {
     const fixture = removalFixture(t);
-    const project = fixture.project('project');
-    const unrelated = fixture.project('unrelated');
+    const project = await fixture.project('project');
+    const unrelated = await fixture.project('unrelated');
     const moved = join(fixture.root, 'moved-project');
     if (state === 'moved') renameSync(project, moved);
     else {
@@ -137,7 +137,7 @@ for (const state of ['moved', 'missing', 'broken symlink'] as const) {
 
 test('project removal rejects unregistered paths and the managed scheduled workspace before touching the bridge', async (t) => {
   const fixture = removalFixture(t);
-  const project = fixture.project('project');
+  const project = await fixture.project('project');
   const unregistered = join(fixture.root, 'unregistered');
   mkdirSync(unregistered);
   writeFileSync(join(fixture.settings.scheduledWorkspace, 'keep.txt'), 'scheduled');
@@ -161,7 +161,7 @@ test('project removal rejects unregistered paths and the managed scheduled works
 
 test('project removal still refuses active work and preserves the saved project', async (t) => {
   const fixture = removalFixture(t);
-  const project = fixture.project('project');
+  const project = await fixture.project('project');
   fixture.activeProjects.add(project);
 
   await assert.rejects(() => fixture.remove(project), /cancel active turns and pending interactions/);

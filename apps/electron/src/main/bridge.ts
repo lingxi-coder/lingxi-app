@@ -13,6 +13,7 @@ import {
   buildNativeUiControlCommand,
   parseUiFrameEvent,
   parseUiInvalidateEvent,
+  readLockfileAsync,
   validateNativeUiControlResponseJson,
   validateUiClientOperationResponseJson,
   validateUiControlMetadataJson,
@@ -25,6 +26,7 @@ import type {
   AudioOwnerDto,
   ClientCommand,
   ClientEvent,
+  Lockfile,
   ProviderModelCatalogEntryDto,
   ComputerAccessRequestDto,
   CronJobDto,
@@ -228,6 +230,7 @@ export class SessionRuntime {
   private recoveryEpoch = 0;
   private recoveryTimer: NodeJS.Timeout | undefined;
   private automaticRecovery: Promise<void> | undefined;
+  private recoveryKind: 'process' | 'transport' | undefined;
   private readonly recoveryAttempts: number[] = [];
   private launchDir: string | null = null;
   private connectionLockfilePath: string | null = null;
@@ -272,6 +275,7 @@ export class SessionRuntime {
   /** The turn the host ran last, by the id it gave it; the ones the window and devices number are small and their own. */
   private hostTurnId: number | undefined;
   private cancellingTurn = false;
+  private sessionEnded = false;
   private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
   /** Permission requests remain replayable until the engine reports a terminal resolution. */
   private readonly pendingPermissionIds = new Map<number, HostPermissionRequest>();
@@ -1339,7 +1343,7 @@ export class SessionRuntime {
       epoch: `${this.runtimeId}:${this.remoteBaseSequence}`,
       baseSequence: this.remoteBaseSequence,
       base,
-      events: base ? this.replayEvents.slice(1) : this.replayEvents,
+      events: this.replayEvents.slice(base ? 1 : 0),
       state: [...this.latestState.values()],
       prompts: this.promptJournal,
       interactions: this.interactionRecords,
@@ -1462,13 +1466,15 @@ export class SessionRuntime {
       // Status is a snapshot, not a transcript event. Keep only the newest
       // one so repeated listing refreshes cannot grow the renderer replay
       // buffer without bound or replay stale cumulative totals on reload.
-      const replay = event.type === 'status_snapshot' || event.type === 'session_storage_state'
+      this.replayEvents = event.type === 'status_snapshot' || event.type === 'session_storage_state'
         ? this.replayEvents.filter(({ event: retained }) => retained.type !== event.type)
         : event.type === 'ui_status'
           ? this.replayEvents.filter(({ event: retained }) =>
               retained.type !== 'ui_status' || retained.plugin !== event.plugin)
           : this.replayEvents;
-      this.replayEvents = [...replay, envelope];
+      // The live buffer stays private: replaySnapshot and remoteView capture
+      // their arrays at the read boundary, so ordinary deltas can append in O(1).
+      this.replayEvents.push(envelope);
     }
     return envelope;
   }
@@ -1600,8 +1606,8 @@ export class SessionRuntime {
     })();
   }
 
-  /** A foreground terminal cannot settle independent background permission gates. */
-  private clearTurnInteractions(all = false): void {
+  /** A foreground terminal cannot settle independently owned interactions. */
+  private clearTurnInteractions(all = false, questionScope: 'turn' | 'session' = all ? 'session' : 'turn'): void {
     ++this.foregroundInteractionEpoch;
     for (const id of this.pendingPermissionIds.keys()) {
       if (all || !this.backgroundPermissionIds.has(id)) this.clearPendingPermission(id);
@@ -1613,7 +1619,10 @@ export class SessionRuntime {
     }
     this.pendingComputerAccessIds.clear();
     for (const requestId of [...this.pendingAskUserQuestionIds]) {
-      this.clearPendingAskUserQuestion(requestId);
+      if (questionScope === 'session'
+        || this.pendingAskUserQuestionRequests.get(requestId)?.request.sessionOwned !== true) {
+        this.clearPendingAskUserQuestion(requestId);
+      }
     }
     this.notifyRemotePending();
   }
@@ -1742,7 +1751,10 @@ export class SessionRuntime {
     // because its transport disconnected or a retry handshake failed.
     const lockfilePath = this.connectionLockfilePath;
     if (!lockfilePath) throw new Error('The running bridge has no known connection endpoint; no replacement was started.');
-    validateBridgeLockfile(JSON.parse(readFileSync(lockfilePath, 'utf8')), pid, this.projectPath || this.activeWorkspace || '');
+    const connectingGeneration = this.generation;
+    const lockfile = await readLockfileAsync(lockfilePath);
+    if (this.disposed || connectingGeneration !== this.generation) throw new Error('bridge connection superseded');
+    validateBridgeLockfile(lockfile.body, pid, this.projectPath || this.activeWorkspace || '');
     const client = this.client;
     this.nativeMediaClient = undefined;
     this.invalidateNativeMediaBinding();
@@ -1756,7 +1768,7 @@ export class SessionRuntime {
     if (this.disposed || recoveredGeneration !== this.generation) throw new Error('bridge connection superseded');
     this.clearPendingConnectionOperations();
     try {
-      await this.connectBridgeClient(lockfilePath, recoveredGeneration, false, false);
+      await this.connectBridgeClient(lockfilePath, recoveredGeneration, false, false, lockfile);
       if (this.disposed || recoveredGeneration !== this.generation) throw new Error('bridge connection superseded');
       // During shutdown the authenticated hello itself is the server's drain
       // barrier. Do not restore Side Chats, audio, or publish new work merely
@@ -1796,7 +1808,7 @@ export class SessionRuntime {
         this.activeTurnGeneration = undefined;
         this.activeTurnId = undefined;
         this.cancellingTurn = false;
-        this.clearTurnInteractions();
+        this.clearTurnInteractions(false, 'session');
       }
       this.liveConnectionRecovered = true;
       this.disconnectedForegroundPending = false;
@@ -1824,6 +1836,7 @@ export class SessionRuntime {
     ++this.recoveryEpoch;
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
+    this.recoveryKind = undefined;
   }
 
   private managedChildExited(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null, established: boolean): void {
@@ -1865,11 +1878,16 @@ export class SessionRuntime {
     this.scheduleAutomaticRecovery();
   }
 
-  private scheduleAutomaticRecovery(): void {
-    if (this.disposed || !this.desiredRunning || this.recoveryTimer || this.automaticRecovery) return;
+  private scheduleAutomaticRecovery(kind: 'process' | 'transport' = 'process'): void {
+    if (this.disposed || !this.desiredRunning) return;
+    // Process exit supersedes a pending socket reconnect. Transport loss on
+    // its own never authorizes replacing a living or externally owned peer.
+    if (kind === 'process' || this.recoveryKind === undefined) this.recoveryKind = kind;
+    if (this.recoveryTimer || this.automaticRecovery) return;
     const now = Date.now();
     while (this.recoveryAttempts.length && now - this.recoveryAttempts[0] >= 60_000) this.recoveryAttempts.shift();
     if (this.recoveryAttempts.length >= 3) {
+      this.recoveryKind = undefined;
       this.fail('The engine could not recover after three attempts. Restart the engine to try again.');
       return;
     }
@@ -1883,9 +1901,29 @@ export class SessionRuntime {
   }
 
   private beginAutomaticRecovery(epoch: number): Promise<void> {
+    let kind: 'process' | 'transport' = 'process';
     const operation = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+      kind = this.recoveryKind ?? 'process';
+      this.recoveryKind = undefined;
+      if (kind === 'transport' && this.state.status === 'connected') return;
+      // A reconnect advances the client generation, retiring the old socket's
+      // exit watcher. Recheck owned detached peers before every retry so an
+      // exit during a failed handshake still gets exact-source restoration.
+      if (kind === 'transport' && this.adoptedPid && this.adoptedProcessOwned && !this.processIsAlive(this.adoptedPid)) {
+        this.adoptedPid = null;
+        this.adoptedProcessOwned = false;
+        this.managedProcessExited(true);
+        kind = 'process';
+        this.recoveryKind = undefined;
+      }
       this.recoveryAttempts.push(Date.now());
+      if (kind === 'transport') {
+        await this.recoverConnection(true);
+        if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
+        await this.restoreDraftSessionModeIfNeeded();
+        return;
+      }
       if ((this.sessionHasHistory || this.ownedSessionResumeRequired) && !this.ownedTranscriptPath) {
         throw new Error('Choose the exact transcript source before recovering this chat.');
       }
@@ -1907,12 +1945,14 @@ export class SessionRuntime {
     this.restartChain = operation;
     void operation.then(() => {
       this.automaticRecovery = undefined;
-      if (epoch === this.recoveryEpoch && this.state.status === 'disconnected') this.scheduleAutomaticRecovery();
+      if (epoch === this.recoveryEpoch && (this.recoveryKind !== undefined || this.state.status === 'disconnected')) {
+        this.scheduleAutomaticRecovery(this.recoveryKind ?? kind);
+      }
     }, (error) => {
       this.automaticRecovery = undefined;
       if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
       this.diagnostics.add('warn', 'host', `automatic engine recovery failed: ${sanitizeDiagnostic(error)}`);
-      this.scheduleAutomaticRecovery();
+      this.scheduleAutomaticRecovery(this.recoveryKind ?? kind);
     });
     return operation;
   }
@@ -2166,7 +2206,7 @@ export class SessionRuntime {
     }
   }
 
-  private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true, publishConnected = true): Promise<void> {
+  private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true, publishConnected = true, capturedLockfile?: Lockfile): Promise<void> {
     if (generation !== this.generation || this.disposed) throw new Error('bridge connection superseded');
     this.connectionLockfilePath = lockfilePath;
     this.setState({ status: 'connecting' });
@@ -2197,7 +2237,7 @@ export class SessionRuntime {
       }
     };
     const handshakeStartedAt = Date.now();
-    const hello = await client.connect();
+    const hello = await client.connect(capturedLockfile);
     await this.decisionToolBridge?.refreshConfiguration();
     assertCurrentConnection();
     if (this.disposing) return;
@@ -2456,6 +2496,7 @@ export class SessionRuntime {
   }
 
   private wireClient(client: BridgeClient, generation: number): void {
+    let connectedBeforeError = false;
     if (generation === this.generation && !this.disposed) {
       this.client = client;
       this.decisionToolBridge?.dispose();
@@ -2653,7 +2694,8 @@ export class SessionRuntime {
         return;
       }
       const resumeOwner = this.currentResumeOwner();
-      if (isTurnOwnedEvent(event) && !this.activeTurn && this.pendingSlashCommands.size === 0 && !resumeOwner && !resumedUsage) {
+      const sessionQuestion = event.type === 'ask_user_question' && event.request.sessionOwned === true && !this.sessionEnded;
+      if (isTurnOwnedEvent(event) && !sessionQuestion && !this.activeTurn && this.pendingSlashCommands.size === 0 && !resumeOwner && !resumedUsage) {
         this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
         return;
       }
@@ -2733,6 +2775,7 @@ export class SessionRuntime {
           this.fail('engine resumed a session in a different mode');
           return;
         }
+        this.sessionEnded = false;
         this.sessionMode = event.mode;
         this.requestAudioSessionContext(client, generation);
         this.sessionHasHistory = true;
@@ -2753,6 +2796,7 @@ export class SessionRuntime {
           this.fail('engine started a session in a different mode');
           return;
         }
+        this.sessionEnded = false;
         this.sessionMode = event.mode;
         this.requestAudioSessionContext(client, generation);
       }
@@ -2814,6 +2858,7 @@ export class SessionRuntime {
         this.activeTurnGeneration = undefined;
         this.activeTurnId = undefined;
         this.cancellingTurn = false;
+        if (event.type === 'session_ended') this.sessionEnded = true;
         this.clearTurnInteractions(event.type === 'session_ended');
       }
       if (event.type === 'session_ended') this.invalidateNativeMediaBinding();
@@ -2844,7 +2889,7 @@ export class SessionRuntime {
         }
       }
       if (event.type === 'ask_user_question') {
-        if (this.cancellingTurn) return;
+        if (event.request.sessionOwned === true ? this.sessionEnded : this.cancellingTurn) return;
         const requestId = event.request.request_id;
         if (
           !this.pendingAskUserQuestionIds.has(requestId)
@@ -2940,11 +2985,13 @@ export class SessionRuntime {
     client.on('close', (code, reason) => {
       if (generation === this.generation && client === this.client) this.decisionToolBridge?.dispose();
       if (generation !== this.generation || client !== this.client || this.disposed) return;
+      const wasConnected = this.state.status === 'connected' || connectedBeforeError;
       this.permissionScopeChecks.clear();
       this.nativeMediaClient = undefined;
       this.invalidateNativeMediaBinding();
       void this.teardownAudioGeneration(generation);
       this.setState({ status: 'disconnected', reason: reason || `ws closed (code=${code})` });
+      if (wasConnected && this.connectionLockfilePath) this.scheduleAutomaticRecovery('transport');
       // A living peer is never replaced for a transport-only disconnect.
       const adoptedPid = this.adoptedPid;
       if (adoptedPid && this.adoptedProcessOwned && this.desiredRunning) {
@@ -2966,6 +3013,9 @@ export class SessionRuntime {
     });
     client.on('error', (error) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
+      // WebSocket errors can precede close. Preserve the established state so
+      // the error notification cannot suppress the ensuing reconnect.
+      connectedBeforeError ||= this.state.status === 'connected';
       this.permissionScopeChecks.clear();
       this.nativeMediaClient = undefined;
       this.invalidateNativeMediaBinding();
@@ -3917,7 +3967,7 @@ export class SessionRuntime {
     this.pendingSessionResume = null;
     clearTimeout(pending.timer);
     pending.controller.abort();
-    this.clearTurnInteractions();
+    this.clearTurnInteractions(false, 'session');
     this.notifyActivityChanged();
     pending.resolve();
   }
@@ -3928,7 +3978,7 @@ export class SessionRuntime {
     this.pendingSessionResume = null;
     clearTimeout(pending.timer);
     pending.controller.abort();
-    this.clearTurnInteractions();
+    this.clearTurnInteractions(false, 'session');
     this.notifyActivityChanged();
     pending.reject(error);
   }

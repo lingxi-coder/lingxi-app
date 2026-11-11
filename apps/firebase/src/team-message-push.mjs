@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { sendTeamPush } from './push.mjs';
+import { FRIEND_COPY, sendTeamPush } from './push.mjs';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const millis = value => value?.toMillis?.() ?? 0;
 const segment = value => typeof value === 'string' && /^[A-Za-z0-9_-]{8,64}$/u.test(value);
@@ -40,11 +40,13 @@ export async function onTeamMessageCreated({ db, pushStore, messaging, teamId, c
         title = bot.name;
       } else if (m.author.uid !== senderUid || !conversation.data().participants.includes(`user:${senderUid}`)) return null;
       tx.create(attempt, { state: 'attempted', generation: recipient.data().generation, at: new Date(clock()) });
-      return { title: typeof title === 'string' && title.trim() ? title.trim().slice(0, 80) : 'LingXi', generation: recipient.data().generation };
+      return { title: typeof title === 'string' && title.trim() ? title.trim().slice(0, 80) : 'LingXi', generation: recipient.data().generation, pair: t.data().kind === 'pair' };
     });
     if (!value) return;
+    // A friendship is a pair team: its push opens the friend chat with the sender (the other member), never the Team inbox.
     const result = await sendTeamPush(pushStore, messaging, { uid, title: value.title, notificationId: hash(JSON.stringify([teamId, conversationId, messageId, uid])),
-      collapseKey: `team:${hash(JSON.stringify([teamId, conversationId])).slice(0, 32)}` }, async () => {
+      collapseKey: `team:${hash(JSON.stringify([teamId, conversationId])).slice(0, 32)}`,
+      ...(value.pair ? { route: `friend/chat?uid=${encodeURIComponent(senderUid)}`, kind: 'friend_message', copy: FRIEND_COPY.message } : {}) }, async () => {
       const [t, member, conversation] = await Promise.all([team.get(), team.collection('members').doc(uid).get(), thread.get()]);
       return t.data()?.state === 'active' && member.data()?.generation === value.generation && conversation.data()?.memberUids.includes(uid);
     }, clock);

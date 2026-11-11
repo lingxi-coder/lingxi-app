@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactElement } from 'react';
 import { messageErrorText, teamsErrorText } from './errors.js';
-import type { TeamConversation } from './messages.js';
+import { pendingPayload, type TeamConversation } from './messages.js';
+import { snippet } from './compose.js';
 import { NewBotDmDialog, NewConversationDialog } from './NewConversationDialog';
 import { formatListTime } from './stream.js';
 import { CreateTeamDialog, JoinTeamDialog } from './team-dialogs';
-import { avatarColor, ConversationLead, Icon, initials, platformNotice, PopupMenu, rovingIndex, UnreadBadge, type DrawerTab, type MenuItem, type RenderAvatar } from './ui';
+import { ConversationLead, Icon, platformNotice, PopupMenu, rovingIndex, TeamMark, UnreadBadge, type DrawerTab, type MenuItem, type RenderAvatar } from './ui';
 import { conversationLabel, conversationPreview, groupConversations, unreadCount, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
 
 /** Rows shown per section before "Show more". The open conversation is always shown. */
@@ -62,7 +63,7 @@ export function connectionStatus(snapshot: Pick<TeamsSnapshot, 'loading' | 'sele
       detail: snapshot.messagingError ? messageErrorText(snapshot.messagingError, zh) : t('Showing saved messages. Reconnect to confirm access and send pending messages.', '当前显示本机缓存。联网后确认权限并发送待发消息。'),
     };
   }
-  return { kind: 'ok', label: t('Connected', '已连接'), detail: t('Recently loaded messages are available offline.', '已加载的近期消息可离线查看。') };
+  return { kind: 'ok', label: t('Teams connected', '团队已连接'), detail: t('Teams is connected. Bot host availability is shown in each conversation.', '团队已连接。Bot 宿主状态显示在各个会话中。') };
 }
 
 type DialogState = { kind: 'createTeam' } | { kind: 'joinTeam'; code: string } | { kind: 'channel' } | { kind: 'direct' } | { kind: 'botDm' } | null;
@@ -200,11 +201,6 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
   </nav>;
 }
 
-/** A team's square mark: its initials on a color that stays the same for the team. */
-function TeamMark({ id, name }: { id: string; name: string }): ReactElement {
-  return <span className="tw-team-mark" aria-hidden="true" style={{ background: avatarColor(id) }}>{initials(name)}</span>;
-}
-
 function ConversationRow({ conversation, snapshot, zh, renderAvatar, selected, tabStop, locale, now, authorName, menuOpen, onMenu, onFocusRow, onSelect, onMarkRead, onOpenDetails }: {
   conversation: TeamConversation; snapshot: TeamsSnapshot; zh: boolean; renderAvatar?: RenderAvatar; selected: boolean; tabStop: boolean; locale: string; now: number;
   authorName(author: import('./messages').MessageAuthor): string; menuOpen: boolean;
@@ -214,8 +210,14 @@ function ConversationRow({ conversation, snapshot, zh, renderAvatar, selected, t
   const mainRef = useRef<HTMLButtonElement>(null), moreRef = useRef<HTMLButtonElement>(null), origin = useRef<'main' | 'more'>('more');
   const unread = unreadCount(conversation);
   const label = conversationLabel(conversation, snapshot.directory, snapshot.uid, { bots: snapshot.bots, zh });
-  const preview = conversationPreview(conversation, snapshot.uid, zh, last => authorName(last.author));
-  const time = formatListTime(conversation.lastMessage?.at, now, locale);
+  const pending = [...(snapshot.messaging?.state.outbox ?? [])].reverse().find(item => {
+    const payload = pendingPayload(item);
+    return payload.conversationId === conversation.id && (!('operation' in payload) || payload.operation === 'create');
+  });
+  const preview = pending
+    ? `${pending.error ? t('Not sent', '未发送') : t('Pending', '待发送')}: ${snippet(pendingPayload(pending).text)}`
+    : conversationPreview(conversation, snapshot.uid, zh, last => authorName(last.author));
+  const time = pending ? '' : formatListTime(conversation.lastMessage?.at, now, locale);
   const items: MenuItem[] = [
     ...(unread > 0 ? [{ id: 'read', label: t('Mark as read', '标为已读'), icon: 'check' as const, disabled: snapshot.offline, onSelect: () => onMarkRead(conversation.id) }] : []),
     ...(onOpenDetails ? [{ id: 'details', label: t('Conversation details', '会话详情'), icon: 'info' as const, onSelect: () => onOpenDetails(conversation.id) }] : []),

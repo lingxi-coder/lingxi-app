@@ -65,8 +65,8 @@ export class RemoteRpcError extends Error {
 /** Answers an inbound request: resolve with the result, or throw {@link RemoteRpcError}. */
 export type RpcRequestHandler = (method: string, params: unknown) => Promise<unknown> | unknown;
 
-/** Receives an inbound notification. */
-export type RpcNotificationHandler = (method: string, params: unknown) => void;
+/** Return asynchronous notification work to keep it admitted until it settles. Synchronous results are ignored. */
+export type RpcNotificationHandler = (method: string, params: unknown) => unknown;
 
 /** Which transport's liveness timings {@link RpcPeer.startKeepalive} uses. */
 export type KeepaliveKind = 'datachannel' | 'tunnel';
@@ -77,7 +77,14 @@ export interface RpcPeerOptions {
   clock?: Clock;
   /** Default request timeout; 30 s if omitted. */
   timeoutMs?: number;
+  /** Inbound request/reply and asynchronous notification work still pending; defaults to 32. */
+  maxConcurrentRequests?: number;
+  /** Extra slots for cancellation, detach and approval replies; defaults to 4. */
+  maxControlRequests?: number;
 }
+
+// Admission only: the owning handler still authorizes and validates each method.
+const CONTROL_REQUESTS = new Set(['turn.cancel', 'session.detach', 'permission.respond', 'question.answer', 'question.cancel']);
 
 interface Pending {
   resolve(value: unknown): void;
@@ -91,13 +98,19 @@ function isObject(value: unknown): value is Json {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return value !== null && (typeof value === 'object' || typeof value === 'function')
+    && typeof (value as { then?: unknown }).then === 'function';
+}
+
 function toCode(code: string): RemoteErrorCode {
   return (REMOTE_ERROR_CODES as readonly string[]).includes(code) ? (code as RemoteErrorCode) : 'internal';
 }
 
 /**
  * One end of an RPC conversation. Both ends can send requests and
- * notifications. Inbound requests are handled concurrently.
+ * notifications. Inbound requests and asynchronous notifications share a
+ * local capacity budget; overload closes the peer with `capacity`.
  *
  * Failure model: a thrown {@link RemoteRpcError} becomes an error response with
  * its code; any other exception becomes `internal` with a fixed message, so
@@ -113,6 +126,10 @@ export class RpcPeer {
   private readonly clock: Clock;
   private readonly defaultTimeoutMs: number;
   private readonly pending = new Map<string, Pending>();
+  private readonly inbound = new Set<symbol>();
+  private readonly inboundControl = new Set<symbol>();
+  private readonly maxConcurrentRequests: number;
+  private readonly maxControlRequests: number;
   private requestHandler: RpcRequestHandler | undefined;
   private notificationHandler: RpcNotificationHandler | undefined;
   private nextId = 0;
@@ -127,6 +144,10 @@ export class RpcPeer {
   ) {
     this.clock = options.clock ?? systemClock;
     this.defaultTimeoutMs = options.timeoutMs ?? RPC_DEFAULT_TIMEOUT_MS;
+    this.maxConcurrentRequests = options.maxConcurrentRequests ?? 32;
+    this.maxControlRequests = options.maxControlRequests ?? 4;
+    if (!Number.isSafeInteger(this.maxConcurrentRequests) || this.maxConcurrentRequests < 1) throw new RangeError('invalid concurrent request limit');
+    if (!Number.isSafeInteger(this.maxControlRequests) || this.maxControlRequests < 1) throw new RangeError('invalid control request limit');
     this.lastReceivedAt = this.clock.now();
     transport.onActivity?.(() => {
       this.lastReceivedAt = this.clock.now();
@@ -249,6 +270,8 @@ export class RpcPeer {
       entry.reject(new RemoteRpcError('closed', reason));
     }
     this.pending.clear();
+    this.inbound.clear();
+    this.inboundControl.clear();
   }
 
   private receive(text: string): void {
@@ -269,13 +292,30 @@ export class RpcPeer {
           return;
         }
         if (method === 'pong') return;
+        const handler = this.notificationHandler;
+        if (handler === undefined) return;
+        const release = this.reserveInbound(method);
+        if (release === undefined) return this.close('capacity');
+        let asynchronous = false;
         try {
-          this.notificationHandler?.(method, message['params']);
+          const result = handler(method, message['params']);
+          if (isPromiseLike(result)) {
+            void Promise.resolve(result).then(release, release);
+            asynchronous = true;
+          }
         } catch {
           // A failing notification handler is the handler's problem, not the peer's.
+        } finally {
+          // Ordinary event callbacks must not occupy slots until a microtask:
+          // an inline burst of completed events is not concurrent work.
+          if (!asynchronous) release();
         }
       } else if (typeof id === 'string') {
-        void this.answer(id, method, message['params']);
+        const release = this.reserveInbound(method);
+        if (release === undefined) return this.close('capacity');
+        // Keep the slot until the reply leaves the message queue, not merely
+        // until the handler returns a potentially large result.
+        void this.answer(id, method, message['params']).then(release, release);
       } else {
         this.close('protocol_error');
       }
@@ -284,6 +324,18 @@ export class RpcPeer {
     } else {
       this.close('protocol_error');
     }
+  }
+
+  private reserveInbound(method: string): (() => void) | undefined {
+    const reservations = this.inbound.size < this.maxConcurrentRequests
+      ? this.inbound
+      : CONTROL_REQUESTS.has(method) && this.inboundControl.size < this.maxControlRequests
+        ? this.inboundControl
+        : undefined;
+    if (reservations === undefined) return undefined;
+    const reservation = Symbol();
+    reservations.add(reservation);
+    return () => { reservations.delete(reservation); };
   }
 
   private settle(id: string, message: Json): void {
@@ -306,8 +358,10 @@ export class RpcPeer {
     try {
       if (this.requestHandler === undefined) throw new RemoteRpcError('internal', 'no request handler');
       const result = await this.requestHandler(method, params);
+      if (this.ended) return;
       text = JSON.stringify({ id, result: result === undefined ? null : result });
     } catch (error) {
+      if (this.ended) return;
       const failure =
         error instanceof RemoteRpcError
           ? { code: error.code, message: error.message }

@@ -3,7 +3,7 @@ import SwiftUI
 enum LXIconName: String, CaseIterable {
     case menu, edit, pencil, search, sparkle, sparkles, book, bookOpen, listFiles, workflow, cog, wrench, plus, mic, paperclip
     case chevron, sun, moon, check, pin, brain, arrowUp, folder, clock, message
-    case chevronR, play, pause, x, skill, plug, dream, link, copy, share, listChecks
+    case chevronR, play, pause, x, skill, plug, dream, link, copy, share, listChecks, send, localApp
     case warning, stop, squareStop, arrowRight, audioWave, terminal, globe, appBuilder, mcpFallback
 }
 
@@ -47,6 +47,8 @@ extension LXIconName {
         case .copy: "doc.on.doc"
         case .share: "square.and.arrow.up"
         case .listChecks: "checklist"
+        case .send: "paperplane"
+        case .localApp: "square.grid.2x2"
         case .warning: "exclamationmark.triangle"
         case .stop: "stop.fill"
         case .squareStop: "stop.circle"

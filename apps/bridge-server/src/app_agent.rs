@@ -441,6 +441,10 @@ struct AppOutput {
 }
 #[async_trait]
 impl OutputStream for AppOutput {
+    fn wants_forwarded_subagent_messages(&self) -> bool {
+        false
+    }
+
     async fn emit_text(&self, text: &Utf16JsonProjection) {
         let Some(text) = text.string_at("") else {
             return;

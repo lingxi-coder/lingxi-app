@@ -214,6 +214,7 @@ struct RootView: View {
     #endif
     @State private var botsBadge = BotsBadge()
     @State private var teamsWorkspace = TeamsWorkspace()
+    @State private var friendsWorkspace = FriendsWorkspace()
     @State private var externalImport: CanonicalDeepLink?
     @State private var externalLinkError: String?
     @State private var externalAsyncRouteID = UUID()
@@ -799,7 +800,7 @@ struct RootView: View {
 
     }
 
-    /// The app shell: four tabs (Chats / Bots / Teams / Settings) with the onboarding wizard and the
+    /// The app shell: five tabs (Chats / Bots / Teams / Friends / Settings) with the onboarding wizard and the
     /// engine's permission-prompt presenter above them.
     private var rootStack: some View {
         ZStack {
@@ -831,6 +832,7 @@ struct RootView: View {
         }
         .environment(botsBadge)
         .environment(teamsWorkspace)
+        .environment(friendsWorkspace)
         #if canImport(harness_runtimeFFI)
         .environment(remoteManager)
         .task(id: FirebaseAccount.shared.user?.uid) {
@@ -1265,6 +1267,8 @@ struct RootView: View {
             .task { await LocalApps.initializeOnce() }
             // The Teams data layer lives with the app, not with the Teams tab: its unread counts feed the tab badge.
             .task { teamsWorkspace.start() }
+            // Friends likewise: its requests and unread counts feed the tab badge.
+            .task { friendsWorkspace.start() }
             .task {
                 await consumePendingAppActions()
                 syncConversationBackgroundSurfaces()
@@ -3619,9 +3623,9 @@ struct RootView: View {
     /// (including the cases that never touch session selection).
     @discardableResult
     private func applyAppAction(_ action: LingxiAppAction, approvedDraftChange: Bool = false) -> Bool {
-        // The Bots and Teams tabs preserve the local source and draft. They also work
+        // The Bots, Teams and Friends tabs preserve the local source and draft. They also work
         // when the local engine has not booted or is waiting for an answer.
-        if case let .canonical(target) = action, (["remote", "team"].contains(target.parts.first ?? "") || target.route.hasPrefix("market/bot/")) {
+        if case let .canonical(target) = action, (["remote", "team", "friend"].contains(target.parts.first ?? "") || target.route.hasPrefix("market/bot/")) {
             guard app.setupDone else { return false }
             return applyCanonicalLink(target)
         }
@@ -3794,6 +3798,13 @@ struct RootView: View {
             navigation.closeSidebar()
             navigation.tabs.teamsJoinCode = target.params["code"]
             navigation.selectedTab = .teams
+        case "friend":
+            // `friend/add?code=` only opens a confirmation (docs/FRIENDS-CLIENTS.md D8); the Friends tab takes the request
+            // once someone is signed in. `needsContextRebind` is false for it: no workspace or mode parameter is accepted.
+            guard let link = FriendLink(target) else { return missingLinkedResource("destination") }
+            navigation.closeSidebar()
+            navigation.tabs.friendsRequest = link
+            navigation.selectedTab = .friends
         case "apps":
             let requestID = externalAsyncRouteID
             Task { @MainActor in

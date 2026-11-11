@@ -53,6 +53,19 @@ test('Quota and host failures are permanent pending errors and never automatical
   }
 });
 
+test('host-unavailable messages can be retried explicitly with their original command identity', async context => {
+  const { fake, model } = fixture(); context.after(() => model.close());
+  const calls: MessageCommand[] = []; let hostReady = false;
+  fake.messages = async <T>(command: MessageCommand) => { calls.push(structuredClone(command)); if (!hostReady) throw new Error('HOST_UNAVAILABLE'); return {} as T; };
+  await model.start(); model.select('test-chat'); await model.queue('create', 'Please retry');
+  await until(() => model.state.outbox[0]?.error === 'HOST_UNAVAILABLE', 'host failure');
+  const failed = structuredClone(model.state.outbox[0]!.command);
+  await model.refresh(); assert.equal(calls.length, 1, 'a failed host does not retry without the user');
+  hostReady = true; await model.retryHostUnavailable(pendingPayload(model.state.outbox[0]!).changeId);
+  await until(() => calls.length === 2 && model.state.outbox.length === 0, 'explicit retry succeeds');
+  assert.deepEqual(calls[1], failed, 'the same message and command identities are retained');
+});
+
 test('Shared member boundary vectors accept only the new strict envelope', () => { for (const vector of vectors.commands) assert.equal(isMemberExecutionCommand(vector.input), vector.valid, vector.name); });
 
 test('IndexedDB upgrade deletes only the retired command store and preserves unrelated stores', async context => {

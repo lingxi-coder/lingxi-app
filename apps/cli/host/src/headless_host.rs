@@ -24,6 +24,12 @@ struct CliHeadlessServices {
 
 #[async_trait::async_trait]
 impl HeadlessHostServices for CliHeadlessServices {
+    fn mcp_local_staging_root(&self, session_cwd: &Path) -> Option<std::path::PathBuf> {
+        // This process adapter owns a local workspace. Bind each call to the
+        // session's resolved cwd, including an accepted directory relocation.
+        Some(session_cwd.to_path_buf())
+    }
+
     fn request_identity(&self) -> Option<harness_runtime::desktop::DesktopRequestIdentity> {
         Some(harness_runtime::desktop::DesktopRequestIdentity {
             device_id: migrations::global_config::get_or_create_user_id(),
@@ -98,60 +104,25 @@ pub(crate) async fn run(argv: &Argv, mut permission_mode: permission::Permission
     use harness_runtime::headless::{HeadlessSignal, HeadlessSignals};
 
     let mut desktop = crate::init::resolve_desktop_config(argv, permission_mode);
-    let session_start = if argv.continue_session {
-        let rows = match crate::run::load_resume_rows().await {
-            Ok(rows) => rows,
-            Err(error) => {
-                eprintln!("lingxi-cli: {error}");
-                return crate::exit_codes::RUNTIME_ERROR;
+    let session_start = match select_session_start(argv, &mut desktop).await {
+        Ok(start) => start,
+        Err(error) => {
+            eprintln!("{error}");
+            if argv.is_stream_json() {
+                let session_id = argv
+                    .resume
+                    .as_deref()
+                    .and_then(|arg| lingxi_core::types::SessionId::parse_prefixed(arg.trim()))
+                    .map(|id| id.as_uuid())
+                    .unwrap_or_else(uuid::Uuid::new_v4);
+                let frame = session_selection_error_frame(&session_id.to_string(), &error).await;
+                let output = process_stdout();
+                let line = harness_runtime::headless::stream_json::serialize_ndjson_line(&frame);
+                let _ = output.write_all(line.as_bytes()).await;
+                let _ = output.flush().await;
             }
-        };
-        let Some(row) = rows.first() else {
-            eprintln!("lingxi-cli: No conversation found to continue");
             return crate::exit_codes::RUNTIME_ERROR;
-        };
-        desktop.session_transcript_path = Some(row.path.clone());
-        SessionStart::Resume {
-            session_id: row.uuid,
-            resume_session_at: None,
-            resume_drops_turn: None,
-            fork: argv.fork_session,
         }
-    } else if let Some(resume) = argv.resume.as_deref() {
-        let (session_id, path) = match lingxi_core::types::SessionId::parse_prefixed(resume.trim())
-        {
-            Some(session_id) => {
-                let session_id = session_id.as_uuid();
-                match crate::init::resolve_unique_cli_resume_path(&desktop.lingxi_home, session_id)
-                {
-                    Ok(path) => (session_id, path),
-                    Err(error) => {
-                        eprintln!("lingxi-cli: {error}");
-                        return crate::exit_codes::RUNTIME_ERROR;
-                    }
-                }
-            }
-            None => match crate::run::resolve_resume_title_source(resume.trim()).await {
-                Ok(Some(row)) => (row.uuid, row.path),
-                Ok(None) => {
-                    eprintln!("lingxi-cli: No conversation found to resume");
-                    return crate::exit_codes::RUNTIME_ERROR;
-                }
-                Err(error) => {
-                    eprintln!("lingxi-cli: {error}");
-                    return crate::exit_codes::RUNTIME_ERROR;
-                }
-            },
-        };
-        desktop.session_transcript_path = Some(path);
-        SessionStart::Resume {
-            session_id,
-            resume_session_at: argv.resume_session_at.clone(),
-            resume_drops_turn: argv.resume_drops_turn.clone(),
-            fork: argv.fork_session,
-        }
-    } else {
-        SessionStart::New
     };
     if let SessionStart::Resume {
         session_id, fork, ..
@@ -332,6 +303,149 @@ pub(crate) async fn run(argv: &Argv, mut permission_mode: permission::Permission
     result.code
 }
 
+/// Native emits one zero-turn result for a failed stream-json session lookup.
+/// Text and JSON lookup failures have no stdout. Reuse the normal result/usage
+/// builders and wire serializer without assembling credentials or a runtime.
+async fn session_selection_error_frame(session_id: &str, error: &str) -> serde_json::Value {
+    use harness_runtime::headless::stream_json::StreamJsonStream;
+    let stream = StreamJsonStream::new_placeholder(Output::new(tokio::io::sink()));
+    *stream.session_id_handle().lock().await = session_id.to_string();
+    let mut source = stream
+        .build_result_error_frame(
+            "error_during_execution",
+            vec![error.to_string()],
+            &lingxi_core::host::CostSnapshot::default(),
+            "off",
+            None,
+            &[],
+        )
+        .await;
+    source["duration_ms"] = serde_json::json!(0);
+    source["total_cost_usd"] = serde_json::json!(0);
+    let source = source
+        .as_object_mut()
+        .expect("result builder returns an object");
+    let mut frame = serde_json::Map::new();
+    // Lookup failed before a model turn: only the fields observed in Native's
+    // early result belong here, with their original wire order.
+    for key in [
+        "type",
+        "subtype",
+        "duration_ms",
+        "duration_api_ms",
+        "is_error",
+        "num_turns",
+        "stop_reason",
+        "session_id",
+        "total_cost_usd",
+        "usage",
+        "modelUsage",
+        "permission_denials",
+        "uuid",
+        "errors",
+        "result_index",
+    ] {
+        frame.insert(
+            key.to_string(),
+            source.remove(key).expect("shared result field exists"),
+        );
+    }
+    serde_json::Value::Object(frame)
+}
+
+/// Resolve only the selected local source before runtime or credential startup.
+/// An empty --continue is a fresh session in Claude Code 2.1.321 print mode.
+async fn select_session_start(
+    argv: &Argv,
+    desktop: &mut harness_runtime::desktop::DesktopConfig,
+) -> Result<harness_runtime::headless::config::SessionStart, String> {
+    use harness_runtime::headless::config::SessionStart;
+    use session::jsonl::loader::LoaderError;
+
+    let load_catalog = || async {
+        // The discovery loader maps an absent project bucket to an empty
+        // catalog. Do not let an invalid/unreadable store become a fresh
+        // conversation merely because --continue now permits an empty store.
+        let projects = desktop.lingxi_home.join("projects");
+        match tokio::fs::symlink_metadata(&projects).await {
+            Ok(metadata) => {
+                let metadata = if metadata.is_symlink() {
+                    tokio::fs::metadata(&projects)
+                        .await
+                        .map_err(|error| error.to_string())?
+                } else {
+                    metadata
+                };
+                if !metadata.is_dir() {
+                    return Err("resume transcript root is not a directory".to_string());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.to_string()),
+        }
+        match crate::run::load_resume_rows_from(&desktop.lingxi_home, &desktop.cwd).await {
+            Ok(rows) => Ok(rows),
+            Err(LoaderError::EmptyDirectory) => Ok(Vec::new()),
+            Err(error) => Err(error.to_string()),
+        }
+    };
+    let selected = if argv.continue_session {
+        let rows = load_catalog().await?;
+        rows.into_iter().next().map(|row| (row.uuid, row.path))
+    } else if let Some(raw) = argv.resume.as_deref() {
+        let arg = raw.trim();
+        let selected = if let Some(id) = lingxi_core::types::SessionId::parse_prefixed(arg) {
+            let id = id.as_uuid();
+            let path = crate::init::resolve_unique_cli_resume_path(&desktop.lingxi_home, id)
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        format!("No conversation found with session ID: {id}")
+                    } else {
+                        error.to_string()
+                    }
+                })?;
+            Some((id, path))
+        } else if std::path::Path::new(arg).is_file() {
+            let path = crate::init::absolute_resolved_tui_resume_path(arg.into())
+                .map_err(|error| error.to_string())?;
+            let id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| uuid::Uuid::parse_str(stem).ok())
+                .ok_or_else(|| "resume transcript has invalid filename".to_string())?;
+            // Keep the existing catalog-root, link and ownership checks. The
+            // source capture below revalidates and pins the same exact file.
+            let path = crate::init::validate_exact_tui_resume_path(&desktop.lingxi_home, id, &path)
+                .map_err(|error| error.to_string())?;
+            Some((id, path))
+        } else {
+            crate::run::resolve_resume_title_source_from(load_catalog().await?, arg)?
+                .map(|row| (row.uuid, row.path))
+        };
+        Some(selected.ok_or_else(|| "No conversation found to resume".to_string())?)
+    } else {
+        None
+    };
+    Ok(match selected {
+        Some((session_id, path)) => {
+            let path = crate::init::absolute_resolved_tui_resume_path(path)
+                .map_err(|error| error.to_string())?;
+            desktop.session_transcript_path = Some(path);
+            SessionStart::Resume {
+                session_id,
+                resume_session_at: (!argv.continue_session)
+                    .then(|| argv.resume_session_at.clone())
+                    .flatten(),
+                resume_drops_turn: (!argv.continue_session)
+                    .then(|| argv.resume_drops_turn.clone())
+                    .flatten(),
+                fork: argv.fork_session,
+            }
+        }
+        None => SessionStart::New,
+    })
+}
+
 /// Resolve project configuration from the same captured source that the SDK
 /// will mount. A fork is created in the launch workspace, so retains its config.
 fn configure_selected_resume(
@@ -357,10 +471,166 @@ fn configure_selected_resume(
     Ok(desktop)
 }
 
+#[cfg(all(test, unix))]
+#[path = "headless_host_mcp_test.rs"]
+mod mcp_consumer_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[tokio::test]
+    async fn selection_error_result_matches_native_321_bytes_except_generated_uuid() {
+        let session_id = "77777777-7777-4777-8777-777777777777";
+        let error = format!("No conversation found with session ID: {session_id}");
+        let frame = session_selection_error_frame(session_id, &error).await;
+        let captured = include_str!("../tests/fixtures/session-321-missing-uuid-result.jsonl");
+        let native: serde_json::Value = serde_json::from_str(captured).unwrap();
+        let expected = captured.replace(
+            native["uuid"].as_str().unwrap(),
+            frame["uuid"].as_str().unwrap(),
+        );
+        assert_eq!(
+            harness_runtime::headless::stream_json::serialize_ndjson_line(&frame),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_headless_continue_starts_new_but_invalid_store_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let argv = Argv::try_parse_from(["lingxi-cli", "-p", "--continue", "next"]).unwrap();
+        let mut desktop = harness_runtime::desktop::DesktopConfig::default();
+        desktop.lingxi_home = root.path().join("home");
+        desktop.cwd = root.path().join("work");
+        std::fs::create_dir_all(&desktop.cwd).unwrap();
+        assert!(matches!(
+            select_session_start(&argv, &mut desktop).await.unwrap(),
+            harness_runtime::headless::config::SessionStart::New
+        ));
+        assert!(desktop.session_transcript_path.is_none());
+        std::fs::create_dir_all(&desktop.lingxi_home).unwrap();
+        std::fs::write(desktop.lingxi_home.join("projects"), "invalid store").unwrap();
+        assert!(select_session_start(&argv, &mut desktop).await.is_err());
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(desktop.lingxi_home.join("projects")).unwrap();
+            std::os::unix::fs::symlink("missing-root", desktop.lingxi_home.join("projects"))
+                .unwrap();
+            assert!(select_session_start(&argv, &mut desktop).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_headless_resume_uuid_reports_session_in_absent_store() {
+        let root = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let argv = Argv::try_parse_from(["lingxi-cli", "-p", "--resume", &id.to_string(), "next"])
+            .unwrap();
+        let mut desktop = harness_runtime::desktop::DesktopConfig::default();
+        desktop.lingxi_home = root.path().join("home");
+        desktop.cwd = root.path().to_path_buf();
+        assert_eq!(
+            select_session_start(&argv, &mut desktop).await.unwrap_err(),
+            format!("No conversation found with session ID: {id}")
+        );
+        assert!(!desktop.lingxi_home.exists());
+    }
+
+    #[tokio::test]
+    async fn continue_does_not_apply_explicit_resume_truncation_flags() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let mut desktop = harness_runtime::desktop::DesktopConfig::default();
+        desktop.lingxi_home = root.join("home");
+        desktop.cwd = root.join("work");
+        std::fs::create_dir_all(&desktop.cwd).unwrap();
+        let id = uuid::Uuid::new_v4();
+        crate::init::captured_resume_path_tests::transcript(
+            &desktop.lingxi_home,
+            &desktop.cwd,
+            id,
+            "continue input",
+            "2026-11-09T00:00:00Z",
+            "code",
+        );
+        let argv = Argv::try_parse_from([
+            "lingxi-cli",
+            "-p",
+            "--continue",
+            "--resume",
+            &id.to_string(),
+            "--resume-session-at",
+            "resume-boundary",
+            "--resume-drops-turn",
+            "resume-turn",
+            "next",
+        ])
+        .unwrap();
+        assert!(matches!(
+            select_session_start(&argv, &mut desktop).await.unwrap(),
+            harness_runtime::headless::config::SessionStart::Resume {
+                session_id, resume_session_at: None, resume_drops_turn: None, ..
+            } if session_id == id
+        ));
+    }
+
+    #[tokio::test]
+    async fn headless_uuid_file_and_title_select_the_same_owned_source() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let home = root.join("home");
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let id = uuid::Uuid::new_v4();
+        let path = crate::init::captured_resume_path_tests::transcript(
+            &home,
+            &cwd,
+            id,
+            "owned input",
+            "2026-11-09T00:00:00Z",
+            "code",
+        );
+        use std::io::Write;
+        writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "{}", serde_json::json!({"type":"custom-title", "sessionId":id, "customTitle":"Owned source title"})
+        ).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        for argument in [
+            id.to_string(),
+            path.to_string_lossy().into_owned(),
+            "Owned source title".to_string(),
+        ] {
+            let argv =
+                Argv::try_parse_from(["lingxi-cli", "-p", "--resume", &argument, "next"]).unwrap();
+            let mut desktop = harness_runtime::desktop::DesktopConfig::default();
+            desktop.lingxi_home = home.clone();
+            desktop.cwd = cwd.clone();
+            assert!(matches!(
+                select_session_start(&argv, &mut desktop).await.unwrap(),
+                harness_runtime::headless::config::SessionStart::Resume { session_id, .. } if session_id == id
+            ));
+            assert_eq!(desktop.session_transcript_path.as_ref(), Some(&path));
+        }
+        // File argument handling must retain the existing profile root fence.
+        let external = root.join(format!("{id}.jsonl"));
+        std::fs::write(&external, &before).unwrap();
+        let argv = Argv::try_parse_from([
+            "lingxi-cli",
+            "-p",
+            "--resume",
+            external.to_str().unwrap(),
+            "next",
+        ])
+        .unwrap();
+        let mut desktop = harness_runtime::desktop::DesktopConfig::default();
+        desktop.lingxi_home = home;
+        desktop.cwd = cwd;
+        assert!(select_session_start(&argv, &mut desktop).await.is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert!(!desktop.lingxi_home.join("sessions").exists());
+    }
 
     #[test]
     fn selected_headless_resume_loads_target_project_but_fork_keeps_launch_project() {

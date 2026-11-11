@@ -1,12 +1,13 @@
 import { EventEmitter } from 'node:events';
 import type { FirebaseOptions } from 'firebase/app';
+import type { Firestore } from 'firebase/firestore';
 import { TeamsApiError, teamsTransport, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../../packages/teams';
 import type { MessageSignal, MessageSnapshot, MessageCommand } from '../../../../../packages/teams/messages';
 import type { LocalPublishableBot, PublishLocalBotInput, SelectedSharedFile } from '../../../../../packages/teams/execution';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source';
 import type { TeamsFirestoreSession, TeamsFirestoreOptions } from './firestore.js';
 
-interface Account {
+export interface Account {
   snapshot(): { user: { uid: string } | null };
   sessionEpoch?(): number;
   getIdToken(): Promise<string>;
@@ -182,6 +183,11 @@ export class TeamsService {
       }));
     }
     return current;
+  }
+  /** The account's Firestore session with the SDK that opened it: Friends' owner-only listeners run in it, and nothing else here is exposed. */
+  async firestore(expectedUid: string): Promise<{ db: Firestore; sdk: typeof import('./firestore.js') }> {
+    const session = await this.connect(expectedUid);
+    return { db: session.db, sdk: this.sdk! };
   }
   async messages<T>(command: MessageCommand, expectedUid: string): Promise<T> {
     if (this.account.snapshot().user?.uid !== expectedUid) throw new Error('INVALID_SESSION');

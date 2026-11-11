@@ -93,15 +93,15 @@ class WorkspaceRuntime {
   rememberTranscriptSelection(path: string): void { this.transcriptPath = path; }
 }
 
-function hostFixture(t: TestContext, options: { registered?: boolean } = {}) {
+async function hostFixture(t: TestContext, options: { registered?: boolean } = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-workspace-host-')));
   const source = join(root, 'source'), target = join(root, 'target'), userData = join(root, 'settings');
   mkdirSync(source); mkdirSync(target);
   const settings = new SettingsStore(userData);
   const ref = { projectPath: source, sessionId };
-  settings.conversationSpaces.setMode('code');
+  await settings.conversationSpaces.setMode('code');
   settings.addProject(source); settings.activateProject(source); settings.setActiveSession(ref);
-  if (options.registered !== false) settings.conversationSpaces.register({ ...ref, mode: 'code', projectId: source });
+  if (options.registered !== false) await settings.conversationSpaces.register({ ...ref, mode: 'code', projectId: source });
   const original = new WorkspaceRuntime(source, sessionId);
   writeFileSync(original.transcriptPath, '{}\n');
   const runtimes = new Map<string, WorkspaceRuntime>([[sessionId, original]]);
@@ -113,11 +113,12 @@ function hostFixture(t: TestContext, options: { registered?: boolean } = {}) {
     openArguments: [] as unknown[][],
     picks: [] as string[], trust: [] as string[], find: [] as SessionRef[],
     select: [] as Array<{ ref: SessionRef; selection: SessionOpenSelection }>,
-    list: [] as Array<{ path: string; scope: SessionCatalogScope }>, invalidations: 0,
+    list: [] as Array<{ path: string; scope: SessionCatalogScope }>, invalidations: 0, activated: [] as SessionRef[],
     terminals: [] as Array<{ before: SessionRef; after: SessionRef }>,
   };
   const bridge = {
     registerWindow() {}, registerIpc() {},
+    activateSession: (ref: SessionRef) => { calls.activated.push({ ...ref }); },
     get: (id: string) => runtimes.get(id),
     require: (requested: SessionRef) => {
       const runtime = runtimes.get(requested.sessionId);
@@ -193,8 +194,8 @@ function hostFixture(t: TestContext, options: { registered?: boolean } = {}) {
 }
 
 test('opening a pasted uppercase UUID retains the canonical runtime and persisted owner', async t => {
-  const f = hostFixture(t), id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
-  f.settings.conversationSpaces.register({ projectPath: f.source, sessionId: id, projectId: f.source, mode: 'code' });
+  const f = await hostFixture(t), id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
+  await f.settings.conversationSpaces.register({ projectPath: f.source, sessionId: id, projectId: f.source, mode: 'code' });
   f.runtimes.set(id, new WorkspaceRuntime(f.source, id));
   const snapshot = await f.host.openSessionAndActivate({ projectPath: f.source, sessionId: id.toUpperCase() });
   assert.equal(snapshot.activeSession?.sessionId, id);
@@ -203,9 +204,9 @@ test('opening a pasted uppercase UUID retains the canonical runtime and persiste
 });
 
 test('/cd retains the exact source while remounting its owner in the new cwd', async (t) => {
-  const f = hostFixture(t), moved = { projectPath: f.target, sessionId };
+  const f = await hostFixture(t), moved = { projectPath: f.target, sessionId };
   const owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
-  f.settings.conversationSpaces.register(owner);
+  await f.settings.conversationSpaces.register(owner);
   f.original.directories = [f.root];
   f.settings.setSessionModel(f.ref, 'anthropic/session-model');
   f.settings.setSessionPinned({ ...f.ref, title: 'Pinned chat', pinnedAt: '2026-10-21T00:00:00Z' }, true);
@@ -239,12 +240,12 @@ test('/cd retains the exact source while remounting its owner in the new cwd', a
 
 for (const { mode, global } of [{ mode: 'code', global: false }, { mode: 'chat', global: true }] as const) {
   test(`/cd cold resume retains the ${global ? 'Global' : 'project'} ${mode} owner and exact source`, async t => {
-    const f = hostFixture(t, { registered: !global }), selectedPath = f.original.transcriptPath;
+    const f = await hostFixture(t, { registered: !global }), selectedPath = f.original.transcriptPath;
     const owner = { ...f.ref, mode, projectId: global ? null : f.source };
     const moved = { ...owner, projectPath: f.target };
     f.original.sessionMode = mode;
-    f.settings.conversationSpaces.setMode(mode);
-    f.settings.conversationSpaces.register(owner);
+    await f.settings.conversationSpaces.setMode(mode);
+    await f.settings.conversationSpaces.register(owner);
     f.settings.setActiveSession(owner);
     f.settings.rememberSessionTranscriptSelection(owner, {
       catalogProjectPath: f.source, scope: 'current', transcriptPath: selectedPath,
@@ -273,17 +274,18 @@ for (const { mode, global } of [{ mode: 'code', global: false }, { mode: 'chat',
     (coldHost as any).bootstrap = () => ({ settings: saved.getPublic(), activeSession: saved.getPublic().activeSession });
     t.after(() => coldHost.dispose());
     await coldHost.openSessionAndActivate(moved);
-    assert.deepEqual(f.calls.openArguments, [[moved, false, undefined, true, selectedPath]]);
+    assert.deepEqual(f.calls.openArguments, [[moved, false, undefined, false, selectedPath]]);
+    assert.equal(f.calls.activated.at(-1)?.sessionId, sessionId);
     assert.deepEqual(saved.conversationSpaces.findBySessionId(sessionId), moved);
   });
 }
 
 for (const entry of ['switch', 'startup'] as const) test(`${entry}: entering an empty Chat space starts a trusted global draft for the composer`, async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const host = f.host as any;
   const bridge = f.bridge as any;
   const projectPath = f.settings.conversationSpaces.globalWorkspaces.chat;
-  f.settings.conversationSpaces.setMode('chat');
+  await f.settings.conversationSpaces.setMode('chat');
   host.navigationGeneration = 1;
   let activated: unknown;
   bridge.newSession = async (path: string, model: unknown, options: any) => {
@@ -306,14 +308,14 @@ for (const entry of ['switch', 'startup'] as const) test(`${entry}: entering an 
 });
 
 test('a late empty-space draft cannot replace a newer navigation', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const host = f.host as any;
   const bridge = f.bridge as any;
-  f.settings.conversationSpaces.setMode('chat');
+  await f.settings.conversationSpaces.setMode('chat');
   host.navigationGeneration = 1;
   bridge.newSession = async (projectPath: string, _model: unknown, options: any) => {
     host.navigationGeneration = 2;
-    f.settings.conversationSpaces.setMode('code');
+    await f.settings.conversationSpaces.setMode('code');
     assert.equal(options.activate(), false);
     return { projectPath, sessionId: otherId };
   };
@@ -324,7 +326,7 @@ test('a late empty-space draft cannot replace a newer navigation', async (t) => 
 });
 
 test('startup restores the displayed Current alias path in its authoritative workspace', async (t) => {
-  const f = hostFixture(t), moved = { projectPath: f.target, sessionId };
+  const f = await hostFixture(t), moved = { projectPath: f.target, sessionId };
   f.runtimes.clear();
   const selected = { ...f.row(f.target), path: join(f.root, 'selected-copy', `${sessionId}.jsonl`) };
   f.catalog.list = async () => ({ sessions: [selected] });
@@ -337,14 +339,15 @@ test('startup restores the displayed Current alias path in its authoritative wor
   assert.deepEqual(f.settings.getPublic().activeSession, { ...moved, mode: 'code', projectId: f.source });
   assert.deepEqual(f.calls.select, [{ ref: f.ref,
     selection: { scope: 'current', transcriptPath: selected.path } }]);
-  assert.deepEqual(f.calls.openArguments, [[{ ...moved, mode: 'code', projectId: f.source }, false, undefined, true, selected.path]]);
+  assert.deepEqual(f.calls.openArguments, [[{ ...moved, mode: 'code', projectId: f.source }, false, undefined, false, selected.path]]);
+  assert.equal(f.calls.activated.at(-1)?.sessionId, sessionId);
   assert.deepEqual(f.calls.terminals, [{ before: { projectPath: f.source, sessionId: '__draft__' }, after: { ...moved, mode: 'code', projectId: f.source } }]);
   assert.deepEqual(f.calls.find, [], 'a displayed Current row must not use the CLI UUID resolver');
   assert.equal((f.host as any).catalogs.get(f.source).sessions[0].workspace_path, undefined);
 });
 
 test('a slow startup restore cannot overwrite a newer queued navigation', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   f.runtimes.clear();
   f.settings.addProject(f.target);
   let finish!: (value: { sessions: ProjectSessionCatalogRow[] }) => void;
@@ -352,7 +355,7 @@ test('a slow startup restore cannot overwrite a newer queued navigation', async 
   const startup = f.host.restoreProjectSession(f.source);
   await new Promise(resolve => setImmediate(resolve));
   const newer = { projectPath: f.target, sessionId: otherId };
-  f.settings.conversationSpaces.register({ ...newer, projectId: f.target, mode: 'code' });
+  await f.settings.conversationSpaces.register({ ...newer, projectId: f.target, mode: 'code' });
   const selected = f.row(f.target, otherId);
   const navigation = f.host.openSessionAndActivate(newer,
     { scope: 'current', transcriptPath: selected.path });
@@ -366,7 +369,7 @@ test('a slow startup restore cannot overwrite a newer queued navigation', async 
 });
 
 test('/cd opens an unsent draft without resuming its computed but unwritten transcript path', async (t) => {
-  const f = hostFixture(t), moved = { projectPath: f.target, sessionId };
+  const f = await hostFixture(t), moved = { projectPath: f.target, sessionId };
   f.settings.setActiveSession(undefined);
   f.settings.setActiveSessionDraft(f.ref);
   f.original.hasConversation = false;
@@ -390,7 +393,7 @@ test('/cd opens an unsent draft without resuming its computed but unwritten tran
 });
 
 test('/cd rolls back the native directory move if the target already owns a draft', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   f.settings.setActiveSession(undefined);
   f.settings.setActiveSessionDraft(f.ref);
   f.original.hasConversation = false;
@@ -406,7 +409,7 @@ test('/cd rolls back the native directory move if the target already owns a draf
 
 test('/cd with history and no catalog row propagates a missing transcript failure instead of silently opening an empty draft', async (t) => {
   for (const hasConversation of [true, undefined]) {
-    const f = hostFixture(t);
+    const f = await hostFixture(t);
     f.original.hasConversation = hasConversation;
     unlinkSync(f.original.transcriptPath);
     f.catalog.find = async (path, id) => { f.calls.find.push({ projectPath: path, sessionId: id }); return undefined; };
@@ -423,9 +426,9 @@ test('/cd with history and no catalog row propagates a missing transcript failur
 });
 
 test('/cd ignores a same-UUID sibling anchor and resumes the engine source', async t => {
-  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  const f = await hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
   const moved = { ...owner, projectPath: f.target }, source = f.original.transcriptPath;
-  f.settings.conversationSpaces.register(owner);
+  await f.settings.conversationSpaces.register(owner);
   f.settings.setSessionModel(owner, 'owner/model');
   f.settings.rememberSessionTranscriptSelection(owner, { catalogProjectPath: f.source, scope: 'current', transcriptPath: source });
   f.catalog.find = async () => ({ ...f.row(f.target), empty_session: true, resume_model: 'sibling/model' });
@@ -441,11 +444,11 @@ test('/cd ignores a same-UUID sibling anchor and resumes the engine source', asy
 });
 
 test('/cd preserves and resumes a durable empty scheduled anchor', async t => {
-  const f = hostFixture(t, { registered: false }), owner = { ...f.ref, mode: 'code' as const, projectId: null };
+  const f = await hostFixture(t, { registered: false }), owner = { ...f.ref, mode: 'code' as const, projectId: null };
   const moved = { ...owner, projectPath: f.target }, source = f.original.transcriptPath;
   f.original.hasConversation = false;
   writeFileSync(source, `${JSON.stringify({ type: 'fixed-session-mode', sessionId, sessionMode: 'code', instructionEpoch: 0 })}\n${JSON.stringify({ type: 'custom-title', sessionId, mobileEmptySession: 1, cwd: f.source })}\n`);
-  f.settings.conversationSpaces.register(owner);
+  await f.settings.conversationSpaces.register(owner);
   f.settings.rememberSessionTranscriptSelection(owner, { catalogProjectPath: f.source, scope: 'current', transcriptPath: source });
   f.catalog.select = async (path, id, selection) => {
     assert.deepEqual(selection, { scope: 'current', transcriptPath: source });
@@ -462,9 +465,9 @@ test('/cd preserves and resumes a durable empty scheduled anchor', async t => {
 
 test('/cd rejects a missing or mismatched exact catalog source before changing its owner', async t => {
   for (const conflict of ['missing', 'path', 'mode'] as const) {
-    const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+    const f = await hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
     const source = f.original.transcriptPath;
-    f.settings.conversationSpaces.register(owner);
+    await f.settings.conversationSpaces.register(owner);
     f.settings.rememberSessionTranscriptSelection(owner, { catalogProjectPath: f.source, scope: 'current', transcriptPath: source });
     const before = readFileSync(f.settings.settingsPath, 'utf8');
     f.catalog.select = async (path, id) => conflict === 'missing' ? undefined : {
@@ -481,8 +484,8 @@ test('/cd rejects a missing or mismatched exact catalog source before changing i
 });
 
 test('/cd rejects a different live source even before a selection was saved', async t => {
-  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
-  f.settings.conversationSpaces.register(owner);
+  const f = await hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  await f.settings.conversationSpaces.register(owner);
   const before = readFileSync(f.settings.settingsPath, 'utf8'), source = f.original.transcriptPath;
   const change = f.original.setWorkingDirectory.bind(f.original);
   f.original.setWorkingDirectory = async request => {
@@ -499,9 +502,9 @@ test('/cd rejects a different live source even before a selection was saved', as
 });
 
 test('/cd never recreates an observed empty anchor that disappeared during the move', async t => {
-  const f = hostFixture(t, { registered: false }), owner = { ...f.ref, mode: 'code' as const, projectId: null };
+  const f = await hostFixture(t, { registered: false }), owner = { ...f.ref, mode: 'code' as const, projectId: null };
   f.original.hasConversation = false;
-  f.settings.conversationSpaces.register(owner);
+  await f.settings.conversationSpaces.register(owner);
   const before = readFileSync(f.settings.settingsPath, 'utf8');
   const change = f.original.setWorkingDirectory.bind(f.original);
   f.original.setWorkingDirectory = async request => {
@@ -518,8 +521,8 @@ test('/cd never recreates an observed empty anchor that disappeared during the m
 });
 
 test('/cd rejects a same-byte source replacement during exact catalog lookup', async t => {
-  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
-  f.settings.conversationSpaces.register(owner);
+  const f = await hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  await f.settings.conversationSpaces.register(owner);
   const source = f.original.transcriptPath, bytes = readFileSync(source);
   const before = readFileSync(f.settings.settingsPath, 'utf8');
   f.catalog.select = async (path, id) => {
@@ -536,7 +539,7 @@ test('/cd rejects a same-byte source replacement during exact catalog lookup', a
 });
 
 test('explicit /add-dir saves session grants without adding a project, changing selection or remounting', async (t) => {
-  const f = hostFixture(t), before = f.settings.getPublic(), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const f = await hostFixture(t), before = f.settings.getPublic(), bytes = readFileSync(f.settings.settingsPath, 'utf8');
   f.original.directories = [f.root];
   const snapshot = await f.host.updateSessionWorkspace(sessionId, { action: 'add-dir', path: f.target });
   assert.deepEqual(snapshot?.settings, before);
@@ -550,7 +553,7 @@ test('explicit /add-dir saves session grants without adding a project, changing 
 
 test('canceling either native directory picker leaves settings, grants and the active runtime untouched', async (t) => {
   for (const action of ['cd', 'add-dir'] as const) {
-    const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+    const f = await hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
     assert.equal(await f.host.updateSessionWorkspace(sessionId, { action }), null);
     assert.deepEqual(f.calls.picks, [f.source]);
     assert.deepEqual(f.original.changes, []); assert.deepEqual(f.original.additions, []);
@@ -561,7 +564,7 @@ test('canceling either native directory picker leaves settings, grants and the a
 });
 
 test('a native no-op keeps the existing runtime and settings file', async (t) => {
-  const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const f = await hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
   await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: '.' });
   assert.deepEqual(f.calls.close, []); assert.deepEqual(f.calls.open, []);
   assert.equal(f.runtimes.get(sessionId), f.original);
@@ -569,7 +572,7 @@ test('a native no-op keeps the existing runtime and settings file', async (t) =>
 });
 
 test('busy work and stale active identities reject before a picker or native mutation runs', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   f.original.busy = true;
   await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd' }), /active work/);
   assert.equal(f.original.reads, 0); assert.deepEqual(f.calls.picks, []);
@@ -579,7 +582,7 @@ test('busy work and stale active identities reject before a picker or native mut
 });
 
 test('trust approval echoes the displayed canonical directory and re-prompts when a symlink changes target', { skip: process.platform === 'win32' }, async (t) => {
-  const f = hostFixture(t), changedTarget = join(f.root, 'changed-target'), alias = join(f.root, 'chosen-directory');
+  const f = await hostFixture(t), changedTarget = join(f.root, 'changed-target'), alias = join(f.root, 'chosen-directory');
   mkdirSync(changedTarget); symlinkSync(f.target, alias, 'dir');
   f.original.setWorkingDirectory = async (request) => {
     f.original.changes.push({ ...request });
@@ -605,7 +608,7 @@ test('trust approval echoes the displayed canonical directory and re-prompts whe
 });
 
 test('/cd into the app\'s own data is refused and rolled back, and adds no project', async (t) => {
-  const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const f = await hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
   const inside = join(f.userData, 'bots', 'someone', 'workspace');
   mkdirSync(inside, { recursive: true });
   await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: inside }), /belongs to the app's own data/);
@@ -619,7 +622,7 @@ test('/cd into the app\'s own data is refused and rolled back, and adds no proje
 });
 
 test('an engine that asks to trust a folder of the app\'s own data is not asked of the owner', async (t) => {
-  const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const f = await hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
   const inside = join(f.userData, 'logs');
   mkdirSync(inside, { recursive: true });
   f.original.setWorkingDirectory = async (request) => {
@@ -634,8 +637,8 @@ test('an engine that asks to trust a folder of the app\'s own data is not asked 
 });
 
 test('a session whose folder lies in the app\'s own data is not added as a project by opening it', async (t) => {
-  const f = hostFixture(t), inside = join(f.userData, 'bots', 'someone', 'workspace'), id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
-  f.settings.conversationSpaces.register({ projectPath: f.source, sessionId: id, projectId: f.source, mode: 'code' });
+  const f = await hostFixture(t), inside = join(f.userData, 'bots', 'someone', 'workspace'), id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
+  await f.settings.conversationSpaces.register({ projectPath: f.source, sessionId: id, projectId: f.source, mode: 'code' });
   mkdirSync(inside, { recursive: true });
   const selected = { ...f.row(inside, id), workspace_path: inside };
   f.catalog.find = async () => selected;
@@ -647,7 +650,7 @@ test('a session whose folder lies in the app\'s own data is not added as a proje
 
 test('canceling trust or a rejected native cd leaves the old session authoritative', async (t) => {
   for (const cancelTrust of [true, false]) {
-    const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+    const f = await hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
     f.original.setWorkingDirectory = async (request) => {
       f.original.changes.push({ ...request });
       return cancelTrust ? { status: 'needs_trust', directory: f.target }
@@ -665,8 +668,8 @@ test('canceling trust or a rejected native cd leaves the old session authoritati
 });
 
 test('a real settings write failure rolls the native cwd back before releasing the lease', async (t) => {
-  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
-  f.settings.conversationSpaces.register(owner);
+  const f = await hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  await f.settings.conversationSpaces.register(owner);
   f.settings.rememberSessionTranscriptSelection(owner, {
     catalogProjectPath: f.source, scope: 'current', transcriptPath: f.original.transcriptPath,
   });
@@ -684,8 +687,8 @@ test('a real settings write failure rolls the native cwd back before releasing t
 });
 
 test('a native relocation marker failure keeps the source and owner unchanged', async t => {
-  const f = hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
-  f.settings.conversationSpaces.register(owner);
+  const f = await hostFixture(t), owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  await f.settings.conversationSpaces.register(owner);
   f.settings.rememberSessionTranscriptSelection(owner, {
     catalogProjectPath: f.source, scope: 'current', transcriptPath: f.original.transcriptPath,
   });
@@ -705,7 +708,7 @@ test('a native relocation marker failure keeps the source and owner unchanged', 
 });
 
 test('failed native rollback stops the engine and reports both the persistence and recovery failure', async (t) => {
-  const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const f = await hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
   const move = f.original.setWorkingDirectory.bind(f.original);
   f.original.setWorkingDirectory = async (request) => request.path === f.source
     ? { status: 'rejected', reason: 'rollback', message: 'rollback refused' } : move(request);
@@ -718,7 +721,7 @@ test('failed native rollback stops the engine and reports both the persistence a
 });
 
 test('a lost native response still checks the actual cwd and restores a move that already happened', async (t) => {
-  const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const f = await hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
   const move = f.original.setWorkingDirectory.bind(f.original);
   f.original.setWorkingDirectory = async (request) => {
     const result = await move(request);
@@ -733,8 +736,8 @@ test('a lost native response still checks the actual cwd and restores a move tha
 });
 
 test('repository/all discoveries and their failures do not overwrite the current host catalog cache', async (t) => {
-  const f = hostFixture(t), internal = f.host as any;
-  f.settings.conversationSpaces.register({ projectPath: f.source, projectId: f.source, sessionId: otherId, mode: 'code' });
+  const f = await hostFixture(t), internal = f.host as any;
+  await f.settings.conversationSpaces.register({ projectPath: f.source, projectId: f.source, sessionId: otherId, mode: 'code' });
   f.catalog.list = async (path, scope = 'current') => {
     if (scope === 'all') throw new Error('expanded catalog temporarily unavailable');
     return { sessions: [{ ...f.row(path, scope === 'repository' ? otherId : sessionId), resume_model: 'private/model' }] };
@@ -752,7 +755,7 @@ test('repository/all discoveries and their failures do not overwrite the current
 });
 
 test('resuming a source workspace hint uses its real directory and asks for trust before activation', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   f.runtimes.clear();
   const selected = { ...f.row(f.source), workspace_path: f.target, resume_model: 'anthropic/history-model' };
   f.catalog.find = async () => selected;
@@ -765,7 +768,7 @@ test('resuming a source workspace hint uses its real directory and asks for trus
 });
 
 test('a missing source workspace hint resumes the same UUID from the chosen existing directory', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   f.runtimes.clear();
   const selected = { ...f.row(f.source), workspace_path: join(f.root, 'removed-worktree') };
   f.catalog.find = async () => selected;
@@ -777,7 +780,7 @@ test('a missing source workspace hint resumes the same UUID from the chosen exis
 });
 
 test('an exact cold selection pins its copy for engine startup and subsequent restoration', async t => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
   const other = { ...f.row(f.source), path: join(f.source, 'other-copy', `${sessionId}.jsonl`) };
   f.runtimes.clear();
@@ -809,9 +812,9 @@ test('an exact cold selection pins its copy for engine startup and subsequent re
 });
 
 test('a disconnected writer can reconnect without consulting unavailable catalog metadata', async t => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   (f.original as any).connectionState = { status: 'disconnected' };
-  f.settings.conversationSpaces.register({ ...f.ref, mode: 'code', projectId: f.source });
+  await f.settings.conversationSpaces.register({ ...f.ref, mode: 'code', projectId: f.source });
   f.catalog.find = async () => { throw new Error('catalog unavailable'); };
   f.catalog.select = async () => { throw new Error('catalog unavailable'); };
   await f.host.openSessionAndActivate(f.ref);
@@ -820,7 +823,7 @@ test('a disconnected writer can reconnect without consulting unavailable catalog
 });
 
 test('a cold open without a selected source rejects before resolving a UUID copy', async t => {
-  const f = hostFixture(t, { registered: false });
+  const f = await hostFixture(t, { registered: false });
   const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
   const other = { ...f.row(f.source), path: join(f.source, 'other-copy', `${sessionId}.jsonl`) };
   f.runtimes.clear();
@@ -834,9 +837,9 @@ test('a cold open without a selected source rejects before resolving a UUID copy
 });
 
 test('a saved source whose workspace changes cannot relocate the owner on cold reopen', async t => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
-  f.settings.conversationSpaces.register(owner);
+  await f.settings.conversationSpaces.register(owner);
   f.settings.rememberSessionTranscriptSelection(owner, {
     catalogProjectPath: f.source, scope: 'current', transcriptPath: f.row(f.source).path,
   });
@@ -850,11 +853,11 @@ test('a saved source whose workspace changes cannot relocate the owner on cold r
 });
 
 test('remote cold attach validates the saved copy and reuses the live writer on later attaches', async t => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
   const owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
-  f.settings.conversationSpaces.register(owner);
-  f.settings.relocateSession(f.ref, f.source, { catalogProjectPath: f.source, scope: 'current', transcriptPath: selected.path });
+  await f.settings.conversationSpaces.register(owner);
+  await f.settings.relocateSession(f.ref, f.source, { catalogProjectPath: f.source, scope: 'current', transcriptPath: selected.path });
   const settings = new SettingsStore(f.userData);
   let checks = 0;
   f.catalog.select = async (_path, _id, selection) => {
@@ -888,10 +891,10 @@ test('remote cold attach validates the saved copy and reuses the live writer on 
 });
 
 test('a first durable prompt records the live writer source without changing another selected session', async t => {
-  const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
-  f.settings.conversationSpaces.register(owner);
+  const f = await hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  await f.settings.conversationSpaces.register(owner);
   const other = { projectPath: f.source, sessionId: otherId, projectId: f.source, mode: 'code' as const };
-  f.settings.conversationSpaces.register(other); f.settings.setActiveSession(other);
+  await f.settings.conversationSpaces.register(other); f.settings.setActiveSession(other);
   writeFileSync(f.original.transcriptPath, '{}\n');
   assert.equal(await f.host.rememberCreatedSessionSource(owner, f.original as any, false), f.original.transcriptPath);
   const saved = new SettingsStore(f.userData);
@@ -904,8 +907,8 @@ test('a first durable prompt records the live writer source without changing ano
 });
 
 test('Local App recovery accepts a proven directory alias while retaining its exact catalog selection', { skip: process.platform === 'win32' }, async t => {
-  const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
-  f.settings.conversationSpaces.register(owner);
+  const f = await hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  await f.settings.conversationSpaces.register(owner);
   const original = f.original.transcriptPath;
   const aliasDirectory = join(f.root, 'source-alias'); symlinkSync(f.source, aliasDirectory, 'dir');
   const selected = { scope: 'repository' as const, transcriptPath: join(aliasDirectory, `${sessionId}.jsonl`) };
@@ -932,8 +935,8 @@ test('Local App recovery accepts a proven directory alias while retaining its ex
 });
 
 test('source capture rejects mismatched mode, workspace or writer and preserves the prior source', async t => {
-  const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
-  f.settings.conversationSpaces.register(owner); writeFileSync(f.original.transcriptPath, '{}\n');
+  const f = await hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  await f.settings.conversationSpaces.register(owner); writeFileSync(f.original.transcriptPath, '{}\n');
   const prior = { catalogProjectPath: f.source, scope: 'current' as const, transcriptPath: f.original.transcriptPath };
   f.settings.rememberSessionTranscriptSelection(owner, prior);
   const before = readFileSync(f.settings.settingsPath, 'utf8');
@@ -953,8 +956,8 @@ test('source capture rejects mismatched mode, workspace or writer and preserves 
 });
 
 test('a cold background or remote open without an exact saved source fails before starting an engine', async t => {
-  const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
-  f.settings.conversationSpaces.register(owner);
+  const f = await hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  await f.settings.conversationSpaces.register(owner);
   let started = 0;
   const originalStart = SessionRuntime.prototype.start;
   SessionRuntime.prototype.start = async function (options) {
@@ -976,7 +979,7 @@ test('a cold background or remote open without an exact saved source fails befor
 });
 
 test('a new scheduled anchor records its confirmed source before the binding operation proceeds', async t => {
-  const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  const f = await hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
   let finish!: (path: string) => void, entered!: () => void;
   const waiting = new Promise<string>(resolve => { finish = resolve; });
   const captureEntered = new Promise<void>(resolve => { entered = resolve; });
@@ -995,7 +998,7 @@ test('a new scheduled anchor records its confirmed source before the binding ope
 });
 
 test('a managed scheduled anchor records its exact source and Global ownership across restart', async t => {
-  const f = hostFixture(t), workspace = join(f.root, 'scheduled-run'); mkdirSync(workspace);
+  const f = await hostFixture(t), workspace = join(f.root, 'scheduled-run'); mkdirSync(workspace);
   const ref = { projectPath: workspace, sessionId: otherId, mode: 'code' as const };
   f.settings.registerScheduledSession(ref, 'task', join(workspace, 'memory.md'));
   const runtime = new WorkspaceRuntime(workspace, otherId);
@@ -1009,7 +1012,7 @@ test('a managed scheduled anchor records its exact source and Global ownership a
 });
 
 test('a transient source recording failure does not interrupt an admitted prompt and is retried', async t => {
-  const f = hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
+  const f = await hostFixture(t), owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
   let attempts = 0, commits = 0;
   const manager = new SessionRuntimeManager({
     launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
@@ -1031,11 +1034,11 @@ test('a transient source recording failure does not interrupt an admitted prompt
 });
 
 test('a saved remote source rejects a conflicting catalog owner before starting an engine', async t => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const selected = f.row(f.source);
   const owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
-  f.settings.conversationSpaces.register(owner);
-  f.settings.relocateSession(f.ref, f.source, { catalogProjectPath: f.source, scope: 'current', transcriptPath: selected.path });
+  await f.settings.conversationSpaces.register(owner);
+  await f.settings.relocateSession(f.ref, f.source, { catalogProjectPath: f.source, scope: 'current', transcriptPath: selected.path });
   const settings = new SettingsStore(f.userData);
   let started = 0;
   const originalStart = SessionRuntime.prototype.start;
@@ -1062,11 +1065,11 @@ test('a saved remote source rejects a conflicting catalog owner before starting 
 });
 
 test('background cold opens use the saved source while new anchors do not consult it', async t => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const selected = f.row(f.source);
   const owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
-  f.settings.conversationSpaces.register(owner);
-  f.settings.relocateSession(f.ref, f.source, { catalogProjectPath: f.source, scope: 'current', transcriptPath: selected.path });
+  await f.settings.conversationSpaces.register(owner);
+  await f.settings.relocateSession(f.ref, f.source, { catalogProjectPath: f.source, scope: 'current', transcriptPath: selected.path });
   const settings = new SettingsStore(f.userData);
   let checks = 0;
   f.catalog.select = async () => { checks++; return selected; };
@@ -1092,7 +1095,7 @@ test('background cold opens use the saved source while new anchors do not consul
 });
 
 test('an old project reference still opens an already-remounted UUID in its authoritative runtime directory', async (t) => {
-  const f = hostFixture(t), moved = { projectPath: f.target, sessionId };
+  const f = await hostFixture(t), moved = { projectPath: f.target, sessionId };
   await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target });
   f.calls.open.length = 0; f.calls.find.length = 0;
   await f.host.openSessionAndActivate(f.ref);
@@ -1103,7 +1106,7 @@ test('an old project reference still opens an already-remounted UUID in its auth
 
 for (const scope of ['repository', 'all'] as const) {
   test(`${scope} selection revalidates a fresh copy instead of reusing the cached current copy of the same UUID`, async (t) => {
-    const f = hostFixture(t), selected = { ...f.row(f.target), resume_model: 'anthropic/selected-copy' };
+    const f = await hostFixture(t), selected = { ...f.row(f.target), resume_model: 'anthropic/selected-copy' };
     const cached = await (f.host as any).loadProjectSessions(f.source, 'current');
     assert.equal(cached.sessions[0].path, f.original.transcriptPath);
     const select = f.catalog.select;
@@ -1114,7 +1117,8 @@ for (const scope of ['repository', 'all'] as const) {
     assert.deepEqual(f.calls.select, [{ ref: f.ref, selection }]);
     assert.deepEqual(f.calls.close, [f.ref]);
     assert.deepEqual(f.calls.open, [{ ref: restored, empty: false, model: 'anthropic/selected-copy' }]);
-    assert.equal(f.calls.openArguments[0]?.[3] ?? true, true);
+    assert.equal(f.calls.openArguments[0]?.[3], false, 'prepare the runtime before publishing its selection');
+    assert.equal(f.calls.activated.at(-1)?.sessionId, sessionId);
     assert.equal(f.calls.openArguments[0]?.[4], selected.path);
     assert.notEqual(f.runtimes.get(sessionId), f.original);
     assert.equal(f.runtimes.get(sessionId)?.transcriptPath, selected.path);
@@ -1124,7 +1128,7 @@ for (const scope of ['repository', 'all'] as const) {
 }
 
 test('a selected path that no longer matches fresh metadata rejects before closing or opening a runtime', async (t) => {
-  const f = hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const f = await hostFixture(t), bytes = readFileSync(f.settings.settingsPath, 'utf8');
   const select = f.catalog.select;
   f.catalog.select = async (...args) => { await select(...args); return f.row(f.source); };
   const selection = { scope: 'repository' as const, transcriptPath: f.row(f.target).path };
@@ -1137,7 +1141,7 @@ test('a selected path that no longer matches fresh metadata rejects before closi
 });
 
 test('a busy current copy blocks switching to an exact selected copy with the same UUID', async (t) => {
-  const f = hostFixture(t), selected = f.row(f.target), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const f = await hostFixture(t), selected = f.row(f.target), bytes = readFileSync(f.settings.settingsPath, 'utf8');
   const select = f.catalog.select;
   f.catalog.select = async (...args) => { await select(...args); return selected; };
   f.original.busy = true;
@@ -1149,8 +1153,8 @@ test('a busy current copy blocks switching to an exact selected copy with the sa
 });
 
 test('an admitted standard audio operation prevents replacing its owner but allows another UUID to open', async t => {
-  const f = hostFixture(t), selected = f.row(f.target);
-  f.settings.conversationSpaces.register({ projectPath: f.source, sessionId: otherId, projectId: f.source, mode: 'code' });
+  const f = await hostFixture(t), selected = f.row(f.target);
+  await f.settings.conversationSpaces.register({ projectPath: f.source, sessionId: otherId, projectId: f.source, mode: 'code' });
   f.catalog.select = async (path, id, selection) => id === sessionId ? selected : f.row(path, id);
   const frame = { url: 'http://127.0.0.1:4242' };
   const sender = { id: 1, mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
@@ -1170,7 +1174,7 @@ test('an admitted standard audio operation prevents replacing its owner but allo
 });
 
 test('an admitted remount prevents a later audio operation from claiming its old owner', async t => {
-  const f = hostFixture(t), selected = f.row(f.target);
+  const f = await hostFixture(t), selected = f.row(f.target);
   f.catalog.select = async () => selected;
   let entered!: () => void, resume!: () => void;
   const started = new Promise<void>(resolve => { entered = resolve; });
@@ -1188,7 +1192,7 @@ test('an admitted remount prevents a later audio operation from claiming its old
 });
 
 test('realtime startup and its adopted lane both retain the exact runtime until stopped', async t => {
-  const f = hostFixture(t), selected = f.row(f.target);
+  const f = await hostFixture(t), selected = f.row(f.target);
   f.catalog.select = async () => selected;
   let entered!: () => void, resume!: (value: unknown) => void;
   const started = new Promise<void>(resolve => { entered = resolve; });
@@ -1214,7 +1218,7 @@ test('realtime startup and its adopted lane both retain the exact runtime until 
 });
 
 test('an exact selection already open at the same source and transcript reuses its runtime', async (t) => {
-  const f = hostFixture(t), selected = f.row(f.source), selection = { scope: 'repository' as const, transcriptPath: selected.path };
+  const f = await hostFixture(t), selected = f.row(f.source), selection = { scope: 'repository' as const, transcriptPath: selected.path };
   const snapshot = await f.host.openSessionAndActivate(f.ref, selection);
   assert.deepEqual(f.calls.select, [{ ref: f.ref, selection }]);
   assert.deepEqual(f.calls.close, []);
@@ -1224,7 +1228,7 @@ test('an exact selection already open at the same source and transcript reuses i
 });
 
 test('an exact selection of a different transcript in the same source still replaces the idle copy', async (t) => {
-  const f = hostFixture(t), selected = { ...f.row(f.source), path: join(f.source, 'other-copy', `${sessionId}.jsonl`) };
+  const f = await hostFixture(t), selected = { ...f.row(f.source), path: join(f.source, 'other-copy', `${sessionId}.jsonl`) };
   const select = f.catalog.select;
   f.catalog.select = async (...args) => { await select(...args); return selected; };
   await f.host.openSessionAndActivate(f.ref, { scope: 'repository', transcriptPath: selected.path });
@@ -1235,7 +1239,7 @@ test('an exact selection of a different transcript in the same source still repl
 });
 
 test('a selected transcript keeps its exact path when its missing source directory falls back to the current directory', async (t) => {
-  const f = hostFixture(t), selected = { ...f.row(f.target), workspace_path: join(f.root, 'removed-worktree') };
+  const f = await hostFixture(t), selected = { ...f.row(f.target), workspace_path: join(f.root, 'removed-worktree') };
   f.runtimes.clear();
   const select = f.catalog.select;
   f.catalog.select = async (...args) => { await select(...args); return selected; };
@@ -1248,7 +1252,7 @@ test('a selected transcript keeps its exact path when its missing source directo
 });
 
 test('canceling trust for a selected copy leaves the currently open copy in place', async (t) => {
-  const f = hostFixture(t), selected = f.row(f.target), bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  const f = await hostFixture(t), selected = f.row(f.target), bytes = readFileSync(f.settings.settingsPath, 'utf8');
   const select = f.catalog.select;
   f.catalog.select = async (...args) => { await select(...args); return selected; };
   f.dialogs.trustDirectory = async (path) => { f.calls.trust.push(path); return false; };
@@ -1261,7 +1265,7 @@ test('canceling trust for a selected copy leaves the currently open copy in plac
 
 for (const coldStart of [false, true]) {
   test(`an exact selected transcript survives ${coldStart ? 'a full settings and host reload' : 'eviction and ordinary sidebar reopen'}`, async (t) => {
-    const f = hostFixture(t);
+    const f = await hostFixture(t);
     const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
     f.catalog.select = async (path, id, selection) => {
       f.calls.select.push({ ref: { projectPath: path, sessionId: id }, selection });
@@ -1289,7 +1293,7 @@ for (const coldStart of [false, true]) {
 }
 
 test('a missing saved selected transcript cannot silently resume another copy after cold start', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
   f.catalog.select = async () => selected;
   await f.host.openSessionAndActivate(f.ref, { scope: 'all', transcriptPath: selected.path });
@@ -1309,7 +1313,7 @@ test('a missing saved selected transcript cannot silently resume another copy af
 });
 
 test('a cold public open through a symlink revalidates the canonical owner\'s saved transcript', { skip: process.platform === 'win32' }, async (t) => {
-  const f = hostFixture(t), alias = join(f.root, 'project-alias');
+  const f = await hostFixture(t), alias = join(f.root, 'project-alias');
   symlinkSync(f.source, alias, 'dir');
   const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
   f.catalog.select = async (path, id, selection) => {
@@ -1334,7 +1338,7 @@ test('a cold public open through a symlink revalidates the canonical owner\'s sa
 });
 
 test('cold restore revalidates the original picker scope after the selected source moves navigation to another directory', async (t) => {
-  const f = hostFixture(t), moved = { projectPath: f.target, sessionId }, selected = f.row(f.target);
+  const f = await hostFixture(t), moved = { projectPath: f.target, sessionId }, selected = f.row(f.target);
   f.catalog.select = async (path, id, selection) => {
     f.calls.select.push({ ref: { projectPath: path, sessionId: id }, selection });
     assert.equal(path, f.source, 're-query the original alias/picker context, not the new launch directory');
@@ -1359,7 +1363,7 @@ test('cold restore revalidates the original picker scope after the selected sour
 
 
 test('/cd carries only the current runtime controls to its same-UUID replacement', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   f.original.runtimeControls = '{"private":"source-runtime-controls"}';
   await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target });
   assert.equal(f.calls.openArguments[0]?.[5], f.original.runtimeControls);
@@ -1367,10 +1371,10 @@ test('/cd carries only the current runtime controls to its same-UUID replacement
 });
 
 test('a failed selected remount leaves the confirmed conversation owner and navigation unchanged', async t => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
-  f.settings.conversationSpaces.register(owner);
-  f.settings.conversationSpaces.setNavigation('code', f.source, owner);
+  await f.settings.conversationSpaces.register(owner);
+  await f.settings.conversationSpaces.setNavigation('code', f.source, owner);
   const selected = f.row(f.target);
   f.catalog.select = async () => selected;
   f.bridge.openSession = async () => { throw new Error('selected mount failed'); };
@@ -1382,7 +1386,7 @@ test('a failed selected remount leaves the confirmed conversation owner and navi
 });
 
 test('an unregistered first mount is rejected before a runtime starts', async t => {
-  const f = hostFixture(t, { registered: false }); f.runtimes.clear();
+  const f = await hostFixture(t, { registered: false }); f.runtimes.clear();
   let started = false; f.bridge.openSession = async () => { started = true; throw new Error('must not start'); };
   await assert.rejects(f.host.openSessionAndActivate(f.ref, { scope: 'current', transcriptPath: f.row(f.source).path }), /no authenticated conversation scope/);
   assert.equal(started, false);
@@ -1390,9 +1394,9 @@ test('an unregistered first mount is rejected before a runtime starts', async t 
 });
 
 test('/cd keeps the visible draft selection attached to its relocated owner', async t => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const draft = { ...f.ref, mode: 'code' as const, projectId: f.source };
-  f.settings.conversationSpaces.register(draft); f.settings.conversationSpaces.setMode('code');
+  await f.settings.conversationSpaces.register(draft); await f.settings.conversationSpaces.setMode('code');
   f.settings.setActiveSession(undefined); f.settings.setActiveSessionDraft(draft);
   (f.host as any).draftSelections.set('code', draft);
   f.original.hasConversation = false;
@@ -1406,9 +1410,9 @@ test('/cd keeps the visible draft selection attached to its relocated owner', as
 });
 
 test('a cold copy in another directory preserves the session UUID owner and project', async t => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const owner = { ...f.ref, projectId: f.source, mode: 'code' as const };
-  f.settings.conversationSpaces.register(owner); f.settings.conversationSpaces.setNavigation('code', f.source, owner);
+  await f.settings.conversationSpaces.register(owner); await f.settings.conversationSpaces.setNavigation('code', f.source, owner);
   f.settings.addProject(f.target); f.runtimes.clear();
   await f.host.openSessionAndActivate({ projectPath: f.target, sessionId }, { scope: 'current', transcriptPath: f.row(f.target).path });
   const moved = f.settings.conversationSpaces.find({ projectPath: f.target, sessionId });

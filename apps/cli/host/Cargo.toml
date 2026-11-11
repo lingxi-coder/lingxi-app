@@ -127,6 +127,7 @@ uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 
 [dev-dependencies]
+orchestrator = { workspace = true, features = ["test-support"] }
 # Pinned: assert_cmd 2.0.x is the last MSRV-1.82-compatible series.
 # 2.2.0+ requires edition2024 (Rust 1.85+).
 assert_cmd = "=2.0.16"

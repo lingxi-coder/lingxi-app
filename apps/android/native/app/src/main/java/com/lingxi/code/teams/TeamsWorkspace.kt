@@ -12,6 +12,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -40,6 +41,9 @@ internal class TeamsPrefs(private val store: DataStore<Preferences>) {
 /** Unsent text of one conversation: kept in memory by the workspace only (Desktop parity), never on disk. */
 internal data class ComposerDraft(val text: String = "", val replyToId: String? = null, val editingId: String? = null, val targets: Set<String> = emptySet())
 
+/** The one team of a friend chat (docs/FRIENDS-CLIENTS.md D9): the signed-in account and the pair team's synthesized summary. */
+internal data class PairTeam(val uid: String, val summary: TeamSummary)
+
 /**
  * The app-level Teams workspace (SPEC-mobile-team-bot-ui section 6.6): one per process, started by the Teams tab or by the
  * first read of [TeamsBadge.count], stopped only by sign-out or an account change, never by a page closing.
@@ -50,6 +54,9 @@ internal data class ComposerDraft(val text: String = "", val replyToId: String? 
  * 3. Directory-only [TeamsUnreadWatcher]s for every other team (at most [MAX_WATCHED_TEAMS]) so the switcher and the tab badge
  *    know every team's unread count.
  * 4. The persisted selected team and collapsed sections ([TeamsPrefs]) and the in-memory composer drafts.
+ *
+ * With a [pair] it is a friend chat's workspace instead (see [pinned]): only [messagingModel] runs, on the pair team. [teamsModel]
+ * is never started, so nothing lists teams, selects one, watches the others or persists a selection.
  */
 internal class TeamsWorkspace(
     context: Context,
@@ -58,6 +65,7 @@ internal class TeamsWorkspace(
     private val db: FirebaseFirestore,
     private val prefs: TeamsPrefs,
     apiRoot: String = TEAMS_API_ROOT,
+    private val pair: PairTeam? = null,
 ) {
     val teamsModel = TeamsViewModel(scope, apiRoot, auth, db)
     val messagingModel = TeamMessagingModel(scope, File(context.noBackupFilesDir, "team-messages"), apiRoot, auth, db)
@@ -93,6 +101,11 @@ internal class TeamsWorkspace(
     fun start() {
         if (started) return
         started = true
+        if (pair != null) {
+            currentUid = pair.uid; startedTeam = pair.summary
+            messagingModel.start(pair.uid, pair.summary)
+            return
+        }
         teamsModel.start()
         scope.launch { teamsModel.state.collect { onTeams(it) } }
         scope.launch { messagingModel.state.collect { onMessaging(it) } }
@@ -170,6 +183,9 @@ internal class TeamsWorkspace(
 
     // --- what the screens call -----------------------------------------------------------------------
 
+    /** Ends a friend chat's workspace: its listeners and its coroutines. The process workspace is never closed. */
+    fun close() { messagingModel.reset(); scope.cancel() }
+
     fun selectTeam(teamId: String) { if (teamsModel.state.value.selectedId != teamId) teamsModel.select(teamId) }
 
     /** Opens a conversation's thread (its messages listener); "" closes it. */
@@ -205,6 +221,15 @@ internal class TeamsWorkspace(
         const val SECTION_BOTS = "bots"
 
         @Volatile private var instance: TeamsWorkspace? = null
+
+        /**
+         * The workspace of one friendship's chat (D9), pinned to its pair team so the Teams tab's workspace never sees that team. The
+         * caller starts it and [close]s it; it makes no `GET /v1/teams` and no team-detail call.
+         */
+        fun pinned(context: Context, pair: PairTeam): TeamsWorkspace = TeamsWorkspace(
+            context.applicationContext, CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+            FirebaseAuth.getInstance(), FirebaseFirestore.getInstance(), TeamsPrefs(context.applicationContext.teamsDataStore), pair = pair,
+        )
 
         /** The process-wide workspace, started on first use. */
         fun get(context: Context): TeamsWorkspace = instance ?: synchronized(this) {

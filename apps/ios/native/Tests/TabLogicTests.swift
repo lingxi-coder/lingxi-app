@@ -3,7 +3,8 @@ import XCTest
 @testable import LingxiCode
 
 /// Spec §8.6 shell logic against the shared vectors (`mobile.tabBarVisible`, `.tabForLink`,
-/// `.tabBadgeText`, `.botsBadgeCount`, `.settingsJump`). Android runs the same rows in `TabLogicTest`.
+/// `.tabBadgeText`, `.botsBadgeCount`, `.settingsJump`, and `links.tabForLink` of the Friends vectors).
+/// Android runs the same rows in `TabLogicTest`.
 final class TabLogicTests: XCTestCase {
     func testTabBarVisibleMatchesTheSharedRows() throws {
         let rows = try MobileVectors.rows("mobile", "tabBarVisible")
@@ -46,10 +47,25 @@ final class TabLogicTests: XCTestCase {
         }
     }
 
+    /// D16: Friends links open the Friends tab (`links.tabForLink` of `friends-vectors.json`); `friends/...` is no route.
+    func testTabForLinkMatchesTheFriendsRows() throws {
+        let rows = try FriendsVectors.rows("links", "tabForLink")
+        XCTAssertEqual(rows.count, 14)
+        for row in rows {
+            let route = try XCTUnwrap(row["route"] as? String)
+            XCTAssertEqual(TabLogic.tabForLink(route).rawValue, row["expect"] as? String, "route '\(route)'")
+        }
+    }
+
+    func testTheTabsAreChatsBotsTeamsFriendsSettings() {
+        XCTAssertEqual(AppTab.allCases, [.chats, .bots, .teams, .friends, .settings])
+    }
+
     func testLinkTargetsMapToTabs() {
         XCTAssertEqual(LinkTarget.chats.tab, .chats)
         XCTAssertEqual(LinkTarget.bots.tab, .bots)
         XCTAssertEqual(LinkTarget.teams.tab, .teams)
+        XCTAssertEqual(LinkTarget.friends.tab, .friends)
         XCTAssertEqual(LinkTarget.settings.tab, .settings)
         XCTAssertNil(LinkTarget.stay.tab)
         XCTAssertNil(LinkTarget.none.tab)
@@ -72,6 +88,9 @@ final class TabLogicTests: XCTestCase {
             ("lingxi://runtime/agent/r1", .chats),
             ("lingxi://remote/host1/session1", .bots),
             ("lingxi://team/inbox", .teams),
+            ("lingxi://friend/requests", .friends),
+            ("lingxi://friend/chat?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e", .friends),
+            ("lingxi://friend/add?code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-", .friends),
             ("lingxi://import/provider#payload=%7B%7D", .stay),
         ]
         XCTAssertNil(CanonicalDeepLink.parse("lingxi://session/abc"), "session links require their fixed mode")

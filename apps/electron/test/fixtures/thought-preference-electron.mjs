@@ -23,19 +23,20 @@ async function main() {
     text: document.querySelector('.desktop-stage').textContent
   })`);
   const assertAgentRows = async () => {
-    const rows = await evaluate(`Array.from(document.querySelectorAll('.transcript-agent-row')).map(row => {
+    const rows = await evaluate(`Array.from(document.querySelectorAll('.transcript-agent-row[data-agent-id]')).map(row => {
       const { top, bottom, left, right } = row.getBoundingClientRect();
       return { top, bottom, left, right };
     })`);
     assert.equal(rows.length, 2);
-    assert.ok(rows[1].top >= rows[0].bottom, 'agents are separate vertically stacked rows');
+    assert.ok(rows[1].top >= rows[0].bottom, 'expanded members have individually reachable rows');
     assert.equal(rows[0].left, rows[1].left);
-    assert.equal(rows[0].right, rows[1].right);
     assert.ok(await evaluate(`Array.from(document.querySelectorAll('.transcript-agent-row')).every(row => row.scrollWidth <= row.clientWidth)`), 'agent rows do not overflow');
   };
   try {
     await win.loadURL(url);
     for (let n = 0; n < 80 && !await evaluate('Boolean(window.thoughtFixture)'); n++) await wait();
+    assert.equal(await evaluate(`document.querySelectorAll('.transcript-agent-group-trigger').length`), 1);
+    await evaluate(`document.querySelector('.transcript-agent-group-trigger').click()`); await wait();
     await assertAgentRows();
     await evaluate(`document.querySelector('[data-agent-id="explorer"]').click()`); await wait();
     assert.equal(await evaluate(`document.querySelector('[data-opened-agent]').dataset.openedAgent`), 'explorer');
@@ -79,6 +80,8 @@ async function main() {
     await evaluate('window.thoughtFixture.switchSession()'); await wait();
     assert.equal((await state()).thinking, false, 'history never renders unfinished reasoning as active');
     assert.equal(await evaluate(`document.querySelector('.tool-group-trigger').getAttribute('aria-expanded')`), 'false', 'new session resets tool group expansion');
+    assert.equal(await evaluate(`document.querySelector('.transcript-agent-group-trigger').getAttribute('aria-expanded')`), 'false', 'new session resets agent group expansion');
+    await evaluate(`document.querySelector('.transcript-agent-group-trigger').click()`); await wait();
     await evaluate('window.thoughtFixture.restart()'); await wait();
     await evaluate('window.thoughtFixture.waitWithoutReasoning()'); await wait();
     assert.equal((await state()).thinking, true, 'waiting indicator works without reasoning deltas');

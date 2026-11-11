@@ -5,10 +5,10 @@ import Foundation
 // (`mobile.tabBarVisible`, `.tabForLink`, `.tabBadgeText`, `.botsBadgeCount`, `.settingsJump`).
 // Android has the identical contract in `tabs/TabLogic.kt`.
 
-/// Where an incoming link opens: one of the four tabs, `stay` (a shell-level sheet on whatever tab is
+/// Where an incoming link opens: one of the five tabs, `stay` (a shell-level sheet on whatever tab is
 /// showing) or `none` (not a link this build routes: the existing "unavailable" toast).
 enum LinkTarget: String, Equatable, Sendable {
-    case chats, bots, teams, settings, stay, none
+    case chats, bots, teams, friends, settings, stay, none
 
     /// The tab to select, or `nil` when the link keeps the current tab (`stay`) or is unknown (`none`).
     var tab: AppTab? {
@@ -16,6 +16,7 @@ enum LinkTarget: String, Equatable, Sendable {
         case .chats: .chats
         case .bots: .bots
         case .teams: .teams
+        case .friends: .friends
         case .settings: .settings
         case .stay, .none: nil
         }
@@ -51,6 +52,7 @@ enum TabLogic {
         case "session", "new", "project", "apps", "market", "runtime", "terminal", "cron": return .chats
         case "remote": return .bots
         case "team": return .teams
+        case "friend": return .friends
         case "settings", "provider", "extensions": return .settings
         case "import": return .stay
         default: return .none

@@ -78,6 +78,64 @@ test('status reads do not write Broker credentials and snapshots contain no secr
   assert.equal(JSON.stringify(snapshot).includes('private-key-a'), false);
 });
 
+test('selected API-key loading never probes or refreshes unrelated accounts', async () => {
+  const f = fixture();
+  try {
+    let snapshot = await f.service.command({ action: 'add', expectedRevision: 0, providerId: 'openai', executionBindingId: 'openai', authKind: 'api_key' }, 'selected-key');
+    snapshot = await f.service.command({ action: 'add', expectedRevision: snapshot.configRevision, providerId: 'openai', executionBindingId: 'openai-chatgpt', authKind: 'oauth' });
+    const selected = snapshot.accounts[0], reads: string[] = [], pendingChecks: string[] = [];
+    const resolve = f.storage.resolve;
+    f.storage.resolve = async reference => { reads.push(reference); return resolve(reference); };
+    f.storage.listStatus = async () => { throw new Error('Unrelated credential presence must not be probed'); };
+    f.tokens.hasPendingCommit = async reference => { pendingChecks.push(reference); return false; };
+    f.tokens.current = async () => { throw new Error('Unrelated OAuth refresh must not run'); };
+    const versions: string[] = [];
+    f.publish = async rows => { versions.push(...rows.map(row => row.accountId)); };
+    const launch = await f.service.launchApiKeyAccount(selected.accountId, 'openai', 'openai');
+    assert.deepEqual(Object.keys(launch.providerAccountCredentials), [selected.accountId]);
+    assert.deepEqual(reads, [`${selected.credentialRef.secretRef}.mutation`, selected.credentialRef.secretRef]);
+    assert.deepEqual(pendingChecks, [selected.credentialRef.secretRef]);
+    assert.deepEqual(versions, [selected.accountId]);
+    assert.deepEqual(launch.providerAccountCredentials[selected.accountId].kind, { kind: 'api_key', key: 'selected-key' });
+  } finally { await f.service.dispose(); }
+});
+
+test('selected API-key loading excludes disabled, mismatched and pending credentials', async () => {
+  for (const failure of ['disabled', 'provider', 'binding', 'identity', 'kind', 'pending'] as const) {
+    const f = fixture();
+    try {
+      const snapshot = await f.service.command({ action: 'add', expectedRevision: 0, providerId: 'openai', executionBindingId: 'openai', authKind: 'api_key' }, 'selected-key');
+      const account = snapshot.accounts[0], reference = account.credentialRef.secretRef;
+      if (failure === 'disabled') await f.service.command({ action: 'enable', expectedRevision: snapshot.configRevision, accountId: account.accountId, enabled: false });
+      if (failure === 'identity' || failure === 'kind') {
+        const stored = JSON.parse(f.storage.values.get(reference)!);
+        if (failure === 'identity') stored.identity_generation++;
+        else stored.kind = { kind: 'oauth', ...fresh, issuer: 'https://auth.openai.com', scopes: [] };
+        f.storage.values.set(reference, JSON.stringify(stored));
+      }
+      if (failure === 'pending') f.storage.values.set(`${reference}.mutation`, '{}');
+      f.tokens.current = async () => { throw new Error('OAuth refresh must not run'); };
+      const launch = await f.service.launchApiKeyAccount(account.accountId, failure === 'provider' ? 'other' : 'openai', failure === 'binding' ? 'other' : 'openai');
+      assert.deepEqual(Object.keys(launch.providerAccountCredentials), [], failure);
+    } finally { await f.service.dispose(); }
+  }
+});
+
+test('selected API-key loading rechecks account metadata after acquiring its mutation lock', async () => {
+  const f = fixture();
+  try {
+    const snapshot = await f.service.command({ action: 'add', expectedRevision: 0, providerId: 'openai', executionBindingId: 'openai', authKind: 'api_key' }, 'selected-key');
+    const account = snapshot.accounts[0];
+    const options = (f.service as unknown as { options: { withAccountMutationLock: (reference: string, operation: () => Promise<void>) => Promise<void> } }).options;
+    options.withAccountMutationLock = async (_reference, operation) => {
+      await f.registry({ action: 'enable', expectedRevision: snapshot.configRevision, accountId: account.accountId, enabled: false });
+      await operation();
+    };
+    const launch = await f.service.launchApiKeyAccount(account.accountId, 'openai', 'openai');
+    assert.deepEqual(Object.keys(launch.providerAccountCredentials), []);
+  } finally { await f.service.dispose(); }
+});
+
 test('two OAuth identities coexist; duplicate login cannot overwrite an existing grant', async () => {
   const f = fixture();
   let snapshot = await f.service.command({ action: 'add', expectedRevision: 0, providerId: 'openai', executionBindingId: 'openai-chatgpt', authKind: 'oauth', displayName: 'A' });

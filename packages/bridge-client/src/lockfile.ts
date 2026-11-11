@@ -10,6 +10,7 @@
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 
@@ -58,11 +59,22 @@ export function readLockfile(path: string): Lockfile {
   if (port === null) {
     throw new Error(`lockfile name not <port>.lock: ${path}`);
   }
-  const body = JSON.parse(readFileSync(path, 'utf8')) as LockfileBody;
+  return parseLockfile(path, port, readFileSync(path, 'utf8'));
+}
+
+function parseLockfile(path: string, port: number, source: string): Lockfile {
+  const body = JSON.parse(source) as LockfileBody;
   if (typeof body.authToken !== 'string' || body.authToken.length === 0) {
     throw new Error(`lockfile missing authToken: ${path}`);
   }
   return { path, port, body };
+}
+
+/** Capture one connection's discovery file without blocking the host event loop. */
+export async function readLockfileAsync(path: string): Promise<Lockfile> {
+  const port = portFromFilename(path);
+  if (port === null) throw new Error(`lockfile name not <port>.lock: ${path}`);
+  return parseLockfile(path, port, await readFile(path, 'utf8'));
 }
 
 /**
@@ -103,4 +115,23 @@ export function discoverLatestLockfile(dir: string = defaultBridgeDir()): Lockfi
   } catch {
     return null;
   }
+}
+
+/** Asynchronous discovery with bounded filesystem concurrency and the same selection rule. */
+export async function discoverLatestLockfileAsync(dir: string = defaultBridgeDir()): Promise<Lockfile | null> {
+  let entries: string[];
+  try { entries = await readdir(dir); } catch { return null; }
+  let best: { mtimeMs: number; path: string } | null = null;
+  for (let offset = 0; offset < entries.length; offset += 32) {
+    const candidates = await Promise.all(entries.slice(offset, offset + 32).map(async entry => {
+      if (portFromFilename(entry) === null) return null;
+      const path = join(dir, entry);
+      try { return { path, mtimeMs: (await stat(path)).mtimeMs }; } catch { return null; }
+    }));
+    for (const candidate of candidates) {
+      if (candidate && (best === null || candidate.mtimeMs > best.mtimeMs)) best = candidate;
+    }
+  }
+  if (!best) return null;
+  try { return await readLockfileAsync(best.path); } catch { return null; }
 }

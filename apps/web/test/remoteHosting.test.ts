@@ -61,17 +61,22 @@ test('the sign-in page has its own, lighter policy and the strict one does not a
 
 test('security zones have disjoint policy patterns', () => {
   const withPolicy = config.hosting.headers.filter((entry) => entry.headers.some((header) => header.key === 'Content-Security-Policy')).map((entry) => entry.source);
-  assert.deepEqual(withPolicy, ['/remote', '/remote/**', '/login/remote', '/teams', '/teams/**']);
+  assert.deepEqual(withPolicy, ['/remote', '/remote/**', '/login/remote', '/teams', '/teams/**', '/friends', '/friends/**']);
 });
 
-test('Teams alone gets Firestore connectivity and invitation links suppress referrers', () => {
+test('Teams and Friends alone get Firestore connectivity and invitation and friend links suppress referrers', () => {
   const teamPolicy = policyFor('/teams');
   assert.ok(teamPolicy);
   assert.equal(policyFor('/teams/**'), teamPolicy);
+  // Friends is in the teams security zone: the same policy, never cached, never leaking a friend code in a referrer (D1).
+  assert.equal(policyFor('/friends'), teamPolicy);
+  assert.equal(policyFor('/friends/**'), teamPolicy);
   assert.ok(directives(teamPolicy).get('connect-src')!.includes('https://firestore.googleapis.com'));
   assert.ok(!directives(policyFor('/remote')!).get('connect-src')!.includes('https://firestore.googleapis.com'));
-  for (const source of ['/teams', '/teams/**', '/open/team/join']) {
-    assert.equal(config.hosting.headers.find(entry => entry.source === source)?.headers.find(header => header.key === 'Referrer-Policy')?.value, 'no-referrer');
+  for (const source of ['/teams', '/teams/**', '/friends', '/friends/**', '/open/team/join', '/open/friend/add']) {
+    const headers = config.hosting.headers.find(entry => entry.source === source)?.headers;
+    assert.equal(headers?.find(header => header.key === 'Referrer-Policy')?.value, 'no-referrer', source);
+    assert.equal(headers?.find(header => header.key === 'Cache-Control')?.value, 'no-store', source);
   }
 });
 
@@ -83,8 +88,8 @@ const globToRegExp = (glob: string): RegExp => {
 };
 const matches = (source: string, route: string): boolean => globToRegExp(source).test(route);
 
-test('membership requests reach teamsApi before the general catalog rewrite', () => {
-  for (const route of ['/v1/teams', '/v1/teams/session', '/v1/teams/team-test']) {
+test('membership and friend requests reach teamsApi before the general catalog rewrite', () => {
+  for (const route of ['/v1/teams', '/v1/teams/session', '/v1/teams/team-test', '/v1/friends', '/v1/friends/profile']) {
     assert.deepEqual(config.hosting.rewrites.find(entry => matches(entry.source, route))?.function,
       { functionId: 'teamsApi', region: 'us-central1' });
   }

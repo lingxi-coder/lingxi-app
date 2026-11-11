@@ -8,14 +8,14 @@ import { CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT, CH_SESSION_METADATA_C
 import { DiagnosticBuffer } from '../src/main/host-utils';
 
 const sessionId = '11111111-2222-4333-8444-555555555555';
-test('archive persists metadata and unpins without touching the transcript; restore clears marker', () => {
+test('archive persists metadata and unpins without touching the transcript; restore clears marker', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'lingxi-archive-'));
   const projectPath = realpathSync.native(dir);
   try {
     const settings = new SettingsStore(dir);
     const ref = { projectPath, sessionId };
     settings.addProject(projectPath);
-    settings.conversationSpaces.register({ ...ref, projectId: projectPath, mode: 'code' });
+    await settings.conversationSpaces.register({ ...ref, projectId: projectPath, mode: 'code' });
     settings.setActiveSession(ref);
     settings.setSessionPinned({ ...ref, title: 'Saved chat', pinnedAt: new Date().toISOString() }, true);
     const transcript = join(dir, 'transcript.jsonl');
@@ -116,7 +116,7 @@ test('cold archive preflight retains the exact source and uses its project sched
   const directory = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-archive-capture-')));
   const settings = new SettingsStore(join(directory, 'settings'));
   settings.addProject(directory);
-  settings.conversationSpaces.register({ projectPath: directory, projectId: directory, sessionId, mode: 'code' });
+  await settings.conversationSpaces.register({ projectPath: directory, projectId: directory, sessionId, mode: 'code' });
   const path = join(directory, `${sessionId}.jsonl`);
   const content = '{"type":"user"}\n';
   writeFileSync(path, content);
@@ -227,7 +227,7 @@ test('Global archive uses the Global scheduler and fails closed when it is unava
   const settings = new SettingsStore(directory);
   const projectPath = settings.conversationSpaces.globalWorkspaces.chat;
   const ref = { projectPath, sessionId };
-  settings.conversationSpaces.register({ ...ref, projectId: null, mode: 'chat' });
+  await settings.conversationSpaces.register({ ...ref, projectId: null, mode: 'chat' });
   const path = join(projectPath, `${sessionId}.jsonl`);
   const captured = { requested: ref, source: { ref: { ...ref, mode: 'chat' }, transcriptPath: path },
     owner: { ...ref, mode: 'chat', projectId: null },
@@ -258,18 +258,20 @@ test('opening an archived chat restores it only after the existing session resum
     const settings = new SettingsStore(dir);
     const ref = { projectPath, sessionId };
     settings.addProject(projectPath);
-    settings.conversationSpaces.register({ ...ref, projectId: projectPath, mode: 'code' });
+    await settings.conversationSpaces.register({ ...ref, projectId: projectPath, mode: 'code' });
     settings.setSessionArchived(ref, true, 'Saved chat');
-    let fail = true;
+    let fail = true, activated = false;
     const row = { uuid: sessionId, mode: 'code', path: join(projectPath, `${sessionId}.jsonl`), empty_session: false };
-    const bridge = { get: () => undefined, isProjectClosing: () => false, openSession: async () => { if (fail) throw new Error('resume failed'); } };
+    const bridge = { activateSession: () => { activated = true; }, get: () => undefined, isProjectClosing: () => false, openSession: async () => { if (fail) throw new Error('resume failed'); } };
     const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { find: async () => row, select: async () => row, list: async () => ({ sessions: [row] }), invalidate: () => undefined } as any);
     (host as any).bootstrap = () => ({ settings: settings.getPublic() });
     await assert.rejects((host as any).openSessionAndActivateInternal(ref, { scope: 'current', transcriptPath: row.path }), /resume failed/);
     assert.equal(settings.isSessionArchived(ref), true);
+    assert.equal(activated, false);
     fail = false;
     await (host as any).openSessionAndActivateInternal(ref, { scope: 'current', transcriptPath: row.path });
     assert.equal(new SettingsStore(dir).isSessionArchived(ref), false);
+    assert.equal(activated, true);
     assert.equal(settings.getPublic().activeSession?.sessionId, sessionId);
     assert.equal((host as any).catalogs.get(projectPath).sessions[0].uuid, sessionId);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -282,9 +284,9 @@ test('failure to create the replacement keeps the durable archive and cleared ac
     const settings = new SettingsStore(dir);
     const ref = { projectPath, sessionId };
     settings.addProject(projectPath);
-    settings.conversationSpaces.register({ ...ref, projectId: projectPath, mode: 'code' });
+    await settings.conversationSpaces.register({ ...ref, projectId: projectPath, mode: 'code' });
     settings.setActiveSession(ref);
-    settings.conversationSpaces.setMode('code');
+    await settings.conversationSpaces.setMode('code');
     const runtime = { projectPath, sessionMode: 'code', connectionState: { status: 'connected' }, beginArchive: () => () => {}, manageCron: async () => [] };
     const bridge = { get: () => runtime, isProjectClosing: () => false, withBackgroundSession: async (_ref: unknown, _empty: unknown, _model: unknown, operation: (runtime: any) => Promise<unknown>) => operation(runtime), closeSession: async () => {}, newSession: async () => { throw new Error('fixture launch failure'); } };
     const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { list: async () => ({ sessions: [] }), invalidate: () => undefined } as any);

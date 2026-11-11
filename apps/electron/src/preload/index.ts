@@ -12,6 +12,7 @@ import { CH_COMPUTER_SETTINGS, CH_COMPUTER_SETTINGS_CHANGED, type ComputerSettin
 import { ModUiIpcQueue } from '../shared/modUiIpcQueue';
 import type { AccountApi, AccountState } from '../shared/account.js';
 import type { DesktopTeamsApi } from '../../../../packages/teams';
+import type { DesktopFriendsApi } from '../../../../packages/teams/friends';
 import { CH_APPLICATION_MENU, type ApplicationMenuAction } from '../shared/applicationMenu.js';
 import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectCreationPurpose, type ProjectFolderSelection } from '../shared/projectCreation.js';
 import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE, type NativeRealtimeAudioCommand, type NativeRealtimeAudioState } from '../shared/realtimeAudio.js';
@@ -281,6 +282,7 @@ export interface LingxiApi {
   isElectron: true;
   account: AccountApi;
   teams: DesktopTeamsApi;
+  friends: DesktopFriendsApi;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
   openSettingsFile(path: string): Promise<void>;
@@ -375,10 +377,25 @@ async function teamsRequest<T>(command: unknown): Promise<T> {
   if (result.error) throw new Error(result.error);
   return result.value;
 }
+async function friendsRequest<T>(command: unknown): Promise<T> {
+  const result = await ipcRenderer.invoke('lingxi:friends', command) as { value: T; error?: string };
+  if (result.error) throw new Error(result.error);
+  return result.value;
+}
 function subscribe<T>(channel: string, callback: (payload: T) => void): Unsubscribe {
   const listener = (_event: IpcRendererEvent, payload: T): void => callback(payload);
   ipcRenderer.on(channel, listener);
   return () => ipcRenderer.removeListener(channel, listener);
+}
+
+/** One of the account's three Friends collections, as plain rows on every change; a failed watch is reported once and is over. */
+function watchFriends<T>(uid: string, collection: 'friends' | 'blocks' | 'teamOffers', next: (rows: T[]) => void, failed: (code: string) => void): Unsubscribe {
+  const leaseId = crypto.randomUUID();
+  let closed = false;
+  const stopRows = subscribe('lingxi:friends:rows', (event: { leaseId: string; rows: T[] }) => { if (event.leaseId === leaseId) next(event.rows); });
+  const stopFailed = subscribe('lingxi:friends:failed', (event: { leaseId: string; code: string }) => { if (event.leaseId === leaseId) failed(event.code); });
+  void friendsRequest({ type: 'watch', uid, collection, leaseId }).catch(error => { if (!closed) failed(error instanceof Error ? error.message : 'SERVICE_UNAVAILABLE'); });
+  return () => { closed = true; stopRows(); stopFailed(); void friendsRequest({ type: 'unwatch', uid, leaseId }).catch(() => undefined); };
 }
 
 function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelope<ClientEvent>) => void): Unsubscribe {
@@ -506,6 +523,14 @@ const api: LingxiApi = {
     },
     execute: (uid, command) => teamsRequest({ type: 'execute', uid, command }),
     onChanged: callback => subscribe('lingxi:teams:changed', callback),
+  },
+  friends: {
+    profile: uid => friendsRequest({ type: 'profile', uid }),
+    execute: (uid, command) => friendsRequest({ type: 'execute', uid, command }),
+    watchCards: (uid, next, failed) => watchFriends(uid, 'friends', next, failed),
+    watchBlocks: (uid, next, failed) => watchFriends(uid, 'blocks', next, failed),
+    watchOffers: (uid, next, failed) => watchFriends(uid, 'teamOffers', next, failed),
+    readProfile: (uid, friendUid) => friendsRequest({ type: 'readProfile', uid, friendUid }),
   },
   scheduled: {
     context: (scopeId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'context', scopeId }),

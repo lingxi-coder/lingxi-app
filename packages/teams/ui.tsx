@@ -5,6 +5,17 @@ import { conversationParticipants, type Identity, type TeamsSnapshot } from './w
 /** Layout effects warn on the server; there they are plain effects. */
 export const useIsoLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
+/** Whether the page is visible; true where there is no document. */
+export function useDocumentShown(): boolean {
+  const [shown, setShown] = useState(() => typeof document === 'undefined' || document.visibilityState !== 'hidden');
+  useEffect(() => {
+    const change = () => setShown(document.visibilityState !== 'hidden');
+    document.addEventListener('visibilitychange', change);
+    return () => document.removeEventListener('visibilitychange', change);
+  }, []);
+  return shown;
+}
+
 // ─── Avatars ────────────────────────────────────────────────────────────────
 
 /**
@@ -49,6 +60,11 @@ export function Avatar({ identity, size, render }: { identity: Identity; size: n
     style={{ width: size, height: size, fontSize: Math.max(10, Math.round(size * 0.42)), background: avatarColor(identity.id) }}>{initials(identity.name)}</span>;
 }
 
+/** A team's square mark: its initials on a color that stays the same for the team. */
+export function TeamMark({ id, name }: { id: string; name: string }): ReactElement {
+  return <span className="tw-team-mark" aria-hidden="true" style={{ background: avatarColor(id) }}>{initials(name)}</span>;
+}
+
 /** Up to `max` avatars, then "+N". */
 export function AvatarStack({ identities, size, render, max = 3, more }: { identities: Identity[]; size: number; render?: RenderAvatar; max?: number; more: (count: number) => string }): ReactElement {
   const shown = identities.slice(0, max), rest = identities.length - shown.length;
@@ -80,6 +96,7 @@ export function ConversationLead({ conversation, label, snapshot, zh, size = 28,
 
 const paths = {
   chevronDown: 'M6 9l6 6 6-6',
+  chevronLeft: 'M15 6l-6 6 6 6',
   chevronRight: 'M9 6l6 6-6 6',
   plus: 'M12 5v14M5 12h14',
   more: 'M5 12h.01M12 12h.01M19 12h.01',
@@ -94,6 +111,7 @@ const paths = {
   arrowDown: 'M12 5v14M6 13l6 6 6-6',
   panel: 'M4 5h16v14H4zM15 5v14',
   copy: 'M9 9h11v11H9zM5 15V5h10',
+  bot: 'M12 8V4H8M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2zM2 14h2M20 14h2M15 13v2M9 13v2',
 } as const;
 export type IconName = keyof typeof paths;
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }): ReactElement {

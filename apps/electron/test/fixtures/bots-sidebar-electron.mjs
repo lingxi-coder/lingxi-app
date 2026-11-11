@@ -38,7 +38,7 @@ try {
   await win.loadURL(url);
   await wait(`document.querySelector('${rail('Bots')}')`);
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button')).map(button => button.getAttribute('aria-label'))`),
-    ['Home', 'Bots', 'Teams', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
+    ['Home', 'Bots', 'Teams', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
   assert.equal(await run(`document.querySelector('.desktop-rail-divider').previousElementSibling.getAttribute('aria-label')`), 'Apps');
   assert.deepEqual(await marked(), ['Home']);
   assert.equal(await run(`Boolean(document.querySelector('.sidebar-new-chat'))`), true, 'Home lists the projects and has its own New chat');
@@ -287,7 +287,7 @@ try {
   await wait(`document.querySelector('${rail('Home')}[data-active]') && document.querySelector('.sidebar-new-chat')`);
   await delay(150);
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button')).map(button => button.getAttribute('aria-label'))`),
-    ['Home', 'Teams', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
+    ['Home', 'Teams', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
   assert.equal(await shown('.bots-page'), false);
   assert.equal((await calls()).filter(call => call[0] === 'updateSettings').length, 0);
   await menuAction('bots');

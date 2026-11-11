@@ -1,4 +1,4 @@
-/* Tool activity stays on the transcript surface. Interaction changes ink only. */
+/* Calm, compact activity rows. Disclosures stay discoverable without hover. */
 .transcript-tool-row:not([data-kind='permission']) { background: transparent; transition: none; }
 .transcript-tool-row:not([data-kind='permission']):is(:hover, :focus-within) {
   background: transparent;
@@ -7,6 +7,7 @@
 }
 .transcript-tool-row .tool-call-summary { width: auto; flex: 1; overflow: hidden; }
 .transcript-tool-row .tool-row-title { flex: 0 1 auto !important; gap: 4px; }
+.transcript-tool-row .tool-row-title > span:not([dir='ltr']) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .transcript-tool-row .tool-row-icon { color: var(--tool-icon-color); }
 .transcript-tool-row .tool-row-action { flex-shrink: 0; }
 .transcript-tool-row .tool-row-argument { font-size: inherit !important; line-height: inherit; }
@@ -14,27 +15,39 @@
 .transcript-tool-row .tool-row-qualifier { color: var(--tool-argument-color); font-size: 12px; }
 .transcript-tool-row .tool-row-diff-stats { flex-shrink: 0; color: var(--tool-label-color); font-size: 12px; font-variant-numeric: tabular-nums; }
 .transcript-tool-row .tool-row-state-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--tool-state-color); }
-.transcript-tool-row .tool-row-response { margin-left: auto; }
-.transcript-tool-row :is(.tool-row-title, .tool-row-icon, .tool-row-diff-stats) { opacity: .82; transition: color 120ms ease, opacity 120ms ease; }
+.transcript-tool-row:not([data-kind='permission']) .tool-row-response { margin-left: 0; flex: 0 1 auto; max-width: 40%; opacity: 1; }
+.transcript-tool-row .tool-row-inline-detail { opacity: 1; }
+.transcript-tool-row:not([data-kind='permission']) .tool-row-response::before { content: '·'; margin-right: .45rem; }
+.transcript-tool-row .tool-row-status { padding: 0; border-radius: 0; background: transparent; font-size: .75rem; font-weight: 450; }
+.transcript-tool-row :is(.tool-row-title, .tool-row-icon, .tool-row-diff-stats) { transition: color 120ms ease, opacity 120ms ease; }
 .transcript-tool-row:is(:hover, :focus-within) :is(.tool-row-title, .tool-row-icon, .tool-row-file, .tool-row-qualifier, .tool-row-diff-stats, .tool-row-response) { color: var(--tool-focus-color); opacity: 1; }
 .transcript-tool-row .tool-disclosure-trigger,
 .transcript-tool-row .tool-disclosure-trigger:is(:hover, :focus, :focus-visible, :active) {
   background: transparent !important; scale: 1; outline: none; transition: color 120ms ease, opacity 120ms ease;
 }
-.transcript-tool-row .tool-disclosure-trigger .transcript-disclosure-chevron { color: var(--tool-label-color); opacity: 0; }
+.transcript-tool-row .tool-disclosure-trigger[aria-expanded] .transcript-disclosure-chevron { color: var(--tool-label-color); opacity: .7; }
 .transcript-tool-row .tool-disclosure-trigger:is(:hover, :focus-visible) .transcript-disclosure-chevron { color: var(--tool-focus-color); opacity: 1; }
 .transcript-tool-group > .tool-group-trigger {
-  width: fit-content !important; background: transparent !important; opacity: .82; transition: color 120ms ease, opacity 120ms ease;
+  width: fit-content !important; max-width: 100%; background: transparent !important; transition: color 120ms ease, opacity 120ms ease;
 }
 .tool-group-icon { width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.tool-group-state { flex-shrink: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+.tool-group-state { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; }
+.tool-group-state[data-unsuccessful] { color: var(--tool-group-danger); }
 .tool-group-calls { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 4px 9px; padding-left: 19px; border-left: 1px solid var(--tool-group-border); min-width: 0; }
 .transcript-tool-group > .tool-group-trigger:is(:hover, :focus, :focus-visible, :active) {
   background: transparent !important; color: var(--tool-focus-color) !important; opacity: 1; outline: none; scale: 1;
 }
-.transcript-tool-group > .tool-group-trigger[aria-expanded] .transcript-disclosure-chevron { opacity: 0; }
+.transcript-tool-group > .tool-group-trigger[aria-expanded] .transcript-disclosure-chevron { opacity: .7; }
 .transcript-tool-group > .tool-group-trigger:is(:hover, :focus-visible) .transcript-disclosure-chevron { opacity: 1; }
+.transcript-tool-row .tool-disclosure-trigger:focus-visible,
+.transcript-tool-group > .tool-group-trigger:focus-visible { outline: 2px solid var(--tool-focus-ring); outline-offset: -2px; }
+.transcript-tool-row .tool-disclosure-trigger:active,
+.transcript-tool-group > .tool-group-trigger:active { opacity: .65; transition: none; }
 .transcript-tool-group .tool-group-summary-text { line-height: 1.5; }
+@media (pointer: coarse) {
+  .transcript-tool-row .tool-disclosure-trigger,
+  .transcript-tool-group > .tool-group-trigger { min-height: 44px !important; }
+}
 @media (prefers-reduced-motion: reduce) {
   .transcript-tool-row :is(.tool-row-title, .tool-row-icon, .tool-row-diff-stats, .tool-disclosure-trigger),
   .transcript-tool-group > .tool-group-trigger, .transcript-disclosure-chevron { transition: none; }
@@ -42,4 +55,13 @@
 @media (prefers-contrast: more) {
   .transcript-tool-row :is(.tool-row-title, .tool-row-icon),
   .transcript-tool-group > .tool-group-trigger { opacity: 1; }
+  .transcript-tool-row .tool-row-status { outline: none; font-weight: 600; }
+  .transcript-tool-row .tool-disclosure-trigger[aria-expanded] .transcript-disclosure-chevron,
+  .transcript-tool-group > .tool-group-trigger[aria-expanded] .transcript-disclosure-chevron { opacity: 1; }
 }
+
+/* Application work reads as one local summary, with its disclosure beside it. */
+.transcript-tool-row[data-kind='local-app'] .tool-disclosure-trigger { width: fit-content !important; gap: 9px !important; }
+.transcript-tool-row[data-kind='local-app'] .tool-call-summary { flex: 0 1 auto; }
+.transcript-tool-row[data-kind='local-app'] .tool-row-title { gap: 8px; }
+.transcript-tool-row[data-kind='local-app'] .tool-row-argument { direction: ltr !important; text-align: left; }

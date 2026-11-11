@@ -24,7 +24,7 @@ class DeepLinkInbox(private val saved: SavedStateHandle) : ViewModel() {
     }
     fun next(readiness: DeepLinkReadiness): String? {
         val first = mutable.value.firstOrNull() ?: return null
-        val independent = DeepLink.parse(first)?.route?.let { it.startsWith("team/") || it.startsWith("market/bot/") } == true
+        val independent = DeepLink.parse(first)?.route?.let { it.startsWith("team/") || it.startsWith("friend/") || it.startsWith("market/bot/") } == true
         return first.takeIf { readiness.canNavigate || (independent && readiness.foreground && readiness.onboardingComplete && !readiness.blockingSurfaceOpen) }
     }
     fun complete(raw: String) {

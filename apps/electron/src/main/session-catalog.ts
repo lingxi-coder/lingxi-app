@@ -15,6 +15,12 @@ import { sessionCatalogScope, type SessionCatalogScope, type SessionOpenSelectio
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SESSIONS = 200;
 const DEFAULT_CACHE_TTL_MS = 15_000;
+const MAX_CATALOG_CHILDREN = 2;
+const MAX_QUEUED_CATALOG_OPERATIONS = 512;
+const MAX_WORKER_FRAME_BYTES = MAX_OUTPUT_BYTES * 2 + 4_096;
+const MAX_WORKER_REQUEST_BYTES = 64 * 1024;
+const DEFAULT_WORKER_IDLE_MS = 30_000;
+const CHILD_TERMINATION_RETRY_MS = 100;
 
 export interface ProviderAccountConfiguration {
   profilesJson: string;
@@ -30,6 +36,10 @@ export interface ProjectSessionCatalogOptions {
   timeoutMs?: number;
   /** Keep project metadata warm while session/runtime work is in flight. */
   cacheTtlMs?: number;
+  /** Use the metadata-only worker; false retains the public oneshot CLI path. */
+  catalogWorker?: boolean;
+  /** Retire an unused metadata worker rather than keeping its pipes/resources open. */
+  workerIdleMs?: number;
   /**
    * Read this configuration home instead of the default one. The catalog modes
    * of the bridge server take the home from `LINGXI_CONFIG_DIR` only (they
@@ -63,6 +73,244 @@ export interface ProjectSessionCatalogRow extends SessionRowDto {
 interface CatalogCacheEntry {
   result: ProjectSessionCatalogResult;
   expiresAt: number;
+}
+
+/** A lease covers the child's lifetime, including a timed-out writer's drain. */
+class CatalogChildAdmission {
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
+  private readonly idle = new Map<() => void, () => void>();
+  private readonly unreaped = new Set<() => void>();
+
+  start<T>(start: (release: () => void) => T, waitMs = 15_000): Promise<Awaited<T>> {
+    return new Promise<Awaited<T>>((resolve, reject) => {
+      const launch = () => {
+        this.active++;
+        let released = false;
+        const release = () => {
+          if (released) return;
+          released = true;
+          this.idle.delete(release);
+          this.unreaped.delete(release);
+          this.active--;
+          this.drain();
+        };
+        try { resolve(start(release) as Awaited<T>); }
+        catch (error) { release(); reject(error); }
+      };
+      if (this.active < MAX_CATALOG_CHILDREN && this.waiting.length === 0) launch();
+      else if (this.waiting.length >= MAX_QUEUED_CATALOG_OPERATIONS) reject(this.busyError());
+      else {
+        const admitted = () => { clearTimeout(timeout); launch(); };
+        const timeout = setTimeout(() => {
+          const index = this.waiting.indexOf(admitted);
+          if (index < 0) return;
+          this.waiting.splice(index, 1);
+          reject(this.busyError());
+          this.drain();
+        }, waitMs);
+        timeout.unref();
+        this.waiting.push(admitted);
+        this.drain();
+      }
+    });
+  }
+
+  busy(release: () => void): void { this.idle.delete(release); }
+
+  notReaped(release: () => void): void { this.unreaped.add(release); }
+
+  private busyError(): Error {
+    return new Error(this.unreaped.size > 0
+      ? 'session catalog is busy; a previous metadata child has not closed after termination was attempted'
+      : 'session catalog is busy; try again shortly');
+  }
+
+  markIdle(release: () => void, retire: () => void): void {
+    this.idle.set(release, retire);
+    this.drain();
+  }
+
+  private drain(): void {
+    while (this.waiting.length > 0 && this.active < MAX_CATALOG_CHILDREN) this.waiting.shift()!();
+    // A persistent reader must give up its process slot when another helper,
+    // especially a durable metadata writer, is waiting to start.
+    if (this.waiting.length > 0) {
+      const idle = this.idle.entries().next().value;
+      if (idle) { this.idle.delete(idle[0]); idle[1](); }
+    }
+  }
+}
+
+const catalogChildren = new CatalogChildAdmission();
+
+/** Signalling is an attempt; only the ChildProcess close event returns its lease. */
+class CatalogChildTermination {
+  private requested = false;
+  private exited = false;
+  private closed = false;
+  private retry?: ReturnType<typeof setTimeout>;
+
+  constructor(private readonly child: ReturnType<typeof spawn>, private readonly release: () => void) {
+    const stopRetries = () => { if (this.retry) clearTimeout(this.retry); this.retry = undefined; };
+    child.once('exit', () => { this.exited = true; stopRetries(); });
+    child.once('close', () => { this.closed = true; stopRetries(); });
+  }
+
+  error(): void {
+    if (this.requested && !this.closed && !this.exited) catalogChildren.notReaped(this.release);
+  }
+
+  stop(): void {
+    if (this.requested || this.closed || this.exited) return;
+    this.requested = true;
+    // EOF lets a private reader stop normally even if signal delivery fails.
+    try { this.child.stdin?.end(); } catch { /* Signal attempts below remain bounded. */ }
+    this.signal('SIGTERM');
+    if (this.closed || this.exited) return;
+    this.retry = setTimeout(() => {
+      this.retry = undefined;
+      if (this.closed || this.exited) return;
+      this.signal('SIGKILL');
+      if (this.closed || this.exited) return;
+      this.retry = setTimeout(() => {
+        this.retry = undefined;
+        if (!this.closed && !this.exited) catalogChildren.notReaped(this.release);
+      }, CHILD_TERMINATION_RETRY_MS);
+      this.retry.unref();
+    }, CHILD_TERMINATION_RETRY_MS);
+    this.retry.unref();
+  }
+
+  private signal(signal: NodeJS.Signals): void {
+    if (this.closed || this.exited) return;
+    try { if (!this.child.kill(signal)) this.error(); }
+    catch { this.error(); }
+  }
+}
+
+interface CatalogWorkerQuery {
+  cwd: string;
+  sessionId?: string;
+  scope?: SessionCatalogScope;
+  transcriptPath?: string;
+}
+
+/** One request at a time bounds worker IO; catalog callers retain their own deduplication. */
+class CatalogWorker {
+  private nextId = 0;
+  private current?: { id: number; resolve(output: string): void; reject(error: Error): void; timeout: ReturnType<typeof setTimeout> };
+  private parts: Buffer[] = [];
+  private bytes = 0;
+  private stderr = Buffer.alloc(0);
+  private idleTimer?: ReturnType<typeof setTimeout>;
+  private alive = true;
+  private retiring = false;
+  private readonly termination: CatalogChildTermination;
+
+  constructor(
+    private readonly child: ReturnType<typeof spawn>,
+    private readonly release: () => void,
+    private readonly timeoutMs: number,
+    private readonly idleMs: number,
+  ) {
+    this.termination = new CatalogChildTermination(child, release);
+    child.stdout!.on('data', (chunk: Buffer | string) => this.receive(typeof chunk === 'string' ? Buffer.from(chunk) : chunk));
+    child.stderr!.on('data', (chunk: Buffer | string) => {
+      const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+      this.stderr = Buffer.concat([this.stderr, bytes.subarray(Math.max(0, bytes.length - 16 * 1024))]).subarray(-16 * 1024);
+    });
+    child.stdin!.on('error', () => this.fail(new Error('session catalog worker input failed')));
+    child.on('error', (error) => {
+      this.termination.error();
+      this.fail(new Error(`session catalog failed to start: ${error.message}`));
+    });
+    child.once('close', (code, signal) => {
+      this.alive = false;
+      let firstCodepoint = 0;
+      while (firstCodepoint < Math.min(3, this.stderr.length) && (this.stderr[firstCodepoint] & 0xc0) === 0x80) firstCodepoint++;
+      const diagnostic = this.stderr.toString('utf8', firstCodepoint).trim();
+      this.fail(new Error(`session catalog failed (code=${code ?? 'null'}, signal=${signal ?? 'null'}): ${diagnostic || 'worker closed'}`));
+      this.release();
+    });
+  }
+
+  get available(): boolean { return this.alive && !this.retiring; }
+
+  request(query: CatalogWorkerQuery): Promise<string> {
+    if (!this.available || this.current) return Promise.reject(new Error('session catalog worker is unavailable'));
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    catalogChildren.busy(this.release);
+    const id = ++this.nextId;
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => this.fail(new Error('session catalog timed out')), this.timeoutMs);
+      timeout.unref();
+      this.current = { id, resolve, reject, timeout };
+      const frame = `${JSON.stringify({ version: 1, id, ...query })}\n`;
+      if (Buffer.byteLength(frame, 'utf8') > MAX_WORKER_REQUEST_BYTES) { this.fail(new Error('session catalog request is too large')); return; }
+      try { this.child.stdin!.write(frame); }
+      catch { this.fail(new Error('session catalog worker input failed')); }
+    });
+  }
+
+  retire(): void {
+    this.retiring = true;
+    if (!this.current) this.stop();
+  }
+
+  private stop(): void {
+    this.retiring = true;
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    catalogChildren.busy(this.release);
+    if (this.alive) this.termination.stop();
+  }
+
+  private fail(error: Error): void {
+    const current = this.current;
+    this.current = undefined;
+    this.parts = [];
+    this.bytes = 0;
+    if (current) { clearTimeout(current.timeout); current.reject(error); }
+    this.stop();
+  }
+
+  private receive(chunk: Buffer): void {
+    if (!this.available && !this.current) return;
+    let start = 0;
+    while (start < chunk.length) {
+      const newline = chunk.indexOf(10, start);
+      const end = newline < 0 ? chunk.length : newline;
+      const part = chunk.subarray(start, end);
+      this.bytes += part.length;
+      if (this.bytes > MAX_WORKER_FRAME_BYTES) { this.fail(new Error('session catalog output is too large')); return; }
+      this.parts.push(part);
+      if (newline < 0) return;
+      const frame = Buffer.concat(this.parts, this.bytes).toString('utf8');
+      this.parts = []; this.bytes = 0;
+      let value: { version?: unknown; id?: unknown; output?: unknown; error?: unknown };
+      try { value = JSON.parse(frame); }
+      catch { this.fail(new Error('session catalog returned invalid worker JSON')); return; }
+      const current = this.current;
+      if (!current || value?.version !== 1 || value.id !== current.id
+        || (typeof value.output !== 'string' && typeof value.error !== 'string')) {
+        this.fail(new Error('session catalog returned an invalid worker response')); return;
+      }
+      this.current = undefined;
+      clearTimeout(current.timeout);
+      if (typeof value.error === 'string') current.reject(new Error(value.error));
+      else {
+        try { current.resolve(boundedOutput(value.output as string)); }
+        catch (error) { current.reject(error instanceof Error ? error : new Error(String(error))); this.retiring = true; }
+      }
+      if (this.retiring) this.stop();
+      else {
+        this.idleTimer = setTimeout(() => this.retire(), this.idleMs);
+        this.idleTimer.unref();
+        catalogChildren.markIdle(this.release, () => this.retire());
+      }
+      start = newline + 1;
+    }
+  }
 }
 
 function boundedOutput(value: string): string {
@@ -137,6 +385,12 @@ export class ProjectSessionCatalog {
   private readonly pendingSessions = new Map<string, Promise<ProjectSessionCatalogResult>>();
   private nativeProductPaths?: Promise<ProductPaths>;
   private generation = 0;
+  private worker?: CatalogWorker;
+  private workerKey?: string;
+  private workerPending?: Promise<CatalogWorker>;
+  private catalogTail: Promise<void> = Promise.resolve();
+  private catalogQueued = 0;
+  private disposed = false;
 
   constructor(private readonly options: ProjectSessionCatalogOptions = {}) {}
 
@@ -150,6 +404,7 @@ export class ProjectSessionCatalog {
   async mutateMetadataSource(projectPath: string, receipt: string, action: 'rename' | 'touch' | 'verify', title?: string): Promise<void> {
     const result = await this.metadataRequest(projectPath, { action, receipt, ...(title === undefined ? {} : { title }) });
     if (result.ok !== true) throw new Error('Invalid session metadata result.');
+    if (action === 'rename' || action === 'touch') this.invalidate(projectPath);
   }
 
   private async metadataRequest(projectPath: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -330,8 +585,16 @@ export class ProjectSessionCatalog {
     this.cache.clear();
     this.pending.clear();
     this.pendingSessions.clear();
+    // Retire after the current captured response; a mutation must never reuse
+    // projections from before its durable revision/generation boundary.
+    this.worker?.retire();
+    this.worker = undefined;
+    this.workerKey = undefined;
     void projectPath;
   }
+
+  /** Release metadata resources when the owning Host is disposed. */
+  dispose(): void { this.disposed = true; this.invalidate(); }
 
   private load(projectPath: string, scope: SessionCatalogScope): Promise<ProjectSessionCatalogResult> {
     const canonical = realpathSync.native(projectPath);
@@ -369,6 +632,25 @@ export class ProjectSessionCatalog {
   }
 
   private run(canonical: string, sessionId?: string, scope?: SessionCatalogScope, transcriptPath?: string): Promise<ProjectSessionCatalogResult> {
+    if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
+    if (this.options.catalogWorker !== false) {
+      if (this.catalogQueued >= MAX_QUEUED_CATALOG_OPERATIONS) return Promise.reject(new Error('session catalog is busy; try again shortly'));
+      this.catalogQueued++;
+      const operation = this.catalogTail.then(async () => {
+        if (this.disposed) throw new Error('session catalog is disposed');
+        const worker = await this.getWorker(canonical);
+        try {
+          return parseCatalog(await worker.request({ cwd: canonical, ...(sessionId ? { sessionId } : {}),
+            ...(scope ? { scope } : {}), ...(transcriptPath ? { transcriptPath } : {}) }));
+        } catch (error) {
+          worker.retire();
+          if (this.worker === worker) this.worker = undefined;
+          throw error;
+        }
+      });
+      this.catalogTail = operation.then(() => undefined, () => undefined);
+      return operation.finally(() => { this.catalogQueued--; });
+    }
     const args = buildBridgeArguments({
       workspace: canonical,
       bridgeDir: '',
@@ -381,20 +663,57 @@ export class ProjectSessionCatalog {
     return this.runOutput(canonical, args).then((output) => parseCatalog(output));
   }
 
+  private getWorker(canonical: string): Promise<CatalogWorker> {
+    if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
+    const bin = resolveServerBin({ serverBin: this.options.serverBin, isPackaged: this.options.isPackaged,
+      resourcesPath: this.options.resourcesPath } as Omit<BridgeManagerOptions, 'launchConfig'>);
+    const env = { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) };
+    const key = JSON.stringify([bin, Object.entries(env).sort(([left], [right]) => left.localeCompare(right))]);
+    if (this.worker?.available && this.workerKey === key) return Promise.resolve(this.worker);
+    if (this.workerPending) return this.workerPending;
+    this.worker?.retire();
+    this.worker = undefined;
+    let generation = this.generation;
+    const operation: Promise<CatalogWorker> = catalogChildren.start((release) => {
+      if (this.disposed) { release(); throw new Error('session catalog is disposed'); }
+      generation = this.generation;
+      const child = (this.options.spawnProcess ?? spawn)(bin, ['--session-catalog-worker-json'], {
+        cwd: canonical, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+      });
+      return new CatalogWorker(child, release, this.options.timeoutMs ?? 15_000, this.options.workerIdleMs ?? DEFAULT_WORKER_IDLE_MS);
+    }, this.options.timeoutMs).then((worker) => {
+      if (generation !== this.generation) {
+        worker.retire();
+        if (this.workerPending === operation) this.workerPending = undefined;
+        return this.getWorker(canonical);
+      }
+      this.worker = worker;
+      this.workerKey = key;
+      return worker;
+    }).finally(() => { if (this.workerPending === operation) this.workerPending = undefined; });
+    this.workerPending = operation;
+    return operation;
+  }
+
   private runOutput(canonical: string, args: string[], input?: string, killOnTimeout = true): Promise<string> {
     const bin = resolveServerBin({
       serverBin: this.options.serverBin,
       isPackaged: this.options.isPackaged,
       resourcesPath: this.options.resourcesPath,
     } as Omit<BridgeManagerOptions, 'launchConfig'>);
-    return new Promise<string>((resolve, reject) => {
-      const child = (this.options.spawnProcess ?? spawn)(bin, args, {
-        cwd: canonical,
-        env: { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) },
-        stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
-        windowsHide: true,
-        detached: !killOnTimeout,
-      });
+    return catalogChildren.start((release) => new Promise<string>((resolve, reject) => {
+      if (this.disposed) { release(); reject(new Error('session catalog is disposed')); return; }
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = (this.options.spawnProcess ?? spawn)(bin, args, {
+          cwd: canonical,
+          env: { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) },
+          stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+          windowsHide: true,
+          detached: !killOnTimeout,
+        });
+      } catch (error) { release(); reject(error); return; }
+      const termination = new CatalogChildTermination(child, release);
       if (input !== undefined) {
         child.stdin?.on('error', () => { /* Process close carries the bounded failure. */ });
         child.stdin?.end(input);
@@ -407,7 +726,7 @@ export class ProjectSessionCatalog {
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
-        if (killOnTimeout) child.kill(); else child.unref();
+        if (killOnTimeout) termination.stop(); else child.unref();
         reject(new Error(killOnTimeout ? 'session catalog timed out' : 'The metadata result is unconfirmed; its writer is still completing.'));
       }, this.options.timeoutMs ?? 15_000);
       timeout.unref();
@@ -418,7 +737,7 @@ export class ProjectSessionCatalog {
         if (stdoutBytes > MAX_OUTPUT_BYTES) {
           settled = true;
           clearTimeout(timeout);
-          if (killOnTimeout) child.kill(); else child.unref();
+          if (killOnTimeout) termination.stop(); else child.unref();
           reject(new Error(killOnTimeout ? 'session catalog output is too large' : 'The metadata result is unconfirmed after oversized output.'));
           return;
         }
@@ -439,13 +758,16 @@ export class ProjectSessionCatalog {
           stderrBytes -= removed;
         }
       });
-      child.once('error', (error) => {
+      child.on('error', (error) => {
+        termination.error();
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        if (killOnTimeout) termination.stop();
         reject(new Error(`session catalog failed to start: ${error.message}`));
       });
       child.once('close', (code, signal) => {
+        release();
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
@@ -466,6 +788,6 @@ export class ProjectSessionCatalog {
           reject(error instanceof Error ? error : new Error(String(error)));
         }
       });
-    });
+    }), this.options.timeoutMs);
   }
 }

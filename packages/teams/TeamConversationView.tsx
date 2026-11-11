@@ -8,8 +8,18 @@ import { messageErrorText } from './errors.js';
 import { pendingPayload, type TeamConversation, type TeamMessage } from './messages.js';
 import { ArtifactButton, BotRun } from './BotRunCards';
 import { buildStreamRows, formatClock, placeTasks, visibleStart, WINDOW_SIZE } from './stream.js';
-import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useIsoLayoutEffect, type RenderAvatar, type RenderMarkdown } from './ui';
+import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useDocumentShown, useIsoLayoutEffect, type RenderAvatar, type RenderMarkdown } from './ui';
 import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
+
+/**
+ * A friend chat (D9) is this view on a pair team: the header is the friend, there is no details button or platform chip, there are no
+ * Bot runs, and the chat marks itself read while its newest message is in view. A Bot DM of a friendship (D22) is the plain Teams view.
+ */
+export interface FriendHeader {
+  uid: string; name: string; handle?: string;
+  /** The right of the header: the friend menu. */
+  actions?: ReactNode;
+}
 
 export interface TeamConversationViewProps {
   workspace: TeamsWorkspace;
@@ -25,6 +35,9 @@ export interface TeamConversationViewProps {
   locale?: string;
   /** The current time for "Today" and "Yesterday". Defaults to now. */
   now?: number | Date;
+  friend?: FriendHeader;
+  /** A Back button at the start of the header: a friendship's Bot DM returns to the friend chat (D22). */
+  onBack?(): void;
 }
 
 /** The second line of the header: who is in the conversation, or whether its Bot is reachable. */
@@ -74,7 +87,7 @@ export function TeamConversationView(props: TeamConversationViewProps): ReactEle
   return <ConversationPane key={`${snapshot.uid}:${team.id}:${team.generation}:${conversation.id}`} {...props} conversation={conversation} model={model} team={team} />;
 }
 
-function CreationBanner({ workspace, snapshot, zh }: { workspace: TeamsWorkspace; snapshot: TeamsSnapshot; zh: boolean }): ReactElement | null {
+export function CreationBanner({ workspace, snapshot, zh }: { workspace: TeamsWorkspace; snapshot: TeamsSnapshot; zh: boolean }): ReactElement | null {
   const creation = snapshot.creation, model = snapshot.messaging;
   if (!creation || !model) return null;
   const t = (en: string, cn: string) => zh ? cn : en;
@@ -87,7 +100,7 @@ function CreationBanner({ workspace, snapshot, zh }: { workspace: TeamsWorkspace
 
 type Pane = TeamConversationViewProps & { conversation: TeamConversation; model: NonNullable<TeamsSnapshot['messaging']>; team: NonNullable<TeamsSnapshot['team']> };
 
-function ConversationPane({ workspace, snapshot, zh, conversation, model, team, detailsOpen, onToggleDetails, renderAvatar, renderMarkdown, locale, now }: Pane): ReactElement {
+function ConversationPane({ workspace, snapshot, zh, conversation, model, team, detailsOpen, onToggleDetails, renderAvatar, renderMarkdown, locale, now, friend, onBack }: Pane): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
   const uid = snapshot.uid, messages = snapshot.messages, tag = locale ?? (zh ? 'zh-CN' : 'en-US');
   const minute = Math.floor((now === undefined ? Date.now() : typeof now === 'number' ? now : now.getTime()) / 60_000);
@@ -99,13 +112,13 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
   const scroller = useRef<HTMLDivElement>(null), content = useRef<HTMLOListElement>(null);
   const pinnedRef = useRef(true), placed = useRef(false), anchor = useRef<{ height: number; top: number }>(), pendingCount = useRef(snapshot.pending.length);
 
-  const label = conversationLabel(conversation, snapshot.directory, uid, { bots: snapshot.bots, zh });
+  const label = friend ? friend.name : conversationLabel(conversation, snapshot.directory, uid, { bots: snapshot.bots, zh });
   const unread = unreadCount(conversation);
   const start = visibleStart(messages, { startId, lastReadSeq: conversation.lastReadSeq, uid });
   const visible = useMemo(() => messages.slice(start), [messages, start]);
   const rows = useMemo(() => buildStreamRows(visible, { lastReadSeq: conversation.lastReadSeq, uid, locale: tag, now: minute * 60_000 }), [visible, conversation.lastReadSeq, uid, tag, minute]);
   const byId = useMemo(() => new Map(messages.map(message => [message.id, message])), [messages]);
-  const runs = useTeamTasks(workspace.api, { teamId: team.id, generation: team.generation }, conversation.id);
+  const runs = useTeamTasks(workspace.api, { teamId: team.id, generation: team.generation }, conversation.id, !friend);
 
   const lock = composerLock({ uid, conversation, bots: snapshot.bots, botsLoaded: snapshot.botsLoaded, botsUnverified: snapshot.botsUnverified }, zh);
   const participant = !conversation.participants.length || conversation.participants.includes(`user:${uid}`);
@@ -168,6 +181,13 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
     node.scrollTop = saved.top + (node.scrollHeight - saved.height);
   }, [start]);
   useEffect(() => { if (pinned) setSeen(tail?.seq ?? 0); }, [pinned, tail?.seq]);
+  // A friend chat reads itself while it is shown and its newest message is in view (D13); a lost mark is retried by the next change.
+  const shown = useDocumentShown();
+  useEffect(() => {
+    if (friend && shown && pinned && unread > 0 && !snapshot.offline) void workspace.markRead();
+  // The mark depends on what is in view, not on the workspace object or the busy flag.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [friend, shown, pinned, unread, tail?.seq, snapshot.offline]);
   useEffect(() => {
     const node = content.current, box = scroller.current;
     if (!node || !box || typeof ResizeObserver === 'undefined') return;
@@ -193,14 +213,18 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
 
   return <section className="tw-scope tw-conv" aria-label={label}>
     <header className="tw-conv-head">
-      <ConversationLead conversation={conversation} label={label} snapshot={snapshot} zh={zh} size={32} render={renderAvatar} />
+      {onBack ? <button type="button" className="tw-icon-btn" aria-label={t('Back', '返回')} title={t('Back', '返回')} onClick={onBack}><Icon name="chevronLeft" /></button> : null}
+      {friend ? <Avatar identity={{ kind: 'user', id: friend.uid, name: friend.name }} size={32} render={renderAvatar} />
+        : <ConversationLead conversation={conversation} label={label} snapshot={snapshot} zh={zh} size={32} render={renderAvatar} />}
       <div className="tw-conv-title">
         <h2>{label}</h2>
-        {subtitle ? <p>{subtitle}</p> : null}
+        {friend ? friend.handle ? <p>@{friend.handle}</p> : null : subtitle ? <p>{subtitle}</p> : null}
       </div>
-      <span className="tw-platform" title={platformNotice(zh)}>{platformChip(zh)}</span>
-      {unread > 0 ? <button type="button" disabled={snapshot.messageBusy || snapshot.offline} onClick={() => void workspace.markRead()}>{t('Mark as read', '标为已读')}</button> : null}
-      {onToggleDetails ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t('Team details', '团队详情')} title={t('Team details', '团队详情')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
+      {friend ? null : <span className="tw-platform" title={platformNotice(zh)}>{platformChip(zh)}</span>}
+      {/* A friend chat reads itself (D13), so it has no manual mark, as on Android. */}
+      {unread > 0 && !friend ? <button type="button" disabled={snapshot.messageBusy || snapshot.offline} onClick={() => void workspace.markRead()}>{t('Mark as read', '标为已读')}</button> : null}
+      {friend?.actions}
+      {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t('Team details', '团队详情')} title={t('Team details', '团队详情')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
     </header>
     {snapshot.messagingError
       ? <div className="tw-banner" role="alert" data-kind="error"><span>{messageErrorText(snapshot.messagingError, zh)}</span><button type="button" className="tw-link" onClick={() => workspace.reconnect()}>{t('Reconnect', '重新连接')}</button></div>
@@ -216,7 +240,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
     <div className="tw-stream-wrap">
       <div ref={scroller} className="tw-stream" role="log" aria-label={t('Messages', '消息')} tabIndex={0} onScroll={measure}>
         {start > 0 ? <div className="tw-earlier"><button type="button" onClick={showEarlier}>{t('Show earlier messages', '显示更早的消息')} ({start})</button></div> : null}
-        {!messages.length ? <p className="tw-empty-line" role="status">{loadingMessages ? t('Loading messages…', '正在加载消息…') : t('No messages yet. Say hello.', '还没有消息，打个招呼吧。')}</p> : null}
+        {!messages.length && !snapshot.pending.length && !runs.tasks.length ? <p className="tw-empty-line" role="status">{loadingMessages ? t('Loading messages…', '正在加载消息…') : t('No messages yet. Say hello.', '还没有消息，打个招呼吧。')}</p> : null}
         <ol ref={content} className="tw-messages">
           {unanswered.head.map(taskRow)}
           {rows.map(row => {
@@ -243,7 +267,10 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
               <div className="tw-msg-main">
                 <div className="tw-msg-head"><b className="tw-msg-author">{nameOf(uid)}</b><small role="status">{status}</small></div>
                 <p className="tw-msg-body">{operation === 'recall' ? t('Recall message', '撤回消息') : `${operation === 'edit' ? `${t('Edit', '编辑')}: ` : ''}${payload.text}`}</p>
-                <button type="button" disabled={Boolean(intent.attempted && !intent.error) || (intent.leaseUntil ?? 0) > Date.now()} onClick={() => void workspace.attempt(() => model.discard(payload.changeId))}>{t('Discard', '丢弃')}</button>
+                <div className="tw-pending-actions">
+                  {intent.error === 'HOST_UNAVAILABLE' ? <button type="button" onClick={() => void workspace.attempt(() => model.retryHostUnavailable(payload.changeId))}>{t('Retry', '重试')}</button> : null}
+                  <button type="button" disabled={Boolean(intent.attempted && !intent.error) || (intent.leaseUntil ?? 0) > Date.now()} onClick={() => void workspace.attempt(() => model.discard(payload.changeId))}>{t('Discard', '丢弃')}</button>
+                </div>
               </div>
             </li>;
           })}

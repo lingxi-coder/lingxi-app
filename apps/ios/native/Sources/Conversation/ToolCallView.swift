@@ -89,14 +89,6 @@ struct ToolCallView: View {
                 RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5)
             }
         }
-        .overlay(alignment: .bottom) {
-            if compact && !isSkill {
-                Rectangle()
-                    .fill(t.border.opacity(0.45))
-                    .frame(height: 0.5)
-                    .padding(.leading, 32)
-            }
-        }
         .accessibilityElement(children: .contain)
         .accessibilityValue(trace.status.label)
         .accessibilityIdentifier("conversation.tool-call.\(trace.id)")
@@ -109,25 +101,27 @@ struct ToolCallView: View {
                 .accessibilityIdentifier("conversation.tool-call.\(trace.id).icon.\(ToolDisplayText.icon(header: trace.header, tool: trace.tool).rawValue)")
             Text(compactSummary)
                 .font(.footnote.weight(.medium))
-                .foregroundStyle(trace.status == .failed ? t.danger : t.text3)
+                .foregroundStyle(t.text3)
                 .lineLimit(showsRequiresCodeMessage ? nil : 1)
-                .truncationMode(.middle)
+                .truncationMode(.tail)
                 .fixedSize(horizontal: false, vertical: showsRequiresCodeMessage)
                 .layoutPriority(showsRequiresCodeMessage ? 1 : 0)
                 .runtimeTextSweep(isActive: trace.status == .running, highlightColor: t.text)
-            Spacer(minLength: 0)
+            if trace.status == .failed {
+                Text(trace.status.label).font(.caption).foregroundStyle(t.danger).lineLimit(1).layoutPriority(1)
+            }
             if isCollapsible {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(t.text3)
                     .timelineChevron(
-                        isHighlighted: isFocused || isHovering,
+                        isHighlighted: true,
                         isExpanded: isExpanded,
                         reduceMotion: reduceMotion
                     )
             }
         }
-        .frame(minHeight: 40)
+        .frame(minHeight: 44)
         .padding(.horizontal, 6)
         .background {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -140,6 +134,7 @@ struct ToolCallView: View {
 
     private var compactSummary: String {
         var summary = ConversationDesktopTimeline.summary([trace])
+        if trace.tool == "LocalApp" && !showsRequiresCodeMessage { return summary }
         if let display = trace.display, let headline = ToolDisplayText.headline(display, trace: trace) {
             summary += " · " + headline
         }
@@ -364,6 +359,10 @@ enum ToolDisplayText {
     /// Maps the engine's stable tool verb to a compact action glyph. An orphan
     /// or synthetic row without a start header uses the raw tool name.
     static func icon(header: ConversationToolHeader?, tool: String) -> LXIconName {
+        if tool == "LocalApp" { return .localApp }
+        if ConversationToolTrace.isTaskProgressTool(tool) { return .listChecks }
+        if ["sendmessage", "send_message"].contains(tool.lowercased()) || tool.lowercased().hasSuffix("__send_message") { return .send }
+        if tool == "ToolSearch" { return .search }
         if tool.lowercased().hasPrefix("mcp__"),
            (header == nil || header?.verb == .generic),
            (header?.icon == nil || header?.icon == .wrench) { return .mcpFallback }

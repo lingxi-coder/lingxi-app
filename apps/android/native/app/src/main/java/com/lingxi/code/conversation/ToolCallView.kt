@@ -141,30 +141,30 @@ internal fun ToolCallView(
                     size = 18.dp, color = if (call.status == AgentToolStatus.Failed) t.danger else t.text3)
             }
             Spacer(Modifier.width(9.dp))
-            Column(modifier = Modifier.weight(1f)) {
+            Column(modifier = Modifier.weight(1f, fill = false)) {
                 Text(
                     text = title,
-                    color = if (isSkill) t.text2 else t.text,
+                    color = if (isSkill) t.text2 else t.text3,
                     fontSize = 13.sp,
                     fontWeight = if (isSkill) FontWeight.Normal else FontWeight.Medium,
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 if (isSkill && headline != null) {
                     Text(headline, color = if (call.status == AgentToolStatus.Failed) t.danger else t.text3,
                         fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                call.header?.subLine?.let { sub ->
+                if (expanded) call.header?.subLine?.let { sub ->
                     Text(
                         text = "${sub.prefix} ${sub.text}",
                         color = t.text3,
                         fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                         fontFamily = FontFamily.Monospace,
-                        maxLines = 2,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                if (call.tool.equals("Shell", ignoreCase = true) && call.header == null) {
+                if (expanded && call.tool.equals("Shell", ignoreCase = true) && call.header == null) {
                     call.syntheticShellCommand?.let {
                         Text(
                             text = it,
@@ -177,10 +177,15 @@ internal fun ToolCallView(
                     }
                 }
             }
-            if (isSkill && collapsible) {
+            if (call.status == AgentToolStatus.Failed || call.status == AgentToolStatus.Cancelled) {
+                Spacer(Modifier.width(9.dp))
+                Text(statusLabel, color = toolCallStatusColor(call.status), fontSize = 12.sp, maxLines = 1)
+            }
+            if (collapsible) {
+                Spacer(Modifier.width(9.dp))
                 com.lingxi.code.components.LXIcon(
                     com.lingxi.code.components.LXIconName.ChevronR,
-                    modifier = Modifier.alpha(if (focused || hovered) 1f else 0f),
+                    modifier = Modifier.alpha(if (focused || hovered) 1f else 0.75f),
                     size = 16.dp, color = t.text3,
                     contentDescription = null,
                 )
@@ -195,7 +200,7 @@ internal fun ToolCallView(
             }
         }
 
-        if (headline != null && !isSkill) {
+        if (headline != null && !isSkill && requiresCode) {
             Row(verticalAlignment = Alignment.Top) {
                 Text(
                     text = "⎿",
@@ -273,6 +278,10 @@ internal fun ToolCallView(
  */
 @Composable
 internal fun toolCallTitle(call: ToolCallUi): String {
+    if (call.tool == "LocalApp") {
+        val argument = call.header?.primary ?: call.display?.takeIf { call.status != AgentToolStatus.Failed }?.let { resultHeadline(it) }
+        return listOfNotNull(stringResource(R.string.chat_local_app_kind), argument).joinToString(" ")
+    }
     val header = call.header ?: return call.tool
     return composeToolTitle(
         label = toolVerbLabel(header),

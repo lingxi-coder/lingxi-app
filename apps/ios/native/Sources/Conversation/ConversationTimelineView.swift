@@ -139,6 +139,8 @@ struct ConversationTimelineView: View {
                 .id(id)
         case let .agents(id, agents):
             ConversationTranscriptAgents(
+                groupExpanded: expandedToolCalls.contains(id),
+                onToggleGroup: { onToggleToolCall(id) },
                 agents: agents,
                 activeAgentID: activeAgentID,
                 onSelect: onSelectAgent
@@ -270,6 +272,15 @@ struct ConversationTimelineView: View {
                 }
             }
         }
+        // Merge only adjacent visible launch rows; prose/tools preserve their boundaries.
+        var merged: [Segment] = []
+        for segment in result {
+            if case let .agents(_, agents) = segment,
+               let last = merged.last, case let .agents(id, previous) = last {
+                merged[merged.count - 1] = .agents(id: id, agents: previous + agents)
+            } else { merged.append(segment) }
+        }
+        result = merged
         var previousTool: ConversationToolTrace?
         for index in result.indices {
             switch result[index] {
@@ -470,29 +481,32 @@ private struct ConversationToolBatchRow: View {
                     HStack(spacing: 8) {
                         Text(summary)
                             .font(.caption)
-                            .foregroundStyle(t.text4)
+                            .foregroundStyle(t.text3)
                             .lineLimit(1)
                     }
                     .runtimeTextSweep(isActive: containsRunningTool, highlightColor: t.text)
                     if containsRunningTool {
                         Text(String(localized: "chat_tool_running_count \(activeTools.count)"))
                             .font(.caption).foregroundStyle(t.text3)
-                    } else if ordinaryTools.allSatisfy({ $0.status == .failed }) {
+                    }
+                    if ordinaryTools.allSatisfy({ $0.isTaskWorkflow }), ordinaryTools.contains(where: { $0.status == .failed }) {
+                        Text("\(ordinaryTools.filter { $0.status == .failed }.count) \(String(localized: "chat_tool_calls_unsuccessful"))")
+                            .font(.caption).foregroundStyle(t.danger).lineLimit(1).layoutPriority(1)
+                    } else if !containsRunningTool && ordinaryTools.allSatisfy({ $0.status == .failed }) {
                         Text(String(localized: "chat_tool_calls_unsuccessful"))
                             .font(.caption).foregroundStyle(t.text3)
                     }
-                    Spacer(minLength: 0)
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(t.text4)
                         .timelineChevron(
-                            isHighlighted: isFocused || isHovering,
+                            isHighlighted: true,
                             isExpanded: isExpanded,
                             reduceMotion: reduceMotion
                         )
                 }
+                .frame(minHeight: 44)
                 .padding(.horizontal, 10)
-                .padding(.vertical, 7)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -504,7 +518,7 @@ private struct ConversationToolBatchRow: View {
                 : String(localized: "chat_agent_details_expand"))
             .accessibilityIdentifier("conversation.timeline.tool-batch.\(id)")
 
-            if isExpanded || containsRunningTool {
+            if isExpanded || (containsRunningTool && !ordinaryTools.allSatisfy({ $0.isTaskWorkflow })) {
                 ForEach(isExpanded ? ordinaryTools : activeTools) { trace in
                     ToolCallView(
                         trace: trace,
@@ -535,6 +549,7 @@ private struct ConversationToolBatchRow: View {
     }
 
     private var batchIcon: LXIconName {
+        if tools.allSatisfy({ $0.isTaskWorkflow }) { return .listChecks }
         guard let first = tools.first else { return .workflow }
         return ToolDisplayText.icon(header: first.header, tool: first.tool)
     }
@@ -663,8 +678,16 @@ enum ConversationDesktopTimeline {
 
     static func summary(_ tools: [ConversationToolTrace]) -> String {
         guard let first = tools.first else { return "" }
-        if tools.count == 1 { return first.header.map(ToolDisplayText.title) ?? first.tool }
-        let label = first.header.map { header in
+        if tools.count == 1 {
+            if first.tool == "LocalApp" {
+                let argument = first.header?.primary ?? (first.status == .failed ? nil : first.display.flatMap { ToolDisplayText.headline($0, trace: first) })
+                return [String(localized: "chat_local_app_kind"), argument].compactMap { $0 }.joined(separator: " ")
+            }
+            return first.header.map(ToolDisplayText.title) ?? first.tool
+        }
+        let label = tools.allSatisfy({ $0.isTaskWorkflow })
+            ? String(localized: tools.allSatisfy({ ConversationToolTrace.isTaskProgressTool($0.tool) }) ? "chat_tool_group_tasks" : "chat_tool_group_coordination")
+            : first.header.map { header in
             header.verb == .shell ? String(localized: "chat_tool_group_shell") : ToolDisplayText.verbLabel(header)
         } ?? first.tool
         return "\(label) · \(String(localized: "chat_tool_calls_count \(tools.count)"))"

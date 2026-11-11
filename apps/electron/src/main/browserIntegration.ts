@@ -9,7 +9,7 @@ export const BROWSER_PROTOCOL = 'lingxi-browser/1';
 export const BROWSER_EXTENSION_ID = 'nciganheacfkdbpdfdnjnjdkcabfbkmg';
 const NATIVE_HOST = 'com.lingxi.browser';
 const MAX_BODY = 16 * 1024 * 1024;
-const ACTIONS = new Set(['navigate', 'tabs', 'screenshot', 'click', 'type', 'key', 'history', 'download', 'site_tools', 'cdp']);
+const ACTIONS = new Set(['status', 'navigate', 'tabs', 'screenshot', 'click', 'type', 'key', 'history', 'download', 'site_tools', 'cdp']);
 type RecordValue = Record<string, unknown>;
 type BrowserStatus = { connected: boolean; installed: boolean; extensionDirectory: string; error?: string };
 interface BrowserOptions {
@@ -250,6 +250,13 @@ export class BrowserIntegration {
     if (canonical(input).length > 262_144) throw new Error('Browser action is too large');
     const sessionId = input.sessionId as string;
     const policy = this.options.policy();
+    if (action === 'status') {
+      const connected = this.status().connected;
+      return { result: { connected, enabled: policy.enabled,
+        guidance: !policy.enabled ? 'Computer use is turned off. Enable it in Computer use settings to test in the browser.'
+          : !connected ? 'LingXi Browser extension is not connected. Install or reconnect it in Computer use settings. Continue available build checks and report browser validation as untested.'
+          : 'Browser extension is connected. Site permissions still apply; Desktop Local App windows require separate validation.' } };
+    }
     if (!policy.enabled) throw new Error('Computer use is turned off');
     if (action === 'site_tools' && !policy.browser.siteTools) throw new Error('Site tools are disabled in Browser settings');
     if (action === 'cdp' && !policy.browser.fullCdp) throw new Error('Full CDP access is disabled in Browser settings');

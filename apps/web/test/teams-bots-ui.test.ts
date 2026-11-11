@@ -14,6 +14,7 @@ async function open(context: Parameters<Parameters<typeof scenario>[1]>[0], over
   const workspace = new TeamsWorkspace(fake.api, 'alice', { storage: memoryStorage, environment: new EventTarget() }); context.after(() => workspace.close()); await until(() => workspace.getSnapshot().botsLoaded && !!workspace.getSnapshot().detail); return { fake, workspace };
 }
 const directory = (workspace: TeamsWorkspace) => (s: ReturnType<TeamsWorkspace['getSnapshot']>) => createElement(BotDirectory, { api: workspace.api, uid: s.uid, team: s.team!, members: s.directory, bots: s.bots, zh: false, busy: s.messageBusy, status: '', attempt: workspace.attempt, onOpen: bot => workspace.startBotDm(bot), onChanged: workspace.refreshBots });
+const friendDirectory = (workspace: TeamsWorkspace) => (s: ReturnType<TeamsWorkspace['getSnapshot']>) => createElement(BotDirectory, { api: workspace.api, uid: s.uid, team: s.team!, members: s.directory, bots: s.bots, zh: false, busy: s.messageBusy, status: '', attempt: workspace.attempt, onOpen: bot => workspace.startBotDm(bot), onChanged: workspace.refreshBots, friend: 'Bob' });
 scenario('Member home requires no model setup and reopens document with Missing usage', async context => {
   const { fake, workspace } = await open(context); const calls: MessageCommand[] = []; fake.conversations.set('team-test', [conversation('test-chat')]);
   fake.messages = async <T>(command: MessageCommand) => { calls.push(command); if (command.action === 'listTasks') return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state: 'completed', createdAt: 1, deadline: 2, artifactId: 'artifact-test' }] } as T; if (command.action === 'readArtifact') return { artifactId: 'artifact-test', revision: 1, digest: 'a'.repeat(64), document: { title: 'Trip preparation', body: 'Pack passports' } } as T; return { bots: fake.bots } as T; };
@@ -39,6 +40,25 @@ scenario('Publication confirms explicit role, native files, membership audience,
 scenario('Publication refresh preserves role and native file drafts', async context => {
   const { fake, workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-new', name: 'Travel', description: '' }], selectSharedFiles: async () => [{ token: 'native-token', kind: 'file', name: 'notes.txt', bytes: 4, sha256: 'a'.repeat(64), mediaType: 'text/plain' }], publishLocalBot: async () => ({ sharedBotId: 'shared-new', revision: 1 }) });
   const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount()); await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'local-new'); await page.type(page.find(n => n.type === 'textarea')[0], 'Draft role'); await page.click(page.button('Select read-only files / SKILL.md')); await page.during(() => { fake.signal({ bots: true }); }); assert.equal(page.find(n => n.type === 'textarea')[0].props.value, 'Draft role'); assert.match(page.text(), /notes.txt/);
+});
+scenario('A friendship\'s Bots are shared with the friend alone: no audience choice, the review names the friend, and a stopped Bot is published again as its next revision (D23)', async context => {
+  const published: unknown[] = [];
+  const { fake, workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-fixture', name: 'Travel', description: '', model: 'Configured model' }], selectSharedFiles: async () => [], publishLocalBot: async input => { published.push(input); return { sharedBotId: input.sharedBotId, revision: input.expectedRevision + 1 }; } });
+  fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, state: 'paused', revision: 2 })]; await workspace.refreshBots(); await until(() => workspace.getSnapshot().bots[0]?.state === 'paused', 'the stopped Bot');
+  const page = await mount(workspace, friendDirectory(workspace)); context.after(() => page.unmount());
+  assert.match(page.text(), /Share a Bot with Bob/); assert.match(page.text(), /A Bot runs on its owner’s Desktop\. The owner can read every conversation with it\./); assert.match(page.text(), /Paused/);
+  assert.doesNotMatch(page.text(), /Daily requests|All current and future members|Find Bots|Team assistants|Pause\b/);
+  await page.click(page.button('Load local Bots'));
+  assert.equal(page.find(n => n.type === 'select').length, 1, 'only the choice of the local Bot: the audience is the friend');
+  await page.type(page.find(n => n.type === 'select')[0], 'local-fixture'); await page.type(page.find(n => n.type === 'textarea')[0], 'Help with trips.');
+  assert.equal(page.find(n => n.type === 'input' && n.props.type === 'checkbox').length, 0, 'no member checkboxes');
+  await page.submit();
+  assert.match(page.text(), /Audience: Bob\./); assert.match(page.text(), /The owner can read every conversation with it\./); assert.doesNotMatch(page.text(), /every current and future team member/);
+  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
+  assert.equal(published.length, 1); const value = published[0] as Record<string, unknown>;
+  assert.deepEqual(value.usePolicy, { mode: 'all' }); assert.deepEqual(value.quotas, { team: 100, member: 20, bot: 100 });
+  assert.equal(value.sharedBotId, 'assistant-fixture', 'the same shared Bot'); assert.equal(value.expectedRevision, 2, 'as its next revision');
+  assert.deepEqual([value.teamId, value.generation], ['team-test', 1]);
 });
 scenario('Pause uses shared identity and revision with no legacy recovery controls', async context => {
   const { fake, workspace } = await open(context); const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount()); await page.click(page.button('Pause')); await page.click(page.button('Pause assistant')); const command = fake.commands.find(c => c.action === 'pauseSharedBot'); assert.equal(command?.action, 'pauseSharedBot'); if (command?.action === 'pauseSharedBot') assert.deepEqual(command.payload, { sharedBotId: 'assistant-fixture', expectedRevision: 1 }); assert.doesNotMatch(page.text(), /Settle request|Send answer/);

@@ -54,20 +54,28 @@ function principals(values) {
   });
 }
 
+/** The one place a human conversation record is built: trusted creation and pair teams (docs/FRIENDS.md) share it. */
+export function conversationRecord({ kind, title, participants: principalIds, callerUid }) {
+  const parties = principals(principalIds);
+  const humans = parties.filter(party => party.kind === 'user');
+  if ((kind === 'dm' && humans.length !== 2) || humans.length < 2) throw new TeamConversationError(400, 'Invalid conversation participants');
+  const memberUids = [...new Set(parties.map(party => party.uid))].sort();
+  if (!memberUids.includes(callerUid)) throw new TeamConversationError(403, 'Caller is not a participant');
+  const participants = [...principalIds].sort();
+  const requestDigest = createHash('sha256').update(JSON.stringify({
+    kind, title, participants, createdBy: callerUid,
+  })).digest('hex');
+  return { memberUids, requestDigest, record: { kind, title, participants, memberUids,
+    createdBy: callerUid, requestDigest, lastSeq: 0, lastMessage: null, lastChangeSeq: 0, lastChange: null } };
+}
+
 /** Trusted backend entry point: callerUid MUST come from a verified ID token, never the request body. */
 export async function createTeamConversation(db, input) {
   const parsed = inputSchema.safeParse(input);
   if (!parsed.success) throw new TeamConversationError(400, 'Invalid conversation');
   const args = parsed.data;
-  const parties = principals(args.participants);
-  const humans = parties.filter(party => party.kind === 'user');
-  if ((args.kind === 'dm' && humans.length !== 2) || humans.length < 2) throw new TeamConversationError(400, 'Invalid conversation participants');
-  const memberUids = [...new Set(parties.map(party => party.uid))].sort();
-  if (!memberUids.includes(args.callerUid)) throw new TeamConversationError(403, 'Caller is not a participant');
-  const participants = [...args.participants].sort();
-  const requestDigest = createHash('sha256').update(JSON.stringify({
-    kind: args.kind, title: args.title, participants, createdBy: args.callerUid,
-  })).digest('hex');
+  const { memberUids, requestDigest, record } = conversationRecord({ kind: args.kind, title: args.title,
+    participants: args.participants, callerUid: args.callerUid });
   const team = db.doc(`teams/${args.teamId}`);
   const conversation = team.collection('conversations').doc(args.conversationId);
   return db.runTransaction(async transaction => {
@@ -76,6 +84,8 @@ export async function createTeamConversation(db, input) {
     if (teamSnapshot.data()?.state !== 'active' || !snapshots[memberUids.indexOf(args.callerUid)].exists) {
       throw new TeamConversationError(403, 'Current team membership required', 'MEMBERSHIP_REQUIRED');
     }
+    // A pair team has exactly one conversation, written by the backend with the friendship.
+    if (teamSnapshot.data().kind === 'pair') throw new TeamConversationError(400, 'Pair teams have no client conversations', 'PAIR_TEAM');
     if (snapshots.slice(0, memberUids.length).some(member => !member.exists)) throw new TeamConversationError(403, 'Current participants required', 'PARTICIPANT_REQUIRED');
     if (snapshots[memberUids.indexOf(args.callerUid)].data().generation !== args.callerGeneration) {
       throw new TeamConversationError(409, 'Stale membership', 'STALE_MEMBERSHIP');
@@ -84,8 +94,6 @@ export async function createTeamConversation(db, input) {
       if (existing.data().requestDigest !== requestDigest) throw new TeamConversationError(409, 'Conversation identity conflict');
       return existing.data();
     }
-    const record = { kind: args.kind, title: args.title, participants, memberUids,
-      createdBy: args.callerUid, requestDigest, lastSeq: 0, lastMessage: null, lastChangeSeq: 0, lastChange: null };
     transaction.create(conversation, record);
     return record;
   });

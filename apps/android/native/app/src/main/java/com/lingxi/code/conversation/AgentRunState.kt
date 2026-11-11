@@ -57,6 +57,7 @@ data class AgentToolRunState(
     val questionAnswers: List<AnsweredQuestion>? = null,
     val localApp: PublishedLocalApp? = null,
     val skillBody: String? = null,
+    val spawnedAgentId: String? = null,
 ) {
     /** This row as the shared [ToolCallUi] both render surfaces consume. */
     fun toToolCall(): ToolCallUi = ToolCallUi(
@@ -70,6 +71,7 @@ data class AgentToolRunState(
         questionAnswers = questionAnswers,
         localApp = localApp,
         skillBody = skillBody,
+        spawnedAgentId = spawnedAgentId,
     )
 }
 
@@ -169,6 +171,7 @@ internal fun AgentRunState.reduceTool(event: ReplyEvent.ToolActivity): AgentRunS
         questionAnswers = event.questionAnswers ?: existing?.questionAnswers,
         localApp = event.localApp ?: existing?.localApp,
         skillBody = event.skillBody ?: existing?.skillBody,
+        spawnedAgentId = event.spawnedAgentId ?: existing?.spawnedAgentId,
         status = status,
         elapsedMs = event.elapsedMs ?: existing?.elapsedMs,
         // The header rides the CALL, the display rides the RESULT — two separate

@@ -87,6 +87,23 @@ scenario('composer: @ offers the Bots of the conversation, only a chosen Bot is 
   assert.equal('targets' in mutations(fake)[0]!, false, 'typing a name never asks a Bot');
 });
 
+scenario('a failed Bot request can be retried from its message after the host returns', async context => {
+  const { fake, workspace, snapshot, bot } = await open(context);
+  workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3);
+  const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
+  const original = fake.messages; let ready = false; const submits: MessageCommand[] = [];
+  fake.messages = async <T>(command: MessageCommand) => {
+    if (command.action === 'submit') { submits.push(structuredClone(command)); if (!ready) throw new Error('HOST_UNAVAILABLE'); return {} as T; }
+    return original<T>(command);
+  };
+  await snapshot().messaging!.queue('create', 'Please help', undefined, undefined, [bot.sharedBotId]);
+  await until(() => snapshot().pending[0]?.error === 'HOST_UNAVAILABLE');
+  await until(() => page.has('Retry'));
+  ready = true; await page.click(page.button('Retry'));
+  await until(() => submits.length === 2 && snapshot().pending.length === 0);
+  assert.deepEqual(submits[1], submits[0]);
+});
+
 scenario('replying, editing and recalling go through the same queue as sending', async context => {
   const { fake, workspace, snapshot } = await open(context);
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3, 'the thread');

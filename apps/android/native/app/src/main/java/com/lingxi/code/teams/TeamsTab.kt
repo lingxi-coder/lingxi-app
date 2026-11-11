@@ -33,12 +33,22 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lingxi.code.R
+import com.lingxi.code.friends.FriendLink
+import com.lingxi.code.friends.FriendMemberSheet
+import com.lingxi.code.friends.FriendOutcome
+import com.lingxi.code.friends.FriendProof
+import com.lingxi.code.friends.FriendsBanner
+import com.lingxi.code.friends.FriendsWorkspace
+import com.lingxi.code.friends.FriendState
+import com.lingxi.code.friends.InviteFriendsSheet
+import com.lingxi.code.friends.friendNamesText
 import com.lingxi.code.settings.SettingsRoutes
 import com.lingxi.code.tabs.AppTab
 import com.lingxi.code.tabs.LocalTabHost
@@ -67,6 +77,13 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     val wide = LocalWideLayout.current
     val listState = rememberLazyListState()
     var scrollTop by remember { mutableIntStateOf(0) }
+    // Add friend on a member (D15) is the Friends workspace's own lookup; the friends there are who shows "Friends" instead of the action.
+    val friends = remember(context) { FriendsWorkspace.get(context.applicationContext) }
+    val friendsState by friends.state.collectAsStateWithLifecycle()
+    val memberLookup by friends.member.state.collectAsStateWithLifecycle()
+    val friendUids = remember(friendsState.cards) { friendsState.cards.filter { it.state == FriendState.Friends }.map { it.uid }.toSet() }
+    // The friends invited from the picker that just closed (D26): said once, here, because only the person who sent them can know.
+    var invited by remember { mutableStateOf<List<String>>(emptyList()) }
 
     // The pushed screens, newest last: "c:<conversationId>" or "details". Saved as text so it survives the tab leaving composition.
     var stackText by rememberSaveable { mutableStateOf("") }
@@ -82,6 +99,11 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
         if (joinCode != null && uid != null) { joinPrefill = joinCode; sheet = "join"; onJoinCodeHandled() }
     }
     LaunchedEffect(uid) { if (uid == null) { stackText = ""; sheet = "" } }
+    // A friendship made from a member row (a mutual request) opens the chat in the Friends tab.
+    LaunchedEffect(memberLookup.outcome) {
+        val outcome = memberLookup.outcome
+        if (outcome is FriendOutcome.NowFriends) { sheet = ""; friends.member.clear(); host.requestFriends(FriendLink.Chat(outcome.uid)) }
+    }
     val depth = stack.size
     LaunchedEffect(depth) { host.reportDepth(AppTab.Teams, depth) }
     BackHandler(enabled = stack.isNotEmpty()) { setStack(stack.dropLast(1)) }
@@ -135,7 +157,8 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 val details: @Composable (Modifier) -> Unit = { m ->
                     TeamDetailsScreen(
                         workspace = workspace, uid = uid, team = team, teams = teams, messaging = messaging, showBack = !wide,
-                        onClose = { setStack(stack.filterNot { it == "details" }) },
+                        friendUids = friendUids, onAddFriend = { member -> friends.member.lookup(FriendProof.Team(team.id, member.uid)); sheet = "addFriend" },
+                        onInviteFriends = { sheet = "inviteFriends" }, onClose = { setStack(stack.filterNot { it == "details" }) },
                         onMessageBot = { key -> messageBot(workspace, messaging, uid, key) { openConversation(it) } }, modifier = m,
                     )
                 }
@@ -175,6 +198,20 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 onSubmit = { code -> workspace.teamsModel.execute(mapOf("action" to "join", "code" to code, "requestId" to UUID.randomUUID().toString())) { sheet = ""; joinPrefill = ""; setStack(emptyList()) } },
                 onDismiss = dismiss,
             )
+            sheet == "addFriend" && memberLookup.proof != null -> FriendMemberSheet(
+                lookup = memberLookup, onConfirm = { note -> friends.member.confirm(note) },
+                onOpenChat = { friendUid -> sheet = ""; friends.member.clear(); host.requestFriends(FriendLink.Chat(friendUid)) },
+                onDismiss = { sheet = ""; friends.member.clear() },
+            )
+            sheet == "inviteFriends" && team == null -> LaunchedEffect(Unit) { sheet = ""; friends.closeInvites() }
+            // Invite friends (D26): the app-wide Friends workspace's cards against this team's members; a person who turns out to be in already
+            // (ALREADY_MEMBER) asks for the member list again.
+            sheet == "inviteFriends" && team != null -> InviteFriendsSheet(
+                teamName = team.name, state = friendsState,
+                memberUids = teams.detail?.takeIf { it.team.id == team.id }?.members.orEmpty().map { it.uid }.toSet(),
+                onInvite = { friendUid -> friends.offerTeam(team.id, friendUid, onAlreadyMember = { workspace.teamsModel.refresh() }) },
+                onDismiss = { sheet = ""; invited = friends.closeInvites() },
+            )
             sheet == "newMessage" || sheet == "newChannel" || sheet == "newBot" -> NewConversationSheet(
                 mode = sheet, uid = uid, members = teams.detail?.members.orEmpty(), messaging = messaging,
                 onOpen = { id -> sheet = ""; openConversation(id) },
@@ -185,11 +222,15 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 onDismiss = dismiss,
             )
         }
+        if (invited.isNotEmpty()) {
+            val locale = LocalConfiguration.current.locales[0]
+            FriendsBanner(stringResource(R.string.friends_invite_sent_to_fmt, friendNamesText(invited, locale)), invited, onDismiss = { invited = emptyList() }, modifier = Modifier.align(Alignment.BottomCenter))
+        }
     }
 }
 
-/** Opens the viewer's Bot DM with the Bot or creates it; the same rule as the Bots list on the Desktop. */
-private fun messageBot(workspace: TeamsWorkspace, messaging: TeamMessagingState, uid: String, sharedBotId: String, open: (String) -> Unit) {
+/** Opens the viewer's Bot DM with the Bot or creates it; the same rule as the Bots list on the Desktop. A friend's chat starts one the same way (D22). */
+internal fun messageBot(workspace: TeamsWorkspace, messaging: TeamMessagingState, uid: String, sharedBotId: String, open: (String) -> Unit) {
     val existing = TeamsListLogic.findBotDm(messaging.cache?.conversations.orEmpty(), uid, sharedBotId)
     if (existing != null) { open(existing.id); return }
     val bot = messaging.bots.firstOrNull { it.sharedBotId == sharedBotId } ?: return

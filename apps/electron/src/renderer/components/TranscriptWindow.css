@@ -1,0 +1,10 @@
+/* Windowed rows need real heights even inside the overscan region. Offscreen
+   history is represented by spacers, so content-visibility would double-estimate. */
+.desktop-stage-feed[data-windowed='true'] .transcript-run-item {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
+}
+.transcript-window-spacer {
+  flex: none;
+  pointer-events: none;
+}

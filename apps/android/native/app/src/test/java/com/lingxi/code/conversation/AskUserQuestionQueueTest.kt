@@ -278,6 +278,7 @@ class AskUserQuestionQueueTest {
                 ),
             ),
             timeoutSecs = null,
+            sessionOwned = false,
         )
 
         val answer = assembleAskAnswers(request, mapOf(0 to listOf(0)), emptyMap()).pairs.single()
@@ -330,6 +331,7 @@ class AskUserQuestionQueueTest {
         requestId = id,
         questions = questions,
         timeoutSecs = null,
+        sessionOwned = false,
     )
 
     private fun question(

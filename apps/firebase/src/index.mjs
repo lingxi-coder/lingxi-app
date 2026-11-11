@@ -4,15 +4,17 @@ import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import { onRequest } from 'firebase-functions/v2/https';
-import { onDocumentCreated } from 'firebase-functions/v2/firestore';
+import { onDocumentCreated, onDocumentUpdated, onDocumentWritten } from 'firebase-functions/v2/firestore';
 import { onTeamMessageCreated } from './team-message-push.mjs';
+import { mirrorFriendChat, mirrorFriendRead } from './friend-summary.mjs';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { defineSecret } from 'firebase-functions/params';
 import { createMarketGateway } from './market-gateway.mjs';
 import { createHandler } from './catalog.mjs';
 import { CatalogStore } from './store.mjs';
 import { createPushHandler, PushStore } from './push.mjs';
-import { createTeamsHandler, TeamsStore } from './teams.mjs';
+import { PAIR_CONVERSATION_ID, createTeamsHandler, TeamsStore } from './teams.mjs';
+import { FriendsStore, friendNotifier } from './friends.mjs';
 import { OAuth2Client } from 'google-auth-library';
 import { createTeamMarketEligibilityHandler, TeamMarketEligibilityStore } from './team-market-eligibility.mjs';
 
@@ -52,11 +54,16 @@ export const pushApi = onRequest({ region: 'us-central1', minInstances: 0, maxIn
   res.status(output.status).send(Buffer.from(await output.arrayBuffer()));
 });
 
+const teamsDb = getFirestore(app);
+// Friends share teamsApi and the (default) database. Email lookup uses Admin Auth; pushes use the Team push path.
+const friendsStore = new FriendsStore(teamsDb, Date.now, { auth: getAuth(app),
+  notify: friendNotifier({ db: teamsDb, pushStore, messaging: getMessaging(app) }) });
+
 export const prunePushRegistrations = onSchedule({ schedule: 'every 24 hours', timeZone: 'Etc/UTC',
   region: 'us-central1', memory: '256MiB', timeoutSeconds: 540, maxInstances: 1,
-  serviceAccount: pushServiceAccount }, async () => { await pushStore.prune(); });
+  serviceAccount: pushServiceAccount }, async () => { await pushStore.prune(); await friendsStore.prune(); });
 
-const teamsHandler = createTeamsHandler({ store: new TeamsStore(getFirestore(app)),
+const teamsHandler = createTeamsHandler({ store: new TeamsStore(teamsDb), friends: friendsStore,
   verifyToken: token => getAuth(app).verifyIdToken(token, true),
   createCustomToken: uid => getAuth(app).createCustomToken(uid),
   origins: ['https://lingxios.net', 'https://lingxi-5e4b2.web.app', 'https://lingxi-5e4b2.firebaseapp.com',
@@ -77,6 +84,16 @@ export const teamsApi = onRequest({ region: 'us-central1', minInstances: 0, maxI
 export const onTeamMessage = onDocumentCreated({ document: 'teams/{teamId}/conversations/{conversationId}/messages/{messageId}',
   database: '(default)', region: 'us-central1', memory: '256MiB', maxInstances: 2, serviceAccount: pushServiceAccount,
 }, event => onTeamMessageCreated({ db: getFirestore(app), pushStore, messaging: getMessaging(app), ...event.params, original: event.data?.data() }));
+
+// Friend list summaries: a pair team's chat pointer and the owner's read mark are copied onto the friend cards, so clients
+// need no per-friend listener. The document paths name the pair chat itself, so ordinary Team conversations never invoke
+// these; the handlers still check the team (docs/FRIENDS.md). They are idempotent and monotonic, and the next event heals a lost one.
+const friendChat = `teams/{teamId}/conversations/${PAIR_CONVERSATION_ID}`;
+const friendTrigger = { database: '(default)', region: 'us-central1', memory: '256MiB', maxInstances: 2, serviceAccount: pushServiceAccount };
+export const onFriendChatUpdated = onDocumentUpdated({ document: friendChat, ...friendTrigger },
+  event => mirrorFriendChat({ db: getFirestore(app), teamId: event.params.teamId, conversationId: PAIR_CONVERSATION_ID, after: event.data?.after.data() }));
+export const onFriendChatRead = onDocumentWritten({ document: `${friendChat}/reads/{uid}`, ...friendTrigger },
+  event => mirrorFriendRead({ db: getFirestore(app), teamId: event.params.teamId, conversationId: PAIR_CONVERSATION_ID, uid: event.params.uid, after: event.data?.after.data() }));
 
 const marketServiceVerifier = new OAuth2Client();
 const eligibilityHandler = createTeamMarketEligibilityHandler({ store: new TeamMarketEligibilityStore(getFirestore(app)),

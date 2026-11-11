@@ -1324,6 +1324,17 @@ impl Argv {
     /// `--allowedTools "TaskCreate(x)"` does.
     #[must_use]
     pub fn todo_tools_opt_in(&self) -> bool {
+        self.explicit_tools_opt_in(&lingxi_core::host::session_flags::TODO_TOOL_NAMES)
+    }
+
+    /// 319 `searchToolsOptIn`: dedicated search tools named in `--tools` are
+    /// matched bare; `--allowedTools` entries are permission-rule parsed.
+    #[must_use]
+    pub fn search_tools_opt_in(&self) -> bool {
+        self.explicit_tools_opt_in(&["Glob", "Grep"])
+    }
+
+    fn explicit_tools_opt_in(&self, names: &[&str]) -> bool {
         fn entries(list: Option<&Vec<String>>) -> impl Iterator<Item = &str> {
             list.map(Vec::as_slice)
                 .unwrap_or_default()
@@ -1335,7 +1346,7 @@ impl Argv {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
         }
-        let named = |name: &str| lingxi_core::host::session_flags::TODO_TOOL_NAMES.contains(&name);
+        let named = |name: &str| names.contains(&name);
         // `re.includes(un)` — bare names only.
         entries(self.tools.as_ref()).any(named)
             // `Fr(kn).toolName === un` — rule-parsed.

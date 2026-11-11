@@ -136,7 +136,8 @@ fun buildChatRenderItems(state: ChatState, anchoredMessageUuid: String? = null):
                     MessageContent.Tool(when {
                         live != null -> call.copy(status = live.status, header = live.header ?: call.header,
                             display = live.display ?: call.display, questionAnswers = live.questionAnswers ?: call.questionAnswers,
-                            localApp = live.localApp ?: call.localApp, skillBody = live.skillBody ?: call.skillBody)
+                            localApp = live.localApp ?: call.localApp, skillBody = live.skillBody ?: call.skillBody,
+                            spawnedAgentId = live.spawnedAgentId ?: call.spawnedAgentId)
                         call.status == AgentToolStatus.Running -> call.copy(status = AgentToolStatus.Unknown)
                         else -> call
                     })

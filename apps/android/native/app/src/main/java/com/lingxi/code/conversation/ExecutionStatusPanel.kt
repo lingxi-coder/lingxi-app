@@ -120,6 +120,7 @@ internal fun ExecutionStatusPanel(
                     state = agentRun,
                     expandedToolCalls = expandedToolCalls,
                     onToggleToolCall = onToggleToolCall,
+                    agents = agents,
                 )
             }
             if (agents.isNotEmpty()) {
@@ -198,18 +199,10 @@ private fun AgentSummaryRow(agent: SessionAgentUi) {
     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable {
         if (detailHost != null) detailHost("agent:${agent.agentId}") else details = true
     }, verticalAlignment = Alignment.CenterVertically) {
-        com.lingxi.code.theme.AgentAvatar(agentId = agent.agentId, modifier = Modifier.size(28.dp))
-        BoxStatusDot(agent.status)
-        Column(Modifier.padding(start = 7.dp).weight(1f)) {
-            Text(agent.name.ifBlank { agent.agentId }, color = palette.text2, fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(
-                listOfNotNull(agent.agentType.takeIf(String::isNotBlank), agent.model, agent.reportStatusText(), agent.latestActivity).joinToString(" · "),
-                color = palette.text4,
-                fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+        com.lingxi.code.theme.AgentAvatar(agentId = agent.agentId, modifier = Modifier.size(18.dp))
+        Text(agent.name.ifBlank { agent.agentId }, modifier = Modifier.padding(start = 9.dp).weight(1f, fill = false), color = palette.text3, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(agent.transcriptStatusText(), modifier = Modifier.padding(start = 9.dp), color = if (agent.reportDelivery == "withheld" || agent.status in listOf("failed", "error")) palette.danger else palette.text3, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        com.lingxi.code.components.LXIcon(com.lingxi.code.components.LXIconName.ChevronR, modifier = Modifier.padding(start = 9.dp), size = 12.dp, color = palette.text3)
     }
 }
 

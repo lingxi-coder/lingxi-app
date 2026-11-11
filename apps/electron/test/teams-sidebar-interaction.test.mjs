@@ -35,7 +35,7 @@ test('the Teams mode of the sidebar works in the whole window: rail count, conve
       child.once('exit', code => { clearTimeout(timeout); code === 0 ? resolveResult() : reject(new Error(`Teams sidebar exited ${code}\n${errors}`)); });
     });
     const result = JSON.parse(output.trim().split('\n').at(-1));
-    for (const name of ['railBadge', 'teamsMode', 'search', 'stream', 'sends', 'drawer', 'drawerMenu', 'appsWorkspace', 'pageForward', 'badgeFollowsReading', 'focus', 'invite', 'restored', 'signedOut', 'cappedBadge', 'botAvatar']) assert.equal(result[name], true, name);
+    for (const name of ['railBadge', 'teamsMode', 'search', 'stream', 'sends', 'drawer', 'drawerMenu', 'appsWorkspace', 'pageForward', 'badgeFollowsReading', 'focus', 'invite', 'dialogs', 'restored', 'signedOut', 'cappedBadge', 'botAvatar']) assert.equal(result[name], true, name);
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();

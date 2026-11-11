@@ -27,7 +27,7 @@ test('catalog scopes have separate caches and an invalidated pending read cannot
   const project = mkdtempSync(join(tmpdir(), 'catalog-scopes-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   const requests: { args: string[]; finish(value: unknown): void }[] = [];
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: ((_bin, args) => {
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge', spawnProcess: ((_bin, args) => {
     const spawned = child();
     requests.push({ args: [...args as string[]], finish: spawned.finish });
     return spawned.process;
@@ -54,7 +54,7 @@ test('cached current absence still performs exact global UUID resolution', async
   const project = mkdtempSync(join(tmpdir(), 'catalog-exact-global-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   const calls: string[][] = [];
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: ((_bin, args) => {
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge', spawnProcess: ((_bin, args) => {
     calls.push(args as string[]);
     const spawned = child();
     queueMicrotask(() => spawned.finish({ version: 1, sessions: calls.length === 1 ? [] : [row] }));
@@ -72,7 +72,7 @@ test('catalog exact lookups normalize pasted UUIDs before cache, process and sel
   const uuid = 'abcdef12-abcd-4abc-8abc-abcdef123456';
   const path = `/store/${uuid}.jsonl`;
   const calls: string[][] = [];
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: ((_bin, args) => {
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge', spawnProcess: ((_bin, args) => {
     calls.push(args as string[]);
     const spawned = child();
     queueMicrotask(() => spawned.finish({ version: 1, sessions: [{ ...row, uuid, path }] }));
@@ -93,7 +93,7 @@ test('workspace environment reads engine settings without an engine or credentia
   t.after(() => rmSync(project, { recursive: true, force: true }));
   const calls: string[][] = [];
   let response: unknown = { version: 1, environment: { KEEP: 'old', TARGET: '目标' }, config_home: '/original/.lingxi', global_config_path: '/original/.lingxi.json' };
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: ((_bin, args, options) => {
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge', spawnProcess: ((_bin, args, options) => {
     calls.push(args as string[]);
     assert.deepEqual((options as any).stdio, ['ignore', 'pipe', 'pipe']);
     assert.equal((options as any).env.ANTHROPIC_API_KEY, undefined);
@@ -113,7 +113,7 @@ test('catalog rejects nonabsolute or NUL source hints before host navigation', a
   const project = mkdtempSync(join(tmpdir(), 'catalog-source-hint-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));
   for (const workspace_path of ['relative', '/bad\0path']) {
-    const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: (() => {
+    const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge', spawnProcess: (() => {
       const spawned = child();
       queueMicrotask(() => spawned.finish({ version: 1, sessions: [{ ...row, workspace_path }] }));
       return spawned.process;

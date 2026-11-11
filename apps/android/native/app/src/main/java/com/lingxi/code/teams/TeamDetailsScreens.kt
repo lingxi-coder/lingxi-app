@@ -9,12 +9,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -41,11 +43,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
+import com.lingxi.code.friends.FriendsLogic
 import com.lingxi.code.theme.IdentityAvatar
 import com.lingxi.code.theme.PersonAvatar
 import com.lingxi.code.theme.TeamTile
@@ -60,7 +64,7 @@ import java.util.UUID
 @Composable
 internal fun TeamDetailsScreen(
     workspace: TeamsWorkspace, uid: String, team: TeamSummary, teams: TeamsState, messaging: TeamMessagingState, showBack: Boolean,
-    onClose: () -> Unit, onMessageBot: (String) -> Unit, modifier: Modifier = Modifier,
+    friendUids: Set<String>, onAddFriend: (TeamMember) -> Unit, onInviteFriends: () -> Unit, onClose: () -> Unit, onMessageBot: (String) -> Unit, modifier: Modifier = Modifier,
 ) {
     val detail = teams.detail?.takeIf { it.team.id == team.id }
     val current = detail?.team ?: team
@@ -95,8 +99,8 @@ internal fun TeamDetailsScreen(
         }
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             when (segments[selected]) {
-                R.string.teams_members -> membersSection(detail, current, uid, busy) { confirmation = it }
-                R.string.teams_invites -> invitesSection(detail, current, teams, busy, model)
+                R.string.teams_members -> membersSection(detail, current, uid, busy, friendUids, onAddFriend) { confirmation = it }
+                R.string.teams_invites -> invitesSection(detail, current, teams, busy, model, onInviteFriends)
                 else -> botsSection(messaging, detail, uid, onMessageBot, workspace)
             }
             item {
@@ -126,13 +130,20 @@ internal fun TeamDetailsScreen(
     }
 }
 
-private fun androidx.compose.foundation.lazy.LazyListScope.membersSection(detail: TeamDetail?, team: TeamSummary, uid: String, busy: Boolean, confirm: (Pair<Int, Map<String, Any>>) -> Unit) {
+private fun androidx.compose.foundation.lazy.LazyListScope.membersSection(
+    detail: TeamDetail?, team: TeamSummary, uid: String, busy: Boolean, friendUids: Set<String>, onAddFriend: (TeamMember) -> Unit, confirm: (Pair<Int, Map<String, Any>>) -> Unit,
+) {
     items(detail?.members.orEmpty(), key = { "member-${it.uid}" }) { member ->
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             PersonAvatar(member.uid, member.displayName, 40.dp)
             Column(Modifier.weight(1f)) {
                 Text(member.displayName.ifEmpty { stringResource(R.string.teams_member) }, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 AssistChip(onClick = {}, enabled = false, label = { Text(teamRoleLabel(member.role)) })
+                // Add friend (docs/FRIENDS-CLIENTS.md D15): every other person; Bots are not members here.
+                if (member.uid != uid) {
+                    if (member.uid in friendUids) Text(stringResource(R.string.friends_relation_friends), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    else TextButton(onClick = { onAddFriend(member) }, modifier = Modifier.testTag(TeamsTags.addFriend(member.uid))) { Text(stringResource(R.string.friends_add)) }
+                }
             }
             if (member.uid != uid && member.role != "owner" && (team.role == "owner" || (team.role == "admin" && member.role == "member"))) {
                 if (team.role == "owner") TextButton(enabled = !busy, onClick = { confirm(R.string.teams_confirm_change to mapOf("action" to "role", "teamId" to team.id, "uid" to member.uid, "generation" to member.generation, "role" to if (member.role == "admin") "member" else "admin")) }) {
@@ -146,7 +157,18 @@ private fun androidx.compose.foundation.lazy.LazyListScope.membersSection(detail
     }
 }
 
-private fun androidx.compose.foundation.lazy.LazyListScope.invitesSection(detail: TeamDetail?, team: TeamSummary, teams: TeamsState, busy: Boolean, model: TeamsViewModel) {
+private fun androidx.compose.foundation.lazy.LazyListScope.invitesSection(
+    detail: TeamDetail?, team: TeamSummary, teams: TeamsState, busy: Boolean, model: TeamsViewModel, onInviteFriends: () -> Unit,
+) {
+    // Invite friends (docs/FRIENDS-CLIENTS.md D26): an owner or an admin, whatever the member count (a full team still shows it and the server answers
+    // MEMBER_LIMIT); the picker lists the friends who are not in the member list, so it waits for that list.
+    if (FriendsLogic.canInviteFriends(team.role)) item(key = "invite-friends") {
+        OutlinedButton(enabled = detail != null, onClick = onInviteFriends, modifier = Modifier.fillMaxWidth().testTag(TeamsTags.INVITE_FRIENDS)) {
+            Icon(Icons.Outlined.PersonAdd, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(stringResource(R.string.friends_invite_action))
+        }
+    }
     item {
         var admin by rememberSaveable { mutableStateOf(false) }
         var uses by rememberSaveable { mutableIntStateOf(1) }

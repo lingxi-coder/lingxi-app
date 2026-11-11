@@ -288,11 +288,21 @@ export function createPushHandler({ store, messaging, verifyToken, origins = [] 
   };
 }
 
-// Internal Team trigger only. Push contains no message body or invite/session token.
+// Generic wording only: a Team or Friends push never carries message, note or invite text (title = the other person's name).
+const TEAM_COPY = { zh: '团队有新消息', en: 'New message in your team' };
+export const FRIEND_COPY = {
+  message: { zh: '好友有新消息', en: 'New message from a friend' },
+  request: { zh: '想添加你为好友', en: 'wants to add you as a friend' },
+  accepted: { zh: '已接受你的好友请求', en: 'accepted your friend request' },
+  linked: { zh: '已通过你的好友链接成为好友', en: 'is now your friend' },
+  // The team's name is user-authored text, so a push never carries it: the offer itself is read in the app.
+  offer: { zh: '邀请你加入团队', en: 'invited you to join a team' },
+};
+// Internal Team/Friends triggers only. `route` (a deep-link path, query included), `kind` and `copy` default to the Team inbox.
 export async function sendTeamPush(store, messaging, input, allowed, clock = Date.now) {
-  const devices = await store.active(input.uid);
+  const devices = await store.active(input.uid), copy = input.copy ?? TEAM_COPY;
   return deliver(store, messaging, devices, device => buildPushMessage(device, {
-    title: input.title, body: /^zh(?:[-_]|$)/i.test(device.locale ?? '') ? '团队有新消息' : 'New message in your team',
-    ttlSeconds: 3600, route: 'team/inbox', collapseKey: input.collapseKey, data: { notificationId: input.notificationId, kind: 'team_message' },
+    title: input.title, body: /^zh(?:[-_]|$)/i.test(device.locale ?? '') ? copy.zh : copy.en,
+    ttlSeconds: 3600, route: input.route ?? 'team/inbox', collapseKey: input.collapseKey, data: { notificationId: input.notificationId, kind: input.kind ?? 'team_message' },
   }, clock()), clock, allowed);
 }

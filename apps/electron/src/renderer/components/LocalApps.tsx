@@ -31,7 +31,7 @@ export function LocalAppsTopBar({ onOpenMarket }: { onOpenMarket: () => void }) 
     </button>
   </header>;
 }
-export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop }: { visible: boolean; onCreate: () => void; onDevelopmentBlocked: () => void; canDevelop: boolean }) {
+export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop, sidebarTarget }: { sidebarTarget?: HTMLElement | null; visible: boolean; onCreate: () => void; onDevelopmentBlocked: () => void; canDevelop: boolean }) {
   const t = useT();
   const { locale } = useI18n();
   const [publication, setPublication] = useState<DesktopLocalApp>();
@@ -41,6 +41,7 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop 
   const [apps, setApps] = useState<DesktopLocalApp[]>([]);
   const [remoteSettings, setRemoteSettings] = useState<Record<string, boolean>>({});
   const [remoteConfigured, setRemoteConfigured] = useState(false);
+  const [librarySelection] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -97,9 +98,9 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop 
         <button disabled={busy === pending.requestId} onClick={() => { if (requireDevelopment()) void act(pending.requestId, () => appsApi().resumeAuthoringSession(pending.requestId)); }}>{tr('local_app_authoring_recover')}</button>
       </div>)}
     </aside>}
-    <label className="local-app-search"><span className="sr-only">{tr('apps_search_hint')}</span><input type="search" placeholder={tr('desktop_apps_search')} value={query} onChange={event => setQuery(event.target.value)} /></label>
+    {!sidebarTarget && <label className="local-app-search"><span className="sr-only">{tr('apps_search_hint')}</span><input type="search" placeholder={tr('desktop_apps_search')} value={query} onChange={event => setQuery(event.target.value)} /></label>}
     {!apps.length && !error ? <div className="local-app-empty"><AppsGlyph size={38}/><h2>{tr('desktop_apps_empty_title')}</h2><p>{tr('desktop_apps_empty_body')}</p><button onClick={onCreate}>{tr('desktop_apps_start_creating')}</button></div> : <div className="local-app-grid">
-      {filtered.map(app => <article className="local-app-tile" key={app.id}>
+      {filtered.filter(app => !sidebarTarget || librarySelection === null || app.id === librarySelection).map(app => <article className="local-app-tile" key={app.id}>
         <button className="local-app-tile-open" onClick={() => void act(app.id, () => appsApi().open(app.id))} disabled={busy === app.id}>
           <span className="local-app-avatar">{Array.from(app.name)[0]?.toLocaleUpperCase(locale)}</span><h2>{app.name}</h2><p>{app.summary || tr('desktop_apps_fallback_summary')}</p>
         </button>

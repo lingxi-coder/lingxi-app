@@ -22,6 +22,8 @@ import { installCrashReporting } from './crashReporting.js';
 import { AccountService } from './account.js';
 import { TeamsService } from './teams/service.js';
 import { installTeamsIpc } from './teams/ipc.js';
+import { FriendsService } from './teams/friends.js';
+import { installFriendsIpc } from './teams/friendsIpc.js';
 import { TeamConnector } from './teams/connector.js';
 import { TeamPrivateStore } from './teams/privateStore.js';
 import { resolveTeamBinaries } from './teams/process.js';
@@ -139,6 +141,7 @@ let notifier: HostNotifier | null = null;
 let quitting = false;
 let shutdownDiagnostics: DiagnosticBuffer | undefined;
 let disposeProviderAccounts: (() => Promise<void>) | undefined;
+let flushConversationSpaces: (() => Promise<void>) | undefined;
 let localApps: LocalAppHost | null = null;
 let remoteControl: RemoteControlService | null = null;
 let remotePolicy: RemotePolicy | null = null;
@@ -397,6 +400,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const sessionCatalog = new ProjectSessionCatalog(catalogOptions);
   const productPaths = await sessionCatalog.productPaths();
   const settings = new SettingsStore(userData, productPaths.workspaceRoot);
+  flushConversationSpaces = () => settings.conversationSpaces.flush();
   let lastComputerRevision = '';
   const computerSettings = new ComputerSettingsStore(userData, {
     showExtension: async path => { const error = await shell.openPath(path); if (error) throw new Error(error); },
@@ -579,7 +583,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   notifier.setPreferences(settings.getPublic().notifications);
   const decisionHost = new DecisionHost({
     userData, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
-    broker: credentialBroker ?? systemDecisionCredentials(userData), accounts: () => providerAccounts?.launch() ?? Promise.resolve(undefined),
+    broker: credentialBroker ?? systemDecisionCredentials(userData), accounts: accountId => providerAccounts?.launchApiKeyAccount(accountId, 'openai', 'openai') ?? Promise.resolve(undefined),
     changed: snapshot => host?.sendToWindows(CH_DECISION_CHANGED, snapshot),
   });
   bridge = new SessionRuntimeManager({
@@ -639,7 +643,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       // A Bot's session is not one of the owner's: it is neither the one to restore at startup nor one to share.
       if (bots?.ownsWorkspace(ref.projectPath)) return;
       if (isActive) settings.setActiveSession(ref);
-      host?.commitConversationDraft(ref);
+      void host?.commitConversationDraft(ref).catch(error => diagnostics.add('warn', 'host', `conversation navigation: ${sanitizeDiagnostic(error)}`));
       // `remoteControlAtStartup`: a new chat starts shared with the user's other devices.
       try { remotePolicy?.sessionCreated(ref); } catch (error) { diagnostics.add('warn', 'host', `remote control: ${sanitizeDiagnostic(error)}`); }
     },
@@ -755,6 +759,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     credentialBroker,
     nativeAudio ?? undefined,
   );
+  flushConversationSpaces = host.flushConversationSpaces.bind(host);
   host.attachDecision(decisionHost);
   if (providerAccounts) host.attachProviderAccounts(providerAccounts);
   host.attachLocalAppAuthoring((appId, ref, version) => {
@@ -787,7 +792,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
   host.attachAccount(account);
   const teamsService = new TeamsService(account, firebaseConfig);
-  stopTeams = installTeamsIpc(teamsService, () => [...mainWindows]);
+  // Friends listens in the Teams service's Firestore session, so it stops first.
+  const stopFriendsIpc = installFriendsIpc(new FriendsService(account, teamsService), () => [...mainWindows]);
+  const stopTeamsIpc = installTeamsIpc(teamsService, () => [...mainWindows]);
+  stopTeams = () => { stopFriendsIpc(); stopTeamsIpc(); };
   // Off unless the user (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns it on.
   const remoteDiagnostics = (level: 'info' | 'warn' | 'error', message: string): void => {
     diagnostics.add(level, 'host', `remote control: ${message}`);
@@ -1221,5 +1229,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     record('started');
     try { await dispose(); record('completed'); }
     catch (error) { record('failed'); throw error; }
-  })).finally(() => app.quit());
+  })).finally(async () => {
+    await flushConversationSpaces?.();
+    try { await shutdownDiagnostics?.flush(); }
+    finally { app.quit(); }
+  });
   });

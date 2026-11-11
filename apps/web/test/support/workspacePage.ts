@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import test, { type TestContext } from 'node:test';
 import { createElement, useSyncExternalStore, type ReactElement } from 'react';
-import type { TeamsSnapshot, TeamsWorkspace } from '../../../../packages/teams/workspace';
 
 // The locked renderer is required so interaction coverage cannot silently skip.
 const require = createRequire(import.meta.url);
@@ -35,13 +34,15 @@ export function withDom(context: TestContext): void {
 // ── Rendering and driving ──
 
 export const settle = async (turns = 10) => { for (let i = 0; i < turns; i++) await new Promise(resolve => setTimeout(resolve, 0)); };
-export function Host({ workspace, render }: { workspace: TeamsWorkspace; render(snapshot: TeamsSnapshot): ReactElement }): ReactElement {
+/** What a view needs of a workspace: the Teams workspace and the Friends workspace both are one. */
+export interface Store<Snapshot> { subscribe(listener: () => void): () => void; getSnapshot(): Snapshot }
+export function Host<Snapshot>({ workspace, render }: { workspace: Store<Snapshot>; render(snapshot: Snapshot): ReactElement }): ReactElement {
   return render(useSyncExternalStore(workspace.subscribe, workspace.getSnapshot));
 }
 export const classes = (node: any) => String(node.props.className ?? '').split(' ');
 export const textOf = (node: any): string => typeof node === 'string' ? node : (node.children ?? []).map(textOf).join('');
 
-export async function mount(workspace: TeamsWorkspace, render: (snapshot: TeamsSnapshot) => ReactElement) {
+export async function mount<Snapshot>(workspace: Store<Snapshot>, render: (snapshot: Snapshot) => ReactElement) {
   const { create, act } = renderer!;
   let tree: any;
   await act(async () => { tree = create(createElement(Host, { workspace, render }), { createNodeMock: hostNode }); await settle(); });

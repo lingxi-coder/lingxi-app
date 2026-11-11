@@ -9,7 +9,7 @@ import XCTest
 final class TabNavigationModelTests: XCTestCase {
 
     func testLeavingChatsRejectsLateAppPresentationEvenAfterReturning() {
-        for tab in [AppTab.bots, .teams, .settings] {
+        for tab in [AppTab.bots, .teams, .friends, .settings] {
             let navigation = AppNavigationModel()
             navigation.openApps()
             let revision = navigation.presentationRevision
@@ -163,19 +163,21 @@ final class TabNavigationModelTests: XCTestCase {
         XCTAssertEqual(navigation.tabs.scrollToTopRequests[.settings], scrolls + 1, "at the root a re-tap scrolls to top")
     }
 
-    func testReTapOnBotsAndTeamsPopsOnlyWhenTheTabReportedDepth() {
-        let navigation = AppNavigationModel()
-        navigation.tabs.select(.bots)
+    func testReTapOnTheStackTabsPopsOnlyWhenTheTabReportedDepth() {
+        for tab in [AppTab.bots, .teams, .friends] {
+            let navigation = AppNavigationModel()
+            navigation.tabs.select(tab)
 
-        navigation.userSelectedTab(.bots)
-        XCTAssertNil(navigation.tabs.popToRootRequests[.bots])
-        XCTAssertEqual(navigation.tabs.scrollToTopRequests[.bots], 1)
+            navigation.userSelectedTab(tab)
+            XCTAssertNil(navigation.tabs.popToRootRequests[tab], "\(tab)")
+            XCTAssertEqual(navigation.tabs.scrollToTopRequests[tab], 1, "\(tab)")
 
-        navigation.tabs.reportDepth(.bots, 2)
-        XCTAssertEqual(navigation.depth(of: .bots), 2)
-        navigation.userSelectedTab(.bots)
-        XCTAssertEqual(navigation.tabs.popToRootRequests[.bots], 1)
-        XCTAssertEqual(navigation.tabs.scrollToTopRequests[.bots], 1)
+            navigation.tabs.reportDepth(tab, 2)
+            XCTAssertEqual(navigation.depth(of: tab), 2, "\(tab)")
+            navigation.userSelectedTab(tab)
+            XCTAssertEqual(navigation.tabs.popToRootRequests[tab], 1, "\(tab)")
+            XCTAssertEqual(navigation.tabs.scrollToTopRequests[tab], 1, "\(tab)")
+        }
     }
 
     func testPagesAndOverlaysOfChatsSelectTheChatsTab() {
@@ -225,8 +227,10 @@ final class TabNavigationModelTests: XCTestCase {
     func testTheTabCoordinatorKeepsDepthsPerTab() {
         let tabs = TabCoordinator()
         tabs.reportDepth(.teams, 3)
+        tabs.reportDepth(.friends, 1)
         tabs.reportDepth(.bots, -4)
         XCTAssertEqual(tabs.depth[.teams], 3)
+        XCTAssertEqual(tabs.depth[.friends], 1)
         XCTAssertEqual(tabs.depth[.bots], 0, "a depth is never negative")
         tabs.select(.bots)
         XCTAssertEqual(tabs.selected, .bots)

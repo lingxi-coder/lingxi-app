@@ -157,12 +157,19 @@ enum TeamsListLogic {
     /// One line of the newest message. No `lastMessage`: no messages yet. Recalled and non-text messages get
     /// a label. "You: " prefixes the viewer's own message; `author` names the sender in groups and channels.
     static func conversationPreview(_ conversation: TeamMessageConversation, uid: String, strings: TeamsListStrings, author: ((TeamLastMessage) -> String)? = nil) -> String {
-        guard let last = conversation.lastMessage else { return strings.noMessages }
+        pointerPreview(conversation.lastMessage, uid: uid, strings: strings, author: conversation.kind == "group" || conversation.kind == "channel" ? author : nil)
+    }
+
+    /// The message part of that line, from the newest-message pointer alone: a friend's card carries one too
+    /// (docs/FRIENDS-CLIENTS.md D3), so a Friends row reads like a Teams row. `author` names someone else's
+    /// message where the caller wants a prefix (groups and channels); the viewer's own always reads "You: ".
+    static func pointerPreview(_ last: TeamLastMessage?, uid: String, strings: TeamsListStrings, author: ((TeamLastMessage) -> String)? = nil) -> String {
+        guard let last else { return strings.noMessages }
         let mine = last.authorKind == "user" && last.authorUid == uid
         var prefix = ""
         if mine {
             prefix = strings.you + strings.authorSeparator
-        } else if conversation.kind == "group" || conversation.kind == "channel", let author {
+        } else if let author {
             prefix = author(last) + strings.authorSeparator
         }
         if last.recalled { return prefix + strings.recalled }

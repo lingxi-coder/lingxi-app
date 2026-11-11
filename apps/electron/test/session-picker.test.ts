@@ -15,6 +15,7 @@ import {
   SessionPicker,
   sessionPickerRows,
   sessionPickerShortcutScope,
+  sessionPickerWindow,
 } from '../src/renderer/components/SessionPicker';
 import { dialogFocusTarget } from '../src/renderer/bridge/bridgeRuntimeState';
 import { Theme } from '../src/renderer/theme/ThemeContext';
@@ -27,6 +28,21 @@ const row = (uuid: string, title: string, modified = '2026-10-21T00:00:00Z'): Se
   uuid, title, resume_title: title, modified_rfc3339: modified, message_count: 3, mode: 'code', path: `/saved/${uuid}.jsonl`,
 });
 const sessions = [row(firstId, 'Parser investigation', '2026-10-20T00:00:00Z'), row(secondId, 'Review tests')];
+
+test('picker window bounds mounted rows and always includes the selected logical option', () => {
+  assert.deepEqual(sessionPickerWindow(0, 0, 380, 0), []);
+  assert.deepEqual(sessionPickerWindow(2, 0, 380, 0), [0, 1]);
+  const initial = sessionPickerWindow(10000, 0, 380, 0);
+  assert.ok(initial.length <= 14);
+  const scrolled = sessionPickerWindow(10000, 330000, 380, 0);
+  assert.equal(scrolled[0], 0, 'offscreen selected option stays mounted for aria-activedescendant');
+  assert.ok(scrolled.includes(5000));
+  assert.ok(scrolled.length <= 15);
+  const tail = sessionPickerWindow(10000, 660000, 380, 9999);
+  assert.equal(tail.at(-1), 9999);
+  assert.ok(tail.length <= 14);
+  assert.deepEqual(sessionPickerWindow(2, 660000, 380, 0), [0, 1], 'a shortened search result cannot retain an obsolete window');
+});
 
 test('a resume argument selects a UUID or one normalized resume title and preserves ambiguous names for search', () => {
   assert.equal(resumeArgumentSessionId(` ${firstId} `), firstId);

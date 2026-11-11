@@ -71,6 +71,22 @@ struct TuiMsgQueueInput {
 
 #[async_trait::async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInput {
+    fn supports_goal_proposals(&self) -> bool {
+        true
+    }
+    async fn enqueue_goal_proposal(
+        &self,
+        id: String,
+        body: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        origin: lingxi_core::session::GoalOrigin,
+        cancel: CancellationToken,
+    ) -> Result<(), String> {
+        self.queue
+            .enqueue_goal_proposal(id, body, origin, cancel)
+            .await;
+        Ok(())
+    }
+
     fn supports_goal_retries(&self) -> bool {
         true
     }
@@ -1168,7 +1184,46 @@ async fn drain_teammate_prompts(
         let mut mod_settle = None;
         let mut mod_as_user = false;
         let mut mod_origin = None;
-        if let Some((plugin, as_user, settle)) = mod_submission {
+        let goal_proposal = command.uuid.starts_with("goal-proposal:");
+        if goal_proposal {
+            if !orchestrator.claim_goal_proposal(&command.uuid).await {
+                continue;
+            }
+            let Some(dispatcher) = pending_slashes.mod_dispatcher.get() else {
+                continue;
+            };
+            let origin_kind = if command.source == msgqueue::QueueSource::TaskCompletion {
+                "task-notification"
+            } else {
+                "auto-continuation"
+            };
+            mod_origin = Some(serde_json::json!({"kind":origin_kind}));
+            match dispatcher.dispatch(text.clone(), cancel.clone()).await {
+                lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
+                    mod_prompt = Some(prompt);
+                }
+                lingxi_core::host::SlashDispatchResult::Handled { display } => {
+                    let _ = turn_tx.send(tui::TurnEvent::SystemNotice {
+                        body: client::protocol::text::ClientTextDto::from_code_units(
+                            display.string_units("").unwrap_or_default(),
+                        ),
+                        is_error: false,
+                    });
+                    continue;
+                }
+                lingxi_core::host::SlashDispatchResult::Failed { diagnostic } => {
+                    let display = slash_failure_display(&diagnostic);
+                    let _ = turn_tx.send(tui::TurnEvent::SystemNotice {
+                        body: client::protocol::text::ClientTextDto::from_code_units(
+                            display.string_units("").unwrap_or_default(),
+                        ),
+                        is_error: true,
+                    });
+                    continue;
+                }
+                _ => continue,
+            }
+        } else if let Some((plugin, as_user, settle)) = mod_submission {
             mod_prompt = Some(text.clone());
             mod_settle = Some(settle);
             mod_as_user = as_user;
@@ -1340,11 +1395,21 @@ async fn drain_teammate_prompts(
                 });
                 let in_human_turn = mod_as_user
                     || command.source == msgqueue::QueueSource::PromptInput && !command.is_meta;
-                let native_source = cli_native_source_for_queued_prompt(
-                    command.source,
-                    command.is_meta,
-                    mod_as_user,
-                );
+                let native_source = if goal_proposal {
+                    orchestrator::native_user_message_source::NativeUserMessageSource {
+                        message_origin: Some(
+                            Ujp::from_serde_value(&origin)
+                                .expect("trusted goal origin is valid JSON"),
+                        ),
+                        prompt_source: None,
+                    }
+                } else {
+                    cli_native_source_for_queued_prompt(
+                        command.source,
+                        command.is_meta,
+                        mod_as_user,
+                    )
+                };
                 let turn_result = if let Some(inputs) = queued_inputs {
                     let runner = source_batch_runner
                         .expect("batch runner availability was checked before turn admission");

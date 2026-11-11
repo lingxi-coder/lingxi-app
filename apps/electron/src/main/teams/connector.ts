@@ -63,6 +63,8 @@ const permanentDelivery = (error: unknown) => error instanceof TeamsApiError && 
 /** Past the deadline the host stops retrying a refused or orphaned delivery (a policy choice): the server still accepts a completion while the task is `running` and finished by the deadline, replacing the derived `interrupted`. The margin covers a host clock ahead of the server, which also yields TASK_EXPIRED. */
 export const DELIVERY_SKEW_MS = 2 * 60 * 1000;
 const noCursor = { scope: null, sessionRevision: 0, lastMessageSeq: 0, lastChangeSeq: 0, bootstrapFromSeq: 0 };
+/** The id space of a friendship's team (FRIENDS.md): no ordinary team has such an id, and `TeamsService.list` never returns one. */
+const PAIR_PREFIX = 'f_';
 /** Source reads, selected account credentials and backend permits stay in trusted main. */
 export class TeamConnector implements LocalTeamHost {
   private closed = false; private pending = false; private refresh?: Promise<void>; private timer?: ReturnType<typeof setTimeout>;
@@ -72,6 +74,8 @@ export class TeamConnector implements LocalTeamHost {
   private readonly deferred = new Map<string, number>(); private readonly deferredCodes = new Map<string, string>();
   private readonly scheduled = new Map<string, number>(); private readonly stops: Array<() => void>;
   private revision = 0; private probes = 0;
+  /** Friendship teams the server answered MEMBERSHIP_REQUIRED: the friendship is over and no pass sends them another command (D24). Memory only; `revoke()` clears it. */
+  private readonly ended = new Set<string>();
   /** taskId → earliest time another missing-result inspect may spawn. */
   private readonly resultProbes = new Map<string, number>();
   constructor(private readonly options: TeamConnectorOptions) {
@@ -83,8 +87,17 @@ export class TeamConnector implements LocalTeamHost {
   private available() { if ((this.options.platform ?? process.platform) !== 'darwin') throw new Error('TEAM_HOST_MACOS_REQUIRED'); }
   private context(uid: string) { const c = this.options.service.hostContext(); if (!c || c.uid !== uid || this.closed) throw new Error('INVALID_SESSION'); return c; }
   private assert(c: TeamAccountContext) { if (this.closed) throw new Error('INVALID_SESSION'); this.options.service.assertHostContext(c); }
-  private command<T>(c: TeamAccountContext, binding: Pick<SharedBotBinding, 'teamId' | 'generation'>, action: string, payload: Record<string, unknown>, commandId = newId()) {
-    this.assert(c); return this.options.service.hostMessages<T>(c, { schemaVersion: 1, commandId, teamId: binding.teamId, generation: binding.generation, action, payload });
+  private async command<T>(c: TeamAccountContext, binding: Pick<SharedBotBinding, 'teamId' | 'generation'>, action: string, payload: Record<string, unknown>, commandId = newId()): Promise<T> {
+    this.assert(c);
+    // The server's answer for a finished friendship is known: repeat it locally, so a pass that meets the team again makes no call.
+    if (this.ended.has(binding.teamId)) throw new TeamsApiError('MEMBERSHIP_REQUIRED', 403);
+    const revision = this.revision;
+    try { return await this.options.service.hostMessages<T>(c, { schemaVersion: 1, commandId, teamId: binding.teamId, generation: binding.generation, action, payload }); }
+    catch (error) {
+      // Only a friendship's team: an ordinary team the person left is skipped by the `list()` check in `discover()`. A reset since the call began owns the set.
+      if (revision === this.revision && binding.teamId.startsWith(PAIR_PREFIX) && error instanceof TeamsApiError && error.status === 403 && error.code === 'MEMBERSHIP_REQUIRED') this.ended.add(binding.teamId);
+      throw error;
+    }
   }
   private hostFields(b: SharedBotBinding) { return { deploymentId: b.deploymentId, hostId: this.options.privateStore.hostId, accountEpoch: b.accountEpoch }; }
   async localBots(uid: string): Promise<LocalPublishableBot[]> {
@@ -225,7 +238,7 @@ export class TeamConnector implements LocalTeamHost {
     this.wake();
   }
   /** Account reset or sign-out: every running task loses its authority. A cache or listener flicker never comes here. */
-  revoke() { this.revision++; for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.deferredCodes.clear(); this.activated.clear(); this.heartbeats.clear(); this.resultProbes.clear(); this.wake(); }
+  revoke() { this.revision++; this.ended.clear(); for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.deferredCodes.clear(); this.activated.clear(); this.heartbeats.clear(); this.resultProbes.clear(); this.wake(); }
   private wake() {
     if (this.closed || (this.options.platform ?? process.platform) !== 'darwin') return; this.pending = true; if (this.refresh) return;
     this.refresh = (async () => { while (this.pending && !this.closed) { this.pending = false; try { await this.discover(); } catch { /* Retry discovery; a failed authorization never starts work. */ } } })()
@@ -256,7 +269,8 @@ export class TeamConnector implements LocalTeamHost {
     const inactive = new Set<string>();
     for (let index = 0; index < bindings.length; index += 1) {
       let b = bindings[index]!;
-      if (!teams.some(t => t.id === b.teamId && t.generation === b.generation)) continue;
+      // A friendship's team is never in `list()`: its binding stands on the stored generation (always 1), and the server checks the membership with every command (D24).
+      if (!b.teamId.startsWith(PAIR_PREFIX) && !teams.some(t => t.id === b.teamId && t.generation === b.generation)) continue;
       try {
         const { bots } = await this.command<{ bots: SharedBotCard[] }>(c,b,'listSharedBots',{}); assert();
         const card = bots.find(v => v.sharedBotId === b.sharedBotId); if (!card || card.state !== 'published' || card.revision !== b.revision || card.maintainer.uid !== c.uid) { inactive.add(scopeKey(b)); this.stopBinding(b.teamId,b.sharedBotId); continue; }
@@ -336,7 +350,7 @@ export class TeamConnector implements LocalTeamHost {
         // Only a server answer counts: a local INVALID_SESSION means the account moved on, not that the result is dead.
         // DEPLOYMENT_REQUIRED only ends the delivery once this binding's activation is confirmed current, or this pass found its card inactive (activation never comes then):
         // a lost activation response leaves the old epoch locally, and the next pass replays it.
-        if (permanentDelivery(error) || expired && error instanceof TeamsApiError && definitive(error)
+        if (permanentDelivery(error) || this.ended.has(delivery.teamId) || expired && error instanceof TeamsApiError && definitive(error)
           && (error.code !== 'DEPLOYMENT_REQUIRED' || this.activated.get(scopeKey(b)) === activation(b,c) || inactive.has(scopeKey(b)))) await drop(errorCode(error)); }
     }
     candidates.sort((a,b) => (this.scheduled.get(serialKey(a.binding,a.task)) ?? 0) - (this.scheduled.get(serialKey(b.binding,b.task)) ?? 0) || a.task.messageSeq - b.task.messageSeq);

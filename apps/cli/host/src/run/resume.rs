@@ -423,7 +423,7 @@ pub(super) fn resolve_resume_title_from(
     Ok(resolve_resume_title_source_from(rows, arg)?.map(|row| row.uuid))
 }
 
-fn resolve_resume_title_source_from(
+pub(crate) fn resolve_resume_title_source_from(
     rows: Vec<SessionMetadata>,
     arg: &str,
 ) -> Result<Option<SessionMetadata>, String> {
@@ -508,8 +508,7 @@ pub async fn run_continue(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     let rows = match load_resume_rows().await {
         Ok(rows) => rows,
         Err(LoaderError::EmptyDirectory) => {
-            sink.error("runtime", "No conversation found to continue")
-                .await;
+            report_empty_continue(argv, sink).await;
             return exit_codes::RUNTIME_ERROR;
         }
         Err(e) => {
@@ -518,11 +517,19 @@ pub async fn run_continue(argv: &Argv, sink: &dyn OutputSink) -> i32 {
         }
     };
     let Some(first) = rows.first() else {
-        sink.error("runtime", "No conversation found to continue")
-            .await;
+        report_empty_continue(argv, sink).await;
         return exit_codes::RUNTIME_ERROR;
     };
     resume_resolved_session(argv, sink, first.uuid, Some(first.path.clone())).await
+}
+
+async fn report_empty_continue(argv: &Argv, sink: &dyn OutputSink) {
+    if !argv.no_tui && crate::mode::is_full_tty() {
+        eprintln!("No conversation found to continue");
+    } else {
+        sink.error("runtime", "No conversation found to continue")
+            .await;
+    }
 }
 
 /// Shared post-resolution resume dispatch for both `--resume <uuid>` and
@@ -2241,10 +2248,9 @@ pub(super) async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i3
             let first = mount_resumed_tui(argv, uuid, messages, path, None, published).await;
             drive_tui_switch_loop(argv, first, Some(uuid), None).await
         }
-        Ok(Ok(None)) => {
-            sink.text("Cancelled.\n").await;
-            exit_codes::SUCCESS
-        }
+        // Claude Code 2.1.321's startup picker cancels silently with status 1.
+        // This never constructs a runtime or changes the saved transcript.
+        Ok(Ok(None)) => exit_codes::RUNTIME_ERROR,
         Ok(Err(e)) => {
             sink.error("runtime", &e.to_string()).await;
             exit_codes::RUNTIME_ERROR
@@ -2290,7 +2296,7 @@ pub(crate) async fn load_resume_rows_for_cwd(
 /// asks the M5-08 loader for the complete sorted catalog. The picker itself
 /// exposes this in 50-row pages (`tui::resume::RESUME_PAGE_SIZE`), matching
 /// Claude Code 2.1.246's `allStatLogs` / `nextIndex` behavior.
-pub(super) async fn load_resume_rows_from(
+pub(crate) async fn load_resume_rows_from(
     lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {

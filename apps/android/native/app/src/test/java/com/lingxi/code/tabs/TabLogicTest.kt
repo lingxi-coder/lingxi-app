@@ -1,5 +1,6 @@
 package com.lingxi.code.tabs
 
+import com.lingxi.code.friends.FriendsVectors
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -32,6 +33,15 @@ class TabLogicTest {
         assertEquals(21, rows.size)
         rows.forEach { row ->
             assertEquals(row.getString("route"), row.getString("expect"), TabLogic.tabForLink(row.getString("route")).key)
+        }
+    }
+
+    /** D16: Friends links open the Friends tab (`links.tabForLink` of `friends-vectors.json`); `friends/...` is no route. */
+    @Test fun tabForLinkMatchesTheFriendsRows() {
+        val rows = FriendsVectors.rows("links", "tabForLink")
+        assertEquals(14, rows.size)
+        rows.forEach { row ->
+            assertEquals("route '${row.getString("route")}'", row.getString("expect"), TabLogic.tabForLink(row.getString("route")).key)
         }
     }
 
@@ -75,13 +85,14 @@ class TabLogicTest {
         assertEquals(AppTab.Chats, LinkTarget.Chats.tab)
         assertEquals(AppTab.Bots, LinkTarget.Bots.tab)
         assertEquals(AppTab.Teams, LinkTarget.Teams.tab)
+        assertEquals(AppTab.Friends, LinkTarget.Friends.tab)
         assertEquals(AppTab.Settings, LinkTarget.Settings.tab)
         assertNull(LinkTarget.Stay.tab)
         assertNull(LinkTarget.None.tab)
     }
 
     @Test fun tabKeysAreTheSavedStateAndTagNames() {
-        assertEquals(listOf("chats", "bots", "teams", "settings"), AppTab.entries.map { it.key })
+        assertEquals(listOf("chats", "bots", "teams", "friends", "settings"), AppTab.entries.map { it.key })
         AppTab.entries.forEach { assertEquals(it, AppTab.fromKey(it.key)) }
         assertNull(AppTab.fromKey("home"))
         assertNull(AppTab.fromKey(null))

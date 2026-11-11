@@ -1,16 +1,24 @@
-.transcript-agents { display: flex; flex-direction: column; gap: 3px; margin: 0; }
-.transcript-agent-row { display: flex; align-items: center; gap: 9px; width: 100%; min-width: 0; min-height: 28px; padding: 2px 0; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; transition: color 140ms cubic-bezier(.2, 0, 0, 1); }
+.transcript-agents { display: flex; flex-direction: column; min-width: 0; margin: 0; }
+.transcript-agents .transcript-agent-row { display: inline-flex; align-items: center; align-self: flex-start; gap: 9px; width: fit-content; max-width: 100%; min-width: 0; min-height: 28px; padding: 2px 0; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; transition: color 120ms ease, opacity 120ms ease; }
 .transcript-agent-row:hover:not(:disabled),
 .transcript-agent-row:focus-within:not(:disabled) { background: transparent; color: var(--agent-ink-focus); }
-.transcript-agent-row:focus-visible { outline: 2px solid var(--agent-focus); outline-offset: 2px; }
+.transcript-agent-row:focus-visible { outline: 2px solid var(--agent-focus); outline-offset: -2px; }
+.transcript-agent-row:active:not(:disabled) { opacity: .65; transition: none; }
 .transcript-agent-row:disabled { cursor: default; opacity: 1; }
 .transcript-agent-icon { display: flex; align-items: center; justify-content: center; flex: 0 0 20px; height: 20px; }
-.transcript-agent-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.transcript-agent-task { font-weight: 400; letter-spacing: normal; }
-.transcript-agent-name { font-weight: 510; letter-spacing: -.006em; }
-.transcript-agent-status { flex-shrink: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
-.transcript-agent-activity { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.transcript-agent-row > .transcript-disclosure-chevron { margin-left: auto; flex-shrink: 0; }
-.transcript-agent-row[data-agent-running] .transcript-agent-icon { animation: transcript-agent-pulse 1.5s ease-in-out infinite; }
+.transcript-agent-icons { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.transcript-agent-extra { padding: 0 2px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.transcript-agent-copy { display: inline-flex; align-items: baseline; flex: 0 1 auto; gap: .3em; min-width: 0; line-height: 1.5; white-space: nowrap; }
+.transcript-agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 400; }
+.transcript-agent-status { flex: 0 0 auto; min-width: 0; max-width: 55%; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.transcript-agent-status[data-danger], .transcript-agent-status [data-danger] { color: var(--agent-danger); }
+.transcript-agent-members { display: flex; flex-direction: column; gap: 2px; min-width: 0; margin: 2px 0 4px 9px; padding-left: 19px; border-left: 1px solid var(--agent-border); }
+.transcript-agent-members > [role='listitem'] { min-width: 0; }
+.transcript-agent-row[aria-expanded] > .transcript-disclosure-chevron { flex-shrink: 0; opacity: .7; }
+.transcript-agent-row:is(:hover, :focus-visible)[aria-expanded] > .transcript-disclosure-chevron { opacity: 1; }
+.transcript-agent-row[data-agent-running] .transcript-agent-icon,
+.transcript-agent-icon[data-agent-active] { animation: transcript-agent-pulse 1.5s ease-in-out infinite; }
 @keyframes transcript-agent-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .65; } }
-@media (prefers-reduced-motion: reduce) { .transcript-agent-row { transition: none; } .transcript-agent-row[data-agent-running] .transcript-agent-icon { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .transcript-agents .transcript-agent-row { transition: none; } .transcript-agent-row[data-agent-running] .transcript-agent-icon, .transcript-agent-icon[data-agent-active] { animation: none; } }
+@media (pointer: coarse) { .transcript-agents .transcript-agent-row { min-height: 44px; } }
+@media (prefers-contrast: more) { .transcript-agent-row[aria-expanded] > .transcript-disclosure-chevron { opacity: 1; } }

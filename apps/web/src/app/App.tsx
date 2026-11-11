@@ -1,5 +1,5 @@
 import { OpenLinkPage } from '../pages/OpenLinkPage';
-import { lazy, Suspense, useEffect } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { ConsoleLayout } from '../layouts/ConsoleLayout';
 import { PrivacyPage, DataDeletionPage } from '../pages/PrivacyPage';
 import { LoginPage } from '../pages/LoginPage';
@@ -24,18 +24,24 @@ const DocsPage = lazy(async () => {
 const RemotePage = lazy(() => import('../pages/RemotePage'));
 const RemoteSignInPage = lazy(() => import('../pages/RemoteSignInPage'));
 const TeamsPage = lazy(() => import('../pages/TeamsPage'));
+const FriendsPage = lazy(() => import('../pages/FriendsPage'));
 
 export function App() {
   const route = useRouter();
   const [locale, setLocale] = usePersistentState<Locale>('lingxi.web.locale', 'zh');
   const [region, setRegion] = usePersistentState<Region>('lingxi.web.region', detectInitialRegion);
   const [theme, setTheme] = useTheme();
+  // The unread badge of Friends (D14), reported by the page for its header and the document title.
+  const [friendsBadge, setFriendsBadge] = useState<string | null>(null);
 
   useEffect(() => {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
     document.documentElement.dataset.theme = theme;
     if (route === '/teams' || route === '/teams/join') {
       document.title = locale === 'zh' ? '团队 — 灵犀 LingXi' : 'Teams — LingXi';
+    } else if (route === '/friends' || route === '/friends/add') {
+      const title = locale === 'zh' ? '好友 — 灵犀 LingXi' : 'Friends — LingXi';
+      document.title = friendsBadge ? `(${friendsBadge}) ${title}` : title;
     } else if (isRemoteRoute(route) || route === '/login/remote') {
       document.title = locale === 'zh' ? '灵犀远控 — LingXi Remote' : 'LingXi Remote';
     } else if (!route.startsWith('/docs')) {
@@ -47,7 +53,7 @@ export function App() {
         ? '灵犀是你的个人辅助 Agent。帮你梳理想法、查找资料、处理日常任务，与你一起把事情做好。'
         : 'LingXi is your personal AI agent for thinking things through, finding information, and getting everyday tasks done.';
     }
-  }, [locale, route, theme]);
+  }, [locale, route, theme, friendsBadge]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -68,6 +74,8 @@ export function App() {
 
   if (route.startsWith('/open/')) return <OpenLinkPage locale={locale} />;
   if (route === '/teams' || route === '/teams/join') return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载团队…' : 'Loading teams…'}</main>}><TeamsPage locale={locale} /></Suspense>;
+
+  if (route === '/friends' || route === '/friends/add') return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载好友…' : 'Loading friends…'}</main>}><FriendsPage locale={locale} route={route} badge={friendsBadge} onBadge={setFriendsBadge} /></Suspense>;
 
   if (isRemoteRoute(route) || route === '/login/remote') {
     const fallback = <main role="status">{locale === 'zh' ? '正在加载…' : 'Loading…'}</main>;

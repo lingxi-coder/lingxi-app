@@ -140,6 +140,18 @@ INTENTIONAL_IDENTICAL_TO_BASE = {
     ("zh-Hant", "cron_error_detail_fmt"): "%1$s：%2$s",
     ("ja", "cron_error_detail %@ %@"): "%@：%@",
     ("ja", "cron_error_detail_fmt"): "%1$s：%2$s",
+    # Friends: the same two characters in both Chinese variants.
+    ("zh-Hant", "friends_title"): "好友",
+    ("zh-Hant", "friends_request_accept"): "接受",
+    ("zh-Hant", "friends_relation_friends"): "已是好友",
+    # Friends team offers and shared Bots: the same characters in both Chinese variants.
+    ("zh-Hant", "friends_offer_expires %@"): "%@ 到期",
+    ("zh-Hant", "friends_offer_expires_fmt"): "%1$s 到期",
+    ("zh-Hant", "friends_offer_join"): "加入",
+    ("zh-Hant", "friends_offer_dismiss"): "移除",
+    ("zh-Hant", "friends_bots_title"): "共享的 Bot",
+    ("zh-Hant", "friends_bots_none"): "此聊天中尚未共享 Bot。",
+    ("zh-Hant", "friends_share_bot_stop"): "停止共享",
 }
 
 

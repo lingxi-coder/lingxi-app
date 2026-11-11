@@ -22,7 +22,7 @@ const result = {};
 try {
   await win.loadURL(url);
   await wait(`document.querySelector('${review} .desktop-rail-count')?.textContent === '1'`);
-  assert.deepEqual(await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button')).map(button => button.getAttribute('aria-label'))`), ['Home', 'Teams', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
+  assert.deepEqual(await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button')).map(button => button.getAttribute('aria-label'))`), ['Home', 'Teams', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
   await run(`window.changesFixture.showSideChat()`);
   await wait(`document.querySelector('[aria-label="Reopen Side Chat"]')`);
   await click('[aria-label="Reopen Side Chat"]');

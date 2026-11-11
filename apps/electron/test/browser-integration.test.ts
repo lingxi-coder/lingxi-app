@@ -186,3 +186,26 @@ test('a delivered command timeout sends session cancellation before subsequent c
     assert.equal((await f.call({ action:'tabs' })).status,200);
   } finally { t.mock.timers.reset(); await f.close(); }
 });
+
+
+test('browser status reports readiness without extension commands or site approval', async () => {
+  const f = await fixture();
+  try {
+    const connected = await f.call({ action:'status' });
+    assert.equal(connected.status,200);
+    assert.deepEqual({ connected:connected.data.result.connected, enabled:connected.data.result.enabled }, { connected:true, enabled:true });
+    assert.equal(connected.data.approval,undefined);
+    assert.equal(connected.data.result.extensionDirectory,undefined);
+    f.change(value => { value.enabled = false; });
+    const disabled = await f.call({ action:'status' });
+    assert.equal(disabled.data.result.enabled,false);
+    assert.match(disabled.data.result.guidance,/turned off/);
+    await f.service.remove();
+    f.change(value => { value.enabled = true; });
+    const disconnected = await f.call({ action:'status' });
+    assert.equal(disconnected.status,200);
+    assert.equal(disconnected.data.result.connected,false);
+    assert.match(disconnected.data.result.guidance,/untested/);
+    assert.deepEqual(f.effects,[]);
+  } finally { await f.close(); }
+});

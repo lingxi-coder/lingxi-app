@@ -135,6 +135,8 @@ impl QuestionState {
 
 /// The live `AskUserQuestion` selection widget.
 pub struct AskUserQuestionView {
+    /// Goal proposals belong to the live session rather than one model turn.
+    session_goal_proposal: bool,
     /// The questions being walked (immutable prompt data).
     questions: Vec<TuiAskQuestion>,
     /// Per-question selection state (parallel to `questions`).
@@ -169,11 +171,18 @@ impl AskUserQuestionView {
             .is_some_and(oneshot::Sender::is_closed)
     }
 
+    /// Whether ordinary turn cancellation must leave this Goal decision open.
+    #[must_use]
+    pub fn is_session_goal_proposal(&self) -> bool {
+        self.session_goal_proposal && !self.is_asker_gone()
+    }
+
     /// Build the widget for `exchange` (questions + optional timeout + the
     /// answer channel).
     #[must_use]
     pub fn new(exchange: AskUserQuestionExchange) -> Self {
         let AskUserQuestionExchange {
+            lifetime,
             questions,
             timeout_secs,
             resp_tx,
@@ -188,6 +197,7 @@ impl AskUserQuestionView {
             .collect();
         let timeout = timeout_secs.map(Duration::from_secs);
         Self {
+            session_goal_proposal: lifetime.is_live_goal_proposal(),
             questions,
             states,
             current: 0,
@@ -735,6 +745,7 @@ mod tests {
     ) {
         let (resp_tx, resp_rx) = oneshot::channel();
         let view = AskUserQuestionView::new(AskUserQuestionExchange {
+            lifetime: Default::default(),
             questions,
             timeout_secs,
             resp_tx,

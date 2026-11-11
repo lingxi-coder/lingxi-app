@@ -30,6 +30,11 @@ struct TeamComposerDraft: Equatable, Sendable {
 ///   unread count.
 /// - Every other team (at most `maxWatchedTeams`) has a directory-only `TeamsUnreadWatcher`; they feed the
 ///   switcher and the tab badge.
+///
+/// With a `PairTeam` it is the workspace of one friend chat instead (docs/FRIENDS-CLIENTS.md D9): pinned to that
+/// team, whose summary and two people come from the friend's card. It makes no `GET /v1/teams` and no team-detail
+/// call, listens to no team index and no member list, watches no other team, and never persists a selection, so the
+/// Teams tab's workspace never sees the pair. The owner starts and stops it.
 @MainActor @Observable
 final class TeamsWorkspace {
     /// Teams other than the selected one that get a directory-only unread listener.
@@ -65,6 +70,8 @@ final class TeamsWorkspace {
     private(set) var messaging: TeamMessagingModel?
     /// The team `messaging` belongs to. Survives an invalidation, so the open team stays on screen.
     private(set) var messagingTeam: TeamSummary?
+    /// The friendship this workspace is pinned to; `nil` for the Teams tab's workspace.
+    private(set) var pair: PairTeam?
     /// Collapsed list sections of the selected team.
     private(set) var collapsed: Set<TeamsSection> = []
     /// The platform notice (`teams_disclosure`) is shown once per run, under the first conversation that loads.
@@ -104,6 +111,12 @@ final class TeamsWorkspace {
         self.apiRoot = apiRoot
         authOverride = auth
         dbOverride = db
+    }
+
+    /// A friend chat's workspace (D9). `start()` pins it to the pair; nothing else is fetched.
+    convenience init(pair: PairTeam, auth: Auth? = nil, db: Firestore? = nil) {
+        self.init(auth: auth, db: db)
+        self.pair = pair
     }
 
     private var auth: Auth { authOverride ?? Auth.auth() }
@@ -178,9 +191,13 @@ final class TeamsWorkspace {
             lifecycle += 1
             reset()
             uid = value
-            if let value { initialTeamID = preferences.selectedTeam(uid: value) ?? "" }
+            if let value, pair == nil { initialTeamID = preferences.selectedTeam(uid: value) ?? "" }
         }
         guard let uid else { return }
+        if let pair {
+            pin(pair)
+            return
+        }
         if indexListener == nil {
             let life = lifecycle
             indexListener = db.collection("users").document(uid).collection("teams")
@@ -209,6 +226,7 @@ final class TeamsWorkspace {
     // MARK: Team list and selection
 
     func scheduleRefresh() {
+        guard pair == nil else { return }
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
             do { try await Task.sleep(for: Self.refreshDelay) } catch { return }
@@ -218,7 +236,7 @@ final class TeamsWorkspace {
 
     /// Refetch the team list and the selected team's detail. The newest request wins.
     func refresh() async {
-        guard started, uid != nil else { return }
+        guard started, uid != nil, pair == nil else { return }
         revision += 1
         let request = revision, life = lifecycle, teamID = selectedTeamID
         refreshing += 1
@@ -250,6 +268,20 @@ final class TeamsWorkspace {
             // A selection follows the list: a team that is gone (left, removed, deleted) is dropped, one that merely failed to load is kept.
             if syncSelection() { scheduleRefresh() }
         }
+    }
+
+    /// The pair is the only team: select it and open its messaging (the pair workspace's counterpart of a list refresh).
+    private func pin(_ pair: PairTeam) {
+        teams = [pair.team]; selectedTeamID = pair.team.id; directories[pair.team.id] = pair.members; listed = true
+        if messaging == nil { openMessaging(pair.team) }
+    }
+
+    /// The friend's name or username changed (D10): the same pair, new words.
+    func updatePair(_ value: PairTeam) {
+        guard started, let pair, pair.team.id == value.team.id, pair.team.generation == value.team.generation else { return }
+        self.pair = value
+        teams = [value.team]; directories[value.team.id] = value.members
+        if messagingTeam?.id == value.team.id { messagingTeam = value.team }
     }
 
     func selectTeam(_ id: String) {

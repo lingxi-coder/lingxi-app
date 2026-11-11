@@ -66,6 +66,8 @@ import com.lingxi.code.bots.BotsTab
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
+import com.lingxi.code.friends.FriendsBadge
+import com.lingxi.code.friends.FriendsTab
 import com.lingxi.code.teams.TeamsBadge
 import com.lingxi.code.teams.TeamsTab
 import kotlinx.coroutines.flow.StateFlow
@@ -74,12 +76,12 @@ import kotlinx.coroutines.flow.StateFlow
 internal val WideBreakpoint = 840.dp
 
 /**
- * The app shell: four tabs behind a Material 3 bottom bar (a rail from [WideBreakpoint] up).
+ * The app shell: five tabs behind a Material 3 bottom bar (a rail from [WideBreakpoint] up).
  *
  * - **Chats** ([chats], the existing `RootScreen`) is always composed: it owns the live engine, the
  *   transcript and the drawer. When another tab is selected it is still measured but not placed,
  *   has no semantics, and its `BackHandler`s are parked on an inert dispatcher.
- * - **Bots / Teams / Settings** are composed while selected and restored through a
+ * - **Bots / Teams / Friends / Settings** are composed while selected and restored through a
  *   `SaveableStateHolder`, so each keeps its own stack.
  * - The bar shows by [TabLogic.tabBarVisible]; its height is subtracted from the bottom system-bar
  *   inset that the content below would otherwise pad a second time.
@@ -97,11 +99,14 @@ fun MainTabShell(
     modifier: Modifier = Modifier,
     bots: @Composable (Modifier) -> Unit = { BotsTab(state.botsRequest, state::onBotsRequestHandled, it) },
     teams: @Composable (Modifier) -> Unit = { TeamsTab(state.teamsJoinCode, state::onTeamsJoinCodeHandled, it) },
+    friends: @Composable (Modifier) -> Unit = { FriendsTab(state.friendsRequest, state::onFriendsRequestHandled, it) },
     botsBadge: StateFlow<Int> = BotsBadge.count,
     teamsBadge: StateFlow<Int> = TeamsBadge.count,
+    friendsBadge: StateFlow<Int> = FriendsBadge.count,
 ) {
     val botsCount by botsBadge.collectAsState()
     val teamsCount by teamsBadge.collectAsState()
+    val friendsCount by friendsBadge.collectAsState()
     BoxWithConstraints(modifier.fillMaxSize()) {
         val wide = maxWidth >= WideBreakpoint
         val density = LocalDensity.current
@@ -143,7 +148,7 @@ fun MainTabShell(
             }
             Row(Modifier.fillMaxSize()) {
                 if (wide && barVisible) {
-                    TabRail(selected, botsCount, teamsCount, state::onTabClick)
+                    TabRail(selected, botsCount, teamsCount, friendsCount, state::onTabClick)
                 }
                 Column(Modifier.weight(1f).fillMaxHeight()) {
                     TabBodies(
@@ -152,6 +157,7 @@ fun MainTabShell(
                         settings = settings,
                         bots = bots,
                         teams = teams,
+                        friends = friends,
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth()
@@ -165,6 +171,7 @@ fun MainTabShell(
                             selected = selected,
                             botsCount = botsCount,
                             teamsCount = teamsCount,
+                            friendsCount = friendsCount,
                             onSelect = state::onTabClick,
                             onHeightChanged = { barHeightPx = it },
                         )
@@ -184,6 +191,7 @@ private fun TabBodies(
     settings: @Composable (Modifier) -> Unit,
     bots: @Composable (Modifier) -> Unit,
     teams: @Composable (Modifier) -> Unit,
+    friends: @Composable (Modifier) -> Unit,
     modifier: Modifier,
 ) {
     val selected = state.selected
@@ -205,6 +213,7 @@ private fun TabBodies(
                 when (selected) {
                     AppTab.Bots -> bots(body)
                     AppTab.Teams -> teams(body)
+                    AppTab.Friends -> friends(body)
                     AppTab.Settings -> settings(body)
                     AppTab.Chats -> Unit
                 }
@@ -274,6 +283,7 @@ private fun PhoneBar(
     selected: AppTab,
     botsCount: Int,
     teamsCount: Int,
+    friendsCount: Int,
     onSelect: (AppTab) -> Unit,
     onHeightChanged: (Int) -> Unit,
 ) {
@@ -290,10 +300,10 @@ private fun PhoneBar(
                     NavigationBarItem(
                         selected = tab == selected,
                         onClick = { onSelect(tab) },
-                        icon = { TabIcon(tab, badgeCount(tab, botsCount, teamsCount)) },
+                        icon = { TabIcon(tab, badgeCount(tab, botsCount, teamsCount, friendsCount)) },
                         label = { TabLabel(tab) },
                         alwaysShowLabel = true,
-                        modifier = Modifier.testTag(UiTags.tab(tab.key)).tabBadgeState(tab, badgeCount(tab, botsCount, teamsCount)),
+                        modifier = Modifier.testTag(UiTags.tab(tab.key)).tabBadgeState(tab, badgeCount(tab, botsCount, teamsCount, friendsCount)),
                     )
                 }
             }
@@ -302,17 +312,17 @@ private fun PhoneBar(
 }
 
 @Composable
-private fun TabRail(selected: AppTab, botsCount: Int, teamsCount: Int, onSelect: (AppTab) -> Unit) {
+private fun TabRail(selected: AppTab, botsCount: Int, teamsCount: Int, friendsCount: Int, onSelect: (AppTab) -> Unit) {
     val label = stringResource(R.string.tabs_navigation_a11y)
     NavigationRail(Modifier.width(80.dp).testTag(UiTags.TABS_RAIL).semantics { contentDescription = label }) {
         AppTab.entries.forEach { tab ->
             NavigationRailItem(
                 selected = tab == selected,
                 onClick = { onSelect(tab) },
-                icon = { TabIcon(tab, badgeCount(tab, botsCount, teamsCount)) },
+                icon = { TabIcon(tab, badgeCount(tab, botsCount, teamsCount, friendsCount)) },
                 label = { TabLabel(tab) },
                 alwaysShowLabel = true,
-                modifier = Modifier.testTag(UiTags.tab(tab.key)).tabBadgeState(tab, badgeCount(tab, botsCount, teamsCount)),
+                modifier = Modifier.testTag(UiTags.tab(tab.key)).tabBadgeState(tab, badgeCount(tab, botsCount, teamsCount, friendsCount)),
             )
         }
     }
@@ -324,10 +334,11 @@ private fun TabLabel(tab: AppTab) {
         maxLines = 2, overflow = TextOverflow.Ellipsis)
 }
 
-/** Teams shows the unread total, Bots the chats waiting for the user; Chats and Settings never badge. */
-private fun badgeCount(tab: AppTab, botsCount: Int, teamsCount: Int): Int = when (tab) {
+/** Teams shows the unread total, Friends its requests plus unread, Bots the chats waiting for the user; Chats and Settings never badge. */
+private fun badgeCount(tab: AppTab, botsCount: Int, teamsCount: Int, friendsCount: Int): Int = when (tab) {
     AppTab.Bots -> botsCount
     AppTab.Teams -> teamsCount
+    AppTab.Friends -> friendsCount
     AppTab.Chats, AppTab.Settings -> 0
 }
 
@@ -335,7 +346,7 @@ private fun badgeCount(tab: AppTab, botsCount: Int, teamsCount: Int): Int = when
 private fun Modifier.tabBadgeState(tab: AppTab, badge: Int): Modifier {
     if (badge <= 0) return this
     val description = when (tab) {
-        AppTab.Teams -> stringResource(R.string.tabs_badge_unread_fmt, badge)
+        AppTab.Teams, AppTab.Friends -> stringResource(R.string.tabs_badge_unread_fmt, badge)
         AppTab.Bots -> stringResource(R.string.remote_bot_waiting_fmt, badge)
         AppTab.Chats, AppTab.Settings -> ""
     }
@@ -361,6 +372,7 @@ private fun AppTab.labelRes(): Int = when (this) {
     AppTab.Chats -> R.string.tabs_chats
     AppTab.Bots -> R.string.remote_bots
     AppTab.Teams -> R.string.teams_title
+    AppTab.Friends -> R.string.friends_title
     AppTab.Settings -> R.string.settings_title_main
 }
 
@@ -368,5 +380,6 @@ private fun AppTab.icon(): LXIconName = when (this) {
     AppTab.Chats -> LXIconName.Message
     AppTab.Bots -> LXIconName.Bot
     AppTab.Teams -> LXIconName.Users
+    AppTab.Friends -> LXIconName.User
     AppTab.Settings -> LXIconName.Cog
 }

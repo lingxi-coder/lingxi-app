@@ -12,7 +12,7 @@ for (const mode of ['chat', 'code'] as const) {
   test(`each Bot setup opens a separate ${mode} session and preserves the existing draft`, async t => {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-bot-session-')));
     const settings = new SettingsStore(join(root, 'settings'));
-    settings.conversationSpaces.setMode(mode);
+    await settings.conversationSpaces.setMode(mode);
     const projectPath = settings.conversationSpaces.globalWorkspaces[mode];
     const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, trusted: true }) });
     // Exercise the real allocation/cache policy without booting a model process.

@@ -171,7 +171,54 @@
         ]
       },
       {
+        "source": "/friends",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-store"
+          },
+          {
+            "key": "Referrer-Policy",
+            "value": "no-referrer"
+          },
+          {
+            "key": "Content-Security-Policy",
+            "value": "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://apis.google.com https://www.googleapis.com"
+          }
+        ]
+      },
+      {
+        "source": "/friends/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-store"
+          },
+          {
+            "key": "Referrer-Policy",
+            "value": "no-referrer"
+          },
+          {
+            "key": "Content-Security-Policy",
+            "value": "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://apis.google.com https://www.googleapis.com"
+          }
+        ]
+      },
+      {
         "source": "/open/team/join",
+        "headers": [
+          {
+            "key": "Referrer-Policy",
+            "value": "no-referrer"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "no-store"
+          }
+        ]
+      },
+      {
+        "source": "/open/friend/add",
         "headers": [
           {
             "key": "Referrer-Policy",
@@ -194,6 +241,20 @@
       },
       {
         "source": "/v1/teams/**",
+        "function": {
+          "functionId": "teamsApi",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/v1/friends",
+        "function": {
+          "functionId": "teamsApi",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/v1/friends/**",
         "function": {
           "functionId": "teamsApi",
           "region": "us-central1"

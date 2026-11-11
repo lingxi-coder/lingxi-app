@@ -103,8 +103,8 @@ test('the host tells the terminal manager when a chat or project goes away', asy
     assert.deepEqual(calls, [`migrate:__draft__->${replacement.sessionId}`]);
     calls.length = 0;
 
-    settings.conversationSpaces.register({ ...ref, mode: 'code', projectId: project });
-    settings.conversationSpaces.setMode('code');
+    await settings.conversationSpaces.register({ ...ref, mode: 'code', projectId: project });
+    await settings.conversationSpaces.setMode('code');
     settings.setActiveSession(ref);
     await (host as any).clearActiveSession(sessionId);
     assert.ok(calls.includes(`closeScope:${sessionId}`), 'clearing a chat closes its shells');
@@ -135,7 +135,7 @@ test('a shell opened in the draft scope follows the chat the New-chat action cre
   const project = realpathSync(directory);
   const settings = new SettingsStore(join(directory, 'settings'));
   settings.addProject(project);
-  settings.conversationSpaces.addProject(project, 'chat');
+  await settings.conversationSpaces.addProject(project, 'chat');
   const created = { projectPath: project, sessionId: '33333333-4444-4555-8666-777777777777' };
   const migrations: string[] = [];
   const handlers = new Map<string, (...args: any[]) => any>();

@@ -2,11 +2,12 @@ import { useEffect, useState } from 'react';
 import { executionCommand, type ExecutionScope, type TeamTaskView } from './execution.js';
 import type { TeamsApi } from './index.js';
 
-/** One foreground observer per rendered pane; no separate Bot cache or task authority. */
-export function useTeamTasks(api: TeamsApi, scope: ExecutionScope, conversationId?: string) {
+/** One foreground observer per rendered pane; no separate Bot cache or task authority. `enabled` false (a friend chat has no Bots) keeps it idle. */
+export function useTeamTasks(api: TeamsApi, scope: ExecutionScope, conversationId?: string, enabled = true) {
   const [value, setValue] = useState<{ key: string; tasks: TeamTaskView[]; error: string }>({ key: '', tasks: [], error: '' });
   const key = `${scope.teamId}:${scope.generation}:${conversationId ?? ''}`;
   useEffect(() => {
+    if (!enabled) return;
     let closed = false, running = false;
     const refresh = async () => {
       if (closed || running || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return;
@@ -26,6 +27,6 @@ export function useTeamTasks(api: TeamsApi, scope: ExecutionScope, conversationI
     const visible = () => void refresh();
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', visible);
     return () => { closed = true; clearInterval(timer); stop(); if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', visible); };
-  }, [api, key]);
+  }, [api, key, enabled]);
   return value.key === key ? value : { tasks: [] as TeamTaskView[], error: '' };
 }

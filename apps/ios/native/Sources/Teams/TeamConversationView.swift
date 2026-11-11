@@ -131,7 +131,8 @@ struct TeamConversationView: View {
                         .accessibilityIdentifier("teams.conversation.info")
                 }
             }
-            if unread > 0 {
+            // A friendship's chats read themselves (D12/D13), so they have no manual mark, as on Android.
+            if unread > 0, context.pair == nil {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button("teams_mark_read", systemImage: "checkmark.circle") { Task { await workspace.markRead(conversation.id) } }

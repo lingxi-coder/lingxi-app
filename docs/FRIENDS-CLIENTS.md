@@ -223,6 +223,8 @@ is missing or empty show `Member` (the existing `teams_member` string). Nothing 
   newest message visible); it writes `reads/{uid}` as today, and the backend copies the mark onto the card's
   `lastReadSeq` a moment later. The list's unread and the tab badge therefore clear shortly after the chat marks itself
   read, not instantly; a lost copy is healed by the next read mark.
+- The friend chat has no manual "Mark as read" (the Teams header action): it marks itself read, so every client leaves
+  that action out.
 - While a friend's chat is open and visible the client may treat it as read: show 0 unread for that friend in the list
   and in the badge (it also hides the lag after a message arrives or after you send one), and use the card's value again
   when the chat closes. This is a display choice; the vectors cover the card arithmetic only.

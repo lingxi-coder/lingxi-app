@@ -221,7 +221,8 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
         {friend ? friend.handle ? <p>@{friend.handle}</p> : null : subtitle ? <p>{subtitle}</p> : null}
       </div>
       {friend ? null : <span className="tw-platform" title={platformNotice(zh)}>{platformChip(zh)}</span>}
-      {unread > 0 ? <button type="button" disabled={snapshot.messageBusy || snapshot.offline} onClick={() => void workspace.markRead()}>{t('Mark as read', '标为已读')}</button> : null}
+      {/* A friend chat reads itself (D13), so it has no manual mark, as on Android. */}
+      {unread > 0 && !friend ? <button type="button" disabled={snapshot.messageBusy || snapshot.offline} onClick={() => void workspace.markRead()}>{t('Mark as read', '标为已读')}</button> : null}
       {friend?.actions}
       {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t('Team details', '团队详情')} title={t('Team details', '团队详情')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
     </header>

@@ -1,9 +1,0 @@
-{
-  "device": "RFCY419G0ZY",
-  "transport": "USB",
-  "sha256": "410739d2d290cde0a2e05f6e17937fdda4103c38cb614a785cadf86782fde4ed",
-  "appId": "10357",
-  "firstInstallTime": "2026-11-05 11:05:11",
-  "lastUpdateTime": "2026-11-05 20:09:39",
-  "installMode": "overlay -r; no application data clear"
-}

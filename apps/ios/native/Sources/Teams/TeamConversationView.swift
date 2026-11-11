@@ -61,6 +61,8 @@ struct TeamConversationView: View {
         .onDisappear {
             if draftLoaded, editing == nil { workspace.setDraft(draft, for: conversationID) }
         }
+        // Without `.contain` the identifier is copied onto every child (composer input, send, rows).
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.conversation.\(conversationID)")
     }
 
@@ -298,8 +300,9 @@ struct TeamConversationView: View {
                     index -= 1
                     if case .message = rows[index] { seen += 1 }
                 }
+                // `atBottom` follows the scroll geometry: a thread that fits on screen does not move and stays at the
+                // bottom (forcing it false here would never be undone, and the conversation would never be read).
                 position.scrollTo(id: rows[index].key, anchor: .top)
-                atBottom = false
             } else {
                 position.scrollTo(edge: .bottom)
             }

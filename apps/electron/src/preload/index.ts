@@ -1,6 +1,7 @@
 import { CH_BOTS_MARKET } from '../shared/botMarket.js';
 import { CH_DECISION, CH_DECISION_CHANGED, type DecisionApi } from '../shared/decision.js';
 import { DESKTOP_BRIDGE_GLOBAL } from '../shared/desktopBridge.js';
+import { CH_SESSION_RECOVERY, type SessionRecoveryDiagnostic } from '../shared/sessionRecovery.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import type { ProviderAccountsApi } from '../shared/providerAccounts.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
@@ -317,6 +318,7 @@ export interface LingxiApi {
   cleanupPluginSecretsAfterUninstall?(pluginId: string, lastScopeRemoved: true): Promise<PluginSecretCleanupResult>;
   restartBridge(sessionId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticEntry[]>;
+  reportSessionRecovery(sample: SessionRecoveryDiagnostic): void;
   copyDiagnostics(): Promise<void>;
   copyText(text: string): Promise<void>;
   setInterfaceLocale(locale: string, followSystem: boolean): Promise<void>;
@@ -398,7 +400,16 @@ function watchFriends<T>(uid: string, collection: 'friends' | 'blocks' | 'teamOf
   return () => { closed = true; stopRows(); stopFailed(); void friendsRequest({ type: 'unwatch', uid, leaseId }).catch(() => undefined); };
 }
 
+const recoveryDocumentId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+let recoverySubscriptionId = 0;
+function reportSessionRecovery(sample: SessionRecoveryDiagnostic): void {
+  const fields = Object.fromEntries(Object.entries(sample).filter(([, value]) => value !== undefined));
+  void ipcRenderer.invoke(CH_SESSION_RECOVERY, { ...fields, documentId: recoveryDocumentId }).catch(() => undefined);
+}
+
 function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelope<ClientEvent>) => void): Unsubscribe {
+  const subscriptionId = ++recoverySubscriptionId;
+  reportSessionRecovery({ phase: 'preload_subscribe', subscriptionId });
   const replayBuffer = createRuntimeEventReplayBuffer(callback);
   const listener = (_event: IpcRendererEvent, payload: SequencedRuntimeEventEnvelope<ClientEvent>): void => {
     replayBuffer.push(payload);
@@ -407,8 +418,11 @@ function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelop
   const cancelReplay = requestRuntimeEventReplay(
     () => ipcRenderer.invoke(CH_EVENT_REPLAY) as Promise<SequencedRuntimeEventEnvelope<ClientEvent>[]>,
     replayBuffer,
+    undefined,
+    sample => reportSessionRecovery({ ...sample, subscriptionId }),
   );
   return () => {
+    reportSessionRecovery({ phase: 'preload_dispose', subscriptionId });
     cancelReplay();
     replayBuffer.dispose();
     ipcRenderer.removeListener(CH_EVENT, listener);
@@ -621,6 +635,7 @@ const api: LingxiApi = {
   cleanupPluginSecretsAfterUninstall: (pluginId, lastScopeRemoved) => ipcRenderer.invoke(CH_PLUGIN_SECRET_CLEANUP, pluginId, lastScopeRemoved) as Promise<PluginSecretCleanupResult>,
   restartBridge: (sessionId) => ipcRenderer.invoke(CH_BRIDGE_RESTART, sessionId) as Promise<void>,
   diagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_GET) as Promise<DiagnosticEntry[]>,
+  reportSessionRecovery,
   copyDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_COPY) as Promise<void>,
   copyText: (text) => ipcRenderer.invoke(CH_CLIPBOARD_WRITE_TEXT, text) as Promise<void>,
   setInterfaceLocale: (locale, followSystem) => ipcRenderer.invoke(CH_INTERFACE_LOCALE, locale, followSystem) as Promise<void>,

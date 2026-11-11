@@ -1344,6 +1344,35 @@ async function createPackagedLocalAppSourceSession(page, creatorSessionId, confi
 }
 
 async function assertColdSessionOpen(page, sessionId) {
+  const cycles = Number(process.env.LINGXI_COLD_RELOAD_CYCLES ?? 10);
+  assert(Number.isSafeInteger(cycles) && cycles >= 10 && cycles <= 100, 'cold reload cycles must be an integer from 10 to 100');
+  const evidence = [];
+  const capture = () => evaluate(page, `(async () => {
+    const feed = document.querySelector('.desktop-stage-feed');
+    const rows = [...document.querySelectorAll('[data-message-role="assistant"]')];
+    const recovery = (await window.lingxi.diagnostics()).flatMap(entry => {
+      try {
+        const event = JSON.parse(entry.message);
+        return event.event === 'session_recovery' && (!event.sessionId || event.sessionId === ${JSON.stringify(sessionId)})
+          ? [{ timestamp: entry.timestamp, ...event }] : [];
+      } catch { return []; }
+    }).slice(-60);
+    return { documentVisibility: document.visibilityState, documentFocused: document.hasFocus(),
+      sessionKey: feed?.getAttribute('data-session-key'), itemCount: feed?.getAttribute('data-item-count'), rowCount: feed?.getAttribute('data-row-count'),
+      assistantRows: rows.length,
+      domHasReply: rows.some(row => row.textContent.includes('Custom provider verified.')),
+      paintedTextHasReply: document.body.innerText.includes('Custom provider verified.'),
+      rows: rows.map(row => { const content = row.querySelector('.transcript-run-item') ?? row;
+        const rect = content.getBoundingClientRect();
+        return { contentVisibility: getComputedStyle(content).contentVisibility, width: rect.width, height: rect.height,
+          top: rect.top, bottom: rect.bottom, visible: content.checkVisibility({ contentVisibilityAuto: true, visibilityProperty: true }) }; }),
+      viewport: { width: innerWidth, height: innerHeight }, recoveryTrace: recovery };
+  })()`);
+  const save = () => {
+    if (!process.env.LINGXI_LOCAL_APP_EVIDENCE) return;
+    mkdirSync(process.env.LINGXI_LOCAL_APP_EVIDENCE, { recursive: true });
+    writeFileSync(join(process.env.LINGXI_LOCAL_APP_EVIDENCE, 'cold-open-cycles.json'), JSON.stringify(evidence, null, 2));
+  };
   const before = await evaluate(page, 'window.lingxi.bootstrap()');
   assert.equal(before.runtimes.some(runtime => runtime.sessionId === sessionId), false,
     'the saved session must have no live runtime before its first open');
@@ -1387,9 +1416,20 @@ async function assertColdSessionOpen(page, sessionId) {
     log(`cold-open Home navigation state: ${JSON.stringify(await evaluate(page, `(async () => ({ body: document.body?.innerText, home: document.querySelector('.desktop-nav-rail button[aria-label="Home"]')?.outerHTML, rail: document.querySelector('.desktop-nav-rail')?.outerHTML, bootstrap: await window.lingxi.bootstrap() }))()`))}`);
     throw error;
   }
-  for (let reload = 0; reload < 10; reload++) {
+  for (let reload = 0; reload < cycles; reload++) {
+    const started = Date.now();
     if (reload > 0) {
-      await evaluate(page, `window.lingxi.restartBridge(${JSON.stringify(sessionId)})`);
+      if (reload % 2 === 0) {
+        // /clear preserves saved history but closes its runtime. In this
+        // disposable profile it creates a genuinely cold owner again, unlike
+        // restarting the same cached SessionRuntime instance.
+        await evaluate(page, `window.lingxi.clearSession(${JSON.stringify(sessionId)})`);
+        const closed = await evaluate(page, 'window.lingxi.bootstrap()');
+        assert(!closed.runtimes.some(runtime => runtime.sessionId === sessionId), 'cold cycle must dispose the previous runtime');
+        await evaluate(page, `window.lingxi.openSession(${JSON.stringify(before.workspace.path)}, ${JSON.stringify(sessionId)})`);
+      } else {
+        await evaluate(page, `window.lingxi.restartBridge(${JSON.stringify(sessionId)})`);
+      }
     }
     const beforeReload = (await page.send('Page.getFrameTree')).frameTree.frame;
     await page.send('Page.reload', { ignoreCache: true });
@@ -1401,10 +1441,17 @@ async function assertColdSessionOpen(page, sessionId) {
     try {
       // Transcript rows use `content-visibility: auto`, and Chromium leaves off-screen (or hidden-window) rows out of
       // `innerText`; `textContent` still holds every rendered row.
-      await waitFor(() => evaluate(page, `document.body.textContent.includes('Custom provider verified.')`), { label: 'cold-open saved transcript rendered' });
+      await waitFor(() => evaluate(page, `(() => {
+        const feed = document.querySelector('.desktop-stage-feed');
+        return feed && (!feed.hasAttribute('data-session-key') || feed.getAttribute('data-session-key') === ${JSON.stringify(sessionId)})
+          && [...feed.querySelectorAll('[data-message-role="assistant"]')].some(row => row.textContent.includes('Custom provider verified.'));
+      })()`), { label: 'cold-open saved transcript rendered' });
+      evidence.push({ reload, recovery: reload === 0 || reload % 2 === 0 ? 'cold-owner' : 'restart',
+        durationMs: Date.now() - started, ...await capture() });
+      save();
     } catch (error) {
       const state = await evaluate(page, `(async () => ({ url: location.href, ready: document.readyState,
-        body: document.body?.innerText, bootstrap: await window.lingxi?.bootstrap(),
+        body: document.body?.innerText, textContent: document.body?.textContent, bootstrap: await window.lingxi?.bootstrap(),
         replay: await new Promise(resolve => {
           const events = [];
           const off = window.lingxi.onEvent(envelope => {
@@ -1417,17 +1464,24 @@ async function assertColdSessionOpen(page, sessionId) {
           });
           setTimeout(() => { off(); resolve(events); }, 300);
         }) }))()`);
-      log(`cold-open renderer state: ${JSON.stringify({ reload, ...state })}`);
+      const rendering = await capture();
+      log(`cold-open renderer state: ${JSON.stringify({ reload, ...state, rendering })}`);
       if (process.env.LINGXI_LOCAL_APP_EVIDENCE) {
         mkdirSync(process.env.LINGXI_LOCAL_APP_EVIDENCE, { recursive: true });
-        writeFileSync(join(process.env.LINGXI_LOCAL_APP_EVIDENCE, 'cold-open-failure.json'), JSON.stringify({ reload, ...state }, null, 2));
+        writeFileSync(join(process.env.LINGXI_LOCAL_APP_EVIDENCE, 'cold-open-failure.json'), JSON.stringify({ reload, ...state, rendering }, null, 2));
       }
       throw error;
     }
   }
+  // State restoration and visible painting are separate assertions. A real
+  // foreground viewport must show the reply as well as retaining its DOM row.
+  await page.send('Page.bringToFront');
+  await waitFor(() => evaluate(page, `document.body.innerText.includes('Custom provider verified.')`), { label: 'cold-open foreground transcript painted' });
+  evidence.push({ foreground: true, ...await capture() });
+  save();
   assert.equal(await evaluate(page, `document.body.textContent.includes('This chat is being resumed')`), false,
     'the cold-open renderer must not show the original error');
-  log('cold saved session: handshake-time metadata, transcript/model restore, ten renderer reloads with runtime restarts and Remote Control IPC passed');
+  log(`cold saved session: handshake-time metadata, transcript/model restore, ${cycles} renderer reloads alternating cold owners and runtime restarts, foreground painting and Remote Control IPC passed`);
 }
 
 async function openPackagedProjectDraft(page, projectPath) {

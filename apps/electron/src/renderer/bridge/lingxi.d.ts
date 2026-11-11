@@ -226,6 +226,7 @@ export interface LingxiApi {
   cleanupPluginSecretsAfterUninstall?(pluginId: string, lastScopeRemoved: true): Promise<PluginSecretCleanupResult>;
   restartBridge(sessionId: string): Promise<void>;
   diagnostics(): Promise<DiagnosticEntry[]>;
+  reportSessionRecovery?(sample: import('../../shared/sessionRecovery').SessionRecoveryDiagnostic): void;
   copyDiagnostics(): Promise<void>;
   copyText(text: string): Promise<void>;
   setInterfaceLocale(locale: string, followSystem: boolean): Promise<void>;

@@ -465,6 +465,10 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
   const presentationRows = useMemo(() => rows.filter(item => item !== tailThinking
     && item.type !== 'audio' && (item.type !== 'meta' || Boolean(item.files?.length))), [rows, tailThinking]);
   const windowing = useTranscriptWindow({ rows: presentationRows, sessionKey, viewport: stageRef, feed: feedRef, following: followTail });
+  useEffect(() => {
+    window.lingxi?.reportSessionRecovery?.({ phase: 'stage_commit', sessionKey,
+      itemCount: liveItems.length, rowCount: presentationRows.length });
+  }, [sessionKey, liveItems.length, presentationRows.length]);
   const planContentToken = useMemo(() => ({ submittedPlans, onOpenPlan }), [submittedPlans, onOpenPlan]);
 
   const newestPromptId = useMemo(() => {
@@ -700,6 +704,9 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
       <div
         ref={feedRef}
         className="desktop-stage-feed"
+        data-session-key={sessionKey}
+        data-item-count={liveItems.length}
+        data-row-count={presentationRows.length}
         data-windowed={windowing.enabled || undefined}
         role={windowing.enabled ? 'list' : undefined}
         style={{

@@ -30,7 +30,8 @@ import type {
   SessionRuntimeManagerOptions,
   SessionRuntimeSummary,
 } from './bridgeTypes.js';
-import { sanitizeDiagnostic } from './host-utils.js';
+import { diagnosticEvent, sanitizeDiagnostic } from './host-utils.js';
+import { CH_SESSION_RECOVERY, parseSessionRecoveryDiagnostic } from '../shared/sessionRecovery.js';
 import { VisualizationRouter } from './visualization.js';
 import { PrivatePageRouter } from './privatePage.js';
 import {
@@ -879,9 +880,35 @@ export class SessionRuntimeManager {
   registerIpc(): void {
     if (this.registered) return;
     this.registered = true;
+    const recoveryBudgets = new WeakMap<WebContents, { started: number; count: number }>();
+    ipcMain.handle(CH_SESSION_RECOVERY, (event: IpcMainInvokeEvent, input: unknown) => {
+      this.assertSender(event);
+      const sample = parseSessionRecoveryDiagnostic(input);
+      if (!sample) return false;
+      const now = Date.now();
+      let budget = recoveryBudgets.get(event.sender);
+      if (!budget || now - budget.started >= 60_000) {
+        budget = { started: now, count: 0 };
+        recoveryBudgets.set(event.sender, budget);
+      }
+      if (++budget.count > 1200) return false;
+      this.opts.diagnostics?.add(sample.phase === 'preload_failed' ? 'warn' : 'info', 'host', diagnosticEvent('session_recovery', {
+        ...sample, windowId: event.sender.id,
+      }));
+      return true;
+    });
     ipcMain.handle(CH_EVENT_REPLAY, (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
-      return this.replaySnapshots;
+      const replay = this.replaySnapshots;
+      for (const envelope of replay.filter(row => row.event.type === 'session_started' || row.event.type === 'session_resumed').slice(0, 32)) {
+        this.opts.diagnostics?.add('info', 'host', diagnosticEvent('session_recovery', {
+          phase: 'native_replay_snapshot', windowId: event.sender.id, sessionId: envelope.sessionId,
+          sequence: envelope.sequence, eventType: envelope.event.type,
+          messageCount: envelope.event.type === 'session_resumed' ? envelope.event.messages.length : 0,
+          eventCount: replay.length,
+        }));
+      }
+      return replay;
     });
     ipcMain.handle(CH_SEND_PROMPT, async (event: IpcMainInvokeEvent, sessionId: unknown, text: unknown, images: unknown, turnId?: unknown, visualizationContext?: unknown) => {
       this.assertSender(event);
@@ -1141,6 +1168,7 @@ export class SessionRuntimeManager {
     if (!this.registered) return;
     for (const channel of [
       CH_EVENT_REPLAY,
+      CH_SESSION_RECOVERY,
       CH_SEND_PROMPT, CH_APPROVE, CH_DENY, CH_APPROVE_COMPUTER_ACCESS, CH_DENY_COMPUTER_ACCESS,
       CH_ANSWER_ASK_USER_QUESTION, CH_CANCEL_ASK_USER_QUESTION, CH_CANCEL, CH_COMMAND, CH_CONNECTION_STATE,
       CH_MOD_UI_CONTROL, CH_MOD_UI_OPERATION,

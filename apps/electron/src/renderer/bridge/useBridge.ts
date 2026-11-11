@@ -450,6 +450,18 @@ export function useBridge(): UseBridge {
     ? { status: 'spawning' }
     : runtime?.connection ?? bootstrap?.connection ?? { status: 'idle' };
   const conversation = runtime?.conversation ?? emptyConversation();
+  const reportedRecovery = useRef(new Map<string, { signature: string; itemCount: number }>());
+  useEffect(() => {
+    for (const [sessionId, state] of runtimeStates) {
+      const signature = JSON.stringify([state.connection.status, state.conversation.sessionKey, state.conversation.items.length]);
+      const previous = reportedRecovery.current.get(sessionId);
+      if (previous?.signature === signature) continue;
+      host?.reportSessionRecovery?.({ phase: 'renderer_commit', sessionId, sessionKey: state.conversation.sessionKey,
+        connection: state.connection.status, itemCount: state.conversation.items.length, previousItemCount: previous?.itemCount ?? 0 });
+      reportedRecovery.current.set(sessionId, { signature, itemCount: state.conversation.items.length });
+    }
+    for (const id of reportedRecovery.current.keys()) if (!runtimeStates.has(id)) reportedRecovery.current.delete(id);
+  }, [host, runtimeStates]);
   const desktop = runtime?.desktop ?? emptyDesktopState();
   const runtimeCenter = runtime?.runtimeCenter ?? emptyRuntimeCenterState();
   const permissionQueue = runtime?.permissionQueue ?? [];
@@ -578,6 +590,8 @@ export function useBridge(): UseBridge {
 
   const applyBootstrap = useCallback((snapshot: BootstrapState): void => {
     if (!shouldApplyBootstrapSnapshot(latestBootstrapRevisionRef.current, snapshot.revision)) return;
+    host?.reportSessionRecovery?.({ phase: 'renderer_bootstrap', revision: snapshot.revision,
+      runtimeCount: snapshot.runtimes?.length ?? 0, sessionId: snapshot.activeSession?.sessionId ?? snapshot.settings.activeSession?.sessionId });
     latestBootstrapRevisionRef.current = Number.isFinite(snapshot.revision) ? snapshot.revision : 0;
     confirmedSpaceRef.current = snapshot.conversationSpaces.activeMode;
     if (!pendingSessionRef.current) requestedSpaceRef.current = snapshot.conversationSpaces.activeMode;
@@ -639,7 +653,7 @@ export function useBridge(): UseBridge {
     for (const projectPath of sharedDesktopCacheRef.current.keys()) {
       if (!activeProjects.has(projectPath)) sharedDesktopCacheRef.current.delete(projectPath);
     }
-  }, [completeTrackedSpeech]);
+  }, [completeTrackedSpeech, host]);
 
   const beginNavigationOperation = useCallback((): number => {
     if (sessionLoadingRef.current) throw new Error('Wait for the session to finish opening before navigating.');
@@ -849,6 +863,10 @@ export function useBridge(): UseBridge {
       const sessionId = envelope.sessionId;
       if (removedRuntimeIds.current.has(sessionId)) return;
       const event = envelope.event;
+      if (event.type === 'session_started' || event.type === 'session_resumed' || event.type === 'session_ended') {
+        host.reportSessionRecovery?.({ phase: 'renderer_base', sessionId, sequence: envelope.sequence,
+          eventType: event.type, messageCount: event.type === 'session_resumed' ? event.messages.length : 0 });
+      }
       if (event.type === 'error' && isCompactTurnRejection(event.message)) {
         updateRuntime(sessionId, (state) => ({
           ...state, conversation: reduceEvent(state.conversation, event),
@@ -1124,6 +1142,7 @@ export function useBridge(): UseBridge {
     const offState = host.onConnectionStateChanged((envelope) => {
       const sessionId = envelope.sessionId;
       const state = envelope.event;
+      host.reportSessionRecovery?.({ phase: 'renderer_connection', sessionId, connection: state.status });
       if (state.status !== 'connected') {
         interruptConfigurationOperations(pendingConfigurationOperations.current, sessionId);
       }

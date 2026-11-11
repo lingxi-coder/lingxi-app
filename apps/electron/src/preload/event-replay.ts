@@ -52,16 +52,32 @@ export function createRuntimeEventReplayBuffer<T>(
   };
 }
 
+export interface RuntimeReplayDiagnostic {
+  phase: 'preload_request' | 'preload_retry' | 'preload_received' | 'preload_failed';
+  attempt: number;
+  durationMs: number;
+  eventCount?: number;
+}
+
 /** Keep live events buffered while a transient cold-start IPC failure recovers. */
 export function requestRuntimeEventReplay<T>(
   request: () => Promise<readonly SequencedRuntimeEventEnvelope<T>[]>,
   buffer: Pick<ReturnType<typeof createRuntimeEventReplayBuffer<T>>, 'resolve' | 'reject'>,
   reportError: (error: unknown) => void = error => console.error('Runtime event replay failed', error),
+  observe?: (sample: RuntimeReplayDiagnostic) => void,
 ): () => void {
   let active = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let expire: (() => void) | undefined;
   const attempt = async (remaining: number): Promise<void> => {
+    const started = Date.now();
+    const trace = (phase: RuntimeReplayDiagnostic['phase'], eventCount?: number): void => {
+      try {
+        observe?.({ phase, attempt: 3 - remaining, durationMs: Math.max(0, Date.now() - started),
+          ...(eventCount !== undefined ? { eventCount } : {}) });
+      } catch { /* Diagnostics never own recovery. */ }
+    };
+    trace('preload_request');
     let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
       const timeout = new Promise<never>((_resolve, reject) => {
@@ -69,12 +85,17 @@ export function requestRuntimeEventReplay<T>(
         deadline = setTimeout(expire, 2000);
       });
       const replay = await Promise.race([request(), timeout]);
-      if (active) buffer.resolve(replay);
+      if (active) {
+        trace('preload_received', replay.length);
+        buffer.resolve(replay);
+      }
     } catch (error) {
       if (!active) return;
       if (remaining > 0) {
+        trace('preload_retry');
         timer = setTimeout(() => { timer = undefined; void attempt(remaining - 1); }, 250);
       } else {
+        trace('preload_failed');
         reportError(error);
         buffer.reject();
       }

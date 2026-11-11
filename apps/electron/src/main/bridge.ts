@@ -85,7 +85,6 @@ import {
   audioOwnerKey,
   bridgeVersionDiagnostic,
   childExitDiagnostic,
-  connectionDiagnostic,
   isTurnOwnedEvent,
   slashRequestEchoes,
   urlOrigin,
@@ -1457,6 +1456,11 @@ export class SessionRuntime {
     });
     if (TRANSCRIPT_REPLAY_BASE_EVENTS.has(event.type)) {
       this.replayEvents = [envelope];
+      this.diagnostics.add('info', 'host', diagnosticEvent('session_recovery', {
+        phase: 'native_base_cached', sessionId: this.sessionId, runtimeId: this.runtimeId,
+        generation: this.generation, sequence: envelope.sequence, eventType: event.type,
+        messageCount: event.type === 'session_resumed' ? event.messages.length : 0,
+      }));
       // What came before the base is part of it (a resumed transcript holds the earlier prompts) or gone (`/clear`).
       this.remoteBaseSequence = envelope.sequence;
       this.promptJournal = [];
@@ -4103,7 +4107,9 @@ export class SessionRuntime {
         next.status === 'error' ? next.message : `bridge became ${next.status} while resuming the session`,
       ));
     }
-    this.diagnostics.add('info', 'host', connectionDiagnostic(next, this.generation));
+    this.diagnostics.add('info', 'host', diagnosticEvent('connection_state', {
+      state: next, generation: this.generation, sessionId: this.sessionId, runtimeId: this.runtimeId,
+    }));
     this.broadcast(CH_STATE_CHANGED, next);
     this.notifyRemote({ type: 'state', state: next });
     this.notifyActivityChanged();

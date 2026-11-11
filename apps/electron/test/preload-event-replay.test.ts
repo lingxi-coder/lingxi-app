@@ -1,7 +1,34 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createRuntimeEventReplayBuffer, mergeRuntimeEventReplay, requestRuntimeEventReplay } from '../src/preload/event-replay';
+import { createRuntimeEventReplayBuffer, mergeRuntimeEventReplay, requestRuntimeEventReplay, type RuntimeReplayDiagnostic } from '../src/preload/event-replay';
+
+test('replay traces identify failed attempts and recovery without logging event bodies', async () => {
+  const samples: RuntimeReplayDiagnostic[] = [];
+  let attempts = 0;
+  let finish!: () => void;
+  const done = new Promise<void>(resolve => { finish = resolve; });
+  const stop = requestRuntimeEventReplay(async () => {
+    if (++attempts === 1) throw new Error('private error body');
+    return [{ sessionId: 'cold', sequence: 1, event: 'private transcript' }];
+  }, { resolve: finish, reject: () => assert.fail('retry should recover') }, assert.fail, sample => samples.push(sample));
+  try {
+    await done;
+    assert.deepEqual(samples.map(sample => sample.phase), ['preload_request', 'preload_retry', 'preload_request', 'preload_received']);
+    assert.deepEqual(samples.map(sample => sample.attempt), [1, 1, 2, 2]);
+    assert.equal(samples.at(-1)?.eventCount, 1);
+    assert(!JSON.stringify(samples).includes('private'));
+  } finally { stop(); }
+});
+
+test('diagnostic observer failure cannot break cold transcript delivery', async () => {
+  let finish!: () => void;
+  const done = new Promise<void>(resolve => { finish = resolve; });
+  const stop = requestRuntimeEventReplay(async () => [{ sessionId: 'cold', sequence: 1, event: 'saved' }],
+    { resolve: finish, reject: () => assert.fail('diagnostics do not own recovery') }, assert.fail,
+    () => { throw new Error('observer failed'); });
+  try { await done; } finally { stop(); }
+});
 
 test('renderer event replay merges cached and live-racing envelopes exactly once', () => {
   const sessionId = '11111111-2222-4333-8444-555555555555';

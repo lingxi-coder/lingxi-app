@@ -1399,7 +1399,9 @@ async function assertColdSessionOpen(page, sessionId) {
     }, { label: 'cold-open renderer reload committed' });
     await waitFor(() => evaluate(page, `document.readyState === 'complete' && Boolean(document.body)`), { label: 'cold-open renderer document ready' });
     try {
-      await waitFor(() => evaluate(page, `document.body.innerText.includes('Custom provider verified.')`), { label: 'cold-open saved transcript rendered' });
+      // Transcript rows use `content-visibility: auto`, and Chromium leaves off-screen (or hidden-window) rows out of
+      // `innerText`; `textContent` still holds every rendered row.
+      await waitFor(() => evaluate(page, `document.body.textContent.includes('Custom provider verified.')`), { label: 'cold-open saved transcript rendered' });
     } catch (error) {
       const state = await evaluate(page, `(async () => ({ url: location.href, ready: document.readyState,
         body: document.body?.innerText, bootstrap: await window.lingxi?.bootstrap(),
@@ -1423,7 +1425,7 @@ async function assertColdSessionOpen(page, sessionId) {
       throw error;
     }
   }
-  assert.equal(await evaluate(page, `document.body.innerText.includes('This chat is being resumed')`), false,
+  assert.equal(await evaluate(page, `document.body.textContent.includes('This chat is being resumed')`), false,
     'the cold-open renderer must not show the original error');
   log('cold saved session: handshake-time metadata, transcript/model restore, ten renderer reloads with runtime restarts and Remote Control IPC passed');
 }

@@ -9,6 +9,22 @@ import { DesktopDialog, DesktopDialogButton } from './DesktopDialog';
 import { Icon } from './Icon';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const SESSION_PICKER_ROW_HEIGHT = 66;
+const ROW_OVERSCAN = 3;
+
+/** Keep the active descendant mounted without moving a manually scrolled list. */
+export function sessionPickerWindow(count: number, scrollTop: number, height: number, selectedIndex: number): number[] {
+  if (!count) return [];
+  const visible = Math.max(1, Math.ceil(height / SESSION_PICKER_ROW_HEIGHT) + 1);
+  const first = Math.min(Math.max(0, count - visible), Math.max(0, Math.floor(scrollTop / SESSION_PICKER_ROW_HEIGHT)));
+  const start = Math.max(0, first - ROW_OVERSCAN);
+  const end = Math.min(count, first + visible + ROW_OVERSCAN);
+  const indices: number[] = [];
+  if (selectedIndex >= 0 && selectedIndex < start) indices.push(selectedIndex);
+  for (let index = start; index < end; index++) indices.push(index);
+  if (selectedIndex >= end && selectedIndex < count) indices.push(selectedIndex);
+  return indices;
+}
 const SCOPES: readonly { value: SessionCatalogScope; label: string }[] = [
   { value: 'current', label: 'desktop_picker_current' },
   { value: 'repository', label: 'desktop_picker_repository' },
@@ -68,6 +84,7 @@ export function SessionPicker({ projectPath, mode, initialQuery = '', activeSess
   const { locale } = useI18n();
   const dialog = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
+  const list = useRef<HTMLDivElement>(null);
   const mounted = useRef(false);
   const requestGeneration = useRef(0);
   const opening = useRef(false);
@@ -82,14 +99,17 @@ export function SessionPicker({ projectPath, mode, initialQuery = '', activeSess
   const [loaded, setLoaded] = useState(false);
   const [openingUuid, setOpeningUuid] = useState<string>();
   const [error, setError] = useState('');
+  const [viewport, setViewport] = useState({ scrollTop: 0, height: 380 });
   const listId = useId();
   const titleId = useId();
   const descriptionId = useId();
   const rows = useMemo(() => sessionPickerRows(sessions.filter((session) => session.mode === mode), query), [sessions, query, locale, mode]);
-  const selectedIndex = Math.max(0, rows.findIndex((session) => session.path === selectedPath));
+  const selectedIndex = useMemo(() => Math.max(0, rows.findIndex((session) => session.path === selectedPath)), [rows, selectedPath]);
   const selected = rows[selectedIndex];
-  const selectedOptionId = selected ? `${listId}-${selectedIndex}` : undefined;
+  const selectedOptionId = !loading && selected ? `${listId}-${selectedIndex}` : undefined;
   const resumeId = selected?.uuid ?? resumeArgumentSessionId(query);
+  const visibleIndices = useMemo(() => sessionPickerWindow(rows.length, viewport.scrollTop, viewport.height, selectedIndex),
+    [rows.length, viewport.scrollTop, viewport.height, selectedIndex]);
 
   useEffect(() => {
     mounted.current = true;
@@ -173,8 +193,27 @@ export function SessionPicker({ projectPath, mode, initialQuery = '', activeSess
   }, [openingUuid, suspended]);
 
   useEffect(() => {
-    if (selectedOptionId) document.getElementById(selectedOptionId)?.scrollIntoView({ block: 'nearest' });
-  }, [selectedOptionId]);
+    const element = list.current;
+    if (!element) return;
+    const measure = () => setViewport((previous) => {
+      const next = { scrollTop: element.scrollTop, height: element.clientHeight };
+      return previous.scrollTop === next.scrollTop && previous.height === next.height ? previous : next;
+    });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [suspended]);
+
+  useEffect(() => {
+    const element = list.current;
+    if (!element || !selectedOptionId) return;
+    const top = selectedIndex * SESSION_PICKER_ROW_HEIGHT + 3;
+    const bottom = top + SESSION_PICKER_ROW_HEIGHT;
+    if (top < element.scrollTop) element.scrollTop = top;
+    else if (bottom > element.scrollTop + element.clientHeight) element.scrollTop = bottom - element.clientHeight;
+    setViewport((previous) => previous.scrollTop === element.scrollTop ? previous : { ...previous, scrollTop: element.scrollTop });
+  }, [selectedOptionId, selectedIndex, rows, suspended]);
 
   const changeScope = (next: SessionCatalogScope) => {
     if (opening.current) return;
@@ -240,9 +279,15 @@ export function SessionPicker({ projectPath, mode, initialQuery = '', activeSess
       </div>
     </div>
     {error && <div className="session-picker-error" role="alert"><span>{error}</span><button type="button" disabled={Boolean(openingUuid)} onClick={() => { void loadSessions(); }}>{tr('settings_linux_refresh_button')}</button></div>}
-    <div id={listId} role="listbox" aria-label={tr('desktop_picker_saved')} aria-busy={loading || Boolean(openingUuid)} className="session-picker-list">
+    <div ref={list} id={listId} role="listbox" aria-label={tr('desktop_picker_saved')} aria-busy={loading || Boolean(openingUuid)} className="session-picker-list"
+      onScroll={(event) => {
+        const { scrollTop, clientHeight } = event.currentTarget;
+        setViewport((previous) => previous.scrollTop === scrollTop && previous.height === clientHeight ? previous : { scrollTop, height: clientHeight });
+      }}>
       {loading ? <p role="status" className="session-picker-empty">{tr('desktop_picker_loading')}</p>
-        : rows.length ? rows.map((session, index) => <div key={session.path} id={`${listId}-${index}`} role="option" aria-selected={selected?.path === session.path}
+        : rows.length ? <div className="session-picker-window" style={{ height: rows.length * SESSION_PICKER_ROW_HEIGHT }}>
+          {visibleIndices.map((index) => { const session = rows[index]!; return <div key={session.path} id={`${listId}-${index}`} role="option" aria-selected={selected?.path === session.path}
+          aria-posinset={index + 1} aria-setsize={rows.length} style={{ top: index * SESSION_PICKER_ROW_HEIGHT, height: SESSION_PICKER_ROW_HEIGHT }}
           aria-disabled={Boolean(openingUuid)} className="session-picker-row" title={session.path}
           onPointerMove={() => { if (!opening.current) setSelectedPath(session.path); }}
           onPointerDown={(event) => event.preventDefault()} onClick={() => { void openChat(session.uuid, session); }}>
@@ -251,7 +296,7 @@ export function SessionPicker({ projectPath, mode, initialQuery = '', activeSess
             <span>{formatSessionMetadata(session.modified_rfc3339, session.message_count)}<code>{session.uuid.slice(0, 8)}</code></span>
           </span>
           {activeSessionId === session.uuid && <span className="session-picker-current">{tr('desktop_picker_current')}</span>}
-        </div>)
+        </div>; })}</div>
           : <p role="status" className="session-picker-empty">{loaded ? query.trim() ? tr('desktop_picker_no_match') : tr('desktop_picker_empty_scope') : error ? tr('desktop_picker_refresh_hint') : tr('desktop_picker_choose')}</p>}
     </div>
     <div className="session-picker-count" aria-live="polite">{!loading && loaded ? tr(rows.length === 1 ? 'desktop_picker_count_one' : 'desktop_picker_count', rows.length) : openingUuid ? tr('desktop_picker_opening') : ''}</div>

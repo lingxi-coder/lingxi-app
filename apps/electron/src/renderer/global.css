@@ -27,6 +27,8 @@
     Consolas, "Liberation Mono", "Courier New", monospace;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
+/* Native modals use automatic margins to center in the top layer. Anchored pickers override this. */
+dialog { margin: auto; }
 *::-webkit-scrollbar { width: 8px; height: 8px; }
 *::-webkit-scrollbar-thumb { background: color-mix(in srgb, currentColor 24%, transparent); border-radius: 99px; }
 *::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, currentColor 38%, transparent); }

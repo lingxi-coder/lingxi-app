@@ -173,7 +173,7 @@ test('connectionStatus: errors first, then offline, then connected; nothing whil
   assert.equal(connectionStatus({ ...base, loading: true, loadError: 'X' }, false), undefined);
   assert.equal(connectionStatus({ ...base, selectedTeamId: '' }, false), undefined);
   assert.equal(connectionStatus({ ...base, selectedTeamId: '', loadError: 'SERVICE_UNAVAILABLE' }, false)?.action, 'refresh', 'a failed team list can be retried even with no team');
-  assert.deepEqual(connectionStatus(base, false), { kind: 'ok', label: 'Connected', detail: 'Recently loaded messages are available offline.' });
+  assert.deepEqual(connectionStatus(base, false), { kind: 'ok', label: 'Teams connected', detail: 'Teams is connected. Bot host availability is shown in each conversation.' });
   assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true }, false)?.kind, 'connecting');
   assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true }, true)?.label, '正在连接…');
   assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true, messagingError: 'SERVICE_UNAVAILABLE' }, false)?.kind, 'offline');
@@ -278,7 +278,7 @@ test('sidebar: team switcher, three sections with their add buttons, rows with p
   assert.match(markup, /class="tw-chan"[^>]*>#</, 'channels have a # mark');
   assert.match(markup, /role="img" aria-label="4 unread">4</, 'unread = lastSeq - lastReadSeq');
   assert.match(markup, /<time class="tw-row-time" dateTime="[^"]+">11:40/, 'a row shows its newest message time'); assert.doesNotMatch(markup, /aria-label="0 unread"/);
-  assert.match(markup, /data-unread="true" data-kind="channel"/); assert.match(markup, /Connected/);
+  assert.match(markup, /data-unread="true" data-kind="channel"/); assert.match(markup, /Teams connected/);
   assert.equal(count(markup, /class="tw-row-more"/g), 1, 'the row menu exists where it has something to offer: only the unread row, for "Mark as read"');
 });
 

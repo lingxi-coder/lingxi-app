@@ -3,7 +3,6 @@ import { useI18n } from '../i18n/useI18n';
 import { useState, type CSSProperties } from 'react';
 import type { SessionAgentSummaryDto } from '@lingxi/bridge-client';
 import { useT } from '../theme/ThemeContext';
-import { Icon } from './Icon';
 import { AgentAvatar } from './AgentAvatar';
 import { Disclosure } from './Disclosure';
 import { statusLabel } from '../bridge/agentStatus';
@@ -100,8 +99,8 @@ export function TranscriptAgents({ id, open, onSetOpen, agents = EMPTY_AGENTS, l
     return <button
       key={agent.agent_id}
       type="button"
-      className="transcript-agent-row transcript-disclosure-trigger"
-      aria-expanded={onOpenAgent ? activeAgentId === agent.agent_id : undefined}
+      className="transcript-agent-row"
+      aria-current={onOpenAgent && activeAgentId === agent.agent_id ? true : undefined}
       data-agent-id={agent.agent_id}
       data-agent-running={running ? 'true' : undefined}
       disabled={!onOpenAgent}
@@ -109,12 +108,11 @@ export function TranscriptAgents({ id, open, onSetOpen, agents = EMPTY_AGENTS, l
       aria-label={`${title} · ${status}${onOpenAgent ? ` · ${tr('desktop_ui_agent_open_details')}` : ''}`}
       onClick={() => onOpenAgent?.(agent.agent_id)}
     >
-      <span className="transcript-agent-icon"><AgentAvatar agentId={agent.agent_id} size={18} /></span>
+      <span className="transcript-agent-icon"><AgentAvatar agentId={agent.agent_id} size={14} /></span>
       <span className="transcript-agent-copy">
         <span className="transcript-agent-name">{name}</span>
         <span className="transcript-agent-status" data-danger={failed || undefined}>{entry.summaryStatus}</span>
       </span>
-      {onOpenAgent && <span className="transcript-disclosure-chevron" aria-hidden="true"><Icon name="chevronR" size={12} /></span>}
     </button>;
   };
 
@@ -133,7 +131,7 @@ export function TranscriptAgents({ id, open, onSetOpen, agents = EMPTY_AGENTS, l
         summary={<>
           <span className="transcript-agent-icons" aria-hidden="true">
             {entries.slice(0, 3).map(entry => <span className="transcript-agent-icon" key={entry.agent.agent_id} data-agent-active={entry.running || undefined}>
-              <AgentAvatar agentId={entry.agent.agent_id} size={18} />
+              <AgentAvatar agentId={entry.agent.agent_id} size={14} />
             </span>)}
             {entries.length > 3 && <span className="transcript-agent-extra">+{entries.length - 3}</span>}
           </span>

@@ -29,12 +29,14 @@ test('main conversation agent is omitted while background agents keep their rows
   assert.doesNotMatch(html, /data-agent-id="main"/);
   assert.match(html, /data-agent-id="agent:child"/);
   assert.equal((html.match(/data-agent-id=/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /aria-expanded|transcript-disclosure-chevron/);
 });
 
 test('running and finished agents remain visible with distinct states and detail controls', () => {
   const html = render([agent('Search'), { ...agent('Review', 'completed'), latest_activity: 'Checked 5 files' }, agent('Build', 'failed')]);
   assert.equal((html.match(/data-agent-id=/g) ?? []).length, 3);
   assert.equal((html.match(/data-agent-running="true"/g) ?? []).length, 1);
+  assert.equal((html.match(/transcript-disclosure-chevron/g) ?? []).length, 1, 'only the group expands inline');
   assert.match(html, /Search · Running · Open agent details/);
   // `done`, not `completed`: claude-code relabels only that one status, and
   // this chip sentence-cases whatever it is shown as. (A `cancelled` agent

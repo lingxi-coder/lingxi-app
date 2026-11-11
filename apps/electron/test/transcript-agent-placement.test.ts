@@ -193,7 +193,7 @@ test('Stage renders one named agent with its task and current status instead of 
   assert.equal((html.match(/data-agent-id="agent:guide"/g) ?? []).length, 1);
   assert.match(html, /核对配置归属/);
   assert.doesNotMatch(html, /Async agent launched successfully|SubagentHandback/);
-  assert.match(html, /transcript-disclosure-chevron/);
+  assert.doesNotMatch(html, /transcript-disclosure-chevron/);
   assert.ok(html.indexOf('Introduction') < html.indexOf('data-agent-id="agent:guide"'));
   assert.ok(html.indexOf('data-agent-id="agent:guide"') < html.indexOf('Final reply'));
 });

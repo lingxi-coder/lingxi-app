@@ -139,7 +139,7 @@ function ToolGlyph({ item, permissionRequest }: { item: ToolRunItem; permissionR
     >
       {permissionRequest
         ? <Icon name="hand" size={18} stroke={1.7} />
-        : item.agentId ? <AgentAvatar agentId={item.agentId} size={18} />
+        : item.agentId ? <AgentAvatar agentId={item.agentId} size={14} />
         : <ComputerApplicationIcon item={item} fallback={<ToolActivityIcon name={toolIconName(item.view.verb, item.tool, item.view.icon)} />} />}
     </span>
   );
@@ -345,7 +345,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
           summary={summary}
           label={`${presentation ? `${presentation.action} ${presentation.argument}${presentation.qualifier ?? ''}` : view.primary ? `${view.label}(${view.primary})${view.qualifier ?? ''}` : view.title}${!diffStats && summaryResponse && (!isLocalApp || showResponse) ? ` · ${summaryResponse}` : ''}`}
           buttonClassName="tool-disclosure-trigger"
-          buttonStyle={{ width: '100%', maxWidth: '100%', minHeight: permissionRequest ? 40 : 28, margin: 0, padding: '2px 0', borderRadius: 7 }}
+          buttonStyle={{ width: permissionRequest ? '100%' : 'fit-content', maxWidth: '100%', minHeight: permissionRequest ? 40 : 28, margin: 0, padding: '2px 0', borderRadius: 7 }}
           bodyStyle={permissionRequest
             ? { marginLeft: 0, padding: '0 14px 14px 56px' }
             : { marginLeft: 29 }}

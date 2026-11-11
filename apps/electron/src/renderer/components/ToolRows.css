@@ -1,11 +1,11 @@
-/* Calm, compact activity rows. Disclosures stay discoverable without hover. */
+/* Calm, compact activity rows. Disclosures appear on the active summary. */
 .transcript-tool-row:not([data-kind='permission']) { background: transparent; transition: none; }
 .transcript-tool-row:not([data-kind='permission']):is(:hover, :focus-within) {
   background: transparent;
   --tool-label-color: var(--tool-focus-color);
   --tool-icon-color: var(--tool-focus-color);
 }
-.transcript-tool-row .tool-call-summary { width: auto; flex: 1; overflow: hidden; }
+.transcript-tool-row .tool-call-summary { width: auto; flex: 0 1 auto; overflow: hidden; }
 .transcript-tool-row .tool-row-title { flex: 0 1 auto !important; gap: 4px; }
 .transcript-tool-row .tool-row-title > span:not([dir='ltr']) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .transcript-tool-row .tool-row-icon { color: var(--tool-icon-color); }
@@ -25,8 +25,8 @@
 .transcript-tool-row .tool-disclosure-trigger:is(:hover, :focus, :focus-visible, :active) {
   background: transparent !important; scale: 1; outline: none; transition: color 120ms ease, opacity 120ms ease;
 }
-.transcript-tool-row .tool-disclosure-trigger[aria-expanded] .transcript-disclosure-chevron { color: var(--tool-label-color); opacity: .7; }
-.transcript-tool-row .tool-disclosure-trigger:is(:hover, :focus-visible) .transcript-disclosure-chevron { color: var(--tool-focus-color); opacity: 1; }
+.transcript-tool-row .tool-disclosure-trigger[aria-expanded] > .transcript-disclosure-chevron { color: var(--tool-label-color); opacity: 0; }
+.transcript-tool-row .tool-disclosure-trigger[aria-expanded]:is(:hover, :focus-visible) > .transcript-disclosure-chevron { color: var(--tool-focus-color); opacity: 1; }
 .transcript-tool-group > .tool-group-trigger {
   width: fit-content !important; max-width: 100%; background: transparent !important; transition: color 120ms ease, opacity 120ms ease;
 }
@@ -37,8 +37,8 @@
 .transcript-tool-group > .tool-group-trigger:is(:hover, :focus, :focus-visible, :active) {
   background: transparent !important; color: var(--tool-focus-color) !important; opacity: 1; outline: none; scale: 1;
 }
-.transcript-tool-group > .tool-group-trigger[aria-expanded] .transcript-disclosure-chevron { opacity: .7; }
-.transcript-tool-group > .tool-group-trigger:is(:hover, :focus-visible) .transcript-disclosure-chevron { opacity: 1; }
+.transcript-tool-group > .tool-group-trigger[aria-expanded] > .transcript-disclosure-chevron { opacity: 0; }
+.transcript-tool-group > .tool-group-trigger[aria-expanded]:is(:hover, :focus-visible) > .transcript-disclosure-chevron { opacity: 1; }
 .transcript-tool-row .tool-disclosure-trigger:focus-visible,
 .transcript-tool-group > .tool-group-trigger:focus-visible { outline: 2px solid var(--tool-focus-ring); outline-offset: -2px; }
 .transcript-tool-row .tool-disclosure-trigger:active,
@@ -56,8 +56,6 @@
   .transcript-tool-row :is(.tool-row-title, .tool-row-icon),
   .transcript-tool-group > .tool-group-trigger { opacity: 1; }
   .transcript-tool-row .tool-row-status { outline: none; font-weight: 600; }
-  .transcript-tool-row .tool-disclosure-trigger[aria-expanded] .transcript-disclosure-chevron,
-  .transcript-tool-group > .tool-group-trigger[aria-expanded] .transcript-disclosure-chevron { opacity: 1; }
 }
 
 /* Application work reads as one local summary, with its disclosure beside it. */

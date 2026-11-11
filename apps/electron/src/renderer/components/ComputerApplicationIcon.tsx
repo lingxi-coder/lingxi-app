@@ -18,6 +18,6 @@ export function ComputerApplicationIcon({ item, fallback }: { item?: ToolRunItem
     return () => { current = false; };
   }, [bundleId]);
   return icon && icon.bundleId === bundleId && failed !== icon.url
-    ? <img className="tool-application-icon" src={icon.url} width={20} height={20} alt="" aria-hidden="true" title={application?.name} draggable={false} onError={() => setFailed(icon.url)} style={{ display: 'block', flexShrink: 0, objectFit: 'contain' }} />
+    ? <img className="tool-application-icon" src={icon.url} width={14} height={14} alt="" aria-hidden="true" title={application?.name} draggable={false} onError={() => setFailed(icon.url)} style={{ display: 'block', flexShrink: 0, objectFit: 'contain' }} />
     : <>{fallback}</>;
 }

@@ -46,4 +46,31 @@ final class TeamTaskUsageTests: XCTestCase {
         XCTAssertFalse(TeamsBotText.rendersMarkdown(authorKind: "user", recalled: false))
         XCTAssertFalse(TeamsBotText.rendersMarkdown(authorKind: "shared_bot", recalled: true))
     }
+
+    func testABotsMarkdownReadsAsOnePlainLine() {
+        let vectors: [(String, String)] = [
+            ("# QA Follow-Up Check\n\n**Goal: close the open items.**\n\n- Scope: defects", "QA Follow-Up Check Goal: close the open items. Scope: defects"),
+            ("**G", "G"),
+            ("- [ ] Confirm the list\n- [x] Done", "Confirm the list Done"),
+            ("| Item | Owner |\n|---|---|\n| Confirm scope | QA 2 |", "Item Owner Confirm scope QA 2"),
+            ("See [the doc](https://example.com/a) and `code`", "See the doc and code"),
+            ("```ts\nconst a = 1;\n```", "const a = 1;"),
+            ("2 * 3 * 4 and snake_case_name", "2 * 3 * 4 and snake_case_name"),
+            ("1. first\n2. second", "first second"),
+            ("> quoted _text_", "quoted text"),
+            ("![chart](https://x/y.png)", "chart"),
+            ("---", ""),
+            ("", ""),
+        ]
+        for (markdown, plain) in vectors { XCTAssertEqual(TeamsBotText.plainText(markdown), plain, markdown) }
+    }
+
+    func testPlainTextKeepsWhatIsNotMarkup() {
+        XCTAssertEqual(TeamsBotText.plainText("[ ] not a list item"), "[ ] not a list item")
+        XCTAssertEqual(TeamsBotText.plainText("a*b*c and a_b_c"), "a*b*c and a_b_c")
+        XCTAssertEqual(TeamsBotText.plainText("*emphasis* and __more__"), "emphasis and more")
+        XCTAssertEqual(TeamsBotText.plainText("a\r\n\r\nb"), "a b")
+        XCTAssertEqual(TeamsBotText.plainText("| a | b |\n| :--- | ---: |"), "a b")
+        XCTAssertEqual(TeamsBotText.plainText("run `ls | grep x`"), "run ls | grep x")
+    }
 }

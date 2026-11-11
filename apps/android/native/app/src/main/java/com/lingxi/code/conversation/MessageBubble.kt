@@ -22,6 +22,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CheckBox
+import androidx.compose.material.icons.outlined.CheckBoxOutlineBlank
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
@@ -40,6 +44,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.style.TextOverflow
@@ -371,7 +377,7 @@ private fun MdBlockView(block: MdBlock, onOpenLink: (String) -> Unit) {
 
         is MdBlock.BulletList -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             block.items.forEach { item ->
-                ListRow(marker = "•", spans = item, onOpenLink = onOpenLink)
+                ListRow(marker = "•", spans = item.spans, checked = item.checked, onOpenLink = onOpenLink)
             }
         }
 
@@ -383,22 +389,40 @@ private fun MdBlockView(block: MdBlock, onOpenLink: (String) -> Unit) {
     }
 }
 
-/** A single list row: a fixed-width marker gutter + the item's inline content. */
+/**
+ * A single list row: a fixed-width marker gutter + the item's inline content. A task item ([checked] not null) shows a read-only
+ * box in the gutter instead of [marker], and the row announces its state.
+ */
 @Composable
 private fun ListRow(
     marker: String,
     spans: List<MdInline>,
     onOpenLink: (String) -> Unit,
+    checked: Boolean? = null,
 ) {
     val t = LingXiTheme.palette
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
-        Text(
-            text = marker,
-            color = t.text3,
-            fontSize = 14.sp,
-            lineHeight = 23.1.sp,
-            modifier = Modifier.widthIn(min = 18.dp),
-        )
+    val state = checked?.let { stringResource(if (it) R.string.chat_plan_state_completed else R.string.chat_plan_state_pending) }
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Top,
+        modifier = if (state == null) Modifier else Modifier.semantics(mergeDescendants = true) { stateDescription = state },
+    ) {
+        if (checked == null) {
+            Text(
+                text = marker,
+                color = t.text3,
+                fontSize = 14.sp,
+                lineHeight = 23.1.sp,
+                modifier = Modifier.widthIn(min = 18.dp),
+            )
+        } else {
+            Icon(
+                imageVector = if (checked) Icons.Outlined.CheckBox else Icons.Outlined.CheckBoxOutlineBlank,
+                contentDescription = null,
+                tint = t.text3,
+                modifier = Modifier.padding(top = 3.dp).size(18.dp),
+            )
+        }
         val text = inlineSpans(spans, t.surfaceHover, t.text2, t.accent)
         ClickableText(
             text = text,

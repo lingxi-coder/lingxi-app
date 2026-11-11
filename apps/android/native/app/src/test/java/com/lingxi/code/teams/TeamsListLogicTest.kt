@@ -135,4 +135,20 @@ class TeamsListLogicTest {
         assertEquals(TeamsVectors.strings(false), TeamsListStrings.ENGLISH)
         assertTrue(TeamsListStrings.isChinese("zh-Hans-CN")); assertFalse(TeamsListStrings.isChinese("en-US"))
     }
+
+    /** A shared Bot's last message writes Markdown, so its preview is plain text; a person's stays exactly as stored. */
+    @Test fun onlyABotsPreviewIsPlainText() {
+        val strings = TeamsListStrings.ENGLISH
+        fun last(kind: String, preview: String, recalled: Boolean = false) = TeamLastMessage("m", 1, 1, kind, if (kind == "user") "u2" else "", if (kind == "shared_bot") "b" else null, preview, recalled)
+        val markdown = "# QA Follow-Up Check\n\n**Goal: close the open items.**\n\n- Scope: defects"
+        assertEquals("QA Follow-Up Check Goal: close the open items. Scope: defects", TeamsListLogic.pointerPreview(last("shared_bot", markdown), uid, strings))
+        assertEquals("Fixture Bot: QA Follow-Up Check", TeamsListLogic.pointerPreview(last("shared_bot", "# QA Follow-Up Check"), uid, strings) { "Fixture Bot" })
+        assertEquals("2 * 3 * 4 # keep", TeamsListLogic.pointerPreview(last("user", "2 * 3 * 4 # keep"), uid, strings))
+        assertEquals(markdown, TeamsListLogic.pointerPreview(last("user", markdown), uid, strings))
+        assertEquals(strings.nonText, TeamsListLogic.pointerPreview(last("shared_bot", "---"), uid, strings))
+        assertEquals(strings.nonText, TeamsListLogic.pointerPreview(last("shared_bot", ""), uid, strings))
+        assertEquals(strings.recalled, TeamsListLogic.pointerPreview(last("shared_bot", "**x**", recalled = true), uid, strings))
+        val group = TeamMessageConversation("g", "group", "", listOf("user:$uid", "user:u2"), 1, 1, 0, emptyList(), last("shared_bot", "**G"))
+        assertEquals("Bot: G", TeamsListLogic.conversationPreview(group, uid, strings) { "Bot" })
+    }
 }

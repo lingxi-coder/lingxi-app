@@ -183,8 +183,8 @@ class MarkdownParserTest {
         assertEquals(1, blocks.size)
         val list = blocks[0] as MdBlock.BulletList
         assertEquals(3, list.items.size)
-        assertEquals(listOf(MdInline.Text("one")), list.items[0])
-        assertEquals(listOf(MdInline.Text("three")), list.items[2])
+        assertEquals(BulletItem(listOf(MdInline.Text("one"))), list.items[0])
+        assertEquals(BulletItem(listOf(MdInline.Text("three"))), list.items[2])
     }
 
     @Test
@@ -200,12 +200,59 @@ class MarkdownParserTest {
         val list = parseMarkdownBlocks("- run `cmd`\n- be **bold**")[0] as MdBlock.BulletList
         assertEquals(
             listOf(MdInline.Text("run "), MdInline.Code("cmd")),
-            list.items[0],
+            list.items[0].spans,
         )
         assertEquals(
             listOf(MdInline.Text("be "), MdInline.Bold("bold")),
-            list.items[1],
+            list.items[1].spans,
         )
+    }
+
+    // --- task lists -------------------------------------------------------
+
+    @Test
+    fun taskList_uncheckedCheckedAndUppercase() {
+        val list = parseMarkdownBlocks("- [ ] open\n- [x] done\n- [X] DONE")[0] as MdBlock.BulletList
+        assertEquals(
+            listOf(
+                BulletItem(listOf(MdInline.Text("open")), checked = false),
+                BulletItem(listOf(MdInline.Text("done")), checked = true),
+                BulletItem(listOf(MdInline.Text("DONE")), checked = true),
+            ),
+            list.items,
+        )
+    }
+
+    @Test
+    fun taskList_plainBulletNextToTaskItemsStaysABullet() {
+        val blocks = parseMarkdownBlocks("- plain\n- [ ] task\n* [x] star task")
+        assertEquals(1, blocks.size)
+        assertEquals(
+            listOf(null, false, true),
+            (blocks[0] as MdBlock.BulletList).items.map { it.checked },
+        )
+        assertEquals(listOf(MdInline.Text("plain")), (blocks[0] as MdBlock.BulletList).items[0].spans)
+    }
+
+    @Test
+    fun taskList_indentedItemsStayInTheFlatList() {
+        val list = parseMarkdownBlocks("- [ ] parent\n  - [x] child\n    - [ ] grandchild")[0] as MdBlock.BulletList
+        assertEquals(listOf(false, true, false), list.items.map { it.checked })
+        assertEquals(listOf("parent", "child", "grandchild"), list.items.map { (it.spans.single() as MdInline.Text).text })
+    }
+
+    @Test
+    fun taskList_marksOutsideTheStartOfAnItemStayLiteral() {
+        val list = parseMarkdownBlocks("- item [ ] not a task\n- [ ]no space\n- [y] other\n- [x]")[0] as MdBlock.BulletList
+        assertEquals(listOf(null, null, null, null), list.items.map { it.checked })
+        assertEquals(
+            listOf("item [ ] not a task", "[ ]no space", "[y] other", "[x]"),
+            list.items.map { (it.spans.single() as MdInline.Text).text },
+        )
+        val paragraph = parseMarkdownBlocks("[ ] not in a list") .single() as MdBlock.Paragraph
+        assertEquals(listOf(MdInline.Text("[ ] not in a list")), paragraph.spans)
+        val numbered = parseMarkdownBlocks("1. [ ] numbered")[0] as MdBlock.NumberedList
+        assertEquals(listOf(MdInline.Text("[ ] numbered")), numbered.items[0].spans)
     }
 
     // --- numbered lists ---------------------------------------------------

@@ -160,7 +160,7 @@ enum TeamsListLogic {
         pointerPreview(conversation.lastMessage, uid: uid, strings: strings, author: conversation.kind == "group" || conversation.kind == "channel" ? author : nil)
     }
 
-    /// The message part of that line, from the newest-message pointer alone: a friend's card carries one too
+    /// The message part of that line (a shared Bot's Markdown reads as plain text), from the newest-message pointer alone: a friend's card carries one too
     /// (docs/FRIENDS-CLIENTS.md D3), so a Friends row reads like a Teams row. `author` names someone else's
     /// message where the caller wants a prefix (groups and channels); the viewer's own always reads "You: ".
     static func pointerPreview(_ last: TeamLastMessage?, uid: String, strings: TeamsListStrings, author: ((TeamLastMessage) -> String)? = nil) -> String {
@@ -173,7 +173,8 @@ enum TeamsListLogic {
             prefix = author(last) + strings.authorSeparator
         }
         if last.recalled { return prefix + strings.recalled }
-        return prefix + (last.preview.isEmpty ? strings.nonText : last.preview)
+        let text = TeamsBotText.rendersMarkdown(authorKind: last.authorKind, recalled: last.recalled) ? TeamsBotText.plainText(last.preview) : last.preview
+        return prefix + (text.isEmpty ? strings.nonText : text)
     }
 
     /// The search box: the trimmed query matches when empty, or when the label contains it ignoring case.

@@ -103,7 +103,7 @@ internal object TeamsListLogic {
         pointerPreview(conversation.lastMessage, uid, strings, author.takeIf { conversation.kind == "group" || conversation.kind == "channel" })
 
     /**
-     * The message part of a preview, which a Friends row prints from the pointer on its card (docs/FRIENDS-CLIENTS.md D3): [author] names
+     * The message part of a preview (a shared Bot's Markdown reads as plain text), which a Friends row prints from the pointer on its card (docs/FRIENDS-CLIENTS.md D3): [author] names
      * someone else's message only where the caller wants a prefix (groups and channels); the viewer's own always reads "You".
      */
     fun pointerPreview(last: TeamLastMessage?, uid: String, strings: TeamsListStrings, author: ((TeamLastMessage) -> String)? = null): String {
@@ -115,7 +115,8 @@ internal object TeamsListLogic {
             else -> ""
         }
         if (last.recalled) return prefix + strings.recalled
-        return prefix + last.preview.ifEmpty { strings.nonText }
+        val text = if (TeamsBotText.rendersMarkdown(last.authorKind, last.recalled)) TeamsBotText.plainText(last.preview) else last.preview
+        return prefix + text.ifEmpty { strings.nonText }
     }
 
     /** Case-insensitive contains on the label; a blank query matches everything. */

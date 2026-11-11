@@ -28,12 +28,15 @@ sealed interface MdBlock {
     /** A fenced code block. [language] is the first info token (may be empty). */
     data class CodeBlock(val language: String, val code: String, val closed: Boolean = true) : MdBlock
 
-    /** A bullet list (`-` / `*` / `+`). Each item is its own inline run. */
-    data class BulletList(val items: List<List<MdInline>>) : MdBlock
+    /** A bullet list (`-` / `*` / `+`). Each item is its own inline run; a task item (`- [ ]`, `- [x]`) also carries its box. */
+    data class BulletList(val items: List<BulletItem>) : MdBlock
 
     /** A numbered list (`1.` / `2)` …). Each item carries its rendered [marker]. */
     data class NumberedList(val items: List<NumberedItem>) : MdBlock
 }
+
+/** One bullet-list row: its inline content, and for a task item whether its box is checked (null for a plain bullet). */
+data class BulletItem(val spans: List<MdInline>, val checked: Boolean? = null)
 
 /** One numbered-list row: the displayed marker (e.g. "1.") + its inline content. */
 data class NumberedItem(val marker: String, val spans: List<MdInline>)
@@ -61,6 +64,8 @@ sealed interface MdInline {
 private val HEADING_RE = Regex("""^ {0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*$""")
 private val QUOTE_RE = Regex("""^ {0,3}> ?(.*)$""")
 private val BULLET_RE = Regex("""^\s*[-*+]\s+(.*)$""")
+/** A task marker at the start of a bullet's text: `[ ]`, `[x]` or `[X]`, then whitespace. Anywhere else `[ ]` stays literal. */
+private val TASK_RE = Regex("""^\[([ xX])\]\s+(.*)$""")
 private val NUMBERED_RE = Regex("""^\s*(\d+)[.)]\s+(.*)$""")
 private val FENCE_RE = Regex("""^ {0,3}(`{3,}|~{3,})(.*)$""")
 
@@ -143,10 +148,12 @@ fun parseMarkdownBlocks(src: String): List<MdBlock> {
             // --- bullet list --------------------------------------------
             BULLET_RE.matchEntire(line) != null -> {
                 flushParagraph()
-                val items = mutableListOf<List<MdInline>>()
+                val items = mutableListOf<BulletItem>()
                 while (i < lines.size) {
                     val m = BULLET_RE.matchEntire(lines[i]) ?: break
-                    items += parseInline(m.groupValues[1])
+                    val task = TASK_RE.matchEntire(m.groupValues[1])
+                    items += if (task == null) BulletItem(parseInline(m.groupValues[1]))
+                        else BulletItem(parseInline(task.groupValues[2]), checked = task.groupValues[1] != " ")
                     i++
                 }
                 blocks += MdBlock.BulletList(items)

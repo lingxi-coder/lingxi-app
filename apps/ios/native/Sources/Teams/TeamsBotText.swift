@@ -21,6 +21,33 @@ enum TeamsBotText {
         authorKind == "shared_bot" && !recalled
     }
 
+    /// A Bot's Markdown as one plain line, for the conversation list (the stored preview is a truncated copy, so it
+    /// may stop inside a marker). Line by line: block markers (heading, quote, list with its task box), code fences,
+    /// table separators and rules go; the pipes of a table row (one that starts or ends with a pipe) become spaces; links and images keep their text; `**`, `__`, `~~`
+    /// and backticks go; a single `*` or `_` goes only as a pair around text, never inside a word or around spaces.
+    /// The lines join with one space. Android's `TeamsBotText.plainText` and Desktop's share these rules and vectors.
+    static func plainText(_ markdown: String) -> String {
+        func matches(_ line: String, _ pattern: String) -> Bool { line.range(of: pattern, options: .regularExpression) != nil }
+        func replacing(_ text: String, _ pattern: String, with template: String) -> String {
+            text.replacingOccurrences(of: pattern, with: template, options: .regularExpression)
+        }
+        let lines = markdown.components(separatedBy: .newlines).filter {
+            !matches($0, #"^\s*(```|~~~)"#) && !matches($0, #"^\s*([-*_])(\s*\1){2,}\s*$"#)
+                && !matches($0, #"^(?=.*\|)\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$"#)
+        }
+        let plain = lines.map { line -> String in
+            var text = replacing(line, #"^(\s*>)+\s?"#, with: "")
+            text = replacing(text, #"^\s*#{1,6}(\s+|$)"#, with: "")
+            text = replacing(text, #"^\s*([-*+]|\d+[.)])(\s+|$)(\[[ xX]\](\s+|$))?"#, with: "")
+            text = replacing(text, #"!?\[([^\]]*)\]\([^)]*\)"#, with: "$1")
+            if matches(text, #"^\s*\||\|\s*$"#) { text = text.replacingOccurrences(of: "|", with: " ") }
+            for mark in ["**", "__", "~~", "`"] { text = text.replacingOccurrences(of: mark, with: "") }
+            text = replacing(text, #"(?<![A-Za-z0-9_*])\*(?=\S)([^*]*?\S)\*(?![A-Za-z0-9_*])"#, with: "$1")
+            return replacing(text, #"(?<![A-Za-z0-9_])_(?=\S)([^_]*?\S)_(?![A-Za-z0-9_])"#, with: "$1")
+        }
+        return replacing(plain.joined(separator: " "), #"\s+"#, with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// The words of the usage line (Desktop `usageText`).
     struct UsageStrings {
         var missing: String, partial: String, complete: String, costUnknown: String, currencyUnknown: String

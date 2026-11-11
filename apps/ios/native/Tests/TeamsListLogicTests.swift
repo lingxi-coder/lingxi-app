@@ -253,4 +253,24 @@ final class TeamsListLogicTests: XCTestCase {
         XCTAssertEqual(preview(kind: "bot_dm", author: { _ in "Ann" }), "hello")
         XCTAssertEqual(preview(kind: "channel", author: { _ in "Ann" }), "Ann: hello")
     }
+
+    /// A shared Bot's last message writes Markdown, so its preview is plain text; a person's stays exactly as stored.
+    func testOnlyABotsPreviewIsPlainText() {
+        func last(_ kind: String, _ preview: String, recalled: Bool = false) -> TeamLastMessage {
+            TeamLastMessage(id: "m", seq: 1, atMs: 1, authorKind: kind, authorUid: kind == "user" ? "u2" : "", authorSharedBotId: kind == "shared_bot" ? "b" : nil, preview: preview, recalled: recalled)
+        }
+        func preview(_ pointer: TeamLastMessage, author: ((TeamLastMessage) -> String)? = nil) -> String {
+            TeamsListLogic.pointerPreview(pointer, uid: uid, strings: .en, author: author)
+        }
+        let markdown = "# QA Follow-Up Check\n\n**Goal: close the open items.**\n\n- Scope: defects"
+        XCTAssertEqual(preview(last("shared_bot", markdown)), "QA Follow-Up Check Goal: close the open items. Scope: defects")
+        XCTAssertEqual(preview(last("shared_bot", "# QA Follow-Up Check"), author: { _ in "Fixture Bot" }), "Fixture Bot: QA Follow-Up Check")
+        XCTAssertEqual(preview(last("user", "2 * 3 * 4 # keep")), "2 * 3 * 4 # keep")
+        XCTAssertEqual(preview(last("user", markdown)), markdown)
+        XCTAssertEqual(preview(last("shared_bot", "---")), TeamsListStrings.en.nonText)
+        XCTAssertEqual(preview(last("shared_bot", "")), TeamsListStrings.en.nonText)
+        XCTAssertEqual(preview(last("shared_bot", "**x**", recalled: true)), TeamsListStrings.en.recalled)
+        let group = TeamMessageConversation(id: "g", kind: "group", title: "", participants: [], lastSeq: 1, lastChangeSeq: 0, lastReadSeq: 0, lastMessage: last("shared_bot", "**G"))
+        XCTAssertEqual(TeamsListLogic.conversationPreview(group, uid: uid, strings: .en) { _ in "Bot" }, "Bot: G")
+    }
 }

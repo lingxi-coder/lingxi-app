@@ -134,6 +134,8 @@ mod tests {
                 output_tokens: 40,
                 cache_read_input_tokens: 25,
                 cache_creation_input_tokens: 10,
+                cache_creation_5m_input_tokens: 10,
+                cache_creation_1h_input_tokens: 0,
                 reasoning_tokens: 0,
                 web_search_requests: 0,
             }],

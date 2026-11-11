@@ -32,6 +32,7 @@ test('a failed shutdown phase cannot quit before delayed provider cleanup settle
       ['audio', async () => { throw new Error('audio cleanup failed'); }],
       ['bridge', async () => {}],
     ],
+    flushConversationSpaces: async () => {},
     shutdownDiagnostics: {
       add: (_level: string, _source: string, value: string) => events.push(JSON.parse(value)),
       flush: () => { flushes++; return diagnosticsDrain; },

@@ -568,7 +568,7 @@ export class ScheduledTaskService {
             throw new Error('paused: The scheduled conversation source changed before admission.');
           }
           if (!this.bots?.routineBotFor(path)) {
-            this.settings.conversationSpaces.register({ ...ref, mode, projectId: scopeKey === 'global' ? null : path });
+            await this.settings.conversationSpaces.register({ ...ref, mode, projectId: scopeKey === 'global' ? null : path });
           }
           await source.markCronRunStarted(runId, ref.sessionId, { transcriptPath: state.transcript_path, mode, scopeKey });
         });

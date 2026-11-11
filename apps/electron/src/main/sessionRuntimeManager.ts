@@ -301,6 +301,35 @@ export class SessionRuntimeManager {
     this.activate(this.require(ref));
   }
 
+  /** Keep the prior foreground runtime recoverable until a host publication settles. */
+  captureActiveSelection(): { restore(): void; release(): void } {
+    const previousId = this.activeSessionId;
+    const previous = previousId === null ? undefined : this.runtimes.get(previousId);
+    const lastUsed = new Map(this.lastUsed), accessSequence = this.accessSequence;
+    if (previous) this.backgroundSessionLeases.set(previous.sessionId, (this.backgroundSessionLeases.get(previous.sessionId) ?? 0) + 1);
+    let released = false;
+    return {
+      restore: () => {
+        if (previousId !== null && (!previous || this.runtimes.get(previousId) !== previous)) throw new Error('The previous session runtime is no longer available for recovery.');
+        this.activeSessionId = previousId;
+        this.lastUsed.clear();
+        for (const [id, used] of lastUsed) this.lastUsed.set(id, used);
+        this.accessSequence = accessSequence;
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        if (previous) {
+          const count = (this.backgroundSessionLeases.get(previous.sessionId) ?? 1) - 1;
+          if (count) this.backgroundSessionLeases.set(previous.sessionId, count);
+          else this.backgroundSessionLeases.delete(previous.sessionId);
+        }
+        // Publication/recovery must finish before eviction can dispose either owner.
+        this.scheduleCacheTrim();
+      },
+    };
+  }
+
   clearActiveSelection(): void {
     this.activeSessionId = null;
     this.trimCache();

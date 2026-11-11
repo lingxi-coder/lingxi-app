@@ -541,13 +541,13 @@ export class HostConnection {
     });
   }
 
-  private onNotification(method: string, params: unknown): void {
+  private onNotification(method: string, params: unknown): void | Promise<void> {
     const { viewer } = this;
     if (this.closed || this.disconnecting || !this.approved || viewer === undefined) return;
-    Promise.resolve().then(() => {
+    return Promise.resolve().then(() => {
       if (this.closed || this.disconnecting || !this.approved) return;
       return this.deps.gateway.handle(viewer, method, params, this.channel);
-    }).catch((error: unknown) => {
+    }).then(() => undefined).catch((error: unknown) => {
       this.deps.diagnostics('warn', `a remote notification failed (${method}: ${describeError(error)})`);
     });
   }

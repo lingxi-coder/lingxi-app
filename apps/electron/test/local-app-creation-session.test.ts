@@ -13,9 +13,9 @@ import type { SessionRef } from '../src/shared/settings';
 test('repeated Local App creation in one project allocates separate Code sessions and preserves the old draft', async t => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-local-app-session-')));
   const settings = new SettingsStore(join(root, 'settings'));
-  settings.conversationSpaces.setMode('code');
+  await settings.conversationSpaces.setMode('code');
   settings.addProject(root);
-  settings.conversationSpaces.addProject(root, 'code');
+  await settings.conversationSpaces.addProject(root, 'code');
   const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, trusted: true }) });
   // Keep real session allocation/cache behavior; model boot and source verification have their own tests.
   (manager as any).ensure = async (ref: SessionRef) => ({ ...ref });

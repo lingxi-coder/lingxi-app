@@ -6220,8 +6220,9 @@ mod tests {
         batchable_prompt_snapshot, deserialize_source, drain_main_thread,
         fail_pending_mod_calls_on_refusal, is_owned_turn_event, run_queued_mod_command,
         serialize_source, text_object_projection, ActiveTurnControl, BridgeConnection,
-        BridgeModCommandQueue, ModQueueDrain, ModQueueEnqueuePause, PendingModCommands,
-        PendingModPrompts, TurnDriver, TurnInteractions, UnscopedFrameEventSink,
+        BridgeModCommandQueue, CompactWork, ModQueueDrain, ModQueueEnqueuePause,
+        PendingModCommands, PendingModPrompts, TurnDriver, TurnInteractions,
+        UnscopedFrameEventSink,
     };
 
     struct NoTurn;

@@ -488,6 +488,25 @@ test('conversation view: pending messages show their state and can be discarded;
   assert.doesNotMatch(connecting, /data-kind="offline"|Offline:|>Reconnect</);
 });
 
+test('an unavailable Bot keeps the failed message visible with a retry action, without an empty-state prompt', async context => {
+  const { fake, workspace, snapshot } = await open(fake => {
+    const row = fake.conversations.get('team-aaaa')!.find(value => value.id === 'bot-chat')!;
+    row.lastSeq = 0;
+    fake.bots = [botCard({ ready: false })];
+  });
+  context.after(() => workspace.close());
+  workspace.selectConversation('bot-chat'); await until(() => snapshot().selectedConversationId === 'bot-chat');
+  const original = fake.messages;
+  fake.messages = async command => { if (command.action === 'submit') throw new Error('HOST_UNAVAILABLE'); return original(command); };
+  await snapshot().messaging!.queue('create', 'Hello'); await until(() => snapshot().pending[0]?.error === 'HOST_UNAVAILABLE');
+  const markup = html(view(workspace, snapshot()));
+  assert.match(markup, /Host unavailable/); assert.match(markup, /Hello/); assert.match(markup, />Retry<\/button>/);
+  assert.doesNotMatch(markup, /No messages yet\. Say hello\./);
+  assert.match(html(sidebar(workspace, snapshot())), /Not sent: Hello/);
+  workspace.selectConversation('dm-bob');
+  assert.match(html(sidebar(workspace, snapshot())), /Not sent: Hello/, 'the failed message remains visible after switching conversations');
+});
+
 test('conversation view: no team, no conversations, a pending creation', async context => {
   const none = await bare(); context.after(() => none.workspace.close());
   assert.match(html(view(none.workspace, none.snapshot())), /Create or join a team/);

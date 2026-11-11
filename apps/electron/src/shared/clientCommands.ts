@@ -7,6 +7,8 @@ import type {
 export type DesktopDisposition = 'exposed' | 'host_private' | 'degraded' | 'not_applicable';
 
 export const CLIENT_COMMAND_DISPOSITIONS = {
+  decision_configuration_changed: 'host_private',
+  decision_response: 'host_private',
   side_chat_restore: 'host_private',
   side_chat_create: 'exposed',
   side_chat_list: 'exposed',
@@ -84,8 +86,6 @@ export const CLIENT_COMMAND_DISPOSITIONS = {
   fusion_admin: 'exposed',
   plugin_admin: 'exposed',
   hook_admin: 'exposed',
-  decision_response: 'host_private',
-  decision_configuration_changed: 'host_private',
   audio_response: 'host_private',
   media_service_request: 'host_private',
   media_connection_response: 'host_private',
@@ -115,6 +115,8 @@ export const REFRESH_LISTING_DISPOSITIONS = {
 } as const satisfies Record<ListingKindDto['type'], DesktopDisposition>;
 
 export const CLIENT_EVENT_DISPOSITIONS = {
+  decision_request: 'host_private',
+  decision_cancel: 'host_private',
   side_chat_checkpoint: 'host_private',
   side_chat_permission: 'exposed',
   side_chat_submitted: 'exposed',
@@ -223,8 +225,6 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   thinking_delta: 'exposed',
   usage_update: 'exposed',
   api_retry: 'exposed',
-  decision_request: 'host_private',
-  decision_cancel: 'host_private',
   audio_request: 'host_private',
   media_service_response: 'host_private',
   media_connection_request: 'host_private',
@@ -349,6 +349,8 @@ export type AllowedClientCommand =
 export type RemoteEventDisposition = 'forward' | 'coalesce' | 'state' | 'drop' | 'withheld';
 
 export const CLIENT_EVENT_REMOTE_DISPOSITIONS = {
+  decision_request: 'withheld',
+  decision_cancel: 'withheld',
   side_chat_checkpoint: 'withheld',
   side_chat_permission: 'withheld',
   side_chat_submitted: 'withheld',
@@ -457,8 +459,6 @@ export const CLIENT_EVENT_REMOTE_DISPOSITIONS = {
   thinking_delta: 'coalesce',
   usage_update: 'forward',
   api_retry: 'forward',
-  decision_request: 'withheld',
-  decision_cancel: 'withheld',
   audio_request: 'withheld',
   media_service_response: 'withheld',
   media_connection_request: 'withheld',
@@ -488,6 +488,8 @@ export const REMOTE_STATE_EVENT_TYPES = [
 export type RemoteCommandDisposition = 'remote' | 'host_only';
 
 export const CLIENT_COMMAND_REMOTE_DISPOSITIONS = {
+  decision_configuration_changed: 'host_only',
+  decision_response: 'host_only',
   side_chat_restore: 'host_only',
   side_chat_create: 'host_only',
   side_chat_list: 'host_only',
@@ -568,8 +570,6 @@ export const CLIENT_COMMAND_REMOTE_DISPOSITIONS = {
   fusion_admin: 'host_only',
   plugin_admin: 'host_only',
   hook_admin: 'host_only',
-  decision_response: 'host_only',
-  decision_configuration_changed: 'host_only',
   audio_response: 'host_only',
   media_service_request: 'host_only',
   media_connection_response: 'host_only',

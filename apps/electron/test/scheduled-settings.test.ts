@@ -18,7 +18,7 @@ test('managed no-project chat active selection and pin survive restarting with n
   const settings = new SettingsStore(path);
   const ref = { projectPath: settings.scheduledWorkspace, sessionId };
   const owner = { ...ref, projectId: null, mode: 'code' as const };
-  settings.conversationSpaces.register(owner);
+  await settings.conversationSpaces.register(owner);
   settings.activateProject(ref.projectPath);
   settings.setActiveSession(ref);
   settings.setSessionPinned({ ...ref, title: 'Morning brief', pinnedAt: '2026-09-12T10:00:00Z' }, true);
@@ -37,7 +37,7 @@ test('archiving and restoring a managed chat persist without promoting its scope
   const settings = new SettingsStore(path);
   const ref = { projectPath: settings.scheduledWorkspace, sessionId };
   const owner = { ...ref, projectId: null, mode: 'code' as const };
-  settings.conversationSpaces.register(owner);
+  await settings.conversationSpaces.register(owner);
   settings.setActiveSession(ref);
   settings.setSessionPinned({ ...ref, title: 'Dedicated monitor', pinnedAt: '2026-09-12T10:00:00Z' }, true);
   settings.setSessionArchived(ref, true, 'Dedicated monitor');
@@ -62,8 +62,8 @@ test('managed settings restoration preserves a full user project catalog and bot
   const projects = settings.getPublic().projects;
   const normal = { projectPath: projects[0], sessionId: '22222222-3333-4444-8555-666666666666' };
   const managed = { projectPath: settings.scheduledWorkspace, sessionId };
-  settings.conversationSpaces.register({ ...normal, projectId: normal.projectPath, mode: 'code' });
-  settings.conversationSpaces.register({ ...managed, projectId: null, mode: 'code' });
+  await settings.conversationSpaces.register({ ...normal, projectId: normal.projectPath, mode: 'code' });
+  await settings.conversationSpaces.register({ ...managed, projectId: null, mode: 'code' });
   settings.setSessionPinned({ ...normal, title: 'Project chat', pinnedAt: '2026-09-12T10:00:00Z' }, true);
   settings.setSessionPinned({ ...managed, title: 'General chat', pinnedAt: '2026-09-12T11:00:00Z' }, true);
   settings.activateProject(managed.projectPath);
@@ -95,11 +95,11 @@ test('generated scheduled workspaces keep session metadata across restart withou
   const ref = { projectPath, sessionId };
   const memory = join(path, '.other-brand', 'automations', 'task', 'memory.md');
   settings.registerScheduledSession(ref, 'task-1', memory);
-  settings.conversationSpaces.register({ ...ref, projectId: null, mode: 'code' });
+  await settings.conversationSpaces.register({ ...ref, projectId: null, mode: 'code' });
   settings.activateProject(projectPath);
   settings.setActiveSession(ref);
   settings.setSessionPinned({ ...ref, title: 'Generated run', pinnedAt: '2026-10-30T10:00:00Z' }, true);
-  settings.relocateSession(ref, projectPath);
+  await settings.relocateSession(ref, projectPath);
   const reopened = new SettingsStore(path);
   assert.deepEqual(reopened.getPublic().projects, []);
   assert.deepEqual(reopened.getPublic().activeSession, { ...ref, projectId: null, mode: 'code' });

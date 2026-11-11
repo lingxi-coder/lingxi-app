@@ -139,6 +139,7 @@ let notifier: HostNotifier | null = null;
 let quitting = false;
 let shutdownDiagnostics: DiagnosticBuffer | undefined;
 let disposeProviderAccounts: (() => Promise<void>) | undefined;
+let flushConversationSpaces: (() => Promise<void>) | undefined;
 let localApps: LocalAppHost | null = null;
 let remoteControl: RemoteControlService | null = null;
 let remotePolicy: RemotePolicy | null = null;
@@ -397,6 +398,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const sessionCatalog = new ProjectSessionCatalog(catalogOptions);
   const productPaths = await sessionCatalog.productPaths();
   const settings = new SettingsStore(userData, productPaths.workspaceRoot);
+  flushConversationSpaces = () => settings.conversationSpaces.flush();
   let lastComputerRevision = '';
   const computerSettings = new ComputerSettingsStore(userData, {
     showExtension: async path => { const error = await shell.openPath(path); if (error) throw new Error(error); },
@@ -639,7 +641,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       // A Bot's session is not one of the owner's: it is neither the one to restore at startup nor one to share.
       if (bots?.ownsWorkspace(ref.projectPath)) return;
       if (isActive) settings.setActiveSession(ref);
-      host?.commitConversationDraft(ref);
+      void host?.commitConversationDraft(ref).catch(error => diagnostics.add('warn', 'host', `conversation navigation: ${sanitizeDiagnostic(error)}`));
       // `remoteControlAtStartup`: a new chat starts shared with the user's other devices.
       try { remotePolicy?.sessionCreated(ref); } catch (error) { diagnostics.add('warn', 'host', `remote control: ${sanitizeDiagnostic(error)}`); }
     },
@@ -755,6 +757,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     credentialBroker,
     nativeAudio ?? undefined,
   );
+  flushConversationSpaces = host.flushConversationSpaces.bind(host);
   host.attachDecision(decisionHost);
   if (providerAccounts) host.attachProviderAccounts(providerAccounts);
   host.attachLocalAppAuthoring((appId, ref, version) => {
@@ -1222,6 +1225,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     try { await dispose(); record('completed'); }
     catch (error) { record('failed'); throw error; }
   })).finally(async () => {
+    await flushConversationSpaces?.();
     try { await shutdownDiagnostics?.flush(); }
     finally { app.quit(); }
   });

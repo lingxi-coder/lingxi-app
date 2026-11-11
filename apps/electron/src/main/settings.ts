@@ -1,5 +1,7 @@
-import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
+import { copyFile, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 import { isInside } from './bots/files.js';
 import { isSessionId } from './sessionIdentity.js';
@@ -37,6 +39,7 @@ export class SettingsStore {
   private settings: PersistedSettings;
   private audioConfigurationError: string | undefined;
   private settingsWritable = true;
+  private persistedRevision = 0;
   private volatileActiveSession: SessionRef | undefined;
   // Canonical form of the managed scope. Every caller that compares a path
   // against it has already run it through `canonicalWorkspace` (which
@@ -140,6 +143,7 @@ export class SettingsStore {
     const temporary = `${this.settingsPath}.tmp`;
     writeFileSync(temporary, `${JSON.stringify(this.settings, null, 2)}\n`, { mode: 0o600 });
     renameSync(temporary, this.settingsPath);
+    this.persistedRevision++;
   }
 
   getTelemetryConfig(source: NodeJS.ProcessEnv = process.env): DesktopTelemetryConfig {
@@ -240,15 +244,76 @@ export class SettingsStore {
   }
 
   /** Move host metadata with the transcript's stable UUID in one settings write. */
-  relocateSession(ref: SessionRef, projectPath: string, selection?: Omit<SessionTranscriptSelection, keyof SessionRef> | null): void {
+  async relocateSession(ref: SessionRef, projectPath: string, selection?: Omit<SessionTranscriptSelection, keyof SessionRef> | null): Promise<void> {
+    this.validateSessionRelocation(ref, selection);
+    const owned = this.conversationSpaces.find(ref) ?? this.conversationSpaces.find({ ...ref, projectPath });
+    let moved = false;
+    if (owned && owned.projectPath !== projectPath) {
+      await this.conversationSpaces.relocate(owned, projectPath);
+      moved = true;
+    }
+    try { this.commitSessionRelocation(ref, projectPath, selection); }
+    catch (error) {
+      if (moved) await this.conversationSpaces.relocate({ ...owned!, projectPath }, owned!.projectPath);
+      throw error;
+    }
+  }
+
+  private validateSessionRelocation(ref: SessionRef, selection?: Omit<SessionTranscriptSelection, keyof SessionRef> | null): void {
     if (selection && (!isAbsolute(selection.catalogProjectPath) || selection.catalogProjectPath.length > 32_768
       || selection.catalogProjectPath.includes('\0') || !isAbsolute(selection.transcriptPath)
       || selection.transcriptPath.length > 32_768 || selection.transcriptPath.includes('\0')
       || basename(selection.transcriptPath).toLowerCase() !== `${ref.sessionId.toLowerCase()}.jsonl`
       || !['current', 'repository', 'all'].includes(selection.scope))) throw new Error('invalid session transcript selection');
+  }
+
+  /** Prepare disk recovery off-thread; capture memory only inside the final publication fence. */
+  async prepareSelectionRollback(): Promise<{
+    current(): boolean; run<T>(operation: () => T): T; dispose(): Promise<void>;
+  }> {
+    const revision = this.persistedRevision;
+    const backup = `${this.settingsPath}.selection-${randomUUID()}.rollback`;
+    let hadFile = true, preserveBackup = false;
+    try { await copyFile(this.settingsPath, backup); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') hadFile = false;
+      else { await rm(backup, { force: true }).catch(() => undefined); throw error; }
+    }
+    return {
+      current: () => revision === this.persistedRevision,
+      run: <T>(operation: () => T): T => {
+        if (revision !== this.persistedRevision) throw new Error('Settings changed before the conversation publication.');
+        const previous = structuredClone(this.settings);
+        const previousDraft = this.volatileActiveSession && { ...this.volatileActiveSession };
+        try { return operation(); }
+        catch (error) {
+          this.settings = previous;
+          this.volatileActiveSession = previousDraft;
+          this.persistedRevision++;
+          try {
+            if (hadFile) renameSync(backup, this.settingsPath);
+            else {
+              try { unlinkSync(this.settingsPath); }
+              catch (removeError) { if ((removeError as NodeJS.ErrnoException).code !== 'ENOENT') throw removeError; }
+            }
+          } catch (rollbackError) {
+            preserveBackup = true;
+            throw new AggregateError([error, rollbackError], 'Conversation publication failed and its previous settings could not be restored.');
+          }
+          throw error;
+        }
+      },
+      dispose: async () => { if (!preserveBackup) await rm(backup, { force: true }).catch(() => undefined); },
+    };
+  }
+
+  /** Metadata-only half of an already published ownership transaction. */
+  commitSessionRelocation(ref: SessionRef, projectPath: string, selection?: Omit<SessionTranscriptSelection, keyof SessionRef> | null): void {
+    this.validateSessionRelocation(ref, selection);
     const previous = this.settings;
     const previousDraft = this.volatileActiveSession;
     const owned = this.conversationSpaces.find(ref) ?? this.conversationSpaces.find({ ...ref, projectPath });
+    if (owned && owned.projectPath !== projectPath) throw new Error('Conversation ownership must be committed before relocation metadata.');
     const moved = { ...ref, projectPath, sessionId: ref.sessionId };
     const matches = (entry: SessionRef) => entry.sessionId === ref.sessionId && entry.projectPath === ref.projectPath;
     const relocate = <T extends SessionRef>(entry: T): T => matches(entry) ? { ...entry, projectPath } : entry;
@@ -285,18 +350,12 @@ export class SettingsStore {
     }
     this.settings = next;
     this.volatileActiveSession = previousDraft && matches(previousDraft) ? moved : undefined;
-    let relocatedOwner = false;
     try {
-      if (owned && owned.projectPath !== projectPath) {
-        this.conversationSpaces.relocate(owned, projectPath);
-        relocatedOwner = true;
-      }
       this.persist();
     }
     catch (error) {
       this.settings = previous;
       this.volatileActiveSession = previousDraft;
-      if (relocatedOwner) this.conversationSpaces.relocate(moved, owned!.projectPath);
       throw error;
     }
   }

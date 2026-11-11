@@ -76,7 +76,7 @@ async function hostFixture() {
   settings.activateProject(projectPath);
   const manager = createManager();
   const opened = await openFakeRuntime(manager, projectPath);
-  settings.conversationSpaces.register(opened.ref);
+  await settings.conversationSpaces.register(opened.ref);
   settings.setActiveSession(opened.ref);
   const catalog = {
     find: async () => undefined,

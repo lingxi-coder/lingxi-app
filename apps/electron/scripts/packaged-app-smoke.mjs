@@ -1387,22 +1387,45 @@ async function assertColdSessionOpen(page, sessionId) {
     log(`cold-open Home navigation state: ${JSON.stringify(await evaluate(page, `(async () => ({ body: document.body?.innerText, home: document.querySelector('.desktop-nav-rail button[aria-label="Home"]')?.outerHTML, rail: document.querySelector('.desktop-nav-rail')?.outerHTML, bootstrap: await window.lingxi.bootstrap() }))()`))}`);
     throw error;
   }
-  const beforeReload = (await page.send('Page.getFrameTree')).frameTree.frame;
-  await page.send('Page.reload', { ignoreCache: true });
-  await waitFor(async () => {
-    const frame = (await page.send('Page.getFrameTree')).frameTree.frame;
-    return frame.url === beforeReload.url && frame.loaderId !== beforeReload.loaderId;
-  }, { label: 'cold-open renderer reload committed' });
-  await waitFor(() => evaluate(page, `document.readyState === 'complete' && Boolean(document.body)`), { label: 'cold-open renderer document ready' });
-  try {
-    await waitFor(() => evaluate(page, `document.body.innerText.includes('Custom provider verified.')`), { label: 'cold-open saved transcript rendered' });
-  } catch (error) {
-    log(`cold-open renderer state: ${JSON.stringify(await evaluate(page, `(async () => ({ url: location.href, ready: document.readyState, body: document.body?.innerText, bootstrap: await window.lingxi?.bootstrap() }))()`))}`);
-    throw error;
+  for (let reload = 0; reload < 10; reload++) {
+    if (reload > 0) {
+      await evaluate(page, `window.lingxi.restartBridge(${JSON.stringify(sessionId)})`);
+    }
+    const beforeReload = (await page.send('Page.getFrameTree')).frameTree.frame;
+    await page.send('Page.reload', { ignoreCache: true });
+    await waitFor(async () => {
+      const frame = (await page.send('Page.getFrameTree')).frameTree.frame;
+      return frame.url === beforeReload.url && frame.loaderId !== beforeReload.loaderId;
+    }, { label: 'cold-open renderer reload committed' });
+    await waitFor(() => evaluate(page, `document.readyState === 'complete' && Boolean(document.body)`), { label: 'cold-open renderer document ready' });
+    try {
+      await waitFor(() => evaluate(page, `document.body.innerText.includes('Custom provider verified.')`), { label: 'cold-open saved transcript rendered' });
+    } catch (error) {
+      const state = await evaluate(page, `(async () => ({ url: location.href, ready: document.readyState,
+        body: document.body?.innerText, bootstrap: await window.lingxi?.bootstrap(),
+        replay: await new Promise(resolve => {
+          const events = [];
+          const off = window.lingxi.onEvent(envelope => {
+            if (envelope.sessionId !== ${JSON.stringify(sessionId)}) return;
+            const event = envelope.event;
+            events.push({ sequence: envelope.sequence, type: event.type,
+              ...(event.type === 'session_resumed' ? { messages: event.messages.map(message => ({
+                role: message.role, blocks: message.blocks.map(block => ({ type: block.type,
+                  ...(block.type === 'text' ? { text: block.text } : {}) })) })) } : {}) });
+          });
+          setTimeout(() => { off(); resolve(events); }, 300);
+        }) }))()`);
+      log(`cold-open renderer state: ${JSON.stringify({ reload, ...state })}`);
+      if (process.env.LINGXI_LOCAL_APP_EVIDENCE) {
+        mkdirSync(process.env.LINGXI_LOCAL_APP_EVIDENCE, { recursive: true });
+        writeFileSync(join(process.env.LINGXI_LOCAL_APP_EVIDENCE, 'cold-open-failure.json'), JSON.stringify({ reload, ...state }, null, 2));
+      }
+      throw error;
+    }
   }
   assert.equal(await evaluate(page, `document.body.innerText.includes('This chat is being resumed')`), false,
     'the cold-open renderer must not show the original error');
-  log('cold saved session: handshake-time metadata, transcript/model restore, renderer and Remote Control IPC passed');
+  log('cold saved session: handshake-time metadata, transcript/model restore, ten renderer reloads with runtime restarts and Remote Control IPC passed');
 }
 
 async function openPackagedProjectDraft(page, projectPath) {

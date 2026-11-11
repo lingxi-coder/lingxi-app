@@ -84,7 +84,7 @@ import type {
   UiInvalidateEventDto,
 } from '@lingxi/bridge-client';
 import type { HostPermissionRequest } from '../shared/permission.js';
-import { createRuntimeEventReplayBuffer, type SequencedRuntimeEventEnvelope } from './event-replay.js';
+import { createRuntimeEventReplayBuffer, requestRuntimeEventReplay, type SequencedRuntimeEventEnvelope } from './event-replay.js';
 import type { AllowedClientCommand } from '../shared/clientCommands.js';
 import {
   CH_NATIVE_AUDIO_CANCEL,
@@ -404,10 +404,12 @@ function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelop
     replayBuffer.push(payload);
   };
   ipcRenderer.on(CH_EVENT, listener);
-  void (ipcRenderer.invoke(CH_EVENT_REPLAY) as Promise<SequencedRuntimeEventEnvelope<ClientEvent>[]>)
-    .then((replay) => replayBuffer.resolve(replay))
-    .catch(() => replayBuffer.reject());
+  const cancelReplay = requestRuntimeEventReplay(
+    () => ipcRenderer.invoke(CH_EVENT_REPLAY) as Promise<SequencedRuntimeEventEnvelope<ClientEvent>[]>,
+    replayBuffer,
+  );
   return () => {
+    cancelReplay();
     replayBuffer.dispose();
     ipcRenderer.removeListener(CH_EVENT, listener);
   };

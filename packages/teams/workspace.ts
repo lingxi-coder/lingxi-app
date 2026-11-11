@@ -136,7 +136,43 @@ export function pointerPreview(last: NonNullable<TeamConversation['lastMessage']
   const mine = last.author.kind === 'user' && last.author.uid === uid;
   const prefix = mine ? (zh ? '你：' : 'You: ') : author ? `${author(last)}${zh ? '：' : ': '}` : '';
   if (last.recalled) return `${prefix}${zh ? '消息已撤回' : 'Message recalled'}`;
-  return `${prefix}${last.preview || (zh ? '[非文本消息]' : '[Non-text message]')}`;
+  // A shared Bot's text is Markdown (the conversation renders it); a person's is plain text and stays as stored.
+  const text = last.author.kind === 'shared_bot' ? markdownPlainText(last.preview) : last.preview;
+  return `${prefix}${text || (zh ? '[非文本消息]' : '[Non-text message]')}`;
+}
+
+/** Markdown reduced to one plain line for a sidebar row: block markers and emphasis marks dropped, links and images kept as their text. */
+export function markdownPlainText(markdown: string): string {
+  const lines = markdown.replace(/\r\n?/gu, '\n').split('\n');
+  const out: string[] = [];
+  let fence = '';
+  let inTable = false;
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i]!;
+    const opening = /^\s*(`{3,}|~{3,})/u.exec(line);
+    if (fence) {
+      if (opening && opening[1]!.startsWith(fence)) fence = '';
+      else out.push(line);
+      continue;
+    }
+    if (opening) { fence = opening[1]!.slice(0, 3); continue; }
+    const separator = (row: string | undefined): boolean => row !== undefined && row.includes('|') && row.includes('-') && /^[\s|:-]+$/u.test(row);
+    if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/u.test(line) || separator(line)) { inTable = false; continue; }
+    line = line.replace(/^\s*(?:>\s*)+/u, '');
+    if (/^\s{0,3}#{1,6}\s/u.test(line)) line = line.replace(/^\s*#{1,6}\s+/u, '').replace(/\s+#+\s*$/u, '');
+    else line = line.replace(/^\s*(?:[-*+]|\d{1,9}[.)])\s+(?:\[[ xX]\]\s+)?/u, '');
+    if (line.includes('|') && (inTable || /^\s*\||\|\s*$/u.test(line) || separator(lines[i + 1]))) {
+      inTable = true;
+      line = line.replace(/\\\||\|/gu, pipe => pipe === '|' ? ' ' : '|');
+    } else inTable = false;
+    out.push(line
+      .replace(/!\[([^\]]*)\]\(\s*(?:[^\s()]|\([^\s()]*\))+(?:\s+"[^"]*")?\s*\)/gu, '$1')
+      .replace(/\[([^\]]+)\]\(\s*(?:[^\s()]|\([^\s()]*\))+(?:\s+"[^"]*")?\s*\)/gu, '$1')
+      .replace(/\*\*|__|~~|`/gu, '')
+      .replace(/(^|[^\w*])\*(?=[^\s*])([^*]*?[^\s*])\*(?![\w*])/gu, '$1$2')
+      .replace(/(^|\W)_(?=[^\s_])([^_]*?[^\s_])_(?!\w)/gu, '$1$2'));
+  }
+  return out.join(' ').replace(/\s+/gu, ' ').trim();
 }
 
 // ─── Workspace ──────────────────────────────────────────────────────────────

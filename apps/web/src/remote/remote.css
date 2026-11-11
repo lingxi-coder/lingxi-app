@@ -69,6 +69,14 @@
 .rc-assistant { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
 .rc-assistant p { margin: 0 0 8px; }
 .rc-assistant ul, .rc-assistant ol { margin: 0 0 8px; padding-left: 22px; }
+/* Nested lists, task items (the checkbox takes the bullet's place) and tables from the Markdown renderer. */
+.rc-md li > ul, .rc-md li > ol { margin: 2px 0 0; }
+.rc-md li.rc-task { list-style: none; }
+.rc-md li.rc-task > input { width: 1em; height: 1em; margin: 0 .5em 0 -1.5em; vertical-align: -.12em; accent-color: var(--accent); }
+.rc-md .rc-table { margin: 0 0 8px; max-width: 100%; overflow-x: auto; }
+.rc-md .rc-table table { border-collapse: collapse; font-size: 13px; line-height: 1.5; overflow-wrap: normal; }
+.rc-md .rc-table th, .rc-md .rc-table td { padding: 4px 10px; border: 1px solid var(--line-strong); text-align: left; vertical-align: top; }
+.rc-md .rc-table th { background: var(--surface-2); color: var(--ink); font-weight: 600; }
 .rc-assistant blockquote { margin: 0 0 8px; padding-left: 10px; border-left: 3px solid var(--line-strong); color: var(--ink-2); }
 .rc-assistant h1, .rc-assistant h2, .rc-assistant h3, .rc-assistant h4 { margin: 12px 0 6px; font-size: 15px; }
 .rc-assistant code, .rc-inline-code { padding: 1px 4px; border-radius: 4px; background: var(--surface-2); font: 12.5px var(--mono); }

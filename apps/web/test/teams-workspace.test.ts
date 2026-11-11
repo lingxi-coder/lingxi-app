@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  TeamsWorkspace, compareConversations, conversationLabel, conversationParticipants, conversationPreview, defaultConversationTitle, findBotDm, findDm, groupConversations, unreadCount,
+  TeamsWorkspace, compareConversations, conversationLabel, conversationParticipants, conversationPreview, markdownPlainText, pointerPreview, defaultConversationTitle, findBotDm, findDm, groupConversations, unreadCount,
   type TeamsSnapshot,
 } from '../../../packages/teams/workspace';
 import type { TeamConversation } from '../../../packages/teams/messages';
@@ -109,6 +109,37 @@ test('conversationPreview follows the lastMessage rules', () => {
   assert.equal(conversationPreview(row(last(1), 'channel'), uid, false, () => 'Bob'), 'Bob: Hi', 'so do channels');
   assert.equal(conversationPreview(row(last(1), 'bot_dm'), uid, false, () => 'Bob'), 'Hi', 'a Bot dm does not');
   assert.equal(conversationPreview(row(last(1), 'dm'), uid, false, () => 'Bob'), 'Hi', 'a dm does not');
+});
+
+test('markdownPlainText flattens Markdown to one plain line', () => {
+  const vectors: [string, string][] = [
+    ['# QA Follow-Up Check\n\n**Goal: close the open items.**\n\n- Scope: defects', 'QA Follow-Up Check Goal: close the open items. Scope: defects'],
+    ['**G', 'G'],
+    ['- [ ] Confirm the list\n- [x] Done', 'Confirm the list Done'],
+    ['| Item | Owner |\n|---|---|\n| Confirm scope | QA 2 |', 'Item Owner Confirm scope QA 2'],
+    ['See [the doc](https://example.com/a) and `code`', 'See the doc and code'],
+    ['```ts\nconst a = 1;\n```', 'const a = 1;'],
+    ['2 * 3 * 4 and snake_case_name', '2 * 3 * 4 and snake_case_name'],
+    ['1. first\n2. second', 'first second'],
+    ['> quoted _text_', 'quoted text'],
+    ['![chart](https://x/y.png)', 'chart'],
+    ['---', ''],
+    ['', ''],
+  ];
+  for (const [input, expected] of vectors) assert.equal(markdownPlainText(input), expected, JSON.stringify(input));
+});
+
+test('only a shared Bot message preview is flattened; a person\'s and a recalled message stay as stored', () => {
+  const bot = { kind: 'shared_bot' as const, sharedBotId: 'bot-aaaaaaaa', displayName: 'Fixture Bot' };
+  const markdown = '# QA Follow-Up Check **Goal**';
+  assert.equal(pointerPreview(last(1, { preview: markdown, author: bot }), uid, false, () => 'Fixture Bot'), 'Fixture Bot: QA Follow-Up Check Goal');
+  assert.equal(pointerPreview(last(1, { preview: markdown }), uid, false, () => 'Bob'), `Bob: ${markdown}`);
+  assert.equal(pointerPreview(last(1, { preview: '2 * 3 * 4 # keep' }), uid, false), '2 * 3 * 4 # keep');
+  assert.equal(pointerPreview(last(1, { preview: '**G…', author: bot }), uid, false), 'G…');
+  assert.equal(pointerPreview(last(1, { preview: '---', author: bot }), uid, true), '[非文本消息]', 'a preview with no text left falls back like an empty one');
+  assert.equal(pointerPreview(last(1, { preview: '# gone', recalled: true, author: bot }), uid, false), 'Message recalled');
+  const row = conversation('p', { kind: 'bot_dm', lastMessage: last(1, { preview: '**Done**', author: bot }) });
+  assert.equal(conversationPreview(row, uid, false), 'Done');
 });
 
 // ── Workspace ──

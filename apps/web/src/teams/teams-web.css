@@ -76,3 +76,12 @@
 /* Friends shares the Teams layout; its chat and pages sit where the conversation does, and the header shows the unread badge (D14). */
 .teams-web-conversation > .tw-friends-chat, .teams-web-conversation > .tw-friends-page { flex: 1 1 0; height: auto; min-height: 0; }
 .teams-web-nav .teams-web-badge { margin-left: 8px; padding: 1px 7px; border-radius: 999px; background: var(--teams-badge-bg); color: var(--teams-badge-fg); font-size: 11px; font-weight: 700; vertical-align: middle; }
+
+/* Nested lists, task items (the checkbox takes the bullet's place) and tables from Web's Markdown renderer (`remote/markdown.tsx`) inside a Bot's message or document. */
+.tw-md li > ul, .tw-md li > ol { margin: 2px 0 0; }
+.tw-md li.rc-task { list-style: none; }
+.tw-md li.rc-task > input { width: 1em; height: 1em; margin: 0 .5em 0 -1.5em; vertical-align: -.12em; }
+.tw-md .rc-table { margin: 6px 0; max-width: 100%; overflow-x: auto; }
+.tw-md .rc-table table { border-collapse: collapse; font-size: 12.5px; line-height: 1.45; overflow-wrap: normal; }
+.tw-md .rc-table th, .tw-md .rc-table td { padding: 4px 10px; border: 1px solid var(--tw-line); text-align: left; vertical-align: top; }
+.tw-md .rc-table th { background: var(--tw-hover); font-weight: 600; }

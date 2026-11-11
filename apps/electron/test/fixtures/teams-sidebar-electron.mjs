@@ -52,6 +52,18 @@ const menuAction = action => run(`window.applicationMenuAction(${JSON.stringify(
 const rows = () => run(`Array.from(document.querySelectorAll('${sidebar} [data-row]')).map(button => button.getAttribute('data-row'))`);
 const setValue = (selector, value) => run(`(() => { const element = document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value').set.call(element, ${JSON.stringify(value)}); element.dispatchEvent(new Event('input', { bubbles: true })); })()`);
 const drawerWidth = () => run(`Math.round(document.querySelector('.tw-drawer').getBoundingClientRect().width)`);
+async function assertDialogCentered() {
+  const geometry = await run(`(() => {
+    const dialog = document.querySelector('dialog.tw-dialog[open]'), box = dialog.getBoundingClientRect();
+    return { x: Math.abs(box.left + box.width / 2 - innerWidth / 2), y: Math.abs(box.top + box.height / 2 - innerHeight / 2),
+      left: box.left, top: box.top, right: innerWidth - box.right, bottom: innerHeight - box.bottom,
+      focusInside: dialog.contains(document.activeElement) };
+  })()`);
+  assert.ok(geometry.x <= 1 && geometry.y <= 1, `dialog must be centered in the window: ${JSON.stringify(geometry)}`);
+  assert.ok(geometry.left >= 15 && geometry.right >= 15 && geometry.top >= 23 && geometry.bottom >= 23,
+    `dialog must keep viewport margins: ${JSON.stringify(geometry)}`);
+  assert.equal(geometry.focusInside, true, 'keyboard focus stays inside the modal');
+}
 const result = {};
 try {
   // The rail counts the unread messages of every team, before Teams is open: the number for the eye, the label for the rest.
@@ -229,11 +241,33 @@ try {
   assert.deepEqual(await marked(), ['Teams']);
   assert.equal(await run(`document.querySelector('dialog.tw-dialog[open] .tw-dialog-title').textContent`), 'Join a team');
   assert.equal(await run(`document.querySelector('dialog.tw-dialog[open] input').value`), code);
+  await assertDialogCentered();
+  await setViewport(600, 360);
+  await assertDialogCentered();
+  await setViewport(1280, 850);
   await wait(`window.fixtureCalls.some(call => call[0] === 'acknowledge' && call[2] === null)`);
   assert.deepEqual((await calls()).filter(call => call[0] === 'execute' && call[1].action === 'join'), [], 'a link never joins by itself');
   await run(`Array.from(document.querySelectorAll('dialog.tw-dialog[open] button')).find(button => button.textContent.trim() === 'Cancel').click()`);
   await wait(`!document.querySelector('dialog.tw-dialog[open]')`);
   result.invite = true;
+
+  // Native dialogs keep their automatic centering despite the desktop's universal margin reset.
+  await click(`${sidebar} .tw-switcher`);
+  await wait(`document.querySelector('${sidebar} [role="menu"]')`);
+  await run(`Array.from(document.querySelectorAll('${sidebar} [role="menuitem"]')).find(item => item.textContent.trim() === 'Create a team').click()`);
+  await wait(`document.querySelector('dialog.tw-dialog[open] .tw-dialog-title')?.textContent === 'Create a team'`);
+  await assertDialogCentered();
+  if (screenshots) {
+    mkdirSync(screenshots, { recursive: true });
+    writeFileSync(join(screenshots, 'teams-create-dialog.png'), (await win.webContents.capturePage()).toPNG());
+  }
+  await setViewport(320, 360);
+  await assertDialogCentered();
+  await setViewport(1280, 850);
+  win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+  win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+  await wait(`!document.querySelector('dialog.tw-dialog[open]')`);
+  result.dialogs = true;
 
   // A window that was last in Teams mode opens in it, with the panel as wide as the file says.
   await load('?saved=teams&drawerWidth=420');

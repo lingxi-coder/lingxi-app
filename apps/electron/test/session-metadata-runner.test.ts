@@ -28,7 +28,7 @@ function controlledChild() {
   let kills = 0;
   let unrefs = 0;
   process.stdin.on('data', (chunk: Buffer) => { input += chunk.toString(); });
-  process.kill = () => { kills++; return true; };
+  process.kill = () => { kills++; queueMicrotask(() => process.emit('close', null, 'SIGTERM')); return true; };
   process.unref = () => { unrefs++; };
   return {
     process,

@@ -84,7 +84,7 @@ dirs = "5"
 # mock exists in `tui`/`tui-core`; hand-rolling one would re-implement the
 # trait's ~16 non-defaulted methods. `orchestrator` does not depend on `tui`, so
 # this dev-only edge introduces no dependency cycle.
-orchestrator = { workspace = true }
+orchestrator = { workspace = true, features = ["test-support"] }
 # Prompt-history persistence tests write a real `history.jsonl` in a tempdir.
 tempfile = "3.13"
 

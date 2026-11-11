@@ -240,7 +240,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
     <div className="tw-stream-wrap">
       <div ref={scroller} className="tw-stream" role="log" aria-label={t('Messages', '消息')} tabIndex={0} onScroll={measure}>
         {start > 0 ? <div className="tw-earlier"><button type="button" onClick={showEarlier}>{t('Show earlier messages', '显示更早的消息')} ({start})</button></div> : null}
-        {!messages.length ? <p className="tw-empty-line" role="status">{loadingMessages ? t('Loading messages…', '正在加载消息…') : t('No messages yet. Say hello.', '还没有消息，打个招呼吧。')}</p> : null}
+        {!messages.length && !snapshot.pending.length && !runs.tasks.length ? <p className="tw-empty-line" role="status">{loadingMessages ? t('Loading messages…', '正在加载消息…') : t('No messages yet. Say hello.', '还没有消息，打个招呼吧。')}</p> : null}
         <ol ref={content} className="tw-messages">
           {unanswered.head.map(taskRow)}
           {rows.map(row => {
@@ -267,7 +267,10 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
               <div className="tw-msg-main">
                 <div className="tw-msg-head"><b className="tw-msg-author">{nameOf(uid)}</b><small role="status">{status}</small></div>
                 <p className="tw-msg-body">{operation === 'recall' ? t('Recall message', '撤回消息') : `${operation === 'edit' ? `${t('Edit', '编辑')}: ` : ''}${payload.text}`}</p>
-                <button type="button" disabled={Boolean(intent.attempted && !intent.error) || (intent.leaseUntil ?? 0) > Date.now()} onClick={() => void workspace.attempt(() => model.discard(payload.changeId))}>{t('Discard', '丢弃')}</button>
+                <div className="tw-pending-actions">
+                  {intent.error === 'HOST_UNAVAILABLE' ? <button type="button" onClick={() => void workspace.attempt(() => model.retryHostUnavailable(payload.changeId))}>{t('Retry', '重试')}</button> : null}
+                  <button type="button" disabled={Boolean(intent.attempted && !intent.error) || (intent.leaseUntil ?? 0) > Date.now()} onClick={() => void workspace.attempt(() => model.discard(payload.changeId))}>{t('Discard', '丢弃')}</button>
+                </div>
               </div>
             </li>;
           })}

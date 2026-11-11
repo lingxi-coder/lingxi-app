@@ -1,6 +1,6 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -520,31 +520,108 @@ test('diagnostics redact secrets, strip control characters, truncate, and remain
   assert.equal(buffer.snapshot()[0]?.message, '5');
 });
 
-test('sanitized diagnostics persist across host restarts without secret plaintext', () => {
+test('sanitized diagnostics persist across host restarts without secret plaintext', async () => {
   const logPath = join(temporaryDirectory(), 'logs', 'desktop.jsonl');
   const secret = 'sk-persisted-secret-value';
   const first = new DiagnosticBuffer(logPath);
   first.add('error', 'bridge', `authorization=${secret}`, [secret]);
+  assert.equal(first.snapshot().length, 1, 'snapshots do not wait for persistence');
+  assert.equal(existsSync(logPath), false, 'adding diagnostics does not perform synchronous file writes');
+  await first.flush();
   const persisted = readFileSync(logPath, 'utf8');
   assert.doesNotMatch(persisted, /persisted-secret/);
+  assert.equal(statSync(logPath).mode & 0o777, 0o600);
+  assert.equal(statSync(`${logPath}.errors`).mode & 0o777, 0o600);
   const second = new DiagnosticBuffer(logPath);
   assert.equal(second.snapshot().length, 1);
   assert.match(second.snapshot()[0]?.message ?? '', /REDACTED/);
 });
 
-test('failure diagnostics survive live buffer eviction and rotate with redaction', () => {
+test('failure diagnostics survive live buffer eviction and rotate with redaction', async () => {
   const logPath = join(temporaryDirectory(), 'desktop.jsonl');
   const buffer = new DiagnosticBuffer(logPath);
   buffer.add('error', 'bridge', 'fusion failed token=private-value', ['private-value']);
   for (let i = 0; i < MAX_DIAGNOSTICS; i++) buffer.add('info', 'bridge', `activity ${i}`);
   assert.equal(buffer.snapshot().some(entry => entry.level === 'error'), false);
+  await buffer.flush();
   const saved = readFileSync(`${logPath}.errors`, 'utf8');
   assert.match(saved, /fusion failed/);
   assert.doesNotMatch(saved, /private-value|activity/);
   writeFileSync(`${logPath}.errors`, 'x'.repeat(2_000_000));
   buffer.add('warn', 'bridge', 'next failure');
+  await buffer.flush();
   assert.equal(readFileSync(`${logPath}.errors.1`, 'utf8').length, 2_000_000);
   assert.equal(JSON.parse(readFileSync(`${logPath}.errors`, 'utf8')).message, 'next failure');
+});
+
+test('diagnostic bursts persist in order across batches and preserve independent failures under overload', async () => {
+  const logPath = join(temporaryDirectory(), 'desktop.jsonl');
+  const buffer = new DiagnosticBuffer(logPath);
+  buffer.add('error', 'bridge', 'first failure token=private-value', ['private-value']);
+  for (let i = 0; i < 4_096; i++) buffer.add('info', 'bridge', `activity ${i}`);
+  assert.equal(buffer.snapshot()[0]?.message, `activity ${4_096 - MAX_DIAGNOSTICS}`);
+  await Promise.all([buffer.flush(), buffer.flush()]);
+  const rows = readFileSync(logPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  const marker = JSON.parse(rows[0].message);
+  assert.equal(marker.event, 'diagnostic_backlog_dropped');
+  assert.equal(marker.queue, 'live');
+  assert.ok(marker.count > 0);
+  const activities = rows.slice(1).map(row => row.message);
+  assert.equal(activities.length + marker.count, 4_097);
+  assert.deepEqual(activities, Array.from({ length: activities.length }, (_, index) => `activity ${4_096 - activities.length + index}`));
+  const failures = readFileSync(`${logPath}.errors`, 'utf8');
+  assert.match(failures, /first failure/);
+  assert.doesNotMatch(failures, /private-value|activity|diagnostic_backlog_dropped/);
+});
+
+test('diagnostic backlog also bounds encoded bytes and accounts for discarded failure entries', async () => {
+  const logPath = join(temporaryDirectory(), 'desktop.jsonl');
+  const buffer = new DiagnosticBuffer(logPath);
+  for (let i = 0; i < 600; i++) buffer.add('warn', 'host', `${'界'.repeat(1_900)} ${i}`);
+  await buffer.flush();
+  for (const path of [logPath, `${logPath}.errors`]) {
+    const body = readFileSync(path, 'utf8');
+    assert.ok(Buffer.byteLength(body) <= 1024 * 1024 + 1024, 'each queued file stays within its byte budget plus the loss marker');
+    const rows = body.trim().split('\n').map(line => JSON.parse(line));
+    const marker = JSON.parse(rows[0].message);
+    assert.equal(marker.event, 'diagnostic_backlog_dropped');
+    assert.equal(marker.queue, path === logPath ? 'live' : 'errors');
+    assert.equal(rows.length - 1 + marker.count, 600);
+    assert.ok(rows.length < 600, 'the byte budget applies before the entry-count limit');
+    assert.ok(rows.at(-1).message.endsWith(' 599'));
+  }
+});
+
+test('live diagnostic rotation includes each in-flight and future entry once', async () => {
+  const logPath = join(temporaryDirectory(), 'desktop.jsonl');
+  writeFileSync(logPath, 'x'.repeat(2_000_000));
+  const buffer = new DiagnosticBuffer(logPath);
+  buffer.add('info', 'host', 'before rotation');
+  const completion = buffer.flush();
+  // The first batch has captured its retained tail before its asynchronous I/O.
+  for (let i = 0; i < 100; i++) buffer.add('info', 'host', `during rotation ${i}`);
+  await completion;
+  const rows = readFileSync(logPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(rows.map(row => row.message), ['before rotation', ...Array.from({ length: 100 }, (_, i) => `during rotation ${i}`)]);
+  assert.equal(readFileSync(`${logPath}.1`, 'utf8').length, 2_000_000);
+  assert.equal(new DiagnosticBuffer(logPath).snapshot().length, 101);
+  assert.equal(statSync(logPath).mode & 0o777, 0o600);
+});
+
+test('unwritable diagnostic targets do not reject flush and can recover on a later batch', async () => {
+  const blocker = join(temporaryDirectory(), 'not-a-directory');
+  writeFileSync(blocker, 'keep this file');
+  const logPath = join(blocker, 'desktop.jsonl');
+  const buffer = new DiagnosticBuffer(logPath);
+  buffer.add('error', 'host', 'unpersisted failure');
+  await assert.doesNotReject(buffer.flush());
+  assert.equal(buffer.snapshot()[0]?.message, 'unpersisted failure');
+  assert.equal(readFileSync(blocker, 'utf8'), 'keep this file');
+  rmSync(blocker);
+  buffer.add('warn', 'host', 'storage recovered');
+  await buffer.flush();
+  assert.equal(JSON.parse(readFileSync(logPath, 'utf8')).message, 'storage recovered');
+  assert.equal(JSON.parse(readFileSync(`${logPath}.errors`, 'utf8')).message, 'storage recovered');
 });
 
 test('settings reject secret-bearing API URLs and only activate recorded projects', () => {
@@ -572,7 +649,7 @@ test('settings reject secret-bearing API URLs and only activate recorded project
   assert.deepEqual(new SettingsStore(userData).getPublic().projects, [canonical]);
 });
 
-test('settings store persists project activation, pins, and recoverable removal', () => {
+test('settings store persists project activation, pins, and recoverable removal', async () => {
   const userData = temporaryDirectory();
   const first = canonicalWorkspace(temporaryDirectory());
   const second = canonicalWorkspace(temporaryDirectory());
@@ -581,8 +658,8 @@ test('settings store persists project activation, pins, and recoverable removal'
   store.addProject(second);
   store.activateProject(first);
   store.setTrust(second, true);
-  store.conversationSpaces.addProject(second, 'code');
-  store.conversationSpaces.register({ projectPath: second, projectId: second, mode: 'code', sessionId: '22222222-2222-4222-8222-222222222222' });
+  await store.conversationSpaces.addProject(second, 'code');
+  await store.conversationSpaces.register({ projectPath: second, projectId: second, mode: 'code', sessionId: '22222222-2222-4222-8222-222222222222' });
   store.setSessionPinned({
     projectPath: second,
     sessionId: '22222222-2222-4222-8222-222222222222',

@@ -794,6 +794,9 @@ pub struct BridgeConnection {
     /// True while a session transition owns `turn_handoff` and may await a
     /// plugin command queued by its own session.start hook.
     transition_active: Arc<AtomicBool>,
+    /// Manual compact work may be cancelled before commit, but must drain once
+    /// the engine has begun its irreversible transcript/state transition.
+    compact_work: Arc<CompactWork>,
     /// Connection-owned active turn identity and cancellation token. Keeping
     /// this outside the spawned driver closes the race where Cancel arrives
     /// after SendPrompt but before the driver registers with msgqueue.
@@ -845,6 +848,91 @@ impl Default for MetadataWork {
 }
 
 struct MetadataWorkGuard(Arc<MetadataWork>);
+
+#[derive(Default)]
+struct CompactWorkState {
+    closed: bool,
+    owners: HashMap<uuid::Uuid, CancellationToken>,
+}
+
+struct CompactWork {
+    state: StdMutex<CompactWorkState>,
+    changed: tokio::sync::watch::Sender<usize>,
+}
+
+impl Default for CompactWork {
+    fn default() -> Self {
+        let (changed, _) = tokio::sync::watch::channel(0);
+        Self {
+            state: StdMutex::new(CompactWorkState::default()),
+            changed,
+        }
+    }
+}
+
+struct CompactWorkGuard {
+    work: Arc<CompactWork>,
+    id: uuid::Uuid,
+}
+
+impl CompactWork {
+    fn begin(self: &Arc<Self>, cancellation: CancellationToken) -> Option<CompactWorkGuard> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.closed {
+            cancellation.cancel();
+            return None;
+        }
+        let id = uuid::Uuid::new_v4();
+        state.owners.insert(id, cancellation);
+        self.changed.send_replace(state.owners.len());
+        Some(CompactWorkGuard {
+            work: self.clone(),
+            id,
+        })
+    }
+
+    fn reopen(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .closed = false;
+    }
+
+    fn cancel(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.closed = true;
+        for cancellation in state.owners.values() {
+            cancellation.cancel();
+        }
+    }
+
+    async fn drain(&self) {
+        let mut changed = self.changed.subscribe();
+        while *changed.borrow_and_update() != 0 {
+            if changed.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+impl Drop for CompactWorkGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .work
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.owners.remove(&self.id);
+        self.work.changed.send_replace(state.owners.len());
+    }
+}
 
 impl MetadataWork {
     fn begin(self: &Arc<Self>) -> Option<MetadataWorkGuard> {
@@ -1740,6 +1828,7 @@ struct ModQueueDrain {
     driver: Option<Arc<dyn TurnDriver>>,
     loop_runtime: Arc<tool_cron::LoopRuntime>,
     transition_active: Arc<AtomicBool>,
+    compact_work: Arc<CompactWork>,
 }
 
 struct BridgeSlashOwnerContext {
@@ -1941,6 +2030,20 @@ async fn dispatch_queued_bridge_slash(
     let is_compact = parsed.as_ref().is_some_and(|parsed| {
         crate::router::source_text_eq_ascii_ignore_case(&parsed.name, "compact")
     });
+    let _compact_work = if is_compact {
+        let Some(work) = mod_drain.compact_work.begin(cancellation.clone()) else {
+            emit_slash_terminal_failure(
+                mod_drain.events.as_ref(),
+                turn_id,
+                "Compaction canceled.".into(),
+            )
+            .await;
+            return None;
+        };
+        Some(work)
+    } else {
+        None
+    };
     let changes_session = parsed.as_ref().is_some_and(|parsed| {
         ["clear", "new", "reset"]
             .iter()
@@ -3016,6 +3119,7 @@ impl BridgeConnection {
             turn_running: Arc::new(AtomicBool::new(false)),
             turn_handoff: Arc::new(tokio::sync::Mutex::new(())),
             transition_active: Arc::new(AtomicBool::new(false)),
+            compact_work: Arc::new(CompactWork::default()),
             active_turn: ActiveTurnControl::default(),
             resume_interactions: ActiveTurnControl::default(),
             active_turn_task: Arc::new(StdMutex::new(None)),
@@ -3641,6 +3745,7 @@ impl BridgeConnection {
             driver: self.driver.clone(),
             loop_runtime: self.loop_runtime.clone(),
             transition_active: self.transition_active.clone(),
+            compact_work: self.compact_work.clone(),
         }
     }
 
@@ -3695,6 +3800,7 @@ impl BridgeConnection {
                     receipts: HashMap::new(),
                 };
                 *cell = Some(out.clone());
+                self.compact_work.reopen();
                 true
             }
         }
@@ -4350,7 +4456,7 @@ impl BridgeConnection {
             // while no turn owns the event stream. Its completion must bypass
             // the late-turn filter; automatic in-turn compaction continues to
             // flow through `FrameEventSink` and remains owner-scoped.
-            command @ ClientCommand::ForceCompact => {
+            ClientCommand::ForceCompact => {
                 let _handoff = self.turn_handoff.lock().await;
                 // Do not queue on the orchestrator's turn gate in this input
                 // loop: its owner may need a permission reply from this socket.
@@ -4364,8 +4470,14 @@ impl BridgeConnection {
                     return;
                 }
                 let _transition = TransitionScope::begin(&self.transition_active);
+                let cancellation = CancellationToken::new();
+                let Some(_compact_work) = self.compact_work.begin(cancellation.clone()) else {
+                    return;
+                };
                 if let Some(router) = self.router.clone() {
-                    router.route(command, self.unscoped_event_sink()).await;
+                    router
+                        .force_compact_with_cancel(cancellation, self.unscoped_event_sink())
+                        .await;
                 } else {
                     tracing::debug!(
                         "bridge-server: force compact not routed (no CommandRouter bound)"
@@ -5804,6 +5916,19 @@ impl FramePump for BridgeConnection {
     }
 
     async fn on_transport_disconnected(&self, sink: FrameSink) {
+        // An unclaimed socket may have its hello parked behind the current
+        // owner's compact drain. The endpoint joins that callback only after
+        // this notification returns, so it must not queue for admission behind
+        // its own unpolled hello. The active owner is checked again below.
+        if self
+            .out
+            .lock()
+            .await
+            .as_ref()
+            .is_none_or(|current| !current.same_channel(&sink))
+        {
+            return;
+        }
         let _admission = self.connection_admission.lock().await;
         let active = self.out.lock().await;
         if active
@@ -5821,6 +5946,7 @@ impl FramePump for BridgeConnection {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = SessionMetadataReceipts::default();
         self.resume_interactions.cancel(None);
+        self.compact_work.cancel();
         if let Some(rpc) = self.media_service_rpc.as_ref() {
             rpc.begin_close();
         }
@@ -5898,6 +6024,7 @@ impl BridgeConnection {
         // must be able to reacquire it. Those events cannot reach a new socket.
         self.handshaken.store(false, Ordering::SeqCst);
         self.handshake_refused.store(false, Ordering::SeqCst);
+        self.compact_work.cancel();
         *self
             .metadata_receipts
             .lock()
@@ -5905,6 +6032,10 @@ impl BridgeConnection {
         self.cron_requests.disconnected().await;
         *active = None;
         drop(active);
+        // Slash compact runs on the owned task. Cancel its summary, then let
+        // an already-started commit finish before the generic task abort or
+        // any connection-owned resources are retired.
+        self.compact_work.drain().await;
         {
             let _lifecycle = self.ui_lifecycle_gate.lock().await;
             let attached = std::mem::take(&mut *self.ui_attached_clients.lock().await);
@@ -6089,8 +6220,9 @@ mod tests {
         batchable_prompt_snapshot, deserialize_source, drain_main_thread,
         fail_pending_mod_calls_on_refusal, is_owned_turn_event, run_queued_mod_command,
         serialize_source, text_object_projection, ActiveTurnControl, BridgeConnection,
-        BridgeModCommandQueue, ModQueueDrain, ModQueueEnqueuePause, PendingModCommands,
-        PendingModPrompts, TurnDriver, TurnInteractions, UnscopedFrameEventSink,
+        BridgeModCommandQueue, CompactWork, ModQueueDrain, ModQueueEnqueuePause,
+        PendingModCommands, PendingModPrompts, TurnDriver, TurnInteractions,
+        UnscopedFrameEventSink,
     };
 
     struct NoTurn;
@@ -7516,6 +7648,7 @@ mod tests {
             driver: None,
             loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
             transition_active: Arc::new(AtomicBool::new(false)),
+            compact_work: Arc::new(CompactWork::default()),
         }
     }
 
@@ -7810,6 +7943,7 @@ mod tests {
             driver: None,
             loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
             transition_active: Arc::new(AtomicBool::new(false)),
+            compact_work: Arc::new(CompactWork::default()),
         };
         let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
             captured: Arc::new(Mutex::new(None)),

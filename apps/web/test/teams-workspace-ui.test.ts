@@ -173,7 +173,7 @@ test('connectionStatus: errors first, then offline, then connected; nothing whil
   assert.equal(connectionStatus({ ...base, loading: true, loadError: 'X' }, false), undefined);
   assert.equal(connectionStatus({ ...base, selectedTeamId: '' }, false), undefined);
   assert.equal(connectionStatus({ ...base, selectedTeamId: '', loadError: 'SERVICE_UNAVAILABLE' }, false)?.action, 'refresh', 'a failed team list can be retried even with no team');
-  assert.deepEqual(connectionStatus(base, false), { kind: 'ok', label: 'Connected', detail: 'Recently loaded messages are available offline.' });
+  assert.deepEqual(connectionStatus(base, false), { kind: 'ok', label: 'Teams connected', detail: 'Teams is connected. Bot host availability is shown in each conversation.' });
   assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true }, false)?.kind, 'connecting');
   assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true }, true)?.label, '正在连接…');
   assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true, messagingError: 'SERVICE_UNAVAILABLE' }, false)?.kind, 'offline');
@@ -278,7 +278,7 @@ test('sidebar: team switcher, three sections with their add buttons, rows with p
   assert.match(markup, /class="tw-chan"[^>]*>#</, 'channels have a # mark');
   assert.match(markup, /role="img" aria-label="4 unread">4</, 'unread = lastSeq - lastReadSeq');
   assert.match(markup, /<time class="tw-row-time" dateTime="[^"]+">11:40/, 'a row shows its newest message time'); assert.doesNotMatch(markup, /aria-label="0 unread"/);
-  assert.match(markup, /data-unread="true" data-kind="channel"/); assert.match(markup, /Connected/);
+  assert.match(markup, /data-unread="true" data-kind="channel"/); assert.match(markup, /Teams connected/);
   assert.equal(count(markup, /class="tw-row-more"/g), 1, 'the row menu exists where it has something to offer: only the unread row, for "Mark as read"');
 });
 
@@ -486,6 +486,25 @@ test('conversation view: pending messages show their state and can be discarded;
   assert.match(connecting, /data-kind="connecting"/);
   assert.match(connecting, /messages will send after server confirmation/);
   assert.doesNotMatch(connecting, /data-kind="offline"|Offline:|>Reconnect</);
+});
+
+test('an unavailable Bot keeps the failed message visible with a retry action, without an empty-state prompt', async context => {
+  const { fake, workspace, snapshot } = await open(fake => {
+    const row = fake.conversations.get('team-aaaa')!.find(value => value.id === 'bot-chat')!;
+    row.lastSeq = 0;
+    fake.bots = [botCard({ ready: false })];
+  });
+  context.after(() => workspace.close());
+  workspace.selectConversation('bot-chat'); await until(() => snapshot().selectedConversationId === 'bot-chat');
+  const original = fake.messages;
+  fake.messages = async command => { if (command.action === 'submit') throw new Error('HOST_UNAVAILABLE'); return original(command); };
+  await snapshot().messaging!.queue('create', 'Hello'); await until(() => snapshot().pending[0]?.error === 'HOST_UNAVAILABLE');
+  const markup = html(view(workspace, snapshot()));
+  assert.match(markup, /Host unavailable/); assert.match(markup, /Hello/); assert.match(markup, />Retry<\/button>/);
+  assert.doesNotMatch(markup, /No messages yet\. Say hello\./);
+  assert.match(html(sidebar(workspace, snapshot())), /Not sent: Hello/);
+  workspace.selectConversation('dm-bob');
+  assert.match(html(sidebar(workspace, snapshot())), /Not sent: Hello/, 'the failed message remains visible after switching conversations');
 });
 
 test('conversation view: no team, no conversations, a pending creation', async context => {

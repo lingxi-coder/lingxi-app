@@ -1,4 +1,5 @@
-import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync } from 'node:fs';
+import { chmod, copyFile, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import type { ConversationSpace, ConversationSpacesSnapshot, OwnedConversation, SpaceNavigation } from '../shared/conversationSpaces.js';
 import { isSessionId } from './sessionIdentity.js';
@@ -87,6 +88,7 @@ export class ConversationSpaceStore {
   readonly globalWorkspaces: Readonly<Record<ConversationSpace, string>>;
   private readonly file: string;
   private value: StoredSpaces;
+  private pending: Promise<void> = Promise.resolve();
 
   constructor(userData: string, workspaceRoot = join(userData, 'workspaces')) {
     this.file = join(userData, 'conversation-spaces.v2.json');
@@ -114,47 +116,77 @@ export class ConversationSpaceStore {
     return { ...publicValue, globalWorkspaces: { ...this.globalWorkspaces } };
   }
 
-  private update(change: (draft: StoredSpaces) => void): void {
+  private transaction<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = this.pending.then(operation);
+    this.pending = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
+
+  /** Wait for all admitted ownership/navigation writes, including failed transactions. */
+  flush(): Promise<void> { return this.pending; }
+
+  private async stage(value: StoredSpaces): Promise<string> {
+    await mkdir(dirname(this.file), { recursive: true, mode: 0o700 });
+    const temporary = `${this.file}.tmp`;
+    try {
+      await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+      await chmod(temporary, 0o600);
+      return temporary;
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async write(value: StoredSpaces): Promise<void> {
+    const temporary = await this.stage(value);
+    try { await rename(temporary, this.file); }
+    catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; }
+  }
+
+  /** Called only within the transaction queue; failed writes never publish a new owner. */
+  private async update(change: (draft: StoredSpaces) => void): Promise<void> {
     const next = structuredClone(this.value);
     change(next);
     const checked = decode(next);
-    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
-    const temporary = `${this.file}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(checked, null, 2)}\n`, { mode: 0o600 });
-    renameSync(temporary, this.file);
+    await this.write(checked);
     this.value = checked;
   }
 
-  addProject(project: string, space: ConversationSpace): void {
-    if (!path(project) || !mode(space)) throw new Error('Invalid conversation project.');
-    if (this.value.projects[project]?.includes(space)) return;
-    this.update((draft) => { draft.projects[project] = [...(draft.projects[project] ?? []), space]; });
+  addProject(project: string, space: ConversationSpace): Promise<void> {
+    return this.transaction(async () => {
+      if (!path(project) || !mode(space)) throw new Error('Invalid conversation project.');
+      if (this.value.projects[project]?.includes(space)) return;
+      await this.update((draft) => { draft.projects[project] = [...(draft.projects[project] ?? []), space]; });
+    });
   }
 
-  removeProject(project: string, space?: ConversationSpace): void {
-    if (!this.value.projects[project]) return;
-    this.update((draft) => {
-      const remaining = space ? draft.projects[project]!.filter((entry) => entry !== space) : [];
-      if (remaining.length) draft.projects[project] = remaining;
-      else {
-        delete draft.projects[project];
-      }
-      for (const item of ['chat', 'code'] as const) {
-        if ((!space || item === space) && draft.navigation[item].projectId === project) draft.navigation[item] = { projectId: null };
-      }
+  removeProject(project: string, space?: ConversationSpace): Promise<void> {
+    return this.transaction(async () => {
+      if (!this.value.projects[project]) return;
+      await this.update((draft) => {
+        const remaining = space ? draft.projects[project]!.filter((entry) => entry !== space) : [];
+        if (remaining.length) draft.projects[project] = remaining;
+        else delete draft.projects[project];
+        for (const item of ['chat', 'code'] as const) {
+          if ((!space || item === space) && draft.navigation[item].projectId === project) draft.navigation[item] = { projectId: null };
+        }
+      });
     });
   }
 
   trustedWorkspaces(): string[] { return [...this.value.trustedWorkspaces]; }
 
-  trustWorkspace(workspace: string): void {
-    if (!path(workspace)) throw new Error('Invalid trusted workspace.');
-    if (!this.value.trustedWorkspaces.includes(workspace)) this.update((draft) => { draft.trustedWorkspaces.push(workspace); });
+  trustWorkspace(workspace: string): Promise<void> {
+    return this.transaction(async () => {
+      if (!path(workspace)) throw new Error('Invalid trusted workspace.');
+      if (!this.value.trustedWorkspaces.includes(workspace)) await this.update((draft) => { draft.trustedWorkspaces.push(workspace); });
+    });
   }
 
   find(ref: Pick<OwnedConversation, 'projectPath' | 'sessionId'>): OwnedConversation | undefined {
     const match = this.value.sessions.find((entry) => same(entry, ref));
-    return match ? { ...match } : undefined;
+    return match ? structuredClone(match) : undefined;
   }
 
   findBySessionId(sessionId: string): OwnedConversation | undefined {
@@ -162,46 +194,113 @@ export class ConversationSpaceStore {
     return match ? structuredClone(match) : undefined;
   }
 
-  register(value: OwnedConversation): void {
-    const next = owner(value);
-    const existing = this.find(next) ?? this.findBySessionId(next.sessionId);
-    if (existing) {
-      if (existing.mode !== next.mode || existing.projectId !== next.projectId || existing.projectPath !== next.projectPath) {
-        throw new Error('Conversation ownership cannot change.');
+  register(value: OwnedConversation): Promise<void> {
+    const requested = structuredClone(value);
+    return this.transaction(async () => {
+      const next = owner(requested);
+      const existing = this.find(next) ?? this.findBySessionId(next.sessionId);
+      if (existing) {
+        if (existing.mode !== next.mode || existing.projectId !== next.projectId || existing.projectPath !== next.projectPath) {
+          throw new Error('Conversation ownership cannot change.');
+        }
+        return;
       }
-      return;
-    }
-    this.update((draft) => { draft.sessions.push(next); });
+      await this.update((draft) => { draft.sessions.push(next); });
+    });
   }
 
-  relocate(ref: Pick<OwnedConversation, 'projectPath' | 'sessionId'>, workspace: string): OwnedConversation {
-    if (!path(workspace)) throw new Error('Invalid conversation workspace.');
-    const existing = this.find(ref);
-    if (!existing) throw new Error('Conversation ownership is unavailable.');
-    const moved = { ...existing, projectPath: workspace };
-    if (this.find(moved) && !same(existing, moved)) throw new Error('Conversation workspace is already owned.');
-    this.update((draft) => {
-      draft.sessions = draft.sessions.map((entry) => same(entry, existing) ? moved : entry);
+  relocate(ref: Pick<OwnedConversation, 'projectPath' | 'sessionId'>, workspace: string): Promise<OwnedConversation> {
+    const requested = { ...ref };
+    return this.transaction(async () => {
+      if (!path(workspace)) throw new Error('Invalid conversation workspace.');
+      const existing = this.find(requested);
+      if (!existing) throw new Error('Conversation ownership is unavailable.');
+      const moved = { ...existing, projectPath: workspace };
+      if (this.find(moved) && !same(existing, moved)) throw new Error('Conversation workspace is already owned.');
+      if (same(existing, moved)) return moved;
+      await this.update((draft) => {
+        draft.sessions = draft.sessions.map((entry) => same(entry, existing) ? moved : entry);
+        for (const space of ['chat', 'code'] as const) {
+          const navigation = draft.navigation[space];
+          if (navigation.session && same(navigation.session, existing)) navigation.session = moved;
+        }
+      });
+      return moved;
+    });
+  }
+
+  /** Stage disk work before a synchronous authority fence publishes selection and host metadata together. */
+  select<T>(ref: Pick<OwnedConversation, 'projectPath' | 'sessionId'>, workspace: string,
+    commit: (owner: OwnedConversation) => T, authorize: (publish: () => T) => Promise<T>): Promise<T> {
+    const requested = { ...ref };
+    return this.transaction(async () => {
+      if (!path(workspace)) throw new Error('Invalid conversation workspace.');
+      const existing = this.find(requested);
+      if (!existing) throw new Error('Conversation ownership is unavailable.');
+      const moved = { ...existing, projectPath: workspace };
+      const navigation = this.value.navigation[existing.mode];
+      if (same(existing, moved) && this.value.activeMode === existing.mode
+        && navigation.projectId === existing.projectId && navigation.session && same(navigation.session, moved)) {
+        return authorize(() => commit(moved));
+      }
+      const previous = this.value;
+      const next = structuredClone(previous);
+      next.sessions = next.sessions.map((entry) => same(entry, existing) ? moved : entry);
+      next.activeMode = moved.mode;
       for (const space of ['chat', 'code'] as const) {
-        const navigation = draft.navigation[space];
-        if (navigation.session && same(navigation.session, existing)) navigation.session = moved;
+        if (next.navigation[space].session && same(next.navigation[space].session!, existing)) next.navigation[space].session = moved;
+      }
+      next.navigation[moved.mode] = { projectId: moved.projectId, session: moved };
+      const checked = decode(next);
+      const temporary = await this.stage(checked);
+      const backup = `${this.file}.rollback`;
+      let hadFile = true, preserveBackup = false;
+      try {
+        try { await copyFile(this.file, backup); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') hadFile = false; else throw error; }
+        return await authorize(() => {
+          // This short publication stays synchronous so authority cannot be
+          // revoked between its final check, ownership and runtime activation.
+          renameSync(temporary, this.file);
+          this.value = checked;
+          try { return commit(structuredClone(moved)); }
+          catch (error) {
+            try {
+              if (hadFile) renameSync(backup, this.file);
+              else unlinkSync(this.file);
+              this.value = previous;
+            } catch (rollbackError) {
+              preserveBackup = true;
+              throw new AggregateError([error, rollbackError], 'Conversation selection failed and its previous registry could not be restored.');
+            }
+            throw error;
+          }
+        });
+      } finally {
+        await Promise.all((preserveBackup ? [temporary] : [temporary, backup]).map(file => rm(file, { force: true }).catch(() => undefined)));
       }
     });
-    return moved;
   }
 
-  setMode(space: ConversationSpace): void {
-    if (!mode(space)) throw new Error('Invalid conversation space.');
-    if (this.value.activeMode !== space) this.update((draft) => { draft.activeMode = space; });
+  setMode(space: ConversationSpace): Promise<void> {
+    return this.transaction(async () => {
+      if (!mode(space)) throw new Error('Invalid conversation space.');
+      if (this.value.activeMode !== space) await this.update((draft) => { draft.activeMode = space; });
+    });
   }
 
-  setNavigation(space: ConversationSpace, projectId: string | null, session?: OwnedConversation): void {
-    if (!mode(space) || !(projectId === null || path(projectId))) throw new Error('Invalid conversation navigation.');
-    if (session) {
-      const registered = this.find(session);
-      if (!registered || registered.mode !== space || registered.projectId !== projectId) throw new Error('Conversation owner does not match navigation.');
-      session = registered;
-    }
-    this.update((draft) => { draft.navigation[space] = { projectId, ...(session ? { session } : {}) }; });
+  setNavigation(space: ConversationSpace, projectId: string | null, session?: OwnedConversation): Promise<void> {
+    const requested = session && structuredClone(session);
+    return this.transaction(async () => {
+      if (!mode(space) || !(projectId === null || path(projectId))) throw new Error('Invalid conversation navigation.');
+      const registered = requested && this.find(requested);
+      if (requested && (!registered || registered.mode !== space || registered.projectId !== projectId)) {
+        throw new Error('Conversation owner does not match navigation.');
+      }
+      const current = this.value.navigation[space];
+      if (current.projectId === projectId && (!current.session && !registered
+        || current.session && registered && same(current.session, registered))) return;
+      await this.update((draft) => { draft.navigation[space] = { projectId, ...(registered ? { session: registered } : {}) }; });
+    });
   }
 }

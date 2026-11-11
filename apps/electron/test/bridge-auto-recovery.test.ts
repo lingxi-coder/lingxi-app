@@ -23,7 +23,7 @@ function fixture(): { runtime: SessionRuntime; internal: any; child: EventEmitte
 function transportFixture(t: TestContext, external = false) {
   const f = fixture();
   const directory = mkdtempSync(join(tmpdir(), 'lingxi-compact-reconnect-'));
-  const lockfile = join(directory, 'bridge.lock');
+  const lockfile = join(directory, '32123.lock');
   writeFileSync(lockfile, JSON.stringify({ pid: process.pid, workspaceFolders: ['/workspace'],
     ideName: 'LingXi-Bridge', transport: 'ws', runningInWindows: false,
     authToken: '0123456789abcdef0123456789abcdef' }));

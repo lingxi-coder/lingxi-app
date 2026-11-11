@@ -212,8 +212,8 @@ test('session clear uses dedicated IPC and re-checks active work plus pending in
   const settings = new SettingsStore(userData);
   settings.addProject(project);
   settings.activateProject(project);
-  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
-  settings.conversationSpaces.setMode('code');
+  await settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
+  await settings.conversationSpaces.setMode('code');
   settings.setActiveSession({ projectPath: project, sessionId });
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const ipc = {
@@ -285,8 +285,8 @@ test('session clear accepts Claude Code name syntax and labels the session being
   const settings = new SettingsStore(userData);
   settings.addProject(project);
   settings.activateProject(project);
-  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
-  settings.conversationSpaces.setMode('code');
+  await settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
+  await settings.conversationSpaces.setMode('code');
   settings.setActiveSession({ projectPath: project, sessionId });
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const ipc = {
@@ -437,7 +437,7 @@ test('failed session resume does not change the selected project or active sessi
   const targetSession = '22222222-3333-4444-8555-666666666666';
   settings.addProject(first);
   settings.addProject(target);
-  settings.conversationSpaces.register({ projectPath: target, projectId: target, sessionId: targetSession, mode: 'code' });
+  await settings.conversationSpaces.register({ projectPath: target, projectId: target, sessionId: targetSession, mode: 'code' });
   settings.activateProject(first);
   settings.setActiveSession({ projectPath: first, sessionId: firstSession });
   const bridge = {
@@ -470,6 +470,7 @@ test('failed session resume does not change the selected project or active sessi
 });
 
 test('navigation mutations execute in invocation order and the last open wins', async () => {
+  let activated: string | undefined;
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-ordered-navigation-settings-'));
   const projectDirectoryA = mkdtempSync(join(tmpdir(), 'lingxi-ordered-navigation-a-'));
   const projectDirectoryB = mkdtempSync(join(tmpdir(), 'lingxi-ordered-navigation-b-'));
@@ -480,8 +481,8 @@ test('navigation mutations execute in invocation order and the last open wins', 
   const settings = new SettingsStore(userData);
   settings.addProject(projectA);
   settings.addProject(projectB);
-  settings.conversationSpaces.register({ projectPath: projectA, projectId: projectA, sessionId: sessionA, mode: 'code' });
-  settings.conversationSpaces.register({ projectPath: projectB, projectId: projectB, sessionId: sessionB, mode: 'code' });
+  await settings.conversationSpaces.register({ projectPath: projectA, projectId: projectA, sessionId: sessionA, mode: 'code' });
+  await settings.conversationSpaces.register({ projectPath: projectB, projectId: projectB, sessionId: sessionB, mode: 'code' });
   settings.setTrust(projectA, true);
   settings.setTrust(projectB, true);
   const gates = new Map([[sessionA, deferred<void>()], [sessionB, deferred<void>()]]);
@@ -490,6 +491,7 @@ test('navigation mutations execute in invocation order and the last open wins', 
     get: () => undefined,
     isProjectClosing: () => false,
     runtimeSummaries: [],
+    activateSession: (ref: { sessionId: string }) => { activated = ref.sessionId; },
     openSession: async (ref: { sessionId: string }) => {
       calls.push(ref.sessionId);
       await gates.get(ref.sessionId)?.promise;
@@ -525,6 +527,7 @@ test('navigation mutations execute in invocation order and the last open wins', 
 
     assert.equal(settings.getPublic().activeProject, projectB);
     assert.deepEqual(settings.getPublic().activeSession, { projectPath: projectB, sessionId: sessionB, projectId: projectB, mode: 'code' });
+    assert.equal(activated, sessionB, 'selection activates only after successful preparation');
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(projectDirectoryA, { recursive: true, force: true });
@@ -533,19 +536,21 @@ test('navigation mutations execute in invocation order and the last open wins', 
 });
 
 test('historical startup opens the catalog session before persisting it active', async () => {
+  let activated: string | undefined;
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-restore-settings-'));
   const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-restore-project-'));
   const project = realpathSync.native(projectDirectory);
   const sessionId = '33333333-4444-4555-8666-777777777777';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
-  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
-  settings.conversationSpaces.setMode('code');
+  await settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
+  await settings.conversationSpaces.setMode('code');
   const calls: string[] = [];
   const bridge = {
     runtimeSummaries: [],
     get: () => undefined,
     isProjectClosing: () => false,
+    activateSession: (ref: { sessionId: string }) => { activated = ref.sessionId; },
     openSession: async (ref: { sessionId: string }) => { calls.push(`open:${ref.sessionId}`); },
     newSession: async () => { throw new Error('must restore history instead of creating'); },
   };
@@ -560,6 +565,7 @@ test('historical startup opens the catalog session before persisting it active',
     await host.restoreProjectSession(project);
     assert.deepEqual(calls, [`open:${sessionId}`]);
     assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, projectId: project, sessionId, mode: 'code' });
+    assert.equal(activated, sessionId, 'selection activates only after successful preparation');
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(projectDirectory, { recursive: true, force: true });
@@ -617,13 +623,14 @@ test('session open rejects a UUID absent from the selected project catalog', asy
 });
 
 test('session open accepts a matching UUID outside the bounded project list', async () => {
+  let activated: string | undefined;
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-session-owner-long-settings-'));
   const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-session-owner-long-project-'));
   const project = realpathSync.native(projectDirectory);
   const sessionId = '55555555-6666-4777-8888-999999999999';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
-  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
+  await settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   let opened: {
     ref: { projectPath: string; sessionId: string };
     empty?: boolean;
@@ -637,6 +644,7 @@ test('session open accepts a matching UUID outside the bounded project list', as
       get: () => undefined,
       isProjectClosing: () => false,
       runtimeSummaries: [],
+      activateSession: (ref: { sessionId: string }) => { activated = ref.sessionId; },
       openSession: async (
         ref: { projectPath: string; sessionId: string },
         empty?: boolean,
@@ -660,6 +668,7 @@ test('session open accepts a matching UUID outside the bounded project list', as
       resumeModel: 'openrouter/cohere/north-mini-code:free',
     });
     assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, projectId: project, sessionId, mode: 'code' });
+    assert.equal(activated, sessionId, 'selection activates only after successful preparation');
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(projectDirectory, { recursive: true, force: true });
@@ -667,13 +676,14 @@ test('session open accepts a matching UUID outside the bounded project list', as
 });
 
 test('host passes zero-count catalog rows to the empty-session open path', async () => {
+  let activated: string | undefined;
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-empty-session-settings-'));
   const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-empty-session-project-'));
   const project = realpathSync.native(projectDirectory);
   const sessionId = '88888888-9999-4aaa-8bbb-cccccccccccc';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
-  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
+  await settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   let opened: { ref: { projectPath: string; sessionId: string }; empty?: boolean } | undefined;
   const row = { uuid: sessionId, title: 'Empty', modified_rfc3339: '', message_count: 0, mode: 'code',
     path: join(project, `${sessionId}.jsonl`), empty_session: true };
@@ -683,6 +693,7 @@ test('host passes zero-count catalog rows to the empty-session open path', async
       get: () => undefined,
       isProjectClosing: () => false,
       runtimeSummaries: [],
+      activateSession: (ref: { sessionId: string }) => { activated = ref.sessionId; },
       openSession: async (ref: { projectPath: string; sessionId: string }, empty?: boolean) => { opened = { ref, empty }; },
     } as any,
     new DiagnosticBuffer(),
@@ -695,6 +706,7 @@ test('host passes zero-count catalog rows to the empty-session open path', async
   try {
     await host.openSessionAndActivate({ projectPath: project, sessionId }, { scope: 'current', transcriptPath: row.path });
     assert.deepEqual(opened, { ref: { projectPath: project, projectId: project, sessionId, mode: 'code' }, empty: true });
+    assert.equal(activated, sessionId, 'selection activates only after successful preparation');
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(projectDirectory, { recursive: true, force: true });
@@ -702,13 +714,14 @@ test('host passes zero-count catalog rows to the empty-session open path', async
 });
 
 test('zero-visible historical rows still use resume_session path', async () => {
+  let activated: string | undefined;
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-zero-visible-settings-'));
   const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-zero-visible-project-'));
   const project = realpathSync.native(projectDirectory);
   const sessionId = '89898989-9999-4aaa-8bbb-cccccccccccc';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
-  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
+  await settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   let emptyMode: boolean | undefined;
   const row = { uuid: sessionId, title: sessionId.slice(0, 8), modified_rfc3339: '', message_count: 0,
     mode: 'code', path: join(project, `${sessionId}.jsonl`), empty_session: false };
@@ -718,6 +731,7 @@ test('zero-visible historical rows still use resume_session path', async () => {
       get: () => undefined,
       isProjectClosing: () => false,
       runtimeSummaries: [],
+      activateSession: (ref: { sessionId: string }) => { activated = ref.sessionId; },
       openSession: async (_ref: unknown, empty?: boolean) => { emptyMode = empty; },
     } as any,
     new DiagnosticBuffer(),
@@ -729,6 +743,7 @@ test('zero-visible historical rows still use resume_session path', async () => {
   try {
     await host.openSessionAndActivate({ projectPath: project, sessionId }, { scope: 'current', transcriptPath: row.path });
     assert.equal(emptyMode, false);
+    assert.equal(activated, sessionId, 'selection activates only after successful preparation');
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(projectDirectory, { recursive: true, force: true });
@@ -736,13 +751,14 @@ test('zero-visible historical rows still use resume_session path', async () => {
 });
 
 test('opening an already-connected runtime does not require a persisted catalog row', async () => {
+  let activated: string | undefined;
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-connected-session-settings-'));
   const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-connected-session-project-'));
   const project = realpathSync.native(projectDirectory);
   const sessionId = '99999999-aaaa-4bbb-8ccc-dddddddddddd';
   const settings = new SettingsStore(userData);
   settings.addProject(project);
-  settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
+  await settings.conversationSpaces.register({ projectPath: project, projectId: project, sessionId, mode: 'code' });
   let catalogLookups = 0;
   let opened = false;
   const host = new HostController(
@@ -751,6 +767,7 @@ test('opening an already-connected runtime does not require a persisted catalog 
       get: () => ({ projectPath: project, sessionMode: 'code', connectionState: { status: 'connected' } }),
       isProjectClosing: () => false,
       runtimeSummaries: [],
+      activateSession: (ref: { sessionId: string }) => { activated = ref.sessionId; },
       openSession: async () => { opened = true; },
     } as any,
     new DiagnosticBuffer(),
@@ -765,6 +782,7 @@ test('opening an already-connected runtime does not require a persisted catalog 
     assert.equal(catalogLookups, 0);
     assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, projectId: project, sessionId, mode: 'code' });
     assert.equal((await (host as any).bootstrap()).workspace.trusted, true);
+    assert.equal(activated, sessionId, 'selection activates only after successful preparation');
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(projectDirectory, { recursive: true, force: true });

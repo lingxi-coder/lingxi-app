@@ -31,14 +31,34 @@ use bridge_server::boot::{self, BridgeArgs};
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 
 fn main() -> anyhow::Result<()> {
-    tokio::runtime::Builder::new_multi_thread()
+    let catalog_worker =
+        std::env::args().nth(1).as_deref() == Some("--session-catalog-worker-json");
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
         .enable_all()
-        .thread_stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
-        .build()?
-        .block_on(async_main())
+        .thread_stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE);
+    if catalog_worker {
+        builder.worker_threads(2).max_blocking_threads(20);
+    }
+    let runtime = builder.build()?;
+    let result = runtime.block_on(async_main());
+    if catalog_worker {
+        // Tokio stdin's blocking read cannot be cancelled on idle timeout.
+        // Bound shutdown rather than keeping an unused metadata child alive.
+        runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    }
+    result
 }
 
 async fn async_main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--session-catalog-worker-json") {
+        if std::env::args_os().len() != 2 {
+            return Err(anyhow::anyhow!("invalid session catalog worker arguments"));
+        }
+        return boot::run_session_catalog_worker()
+            .await
+            .map_err(|error| anyhow::anyhow!(error));
+    }
     if std::env::args().nth(1).as_deref() == Some("--session-metadata-json") {
         let remaining: Vec<_> = std::env::args_os().skip(2).collect();
         let home = match remaining.as_slice() {

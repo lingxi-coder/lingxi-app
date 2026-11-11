@@ -185,7 +185,7 @@ pub enum ResumeOutcome {
     Stay,
     /// Resume the exact displayed source (Enter on a real row).
     Resume(ResumeSelection),
-    /// Close the picker (Esc, or Enter on empty-state).
+    /// Close the picker (Esc in list mode).
     Cancel,
 }
 
@@ -193,9 +193,10 @@ pub enum ResumeOutcome {
 ///
 /// - `Up` → move selection up (clamped at 0).
 /// - `Down` → move selection down (clamped at `len-1`).
-/// - `Enter` → resume the selected uuid; on empty-state → `Cancel`.
-/// - `Esc` → in search with a query, clear it; in search with no query, leave
-///   search; in list mode, cancel.
+/// - `Enter` → commit a focused search, then resume the selected uuid on the
+///   next Enter; on empty-state → `Stay`.
+/// - `Esc` → in search with a query, clear it while retaining search focus and
+///   the selected source; in empty search leave search; in list mode cancel.
 /// - `/` → enter search mode (in list mode).
 /// - printable → type into the search query.
 /// - anything else → `Stay`.
@@ -203,6 +204,12 @@ pub enum ResumeOutcome {
 pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcome {
     let mut n = state.filtered().len();
     match key.code {
+        // Search owns keyboard focus until confirmation or an arrow moves it
+        // to the results. Neither arrow skips the first matching row.
+        KeyCode::Up | KeyCode::Down if state.in_search_mode && n > 0 => {
+            state.in_search_mode = false;
+            ResumeOutcome::Stay
+        }
         KeyCode::Up => {
             state.selected = state.selected.saturating_sub(1);
             ResumeOutcome::Stay
@@ -220,30 +227,52 @@ pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcom
             }
             ResumeOutcome::Stay
         }
+        // Native 2.1.321 keeps search editing separate from row selection.
+        // The first Enter focuses the filtered list without opening a session.
+        KeyCode::Enter if state.in_search_mode && n > 0 => {
+            state.in_search_mode = false;
+            ResumeOutcome::Stay
+        }
         KeyCode::Enter => match state.selected_row() {
             Some(row) => ResumeOutcome::Resume(ResumeSelection {
                 uuid: row.uuid,
                 transcript_path: row.transcript_path.clone(),
             }),
-            // Only the true empty-state (no sessions at all) cancels on Enter.
-            // A search query that filters every row to nothing is a no-op —
-            // closing the picker on a stray Enter would lose the user's search.
-            None if state.rows.is_empty() => ResumeOutcome::Cancel,
+            // Native 2.1.321 leaves both empty catalogs and empty search
+            // results open on Enter; Escape remains the cancellation action.
             None => ResumeOutcome::Stay,
         },
         KeyCode::Esc => {
-            if state.query.is_empty() {
-                if state.in_search_mode {
+            if state.in_search_mode {
+                if state.query.is_empty() {
                     state.in_search_mode = false;
                     ResumeOutcome::Stay
                 } else {
-                    ResumeOutcome::Cancel
+                    let selected = state
+                        .selected_row()
+                        .map(|row| (row.uuid, row.transcript_path.clone()));
+                    state.query.clear();
+                    if let Some((uuid, path)) = selected {
+                        while state.has_more()
+                            && !state
+                                .rows
+                                .iter()
+                                .any(|row| row.uuid == uuid && row.transcript_path == path)
+                        {
+                            state.load_more();
+                        }
+                        state.selected = state
+                            .rows
+                            .iter()
+                            .position(|row| row.uuid == uuid && row.transcript_path == path)
+                            .unwrap_or(0);
+                    } else {
+                        state.selected = 0;
+                    }
+                    ResumeOutcome::Stay
                 }
             } else {
-                state.query.clear();
-                state.selected = 0;
-                state.in_search_mode = false;
-                ResumeOutcome::Stay
+                ResumeOutcome::Cancel
             }
         }
         KeyCode::Backspace => {
@@ -280,7 +309,7 @@ pub fn selected_title_line_index(state: &ResumeState) -> usize {
     if state.is_empty() {
         return 0;
     }
-    let header = 1 + usize::from(state.in_search_mode) + 1;
+    let header = 1 + usize::from(state.in_search_mode || !state.query.is_empty()) + 1;
     header + state.selected * 2
 }
 
@@ -295,11 +324,8 @@ pub fn resume_lines(state: &ResumeState, theme: &Theme) -> Vec<Line<'static>> {
 
     if state.is_empty() {
         return vec![
-            Line::from("No conversations found to resume."),
-            Line::from(Span::styled(
-                "Press Ctrl+C to exit and start a new conversation.",
-                dim_style,
-            )),
+            Line::from("No conversations found in this project."),
+            Line::from(Span::styled("Esc to cancel", dim_style)),
         ];
     }
 
@@ -322,8 +348,8 @@ pub fn resume_lines(state: &ResumeState, theme: &Theme) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(header));
 
-    // Search box (search mode only).
-    if state.in_search_mode {
+    // Keep the committed filter visible after Enter moves focus to the rows.
+    if state.in_search_mode || !state.query.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("Search: {}", state.query),
             dim_style,
@@ -334,7 +360,11 @@ pub fn resume_lines(state: &ResumeState, theme: &Theme) -> Vec<Line<'static>> {
     // line ("> " on the selected) + a dim metadata line.
     lines.push(Line::from(""));
     for (i, r) in filtered.iter().enumerate() {
-        let marker = if i == selected { "> " } else { "  " };
+        let marker = if !state.in_search_mode && i == selected {
+            "> "
+        } else {
+            "  "
+        };
         lines.push(Line::from(format!("{marker}{}", r.title)));
         lines.push(Line::from(Span::styled(
             format!("  {}", r.metadata_label),
@@ -344,9 +374,9 @@ pub fn resume_lines(state: &ResumeState, theme: &Theme) -> Vec<Line<'static>> {
 
     // Footer (dim italic), mode-dependent copy.
     let footer = if state.in_search_mode {
-        "Type to Search \u{00B7} Enter select \u{00B7} Esc clear"
+        "Type to Search \u{00B7} Enter to select \u{00B7} Esc to clear"
     } else {
-        "Type to search \u{00B7} Esc cancel"
+        "Type to search \u{00B7} Esc to cancel"
     };
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -529,10 +559,85 @@ mod tests {
         }
         assert_eq!(s.filtered().len(), 1);
         assert_eq!(s.filtered()[0].title, "add feature");
-        // Esc with a query clears it and drops back to the list.
+        // Esc clears the query while retaining search focus and selection.
         let _ = handle_resume_key(&mut s, key(KeyCode::Esc));
         assert!(s.query.is_empty());
+        assert!(s.in_search_mode);
+        assert_eq!(s.selected, 1);
         assert_eq!(s.filtered().len(), 2);
+        assert_eq!(
+            handle_resume_key(&mut s, key(KeyCode::Esc)),
+            ResumeOutcome::Stay
+        );
+        assert!(!s.in_search_mode);
+        assert_eq!(
+            handle_resume_key(&mut s, key(KeyCode::Esc)),
+            ResumeOutcome::Cancel
+        );
+    }
+
+    #[test]
+    fn search_enter_commits_filter_before_resuming_exact_source() {
+        let rows = vec![row("recent work"), row("release Alpha")];
+        let expected = ResumeSelection {
+            uuid: rows[1].uuid,
+            transcript_path: rows[1].transcript_path.clone(),
+        };
+        let mut s = ResumeState::new(rows);
+        for c in "Alpha".chars() {
+            let _ = handle_resume_key(&mut s, key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            handle_resume_key(&mut s, key(KeyCode::Enter)),
+            ResumeOutcome::Stay
+        );
+        assert!(!s.in_search_mode);
+        assert_eq!(s.query, "Alpha");
+        let text = resume_lines(&s, &tui_core::theme::Theme::dark())
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(text.iter().any(|line| line == "Search: Alpha"));
+        assert!(text.iter().any(|line| line == "> release Alpha"));
+        assert_eq!(
+            handle_resume_key(&mut s, key(KeyCode::Enter)),
+            ResumeOutcome::Resume(expected)
+        );
+    }
+
+    #[test]
+    fn committed_search_escape_cancels_without_changing_filter() {
+        let mut s = ResumeState::new(vec![row("Alpha")]);
+        let _ = handle_resume_key(&mut s, key(KeyCode::Char('A')));
+        let _ = handle_resume_key(&mut s, key(KeyCode::Enter));
+        assert_eq!(
+            handle_resume_key(&mut s, key(KeyCode::Esc)),
+            ResumeOutcome::Cancel
+        );
+        assert_eq!(s.query, "A");
+    }
+
+    #[test]
+    fn search_arrows_focus_results_without_skipping_first_match() {
+        for arrow in [KeyCode::Up, KeyCode::Down] {
+            let rows = vec![row("session Beta"), row("session Alpha")];
+            let expected = rows[0].uuid;
+            let mut s = ResumeState::new(rows);
+            for c in "session".chars() {
+                let _ = handle_resume_key(&mut s, key(KeyCode::Char(c)));
+            }
+            assert_eq!(handle_resume_key(&mut s, key(arrow)), ResumeOutcome::Stay);
+            assert!(!s.in_search_mode);
+            assert_eq!(s.selected_uuid(), Some(expected));
+            assert!(
+                matches!(handle_resume_key(&mut s, key(KeyCode::Enter)), ResumeOutcome::Resume(selection) if selection.uuid == expected)
+            );
+        }
     }
 
     #[test]
@@ -553,25 +658,26 @@ mod tests {
         assert_eq!(s.selected_uuid(), Some(wanted_uuid));
         assert_eq!(s.rows.len(), RESUME_PAGE_SIZE);
         assert!(s.has_more(), "search must not flatten list-mode pagination");
+        let _ = handle_resume_key(&mut s, key(KeyCode::Esc));
+        assert!(s.in_search_mode);
+        assert_eq!(s.selected_uuid(), Some(wanted_uuid));
+        assert_eq!(s.rows.len(), RESUME_PAGE_SIZE + 1);
     }
 
     #[test]
-    fn empty_state_enter_cancels_and_lines_are_locked() {
+    fn empty_state_enter_stays_and_message_matches_reference() {
         let mut s = ResumeState::new(vec![]);
         assert_eq!(
             handle_resume_key(&mut s, key(KeyCode::Enter)),
-            ResumeOutcome::Cancel
+            ResumeOutcome::Stay
         );
         let lines = resume_lines(&s, &tui_core::theme::Theme::dark());
         let text: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|sp| sp.content.as_ref()).collect())
             .collect();
-        assert_eq!(text[0], "No conversations found to resume.");
-        assert_eq!(
-            text[1],
-            "Press Ctrl+C to exit and start a new conversation."
-        );
+        assert_eq!(text[0], "No conversations found in this project.");
+        assert_eq!(text[1], "Esc to cancel");
     }
 
     #[test]
@@ -586,6 +692,6 @@ mod tests {
         assert!(joined.iter().any(|l| l == "> hello"));
         assert!(joined
             .iter()
-            .any(|l| l == "Type to search \u{00b7} Esc cancel"));
+            .any(|l| l == "Type to search \u{00b7} Esc to cancel"));
     }
 }

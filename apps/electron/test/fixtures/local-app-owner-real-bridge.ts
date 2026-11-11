@@ -24,7 +24,7 @@ async function main() {
   const project = join(root, 'Reading garden'); await fs.mkdir(project, { mode: 0o700 });
   const workspace = await fs.realpath(project), stateDir = join(root, 'desktop-state');
   let settings = new SettingsStore(stateDir);
-  settings.addProject(workspace); settings.conversationSpaces.addProject(workspace, 'code'); settings.conversationSpaces.setMode('code');
+  settings.addProject(workspace); await settings.conversationSpaces.addProject(workspace, 'code'); await settings.conversationSpaces.setMode('code');
   let manager: SessionRuntimeManager | undefined, localApps: LocalAppHost | undefined;
   const create = () => {
     const diagnostics = new DiagnosticBuffer();

@@ -364,8 +364,8 @@ fn fail(sender: &mpsc::UnboundedSender<ListenItem>, error: RtdbListenError) -> N
     Next::Stop
 }
 
-/// Response headers for a listen. The body is not covered; [`SSE_IDLE_TIMEOUT`]
-/// starts only after this handshake.
+/// Token acquisition and response headers share this listen startup budget. The
+/// body is not covered; [`SSE_IDLE_TIMEOUT`] starts only after this handshake.
 const SSE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn connect_once(
@@ -375,12 +375,29 @@ async fn connect_once(
     control: &SseControl,
     state: &mut SseState,
 ) -> Next {
+    let deadline = Instant::now() + SSE_HANDSHAKE_TIMEOUT;
     let (token, refreshed) = match state.retry_token.take() {
         Some(kept) => kept,
         None => {
-            let refreshed = std::mem::take(&mut state.force_refresh);
-            let Ok(token) = inner.tokens.id_token(refreshed).await else {
-                return Next::Backoff;
+            // Retain the refresh requirement until a response arrives, including
+            // when token acquisition fails or the handshake is interrupted.
+            let refreshed = state.force_refresh;
+            let token = inner.tokens.id_token(refreshed);
+            let expires = tokio::time::sleep_until(deadline);
+            tokio::pin!(token, expires);
+            let token = loop {
+                tokio::select! {
+                    biased;
+                    () = control.cancel.cancelled() => return Next::Stop,
+                    () = &mut expires => return Next::Backoff,
+                    // Nothing is connected yet. Coalesce network-change signals
+                    // without restarting this token request or its deadline.
+                    () = control.reconnect.notified() => state.attempt = 0,
+                    result = &mut token => match result {
+                        Ok(token) => break token,
+                        Err(_) => return Next::Backoff,
+                    },
+                }
             };
             (token, refreshed)
         }
@@ -398,7 +415,7 @@ async fn connect_once(
     let response = tokio::select! {
         () = control.cancel.cancelled() => return Next::Stop,
         () = control.reconnect.notified() => { state.attempt = 0; return Next::Now; }
-        result = tokio::time::timeout(SSE_HANDSHAKE_TIMEOUT, request) => match result {
+        result = tokio::time::timeout_at(deadline, request) => match result {
             Ok(Ok(response)) => response,
             Ok(Err(_)) | Err(_) if !state.quick_retried => {
                 state.quick_retried = true;
@@ -412,6 +429,7 @@ async fn connect_once(
         },
     };
     state.quick_retried = false;
+    state.force_refresh = false;
     if response.status() == StatusCode::UNAUTHORIZED && !refreshed {
         state.force_refresh = true;
         return Next::Now;
@@ -501,7 +519,185 @@ fn parse_event(kind: &str, data: &str) -> Option<RtdbEvent> {
 
 #[cfg(test)]
 mod tests {
-    use super::redact;
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use super::super::TokenError;
+
+    #[derive(Default)]
+    struct PendingTokens {
+        requests: Mutex<Vec<bool>>,
+        active: AtomicUsize,
+        dropped: AtomicUsize,
+    }
+
+    struct PendingToken<'a>(&'a PendingTokens);
+
+    impl Drop for PendingToken<'_> {
+        fn drop(&mut self) {
+            self.0.active.fetch_sub(1, Ordering::SeqCst);
+            self.0.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl TokenProvider for PendingTokens {
+        async fn id_token(&self, force_refresh: bool) -> Result<String, TokenError> {
+            self.requests.lock().unwrap().push(force_refresh);
+            self.active.fetch_add(1, Ordering::SeqCst);
+            let _pending = PendingToken(self);
+            std::future::pending().await
+        }
+    }
+
+    #[derive(Default)]
+    struct FailedTokens(Mutex<Vec<bool>>);
+
+    #[async_trait]
+    impl TokenProvider for FailedTokens {
+        async fn id_token(&self, force_refresh: bool) -> Result<String, TokenError> {
+            self.0.lock().unwrap().push(force_refresh);
+            Err(TokenError("token request failed".into()))
+        }
+    }
+
+    fn token_client(tokens: Arc<dyn TokenProvider>) -> RtdbClient {
+        // Token tests never open a socket, even if a provider unexpectedly resolves.
+        let mut options = RtdbClientOptions::new("not-a-database-url", tokens);
+        options.random = Some(Arc::new(|| 0.0));
+        RtdbClient::new(options)
+    }
+
+    fn token_state(force_refresh: bool) -> SseState {
+        SseState {
+            attempt: 0,
+            force_refresh,
+            quick_retried: false,
+            retry_token: None,
+        }
+    }
+
+    fn token_control() -> SseControl {
+        SseControl {
+            cancel: CancellationToken::new(),
+            reconnect: Notify::new(),
+        }
+    }
+
+    async fn settle_token_tasks() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn token_listener_stops(drop_listener: bool) {
+        let tokens = Arc::new(PendingTokens::default());
+        let client = token_client(tokens.clone());
+        let retained = Arc::downgrade(&client.inner);
+        let listener = client.listen("/pending");
+        drop(client);
+        settle_token_tasks().await;
+        assert_eq!(tokens.active.load(Ordering::SeqCst), 1);
+
+        if drop_listener {
+            drop(listener);
+        } else {
+            listener.close();
+        }
+        settle_token_tasks().await;
+        assert_eq!(tokens.active.load(Ordering::SeqCst), 0);
+        assert_eq!(tokens.dropped.load(Ordering::SeqCst), 1);
+        assert!(
+            retained.upgrade().is_none(),
+            "obsolete listener retained its client"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn token_wait_close_releases_pending_listener() {
+        token_listener_stops(false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn token_wait_drop_releases_pending_listener() {
+        token_listener_stops(true).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn token_wait_timeout_uses_existing_backoff_before_retry() {
+        let tokens = Arc::new(PendingTokens::default());
+        let client = token_client(tokens.clone());
+        let listener = client.listen("/pending");
+        settle_token_tasks().await;
+        assert_eq!(tokens.requests.lock().unwrap().len(), 1);
+
+        tokio::time::advance(SSE_HANDSHAKE_TIMEOUT).await;
+        settle_token_tasks().await;
+        assert_eq!(tokens.active.load(Ordering::SeqCst), 0);
+        assert_eq!(tokens.dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(tokens.requests.lock().unwrap().len(), 1);
+
+        tokio::time::advance(backoff_delay(&client.inner, 0)).await;
+        settle_token_tasks().await;
+        assert_eq!(tokens.requests.lock().unwrap().len(), 2);
+        listener.close();
+        settle_token_tasks().await;
+        assert_eq!(tokens.active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn token_wait_reconnects_coalesce_without_extending_startup_deadline() {
+        let tokens = Arc::new(PendingTokens::default());
+        let client = token_client(tokens.clone());
+        let control = token_control();
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut state = token_state(true);
+        state.attempt = 4;
+        {
+            let attempt = connect_once(&client.inner, "/pending", &sender, &control, &mut state);
+            tokio::pin!(attempt);
+            assert!(futures_util::poll!(attempt.as_mut()).is_pending());
+            tokio::time::advance(SSE_HANDSHAKE_TIMEOUT / 2).await;
+            for _ in 0..3 {
+                control.reconnect.notify_one();
+                control.reconnect.notify_one();
+                assert!(futures_util::poll!(attempt.as_mut()).is_pending());
+            }
+            assert_eq!(*tokens.requests.lock().unwrap(), vec![true]);
+            assert_eq!(tokens.active.load(Ordering::SeqCst), 1);
+
+            tokio::time::advance(SSE_HANDSHAKE_TIMEOUT / 2).await;
+            // A queued reconnect at the deadline must not renew the token budget.
+            control.reconnect.notify_one();
+            assert!(matches!(attempt.await, Next::Backoff));
+        }
+        assert_eq!(state.attempt, 0);
+        assert!(
+            state.force_refresh,
+            "timeout lost the required token refresh"
+        );
+        assert_eq!(*tokens.requests.lock().unwrap(), vec![true]);
+        assert_eq!(tokens.active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn token_wait_failure_preserves_force_refresh() {
+        let tokens = Arc::new(FailedTokens::default());
+        let client = token_client(tokens.clone());
+        let control = token_control();
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut state = token_state(true);
+        assert!(matches!(
+            connect_once(&client.inner, "/pending", &sender, &control, &mut state).await,
+            Next::Backoff
+        ));
+        assert!(
+            state.force_refresh,
+            "failed token acquisition lost its refresh state"
+        );
+        assert_eq!(*tokens.0.lock().unwrap(), vec![true]);
+    }
 
     #[test]
     fn redacts_tokens_in_urls() {

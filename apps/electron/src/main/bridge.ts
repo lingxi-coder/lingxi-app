@@ -13,6 +13,7 @@ import {
   buildNativeUiControlCommand,
   parseUiFrameEvent,
   parseUiInvalidateEvent,
+  readLockfileAsync,
   validateNativeUiControlResponseJson,
   validateUiClientOperationResponseJson,
   validateUiControlMetadataJson,
@@ -25,6 +26,7 @@ import type {
   AudioOwnerDto,
   ClientCommand,
   ClientEvent,
+  Lockfile,
   ProviderModelCatalogEntryDto,
   ComputerAccessRequestDto,
   CronJobDto,
@@ -1341,7 +1343,7 @@ export class SessionRuntime {
       epoch: `${this.runtimeId}:${this.remoteBaseSequence}`,
       baseSequence: this.remoteBaseSequence,
       base,
-      events: base ? this.replayEvents.slice(1) : this.replayEvents,
+      events: this.replayEvents.slice(base ? 1 : 0),
       state: [...this.latestState.values()],
       prompts: this.promptJournal,
       interactions: this.interactionRecords,
@@ -1464,13 +1466,15 @@ export class SessionRuntime {
       // Status is a snapshot, not a transcript event. Keep only the newest
       // one so repeated listing refreshes cannot grow the renderer replay
       // buffer without bound or replay stale cumulative totals on reload.
-      const replay = event.type === 'status_snapshot' || event.type === 'session_storage_state'
+      this.replayEvents = event.type === 'status_snapshot' || event.type === 'session_storage_state'
         ? this.replayEvents.filter(({ event: retained }) => retained.type !== event.type)
         : event.type === 'ui_status'
           ? this.replayEvents.filter(({ event: retained }) =>
               retained.type !== 'ui_status' || retained.plugin !== event.plugin)
           : this.replayEvents;
-      this.replayEvents = [...replay, envelope];
+      // The live buffer stays private: replaySnapshot and remoteView capture
+      // their arrays at the read boundary, so ordinary deltas can append in O(1).
+      this.replayEvents.push(envelope);
     }
     return envelope;
   }
@@ -1747,7 +1751,10 @@ export class SessionRuntime {
     // because its transport disconnected or a retry handshake failed.
     const lockfilePath = this.connectionLockfilePath;
     if (!lockfilePath) throw new Error('The running bridge has no known connection endpoint; no replacement was started.');
-    validateBridgeLockfile(JSON.parse(readFileSync(lockfilePath, 'utf8')), pid, this.projectPath || this.activeWorkspace || '');
+    const connectingGeneration = this.generation;
+    const lockfile = await readLockfileAsync(lockfilePath);
+    if (this.disposed || connectingGeneration !== this.generation) throw new Error('bridge connection superseded');
+    validateBridgeLockfile(lockfile.body, pid, this.projectPath || this.activeWorkspace || '');
     const client = this.client;
     this.nativeMediaClient = undefined;
     this.invalidateNativeMediaBinding();
@@ -1761,7 +1768,7 @@ export class SessionRuntime {
     if (this.disposed || recoveredGeneration !== this.generation) throw new Error('bridge connection superseded');
     this.clearPendingConnectionOperations();
     try {
-      await this.connectBridgeClient(lockfilePath, recoveredGeneration, false, false);
+      await this.connectBridgeClient(lockfilePath, recoveredGeneration, false, false, lockfile);
       if (this.disposed || recoveredGeneration !== this.generation) throw new Error('bridge connection superseded');
       // During shutdown the authenticated hello itself is the server's drain
       // barrier. Do not restore Side Chats, audio, or publish new work merely
@@ -2199,7 +2206,7 @@ export class SessionRuntime {
     }
   }
 
-  private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true, publishConnected = true): Promise<void> {
+  private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true, publishConnected = true, capturedLockfile?: Lockfile): Promise<void> {
     if (generation !== this.generation || this.disposed) throw new Error('bridge connection superseded');
     this.connectionLockfilePath = lockfilePath;
     this.setState({ status: 'connecting' });
@@ -2230,7 +2237,7 @@ export class SessionRuntime {
       }
     };
     const handshakeStartedAt = Date.now();
-    const hello = await client.connect();
+    const hello = await client.connect(capturedLockfile);
     await this.decisionToolBridge?.refreshConfiguration();
     assertCurrentConnection();
     if (this.disposing) return;

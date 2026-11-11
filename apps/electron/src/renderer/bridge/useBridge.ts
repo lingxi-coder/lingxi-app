@@ -159,7 +159,7 @@ import {
   finishSideQuestion,
   isSideQuestionCommand,
 } from './sideQuestion.js';
-import { firstSubmittedSession, submittedSessionCatalogs } from './submittedSessionCatalog.js';
+import { firstSubmittedSession, reconcileSubmittedSessions, submittedSessionCatalogs } from './submittedSessionCatalog.js';
 import { botIdOfSession, isBotSession, pendingBotPath } from './botSession.js';
 import type { BotSessionRefUi } from '../../shared/bots.js';
 import type { SubmittedSession } from './submittedSessionCatalog.js';
@@ -199,6 +199,11 @@ interface PendingCatalogMutation {
   refreshing: boolean;
 }
 
+interface RuntimeSnapshot {
+  states: Map<string, RuntimeState>;
+  submitted: ReadonlyMap<string, SubmittedSession>;
+}
+
 export function useBridge(): UseBridge {
   const hostRef = useRef(getHost());
   const host = hostRef.current;
@@ -233,7 +238,17 @@ export function useBridge(): UseBridge {
   // host may still be finishing bootstrap metadata in parallel, so keep that
   // separate from the navigation target itself.
   const [sessionReady, setSessionReady] = useState(false);
-  const [runtimeStates, setRuntimeStates] = useState<Map<string, RuntimeState>>(new Map());
+  const [{ states: runtimeStates, submitted: submittedSessions }, setRuntimeSnapshot] = useState<RuntimeSnapshot>(() => ({
+    states: new Map(), submitted: new Map(),
+  }));
+  const setRuntimeStates = useCallback((updater: (previous: Map<string, RuntimeState>) => Map<string, RuntimeState>) => {
+    setRuntimeSnapshot((previous) => {
+      const states = updater(previous.states);
+      return states === previous.states ? previous : {
+        states, submitted: reconcileSubmittedSessions(previous.submitted, states),
+      };
+    });
+  }, []);
   const sharedDesktopCacheRef = useRef(new Map<string, SharedDesktopCache>());
   // `updateRuntime` replaces this Map on every engine event, so any callback
   // that lists it as a dependency changes identity per streamed token. Consumers
@@ -471,13 +486,14 @@ export function useBridge(): UseBridge {
   }, [host, stableUiSurfaceClientId]);
 
   const updateRuntime = useCallback((sessionId: string, updater: (state: RuntimeState) => RuntimeState): void => {
-    setRuntimeStates((previous) => {
-      const current = previous.get(sessionId) ?? emptyRuntimeState();
+    setRuntimeSnapshot((previous) => {
+      const current = previous.states.get(sessionId) ?? emptyRuntimeState();
       const next = updater(current);
       if (next === current) return previous;
-      const copy = new Map(previous);
+      const copy = new Map(previous.states);
       copy.set(sessionId, next);
-      return copy;
+      return { states: copy, submitted: next.submittedSession === current.submittedSession
+        ? previous.submitted : reconcileSubmittedSessions(previous.submitted, copy) };
     });
   }, []);
 
@@ -2811,14 +2827,12 @@ export function useBridge(): UseBridge {
     [runConfigurationAdmin],
   );
 
-  const presentedBootstrap = useMemo(() => bootstrap ? {
-    ...bootstrap,
-    projectCatalogs: submittedSessionCatalogs(
-      bootstrap.projectCatalogs,
-      [...runtimeStates.values()].flatMap((state) => state.submittedSession ? [state.submittedSession] : []),
-      bootstrap.settings.archivedSessions ?? [],
-    ),
-  } : null, [bootstrap, runtimeStates]);
+  const presentedCatalogs = useMemo(() => bootstrap ? submittedSessionCatalogs(
+    bootstrap.projectCatalogs, submittedSessions.values(), bootstrap.settings.archivedSessions ?? [],
+  ) : undefined, [bootstrap?.projectCatalogs, bootstrap?.settings.archivedSessions, submittedSessions]);
+  const presentedBootstrap = useMemo(() => bootstrap && presentedCatalogs ? (
+    presentedCatalogs === bootstrap.projectCatalogs ? bootstrap : { ...bootstrap, projectCatalogs: presentedCatalogs }
+  ) : null, [bootstrap, presentedCatalogs]);
 
   return {
     linkDraft, offerLinkDraft: setLinkDraft, clearLinkDraft: () => setLinkDraft(null),

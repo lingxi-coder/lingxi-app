@@ -233,6 +233,16 @@ export class TeamMessaging {
     void this.refresh();
   }
   async discard(changeId: string) { await this.commit(old => { if (old.outbox.some(item => pendingPayload(item).changeId === changeId && ((item.attempted && !item.error) || (item.leaseUntil ?? 0) > Date.now()))) throw new Error('MESSAGE_IN_FLIGHT'); return { ...old, outbox: old.outbox.filter(item => pendingPayload(item).changeId !== changeId) }; }); }
+  /** Retry an explicit host-unavailable verdict with the original idempotent command. */
+  async retryHostUnavailable(changeId: string) {
+    if (this.closed) throw new Error('INVALID_SESSION');
+    await this.commit(old => ({ ...old, outbox: old.outbox.map(item => {
+      if (pendingPayload(item).changeId !== changeId || item.error !== 'HOST_UNAVAILABLE' || (item.leaseUntil ?? 0) > Date.now()) return item;
+      const { error: _error, leaseUntil: _lease, retryDelay: _delay, ...retry } = item;
+      return retry;
+    }) }));
+    if (!this.closed) void this.refresh();
+  }
   async discardCreation() { await this.commit(old => { if ((old.creation?.attempted && !old.creation.error) || (old.creation?.leaseUntil ?? 0) > Date.now()) throw new Error('MESSAGE_IN_FLIGHT'); return { ...old, creation: undefined }; }); }
   async markRead() {
     const id = this.selected, thread = this.state.threads[id];

@@ -58,6 +58,13 @@ async function approvedDirectViewer(h: Harness): Promise<{ viewer: SimViewer; ho
   return { viewer, host };
 }
 
+function pendingGatewayResult() {
+  let resolve!: (value: unknown) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<unknown>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
 // ── Pairing ──────────────────────────────────────────────────────────────────
 
 test('an unknown device gets a pairing code, the user allows it, and the device is in', async () => {
@@ -323,6 +330,80 @@ test('notifications from an approved device reach the gateway, and from an unapp
     assert.equal(h.gateway.calls[0]!.method, 'session.detach');
     assert.deepEqual(h.gateway.calls[0]!.params, { session_id: 's1' });
   });
+});
+
+test('approved pending notifications and requests share default work admission through the gateway', async () => {
+  await withHarness(async (h) => {
+    const { host } = await approvedDirectViewer(h);
+    const pending = pendingGatewayResult();
+    h.gateway.result = () => pending.promise;
+    const deliver = (value: unknown) => {
+      for (const fragment of encodeMessage(JSON.stringify(value))) host.deliver(fragment);
+    };
+    try {
+      deliver({ id: 'history', method: 'session.history', params: { session_id: 's1' } });
+      for (let i = 0; i < 31; i++) deliver({ method: 'session.history', params: { session_id: 's1' } });
+      await settle();
+      assert.equal(h.gateway.calls.length, 32);
+      assert.equal(host.closeReason, undefined);
+      deliver({ method: 'turn.cancel', params: { session_id: 's1' } });
+      await settle();
+      assert.equal(h.gateway.calls.length, 33, 'cancellation can use a reserved slot');
+      deliver({ method: 'session.history', params: { session_id: 's1' } });
+      assert.equal(host.closeReason, 'capacity');
+      await settle();
+      assert.equal(h.gateway.calls.length, 33, 'the excess no-id call never reaches the gateway');
+      assert.equal(h.gateway.closed.length, 1);
+    } finally {
+      pending.resolve({ toJSON() { assert.fail('late results after overload must not be serialized'); } });
+      await settle();
+    }
+  });
+});
+
+test('async gateway notification failures release admission without sending notification responses', async () => {
+  await withHarness(async (h) => {
+    const { host } = await approvedDirectViewer(h);
+    const pending = pendingGatewayResult();
+    h.gateway.result = () => pending.promise;
+    const sentBefore = host.sent.length;
+    const deliver = () => {
+      for (const fragment of encodeMessage(JSON.stringify({ method: 'session.history', params: { session_id: 's1' } }))) host.deliver(fragment);
+    };
+    for (let i = 0; i < 32; i++) deliver();
+    await settle();
+    assert.equal(h.gateway.calls.length, 32);
+    pending.reject(undefined);
+    await settle();
+    assert.equal(h.log.messages('warn').filter(message => message.includes('a remote notification failed')).length, 32);
+    h.gateway.result = () => ({ ignored: true });
+    for (let i = 0; i < 32; i++) deliver();
+    await settle();
+    assert.equal(h.gateway.calls.length, 64, 'all settled notification slots can be reused');
+    assert.equal(host.closeReason, undefined);
+    assert.equal(host.sent.length, sentBefore, 'notifications never receive JSON-RPC responses');
+  });
+});
+
+test('closing pending gateway notification work ignores late results or failures and releases the viewer once', async () => {
+  for (const failed of [false, true]) {
+    await withHarness(async (h) => {
+      const { host } = await approvedDirectViewer(h);
+      const pending = pendingGatewayResult();
+      h.gateway.result = () => pending.promise;
+      for (const fragment of encodeMessage(JSON.stringify({ method: 'session.history', params: { session_id: 's1' } }))) host.deliver(fragment);
+      await settle();
+      assert.equal(h.gateway.calls.length, 1);
+      const sentBefore = host.sent.length;
+      host.close('gone');
+      if (failed) pending.reject(undefined);
+      else pending.resolve({ toJSON() { assert.fail('notification results must never be serialized'); } });
+      await settle();
+      assert.equal(h.gateway.closed.length, 1);
+      assert.equal(h.gateway.calls.length, 1);
+      assert.equal(host.sent.length, sentBefore);
+    });
+  }
 });
 
 test('a notification queued before link closure cannot recreate a released viewer', async () => {

@@ -801,7 +801,7 @@ test('a wrong-session reconnect roster cannot release an admitted slash lease', 
   const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1,
     launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
   const directory = mkdtempSync(join(tmpdir(), 'lingxi-slash-reconnect-'));
-  const lockfile = join(directory, 'bridge.lock');
+  const lockfile = join(directory, '32123.lock');
   writeFileSync(lockfile, JSON.stringify({ pid: process.pid, workspaceFolders: ['/project'],
     ideName: 'LingXi-Bridge', transport: 'ws', runningInWindows: false,
     authToken: '0123456789abcdef0123456789abcdef' }));
@@ -1209,7 +1209,7 @@ test('application shutdown waits for an unconfirmed metadata writer to drain', a
 
 test('shutdown reconnects for metadata drain without restoring a live Side Chat', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'lingxi-metadata-drain-reconnect-'));
-  const lockfile = join(directory, 'bridge.lock');
+  const lockfile = join(directory, '32123.lock');
   writeFileSync(lockfile, JSON.stringify({ pid: process.pid, workspaceFolders: ['/project'],
     ideName: 'LingXi-Bridge', transport: 'ws', runningInWindows: false,
     authToken: '0123456789abcdef0123456789abcdef' }));

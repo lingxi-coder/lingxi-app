@@ -16,17 +16,17 @@ import { SettingsStore } from '../src/main/settings';
 const sessionId = '11111111-2222-4333-8444-555555555555';
 const replacementId = '22222222-3333-4444-8555-666666666666';
 
-function fixture(t: TestContext, options: { running?: boolean; savedSource?: boolean } = {}) {
+async function fixture(t: TestContext, options: { running?: boolean; savedSource?: boolean } = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-alias-actions-')));
   const alias = join(root, 'A'), source = join(root, 'B'), store = join(root, 'transcripts');
   mkdirSync(alias); mkdirSync(source); mkdirSync(store);
   const settings = new SettingsStore(join(root, 'settings'));
   settings.addProject(alias);
-  settings.conversationSpaces.setMode('code');
+  await settings.conversationSpaces.setMode('code');
   if (options.savedSource !== false) settings.addProject(source);
   const ref = Object.freeze({ projectPath: alias, sessionId });
   const sourceRef = { projectPath: source, sessionId };
-  settings.conversationSpaces.register({ ...sourceRef, mode: 'code', projectId: options.savedSource === false ? alias : source });
+  await settings.conversationSpaces.register({ ...sourceRef, mode: 'code', projectId: options.savedSource === false ? alias : source });
   if (options.savedSource !== false) settings.setActiveSession(sourceRef);
   const path = join(store, `${sessionId}.jsonl`), untouchedPath = join(alias, 'unrelated.jsonl');
   const original = `${JSON.stringify({ type: 'user', sessionId, cwd: source, message: { role: 'user', content: 'Saved chat' } })}\n`;
@@ -142,7 +142,7 @@ function fixture(t: TestContext, options: { running?: boolean; savedSource?: boo
 }
 
 test('alias rename writes the live source transcript without starting, replacing or selecting an engine', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   f.runtime.hasActiveWork = true;
   const before = readFileSync(f.settings.settingsPath, 'utf8');
   const result = await f.invoke(CH_SESSION_RENAME, 'Renamed in B');
@@ -159,9 +159,9 @@ test('alias rename writes the live source transcript without starting, replacing
 });
 
 test('cold metadata changes select the saved exact source instead of a same-UUID sibling', async t => {
-  const f = fixture(t, { running: false });
+  const f = await fixture(t, { running: false });
   const owner = { ...f.sourceRef, mode: 'code' as const, projectId: f.source };
-  f.settings.conversationSpaces.register(owner);
+  await f.settings.conversationSpaces.register(owner);
   f.settings.rememberSessionTranscriptSelection(owner, { catalogProjectPath: f.source, scope: 'current', transcriptPath: f.path });
   const siblingDir = join(f.root, 'sibling'); mkdirSync(siblingDir);
   const sibling = join(siblingDir, `${sessionId}.jsonl`); writeFileSync(sibling, f.original);
@@ -180,7 +180,7 @@ test('cold metadata changes select the saved exact source instead of a same-UUID
 });
 
 test('alias touch updates only the source transcript and leaves active work in place', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   f.runtime.hasActiveWork = true;
   const untouched = statSync(f.untouchedPath).mtimeMs, before = readFileSync(f.settings.settingsPath, 'utf8');
   const result = await f.invoke(CH_SESSION_TOUCH);
@@ -195,7 +195,7 @@ test('alias touch updates only the source transcript and leaves active work in p
 });
 
 test('alias archive records B ownership and filters the archived UUID from B and the alias list', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   await f.invoke(CH_SESSION_ARCHIVE);
   assert.equal(f.settings.isSessionArchived(f.sourceRef), true);
   assert.equal(f.settings.isSessionArchived(f.ref), false);
@@ -209,7 +209,7 @@ test('alias archive records B ownership and filters the archived UUID from B and
 });
 
 test('cold alias archive uses its registered scope and exact source without starting a chat runtime', async (t) => {
-  const f = fixture(t, { running: false, savedSource: false });
+  const f = await fixture(t, { running: false, savedSource: false });
   await f.invoke(CH_SESSION_ARCHIVE);
   assert.deepEqual(f.calls.find, []);
   assert.deepEqual(f.calls.select, [{ ...f.ref, scope: 'current' }]);
@@ -225,7 +225,7 @@ test('cold alias archive uses its registered scope and exact source without star
 
 test('alias archive preflight uses the logical scheduler and returns only its dependent jobs', async (t) => {
   for (const running of [false, true]) {
-    const f = fixture(t, { running, savedSource: running });
+    const f = await fixture(t, { running, savedSource: running });
     const before = readFileSync(f.settings.settingsPath, 'utf8');
     const result = await f.invoke(CH_SESSION_ARCHIVE_PREFLIGHT);
     assert.deepEqual(result.map((job: { id: string }) => job.id), ['owned']);
@@ -245,7 +245,7 @@ test('alias archive preflight uses the logical scheduler and returns only its de
 
 test('rejecting a selected source leaves archive and preflight data and engines untouched', async (t) => {
   for (const channel of [CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT]) {
-    const f = fixture(t, { running: false, savedSource: false });
+    const f = await fixture(t, { running: false, savedSource: false });
     const before = readFileSync(f.settings.settingsPath, 'utf8');
     f.catalog.select = async () => { throw new Error('selected source unavailable'); };
     await assert.rejects(f.invoke(channel), /selected source unavailable/);
@@ -257,7 +257,7 @@ test('rejecting a selected source leaves archive and preflight data and engines 
 });
 
 test('a cold alias cannot change the registered source owner while archiving', async (t) => {
-  const f = fixture(t, { running: false, savedSource: false });
+  const f = await fixture(t, { running: false, savedSource: false });
   const before = readFileSync(f.settings.settingsPath, 'utf8');
   f.setHint(f.alias);
   await assert.rejects(f.invoke(CH_SESSION_ARCHIVE), /owner changed/i);
@@ -269,7 +269,7 @@ test('a cold alias cannot change the registered source owner while archiving', a
 
 test('missing or rejected source metadata cannot change settings, transcripts or the live engine', async (t) => {
   for (const channel of [CH_SESSION_RENAME, CH_SESSION_TOUCH]) {
-    const f = fixture(t, { running: false });
+    const f = await fixture(t, { running: false });
     const before = readFileSync(f.settings.settingsPath, 'utf8'), modified = statSync(f.path).mtimeMs;
     f.catalog.select = async () => { throw new Error('source catalog unavailable'); };
     await assert.rejects(f.invoke(channel, 'Cannot rename'), /source catalog unavailable/);
@@ -282,7 +282,7 @@ test('missing or rejected source metadata cannot change settings, transcripts or
 });
 
 test('alias archive rejects active source work without replacing or closing the engine', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   f.runtime.hasActiveWork = true;
   const before = readFileSync(f.settings.settingsPath, 'utf8');
   await assert.rejects(f.invoke(CH_SESSION_ARCHIVE), /active work/);
@@ -293,14 +293,14 @@ test('alias archive rejects active source work without replacing or closing the 
 });
 
 test('metadata source resolution does not broaden terminal compound-scope validation', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   await assert.rejects((f.host as any).assertSessionBelongsToProject(f.ref), /different project/);
   await assert.rejects((f.host as any).validateSessionScope(f.ref), /different project/);
   assert.equal(f.runtimes.get(sessionId), f.runtime);
 });
 
 test('cold metadata keeps the stored transcript authoritative when the workspace hint disappeared', async (t) => {
-  const f = fixture(t, { running: false, savedSource: false });
+  const f = await fixture(t, { running: false, savedSource: false });
   f.setHint(join(f.root, 'removed-worktree'));
   const before = readFileSync(f.settings.settingsPath, 'utf8');
   await f.invoke(CH_SESSION_RENAME, 'Stored source remains usable');
@@ -310,9 +310,9 @@ test('cold metadata keeps the stored transcript authoritative when the workspace
 });
 
 test('live metadata follows the exact active copy even when its logical workspace has a different copy', async (t) => {
-  const f = fixture(t);
+  const f = await fixture(t);
   f.runtime.projectPath = f.alias;
-  f.settings.conversationSpaces.relocate(f.sourceRef, f.alias);
+  await f.settings.conversationSpaces.relocate(f.sourceRef, f.alias);
   f.runtime.hasActiveWork = true;
   const otherPath = join(f.alias, `${sessionId}.jsonl`);
   writeFileSync(otherPath, f.original.replace('Saved chat', 'Unselected A chat'));
@@ -332,7 +332,7 @@ test('live metadata follows the exact active copy even when its logical workspac
 
 test('live metadata rejects invalid or non-file writer targets without modifying either copy', async (t) => {
   for (const channel of [CH_SESSION_RENAME, CH_SESSION_TOUCH]) {
-    const f = fixture(t);
+    const f = await fixture(t);
     const directory = join(f.root, `${sessionId}.jsonl`);
     mkdirSync(directory);
     for (const path of ['relative.jsonl', join(f.root, `${replacementId}.jsonl`), directory]) {
@@ -348,7 +348,7 @@ test('live metadata rejects invalid or non-file writer targets without modifying
 
 test('a disconnected owner cannot fall back to a different catalog copy for metadata actions', async (t) => {
   for (const channel of [CH_SESSION_RENAME, CH_SESSION_TOUCH, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT]) {
-    const f = fixture(t);
+    const f = await fixture(t);
     f.runtime.connectionState.status = 'disconnected';
     const settings = readFileSync(f.settings.settingsPath, 'utf8'), modified = statSync(f.path).mtimeMs;
     await assert.rejects(f.invoke(channel, 'Must keep the selected copy'), /Reconnect this chat/);
@@ -361,7 +361,7 @@ test('a disconnected owner cannot fall back to a different catalog copy for meta
   }
 });
 
-function scopedCatalog(f: ReturnType<typeof fixture>, globalDuplicates: boolean) {
+function scopedCatalog(f: Awaited<ReturnType<typeof fixture>>, globalDuplicates: boolean) {
   const requests: string[][] = [];
   const otherPath = join(f.alias, `${sessionId}.jsonl`);
   if (!globalDuplicates) writeFileSync(otherPath, f.original.replace('Saved chat', 'Old A chat'));
@@ -370,7 +370,7 @@ function scopedCatalog(f: ReturnType<typeof fixture>, globalDuplicates: boolean)
     path, workspace_path: workspace, modified_rfc3339: statSync(path).mtime.toISOString(),
     message_count: 1, mode: 'code', empty_session: false,
   });
-  const catalog = new ProjectSessionCatalog({ serverBin: '/fixture-bridge', spawnProcess: ((_bin, args) => {
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/fixture-bridge', spawnProcess: ((_bin, args) => {
     const argv = [...args as string[]]; requests.push(argv);
     const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill(): boolean };
     child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => true;
@@ -392,7 +392,7 @@ function scopedCatalog(f: ReturnType<typeof fixture>, globalDuplicates: boolean)
 
 test('cold rename and touch use fresh Current alias selection rather than the CLI UUID resolver', async (t) => {
   for (const duplicates of [false, true]) for (const channel of [CH_SESSION_RENAME, CH_SESSION_TOUCH]) {
-    const f = fixture(t, { running: false });
+    const f = await fixture(t, { running: false });
     const adapter = scopedCatalog(f, duplicates);
     if (duplicates) await assert.rejects(adapter.catalog.find(f.alias, sessionId), /multiple global copies/);
     else assert.equal((await adapter.catalog.find(f.alias, sessionId))?.path, adapter.otherPath);
@@ -410,7 +410,7 @@ test('cold rename and touch use fresh Current alias selection rather than the CL
 
 test('cold archive and preflight keep the exact Current alias without starting a chat runtime', async (t) => {
   for (const channel of [CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT]) {
-    const f = fixture(t, { running: false, savedSource: false });
+    const f = await fixture(t, { running: false, savedSource: false });
     const adapter = scopedCatalog(f, true);
     await f.invoke(channel);
     assert.deepEqual(f.calls.transcriptPaths, []);

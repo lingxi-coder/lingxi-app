@@ -560,27 +560,28 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             );
             return exit_codes::ARGV_ERROR;
         }
-        // (b) UUID validation (a bare UUID; `parse_prefixed` also tolerates the
-        //     `sess:`-prefixed display form).
-        if lingxi_core::types::SessionId::parse_prefixed(sid).is_none() {
+        // The public fresh-session flag accepts a hyphenated UUID, rather
+        // than the internal `sess:` display form or UUID URN/braced forms.
+        let parsed_id = (sid.len() == 36)
+            .then(|| uuid::Uuid::parse_str(sid).ok())
+            .flatten();
+        let Some(parsed_id) = parsed_id else {
             eprintln!("Error: Invalid session ID. Must be a valid UUID.");
             return exit_codes::ARGV_ERROR;
-        }
+        };
         // (c) A user-supplied fresh session id must not reuse any existing
         //     transcript path, even from another project under the same config
         //     home. Reject before runtime construction so no append/write path
         //     is opened against the occupied JSONL.
-        if let Some(parsed_id) = lingxi_core::types::SessionId::parse_prefixed(sid) {
-            match session_id_exists_in_store(&run::lingxi_home_dir(), parsed_id.as_uuid()).await {
-                Ok(true) => {
-                    eprintln!("Error: Session ID {sid} is already in use.");
-                    return exit_codes::ARGV_ERROR;
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    eprintln!("Error: Unable to verify session ID uniqueness: {error}");
-                    return exit_codes::RUNTIME_ERROR;
-                }
+        match session_id_exists_in_store(&run::lingxi_home_dir(), parsed_id).await {
+            Ok(true) => {
+                eprintln!("Error: Session ID {sid} is already in use.");
+                return exit_codes::ARGV_ERROR;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("Error: Unable to verify session ID uniqueness: {error}");
+                return exit_codes::RUNTIME_ERROR;
             }
         }
     }

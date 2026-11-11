@@ -20,7 +20,7 @@ const REPLACEMENT = 'bbbbbbbb-2222-4333-8444-555555555555';
 /** A chat a routine started in a Bot's workspace. */
 const RUN_SESSION = 'cccccccc-2222-4333-8444-555555555555';
 
-function hostFixture(t: TestContext) {
+async function hostFixture(t: TestContext) {
   const f = botFixture(t);
   // The fixture's stand-in for the app's settings is not a settings file the store can read.
   rmSync(join(f.userData, 'settings.v1.json'));
@@ -29,8 +29,8 @@ function hostFixture(t: TestContext) {
   const ownerRef = { projectPath: project, sessionId: OWNER_SESSION, mode: 'code' as const, projectId: project };
   settings.addProject(project);
   settings.activateProject(project);
-  settings.conversationSpaces.setMode('code');
-  settings.conversationSpaces.register(ownerRef);
+  await settings.conversationSpaces.setMode('code');
+  await settings.conversationSpaces.register(ownerRef);
   settings.setActiveSession(ownerRef);
   const picks: string[] = [];
   let pickResult: string | undefined;
@@ -101,13 +101,13 @@ function hostFixture(t: TestContext) {
   };
 }
 
-async function newBot(f: ReturnType<typeof hostFixture>) {
+async function newBot(f: Awaited<ReturnType<typeof hostFixture>>) {
   const bot = await f.call(CH_BOTS_CREATE, { name: 'Helper' });
   return { bot, workspace: f.store.workspaceDir(bot.botId) };
 }
 
 test('opening a Bot\'s session shows it in the window without making it a project or the session to restore', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   const opened = await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
   assert.deepEqual(opened, { botId: bot.botId, projectPath: workspace, sessionId: SESSION });
@@ -119,7 +119,7 @@ test('opening a Bot\'s session shows it in the window without making it a projec
 });
 
 test('the owner\'s own session shows again when the owner opens it', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
   assert.equal(f.settings.getPublic().activeSession?.projectPath, workspace);
@@ -129,14 +129,14 @@ test('the owner\'s own session shows again when the owner opens it', async (t) =
   assert.equal((f.host as any).workspace().trusted, true);
 });
 
-test('a folder that is not a project and not a Bot\'s stays untrusted', (t) => {
-  const f = hostFixture(t);
+test('a folder that is not a project and not a Bot\'s stays untrusted', async (t) => {
+  const f = await hostFixture(t);
   f.settings.setActiveBotSession({ projectPath: f.folder('stranger'), sessionId: SESSION });
   assert.equal((f.host as any).workspace().trusted, false);
 });
 
 test('the sessions of the runtime manager say which of them are a Bot\'s', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   const summary = (projectPath: string, sessionId: string) => ({ projectPath, sessionId, connection: { status: 'connected' }, turnActive: false, pendingInteractions: 0, pendingAskUserQuestions: 0 });
   f.setSummaries([summary(workspace, SESSION), summary(f.project, OWNER_SESSION)]);
@@ -147,7 +147,7 @@ test('the sessions of the runtime manager say which of them are a Bot\'s', async
 });
 
 test('everything a project can do stays closed to the folder of a Bot', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
   const channels = [...f.registered.keys()];
@@ -160,7 +160,7 @@ test('everything a project can do stays closed to the folder of a Bot', async (t
 });
 
 test('deleting the Bot whose session is shown brings back the session the window had', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
   assert.equal(f.settings.getPublic().activeSession?.projectPath, workspace);
@@ -170,7 +170,7 @@ test('deleting the Bot whose session is shown brings back the session the window
 });
 
 test('deleting a Bot leaves the session the window shows alone when it is not the Bot\'s', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot } = await newBot(f);
   const other = await f.call(CH_BOTS_CREATE, { name: 'Other' });
   await f.call(CH_BOTS_SESSION_OPEN, other.botId);
@@ -180,7 +180,7 @@ test('deleting a Bot leaves the session the window shows alone when it is not th
 });
 
 test('clearing a Bot\'s chat starts a new chat of the same Bot without touching the projects', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
   await f.call('lingxi:session:clear', SESSION);
@@ -192,7 +192,7 @@ test('clearing a Bot\'s chat starts a new chat of the same Bot without touching 
 });
 
 test('a Bot\'s chat cannot move to another folder or take one on', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot } = await newBot(f);
   await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
   for (const action of ['cd', 'add-dir'] as const) {
@@ -205,7 +205,7 @@ test('a Bot\'s chat cannot move to another folder or take one on', async (t) => 
 // The app's own data is no place for a project
 
 test('the app\'s own data folder, and the Bots in it, cannot be added as a project', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { workspace } = await newBot(f);
   mkdirSync(join(f.userData, 'bots-trash'), { recursive: true });
   const places = [
@@ -223,7 +223,7 @@ test('the app\'s own data folder, and the Bots in it, cannot be added as a proje
 });
 
 test('an ordinary folder can still be added as a project', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const repo = f.folder('repo');
   f.pickReturns(repo);
   const selection = await f.call(CH_PROJECT_FOLDER_PICK);
@@ -262,7 +262,7 @@ test('the app data is recognised when it is reached through a link', (t) => {
 
 // The routines of a Bot
 
-function runSession(f: ReturnType<typeof hostFixture>) {
+function runSession(f: Awaited<ReturnType<typeof hostFixture>>) {
   const bot = f.service.list()[0]!;
   const workspace = f.store.workspaceDir(bot.bot_id);
   const directory = f.store.transcriptsDir(bot.bot_id);
@@ -274,7 +274,7 @@ function runSession(f: ReturnType<typeof hostFixture>) {
 }
 
 test('the chat of a routine\'s run opens as a chat of the Bot, not of a project', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   runSession(f);
   assert.deepEqual(f.scheduled.scopes().filter((scope) => scope.botId === bot.botId).map((scope) => scope.id), [workspace], 'the Bot\'s workspace is a scope');
@@ -287,7 +287,7 @@ test('the chat of a routine\'s run opens as a chat of the Bot, not of a project'
 });
 
 test('a routine\'s chat is not opened through a Bot that does not have it, or that is gone', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   await assert.rejects(f.call(CH_SCHEDULED, { action: 'open', scopeId: workspace, sessionId: RUN_SESSION }), /source is unavailable/);
   await assert.rejects(f.call(CH_SCHEDULED, { action: 'open', scopeId: workspace, sessionId: 'not-a-session' }), /Invalid scheduled session/);
@@ -298,7 +298,7 @@ test('a routine\'s chat is not opened through a Bot that does not have it, or th
 });
 
 test('a routine of a project still opens its chat the way a project\'s chat opens', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   await newBot(f);
   const opened: unknown[] = [];
   (f.host as any).openSessionAndActivateInternal = async (ref: unknown) => { opened.push(ref); return {}; };
@@ -307,7 +307,7 @@ test('a routine of a project still opens its chat the way a project\'s chat open
 });
 
 test('clicking the notification of a Bot\'s routine shows its chat and tells the window', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   runSession(f);
   await f.host.showNotifiedSession({ projectPath: workspace, sessionId: RUN_SESSION });
@@ -318,7 +318,7 @@ test('clicking the notification of a Bot\'s routine shows its chat and tells the
 });
 
 test('a notification that names a chat the Bot no longer has shows nothing and tells the window nothing', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { workspace } = await newBot(f);
   await assert.rejects(f.host.showNotifiedSession({ projectPath: workspace, sessionId: RUN_SESSION }), /source is unavailable/);
   assert.deepEqual(f.sent.filter(([channel]) => channel === CH_BOTS_SESSION_SHOWN), []);
@@ -326,7 +326,7 @@ test('a notification that names a chat the Bot no longer has shows nothing and t
 });
 
 test('a project notification validates its saved source before showing the session', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   await newBot(f);
   const path = join(f.project, `${OWNER_SESSION}.jsonl`);
   f.settings.rememberSessionTranscriptSelection(f.ownerRef, { catalogProjectPath: f.project, scope: 'current', transcriptPath: path });
@@ -340,8 +340,8 @@ test('a project notification validates its saved source before showing the sessi
 });
 
 test('a project notification with no saved source keeps the current space and view', async (t) => {
-  const f = hostFixture(t);
-  f.settings.conversationSpaces.setMode('chat');
+  const f = await hostFixture(t);
+  await f.settings.conversationSpaces.setMode('chat');
   const before = f.settings.getPublic().activeSession;
   await assert.rejects(f.host.showNotifiedSession(f.ownerRef), /source is unavailable/);
   assert.equal(f.settings.conversationSpaces.snapshot().activeMode, 'chat');
@@ -350,19 +350,19 @@ test('a project notification with no saved source keeps the current space and vi
 });
 
 test('a failed notification open restores the previously selected space', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const path = join(f.project, `${OWNER_SESSION}.jsonl`);
   f.settings.rememberSessionTranscriptSelection(f.ownerRef, { catalogProjectPath: f.project, scope: 'current', transcriptPath: path });
   (f.host as any).sessionCatalog.select = async () => ({ uuid: OWNER_SESSION, mode: 'code', path, workspace_path: f.project });
   (f.host as any).openSessionAndActivateInternal = async () => { throw new Error('engine failed'); };
-  f.settings.conversationSpaces.setMode('chat');
+  await f.settings.conversationSpaces.setMode('chat');
   await assert.rejects(f.host.showNotifiedSession(f.ownerRef), /engine failed/);
   assert.equal(f.settings.conversationSpaces.snapshot().activeMode, 'chat');
   assert.deepEqual(f.sent, []);
 });
 
 test('a notification of a Bot is taken in turn with the other navigation', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { workspace } = await newBot(f);
   runSession(f);
   const order: string[] = [];
@@ -379,7 +379,7 @@ test('a notification of a Bot is taken in turn with the other navigation', async
 });
 
 test('the hidden session that watches a Bot\'s clock does not count among the Bot\'s running chats', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   const controllerOf = (path: string): string => (f.scheduled as any).controllerRef(path).sessionId;
   const summary = (projectPath: string, sessionId: string) => ({ projectPath, sessionId, connection: { status: 'connected' }, turnActive: true, pendingInteractions: 0, pendingAskUserQuestions: 0 });
@@ -392,7 +392,7 @@ test('the hidden session that watches a Bot\'s clock does not count among the Bo
 });
 
 test('deleting a Bot lets the scheduler go of it before its sessions are stopped', async (t) => {
-  const f = hostFixture(t);
+  const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   const order: string[] = [];
   const release = f.scheduled.releaseScope.bind(f.scheduled);

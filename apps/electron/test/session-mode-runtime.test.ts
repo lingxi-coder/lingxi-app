@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionRuntime } from '../src/main/bridge.js';
@@ -257,7 +257,7 @@ test('handoff creates a global draft and records a durable source backlink; stal
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const settings = new SettingsStore(root);
     const source = { projectPath: settings.conversationSpaces.globalWorkspaces.chat, projectId: null, sessionId, mode: 'chat' as const };
-    settings.conversationSpaces.register(source); settings.setActiveSession(source);
+    await settings.conversationSpaces.register(source); settings.setActiveSession(source);
     const result = deferred<any>(); let creates = 0, released = 0, ownership: any;
     const bridge = { get: () => ({ prepareSessionHandoff: () => result.promise }), retainBackgroundSession: () => () => { released++; },
       newSession: async (path: string, _model: unknown, owner: unknown) => { creates++; ownership = owner; return { projectPath: path, sessionId: targetId }; },
@@ -294,7 +294,7 @@ test('explicit retry reuses the same operation and source instead of charging fo
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const settings = new SettingsStore(root);
   const source = { projectPath: settings.conversationSpaces.globalWorkspaces.chat, projectId: null, sessionId, mode: 'chat' as const };
-  settings.conversationSpaces.register(source); settings.setActiveSession(source);
+  await settings.conversationSpaces.register(source); settings.setActiveSession(source);
   const calls: unknown[] = []; let released = 0;
   const runtime = { prepareSessionHandoff: async (id: string, target: string, _signal: AbortSignal, retry: boolean) => {
     calls.push([id, target, retry]); if (!retry) throw new Error('temporary'); return { cutoff: 'same-capture', summary: 'Progress' };
@@ -318,7 +318,7 @@ test('navigation while a target draft is starting cannot activate the late draft
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const settings = new SettingsStore(root);
   const source = { projectPath: settings.conversationSpaces.globalWorkspaces.chat, projectId: null, sessionId, mode: 'chat' as const };
-  settings.conversationSpaces.register(source); settings.setActiveSession(source);
+  await settings.conversationSpaces.register(source); settings.setActiveSession(source);
   const started = deferred<any>(), closed: unknown[] = [], activated: unknown[] = [];
   const bridge = { get: () => ({ prepareSessionHandoff: async () => ({ cutoff: '1', summary: 'Progress' }) }),
     retainBackgroundSession: () => () => {}, newSession: async () => started.promise,
@@ -339,7 +339,7 @@ test('switching spaces keeps the source turn, listener and pending permission ow
   const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
   const target = { projectPath: settings.conversationSpaces.globalWorkspaces.code, projectId: null, sessionId: targetId, mode: 'code' as const };
-  settings.conversationSpaces.register(source); settings.conversationSpaces.register(target); settings.setActiveSession(source);
+  await settings.conversationSpaces.register(source); await settings.conversationSpaces.register(target); settings.setActiveSession(source);
   const sourceRuntime = new EventEmitter(); let events = 0, closes = 0, cancels = 0;
   sourceRuntime.on('permission', () => { events++; });
   Object.assign(sourceRuntime, { activeTurn: true, pendingPermission: 7, cancel: () => { cancels++; } });
@@ -347,7 +347,7 @@ test('switching spaces keeps the source turn, listener and pending permission ow
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any);
   (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
   (host as any).draftSelections.set('code', target);
-  settings.conversationSpaces.setMode('code');
+  await settings.conversationSpaces.setMode('code');
   await (host as any).switchConversationSpace('code', 0);
   sourceRuntime.emit('permission');
   assert.equal(events, 1); assert.equal((sourceRuntime as any).pendingPermission, 7);
@@ -360,8 +360,8 @@ test('New Chat remains global when a project is selected', async t => {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const project = join(root, 'project'); mkdirSync(project);
   const settings = new SettingsStore(join(root, 'settings'));
-  settings.addProject(project); settings.conversationSpaces.addProject(project, 'chat');
-  settings.activateProject(project); settings.conversationSpaces.setNavigation('chat', project);
+  settings.addProject(project); await settings.conversationSpaces.addProject(project, 'chat');
+  settings.activateProject(project); await settings.conversationSpaces.setNavigation('chat', project);
   let created: any;
   const bridge = { registerWindow() {}, registerIpc() {}, newSession: async (path: string, _model: unknown, owner: any) => {
     created = { path, owner }; return { projectPath: path, sessionId: targetId };
@@ -385,7 +385,7 @@ test('Global New Chat chooses the fixed mode directory without inheriting the se
   const project = join(root, 'project'); mkdirSync(project);
   const settings = new SettingsStore(join(root, 'settings'));
   settings.addProject(project);
-  for (const mode of ['chat', 'code'] as const) settings.conversationSpaces.addProject(project, mode);
+  for (const mode of ['chat', 'code'] as const) await settings.conversationSpaces.addProject(project, mode);
   const created: Array<{ path: string; owner: any }> = [];
   const bridge = { registerWindow() {}, registerIpc() {}, newSession: async (path: string, _model: unknown, owner: any) => {
     created.push({ path, owner }); return { projectPath: path, sessionId: owner.mode === 'chat' ? sessionId : targetId };
@@ -398,8 +398,8 @@ test('Global New Chat chooses the fixed mode directory without inheriting the se
   const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
   host.registerWindow(sender as any, frame.url); host.registerIpc();
   for (const mode of ['chat', 'code'] as const) {
-    settings.conversationSpaces.setMode(mode);
-    settings.conversationSpaces.setNavigation(mode, project);
+    await settings.conversationSpaces.setMode(mode);
+    await settings.conversationSpaces.setNavigation(mode, project);
     settings.activateProject(project);
     await handlers.get(CH_SESSION_NEW)!({ sender, senderFrame: frame }, null, undefined);
     assert.equal(created.at(-1)?.path, settings.conversationSpaces.globalWorkspaces[mode]);
@@ -415,7 +415,7 @@ test('each explicit Local App creation allocates a separate Code Project draft',
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const project = join(root, 'project'); mkdirSync(project);
   const settings = new SettingsStore(join(root, 'settings'));
-  settings.addProject(project); settings.conversationSpaces.addProject(project, 'code'); settings.conversationSpaces.setMode('code');
+  settings.addProject(project); await settings.conversationSpaces.addProject(project, 'code'); await settings.conversationSpaces.setMode('code');
   const owners: any[] = [];
   const bridge = { registerWindow() {}, registerIpc() {}, newSession: async (path: string, _model: unknown, owner: any) => {
     owners.push(owner); const ref = { projectPath: path, sessionId: owners.length === 1 ? sessionId : targetId };
@@ -441,7 +441,7 @@ test('each explicit Local App creation allocates a separate Code Project draft',
   assert.ok(owners.every(owner => owner.forceNew === true && owner.mode === 'code' && owner.projectId === project));
   assert.ok(owners.every(owner => owner.durableDraftTitle === 'App'));
   await assert.rejects(handlers.get(CH_SESSION_NEW)!(event, null, undefined, purpose), /Code Project/);
-  settings.conversationSpaces.setMode('chat');
+  await settings.conversationSpaces.setMode('chat');
   await assert.rejects(handlers.get(CH_SESSION_NEW)!(event, project, undefined, purpose), /local_app_development_requires_code|Code/);
   await assert.rejects(handlers.get(CH_SESSION_OPEN)!(event, project, targetId, undefined, 'code', `a${'1'.repeat(32)}`, 0), /local_app_development_requires_code|Code/);
   assert.equal(owners.length, 2);
@@ -453,7 +453,7 @@ test('an admitted Local App Code session is anchored and registered after Chat n
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const project = join(root, 'project'); mkdirSync(project);
   const settings = new SettingsStore(join(root, 'settings'));
-  settings.addProject(project); settings.conversationSpaces.addProject(project, 'code'); settings.conversationSpaces.setMode('code');
+  settings.addProject(project); await settings.conversationSpaces.addProject(project, 'code'); await settings.conversationSpaces.setMode('code');
   const ledger = new AuthoringSessionIntents(join(root, 'intents'));
   const entered = deferred<void>(), ready = deferred<void>();
   const finished: string[] = [], activated: string[] = [];
@@ -491,8 +491,9 @@ test('an admitted Local App Code session is anchored and registered after Chat n
   const [before] = await ledger.pending();
   assert.equal(before?.sessionId, sessionId); assert.equal(before?.state, 'pending');
   const switching = handlers.get(CH_CONVERSATION_SPACE)!(event, 'chat');
-  assert.equal(settings.conversationSpaces.snapshot().activeMode, 'chat');
+  assert.equal(settings.conversationSpaces.snapshot().activeMode, 'code', 'pending mode intent does not publish uncommitted state');
   ready.resolve(undefined); await Promise.all([creating, switching]);
+  assert.equal(settings.conversationSpaces.snapshot().activeMode, 'chat');
   assert.deepEqual(finished, [sessionId]); assert.deepEqual(activated, []);
   assert.equal(settings.conversationSpaces.findBySessionId(sessionId)?.mode, 'code');
   assert.equal((host as any).draftSelections.get('code'), undefined, 'a parked operation cannot become automatic navigation');
@@ -508,7 +509,7 @@ test('a Local App source changing while registration waits is never activated', 
   const project = join(root, 'project'), other = join(root, 'other'); mkdirSync(project); mkdirSync(other);
   const path = join(root, `${sessionId}.jsonl`), entered = deferred<void>(), finish = deferred<void>();
   const settings = new SettingsStore(join(root, 'settings'));
-  settings.addProject(project); settings.conversationSpaces.addProject(project, 'code'); settings.conversationSpaces.setMode('code');
+  settings.addProject(project); await settings.conversationSpaces.addProject(project, 'code'); await settings.conversationSpaces.setMode('code');
   let cwd = project, activated = false;
   const runtime = { projectPath: project, sessionId, sessionMode: 'code', getWorkspaceState: async () => ({ cwd, transcript_path: path }) };
   const bridge = { registerWindow() {}, registerIpc() {}, retainBackgroundSession: () => () => {}, get: () => runtime, isProjectClosing: () => false,
@@ -538,7 +539,7 @@ test('manual Code recovery reopens the original pending UUID and keeps its saved
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const project = join(root, 'project'); mkdirSync(project);
   const settings = new SettingsStore(join(root, 'settings'));
-  settings.addProject(project); settings.conversationSpaces.addProject(project, 'code'); settings.conversationSpaces.setMode('code');
+  settings.addProject(project); await settings.conversationSpaces.addProject(project, 'code'); await settings.conversationSpaces.setMode('code');
   const ledger = new AuthoringSessionIntents(join(root, 'intents'));
   const saved = await ledger.create({ projectPath: project, sessionId }, { name: 'Draft', setCurrent: false });
   const calls: string[] = [];
@@ -573,7 +574,7 @@ test('Local App recovery selects its recorded transcript when another copy has t
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const project = join(root, 'project'); mkdirSync(project);
   const settings = new SettingsStore(join(root, 'settings'));
-  settings.addProject(project); settings.conversationSpaces.addProject(project, 'code'); settings.conversationSpaces.setMode('code');
+  settings.addProject(project); await settings.conversationSpaces.addProject(project, 'code'); await settings.conversationSpaces.setMode('code');
   const ledger = new AuthoringSessionIntents(join(root, 'intents'));
   const original = join(root, 'copy-a', `${sessionId}.jsonl`), other = join(root, 'copy-b', `${sessionId}.jsonl`);
   let saved = await ledger.create({ projectPath: project, sessionId }, { name: 'Draft', setCurrent: false });
@@ -611,7 +612,7 @@ test('an unconfirmed Local App source cannot adopt an unrelated same-UUID select
   for (const collision of ['selection', 'runtime'] as const) {
     const project = join(root, collision); mkdirSync(project);
     const settings = new SettingsStore(join(root, `settings-${collision}`));
-    settings.addProject(project); settings.conversationSpaces.addProject(project, 'code'); settings.conversationSpaces.setMode('code');
+    settings.addProject(project); await settings.conversationSpaces.addProject(project, 'code'); await settings.conversationSpaces.setMode('code');
     const ledger = new AuthoringSessionIntents(join(root, `intents-${collision}`));
     const saved = await ledger.create({ projectPath: project, sessionId }, { name: 'Draft', setCurrent: false });
     if (collision === 'selection') settings.rememberSessionTranscriptSelection({ projectPath: project, sessionId },
@@ -640,7 +641,7 @@ test('recovering Local App source A never retargets a live same-UUID source B', 
   const original = join(root, 'a', `${sessionId}.jsonl`), livePath = join(root, 'b', `${sessionId}.jsonl`);
   mkdirSync(join(root, 'a')); mkdirSync(join(root, 'b')); writeFileSync(original, '{}\n'); writeFileSync(livePath, '{}\n');
   const settings = new SettingsStore(join(root, 'settings'));
-  settings.addProject(project); settings.conversationSpaces.addProject(project, 'code'); settings.conversationSpaces.setMode('code');
+  settings.addProject(project); await settings.conversationSpaces.addProject(project, 'code'); await settings.conversationSpaces.setMode('code');
   const ledger = new AuthoringSessionIntents(join(root, 'intents'));
   const created = await ledger.create({ projectPath: project, sessionId }, { name: 'Draft', setCurrent: false });
   const saved = await ledger.recordSource(created.requestId, { scope: 'repository', transcriptPath: original });
@@ -691,12 +692,12 @@ test('a registered Global owner keeps its scope after its cwd moves into a proje
   const settings = new SettingsStore(join(root, 'settings'));
   settings.addProject(project);
   const original = { projectPath: settings.conversationSpaces.globalWorkspaces.chat, projectId: null, sessionId, mode: 'chat' as const };
-  settings.conversationSpaces.register(original);
-  const moved = settings.conversationSpaces.relocate(original, project);
+  await settings.conversationSpaces.register(original);
+  const moved = await settings.conversationSpaces.relocate(original, project);
   const path = join(root, `${sessionId}.jsonl`);
   const row = { uuid: sessionId, path, mode: 'chat', workspace_path: project, message_count: 1 };
   let opened: any;
-  const bridge = { get: () => undefined, isProjectClosing: () => false, openSession: async (owner: unknown) => { opened = owner; } };
+  const bridge = { get: () => undefined, isProjectClosing: () => false, openSession: async (owner: unknown) => { opened = owner; }, activateSession() {} };
   const catalog = { select: async () => row, invalidate() {} };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);
   (host as any).bootstrap = () => ({});
@@ -711,11 +712,11 @@ for (const changedAt of ['before-open', 'after-open'] as const) {
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const project = join(root, 'source'), moved = join(root, 'moved'); mkdirSync(project); mkdirSync(moved);
     const settings = new SettingsStore(join(root, 'settings'));
-    settings.addProject(project); settings.conversationSpaces.addProject(project, 'code');
+    settings.addProject(project); await settings.conversationSpaces.addProject(project, 'code');
     const prior = { projectPath: project, projectId: project, sessionId, mode: 'code' as const };
     const selected = { ...prior, sessionId: targetId };
-    settings.conversationSpaces.register(prior); settings.conversationSpaces.register(selected);
-    settings.conversationSpaces.setMode('code'); settings.setActiveSession(prior);
+    await settings.conversationSpaces.register(prior); await settings.conversationSpaces.register(selected);
+    await settings.conversationSpaces.setMode('code'); settings.setActiveSession(prior);
     let cwd = changedAt === 'before-open' ? moved : project;
     let opened = 0, activated = 0, closed = 0, cancelled = 0, verified = 0;
     const runtime = { projectPath: project, sessionId: targetId, sessionMode: 'code', connectionState: { status: 'connected' },
@@ -740,10 +741,10 @@ test('Local App navigation rechecks the captured source receipt before activatin
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const project = join(root, 'source'); mkdirSync(project);
   const settings = new SettingsStore(join(root, 'settings'));
-  settings.addProject(project); settings.conversationSpaces.addProject(project, 'code');
+  settings.addProject(project); await settings.conversationSpaces.addProject(project, 'code');
   const prior = { projectPath: project, projectId: project, sessionId, mode: 'code' as const };
   const selected = { ...prior, sessionId: targetId };
-  settings.conversationSpaces.register(prior); settings.conversationSpaces.register(selected); settings.setActiveSession(prior);
+  await settings.conversationSpaces.register(prior); await settings.conversationSpaces.register(selected); settings.setActiveSession(prior);
   const runtime = { projectPath: project, sessionId: targetId, sessionMode: 'code', connectionState: { status: 'connected' },
     getWorkspaceState: async () => ({ cwd: project }) };
   let activated = false, closed = false;
@@ -762,10 +763,10 @@ test('a verified Local App Code owner activates only after its workspace and rec
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const project = join(root, 'source'); mkdirSync(project);
   const settings = new SettingsStore(join(root, 'settings'));
-  settings.addProject(project); settings.conversationSpaces.addProject(project, 'code');
+  settings.addProject(project); await settings.conversationSpaces.addProject(project, 'code');
   const prior = { projectPath: project, projectId: project, sessionId, mode: 'code' as const };
   const selected = { ...prior, sessionId: targetId };
-  settings.conversationSpaces.register(prior); settings.conversationSpaces.register(selected); settings.setActiveSession(prior);
+  await settings.conversationSpaces.register(prior); await settings.conversationSpaces.register(selected); settings.setActiveSession(prior);
   const order: string[] = [];
   const runtime = { projectPath: project, sessionId: targetId, sessionMode: 'code', connectionState: { status: 'connected' },
     getWorkspaceState: async () => { order.push('cwd'); return { cwd: project }; } };
@@ -784,7 +785,7 @@ test('a linked session checks its fixed mode before switching spaces and rolls b
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-linked-mode-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.code;
-  settings.conversationSpaces.register({ projectPath: path, projectId: null, sessionId: targetId, mode: 'code' });
+  await settings.conversationSpaces.register({ projectPath: path, projectId: null, sessionId: targetId, mode: 'code' });
   const handlers = new Map<string, (...args: any[]) => any>();
   const bridge = { registerWindow() {}, registerIpc() {} };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
@@ -808,7 +809,7 @@ test('voice flow retains its owner and provider context across navigation and re
   const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
   const target = { projectPath: settings.conversationSpaces.globalWorkspaces.code, projectId: null, sessionId: targetId, mode: 'code' as const };
-  settings.conversationSpaces.register(source); settings.conversationSpaces.register(target); settings.setActiveSession(source);
+  await settings.conversationSpaces.register(source); await settings.conversationSpaces.register(target); settings.setActiveSession(source);
   const handlers = new Map<string, (...args: any[]) => any>(), released: string[] = [], contexts: unknown[] = [];
   let cancels = 0, finishes = 0;
   const runtimes = new Map([sessionId, targetId].map(id => [id, { projectPath: path, sessionId: id,
@@ -856,7 +857,7 @@ test('a native operation retains its owner until it settles even if its flow lea
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-audio-operation-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
-  settings.conversationSpaces.register({ projectPath: path, projectId: null, sessionId, mode: 'chat' });
+  await settings.conversationSpaces.register({ projectPath: path, projectId: null, sessionId, mode: 'chat' });
   settings.setActiveSession({ projectPath: path, sessionId });
   const finished = deferred<any>(), handlers = new Map<string, (...args: any[]) => any>();
   let reservations = 0;
@@ -887,7 +888,7 @@ test('renderer teardown holds the audio runtime until native cancellation is con
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-audio-detach-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
-  settings.conversationSpaces.register({ projectPath: path, projectId: null, sessionId, mode: 'chat' });
+  await settings.conversationSpaces.register({ projectPath: path, projectId: null, sessionId, mode: 'chat' });
   settings.setActiveSession({ projectPath: path, sessionId });
   const cancelled = deferred<void>(), handlers = new Map<string, (...args: any[]) => any>();
   let reservations = 0, background = 0;
@@ -914,7 +915,7 @@ test('a failed latest switch restores the confirmed space after rapid opposing c
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
-  settings.conversationSpaces.register(source); settings.setActiveSession(source);
+  await settings.conversationSpaces.register(source); settings.setActiveSession(source);
   const first = deferred<void>(), handlers = new Map<string, (...args: any[]) => any>();
   const bridge = { registerWindow() {}, registerIpc() {} };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
@@ -940,7 +941,7 @@ test('failed captures keep one bounded lease until retry is discarded', async t 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
-  settings.conversationSpaces.register(source); settings.setActiveSession(source);
+  await settings.conversationSpaces.register(source); settings.setActiveSession(source);
   let released = 0;
   const bridge = { get: () => ({ prepareSessionHandoff: async () => { throw new Error('model failed'); } }),
     retainBackgroundSession: () => () => { released++; } };
@@ -960,7 +961,7 @@ test('a slow scheduled history open cannot reactivate its owner after a newer sp
   const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
   const source = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
   const target = { ...source, sessionId: targetId };
-  settings.conversationSpaces.register(source); settings.conversationSpaces.register(target); settings.setActiveSession(source);
+  await settings.conversationSpaces.register(source); await settings.conversationSpaces.register(target); settings.setActiveSession(source);
   const ready = deferred<void>(), entered = deferred<void>(), handlers = new Map<string, (...args: any[]) => any>();
   const activated: unknown[] = [];
   const bridge = { registerWindow() {}, registerIpc() {}, isProjectClosing: () => false, get: (id: string) => id === targetId ? { projectPath: path, sessionMode: 'chat' } : undefined,
@@ -990,9 +991,9 @@ test('a queued scheduled Chat open superseded by New Chat preserves the visible 
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-scheduled-queued-mode-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const settings = new SettingsStore(root), path = settings.conversationSpaces.globalWorkspaces.chat;
-  settings.conversationSpaces.setMode('code');
+  await settings.conversationSpaces.setMode('code');
   const target = { projectPath: path, projectId: null, sessionId, mode: 'chat' as const };
-  settings.conversationSpaces.register(target);
+  await settings.conversationSpaces.register(target);
   const handlers = new Map<string, (...args: any[]) => any>();
   let created: any;
   const bridge = { registerWindow() {}, registerIpc() {}, newSession: async (directory: string, _model: unknown, owner: any) => {
@@ -1042,5 +1043,143 @@ for (const afterStart of [false, true]) {
     ready.resolve(); await blocker; await opening;
     assert.equal(starts, afterStart ? 1 : 0);
     assert.equal(activations, 0);
+  });
+}
+
+test('rapid Code then Chat intent survives an uncommitted asynchronous mode write', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-mode-persist-race-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root);
+  const entered = deferred<void>(), release = deferred<void>();
+  const store = settings.conversationSpaces as any, stage = store.stage.bind(store);
+  let first = true;
+  store.stage = async (value: unknown) => {
+    if (first) { first = false; entered.resolve(); await release.promise; }
+    return stage(value);
+  };
+  const handlers = new Map<string, (...args: any[]) => any>();
+  const bridge = { registerWindow() {}, registerIpc() {} };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any,
+    { handle: (name: string, handler: any) => handlers.set(name, handler), removeHandler() {} } as any);
+  const switched: string[] = [];
+  (host as any).bootstrap = async () => ({ conversationSpaces: settings.conversationSpaces.snapshot() });
+  (host as any).switchConversationSpace = async (space: string) => { switched.push(space); return (host as any).bootstrap(); };
+  const frame = { url: 'http://127.0.0.1:4242' }, sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  host.registerWindow(sender as any, frame.url); host.registerIpc();
+  const event = { sender, senderFrame: frame };
+  const code = handlers.get(CH_CONVERSATION_SPACE)!(event, 'code');
+  await entered.promise;
+  assert.equal(settings.conversationSpaces.snapshot().activeMode, 'chat');
+  const chat = handlers.get(CH_CONVERSATION_SPACE)!(event, 'chat');
+  release.resolve();
+  await Promise.all([code, chat]);
+  assert.deepEqual(switched, ['chat']);
+  assert.equal(settings.conversationSpaces.snapshot().activeMode, 'chat');
+  assert.equal(new SettingsStore(root).conversationSpaces.snapshot().activeMode, 'chat');
+});
+
+test('authoring revocation during staged navigation preserves ownership, saved source and the selected runtime', async t => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-authoring-staged-revocation-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const project = join(root, 'source'); mkdirSync(project);
+  const settings = new SettingsStore(join(root, 'settings'));
+  settings.addProject(project); await settings.conversationSpaces.addProject(project, 'code'); await settings.conversationSpaces.setMode('code');
+  const prior = { projectPath: project, projectId: project, sessionId, mode: 'code' as const };
+  const selected = { ...prior, sessionId: targetId };
+  await settings.conversationSpaces.register(prior); await settings.conversationSpaces.register(selected);
+  await settings.conversationSpaces.setNavigation('code', project, prior); settings.setActiveSession(prior);
+  const before = settings.conversationSpaces.snapshot(), savedSource = settings.getSessionTranscriptSelection(selected);
+  const fileBefore = readFileSync(settings.settingsPath, 'utf8');
+  const entered = deferred<void>(), release = deferred<void>();
+  const store = settings.conversationSpaces as any, stage = store.stage.bind(store);
+  store.stage = async (value: unknown) => { const result = await stage(value); entered.resolve(); await release.promise; return result; };
+  let revoked = false, activated = false;
+  const runtime = { projectPath: project, sessionId: targetId, sessionMode: 'code', connectionState: { status: 'connected' },
+    getWorkspaceState: async () => ({ cwd: project }) };
+  const bridge = { get: () => runtime, isProjectClosing: () => false, openSession: async () => {}, activateSession: () => { activated = true; } };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), {} as any);
+  (host as any).trustSessionSource = async () => {};
+  const opening = (host as any).openSessionAndActivateInternal(selected, undefined, undefined, 'code', {
+    sourceDirectory: project, commit: async (operation: () => unknown) => { if (revoked) throw new Error('authoring lease revoked'); return operation(); },
+  });
+  await entered.promise;
+  revoked = true; release.resolve();
+  await assert.rejects(opening, /authoring lease revoked/);
+  assert.equal(activated, false);
+  assert.deepEqual(settings.conversationSpaces.snapshot(), before);
+  assert.deepEqual(new SettingsStore(join(root, 'settings')).conversationSpaces.snapshot(), before);
+  assert.equal(settings.getSessionTranscriptSelection(selected), savedSource);
+  assert.equal(readFileSync(settings.settingsPath, 'utf8'), fileBefore);
+  assert.equal(settings.getPublic().activeSession?.sessionId, sessionId);
+});
+
+for (const failure of ['activation', 'after-unarchive'] as const) {
+  test(`a failed ${failure} publication restores real settings, draft and runtime under cache pressure`, async t => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-publication-rollback-')));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const project = join(root, 'source'); mkdirSync(project);
+    const settings = new SettingsStore(join(root, 'settings'));
+    settings.addProject(project); await settings.conversationSpaces.addProject(project, 'code'); await settings.conversationSpaces.setMode('code');
+    const prior = { projectPath: project, projectId: project, sessionId, mode: 'code' as const };
+    const target = { ...prior, sessionId: targetId };
+    await settings.conversationSpaces.register(prior); await settings.conversationSpaces.register(target);
+    await settings.conversationSpaces.setNavigation('code', project, prior);
+    settings.setActiveSession(prior); settings.setActiveSessionDraft(prior);
+    const saved = { catalogProjectPath: project, scope: 'current' as const, transcriptPath: join(root, 'prior-copy', `${targetId}.jsonl`) };
+    settings.rememberSessionTranscriptSelection(target, saved);
+    settings.setSessionArchived(target, true);
+    let previousSettings = readFileSync(settings.settingsPath, 'utf8');
+    const previousSelection = settings.getSessionTranscriptSelection(target);
+    const previousRegistry = settings.conversationSpaces.snapshot();
+    const disposed: string[] = [];
+    const runtime = (id: string) => ({ projectPath: project, sessionId: id, sessionMode: 'code', connectionState: { status: 'connected' },
+      hasActiveWork: false, getWorkspaceState: async () => ({ cwd: project }), dispose: async () => { disposed.push(id); } });
+    const priorRuntime = runtime(sessionId), targetRuntime = runtime(targetId);
+    const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1, launchConfig: ref => ({ workspace: ref.projectPath, trusted: true }) });
+    t.after(() => manager.dispose());
+    (manager as any).runtimes.set(sessionId, priorRuntime);
+    manager.activateSession(prior);
+    manager.openSession = async (_ref, _empty, _model, activate) => {
+      assert.equal(activate, false, 'runtime preparation cannot publish selection');
+      (manager as any).runtimes.set(targetId, targetRuntime);
+      return targetRuntime as any;
+    };
+    const activate = manager.activateSession.bind(manager);
+    manager.activateSession = ref => {
+      activate(ref);
+      if (failure === 'activation' && ref.sessionId === targetId) throw new Error('activation publication failed');
+    };
+    const selected = { uuid: targetId, title: 'Target', path: join(root, 'selected-copy', `${targetId}.jsonl`),
+      workspace_path: project, mode: 'code', empty_session: false, modified_rfc3339: '2026-11-10T00:00:00Z', message_count: 1 };
+    const host = new HostController(settings, manager, new DiagnosticBuffer(), { select: async () => selected } as any);
+    (host as any).trustSessionSource = async () => {};
+    (host as any).draftSelections.set('code', prior);
+    host.attachRemoteControl({ sessionsChanged: () => { throw new Error('after-unarchive publication failed'); } } as any);
+    let verifications = 0;
+    const authoring = { sourceDirectory: project, commit: async (operation: () => unknown) => {
+      if (++verifications === 1) {
+        settings.setRemoteControlAtStartup(true);
+        previousSettings = readFileSync(settings.settingsPath, 'utf8');
+      }
+      return operation();
+    } };
+    await assert.rejects((host as any).openSessionAndActivateInternal(target,
+      { scope: 'all', transcriptPath: selected.path }, undefined, 'code', authoring), /publication failed/);
+    assert.equal((manager as any).activeSessionId, sessionId);
+    assert.equal(manager.get(sessionId), priorRuntime);
+    assert.equal(disposed.includes(sessionId), false, 'rollback must retain the prior owner even at the runtime cache limit');
+    assert.deepEqual((host as any).draftSelections.get('code'), prior);
+    assert.equal(settings.getPublic().activeSession?.sessionId, sessionId);
+    assert.deepEqual(settings.getSessionTranscriptSelection(target), previousSelection);
+    assert.equal(settings.isSessionArchived(target), true);
+    assert.equal(readFileSync(settings.settingsPath, 'utf8'), previousSettings);
+    assert.deepEqual(settings.conversationSpaces.snapshot(), previousRegistry);
+    const cold = new SettingsStore(join(root, 'settings'));
+    assert.equal(cold.getPublic().activeSession?.sessionId, sessionId);
+    assert.deepEqual(cold.getSessionTranscriptSelection(target), previousSelection);
+    assert.equal(cold.getRemoteControlAtStartup(), true, 'unrelated settings committed during staging must survive recovery');
+    assert.equal(verifications, 2, 'a settings write invalidates the staged backup and retries the authority fence');
+    assert.equal(cold.isSessionArchived(target), true);
+    assert.deepEqual(cold.conversationSpaces.snapshot(), previousRegistry);
   });
 }

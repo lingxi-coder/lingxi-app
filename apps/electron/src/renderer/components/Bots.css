@@ -1,6 +1,7 @@
 .bots-page { flex: 1; min-height: 0; box-sizing: border-box; overflow: auto; padding: 38px clamp(24px, 5vw, 72px); color: var(--bots-text); background: var(--bots-background); }
 .bots-page :focus-visible { outline: 2px solid var(--bots-accent, #5085ff); outline-offset: 3px; }
-.bots-page button { font: inherit; color: inherit; cursor: pointer; border: 1px solid var(--bots-border); background: transparent; border-radius: 8px; padding: 7px 12px; }
+.bots-page button { font: inherit; color: inherit; cursor: pointer; border: 1px solid var(--bots-border); background: transparent; border-radius: 10px; padding: 7px 12px; transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease; }
+.bots-page button:active:not(:disabled) { filter: brightness(.94); }
 .bots-page button:hover:not(:disabled) { background: var(--bots-surface-hover); }
 .bots-page button:disabled { opacity: .55; cursor: default; }
 .bots-page button[aria-busy='true'] { cursor: progress; }
@@ -12,7 +13,7 @@
 .bots-page h2 { font-size: 19px; font-weight: 500; margin: 22px 0 0; }
 .bots-page p { margin: 0; }
 .bots-page .mono { font-family: ui-monospace, monospace; }
-.bots-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+.bots-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 32px; }
 .bots-header p, .bots-muted { color: var(--bots-muted); font-size: 12px; line-height: 1.5; }
 .bots-header p { font-size: 14px; }
 .bots-hint { color: var(--bots-muted); font-size: 12px; line-height: 1.5; }
@@ -20,13 +21,14 @@
 .bots-problem button { margin-left: 8px; }
 .bots-empty-line { color: var(--bots-muted); font-size: 13px; }
 
-.bots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 18px; padding: 0; margin: 0; list-style: none; }
-.bots-page .bots-card { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; width: 100%; height: 100%; box-sizing: border-box; padding: 20px; text-align: left; border-radius: 14px; background: var(--bots-surface); }
+.bots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 16px; padding: 0; margin: 0; list-style: none; }
+.bots-page .bots-card { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; width: 100%; height: 100%; box-sizing: border-box; padding: 22px; text-align: left; border-radius: 16px; background: var(--bots-surface); box-shadow: 0 2px 10px rgb(0 0 0 / 3%); }
+.bots-page .bots-card:hover:not(:disabled) { border-color: color-mix(in srgb, var(--bots-accent) 40%, var(--bots-border)); box-shadow: 0 6px 20px rgb(0 0 0 / 7%); }
 /* The Bot's avatar (the one of the sidebar and the Teams views) on a tile; it holds a picture, never letters. */
-.bots-avatar { width: 42px; height: 42px; flex: none; display: grid; place-items: center; margin-bottom: 10px; border: 1px solid var(--bots-border); border-radius: 11px; }
-.bots-card-name { font-size: 16px; font-weight: 590; overflow-wrap: anywhere; }
+.bots-avatar { width: 46px; height: 46px; flex: none; display: grid; place-items: center; margin-bottom: 12px; border: 1px solid var(--bots-border); border-radius: 13px; background: var(--bots-background); }
+.bots-card-name { font-size: 16px; font-weight: 600; line-height: 1.3; letter-spacing: -.01em; overflow-wrap: anywhere; }
 .bots-card-description { min-height: 38px; color: var(--bots-muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.bots-card-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; width: 100%; margin-top: auto; padding-top: 14px; }
+.bots-card-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; width: 100%; margin-top: auto; padding-top: 16px; }
 .bots-state { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--bots-muted); white-space: nowrap; }
 .bots-state::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .bots-state[data-state='working'] { color: var(--bots-ok); }
@@ -47,7 +49,7 @@
 .bots-detail-title p { font-size: 13px; }
 .bots-detail-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; }
 .bots-detail-actions { display: flex; flex: 0 0 auto; gap: 8px; }
-.bots-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.bots-tabs { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 2px; }
 .bots-page .bots-tabs button[aria-current='page'] { background: var(--bots-surface); color: var(--bots-accent); border-color: var(--bots-accent); }
 
 .bots-fields { display: flex; flex-direction: column; gap: 18px; max-width: 720px; min-width: 0; border: 0; padding: 0; margin: 0; }
@@ -116,4 +118,8 @@
 }
 @media (prefers-contrast: more) {
   .bots-page .bots-card, .bots-row, .bots-viewer, .bots-folder-list li { border-color: var(--bots-text); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bots-page button { transition: none; }
 }

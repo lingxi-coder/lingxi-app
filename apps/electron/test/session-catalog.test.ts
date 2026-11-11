@@ -16,7 +16,7 @@ function fakeChild(stdoutBody: string) {
   };
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
-  child.kill = () => true;
+  child.kill = () => { queueMicrotask(() => child.emit('close', null, 'SIGTERM')); return true; };
   queueMicrotask(() => {
     child.stdout.emit('data', Buffer.from(stdoutBody));
     child.emit('close', 0, null);
@@ -30,7 +30,7 @@ test('exact selections pass their path to separate catalog queries without a UUI
   const sourceA = join(project, 'a', `${id}.jsonl`), sourceB = join(project, 'b', `${id}.jsonl`);
   const calls: string[][] = [];
   let missingA = false, wrongCopy = false;
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server',
     spawnProcess: ((_bin: string, args: readonly string[]) => {
       calls.push([...args]);
       const path = args[args.indexOf('--session-transcript-path') + 1];
@@ -66,7 +66,7 @@ test('product paths use native product discovery without merging workspace setti
   const brandHome = join(tmpdir(), '.another-product');
   const globalConfigPath = join(tmpdir(), 'another-product-config.json');
   let flags: readonly string[] | undefined;
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server',
     spawnProcess: ((_bin: string, args: readonly string[]) => {
       flags = args;
       return fakeChild(JSON.stringify({ version: 2, brand_home: brandHome, workspace_root: brandHome + '-workspaces', app_projects_root: join(brandHome + '-workspaces', 'apps'), global_config_path: globalConfigPath }));
@@ -83,7 +83,7 @@ test('product directory discovery rejects malformed and nonabsolute native paths
     JSON.stringify({ ...valid, brand_home: brandHome + '\0' }),
     JSON.stringify({ ...valid, global_config_path: 'relative' }), JSON.stringify({ ...valid, global_config_path: undefined }),
     JSON.stringify({ ...valid, global_config_path: brandHome + '\0' })]) {
-    const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
+    const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server',
       spawnProcess: (() => fakeChild(response)) as any });
     await assert.rejects(catalog.productPaths(), /invalid product paths response/);
   }
@@ -93,7 +93,7 @@ test('project catalog uses the allowlisted environment and validates session UUI
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-project-'));
   let spawnedEnv: NodeJS.ProcessEnv | undefined;
   const validId = '11111111-2222-4333-8444-555555555555';
-  const catalog = new ProjectSessionCatalog({
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false,
     serverBin: '/bridge-server',
     spawnProcess: ((_bin: string, _args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
       spawnedEnv = options.env;
@@ -130,7 +130,7 @@ test('project catalog uses the allowlisted environment and validates session UUI
 test('project catalog rejects missing mode metadata instead of guessing', async () => {
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-legacy-mode-'));
   const validId = '11111111-2222-4333-8444-555555555557';
-  const catalog = new ProjectSessionCatalog({
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false,
     serverBin: '/bridge-server',
     spawnProcess: (() => fakeChild(JSON.stringify({
       version: 1,
@@ -146,7 +146,7 @@ test('project catalog rejects missing mode metadata instead of guessing', async 
 
 test('project catalog rejects malformed session identities', async () => {
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-invalid-'));
-  const catalog = new ProjectSessionCatalog({
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false,
     serverBin: '/bridge-server',
     spawnProcess: (() => fakeChild(JSON.stringify({
       version: 1,
@@ -170,7 +170,7 @@ test('project catalog keeps the UI list bounded but supports exact lookup beyond
     path: `session-${index}.jsonl`,
     empty_session: false,
   }));
-  const catalog = new ProjectSessionCatalog({
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false,
     serverBin: '/bridge-server',
     spawnProcess: (() => fakeChild(JSON.stringify({ version: 1, sessions: rows }))) as any,
   });
@@ -192,7 +192,7 @@ test('each space is limited after hidden sessions are excluded', async () => {
     title: `Session ${index}`, modified_rfc3339: '', message_count: 1,
     mode: index < 203 ? 'code' : 'chat', path: `session-${index}.jsonl`, empty_session: false,
   }));
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server',
     spawnProcess: (() => fakeChild(JSON.stringify({ version: 1, sessions: rows }))) as any });
   try {
     const listed = await catalog.list(project, 'current', (row) => row.uuid !== rows[0]!.uuid && row.uuid !== rows[203]!.uuid);
@@ -230,7 +230,7 @@ test('project catalog preserves validated zero-count rows and applies the sideba
     path: 'conversation.jsonl',
     empty_session: false,
   };
-  const catalog = new ProjectSessionCatalog({
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false,
     serverBin: '/bridge-server',
     spawnProcess: (() => fakeChild(JSON.stringify({
       version: 1,
@@ -254,7 +254,7 @@ test('project catalog coalesces concurrent reads and invalidates after a mutatio
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-cache-'));
   const uuid = '33333333-4444-4555-8666-777777777777';
   let spawns = 0;
-  const catalog = new ProjectSessionCatalog({
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false,
     serverBin: '/bridge-server',
     spawnProcess: (() => {
       spawns += 1;
@@ -288,7 +288,7 @@ test('session lookups without a fresh catalog read only that session', async () 
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-narrowed-'));
   const uuid = '44444444-5555-4666-8777-888888888888';
   const spawned: string[][] = [];
-  const catalog = new ProjectSessionCatalog({
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false,
     serverBin: '/bridge-server',
     spawnProcess: ((_bin: string, args: readonly string[]) => {
       spawned.push([...args]);
@@ -316,7 +316,7 @@ function chunkedChild(buffers: Buffer[], code = 0, stderr = false) {
   const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill(): boolean };
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
-  child.kill = () => true;
+  child.kill = () => { queueMicrotask(() => child.emit('close', null, 'SIGTERM')); return true; };
   queueMicrotask(() => {
     for (const buffer of buffers) (stderr ? child.stderr : child.stdout).emit('data', buffer);
     child.emit('close', code, null);
@@ -328,7 +328,7 @@ test('catalog decodes split UTF-8 titles and transcript paths only after collect
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-unicode-'));
   const row = { uuid: '11111111-2222-4333-8444-555555555555', title: '中文标题😀', path: '/session/会话.jsonl', modified_rfc3339: '', message_count: 1, mode: 'code', empty_session: false };
   const body = Buffer.from(JSON.stringify({ version: 1, sessions: [row] }));
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server',
     spawnProcess: (() => chunkedChild(Array.from(body, (byte) => Buffer.from([byte])))) as any });
   try {
     const listed = await catalog.list(project);
@@ -341,7 +341,7 @@ test('catalog decodes split UTF-8 titles and transcript paths only after collect
 test('catalog failure diagnostics preserve Unicode across stderr chunk boundaries', async () => {
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-unicode-error-'));
   const message = '错误：会话目录不可用';
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server',
     spawnProcess: (() => chunkedChild(Array.from(Buffer.from(message), (byte) => Buffer.from([byte])), 1, true)) as any });
   try { await assert.rejects(catalog.list(project), (error) => error instanceof Error && error.message.endsWith(message)); }
   finally { rmSync(project, { recursive: true, force: true }); }
@@ -351,8 +351,8 @@ test('catalog rejects the raw stdout byte limit immediately even when the child 
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-limit-'));
   let kills = 0;
   const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill(): boolean };
-  child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => { kills++; return true; };
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: (() => child) as any });
+  child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => { kills++; queueMicrotask(() => child.emit('close', null, 'SIGTERM')); return true; };
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server', spawnProcess: (() => child) as any });
   try {
     const load = catalog.list(project);
     const rejected = assert.rejects(load, /output is too large/);
@@ -369,7 +369,7 @@ test('catalog retains a bounded UTF-8 stderr tail with the final diagnostic', as
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-stderr-tail-'));
   const message = '错误：最终诊断';
   const buffers = [Buffer.from('中文'.repeat(4000)), Buffer.from(message)];
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: (() => chunkedChild(buffers, 1, true)) as any });
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server', spawnProcess: (() => chunkedChild(buffers, 1, true)) as any });
   try {
     await assert.rejects(catalog.list(project), (error) => {
       assert.ok(error instanceof Error);
@@ -397,8 +397,8 @@ test('a catalog of another configuration home reads that home in every mode, and
   process.env['LINGXI_CONFIG_DIR'] = '/owner/.lingxi';
   try {
     const botHome = join(project, 'bot-home');
-    const bot = new ProjectSessionCatalog({ serverBin: '/bridge-server', configHome: botHome, spawnProcess });
-    const owner = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess });
+    const bot = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server', configHome: botHome, spawnProcess });
+    const owner = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server', spawnProcess });
     assert.equal((await bot.productPaths()).brandHome, botHome);
     assert.equal((await bot.workspaceSettings(project)).configHome, botHome);
     await bot.list(project);
@@ -416,7 +416,7 @@ test('a catalog of another configuration home reads that home in every mode, and
 
 test('account helper uses Host settings and sends secret input only on stdin', async () => {
   let flags: readonly string[] | undefined, envelope: any;
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', providerAccountChannel: 'production', appVersion: '1.2.3',
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server', providerAccountChannel: 'production', appVersion: '1.2.3',
     spawnProcess: ((_bin: string, args: readonly string[], options: any) => {
       flags = args;
       assert.deepEqual(options.stdio, ['pipe', 'pipe', 'pipe']);
@@ -451,7 +451,7 @@ test('account helper uses Host settings and sends secret input only on stdin', a
 
 test('account helper ignores an unavailable runtime and uses the persisted Host home', async () => {
   let envelope: any;
-  const options = { serverBin: '/bridge-server',
+  const options = { catalogWorker: false, serverBin: '/bridge-server',
     spawnProcess: (() => {
       const child = fakeChild(JSON.stringify({ storeScope: 'home', configRevision: 1, accounts: [], health: [] })) as any;
       child.stdin = new PassThrough(); child.stdin.on('data', bytes => { envelope = JSON.parse(bytes.toString()); }); return child;
@@ -466,7 +466,7 @@ test('account helper ignores an unavailable runtime and uses the persisted Host 
 
 test('credential version publication uses a private metadata-only helper envelope without profiles or secrets', async () => {
   let envelope: any;
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', providerAccountChannel: 'production', appVersion: '1.2.3',
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server', providerAccountChannel: 'production', appVersion: '1.2.3',
     spawnProcess: ((_bin: string, args: readonly string[]) => {
       assert.deepEqual(args, ['--provider-account-command']);
       const child = fakeChild(JSON.stringify({ published: true })) as any;
@@ -480,7 +480,7 @@ test('credential version publication uses a private metadata-only helper envelop
 
 test('global provider settings use a headless Host command with expected snapshot on stdin', async () => {
   let flags: readonly string[] = [], envelope: any;
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: ((_bin: string, args: readonly string[]) => {
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server', spawnProcess: ((_bin: string, args: readonly string[]) => {
     flags = args;
     const child = fakeChild(JSON.stringify({ raw: {}, effective: { providers: { custom: { type: 'openai' } }, providerRegion: 'international' }, locked: [] })) as any;
     child.stdin = new PassThrough(); child.stdin.on('data', bytes => { envelope = JSON.parse(bytes.toString()); });
@@ -497,7 +497,7 @@ test('global provider settings use a headless Host command with expected snapsho
 test('native brand paths share discovery across concurrent Host services and survive caller mutation', async () => {
   let calls = 0;
   const brandHome = join(tmpdir(), '.configured-brand');
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: (() => {
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server', spawnProcess: (() => {
     calls++;
     return fakeChild(JSON.stringify({ version: 2, brand_home: brandHome, workspace_root: brandHome + '-workspaces', app_projects_root: join(brandHome + '-workspaces', 'apps'), global_config_path: null }));
   }) as any });
@@ -511,7 +511,7 @@ test('native brand paths share discovery across concurrent Host services and sur
 test('a failed native brand discovery is not retained by later Host operations', async () => {
   let calls = 0;
   const brandHome = join(tmpdir(), '.configured-brand');
-  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: (() => {
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server', spawnProcess: (() => {
     calls++;
     return fakeChild(calls === 1 ? '{' : JSON.stringify({ version: 2, brand_home: brandHome, workspace_root: brandHome + '-workspaces', app_projects_root: join(brandHome + '-workspaces', 'apps'), global_config_path: null }));
   }) as any });

@@ -52,12 +52,12 @@ const owner = { type: 'session', session_id: 's' } as const;
 const started = (handle: string) => ({ type: 'recording_started', handle });
 const stopped = { type: 'status', status: { recording: false, playing: false } };
 
-function uiOwnerFixture(audio: NativeAudioManager) {
+async function uiOwnerFixture(audio: NativeAudioManager) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-audio-owner-close-')));
   const settings = new SettingsStore(root), projectPath = settings.conversationSpaces.globalWorkspaces.chat;
   const sessionId = '11111111-2222-4333-8444-555555555555';
   const leaseId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-  settings.conversationSpaces.register({ projectPath, projectId: null, sessionId, mode: 'chat' });
+  await settings.conversationSpaces.register({ projectPath, projectId: null, sessionId, mode: 'chat' });
   settings.setActiveSession({ projectPath, sessionId });
   const runtime = new SessionRuntime({ projectPath, sessionId, launchConfig: () => ({ workspace: projectPath, trusted: true, sessionId }) });
   (runtime as any).setState({ status: 'connected' });
@@ -81,7 +81,7 @@ function answerClose(helper: Helper, command: any, overrides: Record<string, unk
 }
 
 test('UI audio keeps the original runtime after an admitted timeout until the exact close receipt', async () => {
-  const f = await fixture(), ui = uiOwnerFixture(f.manager);
+  const f = await fixture(), ui = await uiOwnerFixture(f.manager);
   try {
     ui.lease(true);
     const listening = ui.listen(), request = await envelope(f.helper, 1);
@@ -108,7 +108,7 @@ test('UI audio keeps the original runtime after an admitted timeout until the ex
 });
 
 test('UI audio releases its runtime after ordinary completion and before-admission rejection', async () => {
-  const f = await fixture(), ui = uiOwnerFixture(f.manager);
+  const f = await fixture(), ui = await uiOwnerFixture(f.manager);
   try {
     ui.lease(true);
     const listening = ui.listen(), request = await envelope(f.helper, 1);
@@ -126,7 +126,7 @@ test('provider UI listening keeps the owner until every admitted child capture c
   const configuration = audioConfigurationDefaults(); configuration.recognition.source = 'provider';
   const f = await fixture({ getAudioConfiguration: () => configuration,
     providerAudio: { preflight: async () => undefined, execute: async () => { throw new Error('failed capture cannot reach provider'); } } });
-  const ui = uiOwnerFixture(f.manager);
+  const ui = await uiOwnerFixture(f.manager);
   try {
     ui.lease(true);
     const listening = ui.listen(), start = await envelope(f.helper, 1);
@@ -152,7 +152,7 @@ test('provider UI listening releases its owner on normal child and provider comp
   const configuration = audioConfigurationDefaults(); configuration.recognition.source = 'provider';
   const f = await fixture({ getAudioConfiguration: () => configuration,
     providerAudio: { preflight: async () => undefined, execute: async () => ({ type: 'transcript', text: 'provider result', language: 'en-US' }) } });
-  const ui = uiOwnerFixture(f.manager);
+  const ui = await uiOwnerFixture(f.manager);
   try {
     ui.lease(true);
     const listening = ui.listen(), start = await envelope(f.helper, 1);
@@ -172,7 +172,7 @@ test('provider UI stop during capture releases the owner after the child close i
   let providerCalls = 0;
   const f = await fixture({ getAudioConfiguration: () => configuration,
     providerAudio: { preflight: async () => undefined, execute: async () => { providerCalls++; return { type: 'transcript', text: 'late' }; } } });
-  const ui = uiOwnerFixture(f.manager);
+  const ui = await uiOwnerFixture(f.manager);
   try {
     ui.lease(true);
     const listening = ui.listen(), start = await envelope(f.helper, 1);
@@ -198,7 +198,7 @@ test('provider UI cancellation keeps its owner when a dispatched provider task i
       admitProvider(); await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
       return { type: 'failed', error: { kind: 'cancelled', message: 'provider cancelled' } };
     } } });
-  const ui = uiOwnerFixture(f.manager);
+  const ui = await uiOwnerFixture(f.manager);
   try {
     ui.lease(true);
     const listening = ui.listen(), start = await envelope(f.helper, 1);

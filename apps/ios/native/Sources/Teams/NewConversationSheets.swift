@@ -39,24 +39,22 @@ struct TeamSwitcherSheet: View {
                             onSelect(team.id)
                         } label: {
                             HStack(spacing: 12) {
-                                TeamAvatar(teamID: team.id, name: team.name, size: 36)
+                                TeamAvatar(teamID: team.id, name: team.name, size: 40)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(team.name).font(.body.weight(.semibold)).foregroundStyle(.primary).lineLimit(1)
-                                    HStack(spacing: 6) {
-                                        Text(TeamsText.role(team.role))
-                                        Text("·")
-                                        Text(TeamsText.membersCount(team.memberCount))
-                                    }
-                                    .font(.caption).foregroundStyle(.secondary)
+                                    Text(verbatim: TeamsStreamLogic.joinedLine([TeamsText.roleName(team.role), TeamsText.membersCount(team.memberCount)]))
+                                        .font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer(minLength: 8)
                                 if team.id != workspace.selectedTeamID { TeamsUnreadBadge(count: unread[team.id] ?? 0) }
                                 if team.id == workspace.selectedTeamID {
-                                    Image(systemName: "checkmark").foregroundStyle(Color.accentColor).accessibilityLabel(Text("teams_switch_team"))
+                                    // The selected team is said by the trait below, not by the picture.
+                                    Image(systemName: "checkmark").foregroundStyle(Color.accentColor).accessibilityHidden(true)
                                 }
                             }
                             .contentShape(Rectangle())
                         }
+                        .accessibilityAddTraits(team.id == workspace.selectedTeamID ? .isSelected : [])
                         .accessibilityIdentifier("teams.team.\(team.id)")
                     }
                 }
@@ -115,7 +113,7 @@ struct CreateTeamSheet: View {
             }
             .navigationTitle("teams_new")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("teams_cancel") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("common_cancel") { dismiss() } } }
             .onAppear { workspace.clearError() }
         }
         .presentationDetents([.medium])
@@ -164,7 +162,7 @@ struct JoinTeamSheet: View {
             }
             .navigationTitle("teams_join")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("teams_cancel") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("common_cancel") { dismiss() } } }
             .onAppear { workspace.clearError(); text = prefill }
         }
         .presentationDetents([.medium])
@@ -211,7 +209,7 @@ struct NewConversationSheet: View {
             }
             .navigationTitle(LocalizedStringKey(mode == .newChannel ? "teams_new_channel_title" : mode == .newBot ? "teams_new_bot_title" : "teams_new_message_title"))
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button(mode == .newBot ? "common_close" : "teams_cancel") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button(mode == .newBot ? "common_close" : "common_cancel") { dismiss() } } }
             .onAppear { workspace.clearActionError() }
         }
         .presentationDetents([.large])
@@ -242,11 +240,12 @@ struct NewConversationSheet: View {
                 ForEach(people) { member in
                     Button { choose(member.uid) } label: {
                         HStack(spacing: 12) {
-                            PersonAvatar(id: member.uid, name: member.displayName, size: 28)
+                            PersonAvatar(id: member.uid, name: member.displayName, size: 24)
                             Text(member.displayName).foregroundStyle(.primary)
                             Spacer()
                             Image(systemName: parties.contains(member.uid) ? (kind == "dm" ? "largecircle.fill.circle" : "checkmark.circle.fill") : (kind == "dm" ? "circle" : "circle"))
                                 .foregroundStyle(parties.contains(member.uid) ? Color.accentColor : Color.secondary)
+                                .accessibilityHidden(true)
                         }
                         .contentShape(Rectangle())
                     }
@@ -262,13 +261,14 @@ struct NewConversationSheet: View {
                         let chosen = botParties.contains(bot.sharedBotId)
                         Button { toggleBot(bot.sharedBotId) } label: {
                             HStack(spacing: 12) {
-                                AgentAvatar(agentID: bot.avatarId, size: 28)
+                                AgentAvatar(agentID: bot.avatarId, size: 24)
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(bot.name).foregroundStyle(.primary)
                                     Text("teams_bot_owner \(owner(bot.maintainer.uid))").font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer()
                                 Image(systemName: chosen ? "checkmark.circle.fill" : "circle").foregroundStyle(chosen ? Color.accentColor : Color.secondary)
+                                    .accessibilityHidden(true)
                             }
                             .contentShape(Rectangle())
                         }
@@ -354,28 +354,28 @@ struct NewConversationSheet: View {
         let existing = TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: uid, sharedBotId: bot.sharedBotId)
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                AgentAvatar(agentID: bot.avatarId, size: 32)
+                AgentAvatar(agentID: bot.avatarId, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(bot.name).font(.body.weight(.semibold))
-                    HStack(spacing: 6) {
-                        Text(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued"))
-                        Text("·")
-                        Text("teams_bot_owner \(owner(bot.maintainer.uid))")
-                    }
+                    Text(verbatim: TeamsStreamLogic.joinedLine([
+                        TeamsText.localized(bot.ready ? "remote_online" : "teams_bot_offline_queued"),
+                        String(localized: "teams_bot_owner \(owner(bot.maintainer.uid))"),
+                    ]))
                     .font(.caption).foregroundStyle(.secondary)
                 }
             }
             HStack(spacing: 10) {
-                Button(LocalizedStringKey(existing != nil ? "teams_new_bot_open" : "teams_new_bot_start")) {
+                Button {
                     Task { await openBot(bot, fresh: false) }
+                } label: {
+                    Text(LocalizedStringKey(existing != nil ? "teams_new_bot_open" : "teams_new_bot_start")).minimumHitTarget(minWidth: 0)
                 }
                 .buttonStyle(.borderedProminent)
                 if existing != nil {
-                    Button("remote_bot_new_chat") { Task { await openBot(bot, fresh: true) } }
+                    Button { Task { await openBot(bot, fresh: true) } } label: { Text("remote_bot_new_chat").minimumHitTarget(minWidth: 0) }
                         .buttonStyle(.bordered)
                 }
             }
-            .controlSize(.small)
             .disabled(workspace.messageBusy || offline)
         }
         .padding(.vertical, 4)

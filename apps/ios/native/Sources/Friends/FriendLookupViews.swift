@@ -41,7 +41,7 @@ struct FriendResultCard: View {
         if let result = lookup.result {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 12) {
-                    PersonAvatar(id: result.uid, name: result.displayName, size: 44)
+                    PersonAvatar(id: result.uid, name: result.displayName, size: 40)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(verbatim: result.displayName).font(.headline).lineLimit(2)
                         if let handle = result.handle { Text(verbatim: "@" + handle).font(.subheadline).foregroundStyle(.secondary) }
@@ -146,7 +146,7 @@ struct FriendLinkSheet: View {
     private var content: some View {
         if let result = lookup.result {
             VStack(spacing: 16) {
-                PersonAvatar(id: result.uid, name: result.displayName, size: 64)
+                PersonAvatar(id: result.uid, name: result.displayName, size: 56)
                 if result.relation == .friends {
                     Text(verbatim: result.displayName).font(.title3.weight(.semibold)).multilineTextAlignment(.center)
                     Label("friends_relation_friends", systemImage: "checkmark.circle").foregroundStyle(.secondary)

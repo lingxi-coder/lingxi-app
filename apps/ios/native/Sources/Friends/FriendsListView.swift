@@ -6,6 +6,7 @@ import SwiftUI
 struct FriendsListView: View {
     @Environment(FriendsWorkspace.self) private var friends
     @Environment(\.locale) private var locale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The chat open beside the list (wide layout); highlighted. Empty on phones.
     var selectedChat = ""
     /// Increase when the tab is tapped again at its root, and when `friend/requests` was opened.
@@ -61,8 +62,13 @@ struct FriendsListView: View {
             .listStyle(.plain)
             .searchable(text: $query, prompt: Text("friends_filter_placeholder"))
             .safeAreaInset(edge: .top, spacing: 0) { banners }
+            // The three listeners start again (as the Retry of the load error does); what changed arrives by itself.
+            .refreshable {
+                friends.reload()
+                friends.refreshClock()
+            }
             .onChange(of: scrollToTop) { _, _ in
-                withAnimation { proxy.scrollTo(Self.topID, anchor: .top) }
+                withAnimation(.lxMotion(reduceMotion)) { proxy.scrollTo(Self.topID, anchor: .top) }
             }
             .onChange(of: scrollToRequests) { _, _ in
                 scrollPending = true
@@ -106,7 +112,7 @@ struct FriendsListView: View {
         if hasRequests {
             scrollPending = false
             let target = friends.offers.isEmpty ? Self.requestsID : Self.offersID
-            withAnimation { proxy.scrollTo(target, anchor: .top) }
+            withAnimation(.lxMotion(reduceMotion)) { proxy.scrollTo(target, anchor: .top) }
         } else if friends.cardsLoaded && friends.offersAnswered {
             scrollPending = false
         }
@@ -134,9 +140,8 @@ struct FriendsListView: View {
             Image(systemName: "person.crop.circle.badge.exclamationmark").font(.title3).foregroundStyle(.orange).accessibilityHidden(true)
             Text("friends_name_prompt").font(.subheadline)
             Spacer(minLength: 8)
-            Button("friends_name_prompt_action", action: onProfile)
+            Button(action: onProfile) { Text("friends_name_prompt_action").minimumHitTarget(minWidth: 0) }
                 .buttonStyle(.bordered)
-                .controlSize(.small)
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("friends.nameprompt")
@@ -168,14 +173,14 @@ struct FriendsListView: View {
     @ViewBuilder
     private func teamInvitations(_ offers: [TeamOffer]) -> some View {
         if !offers.isEmpty {
-            Text("friends_section_offers")
-                .font(.title3.weight(.semibold))
-                .listRowSeparator(.hidden)
-                .id(Self.offersID)
-                .accessibilityAddTraits(.isHeader)
-                .accessibilityIdentifier("friends.offers")
-            ForEach(rows(offers, expanded: showAllOffers)) { offerRow($0) }
-            showAll(offers.count, expanded: showAllOffers, identifier: "friends.offers.showall") { showAllOffers = true }
+            Section {
+                ForEach(rows(offers, expanded: showAllOffers)) { offerRow($0) }
+                showAll(offers.count, expanded: showAllOffers, identifier: "friends.offers.showall") { showAllOffers = true }
+            } header: {
+                Text("friends_section_offers")
+                    .id(Self.offersID)
+                    .accessibilityIdentifier("friends.offers")
+            }
         }
     }
 
@@ -193,20 +198,19 @@ struct FriendsListView: View {
     @ViewBuilder
     private func requests(_ sections: FriendsListSections) -> some View {
         if !sections.received.isEmpty || !sections.sent.isEmpty {
-            Text("friends_section_requests")
-                .font(.title3.weight(.semibold))
-                .listRowSeparator(.hidden)
-                .id(Self.requestsID)
-                .accessibilityAddTraits(.isHeader)
-            if !sections.received.isEmpty {
-                subheading("friends_requests_received")
-                ForEach(rows(sections.received, expanded: showAllReceived)) { requestRow($0) }
-                showAll(sections.received.count, expanded: showAllReceived, identifier: "friends.requests.showall") { showAllReceived = true }
-            }
-            if !sections.sent.isEmpty {
-                subheading("friends_requests_sent")
-                ForEach(rows(sections.sent, expanded: showAllSent)) { requestRow($0) }
-                showAll(sections.sent.count, expanded: showAllSent, identifier: "friends.requests.showall") { showAllSent = true }
+            Section {
+                if !sections.received.isEmpty {
+                    subheading("friends_requests_received")
+                    ForEach(rows(sections.received, expanded: showAllReceived)) { requestRow($0) }
+                    showAll(sections.received.count, expanded: showAllReceived, identifier: "friends.requests.showall") { showAllReceived = true }
+                }
+                if !sections.sent.isEmpty {
+                    subheading("friends_requests_sent")
+                    ForEach(rows(sections.sent, expanded: showAllSent)) { requestRow($0) }
+                    showAll(sections.sent.count, expanded: showAllSent, identifier: "friends.requests.showall") { showAllSent = true }
+                }
+            } header: {
+                Text("friends_section_requests").id(Self.requestsID)
             }
         }
     }
@@ -227,7 +231,7 @@ struct FriendsListView: View {
     @ViewBuilder
     private func showAll(_ count: Int, expanded: Bool, identifier: String, action: @escaping () -> Void) -> some View {
         if !expanded && count > FriendsLogic.sectionRows {
-            Button(action: action) { Text("friends_show_all \(count)") }
+            Button(action: action) { Text("friends_show_all \(count)").minimumHitTarget(minWidth: 0, alignment: .leading) }
                 .buttonStyle(.borderless)
                 .accessibilityIdentifier(identifier)
         }
@@ -254,6 +258,7 @@ struct FriendsListView: View {
         }
         .buttonStyle(.plain)
         .listRowBackground(card.uid == selectedChat ? Color.accentColor.opacity(0.12) : Color.clear)
+        .accessibilityAddTraits(card.uid == selectedChat ? .isSelected : [])
         .accessibilityIdentifier("friends.row.\(card.uid)")
     }
 }
@@ -316,16 +321,15 @@ private struct FriendOfferRow: View {
                 HStack(spacing: 10) {
                     switch expiry {
                     case .live:
-                        Button("friends_offer_join", action: onJoin).buttonStyle(.borderedProminent)
+                        Button(action: onJoin) { Text("friends_offer_join").minimumHitTarget(minWidth: 0) }.buttonStyle(.borderedProminent)
                             .accessibilityIdentifier("friends.offer.join")
-                        Button("friends_request_decline", action: onDecline).buttonStyle(.bordered)
+                        Button(action: onDecline) { Text("friends_request_decline").minimumHitTarget(minWidth: 0) }.buttonStyle(.bordered)
                             .accessibilityIdentifier("friends.offer.decline")
                     case .expired:
-                        Button("friends_offer_dismiss", action: onDecline).buttonStyle(.bordered)
+                        Button(action: onDecline) { Text("friends_offer_dismiss").minimumHitTarget(minWidth: 0) }.buttonStyle(.bordered)
                             .accessibilityIdentifier("friends.offer.dismiss")
                     }
                 }
-                .controlSize(.small)
                 .padding(.top, 2)
                 if let failure {
                     Text(LocalizedStringKey(failure.key)).font(.footnote).foregroundStyle(.red)
@@ -369,14 +373,13 @@ private struct FriendRequestRow: View {
                 if let note = card.note { Text(verbatim: note).font(.subheadline).foregroundStyle(.secondary).lineLimit(2) }
                 HStack(spacing: 10) {
                     if card.state == .incoming {
-                        Button("friends_request_accept", action: onAccept).buttonStyle(.borderedProminent)
-                        Button("friends_request_decline", action: onDecline).buttonStyle(.bordered)
+                        Button(action: onAccept) { Text("friends_request_accept").minimumHitTarget(minWidth: 0) }.buttonStyle(.borderedProminent)
+                        Button(action: onDecline) { Text("friends_request_decline").minimumHitTarget(minWidth: 0) }.buttonStyle(.bordered)
                     } else {
                         Text("friends_request_sent").font(.subheadline).foregroundStyle(.secondary)
-                        Button("friends_request_cancel", action: onCancel).buttonStyle(.bordered)
+                        Button(action: onCancel) { Text("friends_request_cancel").minimumHitTarget(minWidth: 0) }.buttonStyle(.bordered)
                     }
                 }
-                .controlSize(.small)
                 .padding(.top, 2)
             }
         }

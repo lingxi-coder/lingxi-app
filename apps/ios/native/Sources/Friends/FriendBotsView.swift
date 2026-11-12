@@ -62,6 +62,7 @@ struct FriendBotsView: View {
         let bots = model?.bots ?? []
         let status: LocalizedStringKey? = model?.botsUnverified == true ? "teams_bots_unverified" : model?.botsLoaded == true ? nil : "teams_bots_loading"
         let offline = model?.offline ?? true
+        let empty = bots.isEmpty && status == nil
         return List {
             Section {
                 if let status { TeamsNote(text: status, systemImage: "exclamationmark.triangle") }
@@ -71,25 +72,27 @@ struct FriendBotsView: View {
                         bot: bot, ownerName: name(of: bot.maintainer.uid, in: workspace),
                         isOwner: bot.maintainer == TeamMemberRef(uid: workspace.uid ?? "", generation: chat.generation),
                         busy: workspace.messageBusy || (offline && existing == nil),
-                        showsAudience: false, pauseTitle: "friends_share_bot_stop",
+                        showsAudience: false,
                         onMessage: { Task { if let id = await workspace.openBotDM(bot) { onOpenBot(id) } } },
-                        onPause: { stopping = bot })
+                        onStopSharing: { stopping = bot })
                 }
-                if bots.isEmpty && status == nil {
-                    Text("friends_bots_none").font(.footnote).foregroundStyle(.secondary)
+                if empty {
+                    // What is empty, and what to do about it (U9): the hint is the body here, so it is not repeated below.
+                    TeamsStateView(systemImage: "cpu", title: "friends_bots_none", message: "friends_bots_share_hint")
+                        .listRowSeparator(.hidden).listRowBackground(Color.clear)
                         .accessibilityIdentifier("friends.bots.none")
                 }
             }
             // Under the list, always: a Bot runs on its owner's Desktop and its owner can read every chat with it (D21).
             Section {
                 TeamsNote(text: "friends_bots_note", systemImage: "eye")
-                TeamsNote(text: "friends_bots_share_hint", systemImage: "desktopcomputer")
+                if !empty { TeamsNote(text: "friends_bots_share_hint", systemImage: "desktopcomputer") }
             }
         }
         .listStyle(.insetGrouped)
         .safeAreaInset(edge: .top, spacing: 0) { banners(chat) }
         .confirmationDialog(
-            Text("friends_share_bot_stop"),
+            stopping.map { Text("teams_bot_stop_title \($0.name)") } ?? Text(verbatim: ""),
             isPresented: Binding(get: { stopping != nil }, set: { if !$0 { stopping = nil } }),
             titleVisibility: .visible, presenting: stopping
         ) { bot in
@@ -97,7 +100,7 @@ struct FriendBotsView: View {
                 .disabled(model?.offline ?? true)
             Button("common_cancel", role: .cancel) {}
         } message: { _ in
-            Text("teams_bot_unbind_detail")
+            Text("teams_bot_stop_detail")
         }
     }
 
@@ -108,9 +111,9 @@ struct FriendBotsView: View {
         VStack(spacing: 0) {
             if let model = workspace.messaging {
                 if !model.error.isEmpty {
-                    TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(model.error)), actionTitle: "mcp_reconnect") { workspace.reconnect() }
+                    TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(model.error)), actionTitle: "teams_reconnect") { workspace.reconnect() }
                 } else if model.directoryReady && model.offline {
-                    TeamsBanner(kind: .offline, title: "teams_offline_title", detail: "teams_messages_offline", actionTitle: "mcp_reconnect") { workspace.reconnect() }
+                    TeamsBanner(kind: .offline, title: "teams_offline_title", detail: "teams_messages_offline", actionTitle: "teams_reconnect") { workspace.reconnect() }
                 }
             }
             if !workspace.actionError.isEmpty, workspace.actionError != workspace.messaging?.error {

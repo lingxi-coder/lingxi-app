@@ -246,3 +246,16 @@ enum TeamsStreamLogic {
         a.authorKind == b.authorKind && a.authorUid == b.authorUid && (a.authorSharedBotId ?? "") == (b.authorSharedBotId ?? "")
     }
 }
+
+extension TeamsStreamLogic {
+    /// The line under a name or in a header: the parts that are not blank, joined with " · ". The middle dot is punctuation, the same in
+    /// every language, so it stays in code; only sentences are resources (docs/TEAMS-UI-POLISH.md U12).
+    static func joinedLine(_ parts: [String?]) -> String { join(parts, separator: " · ") }
+
+    /// The same parts as one label for assistive technology ("Ann, Bot, 10:32, Hello"): the commas are the pauses VoiceOver reads.
+    static func spokenLine(_ parts: [String?]) -> String { join(parts, separator: ", ") }
+
+    private static func join(_ parts: [String?], separator: String) -> String {
+        parts.compactMap { $0 }.filter { !JSText.isBlank($0) }.joined(separator: separator)
+    }
+}

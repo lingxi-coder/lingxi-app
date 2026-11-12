@@ -88,7 +88,7 @@ struct TeamComposerView: View {
             bar(systemImage: "pencil") {
                 Text("teams_editing_message").font(.footnote.weight(.semibold))
             } trailing: {
-                Button("teams_cancel", action: onCancelEdit).font(.footnote)
+                Button(action: onCancelEdit) { Text("common_cancel").font(.footnote).minimumHitTarget(minWidth: 0) }
             }
         }
         if let replying {
@@ -96,7 +96,7 @@ struct TeamComposerView: View {
                 Text("teams_replying_to \(replying.author)").font(.footnote.weight(.semibold))
                 Text(replying.text).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             } trailing: {
-                Button(action: onCancelReply) { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                Button(action: onCancelReply) { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary).minimumHitTarget() }
                     .accessibilityLabel(Text("teams_cancel_reply"))
             }
         }
@@ -124,7 +124,10 @@ struct TeamComposerView: View {
                                 AgentAvatar(agentID: context.avatarID(forSharedBotId: key), size: 20)
                                 Text("@" + name).font(.footnote.weight(.semibold))
                                 Button { draft.targets.removeAll { $0 == key } } label: {
+                                    // The chip stays small; the hit area of its remove button is 44 x 44 and overlaps the chip's padding.
                                     Image(systemName: "xmark.circle.fill").font(.footnote).foregroundStyle(.secondary)
+                                        .minimumHitTarget()
+                                        .padding(.horizontal, -14).padding(.vertical, -14)
                                 }
                                 .accessibilityLabel(Text("teams_composer_remove_bot \(name)"))
                             }
@@ -132,6 +135,7 @@ struct TeamComposerView: View {
                             .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
                         }
                     }
+                    .frame(minHeight: 44)
                 }
             }
             .accessibilityIdentifier("teams.composer.chips")
@@ -148,10 +152,10 @@ struct TeamComposerView: View {
                 HStack {
                     Text("teams_composer_bots_can_ask").font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button { dismissedMention = mention.start } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    Button { dismissedMention = mention.start } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary).minimumHitTarget() }
                         .accessibilityLabel(Text("common_close"))
                 }
-                .padding(.horizontal, 12).padding(.vertical, 6)
+                .padding(.horizontal, 12)
                 ForEach(options) { bot in
                     Button { pick(bot, mention: mention) } label: {
                         HStack(spacing: 10) {
@@ -160,7 +164,8 @@ struct TeamComposerView: View {
                             Spacer()
                             Text(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued")).font(.caption).foregroundStyle(.secondary)
                         }
-                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 44)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -204,7 +209,7 @@ struct TeamComposerView: View {
         HStack(alignment: .bottom, spacing: 8) {
             if asks {
                 Button(action: insertAt) {
-                    Image(systemName: "at").font(.system(size: 18, weight: .medium)).frame(width: 32, height: 32)
+                    Image(systemName: "at").font(.title3.weight(.medium)).minimumHitTarget()
                 }
                 .disabled(!askable || draft.targets.count >= TeamsComposeLogic.maxTargets)
                 .accessibilityLabel(Text("teams_composer_ask_bot"))
@@ -218,7 +223,7 @@ struct TeamComposerView: View {
                 .accessibilityIdentifier("teams.composer.input")
                 .onChange(of: draft.text) { _, _ in dismissedMention = -1 }
             Button(action: onSend) {
-                Image(systemName: editing != nil ? "checkmark.circle.fill" : "arrow.up.circle.fill").font(.system(size: 30))
+                Image(systemName: editing != nil ? "checkmark.circle.fill" : "arrow.up.circle.fill").font(.title).minimumHitTarget()
             }
             .disabled(busy || !TeamsComposeLogic.canSendText(draft.text))
             .accessibilityLabel(Text(LocalizedStringKey(editing != nil ? "teams_message_save" : "teams_message_send")))

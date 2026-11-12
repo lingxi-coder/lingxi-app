@@ -5,12 +5,16 @@ import SwiftUI
 // stay Foundation-only and take everything language-dependent as a parameter.
 
 extension TeamsBotText.UsageStrings {
-    static var current: TeamsBotText.UsageStrings {
+    /// The words of the usage line in the UI language. `locale` is the view's environment locale, which carries the language the app
+    /// shows, so the compact number (`1.2K`) and the currency follow it.
+    static func current(locale: Locale) -> TeamsBotText.UsageStrings {
         TeamsBotText.UsageStrings(
             missing: String(localized: "teams_usage_missing"), partial: String(localized: "teams_usage_partial"),
-            complete: String(localized: "teams_usage_complete"), costUnknown: String(localized: "teams_usage_cost_unknown"),
+            costUnknown: String(localized: "teams_usage_cost_unknown"),
             currencyUnknown: String(localized: "teams_usage_currency_unknown"),
-            tokens: { String(localized: "teams_usage_tokens \($0) \($1)") })
+            tokensTotal: { String(localized: "teams_usage_tokens_total \($0)") },
+            tokensSplit: { String(localized: "teams_usage_tokens \($0) \($1)") },
+            locale: locale)
     }
 }
 
@@ -25,7 +29,7 @@ extension TeamsListStrings {
             group: String(localized: "teams_conversation_group"),
             member: String(localized: "teams_member"),
             you: String(localized: "teams_preview_you"),
-            bot: "Bot",
+            bot: String(localized: "teams_bot_tag"),
             noMessages: String(localized: "teams_preview_none"),
             recalled: String(localized: "teams_message_recalled"),
             nonText: String(localized: "teams_preview_non_text"),
@@ -68,6 +72,12 @@ enum TeamsTimeText {
 
 /// Small text helpers shared by the Teams views.
 enum TeamsText {
+    /// A resource looked up by a key that is only known at run time (a run state, a role), as a `String` for a spoken label or a line.
+    static func localized(_ key: String) -> String { String(localized: String.LocalizationValue(key)) }
+
+    /// The author line of the viewer's own messages (`teams_you`, docs/TEAMS-UI-POLISH.md U3). The preview of the list says `teams_preview_you`.
+    static var you: String { String(localized: "teams_you") }
+
     /// `99+` above 99, nothing for no unread messages (the row and section badges).
     static func badge(_ count: Int) -> String? { TabLogic.tabBadgeText(count) }
 
@@ -77,4 +87,7 @@ enum TeamsText {
 
     /// The role label of a team member: `teams_owner`, `teams_admin` or `teams_member`.
     static func role(_ role: String) -> LocalizedStringKey { LocalizedStringKey("teams_" + role) }
+
+    /// The same label as a `String`, for a line that joins it with other parts.
+    static func roleName(_ role: String) -> String { localized("teams_" + role) }
 }

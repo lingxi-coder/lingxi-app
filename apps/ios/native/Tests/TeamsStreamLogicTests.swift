@@ -213,4 +213,18 @@ final class TeamsStreamLogicTests: XCTestCase {
         XCTAssertTrue(stream.recalled)
         XCTAssertNil(stream.createdAtMs)
     }
+
+    /// Separators are punctuation, the same in every language, so they live in code (docs/TEAMS-UI-POLISH.md U12).
+    func testALineJoinsOnlyThePartsThatAreThere() {
+        XCTAssertEqual(TeamsStreamLogic.joinedLine(["Owner", "3 members"]), "Owner · 3 members")
+        XCTAssertEqual(TeamsStreamLogic.joinedLine([nil, "Admin"]), "Admin")
+        XCTAssertEqual(TeamsStreamLogic.joinedLine(["", "  ", nil]), "")
+        XCTAssertEqual(TeamsStreamLogic.joinedLine(["Online", nil, "Maintainer: Ann"]), "Online · Maintainer: Ann")
+        XCTAssertEqual(TeamsStreamLogic.joinedLine([]), "")
+    }
+
+    func testASpokenLineJoinsWithPausesAndSkipsBlanks() {
+        XCTAssertEqual(TeamsStreamLogic.spokenLine(["Ann", "Bot", "10:32", nil, "Hello there", ""]), "Ann, Bot, 10:32, Hello there")
+        XCTAssertEqual(TeamsStreamLogic.spokenLine([nil, nil]), "")
+    }
 }

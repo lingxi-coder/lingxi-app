@@ -12,6 +12,7 @@ struct TeamConversationView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let conversationID: String
     /// Called when the conversation is gone (the viewer is not in it any more). By default the screen pops itself;
     /// the wide layout's pane clears its selection instead.
@@ -76,8 +77,10 @@ struct TeamConversationView: View {
                 Text(creation.title).font(.headline)
                 Text(LocalizedStringKey(creation.error.map(TeamsErrors.key) ?? (creation.attempted == true ? "teams_message_confirming" : "teams_message_pending")))
                     .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                Button("teams_message_discard", role: .destructive) {
+                Button(role: .destructive) {
                     Task { if await workspace.run({ try await model?.discardCreation() }) { dismiss() } }
+                } label: {
+                    Text("teams_message_discard").minimumHitTarget()
                 }
                 .disabled((creation.attempted == true && creation.error == nil) || (creation.leaseUntil ?? 0) > Date().timeIntervalSince1970 * 1000)
             }
@@ -138,6 +141,7 @@ struct TeamConversationView: View {
                         Button("teams_mark_read", systemImage: "checkmark.circle") { Task { await workspace.markRead(conversation.id) } }
                             .disabled(model.offline || workspace.messageBusy)
                     } label: { Image(systemName: "ellipsis.circle") }
+                    .accessibilityLabel(Text("teams_conversation_menu"))
                     .accessibilityIdentifier("teams.conversation.more")
                 }
             }
@@ -149,7 +153,7 @@ struct TeamConversationView: View {
             Button("teams_message_recall", role: .destructive) {
                 Task { await workspace.run { try await model.queue(operation: "recall", text: "", messageId: message.id) } }
             }
-            Button("teams_cancel", role: .cancel) {}
+            Button("common_cancel", role: .cancel) {}
         } message: { _ in
             Text("teams_recall_confirm_detail")
         }
@@ -192,9 +196,9 @@ struct TeamConversationView: View {
         let model = context.model
         return VStack(spacing: 0) {
             if !model.error.isEmpty {
-                TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(model.error)), actionTitle: "mcp_reconnect") { workspace.reconnect() }
+                TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(model.error)), actionTitle: "teams_reconnect") { workspace.reconnect() }
             } else if model.directoryReady && model.offline {
-                TeamsBanner(kind: .offline, title: "teams_offline_title", detail: "teams_messages_offline", actionTitle: "mcp_reconnect") { workspace.reconnect() }
+                TeamsBanner(kind: .offline, title: "teams_offline_title", detail: "teams_messages_offline", actionTitle: "teams_reconnect") { workspace.reconnect() }
             }
             if !workspace.actionError.isEmpty, workspace.actionError != model.error {
                 TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(workspace.actionError)), actionTitle: "common_close") { workspace.clearActionError() }
@@ -231,15 +235,22 @@ struct TeamConversationView: View {
                         .padding(.horizontal, 16).padding(.vertical, 10)
                 }
                 if start > 0 {
-                    Button("teams_messages_earlier") { showEarlier(messages: messages, start: start, rows: rows) }
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+                    Button {
+                        showEarlier(messages: messages, start: start, rows: rows)
+                    } label: {
+                        Text("teams_messages_earlier").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity).minimumHitTarget(minWidth: 0)
+                    }
                 }
                 if messages.isEmpty {
-                    Text(LocalizedStringKey(thread == nil && conversation.lastSeq > 0 ? "teams_loading_messages" : "teams_empty_thread"))
-                        .font(.footnote).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity).padding(.vertical, 24)
+                    if thread == nil && conversation.lastSeq > 0 {
+                        Text("teams_loading_messages")
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity).padding(.vertical, 24)
+                    } else {
+                        // Nothing here yet: the composer below is the action (U9).
+                        TeamsStateView(systemImage: "bubble.left.and.bubble.right", title: "teams_preview_none", message: "teams_empty_thread_hint")
+                            .frame(maxWidth: .infinity).padding(.vertical, 24)
+                    }
                 }
                 ForEach(rows, id: \.key) { row in
                     switch row {
@@ -314,7 +325,7 @@ struct TeamConversationView: View {
         .overlay(alignment: .bottomTrailing) {
             if placed && !atBottom {
                 Button {
-                    withAnimation { position.scrollTo(edge: .bottom) }
+                    withAnimation(.lxMotion(reduceMotion)) { position.scrollTo(edge: .bottom) }
                     seenSeq = newest
                 } label: {
                     HStack(spacing: 6) {
@@ -324,6 +335,7 @@ struct TeamConversationView: View {
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(.regularMaterial, in: Capsule())
                     .overlay(Capsule().stroke(Color.primary.opacity(0.1)))
+                    .minimumHitTarget()
                 }
                 .buttonStyle(.plain)
                 .padding(12)

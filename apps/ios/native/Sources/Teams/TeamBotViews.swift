@@ -8,15 +8,15 @@ struct TeamBotCardView: View {
     /// The audience line (`teams_bot_use_all`, `teams_bot_use_listed`). A friendship has no audience to choose, so the Bots of a
     /// friend chat leave it out (docs/FRIENDS-CLIENTS.md D21).
     var showsAudience = true
-    /// The owner's way to stop it: a Team pauses a Bot (`teams_bot_pause`), a friendship stops sharing it (`friends_share_bot_stop`, D23).
-    var pauseTitle: LocalizedStringKey = "teams_bot_pause"
     let onMessage: () -> Void
-    let onPause: () -> Void
+    /// The maintainer's one way to end a Bot's availability, on Teams and Friends alike: "Stop sharing" (`friends_share_bot_stop`,
+    /// docs/TEAMS-UI-POLISH.md U1). The caller confirms it.
+    let onStopSharing: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                AgentAvatar(agentID: bot.avatarId, size: 36)
+                AgentAvatar(agentID: bot.avatarId, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(bot.name).font(.body.weight(.semibold))
                     Text("teams_bot_owner \(ownerName)").font(.caption).foregroundStyle(.secondary)
@@ -36,13 +36,14 @@ struct TeamBotCardView: View {
             }
             HStack(spacing: 10) {
                 if bot.selectable {
-                    Button("teams_bot_message", action: onMessage).buttonStyle(.borderedProminent)
+                    Button(action: onMessage) { Text("teams_bot_message").minimumHitTarget(minWidth: 0) }
+                        .buttonStyle(.borderedProminent)
                 }
                 if isOwner && (bot.state == "published") {
-                    Button(pauseTitle, role: .destructive, action: onPause).buttonStyle(.bordered)
+                    Button(role: .destructive, action: onStopSharing) { Text("friends_share_bot_stop").minimumHitTarget(minWidth: 0) }
+                        .buttonStyle(.bordered)
                 }
             }
-            .controlSize(.small)
             .disabled(busy)
         }
         .padding(.vertical, 4)
@@ -51,34 +52,91 @@ struct TeamBotCardView: View {
     }
 }
 
+/// What one Bot request looks like in a conversation (docs/TEAMS-UI-POLISH.md U4): the state as a glyph and a word, the Bot's name, one
+/// line of detail (the usage once the run has completed, what to do or what is going on before that) and at most one button. The text
+/// block is one accessibility element, "Bot, state, detail"; the button stays reachable beside it.
 struct TeamTaskCard: View {
     @Environment(TeamsWorkspace.self) private var workspace
+    @Environment(\.locale) private var locale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ScaledMetric(relativeTo: .footnote) private var glyphSide: CGFloat = 16
     let task: TeamTask
     let botName: String
+
+    private var run: TeamsBotText.RunState { TeamsBotText.runState(task.state) }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(botName).font(.subheadline.weight(.semibold))
-            Button {
-                Task { await workspace.run { try await workspace.messaging?.refreshTask(task.taskId) } }
-            } label: {
-                Label(LocalizedStringKey(TeamsBotText.stateKey(task.state)), systemImage: "arrow.clockwise")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            .buttonStyle(.borderless)
-            Text(TeamsBotText.usageLine(task.usage, strings: .current))
-                .font(.caption).foregroundStyle(.secondary)
-                .accessibilityIdentifier("teams.task.usage.\(task.taskId)")
-            if let artifactId = task.artifactId {
-                Button("teams_artifact_open", systemImage: "doc.text") {
-                    Task { await workspace.openArtifact(artifactId) }
+        let words = TeamsBotText.UsageStrings.current(locale: locale)
+        let state = TeamsText.localized(run.labelKey)
+        let completed = task.state == "completed"
+        let detail = completed ? TeamsBotText.usageLine(task.usage, strings: words) : run.detailKey.map(TeamsText.localized)
+        VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    glyph
+                    Text(verbatim: state).font(.footnote.weight(.semibold)).foregroundStyle(.primary)
                 }
-                .buttonStyle(.borderless)
+                Text(verbatim: botName).font(.subheadline.weight(.semibold))
+                if let detail {
+                    Text(verbatim: detail)
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text(verbatim: TeamsStreamLogic.spokenLine([botName, state, detail])))
+            .accessibilityValue(Text(verbatim: completed ? (TeamsBotText.tokenSplit(task.usage, strings: words) ?? "") : ""))
+            // A finished run's detail is its usage line: the element keeps the identifier the line had.
+            .accessibilityIdentifier(completed ? "teams.task.usage.\(task.taskId)" : "teams.task.state.\(task.taskId)")
+            action
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.task.\(task.taskId)")
     }
+
+    /// The state's glyph. It is decorative: the label next to it is the state. Processing is a spinner, and the static `ellipsis.circle`
+    /// under Reduce Motion (U10).
+    @ViewBuilder private var glyph: some View {
+        if run.spins && !reduceMotion {
+            ProgressView().controlSize(.mini).frame(width: glyphSide, height: glyphSide).accessibilityHidden(true)
+        } else {
+            Image(systemName: run.symbol)
+                .font(.footnote)
+                .foregroundStyle(tint)
+                .frame(width: glyphSide, height: glyphSide)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private var tint: Color {
+        switch run.tone {
+        case .ok: .green
+        case .danger: .red
+        case .muted: .secondary
+        }
+    }
+
+    /// At most one button: a task that is still going offers "Refresh status"; a finished one that has a document offers "Open
+    /// document". The other states say what to do in their detail and have none.
+    @ViewBuilder private var action: some View {
+        if run.active {
+            Button {
+                Task { await workspace.run { try await workspace.messaging?.refreshTask(task.taskId) } }
+            } label: {
+                Label("teams_run_refresh", systemImage: "arrow.clockwise").font(.footnote).minimumHitTarget(minWidth: 0, alignment: .leading)
+            }
+            .buttonStyle(.borderless)
+        } else if task.state == "completed", let artifactId = task.artifactId {
+            Button {
+                Task { await workspace.openArtifact(artifactId) }
+            } label: {
+                Label("teams_artifact_open", systemImage: "doc.text").font(.footnote).minimumHitTarget(minWidth: 0, alignment: .leading)
+            }
+            .buttonStyle(.borderless)
+        }
+    }
 }
+
 /// Artifact links come from Bot output, so only web links may leave the app.
 enum TeamArtifactLinkPolicy {
     static func allows(_ url: URL) -> Bool {
@@ -111,7 +169,7 @@ struct TeamArtifactViewer: View {
                     AIText(markdown: artifact.document.body)
                         .textSelection(.enabled)
                         .accessibilityIdentifier("teams.artifact.body")
-                    Text("v\(artifact.revision) · \(artifact.digest)").font(.caption.monospaced()).foregroundStyle(.secondary)
+                    Text("apps_version \(artifact.revision)").font(.caption).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding()
             }
             .background(theme.windowBg)

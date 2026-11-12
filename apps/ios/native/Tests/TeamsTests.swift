@@ -54,16 +54,78 @@ final class TeamsTests: XCTestCase {
 
     func testTaskLabelsCoverOnlyExecutionTwoStatesAndExistInBothLanguages() throws {
         let states: [String: String] = [
-            "queued": "cron_status_queued", "running": "teams_run_processing", "completed": "chat_status_completed", "failed": "chat_status_failed",
-            "expired": "teams_task_expired", "interrupted": "teams_task_interrupted", "authorization_required": "teams_task_authorization_required", "revoked": "teams_run_revoked",
+            "queued": "teams_run_queued", "running": "teams_run_processing", "completed": "chat_status_completed", "failed": "chat_status_failed",
+            "expired": "teams_run_expired", "interrupted": "teams_run_interrupted", "authorization_required": "teams_run_authorization_required", "revoked": "teams_run_revoked",
         ]
         for (state, key) in states { XCTAssertEqual(TeamsBotText.stateKey(state), key, state) }
         for retired in ["pending", "claimed", "recovery", "recovered", "missed", "cancelled"] { XCTAssertEqual(TeamsBotText.stateKey(retired), "chat_status_unknown") }
         XCTAssertEqual(Set(TeamsBotText.allKeys), Set(states.values).union(["chat_status_unknown"]))
         let catalogue = try Catalogue.load()
-        for key in TeamsBotText.allKeys {
+        for key in TeamsBotText.allKeys + TeamsBotText.allDetailKeys {
             XCTAssertFalse((catalogue.value(key, "en") ?? "").isEmpty, "\(key) has no English text")
             XCTAssertFalse((catalogue.value(key, "zh-Hans") ?? "").isEmpty, "\(key) has no Chinese text")
+        }
+    }
+
+    /// docs/TEAMS-UI-POLISH.md U4, row by row: the label, the detail, the glyph and the tone of every state of a Bot request.
+    func testRunStatesAreTheTableOfTheSpec() {
+        typealias Row = (state: String, label: String, detail: String?, symbol: String, tone: TeamsBotText.RunState.Tone, active: Bool)
+        let table: [Row] = [
+            ("queued", "teams_run_queued", "teams_run_queued_detail", "clock", .muted, true),
+            ("running", "teams_run_processing", "teams_run_processing_detail", "ellipsis.circle", .muted, true),
+            ("completed", "chat_status_completed", nil, "checkmark.circle.fill", .ok, false),
+            ("failed", "chat_status_failed", "teams_run_failed_detail", "exclamationmark.triangle.fill", .danger, false),
+            ("expired", "teams_run_expired", "teams_run_expired_detail", "clock.badge.xmark", .muted, false),
+            ("interrupted", "teams_run_interrupted", "teams_run_interrupted_detail", "pause.circle", .muted, false),
+            ("authorization_required", "teams_run_authorization_required", "teams_run_authorization_required_detail", "lock.circle", .muted, true),
+            ("revoked", "teams_run_revoked", "teams_run_revoked_detail", "nosign", .muted, false),
+            ("anything else", "chat_status_unknown", nil, "questionmark.circle", .muted, false),
+        ]
+        for row in table {
+            let run = TeamsBotText.runState(row.state)
+            XCTAssertEqual(run.labelKey, row.label, row.state)
+            XCTAssertEqual(run.detailKey, row.detail, row.state)
+            XCTAssertEqual(run.symbol, row.symbol, row.state)
+            XCTAssertEqual(run.tone, row.tone, row.state)
+            XCTAssertEqual(run.active, row.active, row.state)
+        }
+        // Only a task that is going on spins, and only Completed and Failed are not muted.
+        XCTAssertEqual(table.filter { TeamsBotText.runState($0.state).spins }.map(\.state), ["running"])
+        XCTAssertEqual(table.filter { TeamsBotText.runState($0.state).tone != .muted }.map(\.state), ["completed", "failed"])
+        XCTAssertEqual(Set(table.compactMap(\.detail)), Set(TeamsBotText.allDetailKeys))
+    }
+
+    /// Every key the polish pass reads (docs/TEAMS-UI-POLISH.md Appendix A) has a real text in all five languages. A key with a value
+    /// in it is looked up by its signature, as the compiler writes it (`%@`, `%lld`).
+    func testTheKeysOfThePolishPassExistInAllFiveLanguages() throws {
+        let catalogue = try Catalogue.load()
+        let keys = [
+            // Own message, Bot tag, labels, section state
+            "teams_you", "teams_bot_tag", "teams_conversation_menu", "teams_team_menu", "teams_team_details", "teams_other_unread",
+            "teams_section_expand", "teams_section_collapse", "teams_section_expanded", "teams_section_collapsed", "teams_reconnect",
+            "teams_group_bot_chats", "remote_bots",
+            // Confirmations
+            "teams_confirm_leave_title %@", "teams_confirm_leave_body", "teams_confirm_leave_button",
+            "teams_confirm_delete_title %@", "teams_confirm_delete_body", "teams_confirm_delete_button",
+            "teams_confirm_remove_title %@", "teams_confirm_remove_body", "teams_confirm_remove_button",
+            "teams_confirm_promote_title %@", "teams_confirm_promote_body", "teams_confirm_promote_button",
+            "teams_confirm_demote_title %@", "teams_confirm_demote_body", "teams_confirm_demote_button",
+            "teams_confirm_revoke_title", "teams_confirm_revoke_body", "teams_confirm_revoke_button",
+            "teams_bot_stop_title %@", "teams_bot_stop_detail", "friends_share_bot_stop",
+            "friends_link_reset_title", "friends_link_reset_body", "friends_link_off_title", "friends_link_off_body",
+            "remote_forget_title", "remote_forget_help", "remote_forget_confirm", "common_cancel",
+            // Run card and usage
+            "teams_run_refresh", "teams_usage_tokens_total %@", "teams_usage_tokens %lld %lld", "teams_usage_missing", "teams_usage_partial",
+            "teams_usage_cost_unknown", "teams_usage_currency_unknown", "apps_version %lld",
+            // Empty states
+            "teams_empty_title", "teams_empty", "teams_empty_thread_hint", "teams_preview_none", "friends_blocked_empty_title",
+            "friends_blocked_empty_body", "mobile_bots_none_title", "mobile_bots_none_hint", "mobile_bots_none_check_again",
+            "teams_bots_none", "teams_bots_share_hint", "friends_bots_none", "friends_bots_share_hint",
+        ]
+        for key in keys {
+            for language in ["en", "zh-Hans", "zh-Hant", "ja", "ko"] {
+                XCTAssertFalse((catalogue.value(key, language) ?? "").isEmpty, "\(key) has no \(language) text")
+            }
         }
     }
 
@@ -80,6 +142,7 @@ final class TeamsTests: XCTestCase {
             ("teams_preview_none", TeamsListStrings.en.noMessages, TeamsListStrings.zh.noMessages),
             ("teams_message_recalled", TeamsListStrings.en.recalled, TeamsListStrings.zh.recalled),
             ("teams_preview_non_text", TeamsListStrings.en.nonText, TeamsListStrings.zh.nonText),
+            ("teams_bot_tag", TeamsListStrings.en.bot, TeamsListStrings.zh.bot),
         ]
         for word in words {
             XCTAssertEqual(catalogue.value(word.key, "en"), word.en, word.key)

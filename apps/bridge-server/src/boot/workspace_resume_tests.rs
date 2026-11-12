@@ -1353,6 +1353,157 @@ async fn cold_resume_reports_fixed_mode_in_lifecycle_and_manifest() {
 }
 
 #[tokio::test]
+async fn committed_transcript_checkpoint_is_read_only_recent_and_owner_fenced() {
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let home = cwd.join("config");
+    let id = uuid::Uuid::new_v4();
+    let ids = (0..5).map(|_| uuid::Uuid::new_v4()).collect::<Vec<_>>();
+    let selected = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+    let mut rows = vec![
+        serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+    ];
+    for (index, uuid) in ids.iter().enumerate() {
+        let mut row = serde_json::json!({"uuid":uuid,"sessionId":id,"cwd":cwd,"timestamp":"2026-11-12T00:00:00Z","isSidechain":false,
+            "parentUuid":if index == 2 || index == 4 { Some(ids[index-1]) } else { None }});
+        let content = if index == 1 || index == 3 {
+            serde_json::json!({"type":"system","subtype":"compact_boundary","content":format!("summary {index}"),"compactMetadata":{}})
+        } else {
+            serde_json::json!({"type":"user","message":{"role":"user","content":format!("visible source {index}")}})
+        };
+        row.as_object_mut()
+            .unwrap()
+            .extend(content.as_object().unwrap().clone());
+        rows.push(row);
+    }
+    std::fs::create_dir_all(selected.parent().unwrap()).unwrap();
+    std::fs::write(
+        &selected,
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let mut cfg = isolated_config(&cwd, &home);
+    cfg.session_id_override = Some(id.to_string());
+    cfg.session_transcript_path = Some(selected.clone());
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let runtime = bound.runtime.orchestrator.clone();
+    let lifecycle = bound.session_lifecycle();
+    let (endpoint, mut socket) = connect(bound.connection).await;
+    let before = std::fs::read(&selected).unwrap();
+    let model_before = runtime.session().lock().await.history.clone();
+    for request in 2..5 {
+        let (events, response) = call(
+            &mut socket,
+            request,
+            "desktop_transcript_checkpoint",
+            projection(serde_json::json!({"session_id":id})),
+        )
+        .await;
+        assert!(response.error.is_none(), "{response:?}");
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                ClientEvent::SessionResumed { .. }
+                    | ClientEvent::TurnStarted { .. }
+                    | ClientEvent::ToolUseStarted { .. }
+            )),
+            "a checkpoint returns a baseline only in its correlated response"
+        );
+        let result = response.result.unwrap();
+        assert_eq!(result.string_at("/type"), Some("session_resumed"));
+        assert_eq!(
+            result.string_at("/session_id"),
+            Some(id.to_string().as_str())
+        );
+        assert_eq!(result.string_at("/mode"), Some("code"));
+        assert_eq!(result.array_len("/messages"), Some(2));
+        assert_eq!(
+            result.string_at("/messages/0/transcript_uuid"),
+            Some(ids[3].to_string().as_str())
+        );
+        assert_eq!(
+            result.string_at("/messages/1/transcript_uuid"),
+            Some(ids[4].to_string().as_str())
+        );
+        assert_eq!(
+            result.string_at("/messages/1/blocks/0/text"),
+            Some("visible source 4")
+        );
+    }
+    let (_, wrong_owner) = call(
+        &mut socket,
+        5,
+        "desktop_transcript_checkpoint",
+        projection(serde_json::json!({"session_id":uuid::Uuid::new_v4()})),
+    )
+    .await;
+    assert!(wrong_owner.error.is_some());
+    let (_, malformed) = call(
+        &mut socket,
+        6,
+        "desktop_transcript_checkpoint",
+        projection(serde_json::json!({"session_id":id,"unexpected":true})),
+    )
+    .await;
+    assert!(malformed.error.is_some());
+    assert_eq!(
+        std::fs::read(&selected).unwrap(),
+        before,
+        "checkpoint must never append or replay tools"
+    );
+    assert_eq!(
+        runtime.session().lock().await.history,
+        model_before,
+        "display checkpoint cannot replace model history"
+    );
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
+}
+
+#[tokio::test]
+async fn transcript_checkpoint_does_not_execute_deferred_tools() {
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let (cfg, selected, markers) = pending_bash_config(&cwd, 1);
+    let id = cfg.session_id_override.clone().unwrap();
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let lifecycle = bound.session_lifecycle();
+    let (endpoint, mut socket) = connect(bound.connection).await;
+    let before = std::fs::read(&selected).unwrap();
+    let (events, response) = call(
+        &mut socket,
+        2,
+        "desktop_transcript_checkpoint",
+        projection(serde_json::json!({"session_id":id})),
+    )
+    .await;
+    assert!(response.error.is_none(), "{response:?}");
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::ToolUseStarted { .. } | ClientEvent::ToolUseResult { .. }
+    )));
+    assert!(
+        markers.iter().all(|path| !path.exists()),
+        "read-only capture cannot dispatch pending tools"
+    );
+    assert_eq!(std::fs::read(&selected).unwrap(), before);
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
+}
+
+#[tokio::test]
 async fn cold_draft_boot_restores_fixed_mode_and_instruction_epoch() {
     use client::protocol::commands::ClientCommand;
     let _serial = crate::driver::LOOP_KA_TEST_SERIAL

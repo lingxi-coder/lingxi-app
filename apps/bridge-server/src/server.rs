@@ -717,6 +717,8 @@ pub struct BridgeConnection {
     /// Admitted writer work outlives its socket and must drain before reconnect
     /// or process shutdown can acknowledge completion.
     metadata_work: Arc<MetadataWork>,
+    /// One background transcript capture per pump, including across reconnects.
+    transcript_checkpoint_reads: Arc<tokio::sync::Semaphore>,
     cron_requests: Arc<crate::cron_host::HostCronRequests>,
     queued_prompt_payloads: QueuedPromptPayloads,
     tool_names: Arc<Mutex<HashMap<u64, String>>>,
@@ -3091,6 +3093,7 @@ impl BridgeConnection {
             connection_admission: Mutex::new(()),
             metadata_receipts: Arc::new(StdMutex::new(SessionMetadataReceipts::default())),
             metadata_work: Arc::new(MetadataWork::default()),
+            transcript_checkpoint_reads: Arc::new(tokio::sync::Semaphore::new(1)),
             cron_requests: Arc::new(crate::cron_host::HostCronRequests::default()),
             queued_prompt_payloads: Arc::new(Mutex::new(HashMap::new())),
             tool_names: Arc::new(Mutex::new(HashMap::new())),
@@ -5871,6 +5874,63 @@ impl FramePump for BridgeConnection {
                     }
                     return;
                 }
+                if method == "desktop_transcript_checkpoint" {
+                    #[derive(serde::Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct CheckpointRequest {
+                        session_id: uuid::Uuid,
+                    }
+                    let admitted = (|| {
+                        let request = deserialize_source::<CheckpointRequest>(&params)
+                            .map_err(|_| "invalid desktop transcript checkpoint request")?;
+                        let router = self
+                            .router
+                            .clone()
+                            .ok_or("desktop transcript checkpoint is unavailable")?;
+                        let permit = self
+                            .transcript_checkpoint_reads
+                            .clone()
+                            .try_acquire_owned()
+                            .map_err(|_| {
+                                "a desktop transcript checkpoint is already in progress"
+                            })?;
+                        Ok::<_, &str>((request, router, permit))
+                    })();
+                    // Capture is read-only and uses the existing writer lock.
+                    // Keep it off the ordered command lane, and retain this
+                    // exact socket's sink so an old read cannot publish into
+                    // a later connection. The host rejects racing event state.
+                    let sink = out;
+                    let response_order = self.out.clone();
+                    match admitted {
+                        Err(error) => {
+                            let _ = sink.send(Self::error_response(id, error));
+                        }
+                        Ok((request, router, permit)) => {
+                            tokio::spawn(async move {
+                                let _permit = permit;
+                                let response = match router
+                                    .transcript_checkpoint(request.session_id)
+                                    .await
+                                    .and_then(|event| serialize_source(&event))
+                                {
+                                    Ok(result) => Frame::Response(BridgeResponse {
+                                        id,
+                                        result: Some(result),
+                                        error: None,
+                                    }),
+                                    Err(error) => Self::error_response(id, error),
+                                };
+                                // Queue the reply behind already waiting live
+                                // deliveries, while still using the original
+                                // socket rather than the possibly replaced cell.
+                                let _delivery = response_order.lock().await;
+                                let _ = sink.send(response);
+                            });
+                        }
+                    };
+                    return;
+                }
                 if method == "desktop_runtime_snapshot" {
                     // This router seam only reads state into a collector. Fence
                     // its read and reply against live outbound pushes: a worker
@@ -6235,6 +6295,10 @@ mod prompt_ingress_regression_test;
 #[cfg(test)]
 #[path = "server/telemetry_regression_test.rs"]
 mod telemetry_regression_test;
+
+#[cfg(test)]
+#[path = "server/transcript_checkpoint_tests.rs"]
+mod transcript_checkpoint_tests;
 
 #[cfg(test)]
 mod tests {

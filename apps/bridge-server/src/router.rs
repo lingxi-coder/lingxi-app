@@ -473,6 +473,12 @@ pub trait CommandRouter: Send + Sync + 'static {
         Err("desktop runtime snapshot is unavailable".into())
     }
 
+    /// Read a committed display baseline without changing model context or
+    /// replaying deferred tools. The requesting host fences its event sequence.
+    async fn transcript_checkpoint(&self, _session_id: uuid::Uuid) -> Result<ClientEvent, String> {
+        Err("desktop transcript checkpoint is unavailable".into())
+    }
+
     /// Authenticated, private Native `set_cwd` control request.
     async fn set_working_directory(
         &self,
@@ -2369,6 +2375,49 @@ impl CommandRouter for EngineCommandRouter {
             }
         }
     }
+    async fn transcript_checkpoint(&self, session_id: uuid::Uuid) -> Result<ClientEvent, String> {
+        if self.is_turn_active() || self.handle.current_session_id().await.as_uuid() != session_id {
+            return Err("desktop transcript checkpoint requires the idle session owner".into());
+        }
+        let workspace = self
+            .workspace_commands
+            .as_ref()
+            .ok_or("desktop transcript checkpoint is unavailable")?;
+        let capture = workspace
+            .capture_current_transcript(lingxi_core::types::SessionId::from_uuid(session_id))
+            .await?;
+        let checkpoint = tokio::task::spawn_blocking(move || {
+            let loaded = session::jsonl::loader::route_captured_session_source(
+                &capture.transcript_path,
+                session_id,
+                &capture.source,
+            )
+            .map_err(|error| error.to_string())?;
+            let mode = session::JsonlWriter::fixed_session_mode_from_source(
+                &capture.source,
+                &session_id.to_string(),
+            )?;
+            let replayed = orchestrator::resume::project_transcript_checkpoint(
+                capture.transcript_path,
+                &capture.source,
+                &loaded,
+                session_id,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok::<_, String>(ClientEvent::SessionResumed {
+                session_id: session_id.to_string(),
+                mode: lower_conversation_mode(mode),
+                messages: crate::workspace_commands::lower_initial_transcript(&replayed),
+            })
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        if self.is_turn_active() || self.handle.current_session_id().await.as_uuid() != session_id {
+            return Err("the session changed during desktop transcript checkpoint".into());
+        }
+        Ok(checkpoint)
+    }
+
     async fn runtime_snapshot(&self) -> Result<Vec<ClientEvent>, String> {
         if self.team_registry.is_none() {
             return Err("desktop runtime snapshot is unavailable".into());

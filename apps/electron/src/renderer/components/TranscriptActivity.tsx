@@ -10,6 +10,7 @@ import { ApiRetryNotice, type ApiRetryStatus } from './ApiRetryNotice';
 import { toolGroupSummary } from './toolPresentation';
 import type { TranscriptActivity as Activity } from './transcriptActivities';
 import './TranscriptActivity.css';
+import { TranscriptLeafWindow } from './TranscriptLeafWindow';
 
 export function TranscriptActivity({ activity, open, toolOpen, onSetOpen, modUiSessionId, retry }: {
   activity: Activity;
@@ -52,9 +53,10 @@ export function TranscriptActivity({ activity, open, toolOpen, onSetOpen, modUiS
         {failedState && <span className="transcript-activity-failed">{failedState}</span>}
       </>}>
       <div className="transcript-activity-details">
-        {activity.tools.map(tool => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId}
-          open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
-        {activity.thoughts.map(thought => thought.text.trim() && <MarkdownContent key={thought.id} text={thought.text} />)}
+        <TranscriptLeafWindow items={[...activity.tools, ...activity.thoughts.filter(thought => thought.text.trim())]}
+          renderItem={item => item.type === 'tool'
+            ? <ToolCall item={item} modUiSessionId={modUiSessionId} open={toolOpen(item.id)} onSetOpen={onSetOpen} />
+            : <MarkdownContent text={item.text} />} />
       </div>
     </Disclosure>
   </div>;

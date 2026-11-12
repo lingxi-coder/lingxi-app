@@ -5,6 +5,7 @@ import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
 import { transcriptRowGap, useTranscriptWindow } from './useTranscriptWindow';
 import './TranscriptWindow.css';
+import { TranscriptLeafWindowScope } from './TranscriptLeafWindow';
 import { PlanPreview, PlanDocument } from './PlanDocument';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
@@ -459,6 +460,26 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
   ), running, new Set(submittedPlans.map(plan => plan.id))), [items, liveItems, running, pendingActivity, agents, anchors, submittedPlans]);
   const liveItemById = useMemo(() => new Map(liveItems.map(item => [item.id, item])), [liveItems]);
   const firstAssistantById = useMemo(() => assistantFirstOfReplyByItem(liveItems), [liveItems]);
+  // Paging may merge an older span into the first activity and change its row
+  // id. Carry its disclosure choice through surviving source IDs; individual
+  // tool choices already use their own stable IDs in the same store.
+  const previousGroupChoices = useRef({ sessionKey, sources: new Map<string, string>() });
+  const groupChoices = useMemo(() => {
+    const previous = previousGroupChoices.current.sessionKey === sessionKey ? previousGroupChoices.current.sources : new Map<string, string>();
+    const sources = new Map<string, string>(), aliases = new Map<string, string>();
+    for (const row of rows) {
+      if (row.type !== 'tool-group') continue;
+      const ids = [...row.tools.map(tool => tool.id), ...(isTranscriptActivity(row) ? row.thoughts.map(thought => thought.id) : [])];
+      const inherited = ids.map(id => previous.get(id)).find(id => id !== undefined);
+      const choice = collapseOpen(visible, sessionKey, row.id) !== undefined ? row.id : inherited ?? row.id;
+      aliases.set(row.id, choice);
+      for (const id of ids) sources.set(id, choice);
+    }
+    return { aliases, sources };
+  }, [rows, sessionKey, visible]);
+  useLayoutEffect(() => { previousGroupChoices.current = { sessionKey, sources: groupChoices.sources }; }, [sessionKey, groupChoices]);
+  const groupIsOpen = useCallback((id: string) => collapseOpen(visible, sessionKey, id)
+    ?? collapseOpen(visible, sessionKey, groupChoices.aliases.get(id) ?? id) ?? false, [visible, sessionKey, groupChoices]);
 
   const presentationRows = rows;
   const windowing = useTranscriptWindow({ rows: presentationRows, sessionKey, viewport: stageRef, feed: feedRef, following: followTail });
@@ -534,7 +555,13 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
       else low = middle + 1;
     }
     if (first === -1) { anchor.current = null; return; }
-    const element = rows[first]!;
+    const row = rows[first]!;
+    // Aggregate rows can span thousands of independently windowed leaves.
+    // Pin the actual leaf being read so prepend/recycling never substitutes
+    // an estimate of the aggregate's height for its reading position.
+    const leaf = Array.from(row.querySelectorAll<HTMLElement>('[data-transcript-leaf-id]'))
+      .find(leaf => { const bounds = leaf.getBoundingClientRect(); return bounds.bottom > containerTop && bounds.top < node.getBoundingClientRect().bottom; });
+    const element = leaf ?? row;
     const text = readingTextAnchor(element, containerTop);
     anchor.current = { node: element, text, offset: (text ?? element).getBoundingClientRect().top - containerTop,
       rowOffset: element.getBoundingClientRect().top - containerTop,
@@ -558,13 +585,18 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
     // movement arrived, so the offset it recorded already includes it.
     if (performance.now() < snapMutedUntil.current) return;
     if (!held.node.isConnected) {
-      const replacement = held.uuid && Array.from(feedRef.current?.querySelectorAll('[data-message-uuids]') ?? [])
-        .find(row => row.getAttribute('data-message-uuids')?.split(' ').includes(held.uuid!));
+      const leafId = (held.node as HTMLElement).dataset?.transcriptLeafId;
+      const leaf = leafId && Array.from(feedRef.current?.querySelectorAll<HTMLElement>('[data-transcript-leaf-id]') ?? [])
+        .find(node => node.dataset.transcriptLeafId === leafId);
+      const matches = held.uuid && Array.from(feedRef.current?.querySelectorAll('[data-message-uuids]') ?? [])
+        .filter(row => row.getAttribute('data-message-uuids')?.split(' ').includes(held.uuid!));
+      const replacement = leaf || matches && (matches.find(row => row.hasAttribute('data-transcript-leaf-id')) ?? matches[0]);
       if (!replacement) { anchor.current = null; return; }
       held.node = replacement;
       held.text = undefined;
       held.offset = held.rowOffset;
     }
+    if (held.text && !held.node.contains(held.text.startContainer)) { held.text = undefined; held.offset = held.rowOffset; }
     const target = held.text ?? held.node;
     const offset = target.getBoundingClientRect().top - node.getBoundingClientRect().top;
     const delta = offset - held.offset;
@@ -641,10 +673,12 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
       const row = presentationRows.find(row => row.id === source.id || (row.type === 'tool-group' && row.tools.some(tool => tool.id === source.id)) || (row.type === 'agents' && row.sourceIds.includes(source.id)));
       if (row) {
         if (windowing.reveal(row.id)) return;
+        if (row.type === 'tool-group' && row.tools.length > 1 && !groupIsOpen(row.id)) { setOpen(row.id, true); return; }
       }
     }
     const nodes = feedRef.current?.querySelectorAll<HTMLElement>('[data-message-uuids]');
-    const target = Array.from(nodes ?? []).find(node => node.dataset.messageUuids?.split(' ').includes(messageTarget));
+    const matches = Array.from(nodes ?? []).filter(node => node.dataset.messageUuids?.split(' ').includes(messageTarget));
+    const target = matches.find(node => node.hasAttribute('data-transcript-leaf-id')) ?? matches[0];
     if (!target) {
       if (history.before && !history.error && onLoadMoreHistory) { if (!history.loading) requestOlder(); return; }
       revealInFlight.current = null; onMessageLocated?.(false); return;
@@ -656,7 +690,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
     anchor.current = null;
     target.scrollIntoView({ block: 'center' });
     onMessageLocated?.(true);
-  }, [messageTarget, sessionKey, rows, items, liveItems, foldedItemIds, visible, setOpen, onMessageLocated, presentationRows, windowing.reveal, windowing.start, windowing.end, history, onLoadMoreHistory, requestOlder]);
+  }, [messageTarget, sessionKey, rows, items, liveItems, foldedItemIds, visible, setOpen, groupIsOpen, onMessageLocated, presentationRows, windowing.reveal, windowing.start, windowing.end, history, onLoadMoreHistory, requestOlder]);
 
   useLayoutEffect(() => {
     const previous = historyLayout.current;
@@ -715,7 +749,24 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
     };
   }, [captureAnchor, measureFollow, restoreAnchor, syncTail]);
 
+  const settleLeafLayout = useCallback(() => {
+    if (revealInFlight.current) return;
+    if (!followTail.current && !pointerHeld.current) restoreAnchor();
+    syncTail();
+    // A large scroll may first land in a spacer. Once its leaves mount,
+    // replace the temporary aggregate-row anchor with the actual reading leaf.
+    if (!anchor.current || !anchor.current.node.hasAttribute('data-transcript-leaf-id')
+      && anchor.current.node.querySelector('[data-leaf-windowed]')) captureAnchor();
+  }, [restoreAnchor, syncTail, captureAnchor]);
+  const readingLeafId = useCallback(() => (anchor.current?.node as HTMLElement | undefined)?.dataset?.transcriptLeafId, []);
+  const targetLeafId = messageTarget && locatedMessage.current !== `${sessionKey}:${messageTarget}`
+    ? liveItems.find(item => transcriptRowUuids(item).includes(messageTarget))?.id : undefined;
+  const leafTargetPending = useCallback(() => Boolean(messageTarget) && locatedMessage.current !== `${sessionKey}:${messageTarget}`, [messageTarget, sessionKey]);
+  const leafScope = useMemo(() => ({ sessionKey, viewport: stageRef, following: followTail,
+    targetId: targetLeafId, targetPending: leafTargetPending, readingId: readingLeafId, onLayout: settleLeafLayout }), [sessionKey, targetLeafId, leafTargetPending, readingLeafId, settleLeafLayout]);
+
   return (
+    <TranscriptLeafWindowScope.Provider value={leafScope}>
     <div ref={stageRef} className={activityView ? "desktop-stage activity-view" : "desktop-stage"} tabIndex={windowing.enabled ? 0 : -1} onPointerDown={() => { pointerHeld.current = true; }} onWheel={(event) => {
       if (event.deltaY < 0 && (stageRef.current?.scrollTop ?? Infinity) <= 160 && !history.error) requestOlder();
       // Arrives before the scroll it causes, and in either direction: the
@@ -874,7 +925,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
             );
           }
           if (isTranscriptActivity(item)) {
-            const expanded = collapseOpen(visible, sessionKey, item.id) ?? false;
+            const expanded = groupIsOpen(item.id);
             return <div className="transcript-run-item" data-run-type="activity">
               <NativeToolGroupSite sessionId={modUiSessionId} group={item} expanded={expanded}
                 stateToken={visible} contentToken={item.active ? apiRetry ?? undefined : undefined}>
@@ -890,7 +941,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
               return plan ? <PlanPreview key={tool.id} content={plan.content} status={plan.status} writing={tool.status === 'running' && plan.status === 'submitted'} onOpen={() => onOpenPlan ? onOpenPlan(plan.id) : setLocalPlan(plan)}/> : <ToolGroup key={tool.id} group={{...item,id:tool.id,tools:[tool]}} modUiSessionId={modUiSessionId} open={collapseOpen(visible,sessionKey,tool.id) ?? false} toolOpen={id=>collapseOpen(visible,sessionKey,id)} onSetOpen={setOpen}/>;
             })}</>;
             if (item.tools.length < 2) return <div className="transcript-run-item" data-run-type="tool" key={item.id}>{groupContent}</div>;
-            const expanded = collapseOpen(visible, sessionKey, item.id) ?? false;
+            const expanded = groupIsOpen(item.id);
             return <div className="transcript-run-item" data-run-type="tool" key={item.id}>
               <NativeToolGroupSite sessionId={modUiSessionId} group={item}
                 expanded={expanded} stateToken={visible} contentToken={planContentToken}>
@@ -899,7 +950,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
             </div>;
           }
           if (item.type === 'tool-group') {
-            const expanded = collapseOpen(visible, sessionKey, item.id) ?? false;
+            const expanded = groupIsOpen(item.id);
             const groupContent = <ToolGroup group={item} modUiSessionId={modUiSessionId} open={expanded}
               toolOpen={(id) => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} />;
             if (item.tools.length < 2) return <div className="transcript-run-item" data-run-type="tool" key={item.id}>{groupContent}</div>;
@@ -1007,5 +1058,6 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
 
       </div>
     </div>
+    </TranscriptLeafWindowScope.Provider>
   );
 }

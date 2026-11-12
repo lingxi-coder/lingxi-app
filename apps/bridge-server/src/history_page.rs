@@ -29,47 +29,107 @@ pub(super) struct Page {
 
 struct ReverseLines {
     file: File,
+    /// File offset of the current chunk, or the exclusive read bound initially.
     start: u64,
-    buffer: Vec<u8>,
+    chunk: Vec<u8>,
+    end: usize,
+    skip_final_newline: bool,
+    #[cfg(test)]
+    scanned_bytes: usize,
+    #[cfg(test)]
+    copied_bytes: usize,
 }
 
 impl ReverseLines {
+    fn new(file: File, start: u64) -> Self {
+        Self {
+            file,
+            start,
+            chunk: Vec::new(),
+            end: 0,
+            skip_final_newline: true,
+            #[cfg(test)]
+            scanned_bytes: 0,
+            #[cfg(test)]
+            copied_bytes: 0,
+        }
+    }
+
     fn next(&mut self) -> Result<Option<(u64, String)>, String> {
+        // Chunks are moved here in reverse file order. Scan only unread bytes
+        // and assemble a completed row once, even when it spans many chunks.
+        let mut fragments = Vec::<Vec<u8>>::new();
+        let mut bytes = 0;
         loop {
-            if self.buffer.last() == Some(&b'\n') {
-                self.buffer.pop();
+            if self.end == 0 && self.start > 0 {
+                let start = self.start.saturating_sub(CHUNK);
+                self.chunk = vec![0; (self.start - start) as usize];
+                self.file
+                    .seek(SeekFrom::Start(start))
+                    .map_err(|e| e.to_string())?;
+                self.file
+                    .read_exact(&mut self.chunk)
+                    .map_err(|e| e.to_string())?;
+                self.start = start;
+                self.end = self.chunk.len();
             }
-            if let Some(newline) = self.buffer.iter().rposition(|byte| *byte == b'\n') {
-                let line = self.buffer.split_off(newline + 1);
+            if self.skip_final_newline {
+                if self.end > 0 && self.chunk[self.end - 1] == b'\n' {
+                    self.end -= 1;
+                }
+                self.skip_final_newline = false;
+            }
+            let newline = self.chunk[..self.end]
+                .iter()
+                .rposition(|byte| *byte == b'\n');
+            #[cfg(test)]
+            {
+                self.scanned_bytes += self.end - newline.map_or(0, |at| at + 1);
+            }
+            if let Some(newline) = newline {
                 let offset = self.start + newline as u64 + 1;
-                return String::from_utf8(line)
-                    .map(|line| Some((offset, line)))
-                    .map_err(|_| "History contains invalid UTF-8".into());
+                let line = self.assemble(newline + 1, bytes, fragments)?;
+                self.end = newline;
+                return Ok(Some((offset, line)));
             }
             if self.start == 0 {
-                if self.buffer.is_empty() {
+                if self.end == 0 && fragments.is_empty() {
                     return Ok(None);
                 }
-                let line = std::mem::take(&mut self.buffer);
-                return String::from_utf8(line)
-                    .map(|line| Some((0, line)))
-                    .map_err(|_| "History contains invalid UTF-8".into());
+                let line = self.assemble(0, bytes, fragments)?;
+                self.end = 0;
+                return Ok(Some((0, line)));
             }
-            let start = self.start.saturating_sub(CHUNK);
-            let mut chunk = vec![0; (self.start - start) as usize];
-            self.file
-                .seek(SeekFrom::Start(start))
-                .map_err(|e| e.to_string())?;
-            self.file
-                .read_exact(&mut chunk)
-                .map_err(|e| e.to_string())?;
-            chunk.append(&mut self.buffer);
-            self.buffer = chunk;
-            self.start = start;
-            if self.buffer.len() > MAX_PAGE_BYTES + CHUNK as usize {
+            bytes += self.end;
+            if bytes > MAX_PAGE_BYTES + CHUNK as usize {
                 return Err("One history message exceeds the page size limit".into());
             }
+            self.chunk.truncate(self.end);
+            fragments.push(std::mem::take(&mut self.chunk));
+            self.end = 0;
         }
+    }
+
+    fn assemble(
+        &mut self,
+        from: usize,
+        bytes: usize,
+        fragments: Vec<Vec<u8>>,
+    ) -> Result<String, String> {
+        let length = bytes + self.end - from;
+        if length > MAX_PAGE_BYTES + CHUNK as usize {
+            return Err("One history message exceeds the page size limit".into());
+        }
+        let mut line = Vec::with_capacity(length);
+        line.extend_from_slice(&self.chunk[from..self.end]);
+        for fragment in fragments.into_iter().rev() {
+            line.extend_from_slice(&fragment);
+        }
+        #[cfg(test)]
+        {
+            self.copied_bytes += line.len();
+        }
+        String::from_utf8(line).map_err(|_| "History contains invalid UTF-8".into())
     }
 }
 
@@ -136,11 +196,7 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
         ancestors.extend(anchor.parent_uuid.iter().cloned());
         groups.extend(assistant_group(anchor));
     }
-    let mut reader = ReverseLines {
-        file,
-        start: cursor.offset.unwrap_or(opened.len()),
-        buffer: Vec::new(),
-    };
+    let mut reader = ReverseLines::new(file, cursor.offset.unwrap_or(opened.len()));
     let mut rows = Vec::new();
     let mut pending_siblings = HashMap::<_, Vec<(u64, session::jsonl::JsonlMessage)>>::new();
     let mut pending_calls = HashSet::new();
@@ -676,16 +732,120 @@ mod tests {
         ];
         std::fs::write(&path, expected.join("\n")).unwrap();
         let file = File::open(&path).unwrap();
-        let mut reader = ReverseLines {
-            start: file.metadata().unwrap().len(),
-            file,
-            buffer: Vec::new(),
-        };
+        let length = file.metadata().unwrap().len();
+        let mut reader = ReverseLines::new(file, length);
         let mut result = Vec::new();
         while let Some((_, line)) = reader.next().unwrap() {
             result.push(line);
         }
         result.reverse();
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn reverse_reader_preserves_offsets_and_scans_and_copies_long_rows_once() {
+        let (_root, path, _id, _) = transcript(0);
+        for length in [
+            CHUNK as usize - 1,
+            CHUNK as usize,
+            CHUNK as usize + 1,
+            MAX_PAGE_BYTES - 1,
+            MAX_PAGE_BYTES,
+            MAX_PAGE_BYTES + CHUNK as usize,
+        ] {
+            let prefix = "中文🧪\\ud800";
+            let middle = format!("{prefix}{}", "x".repeat(length - prefix.len()));
+            let expected = [
+                (0, "first\r"),
+                (7, middle.as_str()),
+                (8 + length as u64, "last"),
+            ];
+            for final_newline in [false, true] {
+                let mut source = format!("first\r\n{middle}\nlast");
+                if final_newline {
+                    source.push('\n');
+                }
+                std::fs::write(&path, &source).unwrap();
+                let file = File::open(&path).unwrap();
+                let mut reader = ReverseLines::new(file, source.len() as u64);
+                for (offset, line) in expected.iter().rev() {
+                    assert_eq!(reader.next().unwrap(), Some((*offset, (*line).to_owned())));
+                }
+                assert!(reader.next().unwrap().is_none());
+                assert!(reader.scanned_bytes <= source.len());
+                assert_eq!(reader.copied_bytes, 6 + length + 4);
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_reader_rejects_an_oversized_row_and_invalid_utf8() {
+        let (_root, path, _id, _) = transcript(0);
+        let length = MAX_PAGE_BYTES + CHUNK as usize + 1;
+        std::fs::write(&path, "x".repeat(length)).unwrap();
+        let mut reader = ReverseLines::new(File::open(&path).unwrap(), length as u64);
+        assert!(reader.next().unwrap_err().contains("page size limit"));
+        assert_eq!(
+            reader.copied_bytes, 0,
+            "reject before assembling the oversized row"
+        );
+        std::fs::write(&path, [0xc0, 0x80]).unwrap();
+        let mut reader = ReverseLines::new(File::open(&path).unwrap(), 2);
+        assert!(reader.next().unwrap_err().contains("invalid UTF-8"));
+    }
+
+    #[test]
+    fn near_limit_rows_page_without_gaps_with_exact_byte_cursors_and_lone_surrogates() {
+        let id = uuid::Uuid::new_v4();
+        let ids = (0..3)
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        let mut rows = ids
+            .iter()
+            .enumerate()
+            .map(|(index, uuid)| {
+                let mut row = text_row(&format!(
+                    "row-{index} 中文🧪 {} surrogate-marker",
+                    "x".repeat(MAX_PAGE_BYTES - 4096)
+                ));
+                row["uuid"] = uuid.clone().into();
+                row
+            })
+            .collect::<Vec<_>>();
+        rows.push(text_row("anchor"));
+        let (_root, path, mut cursor) = saved_rows(rows, id);
+        let source = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("surrogate-marker", "\\ud800");
+        std::fs::write(&path, &source).unwrap();
+        let mut offset = 0;
+        let offsets = source
+            .split_inclusive('\n')
+            .map(|line| {
+                let start = offset;
+                offset += line.len() as u64;
+                start
+            })
+            .collect::<Vec<_>>();
+        let mut seen = Vec::new();
+        for index in (0..3).rev() {
+            let page = read(&path, id, cursor).unwrap();
+            assert_eq!(page.messages.len(), 1);
+            assert_eq!(
+                page.messages[0].transcript_uuid.as_deref(),
+                Some(ids[index].as_str())
+            );
+            assert!(serde_json::to_string(&page.messages)
+                .unwrap()
+                .contains("\\ud800"));
+            seen.insert(0, page.messages[0].transcript_uuid.clone().unwrap());
+            if index == 0 {
+                assert!(page.before.is_none());
+                break;
+            }
+            cursor = page.before.unwrap();
+            assert_eq!(cursor.offset, Some(offsets[index]));
+        }
+        assert_eq!(seen, ids);
     }
 }

@@ -1416,14 +1416,14 @@ async fn prepare_selected_boot_session_after_capture(
         if &current != authority || content != snapshot.content.as_ref() {
             return Err("selected transcript snapshot source changed".into());
         }
-        let loaded = session::jsonl::route_lines(&content);
-        validate_captured_transcript(
-            &authority.path(),
-            uuid,
-            &content,
-            &loaded,
-            cfg.restore_draft,
-        )?;
+        let fallback;
+        let loaded = if let Some(loaded) = cfg.prepared_session_resume() {
+            loaded
+        } else {
+            fallback = session::jsonl::route_lines(&content);
+            &fallback
+        };
+        validate_captured_transcript(&authority.path(), uuid, &content, loaded, cfg.restore_draft)?;
         return validate_selected_session_mode(&content, uuid, expected);
     }
     let (authority, preflight) = capture_selected_transcript_source(&cfg.lingxi_home, &path, uuid)?;
@@ -1463,15 +1463,14 @@ async fn prepare_selected_boot_session_after_capture(
     }
     let content = preflight;
     let path = authority.path();
-    let loaded = if cfg.restore_draft {
-        // The ordinary transcript loader deliberately excludes zero-message
-        // files. Drafts use the same captured source and strict validation,
-        // without broadening historical-session discovery or resume.
-        session::jsonl::route_lines(&content)
-    } else {
-        session::jsonl::loader::route_captured_session_source(&path, uuid, &content)
-            .map_err(|error| format!("selected transcript is not resumable: {error}"))?
-    };
+    // The claim proved both the physical source and every byte unchanged.
+    // Reuse the preflight projection while still applying the ordinary loader's
+    // identity/native-compact validation. Draft admission remains separate.
+    let loaded = preview;
+    if !cfg.restore_draft {
+        session::jsonl::loader::validate_captured_session_source(&path, uuid, &content, &loaded)
+            .map_err(|error| format!("selected transcript is not resumable: {error}"))?;
+    }
     validate_captured_transcript(&path, uuid, &content, &loaded, cfg.restore_draft)?;
     // The source can change between the preflight and the writer claim.
     validate_selected_session_mode(&content, uuid, expected)?;
@@ -1515,6 +1514,12 @@ async fn prepare_selected_boot_session_after_capture(
         source_session_id: uuid.to_string(),
         content: content.into(),
     });
+    cfg.session_resume_loaded = Some(harness_runtime::desktop::DesktopSessionResumeLoaded::new(
+        cfg.session_resume_snapshot
+            .as_ref()
+            .expect("the claimed capture was just installed"),
+        Arc::new(loaded),
+    ));
     cfg.session_transcript_path = Some(path);
     cfg.session_transcript_authority = Some(authority);
     cfg.session_writer_lease = Some(lease);
@@ -2219,11 +2224,10 @@ pub async fn assemble_with_account_credentials(
         SettingsContext {
             plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
             fusion_layers: Some(Arc::new({
-                let mut config = cfg.clone();
+                let config = cfg.clone_for_runtime_controls();
                 // Settings reloads outlive individual session mounts. The
                 // bootstrap lease belongs to the hydrated session, not this
                 // configuration snapshot.
-                config.session_writer_lease = None;
                 move || harness_runtime::desktop::fusion_settings_layers_for_config(&config)
             })),
             paths,
@@ -3659,6 +3663,22 @@ mod tests {
         let snapshot = cfg.session_resume_snapshot.as_ref().unwrap();
         assert_eq!(snapshot.source_session_id, id);
         assert_eq!(snapshot.content.as_ref(), selected_content);
+        let prepared = cfg
+            .prepared_session_resume()
+            .expect("boot retains its validated parse");
+        let prepared_address = prepared as *const session::jsonl::LoadedTranscript;
+        let proof = crate::workspace_commands::ColdBootResume::capture(&cfg).unwrap();
+        assert!(proof.is_some());
+        assert_eq!(
+            cfg.prepared_session_resume().unwrap() as *const _,
+            prepared_address
+        );
+        prepare_selected_boot_session(&mut cfg).await.unwrap();
+        assert_eq!(
+            cfg.prepared_session_resume().unwrap() as *const _,
+            prepared_address,
+            "revalidating an unchanged writer capture must reuse the same parsed source"
+        );
         assert_eq!(cfg.session_writer_lease.as_ref().unwrap().session_id(), id);
         assert_eq!(std::fs::read(&default_path).unwrap(), default_bytes);
         assert_eq!(

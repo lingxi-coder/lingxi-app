@@ -187,6 +187,8 @@ export interface RuntimeEventEnvelope<T = unknown> {
 
 export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEventEnvelope<T> {
   sequence: number;
+  /** Replay-only equivalent span, inclusive through `sequence`. Live frames have no span. */
+  replayFromSequence?: number;
 }
 
 export interface SessionRuntimeSummary {
@@ -323,9 +325,8 @@ export interface RemoteRuntimeView {
   prompts: readonly PromptJournalEntry[];
   interactions: readonly InteractionRecord[];
   /**
-   * Records at or below this sequence may be missing from `prompts` and
-   * `interactions` (the bounded lists dropped them), so a viewer that stopped
-   * there cannot be resumed with a delta.
+   * Earlier records may have been dropped from bounded journals or rewritten
+   * into equivalent replay spans, so an older cursor requires a snapshot.
    */
   droppedThroughSequence: number;
   /** The newest sequence handed out. */

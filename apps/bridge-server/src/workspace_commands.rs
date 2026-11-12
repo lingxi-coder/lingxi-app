@@ -76,13 +76,19 @@ impl ColdBootResume {
         if uuid::Uuid::parse_str(&snapshot.source_session_id).ok() != Some(session_id) {
             return Err("cold resume snapshot does not match the active session".into());
         }
-        let loaded = session::jsonl::route_lines(&snapshot.content);
+        let fallback;
+        let loaded = if let Some(loaded) = cfg.prepared_session_resume() {
+            loaded
+        } else {
+            fallback = session::jsonl::route_lines(&snapshot.content);
+            &fallback
+        };
         let mode = session::JsonlWriter::fixed_session_mode_from_source(
             &snapshot.content,
             &session_id.to_string(),
         )?;
         let (messages, _) =
-            session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
+            session::jsonl::build_conversation_chain(loaded, &session_id.to_string());
         // Explicit mobile draft anchors are allowed by the cold loader and
         // have no display baseline or deferred tool calls to replay.
         let replayed = if messages.is_empty()
@@ -93,9 +99,9 @@ impl ColdBootResume {
             None
         } else {
             Some(
-                orchestrator::resume::replay_captured_session(
+                orchestrator::resume::replay_prepared_session(
                     path.clone(),
-                    snapshot.content.to_string(),
+                    &snapshot.content,
                     loaded,
                     session_id,
                 )

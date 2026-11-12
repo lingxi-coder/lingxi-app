@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "generate:i18n": "node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs scripts/generate-extension-locales.ts",
     "preview": "electron-vite preview",
     "remote:tunnel:config": "node scripts/local-app-remote-tunnel.mjs",
     "test": "node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --import ./test/register-css-test-loader.mjs --test --test-concurrency=1 test/*.test.ts test/*.test.mjs",

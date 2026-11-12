@@ -29,13 +29,11 @@ struct Request {
 }
 
 #[derive(Serialize)]
-struct Response {
+struct ResponseHeader {
     version: u8,
     id: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    bytes: usize,
+    kind: &'static str,
 }
 
 struct Adapter {
@@ -193,7 +191,10 @@ impl CatalogWorker {
     }
 
     async fn list(&mut self, request: &Request) -> Result<String, String> {
-        if request.version != 1 || request.id > 9_007_199_254_740_991 || !request.cwd.is_absolute()
+        if request.version != 2
+            || request.id == 0
+            || request.id > 9_007_199_254_740_991
+            || !request.cwd.is_absolute()
         {
             return Err("invalid session catalog worker request".into());
         }
@@ -318,32 +319,18 @@ async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let Some(frame) = frame else { return Ok(()) };
         let request: Request = serde_json::from_slice(&frame)
             .map_err(|_| "invalid session catalog worker request".to_string())?;
-        let response = match worker.list(&request).await {
-            Ok(result) => Response {
-                version: 1,
-                id: request.id,
-                output: Some(result),
-                error: None,
-            },
-            Err(error) => Response {
-                version: 1,
-                id: request.id,
-                output: None,
-                error: Some(error),
-            },
+        if request.version != 2 || request.id == 0 || request.id > 9_007_199_254_740_991 {
+            return Err("invalid session catalog worker request".into());
+        }
+        let (kind, body) = match worker.list(&request).await {
+            Ok(result) => ("output", result),
+            Err(error) => (
+                "error",
+                serde_json::to_string(&error)
+                    .map_err(|_| "failed to encode session catalog worker error".to_string())?,
+            ),
         };
-        // Carry the original oneshot JSON as a string. Do not parse or lower
-        // its source/UTF-16 representation through a second Rust JSON model.
-        let response = serde_json::to_vec(&response)
-            .map_err(|_| "failed to encode session catalog worker response".to_string())?;
-        output
-            .write_all(&response)
-            .await
-            .map_err(|_| "session catalog worker output failed".to_string())?;
-        output
-            .write_all(b"\n")
-            .await
-            .map_err(|_| "session catalog worker output failed".to_string())?;
+        write_response(&mut output, request.id, kind, &body).await?;
         output
             .flush()
             .await
@@ -351,9 +338,102 @@ async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 }
 
+/// Version 2: one small JSON header, exactly `bytes` raw JSON bytes, then LF.
+/// Keep the original JSON representation, including escaped lone UTF-16
+/// surrogates, without re-escaping the page or passing through serde Value.
+async fn write_response<W: AsyncWrite + Unpin>(
+    output: &mut W,
+    id: u64,
+    kind: &'static str,
+    body: &str,
+) -> Result<(), String> {
+    if id == 0
+        || id > 9_007_199_254_740_991
+        || !matches!(kind, "output" | "error")
+        || body.is_empty()
+        || body.len() > MAX_OUTPUT_BYTES
+    {
+        return Err("invalid session catalog worker response".into());
+    }
+    let header = serde_json::to_vec(&ResponseHeader {
+        version: 2,
+        id,
+        bytes: body.len(),
+        kind,
+    })
+    .map_err(|_| "failed to encode session catalog worker header".to_string())?;
+    for fragment in [header.as_slice(), b"\n", body.as_bytes(), b"\n"] {
+        output
+            .write_all(fragment)
+            .await
+            .map_err(|_| "session catalog worker output failed".to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode_responses(mut bytes: &[u8]) -> Vec<(serde_json::Value, &[u8])> {
+        let mut result = Vec::new();
+        while !bytes.is_empty() {
+            let newline = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+            let header: serde_json::Value = serde_json::from_slice(&bytes[..newline]).unwrap();
+            let length = header["bytes"].as_u64().unwrap() as usize;
+            assert_eq!(header["version"], 2);
+            let body = &bytes[newline + 1..newline + 1 + length];
+            assert_eq!(bytes[newline + 1 + length], b'\n');
+            bytes = &bytes[newline + 2 + length..];
+            result.push((header, body));
+        }
+        result
+    }
+
+    #[tokio::test]
+    async fn raw_response_keeps_json_bytes_unicode_surrogates_and_embedded_newlines() {
+        let body = "{\n\"text\":\"中文🧪\\ud800\\udc00\\ud800\\\"\\\\\\n\"\n}";
+        let mut output = Vec::new();
+        write_response(&mut output, 1, "output", body)
+            .await
+            .unwrap();
+        write_response(&mut output, 2, "error", "\"scoped error\"")
+            .await
+            .unwrap();
+        let responses = decode_responses(&output);
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0].0["kind"], "output");
+        assert_eq!(responses[0].1, body.as_bytes());
+        assert_eq!(responses[1].0["kind"], "error");
+        assert_eq!(responses[1].1, b"\"scoped error\"");
+    }
+
+    #[tokio::test]
+    async fn response_bounds_and_request_ids_are_checked_before_output() {
+        for (id, kind, body) in [
+            (0, "output", "{}".to_owned()),
+            (9_007_199_254_740_992, "output", "{}".to_owned()),
+            (1, "other", "{}".to_owned()),
+            (1, "output", String::new()),
+            (1, "output", "x".repeat(MAX_OUTPUT_BYTES + 1)),
+        ] {
+            let mut output = Vec::new();
+            assert!(write_response(&mut output, id, kind, &body).await.is_err());
+            assert!(output.is_empty());
+        }
+        let root = tempfile::tempdir().unwrap();
+        for (version, id) in [(1, 1), (2, 0), (2, 9_007_199_254_740_992_u64)] {
+            let input = format!(
+                "{}\n",
+                serde_json::json!({"version":version,"id":id,"cwd":root.path()})
+            );
+            let mut output = Vec::new();
+            assert!(serve(input.as_bytes(), &mut output, root.path().to_owned())
+                .await
+                .is_err());
+            assert!(output.is_empty());
+        }
+    }
 
     #[test]
     fn filesystem_adapters_reuse_identity_and_have_a_bound() {
@@ -395,25 +475,23 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().canonicalize().unwrap();
         let requests = [
-            serde_json::json!({"version":1,"id":1,"cwd":cwd,"scope":"invalid"}),
-            serde_json::json!({"version":1,"id":2,"cwd":cwd,"scope":"current"}),
+            serde_json::json!({"version":2,"id":1,"cwd":cwd,"scope":"invalid"}),
+            serde_json::json!({"version":2,"id":2,"cwd":cwd,"scope":"current"}),
         ];
         let input = format!("{}\n{}\n", requests[0], requests[1]);
         let mut output = Vec::new();
         serve(input.as_bytes(), &mut output, cwd.join("empty-home"))
             .await
             .unwrap();
-        let lines: Vec<serde_json::Value> = output
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(|line| serde_json::from_slice(line).unwrap())
-            .collect();
+        let lines = decode_responses(&output);
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["id"], 1);
-        assert!(lines[0]["error"].as_str().unwrap().contains("scope"));
-        assert_eq!(lines[1]["id"], 2);
-        let catalog: serde_json::Value =
-            serde_json::from_str(lines[1]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(lines[0].0["id"], 1);
+        assert_eq!(lines[0].0["kind"], "error");
+        assert!(serde_json::from_slice::<String>(lines[0].1)
+            .unwrap()
+            .contains("scope"));
+        assert_eq!(lines[1].0["id"], 2);
+        let catalog: serde_json::Value = serde_json::from_slice(lines[1].1).unwrap();
         assert_eq!(catalog, serde_json::json!({"version":1,"sessions":[]}));
     }
 
@@ -430,7 +508,7 @@ mod tests {
         let anchor = serde_json::json!({"type":"custom-title","sessionId":id,"customTitle":"empty anchor","mobileEmptySession":1,"cwd":cwd});
         std::fs::write(&path, format!("{fixed}\n{anchor}\n")).unwrap();
         let request: Request = serde_json::from_value(
-            serde_json::json!({"version":1,"id":1,"cwd":cwd,"scope":"current"}),
+            serde_json::json!({"version":2,"id":1,"cwd":cwd,"scope":"current"}),
         )
         .unwrap();
         let mut worker = CatalogWorker::new(home.clone());

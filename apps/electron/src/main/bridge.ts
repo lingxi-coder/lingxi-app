@@ -1,6 +1,8 @@
 import { DecisionToolBridge } from './decisionToolBridge.js';
 import { providerAccountRenewFailureCode } from './provider-accounts.js';
 import { SideChatRecovery } from './sideChatRecovery.js';
+import { replayCheckpointState, RuntimeEventReplay } from './runtimeEventReplay.js';
+import { recentTranscript } from '../shared/sessionHistory.js';
 import { parseProviderAccountRouting } from '../shared/providerAccounts.js';
 import type { ProviderAccountConfiguration } from './session-catalog.js';
 import { DesktopTelemetry } from './telemetry.js';
@@ -293,6 +295,14 @@ export class SessionRuntime {
   private ownedSessionResumeRequired = false;
   private sessionIdentityCommitted = false;
   private eventSequence = 0;
+  private replayCheckpointWanted = false;
+  private replayCheckpointQueued = false;
+  private replayCheckpointRequest: Promise<void> | undefined;
+  private replayCheckpointAttempt: { client: BridgeClient; generation: number; sequence: number } | undefined;
+  /** Only confirmed engine starts consume a journaled prompt, including queued sends. */
+  private readonly unconsumedReplayPrompts = new Map<number, number>();
+  private replayPromptOverflow = false;
+  private replayStartedTurn: { turnId: number | undefined } | undefined;
   /** Names this instance, so that a recreated runtime for the same session never reuses an epoch. */
   readonly runtimeId = randomBytes(6).toString('hex');
   private remoteBaseSequence = 0;
@@ -797,7 +807,7 @@ export class SessionRuntime {
     return [...new Set([...configuredCredentialProviderIds(this.credentialRoutingSettings), ...this.latestOfficialProviderCatalog.map((entry) => entry.provider_id)])];
   }
 
-  private replayEvents: SequencedRuntimeEventEnvelope<ClientEvent>[] = [];
+  private readonly replayEvents = new RuntimeEventReplay();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly diagnostics: DiagnosticBuffer;
   private startPromise: Promise<void> | null = null;
@@ -1305,9 +1315,10 @@ export class SessionRuntime {
   }
 
   replaySnapshot(): readonly SequencedRuntimeEventEnvelope<ClientEvent>[] {
-    return Object.freeze(this.replayEvents.map((envelope) => Object.freeze({
+    return Object.freeze(this.replayEvents.snapshot().map((envelope) => Object.freeze({
       sessionId: envelope.sessionId,
       sequence: envelope.sequence,
+      ...(envelope.replayFromSequence !== undefined ? { replayFromSequence: envelope.replayFromSequence } : {}),
       event: structuredClone(envelope.event),
     })));
   }
@@ -1331,7 +1342,8 @@ export class SessionRuntime {
 
   /** Read the state a snapshot is built from. Synchronous, so it can be paired with {@link observeRemote} without a gap. */
   remoteView(): RemoteRuntimeView {
-    const first = this.replayEvents[0];
+    const replay = this.replayEvents.snapshot();
+    const first = replay[0];
     const base = first && TRANSCRIPT_REPLAY_BASE_EVENTS.has(first.event.type) ? first : undefined;
     const controlsEvent = this.latestState.get('conversation_controls_changed')?.event;
     return {
@@ -1342,11 +1354,11 @@ export class SessionRuntime {
       epoch: `${this.runtimeId}:${this.remoteBaseSequence}`,
       baseSequence: this.remoteBaseSequence,
       base,
-      events: this.replayEvents.slice(base ? 1 : 0),
+      events: replay.slice(base ? 1 : 0),
       state: [...this.latestState.values()],
       prompts: this.promptJournal,
       interactions: this.interactionRecords,
-      droppedThroughSequence: this.droppedThroughSequence,
+      droppedThroughSequence: Math.max(this.droppedThroughSequence, this.replayEvents.compactedThroughSequence),
       lastSequence: this.eventSequence,
       pending: this.remotePending(),
       turn: { running: this.turnActive, ...(this.activeTurnId !== undefined ? { turn_id: this.activeTurnId } : {}) },
@@ -1401,6 +1413,7 @@ export class SessionRuntime {
 
   /** Tell observers the pending set changed. Coalesced into one notification per tick; the set is read when they handle it. */
   private notifyRemotePending(): void {
+    this.queueReplayCheckpoint();
     if (this.remotePendingNotified || this.remoteObservers.size === 0) return;
     this.remotePendingNotified = true;
     queueMicrotask(() => {
@@ -1440,6 +1453,15 @@ export class SessionRuntime {
       if (!kept.images.some((image) => image.base64 !== undefined) || ++withBytes <= MAX_JOURNAL_ENTRIES_WITH_IMAGES) return kept;
       return { ...kept, images: kept.images.map((image) => ({ media_type: image.media_type })) };
     }).reverse();
+    this.unconsumedReplayPrompts.set(entry.sequence, entry.turnId);
+    const firstKept = this.promptJournal[0]?.sequence ?? entry.sequence;
+    for (const sequence of this.unconsumedReplayPrompts.keys()) {
+      if (sequence < firstKept) {
+        this.unconsumedReplayPrompts.delete(sequence);
+        // An evicted queued prompt cannot be proven durable from this journal.
+        this.replayPromptOverflow = true;
+      }
+    }
     this.notifyRemote({ type: 'prompt', entry: this.promptJournal[this.promptJournal.length - 1]! });
   }
 
@@ -1455,7 +1477,12 @@ export class SessionRuntime {
       event: structuredClone(event),
     });
     if (TRANSCRIPT_REPLAY_BASE_EVENTS.has(event.type)) {
-      this.replayEvents = [envelope];
+      this.replayEvents.reset(envelope);
+      this.replayCheckpointWanted = false;
+      this.replayCheckpointAttempt = undefined;
+      this.unconsumedReplayPrompts.clear();
+      this.replayPromptOverflow = false;
+      this.replayStartedTurn = undefined;
       this.diagnostics.add('info', 'host', diagnosticEvent('session_recovery', {
         phase: 'native_base_cached', sessionId: this.sessionId, runtimeId: this.runtimeId,
         generation: this.generation, sequence: envelope.sequence, eventType: event.type,
@@ -1467,18 +1494,7 @@ export class SessionRuntime {
       this.interactionRecords = [];
       this.droppedThroughSequence = 0;
     } else if (retain && this.replayEvents.length > 0 && TRANSCRIPT_REPLAY_EVENTS.has(event.type)) {
-      // Status is a snapshot, not a transcript event. Keep only the newest
-      // one so repeated listing refreshes cannot grow the renderer replay
-      // buffer without bound or replay stale cumulative totals on reload.
-      this.replayEvents = event.type === 'status_snapshot' || event.type === 'session_storage_state'
-        ? this.replayEvents.filter(({ event: retained }) => retained.type !== event.type)
-        : event.type === 'ui_status'
-          ? this.replayEvents.filter(({ event: retained }) =>
-              retained.type !== 'ui_status' || retained.plugin !== event.plugin)
-          : this.replayEvents;
-      // The live buffer stays private: replaySnapshot and remoteView capture
-      // their arrays at the read boundary, so ordinary deltas can append in O(1).
-      this.replayEvents.push(envelope);
+      this.replayEvents.append(envelope);
     }
     return envelope;
   }
@@ -1494,6 +1510,19 @@ export class SessionRuntime {
     // useBridge filters these events before parent conversation reducers.
     const envelope = this.eventEnvelope(event, true);
     this.noteRemoteEvent(envelope);
+    if (event.type === 'turn_started') {
+      if (!this.replayStartedTurn || this.replayStartedTurn.turnId !== event.turn_id) {
+        const prompt = [...this.unconsumedReplayPrompts].find(([, turnId]) =>
+          event.turn_id === undefined ? turnId === 0 : turnId === event.turn_id);
+        if (prompt) this.unconsumedReplayPrompts.delete(prompt[0]);
+      }
+      this.replayStartedTurn = { turnId: event.turn_id };
+    }
+    if (event.type === 'turn_ended' || event.type === 'session_ended') this.replayStartedTurn = undefined;
+    if (event.type === 'compaction_completed' || event.type === 'compaction_status' && event.phase === 'complete') {
+      this.replayCheckpointWanted = true;
+    }
+    this.queueReplayCheckpoint();
     if (!this.opts.envelopeEvents) {
       this.broadcast(CH_EVENT, event);
       return;
@@ -1535,6 +1564,70 @@ export class SessionRuntime {
 
   private notifyActivityChanged(): void {
     this.opts.onActivityChanged?.();
+    this.queueReplayCheckpoint();
+  }
+
+  private canCheckpointReplay(client: BridgeClient): boolean {
+    return !this.disposed && !this.disposing && this.desiredRunning && !this.isStarting
+      && !this.archiving && !this.sessionEnded
+      && client === this.client && this.state.status === 'connected'
+      && !this.hasActiveWork && !this.pendingSessionResume && !this.ownedSessionResumeRequired
+      && this.pendingScheduledTurns.size === 0 && this.activeCronExecutions === 0
+      && this.unconsumedReplayPrompts.size === 0 && !this.replayPromptOverflow;
+  }
+
+  private queueReplayCheckpoint(): void {
+    if (!this.replayCheckpointWanted || this.replayCheckpointQueued || this.replayCheckpointRequest) return;
+    this.replayCheckpointQueued = true;
+    queueMicrotask(() => {
+      this.replayCheckpointQueued = false;
+      const client = this.client;
+      const attempt = this.replayCheckpointAttempt;
+      if (!this.replayCheckpointWanted || !client || typeof client.captureTranscriptCheckpoint !== 'function'
+        || !this.canCheckpointReplay(client)
+        || (attempt?.client === client && attempt.generation === this.generation && attempt.sequence === this.eventSequence)) return;
+      const generation = this.generation;
+      const sequence = this.eventSequence;
+      this.replayCheckpointAttempt = { client, generation, sequence };
+      this.replayCheckpointRequest = (async () => {
+        try {
+          const event = await client.captureTranscriptCheckpoint(this.sessionId);
+          if (generation !== this.generation || sequence !== this.eventSequence || !this.canCheckpointReplay(client)
+            || event.type !== 'session_resumed' || event.session_id !== this.sessionId
+            || (this.sessionMode !== undefined && event.mode !== this.sessionMode)) return;
+          const messages = [...recentTranscript(event.messages)];
+          const boundary = messages[0];
+          if (!boundary?.transcript_uuid || !boundary.blocks.some(block => block.type === 'compact_boundary')) return;
+          const replay = this.replayEvents.snapshot();
+          const oldBase = replay[0]?.event;
+          const oldBoundary = oldBase?.type === 'session_resumed' ? recentTranscript(oldBase.messages)[0]?.transcript_uuid : undefined;
+          if (oldBoundary === boundary.transcript_uuid) { this.replayCheckpointWanted = false; return; }
+          const state = replayCheckpointState(replay);
+          const base = Object.freeze({ sessionId: this.sessionId, sequence: ++this.eventSequence,
+            event: structuredClone({ ...event, messages }) });
+          this.replayEvents.reset(base);
+          this.remoteBaseSequence = base.sequence;
+          for (const retained of state) this.replayEvents.append(Object.freeze({
+            sessionId: this.sessionId, sequence: ++this.eventSequence, event: structuredClone(retained),
+          }));
+          // This replaces future replay only. Existing renderers keep their
+          // streaming row IDs; remote viewers use the ordinary epoch reset.
+          // Journals survive, including image references and interaction IDs.
+          this.replayCheckpointWanted = false;
+          this.notifyRemote({ type: 'event', envelope: base });
+          this.diagnostics.add('info', 'host', diagnosticEvent('session_recovery', {
+            phase: 'transcript_checkpoint_cached', sessionId: this.sessionId, generation,
+            sequence: base.sequence, messageCount: messages.length,
+          }));
+        } catch {
+          // An unavailable or changing source leaves the equivalent spans in
+          // place. Retry only after another event or ownership change.
+        }
+      })().finally(() => {
+        this.replayCheckpointRequest = undefined;
+        this.queueReplayCheckpoint();
+      });
+    });
   }
 
   private sendTrackedSlashCommand(client: BridgeClient, command: Extract<ClientCommand, { type: 'run_slash_command' }>): void {
@@ -4168,6 +4261,7 @@ export class SessionRuntime {
   }
 
   private async stopBridge(): Promise<void> {
+    this.replayCheckpointAttempt = undefined;
     this.nativeMediaClient = undefined;
     this.invalidateNativeMediaBinding();
     await this.telemetry?.shutdown();

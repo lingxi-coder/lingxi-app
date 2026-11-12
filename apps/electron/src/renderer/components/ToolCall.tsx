@@ -45,6 +45,7 @@ import { Disclosure } from './Disclosure';
 import { Icon } from './Icon';
 import { MarkdownContent } from './MarkdownContent';
 import { ToolActivityIcon } from './ToolActivityIcon';
+import { ToolDetailPanel } from './ToolDetailPanel';
 import { ComputerApplicationIcon } from './ComputerApplicationIcon';
 import { AgentAvatar } from './AgentAvatar';
 import { ModUiParentSite } from './modUiAbovePrompt';
@@ -60,18 +61,6 @@ const TITLE_STYLE: CSSProperties = Object.freeze({
   // part that identifies it.
   direction: 'rtl',
   textAlign: 'left',
-});
-
-const BODY_STYLE: CSSProperties = Object.freeze({
-  margin: '6px 0 0 22px',
-  padding: 10,
-  maxHeight: 260,
-  overflow: 'auto',
-  whiteSpace: 'pre-wrap',
-  overflowWrap: 'anywhere',
-  borderRadius: 7,
-  fontSize: 11.5,
-  lineHeight: 1.5,
 });
 
 export interface ToolCallProps {
@@ -265,26 +254,16 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       permissionRequest && jsonBody === undefined ? (
         <div className="permission-tool-message">{body}</div>
       ) : skillInstructions && jsonBody === undefined ? (
-        <div className="tool-skill-instructions" tabIndex={0} role="region" aria-label={tr("desktop_ui_skill_instructions")}
-          style={{ margin: '4px 0 8px', padding: '4px 0 4px 14px', maxHeight: 320, overflow: 'auto',
-            borderLeft: `1px solid ${t.borderStrong}`, fontSize: 13, lineHeight: 1.6 }}>
+        <div className="tool-skill-instructions">
           <MarkdownContent text={body} variant="compact" />
         </div>
       ) : jsonBody !== undefined ? (
-        <div style={{ marginTop: 6 }}>
+        <div className="tool-result-code">
           <CodeBlock code={jsonBody} language="json" variant="tool" />
         </div>
       ) : (
         <pre
-          className={compactError ? 'tool-result-error' : 'mono-code tool-result-text'}
-          style={{
-            ...BODY_STYLE,
-            fontSize: compactError ? '0.8rem' : BODY_STYLE.fontSize,
-            marginLeft: 0,
-            background: t.windowBg,
-            color: t.text2,
-            border: `0.5px solid ${t.border}`,
-          }}
+          className={compactError ? 'tool-result-error tool-result-text' : 'mono-code tool-result-text'}
         >
           {body}
         </pre>
@@ -302,6 +281,18 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       </div>
     )}
   </>;
+  const detailContent = permissionRequest ? resultContent : (
+    <ToolDetailPanel label={view.verb === 'shell' ? 'Shell' : skillInstructions ? tr('desktop_ui_skill_instructions') : view.label}
+      footer={<>
+        <Icon name={item.status === 'done' ? 'check' : item.status === 'error' ? 'x' : 'clock'} size={13} stroke={1.7} />
+        <span>{tr(`desktop_ui_tool_result_${item.status}`)}</span>
+      </>}>
+      {view.verb === 'shell' && view.sub_line && <pre className="mono-code tool-result-command">
+        {view.sub_line.prefix}{view.sub_line.text}
+      </pre>}
+      {resultContent}
+    </ToolDetailPanel>
+  );
   const answeredQuestions = questionAnswers(item);
   const rowContent = localAppReference(item) ? (
     <LocalAppCard item={item} />
@@ -318,7 +309,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       data-status={item.status}
       data-kind={permissionRequest ? 'permission' : isLocalApp ? 'local-app' : undefined}
       style={{
-        maxWidth: 760,
+        minWidth: 0, maxWidth: '100%',
         display: 'flex', flexDirection: 'column', gap: 4,
         padding: permissionRequest ? '2px 0' : 0, position: 'relative',
         '--tool-label-color': item.status === 'error' || permissionRequest ? t.text2 : t.text3,
@@ -353,7 +344,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
           buttonStyle={{ width: permissionRequest ? '100%' : 'fit-content', maxWidth: '100%', minHeight: permissionRequest ? 40 : 28, margin: 0, padding: '2px 0', borderRadius: 7 }}
           bodyStyle={permissionRequest
             ? { marginLeft: 0, padding: '0 14px 14px 56px' }
-            : { marginLeft: 29 }}
+            : { minWidth: 0, marginLeft: 0 }}
         >
           <ModUiParentSite
             sessionId={item.status === 'running' ? '' : modUiSessionId ?? ''}
@@ -361,9 +352,9 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
             component="ToolResult"
             instanceId={`tool-result:${item.id}`}
             props={nativeToolResultProps(item)}
-            engineFallback={isOpen ? resultContent : null}
+            engineFallback={isOpen ? detailContent : null}
           >
-            {isOpen ? resultContent : null}
+            {isOpen ? detailContent : null}
           </ModUiParentSite>
         </Disclosure>
       ) : (

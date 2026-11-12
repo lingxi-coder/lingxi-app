@@ -1706,7 +1706,7 @@ body {
 .narration-disclosure-trigger:hover { background: color-mix(in oklab, currentColor 8%, transparent); }
 .narration-disclosure-trigger:active { scale: 0.96; }
 
-.local-app-instructions { min-width: 0; max-width: 760px; color: var(--instructions-text); }
+.local-app-instructions { min-width: 0; max-width: 100%; color: var(--instructions-text); }
 .local-app-instructions-toggle {
   display: inline-flex;
   align-items: center;
@@ -1739,26 +1739,14 @@ body {
   outline-offset: 3px;
 }
 .local-app-instructions-body {
-  margin: 6px 0 8px 9px;
-  padding: 6px 14px 10px 19px;
-  border-left: 1px solid var(--instructions-border);
-  max-width: min(68ch, calc(100% - 9px));
-  max-height: min(24rem, 55vh);
-  overflow: auto;
-  scrollbar-gutter: stable;
-  overflow-wrap: anywhere;
-  font-size: .8125rem;
-  font-weight: 400;
-  line-height: 1.65;
+  min-width: 0;
 }
-.local-app-instructions-body:focus-visible { outline: 2px solid var(--instructions-focus); outline-offset: 3px; }
 @media (pointer: coarse) { .local-app-instructions-toggle { min-height: 44px; } }
 @media (prefers-reduced-motion: reduce) {
   .local-app-instructions-toggle, .local-app-instructions-chevron { transition: none; }
 }
 @media (prefers-contrast: more) {
   .local-app-instructions-chevron { opacity: 1; }
-  .local-app-instructions-body { border-left-color: currentColor; }
 }
 
 .transcript-tool-row {

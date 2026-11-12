@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -52,6 +53,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,6 +70,7 @@ import com.lingxi.code.teams.rememberNowMs
 import com.lingxi.code.teams.rememberTeamsListStrings
 import com.lingxi.code.theme.PersonAvatar
 import com.lingxi.code.theme.TeamTile
+import com.lingxi.code.theme.rememberReduceMotion
 
 /**
  * The Friends root (docs/FRIENDS-CLIENTS.md D3, D4, D5, D27): header, the name banner, the Team invitations and Requests sections, the filter
@@ -96,6 +102,7 @@ internal fun FriendsListScreen(
     val collator = remember(locale) { FriendsLogic.friendCollator(locale) }
     val strings = rememberTeamsListStrings()
     val now = rememberNowMs()
+    val reduceMotion = rememberReduceMotion()
     var searching by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     var more by remember { mutableStateOf(false) }
@@ -112,10 +119,10 @@ internal fun FriendsListScreen(
     val showLoadError = state.cardsFailed && state.cardsLoaded
     val leading = listOf(showNameBanner, showProfileError, showLoadError).count { it }
 
-    LaunchedEffect(scrollToRequests) { if (scrollToRequests > 0) listState.animateScrollToItem(leading) }
+    LaunchedEffect(scrollToRequests) { if (scrollToRequests > 0) { if (reduceMotion) listState.scrollToItem(leading) else listState.animateScrollToItem(leading) } }
 
     Column(modifier.fillMaxSize().testTag(FriendsTags.LIST)) {
-        Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (searching) {
                 val focus = remember { FocusRequester() }
                 LaunchedEffect(Unit) { focus.requestFocus() }
@@ -127,7 +134,7 @@ internal fun FriendsListScreen(
                 )
                 IconButton(onClick = { searching = false; query = "" }) { Icon(Icons.Outlined.Close, stringResource(R.string.common_close)) }
             } else {
-                Text(stringResource(R.string.friends_title), Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(stringResource(R.string.friends_title), Modifier.weight(1f).padding(start = 8.dp).semantics { heading() }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 IconButton(onClick = { searching = true }, modifier = Modifier.testTag(FriendsTags.SEARCH)) { Icon(Icons.Outlined.Search, stringResource(R.string.friends_filter_placeholder)) }
                 IconButton(onClick = onAdd, modifier = Modifier.testTag(FriendsTags.ADD)) { Icon(Icons.Outlined.PersonAdd, stringResource(R.string.friends_add)) }
                 Box {
@@ -157,7 +164,7 @@ internal fun FriendsListScreen(
                 )
                 else -> LazyColumn(Modifier.fillMaxSize(), state = listState) {
                     if (showLoadError) item(key = "load-error") {
-                        Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.errorContainer) {
+                        Surface(Modifier.fillMaxWidth().semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.errorContainer) {
                             Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 Text(stringResource(R.string.friends_load_error), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
                                 TextButton(onClick = onRetry) { Text(stringResource(R.string.common_retry)) }
@@ -180,7 +187,7 @@ internal fun FriendsListScreen(
                     }
                     if (offers.isNotEmpty()) {
                         item(key = "offers") {
-                            Text(stringResource(R.string.friends_section_offers), Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp).testTag(FriendsTags.OFFERS), style = MaterialTheme.typography.titleSmall)
+                            Text(stringResource(R.string.friends_section_offers), Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp).semantics { heading() }.testTag(FriendsTags.OFFERS), style = MaterialTheme.typography.titleSmall)
                         }
                         val all = "offers" in expanded.split(',')
                         items(if (all) offers else offers.take(FriendsLogic.SECTION_ROWS), key = { "offer-${it.teamId}" }) { offer ->
@@ -195,7 +202,7 @@ internal fun FriendsListScreen(
                     }
                     if (incoming.isNotEmpty() || outgoing.isNotEmpty()) {
                         item(key = "requests") {
-                            Text(stringResource(R.string.friends_section_requests), Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp).testTag(FriendsTags.REQUESTS), style = MaterialTheme.typography.titleSmall)
+                            Text(stringResource(R.string.friends_section_requests), Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp).semantics { heading() }.testTag(FriendsTags.REQUESTS), style = MaterialTheme.typography.titleSmall)
                         }
                         requestGroup("received", R.string.friends_requests_received, incoming, expanded, { expanded = it }, state, onAccept, onDecline, onCancel)
                         requestGroup("sent", R.string.friends_requests_sent, outgoing, expanded, { expanded = it }, state, onAccept, onDecline, onCancel)

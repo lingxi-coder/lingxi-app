@@ -14,11 +14,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.lingxi.code.teams.TeamBotCard
 import com.lingxi.code.teams.TeamIdentity
 import com.lingxi.code.teams.TeamMember
@@ -27,10 +28,21 @@ import com.lingxi.code.teams.TeamsListLogic
 import com.lingxi.code.teams.TeamsListStrings
 
 /**
- * Avatars of the Teams surfaces (SPEC-mobile-team-bot-ui section 7). Every one is decorative and hidden from accessibility:
- * the name beside it carries the meaning.
+ * Avatars of the Teams surfaces (SPEC-mobile-team-bot-ui section 7, docs/TEAMS-UI-POLISH.md U2). Every one is decorative and hidden from
+ * accessibility: the name beside it carries the meaning. Five sizes only: 20 chips, 24 pickers, 32 message author and conversation header,
+ * 40 list rows, 56 profile and detail headers. A person is a circle; a Bot, a channel and a team are one rounded square of [SQUIRCLE] x size.
  */
 private val AvatarWhite = Color.White
+
+/** The corner radius of a Bot, channel or team avatar, as a fraction of its size. */
+private const val SQUIRCLE = 0.24f
+
+/**
+ * A glyph size that is [fraction] of the avatar's [size] in dp whatever the font scale: an avatar scales with the layout, so its letters must
+ * not scale with the text and push out of the circle.
+ */
+@Composable
+private fun avatarGlyphSize(size: Dp, fraction: Float, floor: Dp = 0.dp): TextUnit = with(LocalDensity.current) { maxOf(size * fraction, floor).toSp() }
 
 /** A person: initials in white on a colour taken from the uid. */
 @Composable
@@ -39,35 +51,38 @@ fun PersonAvatar(id: String, name: String, size: Dp = 32.dp, modifier: Modifier 
         modifier.size(size).clip(CircleShape).background(Color(AvatarIdentity.avatarColorArgb(id))).clearAndSetSemantics { },
         contentAlignment = Alignment.Center,
     ) {
-        Text(AvatarIdentity.initials(name), color = AvatarWhite, fontSize = (size.value * 0.4f).sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Text(AvatarIdentity.initials(name), color = AvatarWhite, fontSize = avatarGlyphSize(size, 0.4f), fontWeight = FontWeight.SemiBold, maxLines = 1)
     }
 }
 
-/** A Bot: the shipped art, chosen by its `botId` (or, before its card has loaded, the last segment of its key). */
+/**
+ * A Bot: the shipped art, chosen by the Bot's avatar id (a team Bot's `avatarId`, a computer's `botId`, or, before its card has loaded, the
+ * last segment of its key), clipped to the rounded square that tells a Bot from a person.
+ */
 @Composable
 fun BotAvatar(botIdOrKey: String, size: Dp = 32.dp, modifier: Modifier = Modifier) {
-    Box(modifier.size(size).clearAndSetSemantics { }) { AgentAvatar(AvatarIdentity.teamBotAvatarId(botIdOrKey), Modifier.size(size)) }
+    Box(modifier.size(size).clip(RoundedCornerShape(size * SQUIRCLE)).clearAndSetSemantics { }) { AgentAvatar(AvatarIdentity.teamBotAvatarId(botIdOrKey), Modifier.size(size)) }
 }
 
 /** A channel: a rounded square with a `#` glyph, no colour from the id. */
 @Composable
 fun ChannelAvatar(size: Dp = 40.dp, modifier: Modifier = Modifier) {
     Box(
-        modifier.size(size).clip(RoundedCornerShape(size * 0.25f)).background(MaterialTheme.colorScheme.surfaceVariant).clearAndSetSemantics { },
+        modifier.size(size).clip(RoundedCornerShape(size * SQUIRCLE)).background(MaterialTheme.colorScheme.surfaceVariant).clearAndSetSemantics { },
         contentAlignment = Alignment.Center,
     ) {
-        Text("#", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = (size.value * 0.5f).sp, fontWeight = FontWeight.SemiBold)
+        Text("#", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = avatarGlyphSize(size, 0.5f), fontWeight = FontWeight.SemiBold)
     }
 }
 
 /** A team: the first letter of its name on a colour taken from the team id. */
 @Composable
-fun TeamTile(teamId: String, name: String, size: Dp = 36.dp, modifier: Modifier = Modifier) {
+fun TeamTile(teamId: String, name: String, size: Dp = 40.dp, modifier: Modifier = Modifier) {
     Box(
-        modifier.size(size).clip(RoundedCornerShape(size * 0.25f)).background(Color(AvatarIdentity.avatarColorArgb(teamId))).clearAndSetSemantics { },
+        modifier.size(size).clip(RoundedCornerShape(size * SQUIRCLE)).background(Color(AvatarIdentity.avatarColorArgb(teamId))).clearAndSetSemantics { },
         contentAlignment = Alignment.Center,
     ) {
-        Text(AvatarIdentity.teamInitial(name), color = AvatarWhite, fontSize = (size.value * 0.45f).sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Text(AvatarIdentity.teamInitial(name), color = AvatarWhite, fontSize = avatarGlyphSize(size, 0.45f), fontWeight = FontWeight.SemiBold, maxLines = 1)
     }
 }
 
@@ -91,7 +106,7 @@ internal fun AvatarStack(identities: List<TeamIdentity>, size: Dp, modifier: Mod
                 Modifier.align(Alignment.BottomEnd).clip(CircleShape).background(MaterialTheme.colorScheme.surface).padding(1.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("+$more", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = (size.value * 0.26f).sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 3.dp))
+                Text("+$more", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = avatarGlyphSize(size, 0.26f, floor = 11.dp), fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 3.dp))
             }
         }
     }

@@ -27,7 +27,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -45,6 +44,7 @@ import com.lingxi.code.tabs.LocalWideLayout
 import com.lingxi.code.tabs.OnTabReselected
 import com.lingxi.code.teams.TeamsMessageState
 import com.lingxi.code.teams.TeamsWorkspace
+import com.lingxi.code.theme.rememberReduceMotion
 import kotlinx.coroutines.delay
 
 /**
@@ -71,6 +71,7 @@ internal fun FriendsTab(
     val host = LocalTabHost.current
     val wide = LocalWideLayout.current
     val listState = rememberLazyListState()
+    val reduceMotion = rememberReduceMotion()
     var scrollTop by remember { mutableIntStateOf(0) }
     var scrollToRequests by remember { mutableIntStateOf(0) }
 
@@ -118,7 +119,7 @@ internal fun FriendsTab(
     BackHandler(enabled = stack.isNotEmpty()) { setStack(stack.dropLast(1)) }
     // Re-tapping the tab pops to the list, then scrolls it to the top.
     OnTabReselected(AppTab.Friends) { if (stack.isNotEmpty()) setStack(emptyList()) else scrollTop++ }
-    LaunchedEffect(scrollTop) { if (scrollTop > 0) listState.animateScrollToItem(0) }
+    LaunchedEffect(scrollTop) { if (scrollTop > 0) { if (reduceMotion) listState.scrollToItem(0) else listState.animateScrollToItem(0) } }
 
     Box(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).windowInsetsPadding(WindowInsets.systemBars).imePadding().testTag(FriendsTags.ROOT)) {
         if (uid == null) {
@@ -171,7 +172,8 @@ internal fun FriendsTab(
                 onDismiss = workspace.link::clear,
             )
         }
-        state.notice?.let { notice -> FriendsNoticeBanner(notice, onDismiss = { workspace.clearNotice(notice) }, modifier = Modifier.align(Alignment.BottomCenter)) }
+        val notice = state.notice
+        NoticeSnackbar(notice, notice?.let { friendsNoticeText(it) }) { notice?.let(workspace::clearNotice) }
     }
 }
 

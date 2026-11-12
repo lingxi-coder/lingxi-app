@@ -2,6 +2,7 @@ package com.lingxi.code.tabs
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -70,6 +71,7 @@ import com.lingxi.code.friends.FriendsBadge
 import com.lingxi.code.friends.FriendsTab
 import com.lingxi.code.teams.TeamsBadge
 import com.lingxi.code.teams.TeamsTab
+import com.lingxi.code.theme.rememberReduceMotion
 import kotlinx.coroutines.flow.StateFlow
 
 /** The one wide breakpoint (decision D3): the rail, the persistent drawer and every two-pane tab switch here. */
@@ -287,12 +289,14 @@ private fun PhoneBar(
     onSelect: (AppTab) -> Unit,
     onHeightChanged: (Int) -> Unit,
 ) {
+    // U10: with "Remove animations" on, the bar appears and disappears without the expand and fade.
+    val reduceMotion = rememberReduceMotion()
     Box(Modifier.fillMaxWidth().onSizeChanged { onHeightChanged(it.height) }) {
         AnimatedVisibility(
             visible = visible,
-            enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(),
+            enter = if (reduceMotion) EnterTransition.None else expandVertically(expandFrom = Alignment.Top) + fadeIn(),
             // The keyboard takes the bottom edge at once; nothing else should linger beside it.
-            exit = if (keyboardVisible) ExitTransition.None else shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut(),
+            exit = if (keyboardVisible || reduceMotion) ExitTransition.None else shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut(),
         ) {
             val label = stringResource(R.string.tabs_navigation_a11y)
             NavigationBar(Modifier.testTag(UiTags.TABS_BAR).semantics { contentDescription = label }) {

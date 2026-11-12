@@ -2,7 +2,9 @@ package com.lingxi.code.teams
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -44,16 +46,17 @@ import com.lingxi.code.friends.FriendLink
 import com.lingxi.code.friends.FriendMemberSheet
 import com.lingxi.code.friends.FriendOutcome
 import com.lingxi.code.friends.FriendProof
-import com.lingxi.code.friends.FriendsBanner
 import com.lingxi.code.friends.FriendsWorkspace
 import com.lingxi.code.friends.FriendState
 import com.lingxi.code.friends.InviteFriendsSheet
+import com.lingxi.code.friends.NoticeSnackbar
 import com.lingxi.code.friends.friendNamesText
 import com.lingxi.code.settings.SettingsRoutes
 import com.lingxi.code.tabs.AppTab
 import com.lingxi.code.tabs.LocalTabHost
 import com.lingxi.code.tabs.LocalWideLayout
 import com.lingxi.code.tabs.OnTabReselected
+import com.lingxi.code.theme.rememberReduceMotion
 import java.util.UUID
 
 /**
@@ -76,6 +79,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     val host = LocalTabHost.current
     val wide = LocalWideLayout.current
     val listState = rememberLazyListState()
+    val reduceMotion = rememberReduceMotion()
     var scrollTop by remember { mutableIntStateOf(0) }
     // Add friend on a member (D15) is the Friends workspace's own lookup; the friends there are who shows "Friends" instead of the action.
     val friends = remember(context) { FriendsWorkspace.get(context.applicationContext) }
@@ -109,7 +113,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     BackHandler(enabled = stack.isNotEmpty()) { setStack(stack.dropLast(1)) }
     // Re-tapping the tab pops to the list, then scrolls it to the top.
     OnTabReselected(AppTab.Teams) { if (stack.isNotEmpty()) setStack(emptyList()) else scrollTop++ }
-    LaunchedEffect(scrollTop) { if (scrollTop > 0) listState.animateScrollToItem(0) }
+    LaunchedEffect(scrollTop) { if (scrollTop > 0) { if (reduceMotion) listState.scrollToItem(0) else listState.animateScrollToItem(0) } }
 
     Box(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).windowInsetsPadding(WindowInsets.systemBars).imePadding().testTag(TeamsTags.ROOT)) {
         val team = teams.teams.firstOrNull { it.id == teams.selectedId }
@@ -121,11 +125,14 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
             )
             !teams.loaded -> Box(Modifier.fillMaxSize().testTag(TeamsTags.LOADING), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             teams.teams.isEmpty() && teams.loading -> Box(Modifier.fillMaxSize().testTag(TeamsTags.LOADING), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            // U9: what is empty, what to do, then the two actions 8 dp apart. The platform disclosure is read in the Create sheet, before a team exists.
             teams.teams.isEmpty() -> TeamsMessageState(
-                stringResource(R.string.teams_empty), Modifier.testTag(TeamsTags.EMPTY), icon = Icons.Outlined.Groups, body = stringResource(R.string.teams_disclosure),
+                stringResource(R.string.teams_empty_title), Modifier.testTag(TeamsTags.EMPTY), icon = Icons.Outlined.Groups, body = stringResource(R.string.teams_empty),
                 action = {
-                    Button(onClick = { workspace.teamsModel.clearError(); sheet = "create" }) { Text(stringResource(R.string.teams_create)) }
-                    OutlinedButton(onClick = { workspace.teamsModel.clearError(); joinPrefill = ""; sheet = "join" }) { Text(stringResource(R.string.teams_join)) }
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Button(onClick = { workspace.teamsModel.clearError(); sheet = "create" }) { Text(stringResource(R.string.teams_create)) }
+                        OutlinedButton(onClick = { workspace.teamsModel.clearError(); joinPrefill = ""; sheet = "join" }) { Text(stringResource(R.string.teams_join)) }
+                    }
                 },
             )
             team == null -> TeamsMessageState(
@@ -222,10 +229,12 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 onDismiss = dismiss,
             )
         }
-        if (invited.isNotEmpty()) {
-            val locale = LocalConfiguration.current.locales[0]
-            FriendsBanner(stringResource(R.string.friends_invite_sent_to_fmt, friendNamesText(invited, locale)), invited, onDismiss = { invited = emptyList() }, modifier = Modifier.align(Alignment.BottomCenter))
-        }
+        // The tab's one-shot line, in the tab's own Snackbar host (a polite live region with a Dismiss action).
+        val locale = LocalConfiguration.current.locales[0]
+        NoticeSnackbar(
+            key = invited.takeIf { it.isNotEmpty() },
+            text = if (invited.isEmpty()) null else stringResource(R.string.friends_invite_sent_to_fmt, friendNamesText(invited, locale)),
+        ) { invited = emptyList() }
     }
 }
 

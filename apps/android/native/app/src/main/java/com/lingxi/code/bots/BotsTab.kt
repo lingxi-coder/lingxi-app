@@ -7,17 +7,18 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -66,11 +67,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -109,10 +111,13 @@ import com.lingxi.code.tabs.LocalTabHost
 import com.lingxi.code.tabs.LocalWideLayout
 import com.lingxi.code.tabs.OnTabReselected
 import com.lingxi.code.tabs.TabLogic
+import com.lingxi.code.teams.TeamsMessageState
+import com.lingxi.code.teams.disclosure
 import com.lingxi.code.teams.listTimeText
 import com.lingxi.code.teams.rememberNowMs
 import com.lingxi.code.theme.BotAvatar
 import com.lingxi.code.theme.LocalPalette
+import com.lingxi.code.theme.rememberReduceMotion
 import java.time.Instant
 import java.time.ZoneId
 import kotlinx.coroutines.CancellationException
@@ -139,6 +144,7 @@ internal object BotsTags {
     fun note(hostId: String, note: BodyNote) = "bots.note.$hostId.${note.key}"
     fun state(hostId: String) = "bots.state.$hostId"
     fun connect(hostId: String) = "bots.connect.$hostId"
+    fun checkAgain(hostId: String) = "bots.checkAgain.$hostId"
     fun bot(hostId: String, botId: String) = "bots.bot.$hostId.$botId"
     fun newChat(hostId: String, botId: String) = "bots.newChat.$hostId.$botId"
     fun botState(hostId: String, botId: String) = "bots.botState.$hostId.$botId"
@@ -208,6 +214,7 @@ fun BotsTab(request: BotsRequest?, onRequestHandled: (Long) -> Unit, modifier: M
     val creating = remember { mutableStateListOf<String>() }
     val errors = remember { mutableStateMapOf<String, Int>() }
     val listState = rememberLazyListState()
+    val reduceMotion = rememberReduceMotion()
     var scrollTop by remember { mutableIntStateOf(0) }
     fun push(route: RemoteRoute) { stack = if (wide) listOf(route) else stack + route }
 
@@ -263,7 +270,7 @@ fun BotsTab(request: BotsRequest?, onRequestHandled: (Long) -> Unit, modifier: M
     BackHandler(enabled = uid != null && stack.isNotEmpty()) { stack = RemoteRoute.afterBack(stack) }
     // Re-tapping the tab pops to the tree, then scrolls it to the top.
     OnTabReselected(AppTab.Bots) { atDepth -> if (atDepth > 0) stack = emptyList() else scrollTop++ }
-    LaunchedEffect(scrollTop) { if (scrollTop > 0) listState.animateScrollToItem(0) }
+    LaunchedEffect(scrollTop) { if (scrollTop > 0) { if (reduceMotion) listState.scrollToItem(0) else listState.animateScrollToItem(0) } }
 
     val rootState = BotsLogic.rootState(signedIn = uid != null, hosts = hostsState)
     val loadedPrefs = prefs
@@ -374,7 +381,7 @@ fun BotsTab(request: BotsRequest?, onRequestHandled: (Long) -> Unit, modifier: M
                     )
                 }
                 else -> Box(Modifier.fillMaxSize().testTag(BotsTags.DETAIL_EMPTY), contentAlignment = Alignment.Center) {
-                    BotsMessage(stringResource(R.string.remote_bots), icon = { Icon(Icons.Outlined.Computer, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) })
+                    TeamsMessageState(stringResource(R.string.remote_bots), icon = Icons.Outlined.Computer)
                 }
             }
         }
@@ -448,7 +455,7 @@ internal fun BotsRootContent(
             stringResource(R.string.remote_bots),
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp).semantics { heading() },
         )
         when {
             state == RootState.SignedOut -> Box(Modifier.fillMaxSize().testTag(BotsTags.SIGNED_OUT)) { RemoteSignedOut(actions.onSignIn) }
@@ -458,40 +465,20 @@ internal fun BotsRootContent(
                     Text(stringResource(R.string.remote_loading), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            state == RootState.Error -> BotsMessage(
+            state == RootState.Error -> TeamsMessageState(
                 title = stringResource(R.string.remote_hosts_error),
                 modifier = Modifier.testTag(BotsTags.HOSTS_ERROR),
-                icon = { Icon(Icons.Outlined.ErrorOutline, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                icon = Icons.Outlined.ErrorOutline,
                 action = { Button(onClick = actions.onRetryHosts) { Text(stringResource(R.string.common_retry)) } },
             )
-            state == RootState.NoComputers -> BotsMessage(
+            state == RootState.NoComputers -> TeamsMessageState(
                 title = stringResource(R.string.remote_no_computers),
                 body = stringResource(R.string.remote_no_computers_help),
                 modifier = Modifier.testTag(BotsTags.NO_COMPUTERS),
-                icon = { Icon(Icons.Outlined.Computer, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                icon = Icons.Outlined.Computer,
             )
             else -> BotsTree(rows, hostsError, creating, errors, actions, listState, Modifier.fillMaxSize())
         }
-    }
-}
-
-/** A centred message: an optional icon, a title, an optional body and an optional action. */
-@Composable
-private fun BotsMessage(
-    title: String,
-    modifier: Modifier = Modifier,
-    body: String? = null,
-    icon: (@Composable () -> Unit)? = null,
-    action: (@Composable () -> Unit)? = null,
-) {
-    Column(modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-        if (icon != null) { icon(); Spacer(Modifier.height(12.dp)) }
-        Text(title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
-        if (body != null) {
-            Spacer(Modifier.height(6.dp))
-            Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
-        }
-        if (action != null) { Spacer(Modifier.height(16.dp)); action() }
     }
 }
 
@@ -552,17 +539,18 @@ private val ChatIndent = 68.dp
 private fun HostHeaderRow(row: TreeRow.HostHeader, nowMs: Long, actions: BotsActions) {
     val host = row.host
     val t = LocalPalette.current
-    val toggle = stringResource(if (row.collapsed) R.string.chat_run_expand else R.string.chat_run_collapse)
+    // U11: the whole header is the button (Collapse or Expand), its value reads Expanded or Collapsed, and the chevron is only a picture.
     Row(
         Modifier.fillMaxWidth()
-            .clickable(onClickLabel = toggle) { actions.onToggleHost(host.hostId, !row.collapsed) }
+            .heightIn(min = 48.dp)
+            .disclosure(expanded = !row.collapsed) { actions.onToggleHost(host.hostId, !row.collapsed) }
             .padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)
             .testTag(BotsTags.host(host.hostId)),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Icon(
-            Icons.Outlined.KeyboardArrowDown, toggle,
+            Icons.Outlined.KeyboardArrowDown, null,
             Modifier.size(20.dp).rotate(if (row.collapsed) -90f else 0f), tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Icon(Icons.Outlined.Computer, null, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -670,7 +658,14 @@ private fun HostStateRow(row: TreeRow.State, actions: BotsActions) {
     when (row.kind) {
         BodyKind.Loading -> title = stringResource(R.string.remote_loading)
         BodyKind.Unsupported -> title = stringResource(R.string.mobile_bots_unsupported)
-        BodyKind.NoBots -> title = stringResource(R.string.mobile_bots_none)
+        // U9: what is empty, how a Bot gets here, and a way to look again (dialling the connected computer only nudges it to re-read).
+        BodyKind.NoBots -> {
+            TeamsMessageState(
+                stringResource(R.string.mobile_bots_none_title), Modifier.testTag(BotsTags.state(row.hostId)), body = stringResource(R.string.mobile_bots_none_hint), fill = false,
+                action = { OutlinedButton(onClick = { actions.onConnect(row.hostId) }, modifier = Modifier.testTag(BotsTags.checkAgain(row.hostId))) { Text(stringResource(R.string.mobile_bots_none_check_again)) } },
+            )
+            return
+        }
         BodyKind.ConnectToLoad -> { title = stringResource(R.string.mobile_bots_connect_to_load); connect = true }
         BodyKind.OfflineNoSnapshot -> { title = stringResource(R.string.remote_offline); body = stringResource(R.string.remote_offline_help) }
         BodyKind.NotPaired -> { title = stringResource(R.string.remote_not_paired); connect = true }
@@ -689,12 +684,12 @@ private fun HostStateRow(row: TreeRow.State, actions: BotsActions) {
 @Composable
 private fun BotRow(row: TreeRow.Bot, nowMs: Long, actions: BotsActions) {
     val bot = row.bot
-    val toggle = stringResource(if (row.expanded) R.string.chat_run_collapse else R.string.chat_run_expand)
     val waitingText = if (bot.waitingThreads > 0) stringResource(R.string.remote_bot_waiting_fmt, bot.waitingThreads) else null
     Row(
         Modifier.fillMaxWidth()
+            .heightIn(min = 48.dp)
             .alpha(if (row.dimmed) DIMMED else 1f)
-            .clickable(onClickLabel = toggle) { actions.onToggleBot(row) }
+            .disclosure(expanded = row.expanded) { actions.onToggleBot(row) }
             .padding(start = BotIndent, end = 8.dp, top = 8.dp, bottom = 8.dp)
             .testTag(BotsTags.bot(row.facts.hostId, bot.botId)),
         verticalAlignment = Alignment.CenterVertically,
@@ -718,7 +713,7 @@ private fun BotRow(row: TreeRow.Bot, nowMs: Long, actions: BotsActions) {
         }
         if (bot.waitingThreads > 0) WaitingBadge(bot.waitingThreads, waitingText.orEmpty())
         Icon(
-            Icons.Outlined.KeyboardArrowDown, toggle,
+            Icons.Outlined.KeyboardArrowDown, null,
             Modifier.size(20.dp).rotate(if (row.expanded) 0f else -90f), tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
@@ -753,8 +748,10 @@ private fun BotStatus(status: RemoteBotStatusFfi) {
 @Composable
 private fun WaitingBadge(count: Int, description: String) {
     val text = TabLogic.tabBadgeText(count) ?: return
+    // U7: at least 22 dp square and growing with the text, so a larger font scale or "99+" never clips inside the circle.
     Box(
-        Modifier.size(width = 22.dp, height = 22.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary).semantics { contentDescription = description },
+        Modifier.widthIn(min = 22.dp).heightIn(min = 22.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary).padding(horizontal = 4.dp)
+            .semantics { contentDescription = description },
         contentAlignment = Alignment.Center,
     ) { Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.SemiBold, maxLines = 1) }
 }
@@ -766,7 +763,8 @@ private fun NewChatRow(row: TreeRow.NewChat, creating: Boolean, error: Int?, act
         Row(
             Modifier.fillMaxWidth()
                 .alpha(if (row.enabled) 1f else DIMMED)
-                .clickable(enabled = row.enabled && !creating) { actions.onNewChat(row) }
+                .heightIn(min = 48.dp)
+                .clickable(enabled = row.enabled && !creating, role = Role.Button) { actions.onNewChat(row) }
                 .padding(start = ChatIndent, end = 16.dp, top = 8.dp, bottom = 8.dp)
                 .testTag(BotsTags.newChat(hostId, row.botId)),
             verticalAlignment = Alignment.CenterVertically,
@@ -810,6 +808,7 @@ private fun ChatRow(row: TreeRow.Chat, actions: BotsActions) {
     val chat = row.chat
     Row(
         Modifier.fillMaxWidth()
+            .heightIn(min = 48.dp)
             .alpha(if (row.dimmed) DIMMED else 1f)
             .clickable { actions.onOpenChat(row) }
             .padding(start = ChatIndent, end = 16.dp, top = 8.dp, bottom = 8.dp)
@@ -841,9 +840,8 @@ private fun ChatRow(row: TreeRow.Chat, actions: BotsActions) {
 
 @Composable
 private fun TextRow(text: String, tag: String, onClick: () -> Unit) {
-    Text(
-        text,
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = ChatIndent, end = 16.dp, top = 8.dp, bottom = 8.dp).testTag(tag),
-        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary,
-    )
+    Box(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button, onClick = onClick).padding(start = ChatIndent, end = 16.dp, top = 8.dp, bottom = 8.dp).testTag(tag),
+        contentAlignment = Alignment.CenterStart,
+    ) { Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary) }
 }

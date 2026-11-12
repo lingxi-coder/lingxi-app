@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -30,7 +31,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
@@ -90,14 +93,14 @@ internal fun TeamComposer(
         HorizontalDivider()
         if (candidates.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                Text(stringResource(R.string.teams_composer_bots_can_ask), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.teams_composer_bots_can_ask), Modifier.semantics { heading() }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 candidates.forEach { bot ->
                     Row(
-                        Modifier.fillMaxWidth().clickable {
+                        Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) {
                             val at = requireNotNull(mention)
                             val cleaned = TeamsComposeLogic.withoutMention(field.text, at.start, field.selection.end)
                             update(TextFieldValue(cleaned, TextRange(at.start.coerceAtMost(cleaned.length))), draft.targets + bot.sharedBotId)
-                        }.padding(vertical = 6.dp),
+                        },
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         BotAvatar(bot.avatarId, 24.dp)
@@ -125,7 +128,7 @@ internal fun TeamComposer(
             FlowRow(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 draft.targets.sorted().forEach { key ->
                     val bot = bots.firstOrNull { it.sharedBotId == key }
-                    val name = bot?.name ?: "Bot"
+                    val name = bot?.name ?: stringResource(R.string.teams_bot_tag)
                     val remove = stringResource(R.string.teams_composer_remove_bot_fmt, name)
                     InputChip(
                         selected = false, onClick = { update(field, draft.targets - key) },

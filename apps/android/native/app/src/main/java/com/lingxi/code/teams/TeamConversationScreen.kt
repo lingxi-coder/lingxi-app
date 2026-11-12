@@ -1,8 +1,7 @@
 package com.lingxi.code.teams
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -20,12 +20,12 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.MoreVert
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -52,10 +52,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -67,8 +71,10 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lingxi.code.R
 import com.lingxi.code.conversation.AIText
 import com.lingxi.code.theme.BotAvatar
+import com.lingxi.code.theme.ConfirmDialog
 import com.lingxi.code.theme.ConversationLead
 import com.lingxi.code.theme.PersonAvatar
+import com.lingxi.code.theme.rememberReduceMotion
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -124,14 +130,14 @@ internal fun TeamConversationScreen(
     }
 
     Column(modifier.fillMaxSize().testTag(TeamsTags.CONVERSATION)) {
-        Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (showBack) IconButton(onClick = onBack, modifier = Modifier.testTag(TeamsTags.BACK)) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.remote_back)) }
             else Spacer(Modifier.width(12.dp))
             if (friend != null) {
                 PersonAvatar(friend.uid, friend.name, 32.dp)
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(label, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     friend.handle?.let { Text("@$it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 }
                 friend.menu()
@@ -139,15 +145,15 @@ internal fun TeamConversationScreen(
                 ConversationLead(conversation, members, bots, uid, strings, 32.dp, label)
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(label, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     val subtitle = conversationSubtitle(conversation, bots)
                     if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 var menu by remember { mutableStateOf(false) }
-                IconButton(onClick = { showDetails = true }, modifier = Modifier.testTag(TeamsTags.INFO)) { Icon(Icons.Outlined.Info, stringResource(R.string.teams_conversations)) }
+                IconButton(onClick = { showDetails = true }, modifier = Modifier.testTag(TeamsTags.INFO)) { Icon(Icons.Outlined.Info, stringResource(R.string.teams_conversation_details)) }
                 val unread = if (messaging.readsReady) TeamsListLogic.unreadCount(conversation) else 0
                 if (unread > 0 && online) Box {
-                    IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.teams_message_actions)) }
+                    IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.teams_conversation_menu)) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(text = { Text(stringResource(R.string.teams_mark_read)) }, onClick = { menu = false; workspace.messagingModel.markRead(conversation.id, conversation.lastSeq) })
                     }
@@ -171,11 +177,10 @@ internal fun TeamConversationScreen(
         onMarkRead = { workspace.messagingModel.markRead(conversation.id, conversation.lastSeq) }, onDismiss = { showDetails = false },
     )
     recalling?.let { message ->
-        AlertDialog(
-            onDismissRequest = { recalling = null },
-            title = { Text(stringResource(R.string.teams_recall_confirm)) }, text = { Text(stringResource(R.string.teams_recall_confirm_detail)) },
-            confirmButton = { TextButton(onClick = { workspace.messagingModel.queue("recall", "", message.id); recalling = null }) { Text(stringResource(R.string.teams_message_recall), color = MaterialTheme.colorScheme.error) } },
-            dismissButton = { TextButton(onClick = { recalling = null }) { Text(stringResource(R.string.common_cancel)) } },
+        ConfirmDialog(
+            title = stringResource(R.string.teams_recall_confirm), body = stringResource(R.string.teams_recall_confirm_detail),
+            confirm = stringResource(R.string.teams_message_recall), destructive = true,
+            onConfirm = { workspace.messagingModel.queue("recall", "", message.id); recalling = null }, onDismiss = { recalling = null },
         )
     }
 }
@@ -208,7 +213,6 @@ private fun PendingConversation(creation: JSONObject, onDiscard: () -> Unit, mod
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ConversationBody(
     workspace: TeamsWorkspace, uid: String, team: TeamSummary, teams: TeamsState, messaging: TeamMessagingState, conversation: TeamMessageConversation,
@@ -253,6 +257,7 @@ private fun ConversationBody(
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val reduceMotion = rememberReduceMotion()
     val atBottom by remember { derivedStateOf { listState.isAtBottom() } }
     var initial by remember(conversationId) { mutableStateOf(false) }
     var unseen by remember(conversationId) { mutableIntStateOf(0) }
@@ -296,13 +301,19 @@ private fun ConversationBody(
     val editing = editingId?.let { byId[it] }
     fun setDraft(next: ComposerDraft) { draft = next; workspace.setDraft(conversationId, next) }
     fun personName(id: String) = members.firstOrNull { it.uid == id }?.displayName?.takeIf { it.isNotEmpty() } ?: if (id == uid) strings.you else strings.member
-    fun authorOf(message: TeamMessage): String = if (message.authorKind == "shared_bot") message.authorDisplayName ?: bots.firstOrNull { it.sharedBotId == message.sharedBotId }?.name ?: strings.bot else personName(message.authorUid)
-    val copyText = rememberCopyToClipboard("LingXi team message")
+    // U3: the signed-in person reads "You" in the stream and in "Replying to", whatever their display name.
+    val you = stringResource(R.string.teams_you)
+    fun authorOf(message: TeamMessage): String = when {
+        message.authorKind == "shared_bot" -> message.authorDisplayName ?: bots.firstOrNull { it.sharedBotId == message.sharedBotId }?.name ?: strings.bot
+        message.authorKind == "user" && message.authorUid == uid -> you
+        else -> personName(message.authorUid)
+    }
+    val copyText = rememberCopyToClipboard(stringResource(R.string.teams_clip_message))
 
     Column(modifier) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (thread == null || anchor == null) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(stringResource(R.string.teams_loading_messages), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            else if (messages.isEmpty() && outbox.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(stringResource(R.string.teams_empty_thread), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            else if (messages.isEmpty() && outbox.isEmpty()) TeamsMessageState(stringResource(R.string.teams_preview_none), body = stringResource(R.string.teams_empty_thread_hint))
             else LazyColumn(Modifier.fillMaxSize().testTag(TeamsTags.STREAM), state = listState, contentPadding = PaddingValues(vertical = 8.dp)) {
                 items(stream, key = { it.key }) { item ->
                     when (item) {
@@ -323,7 +334,7 @@ private fun ConversationBody(
                 }
             }
             if (initial && !atBottom) Surface(
-                onClick = { scope.launch { listState.animateScrollToItem(maxOf(0, stream.lastIndex)); unseen = 0 } },
+                onClick = { scope.launch { if (reduceMotion) listState.scrollToItem(maxOf(0, stream.lastIndex)) else listState.animateScrollToItem(maxOf(0, stream.lastIndex)); unseen = 0 } },
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp).testTag(TeamsTags.PILL),
                 shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, shadowElevation = 4.dp,
             ) { JumpPill(unseen) }
@@ -369,8 +380,12 @@ private fun NewMessagesDivider() {
     }
 }
 
-/** One message: avatar, name and clock on the first of a run, reply quote, body, edited mark, the question and run cards. */
-@OptIn(ExperimentalFoundationApi::class)
+/**
+ * One message: avatar, name and clock on the first of a run, reply quote, body, edited mark, the question and run cards.
+ * Own messages (U3) read "You" and carry a faint accent tint on the row, never a bubble; Bot messages carry the Bot tag. The author, time and text are one
+ * accessibility element with the message actions as custom actions; the run cards and their buttons stay separate elements beside it. Only the long press
+ * is a real gesture, since there is nothing to tap.
+ */
 @Composable
 private fun MessageCell(
     item: StreamItem.Msg, uid: String, conversation: TeamMessageConversation, bots: List<TeamBotCard>, members: List<TeamMember>, strings: TeamsListStrings,
@@ -388,17 +403,13 @@ private fun MessageCell(
     val copy = stringResource(R.string.chat_message_copy)
     val editable = canAct && own && message.kind == "text"
     val card = bots.firstOrNull { it.sharedBotId == message.sharedBotId }
+    val tint = MaterialTheme.colorScheme.primary.copy(alpha = OWN_MESSAGE_TINT)
+    val haptics = LocalHapticFeedback.current
     Box {
         Row(
             Modifier.fillMaxWidth()
-                .combinedClickable(onClick = {}, onLongClick = if (canAct) ({ menu = true }) else null)
-                .semantics {
-                    if (canAct) customActions = buildList {
-                        add(CustomAccessibilityAction(reply) { onReply(message); true })
-                        if (editable) { add(CustomAccessibilityAction(edit) { onEdit(message); true }); add(CustomAccessibilityAction(recall) { onRecall(message); true }) }
-                        add(CustomAccessibilityAction(copy) { onCopy(message); true })
-                    }
-                }
+                .then(if (own) Modifier.background(tint) else Modifier)
+                .then(if (canAct) Modifier.pointerInput(message.id) { detectTapGestures(onLongPress = { haptics.performHapticFeedback(HapticFeedbackType.LongPress); menu = true }) } else Modifier)
                 .padding(horizontal = 16.dp, vertical = if (item.grouped) 1.dp else 6.dp).testTag(TeamsTags.message(message.id)),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -406,24 +417,36 @@ private fun MessageCell(
             else if (message.authorKind == "shared_bot") BotAvatar(card?.avatarId ?: message.sharedBotId ?: "shared_bot", 32.dp)
             else PersonAvatar(message.authorUid, authorOf(message), 32.dp)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                if (!item.grouped) Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(authorOf(message), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                    Text(TeamsStreamLogic.formatClock(message.createdAtMs), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                message.replyTo?.let { id ->
-                    val source = byId[id]
-                    Row(Modifier.height(androidx.compose.foundation.layout.IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Box(Modifier.width(2.dp).fillMaxSize().background(MaterialTheme.colorScheme.outlineVariant))
-                        Text(
-                            when { source == null -> stringResource(R.string.teams_message_reply); source.recalled -> stringResource(R.string.teams_message_recalled); else -> TeamsComposeLogic.snippet(source.text) },
-                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                        )
+                Column(
+                    Modifier.semantics(mergeDescendants = true) {
+                        if (canAct) customActions = buildList {
+                            add(CustomAccessibilityAction(reply) { onReply(message); true })
+                            if (editable) { add(CustomAccessibilityAction(edit) { onEdit(message); true }); add(CustomAccessibilityAction(recall) { onRecall(message); true }) }
+                            add(CustomAccessibilityAction(copy) { onCopy(message); true })
+                        }
+                    },
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    if (!item.grouped) Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(authorOf(message), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                        if (message.authorKind == "shared_bot") BotTag()
+                        Text(TeamsStreamLogic.formatClock(message.createdAtMs), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    message.replyTo?.let { id ->
+                        val source = byId[id]
+                        Row(Modifier.height(androidx.compose.foundation.layout.IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Box(Modifier.width(2.dp).fillMaxSize().background(MaterialTheme.colorScheme.outlineVariant))
+                            Text(
+                                when { source == null -> stringResource(R.string.teams_message_reply); source.recalled -> stringResource(R.string.teams_message_recalled); else -> TeamsComposeLogic.snippet(source.text) },
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    if (message.recalled) Text(stringResource(R.string.teams_message_recalled), style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    else if (TeamsBotText.rendersMarkdown(message.authorKind, message.recalled)) AIText(markdown = message.text, modifier = Modifier.fillMaxWidth().testTag("teams.message.body.${message.id}"), onOpenLink = rememberTeamBotLinkOpener())
+                    else Text(message.text, style = MaterialTheme.typography.bodyLarge)
+                    if (message.editedAt != null && !message.recalled) Text(stringResource(R.string.teams_message_edited), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (message.recalled) Text(stringResource(R.string.teams_message_recalled), style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                else if (TeamsBotText.rendersMarkdown(message.authorKind, message.recalled)) AIText(markdown = message.text, modifier = Modifier.fillMaxWidth().testTag("teams.message.body.${message.id}"), onOpenLink = rememberTeamBotLinkOpener())
-                else Text(message.text, style = MaterialTheme.typography.bodyLarge)
-                if (message.editedAt != null && !message.recalled) Text(stringResource(R.string.teams_message_edited), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 val taskIds = message.taskId?.let { listOf(it) } ?: message.taskIds
                 taskIds.forEach { taskId ->
                     val task = messaging.tasks.firstOrNull { it.taskId == taskId }
@@ -431,7 +454,6 @@ private fun MessageCell(
                     else TextButton(onClick = { onRefreshTask(taskId) }) { Text(stringResource(R.string.teams_task_view)) }
                 }
                 if (taskIds.isEmpty()) message.artifactId?.let { id -> TextButton(onClick = { onArtifact(id) }) { Text(stringResource(R.string.teams_artifact_open)) } }
-
             }
         }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -443,6 +465,15 @@ private fun MessageCell(
             DropdownMenuItem(text = { Text(copy) }, onClick = { menu = false; onCopy(message) })
         }
     }
+}
+
+/** "Bot" beside a Bot's name, on its secondary container so the two never read as one word. */
+@Composable
+private fun BotTag() {
+    Text(
+        stringResource(R.string.teams_bot_tag), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSecondaryContainer, maxLines = 1,
+        modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(MaterialTheme.colorScheme.secondaryContainer).padding(horizontal = 4.dp, vertical = 1.dp),
+    )
 }
 
 /** A command saved on this device and not yet confirmed (or rejected): the existing outbox semantics, ids and journals unchanged. */

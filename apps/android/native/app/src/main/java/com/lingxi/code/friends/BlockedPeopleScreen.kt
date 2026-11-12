@@ -47,7 +47,9 @@ internal fun BlockedPeopleScreen(
                 action = { Button(onClick = onRetry) { Text(stringResource(R.string.common_retry)) } },
             )
             !state.blocksLoaded -> Box(Modifier.fillMaxSize().testTag(FriendsTags.LOADING), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-            blocks.isEmpty() -> TeamsMessageState(stringResource(R.string.friends_blocked_empty), Modifier.testTag(FriendsTags.BLOCKED_EMPTY), icon = Icons.Outlined.Block)
+            blocks.isEmpty() -> TeamsMessageState(
+                stringResource(R.string.friends_blocked_empty_title), Modifier.testTag(FriendsTags.BLOCKED_EMPTY), icon = Icons.Outlined.Block, body = stringResource(R.string.friends_blocked_empty_body),
+            )
             else -> LazyColumn(Modifier.fillMaxSize()) {
                 items(blocks, key = { "block-${it.uid}" }) { entry ->
                     val op = state.rowOps[entry.uid]

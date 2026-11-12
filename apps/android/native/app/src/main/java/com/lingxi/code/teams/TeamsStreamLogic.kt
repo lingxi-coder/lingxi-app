@@ -103,6 +103,9 @@ internal object TeamsStreamLogic {
     fun formatClock(atMs: Long?, zone: ZoneId = ZoneId.systemDefault(), locale: Locale = Locale.getDefault()): String =
         if (atMs == null) "" else DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withLocale(locale).withZone(zone).format(Instant.ofEpochMilli(atMs))
 
+    /** An ISO-8601 instant ("2026-11-19T12:00:00.000Z") as epoch milliseconds; null when [text] is not one, so the caller shows it as sent. */
+    fun parseInstantMs(text: String?): Long? = text?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
+
     private fun dayOf(ms: Long, zone: ZoneId): LocalDate = Instant.ofEpochMilli(ms).atZone(zone).toLocalDate()
     private fun sameAuthor(a: StreamMessage, b: StreamMessage) = a.authorKind == b.authorKind && a.authorUid == b.authorUid && (a.authorSharedBotId ?: "") == (b.authorSharedBotId ?: "")
 }

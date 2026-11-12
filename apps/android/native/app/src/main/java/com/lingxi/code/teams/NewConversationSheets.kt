@@ -1,6 +1,5 @@
 package com.lingxi.code.teams
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -8,10 +7,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
@@ -42,6 +44,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
@@ -56,7 +61,7 @@ internal fun TeamsSheet(title: String, onDismiss: () -> Unit, content: @Composab
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), modifier = Modifier.testTag(TeamsTags.SHEET)) {
         Column(Modifier.fillMaxWidth().imePadding()) {
             Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f).semantics { heading() })
                 TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
             }
             Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 24.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
@@ -72,11 +77,12 @@ internal fun TeamSwitcherSheet(
 ) {
     TeamsSheet(stringResource(R.string.teams_switch_team), onDismiss) {
         teams.forEach { team ->
+            // The current team is the selected one of a single choice: the row is one element that reads its name, role, count and "selected".
             Row(
-                Modifier.fillMaxWidth().clickable { onSelect(team.id) }.padding(vertical = 6.dp),
+                Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(selected = team.id == selectedId, role = Role.RadioButton, onClick = { onSelect(team.id) }).padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                TeamTile(team.id, team.name, 36.dp)
+                TeamTile(team.id, team.name, 40.dp)
                 Column(Modifier.weight(1f)) {
                     Text(team.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("${teamRoleLabel(team.role)} · ${stringResource(R.string.teams_members_count_fmt, team.memberCount)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -169,31 +175,38 @@ internal fun NewConversationSheet(
                 if (channel) OutlinedTextField(value = name, onValueChange = { if (it.length <= 120) name = it }, singleLine = true, label = { Text(stringResource(R.string.teams_new_channel_name)) }, modifier = Modifier.fillMaxWidth())
                 if (!channel && group) OutlinedTextField(value = name, onValueChange = { if (it.length <= 120) name = it }, singleLine = true, label = { Text(stringResource(R.string.teams_new_group_name_optional)) }, modifier = Modifier.fillMaxWidth())
                 if (others.isEmpty()) Text(stringResource(R.string.teams_new_no_members), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(stringResource(if (!channel && !group) R.string.teams_new_to else R.string.teams_members), style = MaterialTheme.typography.labelLarge)
+                Text(stringResource(if (!channel && !group) R.string.teams_new_to else R.string.teams_members), Modifier.semantics { heading() }, style = MaterialTheme.typography.labelLarge)
+                // A picker row is one element with the control's role and state (radio for one person, checkbox for several); the control inside is only its picture.
                 others.forEach { member ->
+                    val single = !channel && !group
                     Row(
-                        Modifier.fillMaxWidth().clickable {
-                            if (!channel && !group) peer = member.uid else people = if (member.uid in people) people - member.uid else people + member.uid
-                        },
+                        Modifier.fillMaxWidth().heightIn(min = 48.dp).then(
+                            if (single) Modifier.selectable(selected = peer == member.uid, role = Role.RadioButton, onClick = { peer = member.uid })
+                            else Modifier.toggleable(value = member.uid in people, role = Role.Checkbox, onValueChange = { people = if (it) people + member.uid else people - member.uid }),
+                        ),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        if (!channel && !group) RadioButton(selected = peer == member.uid, onClick = { peer = member.uid })
-                        else Checkbox(checked = member.uid in people, onCheckedChange = { people = if (it) people + member.uid else people - member.uid })
-                        PersonAvatar(member.uid, member.displayName, 28.dp)
+                        if (single) RadioButton(selected = peer == member.uid, onClick = null)
+                        else Checkbox(checked = member.uid in people, onCheckedChange = null)
+                        PersonAvatar(member.uid, member.displayName, 24.dp)
                         Text(member.displayName.ifEmpty { stringResource(R.string.teams_member) }, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
                 if (channel || group) {
                     if (usableBots.isNotEmpty()) {
-                        Text(stringResource(R.string.teams_new_participating_bots), style = MaterialTheme.typography.labelLarge)
+                        Text(stringResource(R.string.teams_new_participating_bots), Modifier.semantics { heading() }, style = MaterialTheme.typography.labelLarge)
                         usableBots.forEach { bot ->
                             val chosen = bot.sharedBotId in sharedBotIds
+                            val pickable = chosen || sharedBotIds.size < TeamsComposeLogic.MAX_TARGETS
                             Row(
-                                Modifier.fillMaxWidth().clickable(enabled = chosen || sharedBotIds.size < TeamsComposeLogic.MAX_TARGETS) { sharedBotIds = if (chosen) sharedBotIds - bot.sharedBotId else sharedBotIds + bot.sharedBotId },
+                                Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
+                                    value = chosen, enabled = pickable, role = Role.Checkbox,
+                                    onValueChange = { sharedBotIds = if (it) sharedBotIds + bot.sharedBotId else sharedBotIds - bot.sharedBotId },
+                                ),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                Checkbox(checked = chosen, enabled = chosen || sharedBotIds.size < TeamsComposeLogic.MAX_TARGETS, onCheckedChange = { sharedBotIds = if (it) sharedBotIds + bot.sharedBotId else sharedBotIds - bot.sharedBotId })
-                                BotAvatar(bot.avatarId, 28.dp)
+                                Checkbox(checked = chosen, enabled = pickable, onCheckedChange = null)
+                                BotAvatar(bot.avatarId, 24.dp)
                                 Text(bot.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
@@ -236,7 +249,7 @@ private fun NewBotList(
         )
         return
     }
-    Text(stringResource(R.string.teams_new_bots_pickable), style = MaterialTheme.typography.labelLarge)
+    Text(stringResource(R.string.teams_new_bots_pickable), Modifier.semantics { heading() }, style = MaterialTheme.typography.labelLarge)
     bots.forEach { bot ->
         val existing = TeamsListLogic.findBotDm(conversations, uid, bot.sharedBotId)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {

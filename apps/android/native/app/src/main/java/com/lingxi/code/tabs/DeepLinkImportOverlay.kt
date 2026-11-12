@@ -2,6 +2,8 @@ package com.lingxi.code.tabs
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Box
@@ -18,6 +20,7 @@ import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.navigation.DeepLink
 import com.lingxi.code.settings.DeepLinkImportPage
 import com.lingxi.code.settings.SettingsEngineBridge
+import com.lingxi.code.theme.rememberReduceMotion
 
 /**
  * The import preview of a `lingxi://import/...` link (decision D17): a full-screen page above the
@@ -29,10 +32,12 @@ internal fun DeepLinkImportOverlay(link: DeepLink?, engineSource: ConversationSo
     // Keeps drawing the last link while the page slides out.
     var shown by remember { mutableStateOf<DeepLink?>(null) }
     LaunchedEffect(link) { if (link != null) shown = link }
+    // U10: with "Remove animations" on, the page appears and goes without the slide.
+    val reduceMotion = rememberReduceMotion()
     AnimatedVisibility(
         visible = link != null,
-        enter = slideInVertically(initialOffsetY = { it }),
-        exit = slideOutVertically(targetOffsetY = { it }),
+        enter = if (reduceMotion) EnterTransition.None else slideInVertically(initialOffsetY = { it }),
+        exit = if (reduceMotion) ExitTransition.None else slideOutVertically(targetOffsetY = { it }),
     ) {
         val page = link ?: shown
         if (page != null) ImportPreview(page, engineSource, onDismiss)

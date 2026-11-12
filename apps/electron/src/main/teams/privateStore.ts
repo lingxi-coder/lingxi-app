@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
-import type { TeamHostResult, BotChatScope } from './process.js';
+import type { TeamRunResult, BotChatScope } from './process.js';
+import type { TaskUsage } from '../../../../../packages/teams/execution.js';
 import { dirname, join } from 'node:path';
 
 export interface TeamModelRoute {
@@ -13,7 +14,21 @@ export interface TeamPersonaSnapshot extends TeamModelRoute { instructions: stri
 export interface SharedBotBinding { schemaVersion: 1; ownerUid: string; teamId: string; generation: number; sharedBotId: string; deploymentId: string; instanceId: string; revision: number; snapshot: string; accountEpoch: number; publicationId: string; grantIds: string[]; sessionEpoch: number }
 export interface TeamDataRef { path: string; sha256: string; bytes: number }
 export interface SavedPublication { schemaVersion: 1; requestDigest: string; binding: SharedBotBinding; payload: Record<string, unknown> }
-export interface SavedExecution { schemaVersion: 1; scope: BotChatScope; teamId: string; generation: number; taskId: string; deadlineAt: number; commandId: string; payload: Record<string, unknown> }
+/** One task this host holds or held a model permit for. It lives until the task's result is delivered or the task can no longer continue.
+ * Replaced in place as the task moves on: a new attempt, a question, an answer. */
+export interface SavedExecution { schemaVersion: 2; scope: BotChatScope; teamId: string; generation: number; taskId: string;
+  /** End of the current attempt's active budget. */ deadlineAt: number; commandId: string;
+  /** Host fields, the current permit and the input grants: the base of every host command for the task. */ payload: Record<string, unknown>;
+  /** Attempt number of the current permit: 1 after startTask, then one more per granted continueTask. */ epoch: number;
+  /** The request message and the source watermark the task was admitted with. */ messageSeq: number; lastChangeSeq: number;
+  /** The admitted input batch. A continuing worker is given the same bytes, so it is kept as long as this record. */ batch: TeamDataRef;
+  /** The Bot may ask its requester a question (the deployment publishes durable waits). */ ask: boolean;
+  /** Model requests of the attempts so far, as the server counted them. */ dispatched: number;
+  /** Attempts continued after an interruption. Bounded, so a task that keeps dying ends. */ recoveries: number;
+  /** Usage of the earlier attempts that reported one. */ usage?: TaskUsage;
+  /** The exact pauseTask request for a question the worker asked, saved before it is sent so every retry is identical. */ pause?: Record<string, unknown>;
+  /** The server accepted the question: the task continues only through its answer. */ wait?: { waitId: string; expiresAt: number };
+  /** The answer the task continued with. A later recovery of that attempt hands the same answer to the worker. */ answered?: { waitId: string; messageId: string; text: string } }
 export interface SavedDelivery { schemaVersion: 1; teamId: string; generation: number; taskId: string; deadlineAt: number; commandId: string; payload: Record<string, unknown>;
   /** The host made this failure up (no worker result), so its `finishedAt` is a host clock stamp that delivery may replace. */ synthesized?: true }
 
@@ -202,23 +217,33 @@ export class TeamPrivateStore {
   }
   async releaseDataRef(uid: string, reference: TeamDataRef): Promise<void> {
     const root = (await this.owner(uid)).transport;
-    if (dirname(reference.path) !== root || !new RegExp(`^${reference.sha256}-[a-f0-9]{32}$`, 'u').test(reference.path.slice(root.length+1)) || !/^[a-f0-9]{64}$/u.test(reference.sha256)) throw new Error('UNSAFE_TEAM_STORAGE');
+    if (!this.transportPath(root, reference)) throw new Error('UNSAFE_TEAM_STORAGE');
     await unlink(reference.path).catch(error => { if (error.code !== 'ENOENT') throw error; });
   }
+  /** Atomic replace: the record is whole at every instant, and a later attempt never goes back to an earlier one. */
   saveExecution(uid: string, value: SavedExecution): Promise<void> { return this.serial(async () => {
-    if (!/^[A-Za-z0-9_-]{8,64}$/u.test(value.taskId)) throw new Error('UNSAFE_TEAM_STORAGE');
-    const path = join((await this.owner(uid)).executions, value.taskId), text = JSON.stringify(value);
-    try { await create(path, text); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    if (await read(path, 64 * 1024) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
+    const paths = await this.owner(uid), root = paths.executions, path = join(root, value.taskId), text = JSON.stringify(value);
+    if (!/^[A-Za-z0-9_-]{8,64}$/u.test(value.taskId) || value.schemaVersion !== 2 || !Number.isSafeInteger(value.epoch) || value.epoch < 1
+      || Buffer.byteLength(text) > 64 * 1024 || !this.transportPath(paths.transport, value.batch)) throw new Error('UNSAFE_TEAM_STORAGE');
+    try { const previous = JSON.parse(await read(path, 64 * 1024)) as SavedExecution; if (previous.schemaVersion === 2 && previous.epoch > value.epoch) throw new Error('STALE_EXECUTION'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    await rename(await writeTemporary(root, text), path); await syncDirectory(root);
   }); }
   async executions(uid: string): Promise<SavedExecution[]> {
     const root = (await this.owner(uid)).executions, values: SavedExecution[] = [];
     for (const name of await listed(root)) {
       if (!/^[A-Za-z0-9_-]{8,64}$/u.test(name)) throw new Error('UNSAFE_TEAM_STORAGE');
-      const value = JSON.parse(await read(join(root,name),64*1024)) as SavedExecution;
-      if (value.schemaVersion !== 1 || value.taskId !== name) throw new Error('UNSAFE_TEAM_STORAGE'); values.push(value);
+      let text: string; try { text = await read(join(root,name),64*1024); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+      const value = JSON.parse(text) as SavedExecution;
+      // The retired single-attempt record kept no input batch, so its task cannot be continued or closed from here: it is removed.
+      if ((value as { schemaVersion?: unknown }).schemaVersion === 1) { await unlink(join(root, name)).catch(() => undefined); continue; }
+      if (value.schemaVersion !== 2 || value.taskId !== name) throw new Error('UNSAFE_TEAM_STORAGE'); values.push(value);
     }
     return values;
+  }
+  private transportPath(root: string, reference: TeamDataRef): boolean {
+    return !!reference && typeof reference.path === 'string' && typeof reference.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(reference.sha256) && dirname(reference.path) === root
+      && new RegExp(`^${reference.sha256}-[a-f0-9]{32}$`, 'u').test(reference.path.slice(root.length + 1));
   }
   /** Whether a saved execution still waits for recovery: its intent is saved and its delivery is not. Only two names are looked up, so a run that cleans up meanwhile reads as done. */
   async awaitingRecovery(uid: string, taskId: string): Promise<boolean> {
@@ -226,7 +251,7 @@ export class TeamPrivateStore {
     const paths = await this.owner(uid), exists = (path: string) => lstat(path).then(() => true, (error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return false; throw error; });
     return await exists(join(paths.executions, taskId)) && !await exists(join(paths.outbox, taskId));
   }
-  async savedResult(uid: string, taskId: string): Promise<TeamHostResult | undefined> {
+  async savedResult(uid: string, taskId: string): Promise<TeamRunResult | undefined> {
     if (!/^[A-Za-z0-9_-]{8,64}$/u.test(taskId)) throw new Error('UNSAFE_TEAM_STORAGE');
     const root = (await this.owner(uid)).runtime;
     try {
@@ -235,7 +260,7 @@ export class TeamPrivateStore {
       const result = JSON.parse(await read(join(results,`${taskId}.json`),512*1024));
       if (!result || result.version !== 3 || result.type !== 'result' || !['completed','failed'].includes(result.status)
         || typeof result.text !== 'string' || Buffer.byteLength(result.text)>8192 || !Number.isSafeInteger(result.finishedAt) || !result.usage || !['missing','partial','complete'].includes(result.usage.status)) throw new Error('UNSAFE_TEAM_STORAGE');
-      return result as TeamHostResult;
+      return result as TeamRunResult;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
   }
   saveDelivery(uid: string, value: SavedDelivery): Promise<void> { return this.serial(async () => {
@@ -253,11 +278,15 @@ export class TeamPrivateStore {
     }
     return values;
   }); }
-  async delivered(uid: string, taskId: string): Promise<void> {
+  /** The task is over for this host: its delivery, its execution record and the input batch the record kept are removed. */
+  delivered(uid: string, taskId: string): Promise<void> { return this.serial(async () => {
     if (!/^[A-Za-z0-9_-]{8,64}$/u.test(taskId)) throw new Error('UNSAFE_TEAM_STORAGE');
     const paths = await this.owner(uid), root = paths.outbox; await unlink(join(root, taskId)).catch(error => { if (error.code !== 'ENOENT') throw error; }); await syncDirectory(root);
+    let batch: TeamDataRef | undefined;
+    try { batch = (JSON.parse(await read(join(paths.executions, taskId), 64 * 1024)) as SavedExecution).batch; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     await unlink(join(paths.executions, taskId)).catch(error => { if (error.code !== 'ENOENT') throw error; }); await syncDirectory(paths.executions);
-  }
+    if (batch && this.transportPath(paths.transport, batch)) await unlink(batch.path).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  }); }
   private validateSnapshot(value: TeamPersonaSnapshot): void {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_TEAM_SNAPSHOT');
     const { instructions, documents, provider_account_profiles: profiles, ...route } = value; validateTeamModelRoute(route);

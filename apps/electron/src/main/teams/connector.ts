@@ -3,13 +3,13 @@ import { constants } from 'node:fs';
 import { open, lstat } from 'node:fs/promises';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { providerAccountEnvelope, type ProviderAccountLaunch } from '../provider-accounts.js';
-import type { LocalPublishableBot, PublishLocalBotInput, SelectedSharedFile, SharedBotCard, TeamTaskView } from '../../../../../packages/teams/execution.js';
+import type { LocalPublishableBot, PublishLocalBotInput, SelectedSharedFile, SharedBotCard, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
 import { TeamsApiError, type TeamSummary } from '../../../../../packages/teams/index.js';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source.js';
 import type { BotStore } from '../bots/store.js';
 import { validateBotManifest } from '../bots/package.js';
-import { TeamPrivateStore, digest, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution } from './privateStore.js';
-import { runTeamHost, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type BotChatScope } from './process.js';
+import { TeamPrivateStore, digest, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution, type SavedDelivery, type TeamDataRef } from './privateStore.js';
+import { runTeamHost, runResult, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type TeamRunResult, type TeamTaskCheckpoint, type TeamTaskWait, type TeamContinuation, type BotChatScope } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
 
 export interface TeamHostApi {
@@ -37,11 +37,16 @@ export interface TeamConnectorOptions {
   diagnostics?: (event: string, details: Record<string, unknown>) => void;
 }
 interface Selected { context: TeamAccountContext; instanceId: string; expires: number; document: PublishedDocument }
-interface HostTask extends TeamTaskView { messageId: string; messageSeq: number }
-interface TaskContext { task: HostTask; messageId: string; messageSeq: number; inputs: Array<{ grantId: string; resourceId: string; digest: string }>; deployment: { deploymentId: string; definitionDigest: string; accountEpoch: number } }
+/** `resume` marks a waiting task whose requester answered: it is queued again and continues from its checkpoint. */
+interface HostTask extends TeamTaskView { messageId: string; messageSeq: number; resume?: { waitId: string; answerMessageId: string; answerSeq: number } }
+interface TaskContext { task: HostTask; messageId: string; messageSeq: number; inputs: Array<{ grantId: string; resourceId: string; digest: string }>;
+  deployment: { deploymentId: string; definitionDigest: string; accountEpoch: number; capabilities?: { durableWait?: boolean } } }
+interface ContinueGrant { execute: boolean; state?: string; permitId?: string; epoch?: number; task?: TeamTaskView; physicalDispatchesSpent?: number }
+type HostPaths = Awaited<ReturnType<TeamPrivateStore['owner']>>;
+interface HostEnvironment { paths: HostPaths; bins: { host: string; worker: string } }
 const id = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{8,64}$/u.test(value);
 const scopeKey = (b: SharedBotBinding) => JSON.stringify([b.teamId, b.sharedBotId]);
-const serialKey = (b: SharedBotBinding, task: HostTask) => JSON.stringify([b.teamId, b.sharedBotId, task.conversationId]);
+const serialKey = (b: SharedBotBinding, conversationId: string) => JSON.stringify([b.teamId, b.sharedBotId, conversationId]);
 const activation = (b: SharedBotBinding, c: TeamAccountContext) => JSON.stringify([c.epoch,b.deploymentId,b.accountEpoch]);
 const newId = () => randomBytes(16).toString('base64url');
 const errorCode = (error: unknown) => {
@@ -63,6 +68,27 @@ const permanentDelivery = (error: unknown) => error instanceof TeamsApiError && 
 /** Past the deadline the host stops retrying a refused or orphaned delivery (a policy choice): the server still accepts a completion while the task is `running` and finished by the deadline, replacing the derived `interrupted`. The margin covers a host clock ahead of the server, which also yields TASK_EXPIRED. */
 export const DELIVERY_SKEW_MS = 2 * 60 * 1000;
 const noCursor = { scope: null, sessionRevision: 0, lastMessageSeq: 0, lastChangeSeq: 0, bootstrapFromSeq: 0 };
+/** Model routes on which the runtime can continue a task in a new worker. Only a Bot on such a route publishes durable waits and may ask its requester. */
+const CONTINUABLE_PROTOCOLS = ['open_ai_chat'];
+/** A question waits for its answer at most this long; an answered task is picked up within the server's queue limit. */
+const WAIT_MS = 24 * 60 * 60 * 1000, QUEUE_MS = 5 * 60 * 1000;
+/** Model requests of one task over all its attempts, and how often an interrupted attempt is continued before the task ends. */
+const DISPATCH_LIMIT = 32, MAX_RECOVERIES = 2;
+/** The host process or its worker stopped without a verdict: the attempt can be continued from its checkpoint. */
+const INTERRUPTIONS = ['TEAM_HOST_INTERRUPTED', 'WORKER'];
+/** Server answers after which a question can never be accepted. */
+const PAUSE_REFUSED = ['TASK_REVOKED', 'TASK_REQUIRED', 'TASK_CANCELLED', 'WAIT_CONFLICT', 'EXECUTION_PERMIT_REQUIRED', 'DURABLE_WAIT_UNSUPPORTED'];
+/** Usage of all attempts of a task. An interrupted attempt reported none, so the total is then partial at best. */
+function totalUsage(earlier: TaskUsage | undefined, last: TaskUsage | undefined, lost: boolean): TaskUsage {
+  if (!earlier && !lost) return last ?? { status: 'missing' };
+  const reported = [earlier, last].filter((usage): usage is TaskUsage => !!usage);
+  const counted = reported.filter((usage): usage is Exclude<TaskUsage, { status: 'missing' }> => usage.status !== 'missing');
+  if (!counted.length) return { status: 'missing' };
+  const sum = (key: 'inputTokens' | 'outputTokens' | 'costMicros') => counted.reduce((total, usage) => total + (usage[key] ?? 0), 0);
+  const currency = counted[0]!.currency, priced = counted.every(usage => usage.costMicros !== undefined && usage.currency === currency);
+  return { status: !lost && counted.length === reported.length && counted.every(usage => usage.status === 'complete') ? 'complete' : 'partial',
+    inputTokens: sum('inputTokens'), outputTokens: sum('outputTokens'), ...(priced ? { costMicros: sum('costMicros'), ...(currency ? { currency } : {}) } : {}) };
+}
 /** The id space of a friendship's team (FRIENDS.md): no ordinary team has such an id, and `TeamsService.list` never returns one. */
 const PAIR_PREFIX = 'f_';
 /** Source reads, selected account credentials and backend permits stay in trusted main. */
@@ -195,7 +221,7 @@ export class TeamConnector implements LocalTeamHost {
         sharedBotId: input.sharedBotId, expectedRevision: input.expectedRevision, name: bot.name, description: bot.description, usePolicy: input.usePolicy, quotas: input.quotas,
         deployment: { deploymentId: binding.deploymentId, sharedBotId: binding.sharedBotId, revision: binding.revision, hostId: this.options.privateStore.hostId, owner: { uid, generation: input.generation },
           instanceId: input.instanceId, definitionDigest: snapshotId, capabilitySnapshotDigest: digest(JSON.stringify({ executionVersion: 2, documents: documents.map(d => d.digest) })), executionVersion: 2,
-          capabilities: { durableWait: false, writeOperations: false, delegation: false }, accountEpoch: binding.accountEpoch, enabled: true },
+          capabilities: { durableWait: CONTINUABLE_PROTOCOLS.includes(route.route.model_protocol), writeOperations: false, delegation: false }, accountEpoch: binding.accountEpoch, enabled: true },
         inputs: documents.map(d => ({ resourceId: d.resourceId, revision: d.revision, digest: d.digest, kind: d.kind, sourceAudience: { mode: 'team' } })),
       };
       await this.options.privateStore.savePublication(uid,{schemaVersion:1,requestDigest,binding,payload}); this.assert(context);
@@ -221,13 +247,13 @@ export class TeamConnector implements LocalTeamHost {
     try {
       await authorize(); const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
       const {credential_id:_credential,provider_account_profiles:_profiles,instructions:_instructions,documents:_documents,...model} = snapshot;
-      const result = await (this.options.run ?? runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,assertCurrent:assert,authorize,signal:AbortSignal.timeout(45000),timeoutMs:45000,
+      const result = runResult(await (this.options.run ?? runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,assertCurrent:assert,authorize,signal:AbortSignal.timeout(45000),timeoutMs:45000,
         accountCredentials:async request => { await authorize(); const selected=accounts.providerAccountCredentials[request.accountId];
           if (!selected || selected.identity_generation !== request.identityGeneration) throw new Error('TEAM_MODEL_UNAVAILABLE');
           await this.options.renewModelAccount?.(request.accountId,request.identityGeneration,request.credentialRevision); await authorize();
           const refreshed=await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!refreshed) throw new Error('TEAM_MODEL_UNAVAILABLE'); return refreshed; },
         bootstrap:{version:3,type:'run',storageRoot:paths.runtime,workerExecutable:bins.worker,scope,taskId,invocationId:randomUUID(),instructions:'Confirm model readiness. Reply READY. Do not call tools.',inputBatchRef:reference,knowledge:[],deadlineAt:this.now()+45000,
-          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),limits:{max_turns:1,context_window_tokens:32768,output_tokens_per_request:64,physical_dispatches:1}}});
+          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),limits:{max_turns:1,context_window_tokens:32768,output_tokens_per_request:64,physical_dispatches:1}}}));
       assert(); if (result.status !== 'completed' || !result.text?.trim()) throw new Error('TEAM_MODEL_UNAVAILABLE'); await authorize();
     } finally { await this.options.privateStore.releaseDataRef(c.uid,reference); }
   }
@@ -298,33 +324,51 @@ export class TeamConnector implements LocalTeamHost {
     // A live run may save its delivery, or finish and clean up, while recovery works: check each intent afresh.
     const handled = async (intent: SavedExecution) => { assert();
       return [...this.active.values()].some(active => active.taskId === intent.taskId) || !await this.options.privateStore.awaitingRecovery(c.uid,intent.taskId); };
-    let paths: Awaited<ReturnType<TeamPrivateStore['owner']>> | undefined;
-    let bins: ReturnType<TeamConnectorOptions['binaries']> | undefined;
-    for (const intent of await this.options.privateStore.executions(c.uid)) {
-      if (await handled(intent)) continue;
-      let result = await this.options.privateStore.savedResult(c.uid,intent.taskId); assert();
-      if (!result && (this.resultProbes.get(intent.taskId) ?? 0) <= this.now()) {
-        try {
-          paths ??= await this.options.privateStore.owner(c.uid); bins ??= this.options.binaries();
-          const recovered = await (this.options.run ?? runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,signal:AbortSignal.timeout(10000),timeoutMs:10000,assertCurrent:assert,
-            bootstrap:{version:3,type:'inspect_result',storageRoot:paths.runtime,workerExecutable:bins.worker,scope:intent.scope,taskId:intent.taskId}});
-          assert();
-          if (recovered.status === 'completed' || recovered.status === 'failed') { result = recovered; this.resultProbes.delete(intent.taskId); }
-          else this.resultProbes.set(intent.taskId, this.now() + (this.options.retryMs ?? 5000));
-        } catch { assert(); this.resultProbes.set(intent.taskId, this.now() + (this.options.retryMs ?? 5000)); }
-      }
-      // No result and no process left past the deadline: end the task instead of inspecting it forever.
-      let synthesized = false;
-      if (!result && !(this.now() < intent.deadlineAt)) { this.log('team_task_recovered_failed', { taskId: intent.taskId }); result = this.failedResult(intent); synthesized = true; }
-      if (result && !await handled(intent)) { this.resultProbes.delete(intent.taskId); await this.saveResult(c,intent,result,synthesized); }
-    }
     const bindingsByDeployment = new Map<string, SharedBotBinding>();
     for (const binding of bindings) {
       const key = `${binding.teamId}\0${binding.deploymentId}`;
       if (!bindingsByDeployment.has(key)) bindingsByDeployment.set(key, binding);
     }
+    let environment: HostEnvironment | undefined;
+    for (const intent of await this.options.privateStore.executions(c.uid)) {
+      if (await handled(intent)) continue;
+      const deploymentId = intent.payload.deploymentId, b = typeof deploymentId === 'string' ? bindingsByDeployment.get(`${intent.teamId}\0${deploymentId}`) : undefined;
+      if (intent.wait) {
+        // The task continues only through its answer, as a queued task with `resume` (below). Never answered, cancelled or expired: nothing is left to do for it.
+        if (this.now() > intent.wait.expiresAt + QUEUE_MS + DELIVERY_SKEW_MS) await this.options.privateStore.delivered(c.uid,intent.taskId);
+        continue;
+      }
+      if (intent.pause) {
+        // A question the server has not accepted yet: the saved request is sent again as it is.
+        if (b) await this.sendPause(c,b,intent).catch(() => assert());
+        else if (this.now() > intent.deadlineAt + DELIVERY_SKEW_MS) await this.saveResult(c,intent,this.failedResult(intent),true);
+        continue;
+      }
+      let result = await this.options.privateStore.savedResult(c.uid,intent.taskId); assert();
+      if (!result && (this.resultProbes.get(intent.taskId) ?? 0) <= this.now()) {
+        try {
+          environment ??= { paths: await this.options.privateStore.owner(c.uid), bins: this.options.binaries() };
+          const { paths, bins } = environment;
+          const recovered = runResult(await (this.options.run ?? runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,signal:AbortSignal.timeout(10000),timeoutMs:10000,assertCurrent:assert,
+            bootstrap:{version:3,type:'inspect_result',storageRoot:paths.runtime,workerExecutable:bins.worker,scope:intent.scope,taskId:intent.taskId}}));
+          assert();
+          if (recovered.status === 'completed' || recovered.status === 'failed') { result = recovered; this.resultProbes.delete(intent.taskId); }
+          else {
+            this.resultProbes.set(intent.taskId, this.now() + (this.options.retryMs ?? 5000));
+            // The worker is gone and left no result, and the attempt still has time: the durable checkpoint decides what happens to the task.
+            if (b && this.now() < intent.deadlineAt) await this.recover(c,b,intent,environment,revision,assert);
+          }
+        } catch { assert(); this.resultProbes.set(intent.taskId, this.now() + (this.options.retryMs ?? 5000)); }
+      }
+      // No result and no process left past the deadline: end the task instead of inspecting it forever.
+      let synthesized = false;
+      if (!result && !(this.now() < intent.deadlineAt) && !await handled(intent)) { this.log('team_task_recovered_failed', { taskId: intent.taskId }); result = this.failedResult(intent); synthesized = true; }
+      if (result && !await handled(intent)) { this.resultProbes.delete(intent.taskId); await this.saveResult(c,intent,result,synthesized); }
+    }
     for (const delivery of await this.options.privateStore.deliveries(c.uid)) {
-      assert(); const deploymentId = delivery.payload.deploymentId;
+      // A run still in progress sends its own result; this pass takes it only once that run has ended without delivering.
+      assert(); if ([...this.active.values()].some(active => active.taskId === delivery.taskId)) continue;
+      const deploymentId = delivery.payload.deploymentId;
       const b = typeof deploymentId === 'string' ? bindingsByDeployment.get(`${delivery.teamId}\0${deploymentId}`) : undefined;
       const expired = this.now() > delivery.deadlineAt + DELIVERY_SKEW_MS;
       const drop = async (code: string) => { this.log('team_task_delivery_rejected', { taskId: delivery.taskId, code }); await this.options.privateStore.delivered(c.uid,delivery.taskId).catch(() => undefined); };
@@ -353,27 +397,92 @@ export class TeamConnector implements LocalTeamHost {
         if (permanentDelivery(error) || this.ended.has(delivery.teamId) || expired && error instanceof TeamsApiError && definitive(error)
           && (error.code !== 'DEPLOYMENT_REQUIRED' || this.activated.get(scopeKey(b)) === activation(b,c) || inactive.has(scopeKey(b)))) await drop(errorCode(error)); }
     }
-    candidates.sort((a,b) => (this.scheduled.get(serialKey(a.binding,a.task)) ?? 0) - (this.scheduled.get(serialKey(b.binding,b.task)) ?? 0) || a.task.messageSeq - b.task.messageSeq);
+    candidates.sort((a,b) => (this.scheduled.get(serialKey(a.binding,a.task.conversationId)) ?? 0) - (this.scheduled.get(serialKey(b.binding,b.task.conversationId)) ?? 0) || a.task.messageSeq - b.task.messageSeq);
     for (const candidate of candidates) {
       assert(); if (this.active.size+this.probes >= Math.min(4,this.options.maxConcurrent ?? 4)) break;
-      const key = serialKey(candidate.binding,candidate.task); if (this.active.has(key)) continue;
-      const controller = new AbortController(); this.scheduled.set(key,this.now());
-      const taskId = candidate.task.taskId;
-      const promise = this.execute(c,candidate.binding,candidate.task,candidate.snapshot,controller.signal).catch(error => {
-        // A task retried every few seconds for the same reason is logged once per reason, not per try.
-        const code = errorCode(error); if (this.deferredCodes.get(taskId) !== code) { this.deferredCodes.set(taskId,code); this.log('team_task_deferred', { taskId, code }); }
-        if (revision === this.revision) this.deferred.set(taskId,this.now()+(this.options.retryMs??5000)); }).finally(() => { this.active.delete(key); this.wake(); });
-      this.active.set(key,{taskId:candidate.task.taskId,instanceId:candidate.binding.instanceId,controller,promise});
+      const key = serialKey(candidate.binding,candidate.task.conversationId); if (this.active.has(key)) continue;
+      const { binding, task, snapshot } = candidate, resume = task.resume;
+      this.launch(revision,task.taskId,binding.instanceId,key,signal => resume ? this.answer(c,binding,task,resume,snapshot,signal) : this.execute(c,binding,task,snapshot,signal));
     }
   }
-  private async execute(c: TeamAccountContext, b: SharedBotBinding, task: HostTask, snapshot: TeamPersonaSnapshot, signal: AbortSignal) {
-    const execution = new AbortController(); signal = AbortSignal.any([signal, execution.signal]);
+  /** One task at a time per Bot and Chat. A start that throws is tried again after the retry delay. */
+  private launch(revision: number, taskId: string, instanceId: string, key: string, start: (signal: AbortSignal) => Promise<void>) {
+    const controller = new AbortController(); this.scheduled.set(key,this.now());
+    const promise = start(controller.signal).catch(error => {
+      // A task retried every few seconds for the same reason is logged once per reason, not per try.
+      const code = errorCode(error); if (this.deferredCodes.get(taskId) !== code) { this.deferredCodes.set(taskId,code); this.log('team_task_deferred', { taskId, code }); }
+      if (revision === this.revision) this.deferred.set(taskId,this.now()+(this.options.retryMs??5000)); }).finally(() => { this.active.delete(key); this.wake(); });
+    this.active.set(key,{taskId,instanceId,controller,promise});
+  }
+  private async checkpoint(record: SavedExecution, snapshot: TeamPersonaSnapshot, { paths, bins }: HostEnvironment, assert: () => void): Promise<TeamTaskCheckpoint> {
+    const {credential_id:_credential,provider_account_profiles:_profiles,instructions:_instructions,documents:_documents,...model} = snapshot;
+    const result = await (this.options.run ?? runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,signal:AbortSignal.timeout(10000),timeoutMs:10000,assertCurrent:assert,
+      bootstrap:{version:3,type:'inspect_task',storageRoot:paths.runtime,workerExecutable:bins.worker,scope:record.scope,taskId:record.taskId,model}});
+    assert(); if (result.status !== 'task_checkpoint') throw new Error('TEAM_HOST_PROTOCOL'); return result;
+  }
+  /** A running attempt whose worker is gone and left no result. The durable checkpoint decides: report the question it stopped at, continue it in a new worker, or end it. */
+  private async recover(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, environment: HostEnvironment, revision: number, assert: () => void) {
+    const key = serialKey(b,record.scope.conversationId); if (this.active.has(key)) return;
+    const snapshot = await this.options.privateStore.snapshot(c.uid,b.snapshot); assert();
+    const checkpoint = await this.checkpoint(record,snapshot,environment,assert);
+    if (checkpoint.phase === 'result_recorded') return; // The next result probe reads it.
+    // The attempt that died was already continuing with the answer to this question: it gets the same answer again.
+    const answered = !!checkpoint.wait && record.answered?.waitId === checkpoint.wait.waitId;
+    if (checkpoint.continuable && checkpoint.wait && !answered && record.ask) {
+      await this.pause(c,b,record,{ wait: checkpoint.wait, checkpointDigest: checkpoint.checkpointDigest, pausedAt: Math.min(this.now(),record.deadlineAt), dispatchedRequests: checkpoint.dispatchesObserved }); return;
+    }
+    if (!checkpoint.continuable || !['admitted','in_flight'].includes(checkpoint.phase) || checkpoint.wait && !answered || record.recoveries >= MAX_RECOVERIES) {
+      this.log('team_task_recovered_failed', { taskId: record.taskId, code: checkpoint.reason ?? (checkpoint.continuable ? 'RECOVERY_LIMIT' : 'NOT_CONTINUABLE') });
+      await this.saveResult(c,record,this.failedResult(record),true); return;
+    }
+    if (this.active.size+this.probes >= Math.min(4,this.options.maxConcurrent ?? 4)) return;
+    this.launch(revision,record.taskId,b.instanceId,key,signal => this.resume(c,b,record,snapshot,checkpoint,'recovery',environment,signal));
+  }
+  /** A waiting task whose requester answered: it continues from its checkpoint with exactly that answer. */
+  private async answer(c: TeamAccountContext, b: SharedBotBinding, task: HostTask, resume: NonNullable<HostTask['resume']>, snapshot: TeamPersonaSnapshot, signal: AbortSignal) {
     const assert = () => { this.assert(c); signal.throwIfAborted(); };
-    const fields = {...this.hostFields(b),taskId:task.taskId}, paths = await this.options.privateStore.owner(c.uid), bins = this.options.binaries(); assert();
+    const record = (await this.options.privateStore.executions(c.uid)).find(saved => saved.taskId === task.taskId); assert();
+    // Only the host that asked holds the session and the wait. Without them the task is left to expire.
+    if (!record?.wait || record.wait.waitId !== resume.waitId) throw new Error('WAIT_STATE_MISSING');
+    const environment = { paths: await this.options.privateStore.owner(c.uid), bins: this.options.binaries() }; assert();
+    const checkpoint = await this.checkpoint(record,snapshot,environment,assert);
+    if (!checkpoint.continuable || checkpoint.wait?.waitId !== resume.waitId) throw new Error('NOT_CONTINUABLE');
+    const read = await this.options.service.hostReadChat(c,{teamId:b.teamId,generation:b.generation,conversationId:task.conversationId,mode:'byId',messageId:resume.answerMessageId}); assert();
+    const message = read.messages.find(candidate => candidate.messageId === resume.answerMessageId);
+    if (!message || message.seq !== resume.answerSeq || message.waitId !== resume.waitId || message.recalled || !message.text.trim() || Buffer.byteLength(message.text) > 8192) throw new Error('SOURCE_CHANGED');
+    await this.resume(c,b,{...record,answered:{waitId:resume.waitId,messageId:message.messageId,text:message.text}},snapshot,checkpoint,'answer',environment,signal);
+  }
+  /** One more attempt of a task this host already ran: after its worker was interrupted (`recovery`) or its question was answered (`answer`). The server grants each at most once. */
+  private async resume(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, snapshot: TeamPersonaSnapshot, checkpoint: TeamTaskCheckpoint, reason: 'answer' | 'recovery', environment: HostEnvironment, signal: AbortSignal) {
+    const assert = () => { this.assert(c); signal.throwIfAborted(); };
+    const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    const payload = {...this.hostFields(b),taskId:record.taskId,expectedEpoch:record.epoch,checkpointDigest:checkpoint.checkpointDigest,reason,dispatchedRequests:Math.max(record.dispatched,checkpoint.dispatchesObserved)};
+    const grant = await this.command<ContinueGrant>(c,b,'continueTask',payload,digest(JSON.stringify(['continueTask',payload])));
+    if (!grant.execute || !id(grant.permitId) || !grant.task || !Number.isSafeInteger(grant.epoch) || grant.epoch! <= record.epoch) {
+      this.log('team_task_continue_refused', { taskId: record.taskId, reason, state: grant.state ?? null });
+      // A running attempt is closed with its own permit (a cancelled task then reads as cancelled). An answered task holds no permit: it has ended on the server, or it is tried again until it expires.
+      if (reason === 'recovery') await this.saveResult(c,record,this.failedResult(record),true);
+      else if (grant.state === 'failed') await this.options.privateStore.delivered(c.uid,record.taskId);
+      else { assert(); this.deferred.set(record.taskId,this.now()+(this.options.retryMs??5000)); }
+      return;
+    }
+    this.deferred.delete(record.taskId); this.deferredCodes.delete(record.taskId);
+    const { pause: _pause, wait: _wait, ...rest } = record;
+    const next: SavedExecution = { ...rest, epoch: grant.epoch!, deadlineAt: grant.task.deadline, payload: {...record.payload,...this.hostFields(b),permitId:grant.permitId},
+      dispatched: Math.max(record.dispatched,checkpoint.dispatchesObserved,grant.physicalDispatchesSpent ?? 0), recoveries: record.recoveries + (reason === 'recovery' ? 1 : 0) };
+    // The permit is spent: save it before any abort check, as for the first attempt.
+    await this.options.privateStore.saveExecution(c.uid,next);
+    const answer = checkpoint.wait && next.answered?.waitId === checkpoint.wait.waitId ? next.answered : undefined;
+    await this.attempt(c,b,snapshot,next,accounts,environment,signal,{ epoch: next.epoch, expected_checkpoint_digest: checkpoint.checkpointDigest,
+      ...(answer ? { answer: { wait_id: answer.waitId, message_id: answer.messageId, text: answer.text } } : {}) });
+  }
+  private async execute(c: TeamAccountContext, b: SharedBotBinding, task: HostTask, snapshot: TeamPersonaSnapshot, signal: AbortSignal) {
+    const assert = () => { this.assert(c); signal.throwIfAborted(); };
+    const fields = {...this.hostFields(b),taskId:task.taskId}, environment = { paths: await this.options.privateStore.owner(c.uid), bins: this.options.binaries() }, { paths, bins } = environment; assert();
     const prepared = await this.command<TaskContext>(c,b,'prepareTask',fields); assert();
     const scope: BotChatScope = { teamId:b.teamId, sharedBotId:b.sharedBotId, conversationId:task.conversationId, sessionEpoch:b.sessionEpoch };
     const run = this.options.run ?? runTeamHost;
-    const inspected = await run({ executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,bootstrap:{version:3,type:'inspect_scope',storageRoot:paths.runtime,workerExecutable:bins.worker,scope} }); assert();
+    const inspected = runResult(await run({ executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,bootstrap:{version:3,type:'inspect_scope',storageRoot:paths.runtime,workerExecutable:bins.worker,scope} })); assert();
     const cursor = inspected.cursor, sourceScope = {teamId:b.teamId,generation:b.generation,conversationId:task.conversationId};
     if (cursor.lastMessageSeq >= prepared.messageSeq) throw new Error('TASK_INPUT_ALREADY_COMMITTED');
     const source = await this.options.service.hostReadChat(c,{...sourceScope,...(cursor.sessionRevision === 0 ? {mode:'recent' as const,throughSeq:prepared.messageSeq} : {mode:'range' as const,fromSeqExclusive:cursor.lastMessageSeq,toSeqInclusive:prepared.messageSeq})}); assert();
@@ -385,55 +494,97 @@ export class TeamConnector implements LocalTeamHost {
     const reference = await this.options.privateStore.dataRef(c.uid,{schemaVersion:1,batchId:task.taskId,...scope,expectedSessionRevision:cursor.sessionRevision,
       fromSeqExclusive:cursor.sessionRevision === 0 ? Math.max(0,prepared.messageSeq-200) : cursor.lastMessageSeq,toSeqInclusive:prepared.messageSeq,lastChangeSeq:source.lastChangeSeq,
       bootstrap:cursor.sessionRevision === 0,currentMessageId:prepared.messageId,messages:source.messages,changes:changes?.messages ?? []});
-    const references = [reference]; let interval: ReturnType<typeof setInterval> | undefined;
+    // Once the permit is saved the batch belongs to the execution record: a continuing worker is given the same bytes, and the record's end releases them.
+    let kept = false;
     try {
     assert(); const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
     const startPayload={...fields,expectedLastChangeSeq:source.lastChangeSeq};
     const started = await this.command<TaskContext & {execute:boolean;permitId?:string}>(c,b,'startTask',startPayload,digest(JSON.stringify(['startTask',startPayload,reference.sha256])));
     if (!started.execute || !started.permitId) { assert(); this.deferred.set(task.taskId,this.now()+(this.options.retryMs??5000)); return; }
     this.deferred.delete(task.taskId); this.deferredCodes.delete(task.taskId);
-    const permitId = started.permitId;
-    const intent: SavedExecution = { schemaVersion:1, scope, teamId:b.teamId,generation:b.generation,taskId:task.taskId,
-      commandId:digest(JSON.stringify([task.taskId,'delivery'])),deadlineAt:started.task.deadline,payload:{...fields,permitId,inputGrantIds:b.grantIds} };
+    const record: SavedExecution = { schemaVersion:2, scope, teamId:b.teamId,generation:b.generation,taskId:task.taskId,
+      commandId:digest(JSON.stringify([task.taskId,'delivery'])),deadlineAt:started.task.deadline,payload:{...fields,permitId:started.permitId,inputGrantIds:b.grantIds},
+      epoch:1,messageSeq:prepared.messageSeq,lastChangeSeq:source.lastChangeSeq,batch:reference,dispatched:0,recoveries:0,
+      ask:started.deployment?.capabilities?.durableWait === true && CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) };
     // The permit is spent: save it before any abort check, so a revoke now ends in a failed result instead of losing the permit.
-    // `c` is the account that sent startTask: the execution and its failed delivery stay in that account's private store, never in the current one, and `assert` below keeps the worker from starting.
+    // `c` is the account that sent startTask: the execution and its failed delivery stay in that account's private store, never in the current one, and `assert` in the attempt keeps the worker from starting.
     // The stale context can no longer send completeTask; discovery delivers it once that account is current again, or the deadline derives `interrupted`.
-    await this.options.privateStore.saveExecution(c.uid,intent);
-    const authorize = async () => { assert(); await this.command(c,b,'validateTask',{...fields,permitId,expectedLastChangeSeq:source.lastChangeSeq}); assert(); };
+    await this.options.privateStore.saveExecution(c.uid,record); kept = true;
+    await this.attempt(c,b,snapshot,record,accounts,environment,signal);
+    } finally { if (!kept) await this.options.privateStore.releaseDataRef(c.uid,reference); }
+  }
+  /** One worker attempt under the record's current permit, and what it ends in: a delivered result, a question, or an interruption left for recovery. */
+  private async attempt(c: TeamAccountContext, b: SharedBotBinding, snapshot: TeamPersonaSnapshot, record: SavedExecution, accounts: ProviderAccountLaunch, { paths, bins }: HostEnvironment, outer: AbortSignal, continuation?: TeamContinuation) {
+    const execution = new AbortController(), signal = AbortSignal.any([outer, execution.signal]);
+    const assert = () => { this.assert(c); signal.throwIfAborted(); };
+    const fields = {...this.hostFields(b),taskId:record.taskId}, permitId = record.payload.permitId, sourceScope = {teamId:b.teamId,generation:b.generation,conversationId:record.scope.conversationId};
+    const references: TeamDataRef[] = []; let interval: ReturnType<typeof setInterval> | undefined;
+    try {
+    const authorize = async () => { assert(); await this.command(c,b,'validateTask',{...fields,permitId,expectedLastChangeSeq:record.lastChangeSeq}); assert(); };
     // Worker frames (authorize, read_chat, provider_account_refresh) end the run on any refusal, so they retry a transient failure a few times; the poll below has its own tolerance.
-    const frame = <T>(operation: () => Promise<T>) => this.retrying(signal, started.task.deadline, operation);
+    const frame = <T>(operation: () => Promise<T>) => this.retrying(signal, record.deadlineAt, operation);
     const frameAuthorize = () => frame(authorize);
     // One validation at a time: a slow or failing server is not sent another every tick while the last waits out its timeout.
+    // A cancelled task answers TASK_CANCELLED here, which stops the worker like any other definitive refusal.
     let validating = false;
     interval = setInterval(() => { if (validating) return; validating = true;
       void authorize().catch(error => { if (definitive(error)) execution.abort(errorCode(error)); }).finally(() => { validating = false; }); },2000); interval.unref();
       const {credential_id:_credential,provider_account_profiles:_profiles,instructions,documents,...model} = snapshot;
-      let result: TeamHostResult | undefined, failure: unknown;
-      try { assert(); result = await run({executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,authorize:frameAuthorize,
-        bootstrap:{version:3,type:'run',storageRoot:paths.runtime,workerExecutable:bins.worker,scope,taskId:task.taskId,invocationId:randomUUID(),instructions,
-          inputBatchRef:reference,knowledge:documents.filter(d=>d.kind==='file').map(d=>({id:d.resourceId,title:d.name,text:d.text})),deadlineAt:started.task.deadline,
-          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),limits:{max_turns:20,context_window_tokens:2000000,output_tokens_per_request:4096,physical_dispatches:32}},
+      let result: TeamRunResult | undefined, failure: unknown;
+      try { assert(); result = runResult(await (this.options.run ?? runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,authorize:frameAuthorize,
+        bootstrap:{version:3,type:continuation ? 'continue' : 'run',storageRoot:paths.runtime,workerExecutable:bins.worker,scope:record.scope,taskId:record.taskId,invocationId:randomUUID(),instructions,
+          inputBatchRef:record.batch,knowledge:documents.filter(d=>d.kind==='file').map(d=>({id:d.resourceId,title:d.name,text:d.text})),deadlineAt:record.deadlineAt,
+          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),...(continuation ? { continuation } : {}),...(record.ask ? { askRequester: true } : {}),
+          limits:{max_turns:20,context_window_tokens:2000000,output_tokens_per_request:4096,physical_dispatches:Math.max(1,DISPATCH_LIMIT-record.dispatched)}},
         accountCredentials:async request => { await frameAuthorize();
           const permitted = accounts.providerAccountCredentials[request.accountId]; if (!permitted || permitted.identity_generation !== request.identityGeneration) throw new Error('TEAM_MODEL_UNAVAILABLE');
           await this.options.renewModelAccount?.(request.accountId,request.identityGeneration,request.credentialRevision); assert();
           const current = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!current) throw new Error('TEAM_MODEL_UNAVAILABLE'); return current; },
         readChat:async query => { await frameAuthorize();
-          if (query.kind==='before' && query.before_seq>prepared.messageSeq+1 || query.kind==='range' && query.to_seq_inclusive>prepared.messageSeq) throw new Error('HISTORY_BOUND_EXCEEDED');
+          if (query.kind==='before' && query.before_seq>record.messageSeq+1 || query.kind==='range' && query.to_seq_inclusive>record.messageSeq) throw new Error('HISTORY_BOUND_EXCEEDED');
           const request: ChatReadRequest = {...sourceScope,...(query.kind==='before' ? {mode:'before' as const,beforeSeq:query.before_seq,limit:query.limit} : query.kind==='range' ? {mode:'range' as const,fromSeqExclusive:query.from_seq_exclusive,toSeqInclusive:query.to_seq_inclusive} : {mode:'byId' as const,messageId:query.message_id})};
-          const result = await frame(() => this.options.service.hostReadChat(c,request)); assert(); if (result.messages.some(message=>message.seq>prepared.messageSeq)) throw new Error('HISTORY_BOUND_EXCEEDED');
+          const result = await frame(() => this.options.service.hostReadChat(c,request)); assert(); if (result.messages.some(message=>message.seq>record.messageSeq)) throw new Error('HISTORY_BOUND_EXCEEDED');
           await frameAuthorize(); const ref = await this.options.privateStore.dataRef(c.uid,{messages:result.messages,complete:query.kind !== 'before' || !result.hasMore,nextBeforeSeq:query.kind === 'before' && result.hasMore ? result.messages[0]?.seq ?? null : null}); references.push(ref); return ref; },
-      }); } catch (error) { failure = error; }
-      // The permit is spent: whatever stopped the worker, the task ends with a result and the model never runs again for it.
-      if (!result) {
-        const code = signal.aborted && typeof signal.reason === 'string' ? signal.reason : errorCode(failure);
-        this.log('team_task_failed', { taskId: task.taskId, code, aborted: signal.aborted });
-        const saved = await this.options.privateStore.savedResult(c.uid,task.taskId).catch(() => undefined);
-        result = saved ?? this.failedResult(intent);
-        await this.saveResult(c,intent,result,!saved); return; // Delivered by discovery once the account and fence are current again.
+      })); } catch (error) { failure = error; }
+      clearInterval(interval);
+      const stop = result?.status === 'waiting' && record.ask && result.wait && result.checkpointDigest && result.pausedAt !== undefined
+        ? { wait: result.wait, checkpointDigest: result.checkpointDigest, pausedAt: result.pausedAt, dispatchedRequests: result.dispatchedRequests ?? record.dispatched } : undefined;
+      if (!result || !stop && result.status !== 'completed' && result.status !== 'failed') {
+        const code = signal.aborted && typeof signal.reason === 'string' ? signal.reason : result ? 'TEAM_HOST_PROTOCOL' : errorCode(failure);
+        this.log('team_task_failed', { taskId: record.taskId, code, aborted: signal.aborted });
+        // Only an interruption is continued: this host is closing, or the process stopped without a verdict. Discovery then asks the durable checkpoint.
+        // Lost authority, a cancellation and a refusal by the worker itself end the task: the permit is spent and the model never runs again for it.
+        if (code === 'CLOSED' || !signal.aborted && INTERRUPTIONS.includes(code)) return;
+        const saved = await this.options.privateStore.savedResult(c.uid,record.taskId).catch(() => undefined);
+        await this.saveResult(c,record,saved ?? this.failedResult(record),!saved); return; // Delivered by discovery once the account and fence are current again.
       }
-      const delivery = await this.saveResult(c,intent,result); assert();
-      await this.command(c,b,'completeTask',delivery.payload,delivery.commandId); assert(); await this.options.privateStore.delivered(c.uid,task.taskId);
+      if (stop) { await this.pause(c,b,{...record,usage:totalUsage(record.usage,result.usage,false)},stop); return; }
+      const delivery = await this.saveResult(c,record,result); assert();
+      await this.command(c,b,'completeTask',delivery.payload,delivery.commandId); assert(); await this.options.privateStore.delivered(c.uid,record.taskId);
     } finally { clearInterval(interval); await Promise.all(references.map(ref=>this.options.privateStore.releaseDataRef(c.uid,ref))); }
+  }
+  /** The worker stopped at a question for the requester. The request is saved before it is sent, so every retry is the identical request. */
+  private async pause(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, stop: { wait: TeamTaskWait; checkpointDigest: string; pausedAt: number; dispatchedRequests: number }) {
+    const pause = { ...record.payload, waitId: stop.wait.waitId, kind: 'human_input', question: stop.wait.question, requestDigest: stop.wait.requestDigest, checkpointDigest: stop.checkpointDigest,
+      pausedAt: stop.pausedAt, expiresInMs: WAIT_MS, dispatchedRequests: stop.dispatchedRequests, outputAudience: { mode: 'published_inputs' } };
+    const next: SavedExecution = { ...record, dispatched: Math.max(record.dispatched,stop.dispatchedRequests), pause };
+    await this.options.privateStore.saveExecution(c.uid,next); await this.sendPause(c,b,next);
+  }
+  private async sendPause(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution) {
+    const { pause, ...rest } = record, waitId = pause?.waitId; if (!pause || typeof waitId !== 'string') throw new Error('UNSAFE_TEAM_STORAGE');
+    let answer: { state?: string; expiresAt?: number | null };
+    try { answer = await this.command(c,b,'pauseTask',{...pause,accountEpoch:b.accountEpoch},digest(JSON.stringify(['pauseTask',record.taskId,waitId,b.accountEpoch]))); }
+    catch (error) {
+      // Kept for the next pass (a host clock ahead of the server answers TASK_EXPIRED until the server catches up), unless the server will never take this question.
+      // The attempt then ends with its own permit: a cancelled task reads as cancelled, any other as failed.
+      if (!(error instanceof TeamsApiError && PAUSE_REFUSED.includes(error.code) || this.ended.has(record.teamId) || this.now() > record.deadlineAt + DELIVERY_SKEW_MS && definitive(error))) throw error;
+      this.log('team_task_pause_rejected', { taskId: record.taskId, code: errorCode(error) });
+      await this.saveResult(c,record,this.failedResult(record),true); return;
+    }
+    // The worker has exited and its slot is free; only the answer brings the task back, as a queued task with `resume`.
+    if (answer.state === 'waiting' && typeof answer.expiresAt === 'number' && Number.isSafeInteger(answer.expiresAt)) await this.options.privateStore.saveExecution(c.uid,{...rest,wait:{waitId,expiresAt:answer.expiresAt}});
+    // The audience gate refused the question: the server published its notice and ended the task.
+    else await this.options.privateStore.delivered(c.uid,record.taskId);
   }
   /** Bounded retry of one worker-frame operation: only a transient failure, at most FRAME_ATTEMPTS tries, none begun after the window or the task deadline, and the wait ends at once when the run is aborted. */
   private async retrying<T>(signal: AbortSignal, deadlineAt: number, operation: () => Promise<T>): Promise<T> {
@@ -449,13 +600,15 @@ export class TeamConnector implements LocalTeamHost {
     }
   }
   /** The synthesized failure of a task that has no worker result. Its `finishedAt` is the host clock, which is why delivery may restamp it. */
-  private failedResult(intent: SavedExecution): TeamHostResult {
+  private failedResult(intent: SavedExecution): TeamRunResult {
     return { status: 'failed', cursor: noCursor, finishedAt: Math.min(this.now(), intent.deadlineAt) };
   }
-  private async saveResult(c: TeamAccountContext, intent: SavedExecution, result: TeamHostResult, synthesized = false) {
-    const payload = {...intent.payload,outcome:result.status==='completed'?'completed':'failed',text:result.text || 'The assistant could not complete this request.',finishedAt:result.finishedAt,
-      outputAudience:{mode:'published_inputs'},usage:result.usage ?? {status:'missing'},...(result.document ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
-    const delivery = {...intent,...(synthesized ? { synthesized: true as const } : {}),payload}; await this.options.privateStore.saveDelivery(c.uid,delivery); return delivery;
+  private async saveResult(c: TeamAccountContext, record: SavedExecution, result: TeamRunResult, synthesized = false) {
+    const payload = {...record.payload,outcome:result.status==='completed'?'completed':'failed',text:result.text || 'The assistant could not complete this request.',finishedAt:result.finishedAt,
+      outputAudience:{mode:'published_inputs'},usage:totalUsage(record.usage,result.usage,record.recoveries>0),...(result.document ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
+    const delivery: SavedDelivery = {schemaVersion:1,teamId:record.teamId,generation:record.generation,taskId:record.taskId,deadlineAt:record.deadlineAt,commandId:record.commandId,
+      ...(synthesized ? { synthesized: true as const } : {}),payload};
+    await this.options.privateStore.saveDelivery(c.uid,delivery); return delivery;
   }
   close() { this.closed=true; clearTimeout(this.timer); for(const stop of this.stops)stop(); for(const a of this.active.values())this.abort(a,'CLOSED'); this.selections.clear(); }
 }

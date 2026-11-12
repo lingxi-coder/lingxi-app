@@ -245,7 +245,7 @@ export class TeamsService {
   }
   async hostMessages<T>(context: TeamAccountContext, command: Record<string, unknown>): Promise<T> {
     this.assertHostContext(context);
-    if (command.schemaVersion !== 1 || !['listSharedBots', 'publishSharedBot', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks', 'prepareTask', 'validateTask', 'startTask', 'completeTask'].includes(command.action as string)) throw new Error('INVALID_INPUT');
+    if (command.schemaVersion !== 1 || !['listSharedBots', 'publishSharedBot', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks', 'prepareTask', 'validateTask', 'startTask', 'completeTask', 'pauseTask', 'continueTask'].includes(command.action as string)) throw new Error('INVALID_INPUT');
     const session = await this.connect(context.uid); this.assertHostContext(context);
     const { collection, onSnapshot } = this.sdk!;
     if (command.action === 'listHostTasks' && typeof command.teamId === 'string') {
@@ -260,10 +260,10 @@ export class TeamsService {
         }));
       }
     }
-    // The server grants a start permit once and answers a replay with `execute: false`: an account reset while the request is in flight must still hand the permit
-    // to the connector, which saves it under the sending account and ends the task. Every other answer is discarded once the account moved on.
+    // The server grants a model permit (first start or continue) once and answers a replay with `execute: false`: an account reset while the request is in flight must
+    // still hand the permit to the connector, which saves it under the sending account and ends the task. Every other answer is discarded once the account moved on.
     // The context was asserted just above with no await since, so the request is sent under it.
-    if (command.action === 'startTask') return this.request<T>('/messages', command, true);
+    if (command.action === 'startTask' || command.action === 'continueTask') return this.request<T>('/messages', command, true);
     const result = await this.checked<T>(context.uid, '/messages', command); this.assertHostContext(context); return result;
   }
   /** UI and every Bot read through the same UID/project message service and SDK cache. */

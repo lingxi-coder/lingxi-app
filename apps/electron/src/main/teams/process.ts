@@ -9,17 +9,42 @@ import type { TeamDataRef, TeamModelRoute } from './privateStore.js';
 export interface BotChatScope { teamId: string; sharedBotId: string; conversationId: string; sessionEpoch: number }
 export interface BotChatCursor { scope: BotChatScope | null; sessionRevision: number; lastMessageSeq: number; lastChangeSeq: number; bootstrapFromSeq: number }
 export type TeamChatQuery = { kind: 'before'; before_seq: number; limit: number } | { kind: 'range'; from_seq_exclusive: number; to_seq_inclusive: number } | { kind: 'by_id'; message_id: string };
+/** `continue` only. A waiting task continues with the answer to exactly its question. */
+export interface TeamContinuation { epoch: number; expected_checkpoint_digest: string; answer?: { wait_id: string; message_id: string; text: string } }
 export interface TeamHostBootstrap {
-  version: 3; type: 'inspect_scope' | 'inspect_result' | 'run'; storageRoot: string; workerExecutable: string; scope: BotChatScope;
+  version: 3; type: 'inspect_scope' | 'inspect_result' | 'inspect_task' | 'run' | 'continue'; storageRoot: string; workerExecutable: string; scope: BotChatScope;
   taskId?: string; invocationId?: string; instructions?: string; inputBatchRef?: TeamDataRef;
+  continuation?: TeamContinuation;
+  /** Offer the Bot the ask-the-requester tool (`run` and `continue`). */
+  askRequester?: boolean;
   knowledge?: Array<{ id: string; title: string; text: string }>;
   deadlineAt?: number; model?: Omit<TeamModelRoute, 'credential_id'>; credentials?: ProviderAccountEnvelope;
   limits?: { max_turns: number; context_window_tokens: number; output_tokens_per_request: number; physical_dispatches: number };
 }
-export interface TeamHostResult {
-  status: 'inspected' | 'not_found' | 'completed' | 'failed'; cursor: BotChatCursor; text?: string; finishedAt?: number;
+/** The question a paused task is blocked on, as the runtime's durable checkpoint names it. */
+export interface TeamTaskWait { waitId: string; logicalStepId: string; question: string; requestDigest: string }
+export interface TeamRunResult {
+  status: 'inspected' | 'not_found' | 'completed' | 'failed' | 'waiting'; cursor: BotChatCursor; text?: string; finishedAt?: number;
   document?: { operationId: string; deliveryId: string; title: string; markdown: string; sha256: string };
-  dispatchedRequests?: number; deniedTools?: number; usage?: TaskUsage;
+  /** `dispatchedRequests` counts every attempt of the task, `attemptDispatchedRequests` this process only. */
+  dispatchedRequests?: number; attemptDispatchedRequests?: number; deniedTools?: number; usage?: TaskUsage;
+  /** `waiting` only: the worker has exited and the task continues from this checkpoint with the answer. */
+  wait?: TeamTaskWait; checkpointDigest?: string; pausedAt?: number;
+}
+/** `inspect_task`: what the durable session says about one task. Always inspect again before the next attempt. */
+export interface TeamTaskCheckpoint {
+  status: 'task_checkpoint'; taskId: string; phase: 'absent' | 'admitted' | 'in_flight' | 'result_recorded';
+  attempts: number; dispatchesObserved: number; continuable: boolean; reason?: string; wait?: TeamTaskWait; checkpointDigest: string;
+}
+export type TeamHostResult = TeamRunResult | TeamTaskCheckpoint;
+/** The result of every bootstrap except `inspect_task`. */
+export function runResult(result: TeamHostResult): TeamRunResult { if (result.status === 'task_checkpoint') throw new Error('TEAM_HOST_PROTOCOL'); return result; }
+const DIGEST = /^[a-f0-9]{64}$/u, count = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
+function wait(value: unknown): value is TeamTaskWait {
+  if (!object(value)) return false;
+  exact(value, ['waitId', 'logicalStepId', 'question', 'requestDigest']);
+  return typeof value.waitId === 'string' && /^wait_[a-f0-9]{40}$/u.test(value.waitId) && typeof value.logicalStepId === 'string' && value.logicalStepId.length <= 256
+    && typeof value.question === 'string' && !!value.question.trim() && Buffer.byteLength(value.question) <= 2000 && typeof value.requestDigest === 'string' && DIGEST.test(value.requestDigest);
 }
 export class TeamHostFailure extends Error { constructor(readonly code: string) { super('TEAM_HOST_FAILED'); } }
 export interface TeamHostProcessOptions {
@@ -102,11 +127,27 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
         })();
         requests.add(request); void request.catch(() => finish(new Error('TEAM_HOST_PROTOCOL'))).finally(() => requests.delete(request));
       } else if (value.type === 'result') {
+        const kind = options.bootstrap.type, allowed = kind === 'inspect_scope' ? ['inspected'] : kind === 'inspect_result' ? ['not_found','completed','failed'] : kind === 'inspect_task' ? ['task_checkpoint']
+          : options.bootstrap.askRequester === true ? ['completed','failed','waiting'] : ['completed','failed'];
+        if (typeof value.status !== 'string' || !allowed.includes(value.status)) throw new Error('TEAM_HOST_PROTOCOL');
+        if (value.status === 'task_checkpoint') {
+          exact(value,['version','type','status','taskId','phase','cursor','attempts','dispatchesObserved','pendingToolCalls','continuable','checkpointDigest'],['reason','wait']);
+          if (value.taskId !== options.bootstrap.taskId || !['absent','admitted','in_flight','result_recorded'].includes(value.phase as string) || !count(value.attempts) || !count(value.dispatchesObserved)
+            || typeof value.continuable !== 'boolean' || typeof value.checkpointDigest !== 'string' || !DIGEST.test(value.checkpointDigest) || !Array.isArray(value.pendingToolCalls) || !object(value.cursor)
+            || value.reason !== undefined && (typeof value.reason !== 'string' || !/^[a-z_]{3,60}$/u.test(value.reason)) || value.wait !== undefined && !wait(value.wait)) throw new Error('TEAM_HOST_PROTOCOL');
+          result = { status: 'task_checkpoint', taskId: value.taskId as string, phase: value.phase as TeamTaskCheckpoint['phase'], attempts: value.attempts, dispatchesObserved: value.dispatchesObserved, continuable: value.continuable,
+            checkpointDigest: value.checkpointDigest, ...(value.reason !== undefined ? { reason: value.reason as string } : {}), ...(value.wait !== undefined ? { wait: value.wait as TeamTaskWait } : {}) };
+          return;
+        }
         if (value.status === 'inspected' || value.status === 'not_found') exact(value,['version','type','status','cursor']);
-        else exact(value,['version','type','status','cursor','text','finishedAt','dispatchedRequests','deniedTools','usage'],['document']);
-        if (!['inspected','not_found','completed','failed'].includes(value.status as string) || !cursor(value.cursor)
-          || (value.status === 'inspected') !== (options.bootstrap.type === 'inspect_scope') || (value.status === 'not_found' && options.bootstrap.type !== 'inspect_result')
-          || (!['inspected','not_found'].includes(value.status as string) && (typeof value.text !== 'string' || Buffer.byteLength(value.text) > 8192 || !Number.isSafeInteger(value.finishedAt)))
+        else if (value.status === 'waiting') {
+          exact(value,['version','type','status','cursor','wait','checkpointDigest','pausedAt','dispatchedRequests','attemptDispatchedRequests','deniedTools','usage']);
+          if (!wait(value.wait) || typeof value.checkpointDigest !== 'string' || !DIGEST.test(value.checkpointDigest) || !count(value.pausedAt) || !count(value.dispatchedRequests)) throw new Error('TEAM_HOST_PROTOCOL');
+        }
+        // A result recorded by an earlier runtime has no per-attempt count.
+        else exact(value,['version','type','status','cursor','text','finishedAt','dispatchedRequests','deniedTools','usage'],['document','attemptDispatchedRequests']);
+        if (!cursor(value.cursor)
+          || (['completed','failed'].includes(value.status) && (typeof value.text !== 'string' || Buffer.byteLength(value.text) > 8192 || !Number.isSafeInteger(value.finishedAt)))
           || (value.document !== undefined && (!object(value.document) || typeof value.document.markdown !== 'string' || Buffer.byteLength(value.document.markdown) > 256 * 1024))) throw new Error('TEAM_HOST_PROTOCOL');
         if (value.cursor.sessionRevision === 0 ? value.cursor.scope !== null : JSON.stringify(value.cursor.scope) !== JSON.stringify(options.bootstrap.scope)) throw new Error('TEAM_HOST_PROTOCOL');
         if (value.document !== undefined) {
@@ -123,7 +164,9 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
               || usage.costMicros !== undefined && (!Number.isSafeInteger(usage.costMicros) || (usage.costMicros as number)<0)
               || usage.currency !== undefined && (typeof usage.currency !== 'string' || !/^[A-Z]{3}$/u.test(usage.currency))) throw new Error('TEAM_HOST_PROTOCOL'); }
         }
-        result = { status: value.status, cursor: value.cursor, ...(value.usage !== undefined ? { usage: value.usage } : {}), ...(value.text !== undefined ? { text: value.text } : {}), ...(value.document !== undefined ? { document: value.document } : {}), ...(value.finishedAt !== undefined ? { finishedAt: value.finishedAt } : {}), ...(value.dispatchedRequests !== undefined ? { dispatchedRequests: value.dispatchedRequests } : {}), ...(value.deniedTools !== undefined ? { deniedTools: value.deniedTools } : {}) } as TeamHostResult;
+        result = { status: value.status, cursor: value.cursor, ...(value.usage !== undefined ? { usage: value.usage } : {}), ...(value.text !== undefined ? { text: value.text } : {}), ...(value.document !== undefined ? { document: value.document } : {}), ...(value.finishedAt !== undefined ? { finishedAt: value.finishedAt } : {}), ...(value.dispatchedRequests !== undefined ? { dispatchedRequests: value.dispatchedRequests } : {}),
+          ...(value.attemptDispatchedRequests !== undefined ? { attemptDispatchedRequests: value.attemptDispatchedRequests } : {}), ...(value.deniedTools !== undefined ? { deniedTools: value.deniedTools } : {}),
+          ...(value.status === 'waiting' ? { wait: value.wait, checkpointDigest: value.checkpointDigest, pausedAt: value.pausedAt } : {}) } as TeamRunResult;
       } else if (value.type === 'error') {
         exact(value, ['version','type','code']); if (typeof value.code !== 'string' || !/^[A-Z_]{3,60}$/u.test(value.code)) throw new Error('TEAM_HOST_PROTOCOL'); throw new TeamHostFailure(value.code);
       } else throw new Error('TEAM_HOST_PROTOCOL');

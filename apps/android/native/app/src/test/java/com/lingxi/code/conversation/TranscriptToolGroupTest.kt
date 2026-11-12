@@ -5,17 +5,19 @@ import org.junit.Test
 
 class TranscriptToolGroupTest {
     @Test fun activityTypesNeverReorderOrMergeAcrossOtherCalls() {
-        val calls = listOf("Read", "Read", "Edit", "Read", "mcp__a__search", "mcp__b__search")
+        val calls = listOf("Read", "Read", "Edit", "Read", "mcp__a__search", "mcp__b__search", "Skill", "skill", "Read", "Skill")
             .mapIndexed { index, name -> ToolCallUi(index.toString(), name) }
-        assertEquals(listOf(listOf("0", "1"), listOf("2"), listOf("3"), listOf("4"), listOf("5")),
+        assertEquals(listOf(listOf("0", "1"), listOf("2"), listOf("3"), listOf("4"), listOf("5"), listOf("6", "7"), listOf("8"), listOf("9")),
             consecutiveToolGroups(calls).map { group -> group.map { it.id } })
         assertEquals(calls, consecutiveToolGroups(calls).flatten())
     }
 
-    @Test fun questionsAndAgentsRemainIndividuallyReachable() {
-        for (name in listOf("Skill", "AskUserQuestion", "PermissionRequest")) {
+    @Test fun questionsAndForkedSkillsRemainIndividuallyReachable() {
+        for (name in listOf("AskUserQuestion", "PermissionRequest")) {
             assertEquals(2, consecutiveToolGroups(listOf(ToolCallUi("a", name), ToolCallUi("b", name))).size)
         }
+        val skill = ToolCallUi("skill", "Skill")
+        assertEquals(2, consecutiveToolGroups(listOf(skill, skill.copy(id = "fork", spawnedAgentId = "child"))).size)
     }
     @Test fun agentLaunchesAndTaskCoordinationFoldOnlyWhenAdjacent() {
         val calls = listOf("Agent", "Task", "Read", "TaskList", "TaskUpdate", "SendMessage", "AskUserQuestion", "TaskOutput")
@@ -28,6 +30,7 @@ class TranscriptToolGroupTest {
         assertEquals(com.lingxi.code.components.LXIconName.ListChecks, toolIconName(null, "TaskList"))
         assertEquals(com.lingxi.code.components.LXIconName.Send, toolIconName(null, "SendMessage"))
         assertEquals(com.lingxi.code.components.LXIconName.Apps, toolIconName(ToolVerbUi.Generic, "LocalApp"))
+        assertEquals(com.lingxi.code.components.LXIconName.Globe, toolIconName(ToolVerbUi.Generic, "browser"))
     }
 
     @Test fun structuredAgentIdentitySupportsBothWireSpellings() {

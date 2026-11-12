@@ -325,7 +325,8 @@ struct ConversationToolHeader: Equatable, Hashable {
     }
 
     func icon(for tool: String) -> ConversationToolIcon {
-        icon ?? ConversationToolIcon.resolve(verb: verb, tool: tool.isEmpty ? label : tool)
+        if tool.caseInsensitiveCompare("browser") == .orderedSame { return .globe }
+        return icon ?? ConversationToolIcon.resolve(verb: verb, tool: tool.isEmpty ? label : tool)
     }
 }
 
@@ -922,9 +923,9 @@ extension ConversationToolTrace {
     var groupingKey: String? {
         let name = tool.lowercased()
         guard spawnedAgentID == nil, planDocument == nil, questionAnswers == nil, localApp == nil,
-              !["agent", "task", "skill", "spawn_agent", "fork_agent", "askuserquestion", "exitplanmode", "enterplanmode", "submitplan"].contains(name),
-              !name.contains("permission"),
-              header?.verb != .skill else { return nil }
+              !["agent", "task", "spawn_agent", "fork_agent", "askuserquestion", "exitplanmode", "enterplanmode", "submitplan"].contains(name),
+              !name.contains("permission") else { return nil }
+        if name == "skill" || header?.verb == .skill { return "skill" }
         if isTaskWorkflow { return "task-workflow" }
         if header?.verb == .task || header?.verb == .todo { return nil }
         if name.hasPrefix("mcp") { return tool }

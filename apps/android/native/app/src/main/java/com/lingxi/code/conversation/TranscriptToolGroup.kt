@@ -59,10 +59,10 @@ internal fun isTaskWorkflow(call: ToolCallUi): Boolean {
 /** A nil key makes questions, permissions, deliverables and agents standalone. */
 internal fun toolGroupingKey(call: ToolCallUi): String? {
     if (isAgentLaunchTool(call.tool) && call.planMarkdown == null && call.questionAnswers == null && call.localApp == null) return "agent-launch"
-    if (call.planMarkdown != null || call.questionAnswers != null || call.localApp != null ||
-        call.tool.lowercase() in setOf("agent", "task", "skill", "spawn_agent", "fork_agent", "askuserquestion", "exitplanmode", "enterplanmode", "submitplan") ||
-        call.tool.contains("permission", ignoreCase = true) ||
-        call.header?.verb == ToolVerbUi.Skill) return null
+    if (call.spawnedAgentId != null || call.planMarkdown != null || call.questionAnswers != null || call.localApp != null ||
+        call.tool.lowercase() in setOf("agent", "task", "spawn_agent", "fork_agent", "askuserquestion", "exitplanmode", "enterplanmode", "submitplan") ||
+        call.tool.contains("permission", ignoreCase = true)) return null
+    if (call.tool.equals("Skill", ignoreCase = true) || call.header?.verb == ToolVerbUi.Skill) return "skill"
     if (isTaskWorkflow(call)) return "task-workflow"
     if (call.header?.verb in setOf(ToolVerbUi.Task, ToolVerbUi.Todo)) return null
     if (call.tool.startsWith("mcp", ignoreCase = true)) return call.tool
@@ -112,6 +112,7 @@ internal fun transcriptBlocks(blocks: List<MessageContent>): List<TranscriptBloc
 
 internal fun toolIconName(verb: ToolVerbUi?, tool: String = "") = when {
     tool == "LocalApp" -> LXIconName.Apps
+    tool.equals("browser", ignoreCase = true) -> LXIconName.Globe
     isTaskProgressTool(tool) -> LXIconName.ListChecks
     tool.lowercase() in setOf("sendmessage", "send_message") || tool.lowercase().endsWith("__send_message") -> LXIconName.Send
     tool == "ToolSearch" -> LXIconName.Search

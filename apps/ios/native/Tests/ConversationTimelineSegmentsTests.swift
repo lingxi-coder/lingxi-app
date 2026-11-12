@@ -107,16 +107,20 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
     }
 
     func testToolGroupKeepsItsRowIdentityWhenASecondToolArrives() {
-        let oneTool = ConversationTimelineView.segmentIDs(in: toolGroup([trace("t1")]))
-        let twoTools = ConversationTimelineView.segmentIDs(in: toolGroup([trace("t1"), trace("t2")]))
+        for tool in ["Bash", "Skill"] {
+            let first = ConversationToolTrace(id: "t1", tool: tool, status: .completed)
+            let second = ConversationToolTrace(id: "t2", tool: tool, status: .running)
+            let oneTool = ConversationTimelineView.segmentIDs(in: toolGroup([first]))
+            let twoTools = ConversationTimelineView.segmentIDs(in: toolGroup([first, second]))
 
-        XCTAssertEqual(oneTool.count, 1)
-        XCTAssertEqual(twoTools.count, 1)
-        XCTAssertEqual(
-            oneTool,
-            twoTools,
-            "A tool group must keep one stable ForEach id as it grows from one tool to two"
-        )
+            XCTAssertEqual(oneTool.count, 1)
+            XCTAssertEqual(twoTools.count, 1)
+            XCTAssertEqual(
+                oneTool,
+                twoTools,
+                "A tool group must keep one stable ForEach id as it grows from one tool to two"
+            )
+        }
     }
 
     func testToolDisclosureIdentitySurvivesLiveToRestoredRunReplacement() {

@@ -38,6 +38,7 @@ import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Power
 import androidx.compose.material.icons.outlined.Bedtime
 import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Terminal
@@ -59,7 +60,7 @@ enum class LXIconName {
     Menu, SideChat, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, AudioWave, Paperclip,
     Chevron, Sun, Moon, Check, Pin, Brain, ArrowUp, Folder, Clock, Message,
     ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share, ListChecks, Send,
-    ArrowRight, Terminal, Lightbulb, Apps, AppBuilder, McpFallback,
+    ArrowRight, Terminal, Lightbulb, Apps, AppBuilder, McpFallback, Globe,
     /** The Bots tab: a robot head, distinct from [Sparkle] (which already means "AI" elsewhere). */
     Bot,
     /** The Teams tab: a group of people ([Link], which the old Teams drawer row used, is not one). */
@@ -103,6 +104,7 @@ val LXIconName.materialIcon: ImageVector get() = when (this) {
     LXIconName.Plug -> Icons.Outlined.Power
     LXIconName.Dream -> Icons.Outlined.Bedtime
     LXIconName.Link -> Icons.Outlined.Link
+    LXIconName.Globe -> Icons.Outlined.Language
     LXIconName.Copy -> Icons.Outlined.ContentCopy
     LXIconName.Share -> Icons.Outlined.Share
     LXIconName.Terminal -> Icons.Outlined.Terminal

@@ -129,7 +129,7 @@ function RemoteImage({ url, locale, fetchImage }: { url: string; locale: Locale;
 function ToolGlyph({ tool }: { tool: ToolRunItem }) {
   const task = isTaskProgressTool(tool.tool);
   const send = /(?:^|__)(?:SendMessage|send_message)$/i.test(tool.tool);
-  const kind = tool.tool === 'LocalApp' ? 'local-app' : task ? 'tasks' : send ? 'send' : tool.tool === 'ToolSearch' ? 'search' : tool.view.verb;
+  const kind = tool.tool === 'LocalApp' ? 'local-app' : tool.tool.toLowerCase() === 'browser' ? 'globe' : task ? 'tasks' : send ? 'send' : tool.tool === 'ToolSearch' ? 'search' : tool.view.verb;
   let artwork;
   switch (kind) {
     case 'local-app': artwork = <><rect x="2" y="2" width="4.5" height="4.5" rx="1.2" /><rect x="9.5" y="2" width="4.5" height="4.5" rx="1.2" /><rect x="2" y="9.5" width="4.5" height="4.5" rx="1.2" /><rect x="9.5" y="9.5" width="4.5" height="4.5" rx="1.2" /></>; break;
@@ -137,7 +137,7 @@ function ToolGlyph({ tool }: { tool: ToolRunItem }) {
     case 'send': artwork = <path d="m14 2-4.5 12-2.6-5-5-2.5L14 2ZM7 9l7-7" />; break;
     case 'search': artwork = <><circle cx="6.7" cy="6.7" r="4.5" /><path d="m10 10 3.5 3.5" /></>; break;
     case 'shell': case 'output': artwork = <><rect x="1.5" y="2" width="13" height="12" rx="2" /><path d="m4 5 2.5 3L4 11m5 0h3" /></>; break;
-    case 'fetch': artwork = <><circle cx="8" cy="8" r="6" /><ellipse cx="8" cy="8" rx="2.5" ry="6" /><path d="M2 8h12" /></>; break;
+    case 'globe': case 'fetch': artwork = <><circle cx="8" cy="8" r="6" /><ellipse cx="8" cy="8" rx="2.5" ry="6" /><path d="M2 8h12" /></>; break;
     case 'create': case 'update': artwork = <><path d="m3 10 7.5-7.5a1.5 1.5 0 0 1 2 2L5 12l-3 1 1-3Zm6-6 3 3M8 14h6" /></>; break;
     case 'read': artwork = <><path d="M8 3c-2-2-5-1-6 0v10c2-1 4-1 6 0 2-1 4-1 6 0V3c-1-1-4-2-6 0Zm0 0v10" /></>; break;
     case 'kill': artwork = <rect x="3" y="3" width="10" height="10" rx="2" />; break;

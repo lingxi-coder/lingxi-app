@@ -6,7 +6,7 @@ import { localAppErrorMessage } from '../bridge/localAppErrors';
 import { useI18n } from '../i18n/useI18n';
 import { tr } from '../i18n/locale';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { DesktopLocalApp, LocalAppLog, LocalAppPhase, LocalAppVersion, PendingLocalAppPublication, PendingLocalAppSourceCopy, PendingLocalAppSession } from '../../shared/localApps';
+import type { DesktopLocalApp, LocalAppLog, LocalAppPhase, LocalAppVersion } from '../../shared/localApps';
 import type { ToolRunItem } from '../model/runItem';
 import { localAppReference } from '../model/localAppReference';
 import { useT } from '../theme/ThemeContext';
@@ -37,9 +37,6 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop 
   const t = useT();
   const { locale } = useI18n();
   const [publication, setPublication] = useState<DesktopLocalApp>();
-  const [pendingPublications, setPendingPublications] = useState<PendingLocalAppPublication[]>([]);
-  const [pendingSources, setPendingSources] = useState<PendingLocalAppSourceCopy[]>([]);
-  const [pendingSessions, setPendingSessions] = useState<PendingLocalAppSession[]>([]);
   const [apps, setApps] = useState<DesktopLocalApp[]>([]);
   const [remoteSettings, setRemoteSettings] = useState<Record<string, boolean>>({});
   const [remoteConfigured, setRemoteConfigured] = useState(false);
@@ -63,8 +60,8 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop 
   const refresh = useCallback(async () => {
     const token = ++request.current;
     try {
-      const [rows, output, releases, sharing, configuration, pending, sources, sessions] = await Promise.all([appsApi().list(), selected ? appsApi().logs(selected) : Promise.resolve([]), selected ? appsApi().versions(selected) : Promise.resolve([]), appsApi().remoteSettings(), appsApi().remoteConfiguration(), appsApi().pendingPublications(), appsApi().pendingSourceCopies(), appsApi().pendingAuthoringSessions()]);
-      if (request.current === token) { setApps(rows); setLogs(output); setVersions(releases); setRemoteSettings(sharing); setRemoteConfigured(configuration.configured); setPendingPublications(pending); setPendingSources(sources); setPendingSessions(sessions); }
+      const [rows, output, releases, sharing, configuration] = await Promise.all([appsApi().list(), selected ? appsApi().logs(selected) : Promise.resolve([]), selected ? appsApi().versions(selected) : Promise.resolve([]), appsApi().remoteSettings(), appsApi().remoteConfiguration()]);
+      if (request.current === token) { setApps(rows); setLogs(output); setVersions(releases); setRemoteSettings(sharing); setRemoteConfigured(configuration.configured); }
     } catch (error) { if (request.current === token) setError(localAppErrorMessage(error)); }
   }, [selected, canDevelop]);
   useEffect(() => {
@@ -91,29 +88,6 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop 
       <label className="local-app-search"><Icon name="search" size={16}/><span className="sr-only">{tr('desktop_apps_search')}</span><input type="search" placeholder={tr('desktop_apps_search')} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setQuery(''); }}/></label>
       <button type="button" onClick={() => { dismissError(); void refresh(); }}>{tr('apps_refresh')}</button>
     </div>
-    {pendingPublications.length + pendingSources.length + pendingSessions.length > 0 && <details className="local-app-recovery"><summary>{tr('local_app_authoring_recover')} <span>{pendingPublications.length + pendingSources.length + pendingSessions.length}</span></summary>
-    {pendingPublications.length > 0 && <aside className="local-app-update" aria-label={tr('local_app_publication_pending')}>
-      <strong>{tr('local_app_publication_pending')}</strong>
-      {pendingPublications.map(pending => <div className="local-app-actions" key={pending.requestId}>
-        <span>{apps.find(app => app.id === pending.appId)?.name ?? pending.sourceDirectory ?? tr('desktop_app')}{pending.expectedRevision > 0 && ` · v${pending.expectedRevision}`}</span>
-        <button disabled={busy === pending.requestId} onClick={() => { if (requireDevelopment()) void act(pending.requestId, () => appsApi().resumePublication(pending.requestId)); }}>{tr('local_app_publication_recover')}</button>
-      </div>)}
-    </aside>}
-    {pendingSources.length > 0 && <aside className="local-app-update" aria-label={tr('local_app_authoring_recover')}>
-      <strong>{tr('local_app_authoring_recover')}</strong>
-      {pendingSources.map(pending => <div className="local-app-actions" key={pending.requestId}>
-        <span>{apps.find(app => app.id === pending.appId)?.name ?? tr('desktop_app')} · v{pending.revision}</span>
-        <button disabled={busy === pending.requestId} onClick={() => { if (requireDevelopment()) void act(pending.requestId, () => appsApi().resumeSourceCopy(pending.requestId)); }}>{tr('local_app_authoring_recover')}</button>
-      </div>)}
-    </aside>}
-    {pendingSessions.length > 0 && <aside className="local-app-update" aria-label={tr('local_app_authoring_recover')}>
-      <strong>{tr('local_app_authoring_recover')}</strong>
-      {pendingSessions.map(pending => <div className="local-app-actions" key={pending.requestId}>
-        <span>{pending.name || apps.find(app => app.id === pending.appId)?.name || tr('desktop_app')}</span>
-        <button disabled={busy === pending.requestId} onClick={() => { if (requireDevelopment()) void act(pending.requestId, () => appsApi().resumeAuthoringSession(pending.requestId)); }}>{tr('local_app_authoring_recover')}</button>
-      </div>)}
-    </aside>}
-    </details>}
     {!apps.length && !error ? <div className="local-app-empty"><AppsGlyph size={38}/><h2>{tr('desktop_apps_empty_title')}</h2><p>{tr('desktop_apps_empty_body')}</p><button onClick={onCreate}>{tr('desktop_apps_start_creating')}</button></div> : <div className="local-app-grid">
       {filtered.map(app => <article className="local-app-tile" key={app.id}>
         <button className="local-app-tile-open" onClick={() => void act(app.id, () => appsApi().open(app.id))} disabled={busy === app.id}>

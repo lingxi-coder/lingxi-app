@@ -85,6 +85,8 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
       assert.equal(layout.toolGap, 12, 'activity retains its spacing from prose');
     }
     assert.deepEqual(result.runningGroup, { expanded: 'false', activeCalls: 0 }, 'running calls remain inside the disclosure');
+    assert.equal(result.keyboardEnter, 'true', 'Enter opens the focused disclosure');
+    assert.equal(result.keyboardSpace, 'false', 'Space closes the focused disclosure');
 
     for (const offset of [0, 4]) {
       const baseline = result.deliveryLayouts[offset];

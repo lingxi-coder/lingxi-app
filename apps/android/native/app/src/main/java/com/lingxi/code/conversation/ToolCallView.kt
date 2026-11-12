@@ -123,14 +123,14 @@ internal fun ToolCallView(
             // Announce the status alongside the title, independently of its icon.
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 44.dp)
+                .heightIn(min = 48.dp)
                 .then(if (collapsible) Modifier.clickable(interactionSource = interaction, indication = LocalIndication.current, onClick = openDetail) else Modifier)
-                .then(if (isSkill && collapsible) Modifier.testTag(UiTags.TOOL_CALL_TOGGLE) else Modifier)
+                .then(if (collapsible) Modifier.testTag(UiTags.TOOL_CALL_TOGGLE) else Modifier)
                 .semantics(mergeDescendants = true) {
                     contentDescription = "$statusLabel $title"
                     if (collapsible) role = Role.Button
                 },
-            verticalAlignment = if (isSkill) Alignment.CenterVertically else Alignment.Top,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             if (call.status == AgentToolStatus.Running) {
                 androidx.compose.material3.CircularProgressIndicator(
@@ -241,31 +241,6 @@ internal fun ToolCallView(
             }
         }
 
-        if (collapsible && !isSkill) {
-            // `bodyLines` is the count BEFORE clamping, so the affordance can say
-            // how much is hidden without this side measuring anything.
-            val hiddenLines = when {
-                !display.body.isNullOrEmpty() -> display.bodyLines
-                else -> display.diff?.rows?.size ?: 0
-            }
-            Text(
-                text = if (expanded) {
-                    stringResource(R.string.chat_tool_show_less)
-                } else {
-                    stringResource(R.string.chat_tool_show_more_label, hiddenLines)
-                },
-                color = t.accent,
-                fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
-                modifier = Modifier
-                    .padding(start = 16.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable(onClick = openDetail)
-                    .semantics { role = Role.Button }
-                    .testTag(UiTags.TOOL_CALL_TOGGLE)
-                    .heightIn(min = 44.dp)
-                    .padding(horizontal = 6.dp, vertical = 7.dp),
-            )
-        }
     }
 }
 

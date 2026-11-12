@@ -132,15 +132,17 @@ test('a lone tool with result details has one disclosure without a repeated grou
   assert.equal((html.match(/<button/g) ?? []).length, 1);
   assert.doesNotMatch(html, /tool-group-trigger/);
 });
-test('running groups keep a stable summary, show current work, and honor expanded history', () => {
+test('running groups keep a stable collapsed summary and show calls only when opened', () => {
   const tools = [tool('finished'), tool('retry', 'error'), tool('active', 'running')];
   const closed = renderGroup(tools);
   assert.match(closed, /Read files · 3 calls · 1 running/);
-  assert.match(closed, /Read active/);
-  assert.doesNotMatch(closed, /Read finished|Read retry|unsuccessful|Output/);
+  assert.match(closed, /aria-expanded="false"/);
+  assert.doesNotMatch(closed, /Read active|Read finished|Read retry|unsuccessful|Output|tool-group-calls|data-status=/);
   const opened = renderGroup(tools, true);
   for (const id of ['finished', 'retry', 'active']) assert.match(opened, new RegExp(`Read ${id}`));
   assert.equal((opened.match(/data-status="running"/g) ?? []).length, 1);
+  assert.doesNotMatch(opened, /Output active/);
+  assert.match(renderGroup(tools, true, true), /Output active/);
 });
 test('settled mixed results collapse neutrally and preserve unsuccessful attempts in details', () => {
   const tools = [tool('a'), tool('b', 'error')];

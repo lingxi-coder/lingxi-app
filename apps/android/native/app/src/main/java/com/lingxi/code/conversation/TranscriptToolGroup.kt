@@ -18,6 +18,8 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -151,6 +153,7 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
     }
     val t = LingXiTheme.palette
     val open = group.id in expandedIds
+    val disclosureState = stringResource(if (open) R.string.chat_run_collapse else R.string.chat_run_expand)
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val hovered by interaction.collectIsHoveredAsState()
@@ -169,6 +172,7 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
         Row(
             modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
                 .clickable(interactionSource = interaction, indication = null, role = Role.Button) { onToggle(group.id) }
+                .semantics { stateDescription = disclosureState }
                 .testTag("conversation.tool.group"),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -184,9 +188,8 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
             LXIcon(if (open) LXIconName.Chevron else LXIconName.ChevronR,
                 modifier = Modifier.alpha(if (open || focused || hovered) 1f else 0.75f), size = 12.dp, color = t.text4)
         }
-        val visible = if (open) group.calls else if (workflow) emptyList() else group.calls.filter { it.status == AgentToolStatus.Running }
-        Column(Modifier.padding(start = 24.dp)) {
-            visible.forEach { call -> ToolCallView(call, call.id in expandedIds, { onToggle(call.id) }) }
+        if (open) Column(Modifier.padding(start = 24.dp)) {
+            group.calls.forEach { call -> ToolCallView(call, call.id in expandedIds, { onToggle(call.id) }) }
         }
     }
 }

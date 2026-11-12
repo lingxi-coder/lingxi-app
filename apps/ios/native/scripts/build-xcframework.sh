@@ -551,16 +551,16 @@ run_ios_cargo() {
 
 for t in "${BUILD_TARGETS[@]}"; do
   if [[ "${LINGXI_REUSE_RUST_STATICLIBS:-0}" == "1" ]]; then
-    # A device archive can be compiled once, then paired with fresh bindings
+    # A single-target archive can be compiled once, then paired with fresh bindings
     # after reclaiming its rebuildable dependency cache on a small host disk.
     # Always inspect the exact archive; never pair it with reused bindings.
     arch_lib="${CARGO_TARGET_DIR}/${t}/${PROFILE_DIR}/${STATICLIB}"
-    [[ "${LINGXI_DEVICE_ONLY:-0}" == "1" && "${LINGXI_REUSE_GENERATED_BINDINGS:-0}" != "1" &&
+    [[ ${#BUILD_TARGETS[@]} == 1 && "${LINGXI_REUSE_GENERATED_BINDINGS:-0}" != "1" &&
        -f "${arch_lib}" && ! -L "${arch_lib}" && -n "${LINGXI_FFI_METADATA_LIBRARY:-}" ]] || {
-      echo "ERROR: archive reuse requires a device-only build and fresh bindings from its metadata archive" >&2; exit 1;
+      echo "ERROR: archive reuse requires a single-target build and fresh bindings from its metadata archive" >&2; exit 1;
     }
     cmp -s "${arch_lib}" "${LINGXI_FFI_METADATA_LIBRARY}" || {
-      echo "ERROR: prebuilt device archive differs from the archive used to generate bindings" >&2; exit 1;
+      echo "ERROR: prebuilt target archive differs from the archive used to generate bindings" >&2; exit 1;
     }
     log "Reusing already built ${t} archive with bindings generated from the same bytes"
     continue

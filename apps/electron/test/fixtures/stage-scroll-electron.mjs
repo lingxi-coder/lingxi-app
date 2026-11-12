@@ -64,6 +64,24 @@ async function main() {
         })()`);
       }
     }
+    // Use Chromium's trusted keyboard input so the native button activation
+    // path is exercised in the isolated, hidden renderer too.
+    await run(`document.querySelector('.transcript-activity-trigger').focus({ preventScroll: true })`);
+    const key = async (key, code, keyCode, text) => {
+      await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, text,
+      });
+      await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode,
+      });
+      await settle();
+    };
+    await key('Enter', 'Enter', 13, '\r');
+    result.keyboardEnter = await run(`document.querySelector('.transcript-activity-trigger').getAttribute('aria-expanded')`);
+    await key(' ', 'Space', 32, ' ');
+    result.keyboardSpace = await run(`document.querySelector('.transcript-activity-trigger').getAttribute('aria-expanded')`);
+    assert.equal(result.keyboardEnter, 'true', 'Enter opens the focused tool group');
+    assert.equal(result.keyboardSpace, 'false', 'Space closes the focused tool group');
     await run('window.stageScrollFixture.longList()');
     await settle();
     // Local child layout changes do not update Stage props (e.g. late markdown/media).
@@ -145,8 +163,11 @@ async function main() {
     })()`;
     const clickSecondCopy = async () => {
       const point = result.copyPoints[1];
+      // The control starts outside the row's box with pointer-events disabled.
+      // Reveal it by hovering its owner before moving onto the footer itself.
       const owner = await run(`(() => {
-        const rect = document.querySelectorAll('.transcript-user-message')[1].querySelector('.user-message-bubble').getBoundingClientRect();
+        const bubble = document.querySelectorAll('.transcript-user-message')[1].querySelector('.user-message-bubble');
+        const rect = bubble.getBoundingClientRect();
         return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
       })()`);
       window.webContents.sendInputEvent({ type: 'mouseMove', ...owner });
@@ -155,6 +176,14 @@ async function main() {
       // The move has to land (and re-enable `pointer-events` on the revealed
       // footer) before the press is hit-tested, or the click reaches the row.
       await settle();
+      const hit = await run(`(() => {
+        const button = document.querySelectorAll('.user-message-copy')[1];
+        const target = document.elementFromPoint(${point.x}, ${point.y});
+        return { matches: Boolean(target && button.contains(target)), target: target?.outerHTML.slice(0, 240),
+          point: ${JSON.stringify(point)}, ancestor: document.querySelector('#scroll-ancestor').getBoundingClientRect().toJSON(),
+          button: button.getBoundingClientRect().toJSON() };
+      })()`);
+      assert.equal(hit.matches, true, `copy target must be visible to pointer input: ${JSON.stringify(hit)}`);
       window.webContents.sendInputEvent({ type: 'mouseDown', x: point.x, y: point.y, button: 'left', clickCount: 1 });
       window.webContents.sendInputEvent({ type: 'mouseUp', x: point.x, y: point.y, button: 'left', clickCount: 1 });
       await settle();

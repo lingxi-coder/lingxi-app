@@ -248,7 +248,7 @@ final class ConversationRecoveryTests: XCTestCase {
         XCTAssertNotNil(otherAccepted)
         source.applyForTesting(.turnStarted(turnId: token.clientTurnId))
         failure.set(.beforeWitness)
-        let zero = CostDto(totalUsd: 0, inputTokens: 0, outputTokens: 0, apiCalls: 0, sessionDurationSecs: 0, formatted: "$0.00")
+        let zero = CostDto(totalUsd: 0, inputTokens: 0, outputTokens: 0, apiCalls: 0, sessionDurationSecs: 0, formatted: "$0.00", byAccount: [])
         source.applyForTesting(.turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zero))
         let blockedWhileClearing = await source.send("keep this draft")
         XCTAssertNil(blockedWhileClearing)

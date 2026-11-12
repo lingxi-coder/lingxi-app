@@ -1,4 +1,5 @@
 const entries: Record<string, [string, string, string, string, string]> = {
+  apps_refresh: ['刷新', '重新整理', 'Refresh', '更新', '새로고침'],
   apps_loading: ['正在载入 App…', '正在載入 App…', 'Loading apps…', 'アプリを読み込み中…', '앱 불러오는 중…'],
   apps_new_session_named: ['为 %s 新建开发会话', '為 %s 建立開發對話', 'New development chat for %s', '%s の開発チャットを作成', '%s 새 개발 채팅'],
   apps_workspace_title: ['应用与开发会话', '應用與開發對話', 'Apps and development chats', 'アプリと開発チャット', '앱 및 개발 채팅'],

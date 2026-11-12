@@ -13,7 +13,13 @@ async function main() {
     await window.loadURL(url);
     await configureFixtureWindow(window);
     await waitForFixture(window.webContents, 'Boolean(window.transcriptFixture && document.querySelector(".desktop-stage"))');
-    const run = script => window.webContents.executeJavaScript(script);
+    const run = script => {
+      let timeout;
+      return Promise.race([
+        window.webContents.executeJavaScript(script),
+        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error(`Renderer did not complete: ${script.slice(0, 160)}`)), 8000); }),
+      ]).finally(() => clearTimeout(timeout));
+    };
     const settle = () => delay(160);
     const wait = async (expression, message) => {
       const deadline = Date.now() + 6000;

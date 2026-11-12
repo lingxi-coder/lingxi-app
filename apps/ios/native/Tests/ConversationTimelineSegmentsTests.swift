@@ -64,6 +64,53 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         failed.status = .failed
         XCTAssertFalse(ConversationSkillInstructions.matches(Message(role: .user, text: body), tool: failed))
     }
+
+    func testSkillDirectoryPreamblesMatchAndStayOutOfTheReadableDocument() {
+        let body = "# LingXi API guide\n\nFull instructions."
+        let trace = ConversationToolTrace(id: "skill", tool: "Skill", status: .completed, skillBody: body)
+        let directory = "Base directory for this skill: /skills/lingxi-api\n"
+        let resolution = "Resolve relative references and assets from this directory; use their exact paths instead of searching the application home directory. Use read-only file tools for skill assets; keep project writes in the project directory.\n"
+        for preamble in ["", directory + "\n", directory + resolution + "\n"] {
+            for newline in ["\n", "\r\n"] {
+                let prompt = (preamble + body).replacingOccurrences(of: "\n", with: newline)
+                XCTAssertTrue(ConversationSkillInstructions.matches(Message(role: .user, text: prompt), tool: trace))
+                XCTAssertEqual(ConversationSkillInstructions.displayText(prompt), body)
+            }
+        }
+        XCTAssertFalse(ConversationSkillInstructions.matches(Message(role: .user, text: directory + resolution + "\n# My request"), tool: trace))
+    }
+
+    @MainActor
+    func testClosedSkillInstructionsReserveOnlyTheirDisclosureRow() throws {
+        func height(_ text: String, expanded: Bool) throws -> CGFloat {
+            let renderer = ImageRenderer(content: ConversationSkillInstructionsRow(
+                name: "lingxi-api", text: text, isExpanded: expanded, onToggle: {}
+            ).frame(width: 320))
+            return try XCTUnwrap(renderer.uiImage).size.height
+        }
+        let document = String(repeating: "# Skill guide\n\nSupporting instructions.\n\n", count: 30)
+        XCTAssertEqual(try height(document, expanded: false), try height("Short guide", expanded: false))
+        XCTAssertEqual(try height(document, expanded: false), 44, accuracy: 1)
+        XCTAssertGreaterThan(try height(document, expanded: true), 44)
+        XCTAssertLessThanOrEqual(try height(document, expanded: true), 330)
+    }
+
+    @MainActor
+    func testRunningToolBatchStaysCollapsedUntilExplicitlyOpened() throws {
+        func height(status: ConversationToolStatus, expanded: Bool) throws -> CGFloat {
+            let tools = [ConversationToolTrace(id: "first", tool: "Read", status: .completed),
+                         ConversationToolTrace(id: "second", tool: "Read", status: status)]
+            let renderer = ImageRenderer(content: ConversationTimelineView(
+                groups: [toolGroup(tools)], messageDetails: [:],
+                expandedToolCalls: expanded ? ["activity:after:start"] : [],
+                onToggleToolCall: { _ in }
+            ).frame(width: 320))
+            return try XCTUnwrap(renderer.uiImage).size.height
+        }
+        let closed = try height(status: .running, expanded: false)
+        XCTAssertEqual(closed, try height(status: .completed, expanded: false), accuracy: 1)
+        XCTAssertGreaterThan(try height(status: .running, expanded: true), closed)
+    }
     func testCompactSpacingAndThinkingVisibilityDoesNotChangeLayout() {
         let user = Message(role: .user, text: "Question")
         let assistant = Message(role: .ai, text: "Reply")
@@ -366,8 +413,8 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         ])
     }
 
-    func testTimelineChevronIsHiddenUntilHighlightedOrExpanded() {
-        XCTAssertEqual(ConversationTimelineChevronPresentation.opacity(isHighlighted: false), 0)
+    func testTimelineChevronStaysVisibleAndStrengthensOnHighlightOrExpansion() {
+        XCTAssertGreaterThan(ConversationTimelineChevronPresentation.opacity(isHighlighted: false), 0)
         XCTAssertEqual(ConversationTimelineChevronPresentation.opacity(isHighlighted: false, isExpanded: true), 1)
         XCTAssertEqual(ConversationTimelineChevronPresentation.opacity(isHighlighted: true, isExpanded: false), 1)
         XCTAssertEqual(ConversationTimelineChevronPresentation.opacity(isHighlighted: true, isExpanded: true), 1)

@@ -1,3 +1,5 @@
+import { ErrorBanner } from './ErrorBanner';
+import { Icon } from './Icon';
 import { LocalAppPublish } from './LocalAppPublish';
 import { desktopHost } from '../bridge/bridgeConnection';
 import { localAppErrorMessage } from '../bridge/localAppErrors';
@@ -31,7 +33,7 @@ export function LocalAppsTopBar({ onOpenMarket }: { onOpenMarket: () => void }) 
     </button>
   </header>;
 }
-export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop, sidebarTarget }: { sidebarTarget?: HTMLElement | null; visible: boolean; onCreate: () => void; onDevelopmentBlocked: () => void; canDevelop: boolean }) {
+export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop }: { sidebarTarget?: HTMLElement | null; visible: boolean; onCreate: () => void; onDevelopmentBlocked: () => void; canDevelop: boolean }) {
   const t = useT();
   const { locale } = useI18n();
   const [publication, setPublication] = useState<DesktopLocalApp>();
@@ -41,7 +43,6 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop,
   const [apps, setApps] = useState<DesktopLocalApp[]>([]);
   const [remoteSettings, setRemoteSettings] = useState<Record<string, boolean>>({});
   const [remoteConfigured, setRemoteConfigured] = useState(false);
-  const [librarySelection] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -50,12 +51,21 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop,
   const [logs, setLogs] = useState<LocalAppLog[]>([]);
   const [versions, setVersions] = useState<LocalAppVersion[]>([]);
   const request = useRef(0);
+  const reportedErrors = useRef(new Map<string, string>());
+  const dismissError = useCallback(() => setError(''), []);
+  useEffect(() => {
+    if (!visible) return;
+    const current = new Map(apps.filter(app => app.error).map(app => [app.id, app.error!]));
+    const fresh = apps.filter(app => app.error && reportedErrors.current.get(app.id) !== app.error);
+    reportedErrors.current = current;
+    if (fresh.length) setError(fresh.map(app => `${app.name}: ${app.error}`).join('\n'));
+  }, [apps, visible]);
   const refresh = useCallback(async () => {
     const token = ++request.current;
     try {
       const [rows, output, releases, sharing, configuration, pending, sources, sessions] = await Promise.all([appsApi().list(), selected ? appsApi().logs(selected) : Promise.resolve([]), selected ? appsApi().versions(selected) : Promise.resolve([]), appsApi().remoteSettings(), appsApi().remoteConfiguration(), appsApi().pendingPublications(), appsApi().pendingSourceCopies(), appsApi().pendingAuthoringSessions()]);
       if (request.current === token) { setApps(rows); setLogs(output); setVersions(releases); setRemoteSettings(sharing); setRemoteConfigured(configuration.configured); setPendingPublications(pending); setPendingSources(sources); setPendingSessions(sessions); }
-    } catch (error) { if (request.current === token) setError(error instanceof Error ? error.message : String(error)); }
+    } catch (error) { if (request.current === token) setError(localAppErrorMessage(error)); }
   }, [selected, canDevelop]);
   useEffect(() => {
     if (!visible || !desktopHost()?.localApps) return;
@@ -72,11 +82,16 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop,
     onDevelopmentBlocked();
     return false;
   };
-  const filtered = apps.filter(app => `${app.name} ${app.summary}`.toLocaleLowerCase(locale).includes(query.toLocaleLowerCase(locale)));
-  return <section className="local-app-library" aria-label={tr('apps_title')} style={{ '--apps-background': t.stageBg, '--apps-text': t.text, '--apps-muted': t.text3, '--apps-surface': t.surface, '--apps-border': t.border, '--apps-accent': t.accent, '--apps-error': t.danger } as CSSProperties}>
-    <header className="local-app-library-header"><div><h1>{tr('apps_library')}</h1><p>{tr('desktop_apps_tagline')}</p></div><button className="local-app-create-primary" onClick={onCreate}><span aria-hidden="true">＋</span>{tr('apps_create')}</button></header>
-    <p className="local-app-create-hint">{tr('apps_create_hint')}</p>
-    {error && <div className="local-app-error" role="alert">{error}<button onClick={() => { setError(''); void refresh(); }}>{tr('common_retry')}</button></div>}
+  const filtered = apps.filter(app => `${app.name} ${app.summary}`.toLocaleLowerCase(locale).includes(query.trim().toLocaleLowerCase(locale)));
+  return <>
+    {visible && <ErrorBanner bridge={{ error: error || null, clearError: dismissError }}/>}
+    <section className="local-app-library" aria-label={tr('apps_title')} style={{ '--apps-background': t.stageBg, '--apps-text': t.text, '--apps-muted': t.text3, '--apps-surface': t.surface, '--apps-border': t.border, '--apps-accent': t.accent, '--apps-error': t.danger } as CSSProperties}>
+    <header className="local-app-library-header"><h1>{tr('apps_library')}</h1><button className="local-app-create-primary" onClick={onCreate}><span aria-hidden="true">＋</span>{tr('apps_create')}</button></header>
+    <div className="local-app-library-toolbar">
+      <label className="local-app-search"><Icon name="search" size={16}/><span className="sr-only">{tr('desktop_apps_search')}</span><input type="search" placeholder={tr('desktop_apps_search')} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setQuery(''); }}/></label>
+      <button type="button" onClick={() => { dismissError(); void refresh(); }}>{tr('apps_refresh')}</button>
+    </div>
+    {pendingPublications.length + pendingSources.length + pendingSessions.length > 0 && <details className="local-app-recovery"><summary>{tr('local_app_authoring_recover')} <span>{pendingPublications.length + pendingSources.length + pendingSessions.length}</span></summary>
     {pendingPublications.length > 0 && <aside className="local-app-update" aria-label={tr('local_app_publication_pending')}>
       <strong>{tr('local_app_publication_pending')}</strong>
       {pendingPublications.map(pending => <div className="local-app-actions" key={pending.requestId}>
@@ -98,19 +113,20 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop,
         <button disabled={busy === pending.requestId} onClick={() => { if (requireDevelopment()) void act(pending.requestId, () => appsApi().resumeAuthoringSession(pending.requestId)); }}>{tr('local_app_authoring_recover')}</button>
       </div>)}
     </aside>}
-    {!sidebarTarget && <label className="local-app-search"><span className="sr-only">{tr('apps_search_hint')}</span><input type="search" placeholder={tr('desktop_apps_search')} value={query} onChange={event => setQuery(event.target.value)} /></label>}
+    </details>}
     {!apps.length && !error ? <div className="local-app-empty"><AppsGlyph size={38}/><h2>{tr('desktop_apps_empty_title')}</h2><p>{tr('desktop_apps_empty_body')}</p><button onClick={onCreate}>{tr('desktop_apps_start_creating')}</button></div> : <div className="local-app-grid">
-      {filtered.filter(app => !sidebarTarget || librarySelection === null || app.id === librarySelection).map(app => <article className="local-app-tile" key={app.id}>
+      {filtered.map(app => <article className="local-app-tile" key={app.id}>
         <button className="local-app-tile-open" onClick={() => void act(app.id, () => appsApi().open(app.id))} disabled={busy === app.id}>
           <span className="local-app-avatar">{Array.from(app.name)[0]?.toLocaleUpperCase(locale)}</span><h2>{app.name}</h2><p>{app.summary || tr('desktop_apps_fallback_summary')}</p>
         </button>
-        <div className="local-app-tile-footer"><span className="local-app-phase" data-phase={app.phase}>{tr(phaseLabels[app.phase])}</span><span>v{app.revision}</span></div>
+        {app.phase !== 'stopped' && <div className="local-app-tile-footer"><span className="local-app-phase" data-phase={app.phase}>{tr(phaseLabels[app.phase])}</span></div>}
         {remoteSettings[app.id] && <p className="local-app-update">{tr('desktop_apps_remote_shared')}</p>}
         {app.runningRevision && app.runningRevision !== app.revision && <p className="local-app-update">{tr('desktop_apps_update', app.revision)}</p>}
-        {app.error && <p className="local-app-error">{app.error}</p>}
-        <div className="local-app-actions"><button onClick={() => { setSelected(selected === app.id ? null : app.id); }}>{tr('desktop_logs')}</button><button disabled={Boolean(canDevelop && app.marketOrigin && !app.authoring?.sourceDirectory && !app.manifest.remix?.allowed)} onClick={() => { if (requireDevelopment()) void act(app.id, () => app.marketOrigin && !app.authoring?.sourceDirectory ? appsApi().remix(app.id) : appsApi().edit(app.id)); }}>{app.marketOrigin && !app.authoring?.sourceDirectory && canDevelop ? 'Customize' : tr('desktop_modify')}</button>
+        <div className="local-app-actions"><button disabled={Boolean(canDevelop && app.marketOrigin && !app.authoring?.sourceDirectory && !app.manifest.remix?.allowed)} onClick={() => { if (requireDevelopment()) void act(app.id, () => app.marketOrigin && !app.authoring?.sourceDirectory ? appsApi().remix(app.id) : appsApi().edit(app.id)); }}>{app.marketOrigin && !app.authoring?.sourceDirectory && canDevelop ? 'Customize' : tr('desktop_modify')}</button>
           {app.manifest.capabilities?.includes('agent') && <button onClick={() => setAgentSettings(app.id)}>Agent</button>}
           <details><summary aria-label={`Manage ${app.name}`}>•••</summary><div className="local-app-menu">
+            <span className="local-app-menu-version">v{app.revision}</span>
+            <button onClick={() => { setSelected(selected === app.id ? null : app.id); }}>{tr('desktop_logs')}</button>
             <button onClick={() => void act(app.id, () => appsApi().restart(app.id))}>{tr('desktop_restart')}</button>
             <button onClick={() => void act(app.id, () => appsApi().stop(app.id))}>{tr('desktop_stop')}</button>
             <button onClick={() => void act(app.id, () => appsApi().repair(app.id))}>{tr('desktop_apps_repair')}</button>
@@ -137,7 +153,7 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop,
     {publication && <LocalAppPublish key={publication.id} app={publication} canDevelop={canDevelop} onClose={() => setPublication(undefined)}/>}
     {agentSettings && apps.find(app => app.id === agentSettings) && <LocalAppAgentSettingsDialog key={agentSettings} app={apps.find(app => app.id === agentSettings)!} onClose={() => setAgentSettings(null)} onSaved={() => void refresh()}/>}
     <LocalAppAgentQuestions/>
-  </section>;
+  </section></>;
 }
 
 export function LocalAppCard({ item }: { item: ToolRunItem }) {

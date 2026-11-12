@@ -98,6 +98,24 @@ class TranscriptToolGroupTest {
         assertTrue(ordinary.last() is ChatRenderItem.Message)
     }
 
+    @Test fun skillDirectoryPreamblesMatchWithoutFoldingUnrelatedUserText() {
+        val text = "# LingXi API guide\n\nFull instructions."
+        val call = ToolCallUi("skill", "Skill", status = AgentToolStatus.Completed, skillBody = text)
+        val directory = "Base directory for this skill: /skills/lingxi-api\n"
+        val resolution = "Resolve relative references and assets from this directory; use their exact paths instead of searching the application home directory. Use read-only file tools for skill assets; keep project writes in the project directory.\n"
+        for (preamble in listOf("", "$directory\n", "$directory$resolution\n")) {
+            for (newline in listOf("\n", "\r\n")) {
+                val prompt = (preamble + text).replace("\n", newline)
+                assertTrue(matchesSkillInstructions(call, prompt))
+                assertEquals(text, skillInstructionText(prompt))
+                val user = com.lingxi.code.model.Message(com.lingxi.code.model.Role.User, prompt, id = "injected")
+                assertTrue(buildChatRenderItems(state(message("assistant", MessageContent.Tool(call)), user)).last() is ChatRenderItem.SkillInstructions)
+            }
+        }
+        assertFalse(matchesSkillInstructions(call, "$directory$resolution\n# My request"))
+        assertFalse(matchesSkillInstructions(call.copy(status = AgentToolStatus.Failed), text))
+    }
+
     @Test fun groupsSpanAssistantEnvelopesButStopAtProseAndUserMessages() {
         val rows = buildChatRenderItems(state(
             message("m1", MessageContent.Text("Before"), tool("a")),

@@ -165,8 +165,8 @@ final class LingxiCodeUITests: XCTestCase {
         app.buttons["conversation.summary.category.tools"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["conversation.summary-sheet.tools"].firstMatch.waitForExistence(timeout: 5))
         let shellGroup = app.buttons["conversation.timeline.tool-batch.timeline-tools:ui-shell"]
-        XCTAssertTrue(shellGroup.waitForExistence(timeout: 5), app.debugDescription)
-        shellGroup.tap()
+        // Different tool kinds remain individual disclosures in the summary.
+        XCTAssertFalse(shellGroup.exists)
         let tool = app.descendants(matching: .any)["conversation.tool-call.ui-shell"]
         XCTAssertTrue(tool.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-shell.icon.terminal"].exists)
@@ -180,6 +180,8 @@ final class LingxiCodeUITests: XCTestCase {
         readDisclosure.tap()
         XCTAssertTrue(app.staticTexts["Read fixture body"].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.staticTexts["Read completed"].exists, app.debugDescription)
+        readDisclosure.tap()
+        XCTAssertFalse(app.staticTexts["Read fixture body"].exists)
 
         // A normal completed turn has no persistent runtime footer.
         XCTAssertTrue(waitUntilGone(llmStatus, timeout: 5), app.debugDescription)

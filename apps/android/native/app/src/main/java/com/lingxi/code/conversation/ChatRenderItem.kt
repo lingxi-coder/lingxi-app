@@ -231,7 +231,7 @@ internal fun transcriptSpacingBefore(previous: ChatRenderItem?, current: ChatRen
         else -> false
     }
     fun ChatRenderItem.isActivity(): Boolean = this is ChatRenderItem.Tools ||
-        this is ChatRenderItem.AgentRun || this == ChatRenderItem.StreamingIndicator
+        this is ChatRenderItem.AgentRun || this is ChatRenderItem.SkillInstructions || this == ChatRenderItem.StreamingIndicator
     if (previous.isUser() || current.isUser()) return 16
     if (previous.isActivity() || current.isActivity()) return 8
     return 12

@@ -19,7 +19,7 @@ export function transcriptRowGap(previous: WindowRow | undefined, row: WindowRow
   if (!previous) return 0;
   if (previous.role === 'user') return 1.5;
   if (row.role === 'user') return 1;
-  const compact = (type: string) => type === 'tool-group' || type === 'agents';
+  const compact = (type: string) => type === 'tool-group' || type === 'agents' || type === 'skill-instructions';
   if (compact(previous.type) && compact(row.type)) return 0.125;
   if (compact(previous.type) || compact(row.type) || previous.type === 'thinking' || row.type === 'thinking') return 0.75;
   return 1;

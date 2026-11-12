@@ -906,7 +906,7 @@ struct ConversationToolTrace: Identifiable, Equatable {
 /// Consecutive activity only; nil keys keep interactive and deliverable rows separate.
 extension ConversationToolTrace {
     static func isTaskProgressTool(_ tool: String) -> Bool {
-        tool.range(of: "^(Task_?(Create|Get|Update|List)|Todo_?Write|List_?Checks|update_plan)$", options: .caseInsensitive) != nil
+        tool.range(of: "^(Task_?(Create|Get|Update|List)|Todo_?Write|List_?Checks|update_plan)$", options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     var isTaskWorkflow: Bool {
@@ -935,6 +935,17 @@ extension ConversationToolTrace {
 }
 
 enum ConversationSkillInstructions {
+    private static let directoryPreamble = "^Base directory for this skill: [^\\n]*\\n(?:Resolve relative references and assets from this directory; use their exact paths instead of searching the application home directory\\. Use read-only file tools for skill assets; keep project writes in the project directory\\.\\n)?\\n"
+
+    private static func normalizedNewlines(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+    }
+
+    static func displayText(_ text: String) -> String {
+        normalizedNewlines(text).replacingOccurrences(of: directoryPreamble, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func body(tool: String, json: String) -> String? {
         guard tool.caseInsensitiveCompare("Skill") == .orderedSame,
               let data = json.data(using: .utf8),
@@ -947,9 +958,8 @@ enum ConversationSkillInstructions {
     static func matches(_ message: Message, tool: ConversationToolTrace) -> Bool {
         guard message.role == .user, message.images.isEmpty, tool.status == .completed,
               tool.tool.caseInsensitiveCompare("Skill") == .orderedSame else { return false }
-        let text = message.text.replacingOccurrences(of: "^Base directory for this skill: [^\\n]*\\r?\\n\\r?\\n", with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let body = tool.skillBody?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let text = displayText(message.text)
+        let body = tool.skillBody.map(normalizedNewlines)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return (!body.isEmpty && (text == body || text.hasPrefix(body + "\n"))) ||
             (tool.header?.primary == "local-app" && text.hasPrefix("# Desktop Local Apps\n"))
     }

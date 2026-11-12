@@ -678,11 +678,11 @@ body {
 .transcript-row + .transcript-row {
   margin-top: 1rem;
 }
-.transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking'], [data-row-type='agents']) + .transcript-row,
-.transcript-row + .transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking'], [data-row-type='agents']) {
+.transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking'], [data-row-type='agents'], [data-row-type='skill-instructions']) + .transcript-row,
+.transcript-row + .transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking'], [data-row-type='agents'], [data-row-type='skill-instructions']) {
   margin-top: .75rem;
 }
-.transcript-row:is([data-row-type='tool-group'], [data-row-type='agents']) + .transcript-row:is([data-row-type='tool-group'], [data-row-type='agents']) {
+.transcript-row:is([data-row-type='tool-group'], [data-row-type='agents'], [data-row-type='skill-instructions']) + .transcript-row:is([data-row-type='tool-group'], [data-row-type='agents'], [data-row-type='skill-instructions']) {
   margin-top: .125rem;
 }
 .transcript-row + .transcript-row[data-message-role='user'] {
@@ -1706,14 +1706,14 @@ body {
 .narration-disclosure-trigger:hover { background: color-mix(in oklab, currentColor 8%, transparent); }
 .narration-disclosure-trigger:active { scale: 0.96; }
 
-.local-app-instructions { min-width: 0; color: var(--instructions-text); }
+.local-app-instructions { min-width: 0; max-width: 760px; color: var(--instructions-text); }
 .local-app-instructions-toggle {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   max-width: 100%;
-  min-height: 36px;
-  padding: 6px 8px;
+  min-height: 28px;
+  padding: 2px 0;
   border: 0;
   border-radius: 7px;
   background: transparent;
@@ -1723,27 +1723,42 @@ body {
   line-height: 1.4;
   text-align: left;
   cursor: pointer;
+  touch-action: manipulation;
+  transition: color 120ms ease, background-color 120ms ease;
 }
-.local-app-instructions-toggle > svg { flex-shrink: 0; color: var(--instructions-muted); }
-.local-app-instructions-chevron { display: inline-flex; color: var(--instructions-muted); opacity: 0; transition: opacity 120ms ease; }
-.local-app-instructions-toggle:is(:hover, :focus-visible) .local-app-instructions-chevron { opacity: 1; }
-@media (prefers-reduced-motion: reduce) { .local-app-instructions-chevron { transition: none; } }
-.local-app-instructions-title { font-weight: 550; }
-.local-app-instructions-label { color: var(--instructions-muted); font-size: 12px; }
+.local-app-instructions-icon { width: 20px; height: 20px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; color: var(--instructions-muted); }
+.local-app-instructions-chevron { display: inline-flex; flex: 0 0 auto; color: var(--instructions-muted); opacity: .6; transition: opacity 120ms ease; }
+.local-app-instructions-toggle:is(:hover, :focus-visible, [aria-expanded='true']) .local-app-instructions-chevron { opacity: 1; }
+.local-app-instructions-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.local-app-instructions-label { flex-shrink: 0; color: var(--instructions-muted); font-size: 12px; }
 .local-app-instructions-toggle:hover,
-.local-app-instructions-toggle:active { background: var(--instructions-hover); }
+.local-app-instructions-toggle:focus-visible { background: var(--instructions-hover); }
+.local-app-instructions-toggle:active { background: var(--instructions-hover); opacity: .65; transition: none; }
 .local-app-instructions-toggle:focus-visible {
   outline: 2px solid var(--instructions-focus);
-  outline-offset: 2px;
+  outline-offset: 3px;
 }
 .local-app-instructions-body {
-  margin: 4px 0 8px 15px;
-  padding: 4px 16px;
+  margin: 6px 0 8px 9px;
+  padding: 6px 14px 10px 19px;
   border-left: 1px solid var(--instructions-border);
-  max-width: 68ch;
-  font-size: 13px;
+  max-width: min(68ch, calc(100% - 9px));
+  max-height: min(24rem, 55vh);
+  overflow: auto;
+  scrollbar-gutter: stable;
+  overflow-wrap: anywhere;
+  font-size: .8125rem;
   font-weight: 400;
   line-height: 1.65;
+}
+.local-app-instructions-body:focus-visible { outline: 2px solid var(--instructions-focus); outline-offset: 3px; }
+@media (pointer: coarse) { .local-app-instructions-toggle { min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) {
+  .local-app-instructions-toggle, .local-app-instructions-chevron { transition: none; }
+}
+@media (prefers-contrast: more) {
+  .local-app-instructions-chevron { opacity: 1; }
+  .local-app-instructions-body { border-left-color: currentColor; }
 }
 
 .transcript-tool-row {
@@ -2538,7 +2553,8 @@ textarea, input, select { font-family: inherit; }
  */
 .transcript-user-message {
   position: relative;
-  /* Its action footer extends into the inter-message gap. */
+  /* The footer overflows into the gap. Paint containment would clip it and
+     prevent pointer input even when its hover style is visible. */
   content-visibility: visible;
   contain-intrinsic-size: none;
 }

@@ -170,6 +170,7 @@ final class FriendsWorkspace {
     // MARK: Lifecycle
 
     func start() {
+        guard !IsolatedSimulatorTesting.enabled else { return }
         guard !started else { return }
         started = true; lifecycle += 1; authEpoch += 1
         FirebaseAccount.configure()

@@ -67,6 +67,5 @@ export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen }: 
       bodyStyle={{ minWidth: 0 }}>
       {calls(group.tools)}
     </Disclosure>
-    {!open && !taskWorkflow && active.length > 0 && calls(active)}
   </div>;
 }

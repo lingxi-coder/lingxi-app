@@ -345,7 +345,7 @@ struct ConversationTimelineView: View {
 
         var isActivity: Bool {
             switch self {
-            case .toolBatch, .reasoning, .activity, .agents: return true
+            case .toolBatch, .skillInstructions, .reasoning, .activity, .agents: return true
             default: return false
             }
         }
@@ -422,8 +422,9 @@ struct ConversationTimelineView: View {
 
 }
 
-private struct ConversationSkillInstructionsRow: View {
+struct ConversationSkillInstructionsRow: View {
     @Environment(\.theme) private var t
+    @ScaledMetric(relativeTo: .footnote) private var detailHeight: CGFloat = 280
     let name: String
     let text: String
     let isExpanded: Bool
@@ -433,13 +434,28 @@ private struct ConversationSkillInstructionsRow: View {
         VStack(alignment: .leading, spacing: 4) {
             Button(action: onToggle) {
                 HStack(spacing: 8) {
-                    LXIcon(name: .sparkles, size: 16, color: t.text3, stroke: 1.6)
-                    Text(name).font(.footnote).foregroundStyle(t.text3)
-                }.frame(minHeight: 40).contentShape(Rectangle())
+                    LXIcon(name: .sparkles, size: 16, color: t.text3, stroke: 1.6).frame(width: 20)
+                    Text(name).font(.footnote.weight(.medium)).foregroundStyle(t.text2)
+                        .lineLimit(1).truncationMode(.middle)
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold)).foregroundStyle(t.text3)
+                        .accessibilityHidden(true)
+                }
+                .frame(minHeight: 44).padding(.horizontal, 6).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityValue(isExpanded ? String(localized: "chat_agent_details_collapse") : String(localized: "chat_agent_details_expand"))
-            if isExpanded { AIText(markdown: text).padding(.leading, 24) }
+            .accessibilityIdentifier("conversation.skill-instructions.toggle")
+            if isExpanded {
+                ScrollView {
+                    AIText(markdown: ConversationSkillInstructions.displayText(text), compact: true)
+                        .padding(.leading, 20).padding(.trailing, 6).padding(.vertical, 6)
+                }
+                .frame(maxHeight: detailHeight)
+                .overlay(alignment: .leading) { Rectangle().fill(t.border).frame(width: 1) }
+                .padding(.leading, 15)
+                .accessibilityIdentifier("conversation.skill-instructions.body")
+            }
         }
     }
 }
@@ -473,10 +489,10 @@ private struct ConversationToolBatchRow: View {
             } else if unified || !ordinaryTools.isEmpty {
             Button(action: onToggleBatch) {
                 HStack(spacing: 8) {
-                    LXIcon(name: batchIcon, size: 14, color: t.text3, stroke: 1.6)
+                    LXIcon(name: batchIcon, size: 18, color: t.text3, stroke: 1.6).frame(width: 20)
                     HStack(spacing: 8) {
                         Text(summary)
-                            .font(.caption)
+                            .font(.footnote)
                             .foregroundStyle(t.text3)
                             .lineLimit(1)
                     }
@@ -502,7 +518,7 @@ private struct ConversationToolBatchRow: View {
                         )
                 }
                 .frame(minHeight: 44)
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 6)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -555,9 +571,9 @@ private struct ConversationToolBatchRow: View {
     }
 }
 
-/// Reveal disclosure marks on focus or expansion without shifting layout.
+/// Keep disclosure marks visible and strengthen them on focus or expansion.
 enum ConversationTimelineChevronPresentation {
-    static let restingOpacity = 0.0
+    static let restingOpacity = 0.6
     static let highlightedOpacity = 1.0
     static let restingScale: CGFloat = 0.92
     static let highlightedScale: CGFloat = 1.0

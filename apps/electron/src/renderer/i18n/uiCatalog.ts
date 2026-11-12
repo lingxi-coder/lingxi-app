@@ -61,6 +61,7 @@ const rows: Record<string, readonly [string, string, string, string, string]> = 
   close_command: ['关闭命令结果', '關閉命令結果', 'Close command result', 'コマンド結果を閉じる', '명령 결과 닫기'],
   compact_waiting: ['等待引擎', '等待引擎', 'Waiting for engine', 'エンジンを待機中', '엔진 대기 중'],
   compact_done: ['上下文已压缩', '上下文已壓縮', 'Context compacted', 'コンテキストを圧縮しました', '컨텍스트 압축 완료'],
+  compact_done_automatic: ['上下文已自动压缩', '上下文已自動壓縮', 'Context automatically compacted', 'コンテキストを自動で圧縮しました', '컨텍스트 자동 압축 완료'],
   compact_finished: ['压缩已完成', '壓縮已完成', 'Compaction finished', '圧縮が完了しました', '압축 완료'],
   compact_cancelled: ['已取消压缩', '已取消壓縮', 'Compaction cancelled', '圧縮をキャンセルしました', '압축 취소됨'],
   compact_failed: ['压缩失败', '壓縮失敗', 'Compaction failed', '圧縮に失敗しました', '압축 실패'],

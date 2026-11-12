@@ -4,6 +4,10 @@
 // the MCP fallback is drawn from the supplied reference.
 function artwork(name: string) {
   switch (name) {
+    case 'computer': return <g stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7.25 10.75h-4a1.5 1.5 0 0 1-1.5-1.5v-5.5a1.5 1.5 0 0 1 1.5-1.5h9.5a1.5 1.5 0 0 1 1.5 1.5v2.5M6.25 10.75v3M4.25 13.75h4" />
+      <path d="m9.25 7.25 5 3.25-2.5.5-1 2.5-1.5-6.25Z" />
+    </g>;
     case 'local-app': return <g stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round">
       <rect x="2" y="2" width="4.5" height="4.5" rx="1.2" /><rect x="9.5" y="2" width="4.5" height="4.5" rx="1.2" />
       <rect x="2" y="9.5" width="4.5" height="4.5" rx="1.2" /><rect x="9.5" y="9.5" width="4.5" height="4.5" rx="1.2" />

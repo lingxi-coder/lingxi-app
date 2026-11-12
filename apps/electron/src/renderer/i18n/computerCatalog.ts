@@ -1,5 +1,61 @@
 /** Desktop computer-access copy; user content and application identifiers stay unchanged. */
 export const computerCatalog: Record<string, Record<string, string>> = {
+  "desktop_computer_browser_title": {
+    "zh-Hans": "浏览器",
+    "zh-Hant": "瀏覽器",
+    "en": "Browser",
+    "ja": "ブラウザ",
+    "ko": "브라우저"
+  },
+  "desktop_computer_manage_browser": {
+    "zh-Hans": "管理浏览器",
+    "zh-Hant": "管理瀏覽器",
+    "en": "Manage browser",
+    "ja": "ブラウザを管理",
+    "ko": "브라우저 관리"
+  },
+  "desktop_computer_browser_select": {
+    "zh-Hans": "使用的浏览器",
+    "zh-Hant": "使用的瀏覽器",
+    "en": "Browser to use",
+    "ja": "使用するブラウザ",
+    "ko": "사용할 브라우저"
+  },
+  "desktop_computer_browser_choose": {
+    "zh-Hans": "选择浏览器",
+    "zh-Hant": "選擇瀏覽器",
+    "en": "Choose a browser",
+    "ja": "ブラウザを選択",
+    "ko": "브라우저 선택"
+  },
+  "desktop_computer_browser_choose_description": {
+    "zh-Hans": "选择要连接的浏览器并设置灵犀扩展。",
+    "zh-Hant": "選擇要連線的瀏覽器並設定靈犀擴充功能。",
+    "en": "Choose the browser to connect and set up its LingXi extension.",
+    "ja": "接続するブラウザを選び、LingXi拡張機能を設定してください。",
+    "ko": "연결할 브라우저를 선택하고 LingXi 확장 프로그램을 설정하세요."
+  },
+  "desktop_computer_browser_unsupported": {
+    "zh-Hans": "尚未支持",
+    "zh-Hant": "尚未支援",
+    "en": "Not supported yet",
+    "ja": "未対応",
+    "ko": "아직 지원되지 않음"
+  },
+  "desktop_computer_browser_selection_note": {
+    "zh-Hans": "以下权限应用于所选浏览器。切换浏览器会断开旧连接，并清除会话临时授权。",
+    "zh-Hant": "以下權限適用於所選瀏覽器。切換瀏覽器會中斷舊連線，並清除對話暫時授權。",
+    "en": "The permissions below apply to the selected browser. Switching browsers disconnects the previous connection and clears temporary conversation grants.",
+    "ja": "以下の権限は選択したブラウザに適用されます。切り替えると以前の接続が切断され、会話の一時的な許可が取り消されます。",
+    "ko": "아래 권한은 선택한 브라우저에 적용됩니다. 브라우저를 전환하면 이전 연결과 대화의 임시 권한이 해제됩니다."
+  },
+  "desktop_computer_browser_unsupported_description": {
+    "zh-Hans": "目前提供 %1$s 的扩展连接。%2$s 尚未适配。",
+    "zh-Hant": "目前提供 %1$s 的擴充功能連線。%2$s 尚未適配。",
+    "en": "Extension connections are available for %1$s. Adapters for %2$s are not available yet.",
+    "ja": "%1$sの拡張機能接続に対応しています。%2$sはまだ対応していません。",
+    "ko": "%1$s의 확장 프로그램 연결을 제공합니다. %2$s는 아직 지원되지 않습니다."
+  },
   "desktop_computer_reload": {
     "zh-Hans": "重新加载",
     "zh-Hant": "重新載入",
@@ -70,26 +126,12 @@ export const computerCatalog: Record<string, Record<string, string>> = {
     "ja": "ブラウザ拡張機能に接続済み",
     "ko": "브라우저 확장 프로그램 연결됨"
   },
-  "desktop_computer_browser_waiting_chrome": {
-    "zh-Hans": "连接已设置，等待 Chrome",
-    "zh-Hant": "連線已設定，等待 Chrome",
-    "en": "Connection set up — waiting for Chrome",
-    "ja": "接続設定済み — Chromeを待機中",
-    "ko": "연결 설정 완료 — Chrome 대기 중"
-  },
   "desktop_computer_browser_setup": {
     "zh-Hans": "设置灵犀浏览器扩展",
     "zh-Hant": "設定靈犀瀏覽器擴充功能",
     "en": "Set up the LingXi browser extension",
     "ja": "LingXiブラウザ拡張機能を設定",
     "ko": "LingXi 브라우저 확장 프로그램 설정"
-  },
-  "desktop_computer_manage_chrome": {
-    "zh-Hans": "管理 Google Chrome",
-    "zh-Hant": "管理 Google Chrome",
-    "en": "Manage Google Chrome",
-    "ja": "Google Chromeを管理",
-    "ko": "Google Chrome 관리"
   },
   "desktop_computer_manage": {
     "zh-Hans": "管理",
@@ -323,25 +365,25 @@ export const computerCatalog: Record<string, Record<string, string>> = {
     "ko": "확장 프로그램 연결 해제"
   },
   "desktop_computer_browser_connected_description": {
-    "zh-Hans": "灵犀将按照以下权限使用已连接的浏览器。",
-    "zh-Hant": "靈犀將依照以下權限使用已連線的瀏覽器。",
-    "en": "LingXi uses the connected browser with the permissions below.",
-    "ja": "LingXiは以下の権限で接続済みブラウザを使用します。",
-    "ko": "LingXi는 아래 권한에 따라 연결된 브라우저를 사용합니다."
+    "zh-Hans": "灵犀将按照以下权限使用已连接的 %1$s。",
+    "zh-Hant": "靈犀將依照以下權限使用已連線的 %1$s。",
+    "en": "LingXi uses the connected %1$s browser with the permissions below.",
+    "ja": "LingXiは以下の権限で接続済みの%1$sを使用します。",
+    "ko": "LingXi는 아래 권한에 따라 연결된 %1$s 브라우저를 사용합니다."
   },
   "desktop_computer_browser_setup_steps": {
-    "zh-Hans": "打开 Chrome 的扩展程序页面，启用开发者模式，选择“加载已解压的扩展程序”，然后选择“显示扩展文件”打开的文件夹。最后选择“重试”。",
-    "zh-Hant": "開啟 Chrome 的擴充功能頁面，啟用開發人員模式，選擇「載入未封裝項目」，然後選擇「顯示擴充功能檔案」開啟的資料夾。最後選擇「重試」。",
-    "en": "Open Chrome’s Extensions page, enable Developer mode, choose Load unpacked, and select the folder shown by Show extension files. Then select Retry.",
-    "ja": "Chromeの拡張機能ページでデベロッパーモードを有効にし、「パッケージ化されていない拡張機能を読み込む」で「拡張機能のファイルを表示」が開くフォルダを選び、再試行してください。",
-    "ko": "Chrome 확장 프로그램 페이지에서 개발자 모드를 켜고 ‘압축해제된 확장 프로그램을 로드합니다’를 선택한 다음 ‘확장 프로그램 파일 표시’로 열린 폴더를 선택하세요. 이후 ‘다시 시도’를 선택하세요."
+    "zh-Hans": "在 %1$s 中打开 %2$s，启用开发者模式，选择“加载已解压的扩展程序”，然后选择“显示扩展文件”打开的文件夹。已加载的扩展请重新加载。最后选择“重试”。",
+    "zh-Hant": "在 %1$s 中開啟 %2$s，啟用開發人員模式，選擇「載入未封裝項目」，再選擇「顯示擴充功能檔案」開啟的資料夾。已載入的擴充功能請重新載入。最後選擇「重試」。",
+    "en": "In %1$s, open %2$s, enable Developer mode, choose Load unpacked, and select the folder shown by Show extension files. Reload an existing extension. Then select Retry.",
+    "ja": "%1$sで%2$sを開き、デベロッパーモードを有効にして「パッケージ化されていない拡張機能を読み込む」で「拡張機能のファイルを表示」のフォルダを選択してください。既存の拡張機能は再読み込みし、最後に再試行してください。",
+    "ko": "%1$s에서 %2$s을 열고 개발자 모드를 켠 다음 ‘압축해제된 확장 프로그램을 로드합니다’로 ‘확장 프로그램 파일 표시’의 폴더를 선택하세요. 기존 확장 프로그램은 새로고침하고 ‘다시 시도’를 선택하세요."
   },
   "desktop_computer_browser_setup_description": {
-    "zh-Hans": "先设置浏览器连接，再在 Chrome 中加载灵犀扩展。",
-    "zh-Hant": "先設定瀏覽器連線，再於 Chrome 中載入靈犀擴充功能。",
-    "en": "Set up the browser connection, then load the LingXi extension in Chrome.",
-    "ja": "ブラウザ接続を設定し、ChromeにLingXi拡張機能を読み込んでください。",
-    "ko": "브라우저 연결을 설정한 다음 Chrome에서 LingXi 확장 프로그램을 로드하세요."
+    "zh-Hans": "先选择“设置扩展”，再在 %1$s 中加载灵犀扩展。",
+    "zh-Hant": "先選擇「設定擴充功能」，再於 %1$s 中載入靈犀擴充功能。",
+    "en": "Choose Set up extension, then load the LingXi extension in %1$s.",
+    "ja": "「拡張機能を設定」を選び、%1$sにLingXi拡張機能を読み込んでください。",
+    "ko": "‘확장 프로그램 설정’을 선택한 다음 %1$s에서 LingXi 확장 프로그램을 로드하세요."
   },
   "desktop_computer_show_extension": {
     "zh-Hans": "显示扩展文件",

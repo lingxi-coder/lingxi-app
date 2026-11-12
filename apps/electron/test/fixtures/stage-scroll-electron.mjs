@@ -15,7 +15,7 @@ async function main() {
     const run = (script) => window.webContents.executeJavaScript(script);
     const settle = () => delay(100);
     const deadline = Date.now() + 6000;
-    while (!await run('Boolean(window.stageScrollFixture && document.querySelector(".transcript-thinking"))')) {
+    while (!await run('Boolean(window.stageScrollFixture && document.querySelector(".transcript-activity"))')) {
       if (Date.now() > deadline) throw new Error('Stage fixture did not render');
       await delay(20);
     }
@@ -44,45 +44,51 @@ async function main() {
       await settle();
       result.streamingGaps.push((await run(metrics)).gap);
     }
-    result.thinkingLayouts = [];
-    for (const visible of [true, false, true, false, true]) {
-      await run(`window.stageScrollFixture.thinking(${visible})`);
-      await settle();
-      result.thinkingLayouts.push(await run(`(() => {
-        const stage = document.querySelector('.desktop-stage');
-        const slot = document.querySelector('[data-thinking-slot]');
-        return { scrollHeight: stage.scrollHeight, scrollTop: stage.scrollTop, slotHeight: slot.getBoundingClientRect().height };
-      })()`));
-    }
     result.activityLayouts = [];
     for (const phase of ['running', 'empty-result', 'result', 'reasoning', 'next-tool', 'group-result', 'long-reasoning']) {
       await run(`window.stageScrollFixture.activity(${JSON.stringify(phase)})`);
       await settle();
       result.activityLayouts.push(await run(`(() => {
         const stage = document.querySelector('.desktop-stage');
-        const slot = document.querySelector('[data-thinking-slot]');
-        const tool = document.querySelector('[data-run-type="tool"]');
+                const tool = document.querySelector('[data-run-type="activity"]');
         const previous = [...document.querySelectorAll('[data-run-type="narration"]')].at(-1);
         return { scrollHeight: stage.scrollHeight, scrollTop: stage.scrollTop,
-          slotHeight: slot.getBoundingClientRect().height, toolHeight: tool.getBoundingClientRect().height,
-          toolGap: tool.getBoundingClientRect().top - previous.getBoundingClientRect().bottom,
-          thinkingGap: slot.getBoundingClientRect().top - tool.getBoundingClientRect().bottom };
+          hasThinkingSlot: Boolean(document.querySelector('[data-thinking-slot]')), toolHeight: tool.getBoundingClientRect().height,
+          toolGap: tool.getBoundingClientRect().top - previous.getBoundingClientRect().bottom };
       })()`));
       if (phase === 'next-tool') {
         result.runningGroup = await run(`(() => {
-          const group = document.querySelector('[data-run-type="tool"]');
-          return { expanded: group.querySelector('.tool-group-trigger')?.getAttribute('aria-expanded'),
+          const group = document.querySelector('[data-run-type="activity"]');
+          return { expanded: group.querySelector('.transcript-activity-trigger')?.getAttribute('aria-expanded'),
             activeCalls: group.querySelectorAll('.tool-group-calls .tool-row-state-dot[role="status"]').length };
         })()`);
       }
     }
+    // Use Chromium's trusted keyboard input so the native button activation
+    // path is exercised in the isolated, hidden renderer too.
+    await run(`document.querySelector('.transcript-activity-trigger').focus({ preventScroll: true })`);
+    const key = async (key, code, keyCode, text) => {
+      await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyDown', key, code, windowsVirtualKeyCode: keyCode, text,
+      });
+      await window.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode,
+      });
+      await settle();
+    };
+    await key('Enter', 'Enter', 13, '\r');
+    result.keyboardEnter = await run(`document.querySelector('.transcript-activity-trigger').getAttribute('aria-expanded')`);
+    await key(' ', 'Space', 32, ' ');
+    result.keyboardSpace = await run(`document.querySelector('.transcript-activity-trigger').getAttribute('aria-expanded')`);
+    assert.equal(result.keyboardEnter, 'true', 'Enter opens the focused tool group');
+    assert.equal(result.keyboardSpace, 'false', 'Space closes the focused tool group');
     await run('window.stageScrollFixture.longList()');
     await settle();
     // Local child layout changes do not update Stage props (e.g. late markdown/media).
-    await run(`document.querySelector('.transcript-thinking').style.height = '150px'`);
+    await run(`document.querySelector('.transcript-activity').style.height = '150px'`);
     await waitForFixture(window.webContents, `${metrics}.gap <= 1`);
     result.resizeGap = (await run(metrics)).gap;
-    await run(`document.querySelector('.transcript-thinking').style.height = '20px'`);
+    await run(`document.querySelector('.transcript-activity').style.height = '20px'`);
     await waitForFixture(window.webContents, `${metrics}.gap <= 1`);
     result.shrinkGap = (await run(metrics)).gap;
     result.finalAncestorScroll = (await run(metrics)).ancestor;
@@ -157,10 +163,27 @@ async function main() {
     })()`;
     const clickSecondCopy = async () => {
       const point = result.copyPoints[1];
+      // The control starts outside the row's box with pointer-events disabled.
+      // Reveal it by hovering its owner before moving onto the footer itself.
+      const owner = await run(`(() => {
+        const bubble = document.querySelectorAll('.transcript-user-message')[1].querySelector('.user-message-bubble');
+        const rect = bubble.getBoundingClientRect();
+        return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+      })()`);
+      window.webContents.sendInputEvent({ type: 'mouseMove', ...owner });
+      await waitForFixture(window.webContents, `getComputedStyle(document.querySelectorAll('.user-message-actions')[1]).pointerEvents === 'auto'`);
       window.webContents.sendInputEvent({ type: 'mouseMove', x: point.x, y: point.y });
       // The move has to land (and re-enable `pointer-events` on the revealed
       // footer) before the press is hit-tested, or the click reaches the row.
       await settle();
+      const hit = await run(`(() => {
+        const button = document.querySelectorAll('.user-message-copy')[1];
+        const target = document.elementFromPoint(${point.x}, ${point.y});
+        return { matches: Boolean(target && button.contains(target)), target: target?.outerHTML.slice(0, 240),
+          point: ${JSON.stringify(point)}, ancestor: document.querySelector('#scroll-ancestor').getBoundingClientRect().toJSON(),
+          button: button.getBoundingClientRect().toJSON() };
+      })()`);
+      assert.equal(hit.matches, true, `copy target must be visible to pointer input: ${JSON.stringify(hit)}`);
       window.webContents.sendInputEvent({ type: 'mouseDown', x: point.x, y: point.y, button: 'left', clickCount: 1 });
       window.webContents.sendInputEvent({ type: 'mouseUp', x: point.x, y: point.y, button: 'left', clickCount: 1 });
       await settle();

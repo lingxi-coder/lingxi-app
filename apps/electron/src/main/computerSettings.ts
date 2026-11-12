@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { ComputerDevicePolicy, ComputerPermission, ComputerSettingsCommand, ComputerSettingsSnapshot } from '../shared/computerSettings.js';
 import { validBundleId } from '../shared/applicationIcon.js';
+import { browserDefinition } from '../shared/browserCatalog.js';
 
 const run = promisify(execFile);
 const modes = new Set(['ask', 'allow', 'deny']);
@@ -23,6 +24,7 @@ export function siteOrigin(value: unknown): string {
 }
 function defaults(): ComputerDevicePolicy {
   return { revision: randomUUID(), enabled: true, apps: [], browser: {
+    selectedBrowser: null,
     history: 'ask', siteTools: false, fullCdp: false, defaultBrowsing: 'ask', defaultDownloads: 'ask', sites: [],
   } };
 }
@@ -32,6 +34,8 @@ function decode(value: unknown): ComputerDevicePolicy {
   if (typeof raw.revision !== 'string' || !raw.revision || typeof raw.enabled !== 'boolean'
       || !Array.isArray(raw.apps) || raw.apps.length > 512 || !raw.browser || typeof raw.browser !== 'object') throw new Error('Invalid computer settings');
   const browser = raw.browser as Record<string, unknown>;
+  const selectedBrowser = browser.selectedBrowser === undefined ? 'chrome' : browser.selectedBrowser;
+  if (selectedBrowser !== null && !browserDefinition(selectedBrowser)?.profileDirectory) throw new Error('Unsupported browser selection');
   if (typeof browser.siteTools !== 'boolean' || typeof browser.fullCdp !== 'boolean' || !Array.isArray(browser.sites) || browser.sites.length > 256) throw new Error('Invalid browser settings');
   const apps = raw.apps.map((value: unknown) => {
     if (!value || typeof value !== 'object') throw new Error('Invalid application');
@@ -46,6 +50,7 @@ function decode(value: unknown): ComputerDevicePolicy {
   });
   if (new Set(apps.map(app => app.bundleId)).size !== apps.length || new Set(sites.map(site => site.origin)).size !== sites.length) throw new Error('Duplicate permission entry');
   return { revision: raw.revision, enabled: raw.enabled, apps, browser: {
+    selectedBrowser: selectedBrowser as ComputerDevicePolicy['browser']['selectedBrowser'],
     history: mode(browser.history), siteTools: browser.siteTools, fullCdp: browser.fullCdp,
     defaultBrowsing: mode(browser.defaultBrowsing), defaultDownloads: mode(browser.defaultDownloads), sites,
   } };
@@ -127,7 +132,7 @@ export class ComputerSettingsStore {
   policy(): ComputerDevicePolicy { this.refreshSource(); return structuredClone(this.current); }
   snapshot(): ComputerSettingsSnapshot {
     return { ...this.policy(), browserStatus: this.browser?.status() ?? {
-      connected: false, installed: false, extensionDirectory: '', error: this.browserError ?? this.error ?? 'Browser integration is starting',
+      browserId: this.current.browser.selectedBrowser ?? null, connected: false, installed: false, extensionDirectory: '', error: this.browserError ?? this.error ?? 'Browser integration is starting',
     }, capabilities: { computer: process.platform === 'darwin' && !this.error, browser: !!this.browser && !this.error, lockedUse: false, excel: false }, ...(this.error ? { error: this.error } : {}) };
   }
   private writeAtomic(path: string, value: unknown): void {
@@ -187,6 +192,10 @@ export class ComputerSettingsStore {
       const next = this.policy();
       const expectedRevision = next.revision;
       switch (command.action) {
+        case 'selectBrowser':
+          if (!browserDefinition(command.browserId)?.profileDirectory) throw new Error('This browser does not have a LingXi extension adapter yet');
+          next.browser.selectedBrowser = command.browserId;
+          break;
         case 'setEnabled':
           if (typeof command.enabled !== 'boolean') throw new Error('Invalid enabled value');
           next.enabled = command.enabled;

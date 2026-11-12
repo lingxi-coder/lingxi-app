@@ -1,0 +1,155 @@
+/* Shared appearance for computer access, tool permissions, and questions. */
+.inline-interaction-card.interaction-prompt {
+  border: 1px solid var(--dialog-border);
+  border-radius: 24px;
+  background: var(--dialog-window);
+  box-shadow: none;
+  max-height: min(64vh, 640px);
+  font-optical-sizing: auto;
+}
+.computer-access-content {
+  min-height: 0;
+  overflow: auto;
+  padding: 22px 24px 0;
+}
+.computer-access-risk-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 16px;
+  color: var(--computer-risk);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.inline-interaction-card.interaction-prompt h2,
+.inline-interaction-card.interaction-prompt .inline-interaction-header h2 {
+  margin: 0 0 6px;
+  color: var(--dialog-text);
+  font-size: 17px;
+  font-weight: 550;
+  letter-spacing: -.015em;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.computer-access-copy, .computer-access-reason {
+  margin: 0 0 12px;
+  color: var(--dialog-text-2);
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.computer-access-reason { color: var(--dialog-text); font-size: 13px; }
+.inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 22px 24px 24px;
+  flex: 0 0 auto;
+  border-top: 0;
+  background: var(--dialog-window);
+  box-shadow: none;
+}
+.computer-access-scope { color: var(--dialog-text-2); font-size: 12px; }
+.inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) .desktop-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-left: auto;
+  width: auto;
+}
+.inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) .desktop-dialog-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 14px;
+  border: 1px solid var(--dialog-border);
+  border-radius: 999px;
+  background: var(--dialog-window);
+  color: var(--dialog-text);
+  box-shadow: none;
+  font-size: 14px;
+  font-weight: 450;
+  line-height: 1.2;
+  margin: 0;
+  white-space: normal;
+  transition: background-color 120ms ease, scale 100ms ease-out;
+}
+.inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) .desktop-dialog-action--primary {
+  color: var(--dialog-window);
+  background: var(--dialog-text);
+  border-color: var(--dialog-text);
+}
+.inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) .desktop-dialog-action:hover { background: var(--dialog-surface-hover); box-shadow: none; }
+.inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) .desktop-dialog-action--primary:hover { background: var(--dialog-text-2); filter: none; }
+.inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) .desktop-dialog-action:active { scale: .97; }
+.inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) .desktop-dialog-action:focus-visible {
+  outline: 2px solid var(--dialog-text);
+  outline-offset: 3px;
+}
+.inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) kbd {
+  padding: 1px 7px;
+  border-radius: 7px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  font: inherit;
+  line-height: 1.25;
+}
+.inline-interaction-card.interaction-prompt input[type='checkbox'] { accent-color: var(--dialog-text); }
+.inline-interaction-card.interaction-prompt input:focus-visible { outline: 2px solid var(--dialog-text); outline-offset: 3px; }
+@media (max-width: 600px) {
+  .inline-interaction-card.interaction-prompt { border-radius: 20px; }
+  .computer-access-content { padding: 18px 18px 0; }
+  .inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) { padding: 18px; }
+  .inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) .desktop-dialog-action { white-space: normal; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) .desktop-dialog-action { transition: none; }
+  .inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) .desktop-dialog-action:active { scale: none; }
+}
+@media (prefers-contrast: more) {
+  .inline-interaction-card.interaction-prompt,
+  .inline-interaction-card.interaction-prompt :is(.computer-access-footer, .inline-interaction-footer) .desktop-dialog-action { border-color: var(--dialog-text); }
+}
+
+.inline-interaction-card.interaction-prompt .inline-interaction-header {
+  min-height: 0;
+  padding: 22px 24px 0;
+  gap: 10px;
+}
+.inline-interaction-card.interaction-prompt .inline-interaction-heading-icon {
+  width: 19px;
+  height: 19px;
+  border-radius: 0;
+  background: transparent;
+  color: var(--dialog-text-2);
+}
+.inline-interaction-card.interaction-prompt .inline-interaction-body {
+  padding: 12px 24px 0;
+  scrollbar-width: thin;
+}
+.inline-interaction-card.interaction-prompt :is(.permission-prompt-summary, .ask-dialog-instructions) {
+  color: var(--dialog-text-2);
+  font-size: 14px;
+  line-height: 1.55;
+}
+.inline-interaction-card.interaction-prompt .ask-dialog-question-title {
+  font-size: 17px;
+  font-weight: 550;
+  letter-spacing: -.015em;
+  line-height: 1.4;
+}
+.inline-interaction-card.interaction-prompt .ask-dialog-option:has(input:checked) .ask-dialog-option-index,
+.inline-interaction-card.interaction-prompt .ask-dialog-other-choice:has(input:checked) .ask-dialog-other-icon {
+  background: var(--dialog-text);
+  color: var(--dialog-window);
+}
+@media (max-width: 600px) {
+  .inline-interaction-card.interaction-prompt .inline-interaction-header { padding: 18px 18px 0; flex-wrap: wrap; }
+  .inline-interaction-card.interaction-prompt .inline-interaction-body { padding: 12px 18px 0; }
+}

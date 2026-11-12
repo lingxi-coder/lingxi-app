@@ -1,24 +1,12 @@
 package com.lingxi.code.conversation
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,16 +16,16 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
+import com.lingxi.code.components.LXIcon
+import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.theme.LingXiTheme
 
@@ -64,8 +52,7 @@ internal fun AgentRunTimeline(
     onToggleToolCall: (String) -> Unit = {},
     agents: List<SessionAgentUi> = emptyList(),
 ) {
-    // This card is pinned above the composer, so keep the default footprint to
-    // one status row and let the user expand the execution trace on demand.
+    // Keep one fixed header; execution phases only replace its content.
     var expanded by rememberSaveable(state.turnId) { mutableStateOf(false) }
     val title = when (state.outcome) {
         AgentRunOutcome.Running -> stringResource(R.string.chat_run_status_running)
@@ -74,171 +61,63 @@ internal fun AgentRunTimeline(
         AgentRunOutcome.Cancelled -> stringResource(R.string.chat_run_status_cancelled)
         AgentRunOutcome.Finished -> stringResource(R.string.chat_run_status_finished)
     }
-    val statusColor = runStatusColor(state.outcome)
+    val activity = state.activitySummaryText() ?: title
     val runAccessibilityLabel = stringResource(R.string.chat_run_accessibility_label, title)
-    Card(
-        // The card-wide `clickable` used to live HERE, which swallowed every tap
-        // inside it: a per-tool-call expand toggle nested in the body could never
-        // fire, because the card's own gesture consumed it first. The collapse
-        // gesture now lives on the header Row below, so the tool rows own their
-        // own taps.
-        modifier = modifier
-            .fillMaxWidth()
-            .border(0.5.dp, statusColor.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
-            .testTag(UiTags.AGENT_RUN_TIMELINE)
-            .semantics { contentDescription = runAccessibilityLabel },
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ),
-    ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(role = Role.Button) { expanded = !expanded },
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (state.active) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(15.dp),
-                        strokeWidth = 2.dp,
-                        color = statusColor,
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .size(9.dp)
-                            .background(statusColor, CircleShape),
-                    )
-                }
-                Spacer(Modifier.width(9.dp))
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = statusColor,
-                    modifier = Modifier.weight(1f),
-                )
-                val activity = when {
-                    state.activeWorkers > 0 ->
-                        stringResource(R.string.chat_run_active_collaborators, state.activeWorkers)
-                    state.tools.any { it.status == AgentToolStatus.Running } ->
-                        stringResource(R.string.chat_run_tool_executing)
-                    state.reasoningActive -> stringResource(R.string.chat_run_reasoning_active)
-                    state.active -> stringResource(R.string.chat_run_generating)
-                    else -> null
-                }
-                activity?.let {
-                    Text(
-                        text = it,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = if (expanded) {
-                        stringResource(R.string.chat_run_collapse)
-                    } else {
-                        stringResource(R.string.chat_run_expand)
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+    // One persistent disclosure header owns both reasoning and tool activity.
+    // No conditional status/body is inserted when the execution phase changes.
+    Column(modifier.fillMaxWidth().testTag(UiTags.AGENT_RUN_TIMELINE)
+        .semantics { contentDescription = runAccessibilityLabel }) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
+            .clickable(role = Role.Button) { expanded = !expanded }
+            .testTag("conversation.activity.header"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            LXIcon(
+                name = state.tools.lastOrNull()?.let { toolIconName(it.header?.verb, it.tool) }
+                    ?: LXIconName.Workflow,
+                size = 18.dp, color = LingXiTheme.palette.text3)
+            Text(activity, Modifier.weight(1f), color = LingXiTheme.palette.text3,
+                style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (state.tools.any { it.status == AgentToolStatus.Failed }) {
+                Text(stringResource(R.string.chat_tool_calls_unsuccessful), color = LingXiTheme.palette.danger,
+                    style = MaterialTheme.typography.labelSmall, maxLines = 1)
             }
-
-            AnimatedVisibility(expanded) {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (state.active && state.reasoningActive) {
-                        val reasoningTitle = if (state.reasoningActive) {
-                            stringResource(R.string.chat_run_reasoning_active)
-                        } else {
-                            stringResource(R.string.chat_thinking)
-                        }
-                        TraceSection(title = reasoningTitle) {
-                            Text(
-                                text = state.reasoning.ifBlank {
-                                    stringResource(R.string.chat_run_analyzing_request)
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 16,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            if (state.reasoningTruncated) {
-                                Text(
-                                    text = stringResource(R.string.chat_run_reasoning_truncated),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                    }
-
-                    // A DISPLAY window, not storage: this card is a plain
-                    // `Column`, so every row it lists is composed. The rows it
-                    // leaves out are still in `state.tools` and still settle
-                    // into the transcript — dropping them from the state was a
-                    // permanent transcript loss, this is only a scroll budget.
-                    val hiddenTools = state.hiddenToolCount()
-                    if (hiddenTools > 0) {
-                        Text(
-                            text = stringResource(
-                                R.string.chat_run_tools_windowed,
-                                hiddenTools,
-                            ),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    val activeTools = state.tools.filter { it.status == AgentToolStatus.Running }
-                    val tools = activeTools.ifEmpty { state.toolDisplayWindow() }.map { it.toToolCall() }
-                    if (tools.isNotEmpty()) {
-                        ToolGroupView(TranscriptBlock.Tools(tools, state.tools.first().id),
-                            expandedToolCalls, onToggleToolCall, agents)
-                    }
-
-                    state.notices.forEach { notice ->
-                        NoticeTraceRow(notice)
-                    }
-
-                    if (state.activeWorkers > 0 || state.teamName != null) {
-                        val team = state.teamName?.let { " · $it" }.orEmpty()
-                        Text(
-                            text = stringResource(
-                                R.string.chat_run_collaborators_label,
-                                state.activeWorkers,
-                                team,
-                            ),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-
-                    TraceFooter(state)
-                }
+            LXIcon(
+                if (expanded) LXIconName.Chevron else LXIconName.ChevronR,
+                size = 12.dp, color = LingXiTheme.palette.text4)
+        }
+        if (expanded) {
+            Column(Modifier.padding(start = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val hiddenTools = state.hiddenToolCount()
+                if (hiddenTools > 0) Text(stringResource(R.string.chat_run_tools_windowed, hiddenTools),
+                    style = MaterialTheme.typography.labelSmall)
+                val tools = state.toolDisplayWindow().map { it.toToolCall() }
+                if (tools.isNotEmpty()) ToolGroupView(TranscriptBlock.Tools(tools, state.tools.first().id),
+                    expandedToolCalls, onToggleToolCall, agents)
+                // Retain the reasoning body across tool starts and completion;
+                // it never appears as a separate collapsed transcript row.
+                if (state.reasoning.isNotBlank()) Text(state.reasoning,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (state.reasoningTruncated) Text(stringResource(R.string.chat_run_reasoning_truncated),
+                    style = MaterialTheme.typography.labelSmall)
+                state.notices.forEach { NoticeTraceRow(it) }
+                if (state.activeWorkers > 0 || state.teamName != null) Text(
+                    stringResource(R.string.chat_run_collaborators_label, state.activeWorkers, state.teamName?.let { " · $it" }.orEmpty()),
+                    style = MaterialTheme.typography.labelMedium)
+                TraceFooter(state)
             }
         }
     }
 }
 
-@Composable
-private fun TraceSection(
-    title: String,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-        )
-        content()
-    }
+/** Header content changes; the caller keeps one stable row for the whole turn. */
+internal fun AgentRunState.activitySummaryText(): String? {
+    val running = tools.lastOrNull { it.status == AgentToolStatus.Running }
+    if (running != null) return running.header?.title ?: running.tool
+    if (active && reasoningActive && reasoning.isNotBlank()) return reasoning.takeLast(240).replace('\n', ' ').replace('\r', ' ')
+    if (tools.isNotEmpty()) return tools.map { it.header?.label ?: it.tool }.distinct().joinToString(" · ")
+    return null
 }
 
 @Composable
@@ -275,13 +154,4 @@ private fun TraceFooter(state: AgentRunState) {
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-}
-
-@Composable
-private fun runStatusColor(outcome: AgentRunOutcome): Color = when (outcome) {
-    AgentRunOutcome.Running -> LingXiTheme.palette.accent
-    AgentRunOutcome.Completed -> LingXiTheme.palette.ok
-    AgentRunOutcome.Failed -> LingXiTheme.palette.danger
-    AgentRunOutcome.Cancelled -> LingXiTheme.palette.statusTesting
-    AgentRunOutcome.Finished -> MaterialTheme.colorScheme.onSurfaceVariant
 }

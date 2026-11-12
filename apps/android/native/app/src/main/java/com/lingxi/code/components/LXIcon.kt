@@ -38,6 +38,7 @@ import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Power
 import androidx.compose.material.icons.outlined.Bedtime
 import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Terminal
@@ -52,6 +53,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -59,7 +64,7 @@ enum class LXIconName {
     Menu, SideChat, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, AudioWave, Paperclip,
     Chevron, Sun, Moon, Check, Pin, Brain, ArrowUp, Folder, Clock, Message,
     ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share, ListChecks, Send,
-    ArrowRight, Terminal, Lightbulb, Apps, AppBuilder, McpFallback,
+    ArrowRight, Terminal, Lightbulb, Apps, AppBuilder, McpFallback, Globe, Computer,
     /** The Bots tab: a robot head, distinct from [Sparkle] (which already means "AI" elsewhere). */
     Bot,
     /** The Teams tab: a group of people ([Link], which the old Teams drawer row used, is not one). */
@@ -68,8 +73,36 @@ enum class LXIconName {
     User,
 }
 
+/** Matches the desktop computer-use glyph on a 16-point grid. */
+private val computerIcon = ImageVector.Builder(
+    name = "Computer", defaultWidth = 24.dp, defaultHeight = 24.dp,
+    viewportWidth = 16f, viewportHeight = 16f,
+).apply {
+    path(stroke = SolidColor(Color.Black), strokeLineWidth = 1.1f,
+        strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round) {
+        moveTo(7.25f, 10.75f)
+        horizontalLineTo(3.25f)
+        arcTo(1.5f, 1.5f, 0f, false, true, 1.75f, 9.25f)
+        verticalLineTo(3.75f)
+        arcTo(1.5f, 1.5f, 0f, false, true, 3.25f, 2.25f)
+        horizontalLineTo(12.75f)
+        arcTo(1.5f, 1.5f, 0f, false, true, 14.25f, 3.75f)
+        verticalLineTo(6.25f)
+        moveTo(6.25f, 10.75f)
+        verticalLineTo(13.75f)
+        moveTo(4.25f, 13.75f)
+        horizontalLineTo(8.25f)
+        moveTo(9.25f, 7.25f)
+        lineTo(14.25f, 10.5f)
+        lineTo(11.75f, 11f)
+        lineTo(10.75f, 13.5f)
+        close()
+    }
+}.build()
+
 /** Shared semantic names resolve to Android's Material icon family. */
 val LXIconName.materialIcon: ImageVector get() = when (this) {
+    LXIconName.Computer -> computerIcon
     LXIconName.McpFallback -> Icons.Outlined.Power
     LXIconName.Menu -> Icons.Outlined.Menu
     LXIconName.SideChat -> Icons.Outlined.Forum
@@ -103,6 +136,7 @@ val LXIconName.materialIcon: ImageVector get() = when (this) {
     LXIconName.Plug -> Icons.Outlined.Power
     LXIconName.Dream -> Icons.Outlined.Bedtime
     LXIconName.Link -> Icons.Outlined.Link
+    LXIconName.Globe -> Icons.Outlined.Language
     LXIconName.Copy -> Icons.Outlined.ContentCopy
     LXIconName.Share -> Icons.Outlined.Share
     LXIconName.Terminal -> Icons.Outlined.Terminal

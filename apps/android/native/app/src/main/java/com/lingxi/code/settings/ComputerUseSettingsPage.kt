@@ -54,6 +54,7 @@ fun ComputerUseSettingsPage(
     voice: AudioConfigurationV4,
     capability: VoiceCapabilitySnapshot,
     onOpenAudioSettings: () -> Unit,
+    onOpenBrowserSettings: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val resources = LocalResources.current
@@ -198,6 +199,17 @@ fun ComputerUseSettingsPage(
                 modifier = Modifier.sizeIn(minHeight = 48.dp),
             ) {
                 Text(if (state.serviceEnabled) stringResource(R.string.settings_cu_check_service) else stringResource(R.string.settings_cu_enable_a11y))
+            }
+        }
+
+        if (onOpenBrowserSettings != null) {
+            SettingsSection(label = stringResource(R.string.settings_browser_title)) {
+                SettingsRow(
+                    label = stringResource(R.string.settings_browser_manage),
+                    sub = stringResource(R.string.settings_browser_android_supported),
+                    isLast = true,
+                    onTap = onOpenBrowserSettings,
+                )
             }
         }
 

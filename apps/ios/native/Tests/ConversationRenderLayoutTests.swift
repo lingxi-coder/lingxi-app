@@ -133,6 +133,10 @@ final class ConversationRenderLayoutTests: XCTestCase {
         XCTAssertEqual(ConversationToolIcon.resolve(verb: .skill, tool: "Skill"), .sparkles)
         XCTAssertEqual(ConversationToolIcon.resolve(verb: .output, tool: "Output"), .output)
         XCTAssertEqual(ConversationToolIcon.resolve(verb: .kill, tool: "Kill"), .stop)
+        let browserHeader = ConversationToolHeader(verb: .generic, icon: .wrench, label: "browser",
+            primary: nil, qualifier: nil, count: nil, subLine: nil, title: "browser")
+        XCTAssertEqual(browserHeader.icon(for: "browser"), .globe)
+        XCTAssertEqual(ToolDisplayText.icon(header: browserHeader, tool: "browser"), .globe)
     }
 
     func testTimelineActivityLedgerPreservesTextBoundaries() {

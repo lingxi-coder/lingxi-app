@@ -2916,4 +2916,26 @@
     <string name="chat_agent_finished">finished</string>
     <string name="chat_tool_group_tasks">Task progress</string>
     <string name="chat_tool_group_coordination">Task coordination</string>
+    <string name="settings_browser_title">Browser</string>
+    <string name="settings_browser_manage">Manage browser permissions</string>
+    <string name="settings_browser_opening">Opening webpages</string>
+    <string name="settings_browser_system_default">System default browser</string>
+    <string name="settings_browser_default_description">External webpages use the system default browser. Local Apps also offer other opening methods in each app. The default browser setting does not grant automation access.</string>
+    <string name="settings_browser_open_default_settings">Change the default browser in system settings</string>
+    <string name="settings_browser_ios_default_settings">Choose the default browser in iOS system settings.</string>
+    <string name="settings_browser_open_settings_error">Could not open default app settings. Change the default browser in system settings.</string>
+    <string name="settings_browser_automation">Browser automation</string>
+    <string name="settings_browser_desktop_note">Manage Desktop browser connections on the computer in Settings → Computer use → Browser. That connection does not control browsers on this phone.</string>
+    <string name="settings_browser_android_control">Browser control on this Android device</string>
+    <string name="settings_browser_android_supported">Observe or control authorized browser apps through Accessibility. Desktop extension connections and per-site permissions are not available in this client.</string>
+    <string name="settings_browser_android_unavailable">This distribution does not provide control of phone apps. External webpages can still open in the system default browser.</string>
+    <string name="settings_browser_ios_control">Browser control on this iPhone or iPad</string>
+    <string name="settings_browser_ios_unavailable">This iOS client does not provide tools to connect to or control browsers on this device. Opening a webpage does not establish an automation connection, and Desktop browser extensions cannot connect here.</string>
+    <string name="settings_browser_unavailable">Not available in this version</string>
+    <string name="settings_browser_saved_note">These choices share the Computer use app permissions. Saved choices apply to the next session and grant access only after you start a control session.</string>
+    <string name="settings_browser_stop_to_change">Stop the current control session before changing browser permissions.</string>
+    <string name="settings_browser_no_installed">No installed browsers available for authorization were found.</string>
+    <string name="settings_browser_session_authorized">Authorized in the active control session</string>
+    <string name="settings_browser_saved">Saved for the next control session</string>
+    <string name="settings_browser_manage_session">Manage control session</string>
 </resources>

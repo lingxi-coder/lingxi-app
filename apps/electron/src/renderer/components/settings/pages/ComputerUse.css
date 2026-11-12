@@ -73,6 +73,9 @@
 .computer-browser-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 38px; }
 .computer-browser-heading h1:focus { outline: none; }
 .computer-browser-toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
+.computer-browser-choice { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 20px; }
+.computer-browser-choice label { font-size: 14px; font-weight: 500; }
+.computer-browser-choice p { flex-basis: 100%; margin: 0; color: var(--computer-settings-muted); font-size: 13px; line-height: 1.5; }
 .computer-use-manage:not(:disabled) { color: var(--computer-settings-text); cursor: pointer; transition: background-color 120ms ease, transform 100ms ease; }
 .computer-use-manage:not(:disabled):active { transform: scale(.97); }
 .computer-browser-toolbar .computer-browser-remove { color: var(--computer-settings-danger); background: color-mix(in srgb, var(--computer-settings-danger) 8%, transparent); opacity: .45; }

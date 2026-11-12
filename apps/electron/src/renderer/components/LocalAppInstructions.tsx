@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { MarkdownContent } from './MarkdownContent';
+import { skillInstructionText } from './localAppInstructionPresentation';
 
 export function LocalAppInstructions({ id, text, name = 'local-app', open, onSetOpen }: {
   id: string;
@@ -22,13 +23,14 @@ export function LocalAppInstructions({ id, text, name = 'local-app', open, onSet
   } as CSSProperties}>
     <button type="button" className="local-app-instructions-toggle"
       aria-expanded={open} aria-controls={contentId} onClick={() => onSetOpen(id, !open)}>
-      <Icon name="spark" size={15} stroke={1.6} />
-      <span className="local-app-instructions-title">{name === 'local-app' ? tr('desktop_local_apps') : name}</span>
+      <span className="local-app-instructions-icon" aria-hidden="true"><Icon name="spark" size={16} stroke={1.6} /></span>
+      <span className="local-app-instructions-title" title={name}>{name === 'local-app' ? tr('desktop_local_apps') : name}</span>
       <span className="local-app-instructions-label">{tr('desktop_instructions')}</span>
       <span className="local-app-instructions-chevron" aria-hidden="true"><Icon name={open ? 'chevron' : 'chevronR'} size={12} stroke={1.8} /></span>
     </button>
-    <div id={contentId} hidden={!open} className="local-app-instructions-body">
-      {open && <MarkdownContent text={text} variant="compact" />}
+    <div id={contentId} hidden={!open} className="local-app-instructions-body" tabIndex={open ? 0 : undefined}
+      role="region" aria-label={`${name} · ${tr('desktop_instructions')}`}>
+      {open && <MarkdownContent text={skillInstructionText(text)} variant="compact" />}
     </div>
   </section>;
 }

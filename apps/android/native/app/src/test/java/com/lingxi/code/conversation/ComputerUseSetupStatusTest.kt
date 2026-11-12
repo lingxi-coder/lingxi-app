@@ -38,7 +38,7 @@ class ComputerUseSetupStatusTest {
     }
 
     @Test
-    fun startingSessionWithBrowserGrantIsAlreadyReady() {
+    fun startingSessionWithBrowserGrantWaitsUntilTheHostIsActive() {
         val status = computerUseSetupStatus(
             state = ComputerUseUiState(
                 serviceEnabled = true,
@@ -54,7 +54,10 @@ class ComputerUseSetupStatusTest {
             browserPackages = setOf("com.android.browser"),
         )
 
-        assertTrue(status.ready)
+        assertFalse(status.ready)
+        assertFalse(status.sessionActive)
+        assertTrue(status.sessionStarting)
+        assertEquals("启动中", status.missingSteps())
     }
 
     @Test
@@ -79,6 +82,23 @@ class ComputerUseSetupStatusTest {
 
         assertFalse(status.ready)
         assertEquals("授权浏览器、启动控制会话", status.missingSteps())
+    }
+
+    @Test
+    fun savedBrowserChoicesCannotReplaceAnActiveSessionsRealGrants() {
+        val status = computerUseSetupStatus(
+            state = ComputerUseUiState(
+                serviceEnabled = true,
+                sessionState = ComputerUseSessionState.Active,
+                grants = listOf(ComputerUseGrant("org.example.editor", "Editor", ComputerUseTier.Full)),
+            ),
+            configuredPackages = setOf("org.example.browser"),
+            browserPackages = setOf("org.example.browser"),
+        )
+        assertTrue(status.sessionActive)
+        assertFalse(status.browserAuthorized)
+        assertFalse(status.ready)
+        assertEquals("授权浏览器", status.missingSteps())
     }
 
     @Test

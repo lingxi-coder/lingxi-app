@@ -3,7 +3,6 @@ package com.lingxi.code
 import com.lingxi.code.conversation.blocksEngineReconnect
 import com.lingxi.code.apps.LocalAppAuthoringPrompt
 
-import android.content.pm.PackageManager
 import android.util.Base64
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -85,6 +84,7 @@ import com.lingxi.code.computeruse.ComputerUseApprovalDialog
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.computeruse.ComputerUseSessionState
 import com.lingxi.code.computeruse.ComputerUseUiState
+import com.lingxi.code.computeruse.resolveBrowserPackages
 import com.lingxi.code.connectivity.rememberOnlineState
 import com.lingxi.code.connectivity.shouldShowOfflineBanner
 import com.lingxi.code.cron.AndroidCronRepository
@@ -3843,38 +3843,17 @@ internal fun computerUseSetupStatus(
 ): ComputerUseSetupStatus =
     ComputerUseSetupStatus(
         accessibilityEnabled = state.serviceEnabled,
-        browserAuthorized =
-            state.grants.any { it.packageName in browserPackages } ||
-                configuredPackages.any { it in browserPackages },
+        browserAuthorized = if (state.sessionState == ComputerUseSessionState.Inactive) {
+            configuredPackages.any { it in browserPackages }
+        } else {
+            state.grants.any { it.packageName in browserPackages }
+        },
         sessionActive = state.sessionState in setOf(
-            ComputerUseSessionState.Starting,
             ComputerUseSessionState.Active,
             ComputerUseSessionState.AwaitingApproval,
         ),
+        sessionStarting = state.sessionState == ComputerUseSessionState.Starting,
     )
-
-/**
- * Returns the selected Computer Use apps that Android confirms can open web
- * links. Resolving each already-visible package explicitly avoids assuming a
- * vendor-specific browser package such as Chrome or MIUI Browser.
- */
-internal fun resolveBrowserPackages(
-    context: Context,
-    candidatePackages: Set<String>,
-): Set<String> {
-    if (candidatePackages.isEmpty()) return emptySet()
-
-    val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com"))
-        .addCategory(Intent.CATEGORY_BROWSABLE)
-    return candidatePackages.filterTo(linkedSetOf()) { packageName ->
-        runCatching {
-            context.packageManager.resolveActivity(
-                Intent(webIntent).setPackage(packageName),
-                PackageManager.MATCH_DEFAULT_ONLY,
-            ) != null
-        }.getOrDefault(false)
-    }
-}
 
 internal fun shouldShowComputerUseSetup(
     readiness: ComputerUseSetupStatus?,

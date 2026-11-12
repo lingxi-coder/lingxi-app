@@ -8,8 +8,8 @@ import '../../src/renderer/components/settings/pages/ComputerUse.css';
 let state: ComputerSettingsSnapshot = {
   revision: 'r0', enabled: true,
   apps: [{ bundleId: 'com.apple.finder', displayName: 'Finder', permission: 'allow' }, { bundleId: 'com.docker.docker', displayName: 'Docker', permission: 'deny' }],
-  browser: { history: 'ask', siteTools: true, fullCdp: false, defaultBrowsing: 'ask', defaultDownloads: 'ask', sites: [] },
-  browserStatus: { installed: false, connected: false, extensionDirectory: '/controlled/extension' },
+  browser: { selectedBrowser: 'chrome', history: 'ask', siteTools: true, fullCdp: false, defaultBrowsing: 'ask', defaultDownloads: 'ask', sites: [] },
+  browserStatus: { browserId: 'chrome', installed: false, connected: false, extensionDirectory: '/controlled/extension' },
   capabilities: { computer: true, browser: true, lockedUse: false, excel: false },
 };
 let revision = 0, failNext = '', holdNext = false;
@@ -29,6 +29,7 @@ Object.assign(window, { lingxi: {
       if (failNext) { const error = failNext; failNext = ''; throw new Error(error); }
       if ('revision' in command && command.revision !== state.revision) throw new Error('Settings changed; reload.');
       switch (command.action) {
+        case 'selectBrowser': state.browser.selectedBrowser = command.browserId; state.browserStatus.browserId = command.browserId; state.browserStatus.installed = false; state.browserStatus.connected = false; break;
         case 'setEnabled': state.enabled = command.enabled; break;
         case 'setApplication': {
           const existing = state.apps.find((app) => app.bundleId === command.bundleId);

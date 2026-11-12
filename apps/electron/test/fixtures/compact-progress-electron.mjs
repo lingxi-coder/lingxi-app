@@ -62,7 +62,7 @@ async function main() {
       results[phase] = await snapshot();
     }
     await webContents.executeJavaScript('window.compactFixture.ageAndRemount()');
-    await waitFor(webContents, `document.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow') === '99'`);
+    await waitFor(webContents, `window.compactFixture.state().items.some(item => item.type === 'compaction' && Date.now() - item.startedAt >= 90000)`);
     await delay(100);
     if (process.env.LINGXI_COMPACT_SCREENSHOT) {
       const image = await webContents.capturePage();
@@ -70,7 +70,6 @@ async function main() {
       await writeFile(process.env.LINGXI_COMPACT_SCREENSHOT, image.toPNG());
     }
 
-    await waitFor(webContents, `document.querySelector('.compact-status-elapsed')?.getAttribute('aria-label')?.match(/9[0-9] seconds/)`);
     results.aged = await snapshot();
     await webContents.executeJavaScript('window.compactFixture.remount()');
     results.remounted = await snapshot();
@@ -83,6 +82,12 @@ async function main() {
       await delay(100);
       const image = await webContents.capturePage();
       await writeFile(`${process.env.LINGXI_COMPACT_SCREENSHOT}.complete.png`, image.toPNG());
+      await webContents.executeJavaScript('window.compactFixture.setTheme(true)');
+      await delay(50);
+      await writeFile(`${process.env.LINGXI_COMPACT_SCREENSHOT}.dark.png`, (await webContents.capturePage()).toPNG());
+      window.setSize(375, 300);
+      await delay(50);
+      await writeFile(`${process.env.LINGXI_COMPACT_SCREENSHOT}.narrow.png`, (await webContents.capturePage()).toPNG());
     }
 
     for (const phase of ['cancelled', 'error', 'skipped']) {

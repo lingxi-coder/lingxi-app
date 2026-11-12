@@ -18,6 +18,8 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -59,10 +61,10 @@ internal fun isTaskWorkflow(call: ToolCallUi): Boolean {
 /** A nil key makes questions, permissions, deliverables and agents standalone. */
 internal fun toolGroupingKey(call: ToolCallUi): String? {
     if (isAgentLaunchTool(call.tool) && call.planMarkdown == null && call.questionAnswers == null && call.localApp == null) return "agent-launch"
-    if (call.planMarkdown != null || call.questionAnswers != null || call.localApp != null ||
-        call.tool.lowercase() in setOf("agent", "task", "skill", "spawn_agent", "fork_agent", "askuserquestion", "exitplanmode", "enterplanmode", "submitplan") ||
-        call.tool.contains("permission", ignoreCase = true) ||
-        call.header?.verb == ToolVerbUi.Skill) return null
+    if (call.spawnedAgentId != null || call.planMarkdown != null || call.questionAnswers != null || call.localApp != null ||
+        call.tool.lowercase() in setOf("agent", "task", "spawn_agent", "fork_agent", "askuserquestion", "exitplanmode", "enterplanmode", "submitplan") ||
+        call.tool.contains("permission", ignoreCase = true)) return null
+    if (call.tool.equals("Skill", ignoreCase = true) || call.header?.verb == ToolVerbUi.Skill) return "skill"
     if (isTaskWorkflow(call)) return "task-workflow"
     if (call.header?.verb in setOf(ToolVerbUi.Task, ToolVerbUi.Todo)) return null
     if (call.tool.startsWith("mcp", ignoreCase = true)) return call.tool
@@ -111,7 +113,9 @@ internal fun transcriptBlocks(blocks: List<MessageContent>): List<TranscriptBloc
 }
 
 internal fun toolIconName(verb: ToolVerbUi?, tool: String = "") = when {
+    tool.equals("computer", ignoreCase = true) -> LXIconName.Computer
     tool == "LocalApp" -> LXIconName.Apps
+    tool.equals("browser", ignoreCase = true) -> LXIconName.Globe
     isTaskProgressTool(tool) -> LXIconName.ListChecks
     tool.lowercase() in setOf("sendmessage", "send_message") || tool.lowercase().endsWith("__send_message") -> LXIconName.Send
     tool == "ToolSearch" -> LXIconName.Search
@@ -149,6 +153,7 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
     }
     val t = LingXiTheme.palette
     val open = group.id in expandedIds
+    val disclosureState = stringResource(if (open) R.string.chat_run_collapse else R.string.chat_run_expand)
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val hovered by interaction.collectIsHoveredAsState()
@@ -167,6 +172,7 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
         Row(
             modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
                 .clickable(interactionSource = interaction, indication = null, role = Role.Button) { onToggle(group.id) }
+                .semantics { stateDescription = disclosureState }
                 .testTag("conversation.tool.group"),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -182,9 +188,8 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
             LXIcon(if (open) LXIconName.Chevron else LXIconName.ChevronR,
                 modifier = Modifier.alpha(if (open || focused || hovered) 1f else 0.75f), size = 12.dp, color = t.text4)
         }
-        val visible = if (open) group.calls else if (workflow) emptyList() else group.calls.filter { it.status == AgentToolStatus.Running }
-        Column(Modifier.padding(start = 24.dp)) {
-            visible.forEach { call -> ToolCallView(call, call.id in expandedIds, { onToggle(call.id) }) }
+        if (open) Column(Modifier.padding(start = 24.dp)) {
+            group.calls.forEach { call -> ToolCallView(call, call.id in expandedIds, { onToggle(call.id) }) }
         }
     }
 }

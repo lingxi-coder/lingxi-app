@@ -25,13 +25,14 @@ import { ImagePreview } from './ImagePreview';
 import type { SessionAgentSummaryDto, UiJsonValue } from '@lingxi/bridge-client';
 import { TranscriptAgents } from './TranscriptAgents';
 import { anchorTranscriptAgents, placeTranscriptAgents, type AgentAnchors } from './transcriptAgentPlacement';
-import { ApiRetryNotice, type ApiRetryStatus } from './ApiRetryNotice';
+import type { ApiRetryStatus } from './ApiRetryNotice';
 import { transcriptRows, type TranscriptToolGroup } from './transcriptRows';
 import { ToolGroup } from './ToolGroup';
+import { TranscriptActivity } from './TranscriptActivity';
+import { isTranscriptActivity, sameTranscriptActivity, transcriptActivities } from './transcriptActivities';
 import { TurnFileSummary } from './TurnFileSummary';
 import { MarkdownContent } from './MarkdownContent';
 import { LocalAppInstructions } from './LocalAppInstructions';
-import { skillInstructionNames } from './localAppInstructionPresentation';
 import { CommandIdentity } from './CommandIdentity';
 import { parseSlashCommandMessage } from './slashCommandMessage';
 import { formatClockTime } from '../bridge/sessionPresentation';
@@ -45,15 +46,6 @@ import {
 } from './nativeUiSiteProps';
 
 // ─── RUN ITEMS ───────────────────────────────────────────────
-function ThinkingLabel({ text }: { text: string }) {
-  const t = useT();
-  const content = text.trim();
-  return <span className="transcript-thinking-label running-sweep" title={content || undefined}
-    style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>
-    {content || 'Thinking…'}
-  </span>;
-}
-
 const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
   item: Extract<RunItem, { type: 'narration' }>;
   open: boolean;
@@ -203,7 +195,10 @@ const NativeToolGroupSite = memo(function NativeToolGroupSite({
   expanded,
   children,
 }: NativeToolGroupSiteProps) {
-  const requestProps = useMemo(() => nativeToolGroupProps(group, expanded), [group, expanded]);
+  const requestProps = useMemo(() => {
+    const props = nativeToolGroupProps(group, expanded);
+    return isTranscriptActivity(group) ? { ...props, isActive: group.active } : props;
+  }, [group, expanded]);
   return <ModUiParentSite
     sessionId={sessionId}
     surface="desktop"
@@ -217,6 +212,7 @@ const NativeToolGroupSite = memo(function NativeToolGroupSite({
   && previous.expanded === next.expanded
   && previous.stateToken === next.stateToken
   && previous.contentToken === next.contentToken
+  && sameTranscriptActivity(previous.group, next.group)
   && previous.group.tools.length === next.group.tools.length
   && previous.group.tools.every((tool, index) => tool === next.group.tools[index]));
 
@@ -365,11 +361,11 @@ interface StageProps {
  * scroller's `bottomSlack`.
  */
 const BOTTOM_SLACK = 24;
+const EMPTY_SUBMITTED_PLANS: readonly SubmittedPlan[] = [];
 
-export function Stage({ messageTarget, onMessageLocated, activityView = false, onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
+export function Stage({ messageTarget, onMessageLocated, activityView = false, onReviewFiles, submittedPlans = EMPTY_SUBMITTED_PLANS, onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
-  const instructionIds = useMemo(() => skillInstructionNames(liveItems), [liveItems]);
   useEffect(() => setLocalPlan(null), [sessionKey]);
   const stageRef = useRef<HTMLDivElement>(null);
   const feedRef = useRef<HTMLDivElement>(null);
@@ -454,20 +450,18 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
     anchors = anchorTranscriptAgents(placement.sessionKey === sessionKey ? anchors : new Map(), liveItems, agents ?? []);
     setPlacement({ sessionKey, source: agents, items: liveItems, anchors });
   }
-  const rows = useMemo(() => placeTranscriptAgents(
-    transcriptRows(items, running, Boolean(pendingActivity?.trim())), liveItems, agents ?? [], anchors,
-  ), [items, liveItems, running, pendingActivity, agents, anchors]);
+  const rows = useMemo(() => transcriptActivities(placeTranscriptAgents(
+    transcriptRows(items, running, Boolean(pendingActivity?.trim()), true), liveItems, agents ?? [], anchors,
+  ), running, new Set(submittedPlans.map(plan => plan.id))), [items, liveItems, running, pendingActivity, agents, anchors, submittedPlans]);
   const liveItemById = useMemo(() => new Map(liveItems.map(item => [item.id, item])), [liveItems]);
   const firstAssistantById = useMemo(() => assistantFirstOfReplyByItem(liveItems), [liveItems]);
 
-  const lastRow = rows.at(-1);
-  const tailThinking = lastRow?.type === 'thinking' ? lastRow : undefined;
-  const presentationRows = useMemo(() => rows.filter(item => item !== tailThinking
-    && item.type !== 'audio' && (item.type !== 'meta' || Boolean(item.files?.length))), [rows, tailThinking]);
+  const presentationRows = rows;
   const windowing = useTranscriptWindow({ rows: presentationRows, sessionKey, viewport: stageRef, feed: feedRef, following: followTail });
   useEffect(() => {
     window.lingxi?.reportSessionRecovery?.({ phase: 'stage_commit', sessionKey,
-      itemCount: liveItems.length, rowCount: presentationRows.length });
+      itemCount: liveItems.length, rowCount: presentationRows.length,
+      visibility: document.visibilityState, focused: document.hasFocus() });
   }, [sessionKey, liveItems.length, presentationRows.length]);
   const planContentToken = useMemo(() => ({ submittedPlans, onOpenPlan }), [submittedPlans, onOpenPlan]);
 
@@ -761,17 +755,14 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
         */}
         {windowing.enabled && <div ref={windowing.beforeRef} className="transcript-window-spacer" aria-hidden="true" style={{ height: windowing.before }} />}
         {presentationRows.slice(windowing.start, windowing.end).map((item, mountedIndex) => {
-          // The persistent slot renders the tail. An empty wrapper here would
-          // break the sibling spacing when that status appears or disappears.
-          if (item === tailThinking) return null;
           const content = (() => {
           if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} files={item.files} onReview={onReviewFiles ? path => onReviewFiles(item.id, item.files!, path) : undefined} />;
           if (item.type === 'agents') return <TranscriptAgents key={item.id} id={item.id} open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} agents={item.agents} launches={item.launches} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
+          if (item.type === 'skill-instructions') return <div className="transcript-run-item" data-run-type="skill-instructions" key={item.id}>
+            <LocalAppInstructions id={item.id} text={item.text} name={item.name}
+              open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} />
+          </div>;
           if (item.type === 'narration') {
-            if (instructionIds.has(item.id)) return <div className="transcript-run-item" data-run-type="skill-instructions" key={item.id}>
-              <LocalAppInstructions id={item.id} text={item.text} name={instructionIds.get(item.id)}
-                open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} />
-            </div>;
             const document = submittedPlans.find(plan => plan.id === item.id);
             if (document) return <PlanPreview key={item.id} content={document.content} status={document.status} writing={running && item.streamed === true && item.text.trimStart().startsWith('<proposed_plan>') && !item.text.includes('</proposed_plan>')} onOpen={() => onOpenPlan ? onOpenPlan(document.id) : setLocalPlan(document)}/>;
             const user = item.role === 'user';
@@ -828,16 +819,16 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
               </div>
             );
           }
-          if (item.type === 'thinking') {
-            // A backoff owns the waiting indicator while it lasts: "Thinking…"
-            // during a multi-minute retry is what made a rate-limited turn look
-            // like nothing was happening at all.
-            if (apiRetry) return <ApiRetryNotice key={item.id} retry={apiRetry} />;
-            return (
-              <div className="transcript-run-item transcript-thinking" data-run-type="thinking" key={item.id} role="status">
-                <ThinkingLabel text={item.text} />
-              </div>
-            );
+          if (isTranscriptActivity(item)) {
+            const expanded = collapseOpen(visible, sessionKey, item.id) ?? false;
+            return <div className="transcript-run-item" data-run-type="activity">
+              <NativeToolGroupSite sessionId={modUiSessionId} group={item} expanded={expanded}
+                stateToken={visible} contentToken={item.active ? apiRetry ?? undefined : undefined}>
+                <TranscriptActivity activity={item} open={expanded} modUiSessionId={modUiSessionId}
+                  toolOpen={id => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen}
+                  retry={item.active ? apiRetry ?? undefined : undefined} />
+              </NativeToolGroupSite>
+            </div>;
           }
           if (item.type === 'tool-group' && item.tools.some(tool => submittedPlans.some(plan => plan.id === tool.id))) {
             const groupContent = <>{item.tools.map(tool => {
@@ -909,7 +900,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           return null;
           })();
           if (!content) return null;
-          const sourceIds = item.type === 'tool-group' ? item.tools.map(tool => tool.id) : item.type === 'agents' ? item.sourceIds : [item.id];
+          const sourceIds = item.type === 'tool-group' ? [...item.tools.map(tool => tool.id), ...(isTranscriptActivity(item) ? item.thoughts.map(thought => thought.id) : [])] : item.type === 'agents' ? item.sourceIds : [item.id];
           const uuids = [...new Set(sourceIds.flatMap(id => {
             const source = liveItemById.get(id);
             return source ? transcriptRowUuids(source) : [];
@@ -923,17 +914,6 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
               ...(uuid && uuid === messageTarget ? { outline: `2px solid ${t.text3}`, outlineOffset: 4, borderRadius: 8 } : {}) }}>{content}</div>;
         })}
         {windowing.enabled && <div className="transcript-window-spacer" aria-hidden="true" style={{ height: windowing.after }} />}
-
-        {/* Keep the tail slot mounted even when thinking yields to another activity. */}
-        {(rows.length > 0 || running) && (
-          <div className="transcript-row transcript-run-item transcript-thinking" data-thinking-slot="true" data-row-type="thinking"
-            data-run-type={tailThinking ? 'thinking' : undefined}
-            aria-hidden={!tailThinking}
-            role={tailThinking ? 'status' : undefined}
-            style={{ visibility: tailThinking ? 'visible' : 'hidden', ...(windowing.enabled ? { marginTop: `${transcriptRowGap(presentationRows.at(-1), { type: 'thinking', id: 'thinking:slot' })}rem` } : {}) }}>
-            {tailThinking ? apiRetry ? <ApiRetryNotice retry={apiRetry} /> : <ThinkingLabel text={tailThinking.text} /> : null}
-          </div>
-        )}
 
         {localPlan && <div role="dialog" aria-label={tr('desktop_stage_plan')} style={{position:'fixed',inset:'10%',zIndex:100,background:t.surface,overflow:'auto',borderRadius:16}}><button onClick={()=>setLocalPlan(null)}>{tr('desktop_stage_close_plan')}</button><PlanDocument content={localPlan.content}/></div>}
 

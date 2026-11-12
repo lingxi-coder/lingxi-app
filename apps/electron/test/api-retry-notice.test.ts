@@ -68,8 +68,9 @@ test('the retry reads as an error, not as neutral progress', () => {
   const danger = tokens(false).danger;
   const html = stage(reduce(retry()).apiRetry);
   assert.ok(html.includes(danger), `the notice must use the danger token ${danger}`);
+  const notice = html.slice(html.indexOf('data-run-type="api-retry"'), html.indexOf('transcript-disclosure-chevron'));
   assert.ok(
-    !html.includes(`color:${tokens(false).text3}`),
+    !notice.includes(`color:${tokens(false).text3}`),
     'the muted token is what it used to be styled with',
   );
   // The sweep band stays on the same hue, so the row never smears to a

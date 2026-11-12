@@ -1,4 +1,4 @@
-/* Calm, compact activity rows. Disclosures appear on the active summary. */
+/* Calm, compact activity rows. Visible chevrons make details discoverable. */
 .transcript-tool-row:not([data-kind='permission']) { background: transparent; transition: none; }
 .transcript-tool-row:not([data-kind='permission']):is(:hover, :focus-within) {
   background: transparent;
@@ -23,12 +23,12 @@
 .transcript-tool-row:is(:hover, :focus-within) :is(.tool-row-title, .tool-row-icon, .tool-row-file, .tool-row-qualifier, .tool-row-diff-stats, .tool-row-response) { color: var(--tool-focus-color); opacity: 1; }
 .transcript-tool-row .tool-disclosure-trigger,
 .transcript-tool-row .tool-disclosure-trigger:is(:hover, :focus, :focus-visible, :active) {
-  background: transparent !important; scale: 1; outline: none; transition: color 120ms ease, opacity 120ms ease;
+  background: transparent !important; scale: 1; outline: none; touch-action: manipulation; transition: color 120ms ease, opacity 120ms ease;
 }
-.transcript-tool-row .tool-disclosure-trigger[aria-expanded] > .transcript-disclosure-chevron { color: var(--tool-label-color); opacity: 0; }
-.transcript-tool-row .tool-disclosure-trigger[aria-expanded]:is(:hover, :focus-visible) > .transcript-disclosure-chevron { color: var(--tool-focus-color); opacity: 1; }
+.transcript-tool-row .tool-disclosure-trigger[aria-expanded] > .transcript-disclosure-chevron { color: var(--tool-label-color); opacity: .6; }
+.transcript-tool-row .tool-disclosure-trigger[aria-expanded]:is(:hover, :focus-visible, [aria-expanded='true']) > .transcript-disclosure-chevron { color: var(--tool-focus-color); opacity: 1; }
 .transcript-tool-group > .tool-group-trigger {
-  width: fit-content !important; max-width: 100%; background: transparent !important; transition: color 120ms ease, opacity 120ms ease;
+  width: fit-content !important; max-width: 100%; background: transparent !important; touch-action: manipulation; transition: color 120ms ease, opacity 120ms ease;
 }
 .tool-group-icon { width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .tool-group-state { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -37,8 +37,8 @@
 .transcript-tool-group > .tool-group-trigger:is(:hover, :focus, :focus-visible, :active) {
   background: transparent !important; color: var(--tool-focus-color) !important; opacity: 1; outline: none; scale: 1;
 }
-.transcript-tool-group > .tool-group-trigger[aria-expanded] > .transcript-disclosure-chevron { opacity: 0; }
-.transcript-tool-group > .tool-group-trigger[aria-expanded]:is(:hover, :focus-visible) > .transcript-disclosure-chevron { opacity: 1; }
+.transcript-tool-group > .tool-group-trigger[aria-expanded] > .transcript-disclosure-chevron { opacity: .6; }
+.transcript-tool-group > .tool-group-trigger[aria-expanded]:is(:hover, :focus-visible, [aria-expanded='true']) > .transcript-disclosure-chevron { opacity: 1; }
 .transcript-tool-row .tool-disclosure-trigger:focus-visible,
 .transcript-tool-group > .tool-group-trigger:focus-visible { outline: 2px solid var(--tool-focus-ring); outline-offset: -2px; }
 .transcript-tool-row .tool-disclosure-trigger:active,
@@ -54,7 +54,9 @@
 }
 @media (prefers-contrast: more) {
   .transcript-tool-row :is(.tool-row-title, .tool-row-icon),
-  .transcript-tool-group > .tool-group-trigger { opacity: 1; }
+  .transcript-tool-group > .tool-group-trigger,
+  .transcript-tool-row .tool-disclosure-trigger[aria-expanded] > .transcript-disclosure-chevron,
+  .transcript-tool-group > .tool-group-trigger[aria-expanded] > .transcript-disclosure-chevron { opacity: 1; }
   .transcript-tool-row .tool-row-status { outline: none; font-weight: 600; }
 }
 

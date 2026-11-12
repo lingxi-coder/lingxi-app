@@ -20,6 +20,7 @@ struct DesktopSettingsEntry: Identifiable {
         case "appearance": .sun
         case "voice": .mic
         case "language": .globe
+        case "browser": .globe
         case "linux-runtime": .terminal
         case "typescript-lsp": .wrench
         case "app-integration": .link
@@ -64,6 +65,7 @@ struct DesktopSettingsEntry: Identifiable {
         .init(id: "permission-mode", titleKey: "settings_permission_mode_title", group: "编码", page: .permissionMode, keys: ["permission mode", "ask", "plan", "bypass"], mobileGroup: .modes),
         .init(id: "dream", titleKey: "settings_dream_mode", group: "编码", page: .dream, keys: ["dream", "memory"], mobileGroup: .modes),
         .init(id: "linux-runtime", titleKey: "settings_linux_runtime", group: "高级", page: .linuxRuntime, keys: ["linux", "runtime", "terminal", "shell"], mobileGroup: .phone),
+        .init(id: "browser", titleKey: "settings_browser_title", group: "编码", page: .browser, keys: ["browser", "浏览器", "瀏覽器", "chrome", "chromium", "edge", "brave", "safari", "firefox", "computer use", "extension", "扩展"], mobileGroup: .phone),
         .init(id: "typescript-lsp", titleKey: "settings_typescript_lsp_title", group: "高级", page: .typescriptLsp, keys: ["typescript", "lsp"], mobileGroup: .phone),
         .init(id: "app-integration", titleKey: "settings_app_integration", group: "高级", page: .appIntegration, keys: ["integration", "shortcuts", "siri"], mobileGroup: .phone),
         .init(id: "privacy", titleKey: "settings_data_privacy", group: "高级", page: .privacy, keys: ["privacy", "data"], mobileGroup: .data),

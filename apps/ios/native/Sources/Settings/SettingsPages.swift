@@ -17,6 +17,7 @@ struct SettingsPages: View {
         case .providerEdit(let b, let id): ProviderEditPage(store: store, host: host, kind: b.kind, providerId: id)
         case .voice:                      VoicePage(store: store)
         case .linuxRuntime:               LinuxRuntimePage(store: store, onOpenTerminal: host.openTerminal)
+        case .browser:                    BrowserSettingsPage()
         case .knowledge:                  KnowledgePage()
         case .memory:                     MemoryPage()
         case .workflows:                  WorkflowsPage()

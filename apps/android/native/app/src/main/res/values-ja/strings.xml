@@ -2916,4 +2916,26 @@
     <string name="chat_agent_finished">完了</string>
     <string name="chat_tool_group_tasks">タスクの進捗</string>
     <string name="chat_tool_group_coordination">タスクの連携</string>
+    <string name="settings_browser_title">ブラウザ</string>
+    <string name="settings_browser_manage">ブラウザ権限を管理</string>
+    <string name="settings_browser_opening">ウェブページを開く</string>
+    <string name="settings_browser_system_default">システムのデフォルトブラウザ</string>
+    <string name="settings_browser_default_description">外部ウェブページはシステムのデフォルトブラウザで開きます。Local Appではアプリごとに別の開き方も選べます。デフォルトブラウザの設定で自動操作の権限は付与されません。</string>
+    <string name="settings_browser_open_default_settings">システム設定でデフォルトブラウザを変更</string>
+    <string name="settings_browser_ios_default_settings">iOSのシステム設定でデフォルトブラウザを選んでください。</string>
+    <string name="settings_browser_open_settings_error">デフォルトアプリの設定を開けません。システム設定で変更してください。</string>
+    <string name="settings_browser_automation">ブラウザの自動操作</string>
+    <string name="settings_browser_desktop_note">デスクトップのブラウザ接続はパソコンのSettings → Computer use → Browserで管理します。この接続でスマートフォンのブラウザは操作できません。</string>
+    <string name="settings_browser_android_control">このAndroid端末のブラウザ操作</string>
+    <string name="settings_browser_android_supported">ユーザーが許可したブラウザアプリをユーザー補助で確認・操作します。このクライアントにはデスクトップ拡張機能の接続やサイト別の権限設定はありません。</string>
+    <string name="settings_browser_android_unavailable">この配布版にはスマートフォンのアプリ操作機能はありません。外部ウェブページは引き続きシステムのデフォルトブラウザで開けます。</string>
+    <string name="settings_browser_ios_control">このiPhone・iPadのブラウザ操作</string>
+    <string name="settings_browser_ios_unavailable">このiOSクライアントには端末のブラウザへの接続・操作ツールはありません。ウェブページを開いても自動操作には接続されず、デスクトップのブラウザ拡張機能も接続できません。</string>
+    <string name="settings_browser_unavailable">このバージョンでは利用不可</string>
+    <string name="settings_browser_saved_note">この選択はComputer useのアプリ権限と共通です。保存した選択は次回のセッション用で、ユーザーが操作セッションを開始して初めて有効になります。</string>
+    <string name="settings_browser_stop_to_change">現在の操作セッションを停止してからブラウザ権限を変更してください。</string>
+    <string name="settings_browser_no_installed">許可できるインストール済みブラウザが見つかりません。</string>
+    <string name="settings_browser_session_authorized">現在の操作セッションで許可済み</string>
+    <string name="settings_browser_saved">次回の操作セッション用に保存済み</string>
+    <string name="settings_browser_manage_session">操作セッションを管理</string>
 </resources>

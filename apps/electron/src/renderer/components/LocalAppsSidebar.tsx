@@ -42,13 +42,12 @@ export function LocalAppsSidebar({ groups, activeSessionId, chatVisible, library
         <div className="local-apps-sidebar-app">
           <button type="button" className="local-apps-sidebar-disclosure" aria-expanded={open} aria-controls={open ? id : undefined}
             title={group.name} onClick={() => setExpanded(before => { const next = new Set(before); if (!next.delete(group.key)) next.add(group.key); return next; })}>
-            <Icon name="chevron" size={12} style={{ transform: open ? 'none' : 'rotate(-90deg)', flexShrink: 0 }}/>
-            <span className="local-apps-sidebar-avatar">{Array.from(group.name)[0]}</span>
+            <span className="local-apps-sidebar-avatar" aria-hidden="true">{Array.from(group.name)[0]}</span>
             <span className="local-apps-sidebar-name">{group.name}</span>
             {!group.app && <span className="local-apps-draft-dot" title={tr('apps_in_progress')}/>}
           </button>
           {(group.app || group.projectPath) && <div className="local-apps-sidebar-actions">
-            {group.app && <button type="button" disabled={busy} title={tr('desktop_open_app_named', group.name)} aria-label={tr('desktop_open_app_named', group.name)} onClick={() => onOpen(group.app!.id)}><Icon name="play" size={13}/></button>}
+            {group.app && <button type="button" disabled={busy} title={tr('desktop_open_app_named', group.name)} aria-label={tr('desktop_open_app_named', group.name)} onClick={() => onOpen(group.app!.id)}>{tr('desktop_open_app')}</button>}
             {group.projectPath && !group.app?.authoringSourceMissing
               ? <button type="button" disabled={busy} title={tr('apps_new_session_named', group.name)} aria-label={tr('apps_new_session_named', group.name)} onClick={() => onNewChat(group)}><Icon name="compose" size={13}/></button>
               : group.app && <button type="button" disabled={busy || Boolean(group.app.marketOrigin && !group.app.authoring?.sourceDirectory && !group.app.manifest.remix?.allowed)} title={tr('apps_edit_named', group.name)} aria-label={tr('apps_edit_named', group.name)} onClick={() => onEdit(group.app!.id)}><Icon name="pencil" size={13}/></button>}
@@ -58,7 +57,7 @@ export function LocalAppsSidebar({ groups, activeSessionId, chatVisible, library
           {group.chats.filter(chat => !query || matches(group.name) || matches(chat.title)).map(chat => <button type="button" key={chat.sessionId}
             disabled={busy} aria-current={chatVisible && chat.sessionId === activeSessionId ? 'page' : undefined}
             title={chat.title || tr('apps_development_chat')} onClick={() => onChat(chat)}>
-            <Icon name="chat" size={14}/><span>{chat.title || tr('apps_development_chat')}</span>
+            <span>{chat.title || tr('apps_development_chat')}</span>
           </button>)}
           {!group.chats.length && <p className="local-apps-sidebar-note">{tr('apps_no_development_chats')}</p>}
         </div>}

@@ -558,9 +558,10 @@ enum MDTableAlignment: Equatable {
 private struct MDBlockView: View, Equatable {
     @Environment(\.theme) private var t
     let block: MDBlock
+    var compact: Bool = false
 
     static func == (lhs: MDBlockView, rhs: MDBlockView) -> Bool {
-        lhs.block == rhs.block
+        lhs.block == rhs.block && lhs.compact == rhs.compact
     }
 
     var body: some View {
@@ -628,7 +629,7 @@ private struct MDBlockView: View, Equatable {
             // `AttributedString`s, and it keeps the layout byte-identical
             // because the spacing still comes from this VStack.
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                MDLineView(line: line).equatable()
+                MDLineView(line: line, compact: compact).equatable()
             }
         }
     }
@@ -783,11 +784,14 @@ private struct MDTableView: View, Equatable {
 private struct MDLineView: View, Equatable {
     @Environment(\.theme) private var t
     let line: MDLine
+    var compact: Bool = false
 
     @ScaledMetric(relativeTo: .body) private var bodySize: CGFloat = 17
+    @ScaledMetric(relativeTo: .footnote) private var compactSize: CGFloat = 13
+    private var textSize: CGFloat { compact ? compactSize : bodySize }
 
     static func == (lhs: MDLineView, rhs: MDLineView) -> Bool {
-        lhs.line == rhs.line
+        lhs.line == rhs.line && lhs.compact == rhs.compact
     }
 
     var body: some View {
@@ -799,8 +803,8 @@ private struct MDLineView: View, Equatable {
         case let .numbered(marker, s):
             listRow(marker: marker, s)
         case let .heading(level, s):
-            Text(AIText.parseInline(s, size: bodySize))
-                .font(.system(size: bodySize + max(0, 8 - CGFloat(level) * 2), weight: .semibold))
+            Text(AIText.parseInline(s, size: textSize))
+                .font(.system(size: textSize + (compact ? 0 : max(0, 8 - CGFloat(level) * 2)), weight: .semibold))
                 .foregroundStyle(t.text)
                 .padding(.top, 8)
                 .accessibilityAddTraits(.isHeader)
@@ -827,7 +831,7 @@ private struct MDLineView: View, Equatable {
     private func listRow(marker: String, _ s: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Text(marker)
-                .font(.system(size: bodySize))
+                .font(.system(size: textSize))
                 .foregroundColor(t.text2)
                 .frame(minWidth: 14, alignment: .trailing)
             inlineText(s)
@@ -837,9 +841,9 @@ private struct MDLineView: View, Equatable {
     private func inlineText(_ s: String) -> some View {
         // Pass the scaled size into inline spans as well, so emphasis and
         // code grow together with the surrounding Dynamic Type body.
-        Text(AIText.parseInline(s, size: bodySize))
-            .font(.system(size: bodySize))
-            .lineSpacing(bodySize * 0.25)
+        Text(AIText.parseInline(s, size: textSize))
+            .font(.system(size: textSize))
+            .lineSpacing(textSize * 0.25)
             .foregroundColor(t.text)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -850,9 +854,10 @@ private struct MDLineView: View, Equatable {
 struct AIText: View, Equatable {
     @Environment(\.theme) private var t
     let markdown: String
+    var compact: Bool = false
 
     static func == (lhs: AIText, rhs: AIText) -> Bool {
-        lhs.markdown == rhs.markdown
+        lhs.markdown == rhs.markdown && lhs.compact == rhs.compact
     }
 
     var body: some View {
@@ -875,7 +880,7 @@ struct AIText: View, Equatable {
             // safe: it closes a fenced code block only at its closing fence,
             // so no block is ever cut through the middle of a construct.
             ForEach(Array(Self.parseBlocks(markdown).enumerated()), id: \.offset) { _, block in
-                MDBlockView(block: block).equatable()
+                MDBlockView(block: block, compact: compact).equatable()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

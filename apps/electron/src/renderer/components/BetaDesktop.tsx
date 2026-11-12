@@ -3853,7 +3853,9 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               ...promptTextStyle, color: t.text,
               '--command-identity-color': commandPaletteColor(draftCommand.name, t.dark),
             } as CSSProperties}>
-              <span className="composer-command-prefix">{draftCommand.prefix}</span>{draftCommand.rest}
+              <span className="composer-command-prefix">
+                {draftCommand.prefix.slice(0, draftCommand.prefix.indexOf('/'))}<span className="composer-command-slash">/</span>{draftCommand.name}
+              </span>{draftCommand.rest}
             </div>
           )}
           {argumentHint && <ComposerSlashArgumentHint editor={input} text={text} hint={argumentHint} color={t.text4} />}

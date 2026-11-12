@@ -133,16 +133,11 @@ function renderCompaction(item: CompactionRunItem): string {
   return render(React.createElement(Stage, { liveItems: [item], sessionKey: 'session-a' }));
 }
 
-test('compaction status shows phase-bounded estimates and engine-confirmed completion', () => {
+test('compaction status shows a quiet inline label and engine-confirmed completion', () => {
   const running = renderCompaction({ type: 'compaction', id: 'compact-1', status: 'running', phase: 'summarizing', phaseStartedAt: Date.now() });
   assert.match(running, /role="status"/);
-  assert.match(running, /Summarizing conversation/);
-  assert.match(running, /class="compact-progress-track"/);
-  assert.match(running, /aria-label="Estimated progress"/);
-  assert.match(running, /aria-valuenow="10"/);
-  assert.match(running, />Estimated progress: 10% · 0s<\/span>/);
-  assert.match(running, /--sweep-base:/);
-  assert.match(running, /--sweep-highlight:/);
+  assert.match(running, /Compacting context/);
+  assert.doesNotMatch(running, /progressbar|compact-progress|compact-status-elapsed|running-sweep/);
 
   const complete = renderCompaction({
     type: 'compaction',
@@ -153,9 +148,9 @@ test('compaction status shows phase-bounded estimates and engine-confirmed compl
     bytesSaved: 32_768,
   });
   assert.match(complete, /Context compacted/);
-  assert.match(complete, /18 → 4 messages/);
-  assert.match(complete, /32 KB saved/);
-  assert.doesNotMatch(complete, /compact-progress-track/);
+  assert.doesNotMatch(complete, /18 → 4|KB saved|progressbar|compact-status-detail|compact-status-elapsed/);
+  const automatic = renderCompaction({ type: 'compaction', id: 'auto', status: 'complete', automatic: true });
+  assert.match(automatic, /Context automatically compacted/);
 
   const failed = renderCompaction({
     type: 'compaction', id: 'compact-1', status: 'error', detail: 'provider rate limited',
@@ -165,21 +160,17 @@ test('compaction status shows phase-bounded estimates and engine-confirmed compl
   assert.match(failed, /provider rate limited/);
 });
 
-test('compaction renders engine stages and keeps cancellation distinct from failure', () => {
-  for (const [phase, title] of Object.entries({
-    queued: 'Waiting for engine', preparing: 'Preparing compaction',
-    summarizing: 'Summarizing conversation', restoring: 'Restoring context',
-  })) {
+test('compaction keeps one running label across engine stages and cancellation distinct from failure', () => {
+  for (const phase of ['queued', 'preparing', 'summarizing', 'restoring']) {
     const html = renderCompaction({ type: 'compaction', id: 'compact', status: 'running', phase: phase as CompactionRunItem['phase'] });
-    assert.match(html, new RegExp(title));
-    if (phase === 'queued') assert.doesNotMatch(html, /aria-valuenow/);
-    else assert.match(html, /aria-valuenow/);
+    assert.match(html, /Compacting context/);
+    assert.doesNotMatch(html, /progressbar|aria-valuenow/);
   }
   const cancelled = renderCompaction({ type: 'compaction', id: 'compact', status: 'cancelled' });
   assert.match(cancelled, /Compaction cancelled/);
   assert.doesNotMatch(cancelled, /role="alert"|role="progressbar"/);
   const noOp = renderCompaction({ type: 'compaction', id: 'compact', status: 'complete' });
-  assert.match(noOp, /Compaction finished/);
+  assert.match(noOp, /Context compacted/);
   assert.doesNotMatch(noOp, /0 → 0|0 B saved/);
 });
 

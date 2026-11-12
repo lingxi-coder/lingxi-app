@@ -7,7 +7,7 @@ enum SettingsPage: Hashable {
     case general, customProviders, fusion, permissions, toolsAgent, hooks, plugins, diagnostics, about, archivedChats, projectsTrust
     case providerList(ProviderKindBox)
     case providerEdit(ProviderKindBox, String)
-    case voice, linuxRuntime, knowledge, memory, workflows
+    case voice, linuxRuntime, browser, knowledge, memory, workflows
     case appearance, language, notifications, input, appIntegration, privacy, permissionMode, typescriptLsp
     case skills, skillDetail(String)
     case pluginDetail(String), pluginsAdvanced
@@ -400,6 +400,7 @@ struct SettingsHost: View {
             return store.providers(b.kind).first(where: { $0.id == id })?.name ?? String(localized: "settings_title_edit")
         case .voice: return String(localized: "settings_group_voice")
         case .linuxRuntime: return String(localized: "settings_linux_runtime")
+        case .browser: return String(localized: "settings_browser_title")
         case .knowledge: return String(localized: "settings_knowledge")
         case .memory: return String(localized: "settings_memory")
         case .workflows: return String(localized: "settings_title_workflows")

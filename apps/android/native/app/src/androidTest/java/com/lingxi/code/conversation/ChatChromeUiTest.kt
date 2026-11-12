@@ -36,6 +36,54 @@ class ChatChromeUiTest {
     }
     private fun state() = ChatState(SessionRef("new", "新对话"), emptyList(), isNew = true, model = EngineModelCatalog.pending)
 
+    @Test fun runningToolGroupRevealsCallsOnlyAfterTapInBothThemes() {
+        val dark = mutableStateOf(false)
+        val expanded = mutableStateOf(emptySet<String>())
+        val calls = listOf(
+            ToolCallUi("first", "Read", status = AgentToolStatus.Completed,
+                header = ToolHeaderUi(ToolVerbUi.Read, "Read", "first.md", title = "Read(first.md)")),
+            ToolCallUi("second", "Read", status = AgentToolStatus.Running,
+                header = ToolHeaderUi(ToolVerbUi.Read, "Read", "second.md", title = "Read(second.md)")),
+        )
+        rule.setContent {
+            LingXiTheme(dark.value) {
+                Surface(Modifier.fillMaxWidth().systemBarsPadding()) { ToolGroupView(TranscriptBlock.Tools(calls), expanded.value, { id ->
+                    expanded.value = if (id in expanded.value) expanded.value - id else expanded.value + id
+                }) }
+            }
+        }
+        for (night in listOf(false, true)) {
+            rule.runOnIdle { dark.value = night; expanded.value = emptySet() }
+            rule.onNodeWithText("first.md", substring = true).assertDoesNotExist()
+            rule.onNodeWithText("second.md", substring = true).assertDoesNotExist()
+            snapshot("tools-collapsed-${if (night) "dark" else "light"}")
+            rule.onNodeWithTag("conversation.tool.group").performClick()
+            rule.onNodeWithText("first.md", substring = true).assertIsDisplayed()
+            rule.onNodeWithText("second.md", substring = true).assertIsDisplayed()
+            snapshot("tools-expanded-${if (night) "dark" else "light"}")
+            rule.onNodeWithTag("conversation.tool.group").performClick()
+            rule.onNodeWithText("second.md", substring = true).assertDoesNotExist()
+        }
+    }
+
+    @Test fun skillInstructionsRevealTheDocumentWithoutHostMetadata() {
+        val expanded = mutableStateOf(false)
+        val document = "Base directory for this skill: /skills/lingxi-api\nResolve relative references and assets from this directory; use their exact paths instead of searching the application home directory. Use read-only file tools for skill assets; keep project writes in the project directory.\n\n# Skill guide\n\nSupporting instructions."
+        rule.setContent {
+            LingXiTheme(false) { Surface(Modifier.fillMaxWidth().systemBarsPadding()) { SkillInstructionsView("lingxi-api", document, expanded.value,
+                { expanded.value = !expanded.value }, {}) } }
+        }
+        rule.onNodeWithTag("conversation.skill-instructions.body").assertDoesNotExist()
+        snapshot("skill-instructions-collapsed")
+        rule.onNodeWithTag("conversation.skill-instructions.toggle").performClick()
+        rule.onNodeWithText("Skill guide").assertIsDisplayed()
+        rule.onNodeWithText("Supporting instructions.").assertIsDisplayed()
+        rule.onNodeWithText("Base directory", substring = true).assertDoesNotExist()
+        snapshot("skill-instructions-expanded")
+        rule.onNodeWithTag("conversation.skill-instructions.toggle").performClick()
+        rule.onNodeWithTag("conversation.skill-instructions.body").assertDoesNotExist()
+    }
+
     @Test fun phoneUsesOneActionRowAndAttachmentWorks() {
         var camera = 0; var permission = 0
         val draft = mutableStateOf("")

@@ -41,11 +41,26 @@ test('generic tools and MCP endpoints retain distinct groups despite sharing a v
   const items = [generic('one', 'ToolSearch'), generic('two', 'ToolSearch'), generic('three', 'mcp__docs__search'), generic('four', 'mcp__web__search')];
   assert.deepEqual(transcriptRows(items, false).flatMap(row => row.type === 'tool-group' ? [row.tools.map(tool => tool.id)] : []), [['one', 'two'], ['three'], ['four']]);
 });
-test('questions, permissions, plans and agent launches remain individually reachable', () => {
-  for (const name of ['AskUserQuestion', 'PermissionRequest', 'SubmitPlan', 'Agent', 'Skill']) {
+test('interactive calls remain reachable while adjacent skills share a stable disclosure', () => {
+  for (const name of ['AskUserQuestion', 'PermissionRequest', 'SubmitPlan', 'Agent']) {
     const items = [1, 2].map(index => ({ ...tool(`${name}-${index}`), tool: name }));
     assert.equal(transcriptRows(items, false).filter(row => row.type === 'tool-group').length, 2, name);
   }
+  const skills: ToolRunItem[] = ['lingxi-api', 'other-skill'].map((name, index) => ({
+    ...tool(`skill-${index}`), tool: 'Skill',
+    view: { verb: 'skill', icon: 'sparkles', label: 'Skill', primary: name, title: `Skill(${name})` },
+  }));
+  const grouped = transcriptRows(skills, false);
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0]?.id, transcriptRows([{ ...skills[0]!, status: 'running' }], true)[0]?.id);
+  assert.equal(transcriptRows([skills[0]!, tool('read'), skills[1]!], false).length, 3);
+  assert.equal(transcriptRows([skills[0]!, { type: 'narration', id: 'note', text: 'Progress' }, skills[1]!], false).length, 3);
+  assert.equal(transcriptRows([skills[0]!, { ...skills[1]!, agentId: 'child' }], false).length, 2);
+  assert.match(renderGroup(skills), /Skill · 2 calls/);
+  assert.doesNotMatch(renderGroup(skills), /data-status=/);
+  const expanded = renderGroup(skills, true);
+  assert.equal((expanded.match(/data-status=/g) ?? []).length, 2);
+  for (const skill of skills) assert.ok(expanded.includes(skill.view.primary!));
 });
 
 const taskTool = (id: string, name: string, primary?: string): ToolRunItem => ({
@@ -117,15 +132,17 @@ test('a lone tool with result details has one disclosure without a repeated grou
   assert.equal((html.match(/<button/g) ?? []).length, 1);
   assert.doesNotMatch(html, /tool-group-trigger/);
 });
-test('running groups keep a stable summary, show current work, and honor expanded history', () => {
+test('running groups keep a stable collapsed summary and show calls only when opened', () => {
   const tools = [tool('finished'), tool('retry', 'error'), tool('active', 'running')];
   const closed = renderGroup(tools);
   assert.match(closed, /Read files · 3 calls · 1 running/);
-  assert.match(closed, /Read active/);
-  assert.doesNotMatch(closed, /Read finished|Read retry|unsuccessful|Output/);
+  assert.match(closed, /aria-expanded="false"/);
+  assert.doesNotMatch(closed, /Read active|Read finished|Read retry|unsuccessful|Output|tool-group-calls|data-status=/);
   const opened = renderGroup(tools, true);
   for (const id of ['finished', 'retry', 'active']) assert.match(opened, new RegExp(`Read ${id}`));
   assert.equal((opened.match(/data-status="running"/g) ?? []).length, 1);
+  assert.doesNotMatch(opened, /Output active/);
+  assert.match(renderGroup(tools, true, true), /Output active/);
 });
 test('settled mixed results collapse neutrally and preserve unsuccessful attempts in details', () => {
   const tools = [tool('a'), tool('b', 'error')];

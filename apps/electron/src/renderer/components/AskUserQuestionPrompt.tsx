@@ -124,14 +124,14 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
     '--dialog-text': t.text,
     '--dialog-text-2': t.text2,
     '--dialog-text-3': t.text3,
-    '--dialog-accent': t.accent,
-    '--dialog-accent-border': t.accentBorder,
+    '--dialog-accent': t.text,
+    '--dialog-accent-border': t.borderStrong,
     '--dialog-danger': t.danger,
   } as CSSProperties;
 
   return (
     <section
-      className="inline-interaction-card ask-user-question-inline"
+      className="inline-interaction-card interaction-prompt ask-user-question-inline"
       style={dialogVariables}
       role="region"
       aria-labelledby="lingxi-ask-heading"

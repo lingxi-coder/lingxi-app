@@ -369,6 +369,7 @@ export interface RemotePromptRow {
  * same turn changes nothing.
  */
 export function appendRemoteUserPrompt(state: ConversationState, prompt: RemotePromptRow, now = Date.now()): ConversationState {
+  if (/^\/compact(?:\s|$)/i.test(prompt.text.trim())) return state;
   const already = state.items.some((item) => item.type === 'narration' && item.role === 'user'
     && item.origin?.kind === 'device' && item.origin.turnId === prompt.turnId);
   if (already) return state;
@@ -397,7 +398,7 @@ export function slashCommandEchoesRequest(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed) return false;
   const name = trimmed.split(/\s/, 1)[0]?.toLowerCase() ?? '';
-  return isTaskControl(name) || name === '/fusion' || isPlanRequest(name, trimmed);
+  return name === '/goal' || name === '/fusion' || isPlanRequest(name, trimmed);
 }
 
 /** Echo task requests that should be visible before the engine starts their turn. */
@@ -408,7 +409,7 @@ export function beginSlashCommand(state: ConversationState, raw: string): Conver
   const echo = slashCommandEchoesRequest(trimmed);
   const next = echo ? appendUserPrompt(state, trimmed) : state;
   return {
-    ...next, pendingSlashName: name, pendingSlashPrompt: echo ? null : trimmed,
+    ...next, pendingSlashName: name, pendingSlashPrompt: echo || name === '/compact' ? null : trimmed,
     pendingSlashWasRunning: state.running, running: true, commandResult: null,
   };
 }
@@ -440,7 +441,7 @@ export function beginLocalSlashCommand(state: ConversationState, raw: string): C
   const trimmed = raw.trim();
   if (!trimmed) return state;
   const name = trimmed.split(/\s/, 1)[0]?.toLowerCase() ?? '';
-  const next = isTaskControl(name) ? appendUserPrompt(state, trimmed) : state;
+  const next = name === '/goal' ? appendUserPrompt(state, trimmed) : state;
   return {
     ...next, pendingSlashName: name, pendingSlashPrompt: null,
     pendingSlashWasRunning: state.running, commandResult: null,
@@ -450,10 +451,8 @@ export function beginLocalSlashCommand(state: ConversationState, raw: string): C
 /**
  * Make manual compaction visible before the bridge can report completion.
  *
- * Composer submission has already echoed `/compact` through
- * {@link beginLocalSlashCommand}; command-palette and diagnostics entry points
- * have not. The pending slash name distinguishes those paths so every entry
- * point gets exactly one command echo and one status row.
+ * Every entry point shares one status row; the utility command itself does
+ * not create a user message in the conversation.
  */
 export function beginCompaction(state: ConversationState, now = Date.now()): ConversationState {
   if (state.activeCompactionId !== null) {
@@ -461,16 +460,14 @@ export function beginCompaction(state: ConversationState, now = Date.now()): Con
     if (active?.type === 'compaction' && active.status === 'running') return state;
   }
 
-  const pendingIsCompact = state.pendingSlashName?.trim().toLocaleLowerCase() === '/compact';
-  const base = pendingIsCompact ? state : appendUserPrompt(state, '/compact', [], now);
-  const id = itemId(base.nextId);
+  const id = itemId(state.nextId);
   return {
-    ...base,
-    items: [...base.items, { type: 'compaction', id, status: 'running', phase: 'queued', startedAt: now }],
+    ...state,
+    items: [...state.items, { type: 'compaction', id, status: 'running', automatic: false, phase: 'queued', startedAt: now }],
     pendingSlashName: '/compact',
     activeCompactionId: id,
     lastError: null,
-    nextId: base.nextId + 1,
+    nextId: state.nextId + 1,
   };
 }
 
@@ -956,7 +953,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       const id = itemId(state.nextId);
       return {
         ...state,
-        items: [...state.items, { type: 'compaction', id, status: 'running', phase, startedAt: now, phaseStartedAt: now }],
+        items: [...state.items, { type: 'compaction', id, status: 'running', automatic: state.pendingSlashName !== '/compact', phase, startedAt: now, phaseStartedAt: now }],
         activeCompactionId: id,
         nextId: state.nextId + 1,
       };
@@ -993,7 +990,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       if (index >= 0) {
         items[index] = { ...items[index], ...completed } as RunItem;
       } else {
-        items.push({ ...completed, id: itemId(nextId) });
+        items.push({ ...completed, id: itemId(nextId), automatic: state.pendingSlashName !== '/compact' });
         nextId += 1;
       }
       const summaryId = index >= 0 ? items[index]!.id : itemId(nextId - 1);
@@ -1182,8 +1179,6 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         const removed = new Set<string>();
         if (index >= 0) {
           removed.add(state.items[index]!.id);
-          const echo = state.items[index - 1];
-          if (echo?.type === 'narration' && echo.role === 'user' && /^\/compact(?:\s|$)/i.test(echo.text)) removed.add(echo.id);
         }
         const items = state.items.filter((item) => !removed.has(item.id));
         const indexById = firstIndexById(items);
@@ -1343,6 +1338,8 @@ export function conversationFromMessages(
   let foldedItemIds: readonly string[] = [];
 
   for (const message of messages) {
+    if (message.role === 'user' && message.blocks.every(block => block.type === 'text')
+      && /^\/compact(?:\s|$)/i.test(message.blocks.map(block => block.type === 'text' ? block.text : '').join('\n').trim())) continue;
     const messageStart = items.length;
     if (message.loop_wakeup) {
       const restored = reduceEvent({ ...emptyConversation(), items, nextId, foldedItemIds }, {
@@ -1421,12 +1418,11 @@ export function conversationFromMessages(
           const id = itemId(nextId++);
           const summaryContent = block.summary?.trim() ?? '';
           items.push({
-            type: 'narration',
+            type: 'compaction',
             id,
-            text: block.messages_before > 0
-              ? `Conversation compacted (${block.messages_before} messages)`
-              : 'Conversation compacted',
-            tone: 'muted',
+            status: 'complete',
+            messagesBefore: block.messages_before,
+            messagesAfter: block.messages_after,
           });
           if (summaryContent) {
             summaries.push({

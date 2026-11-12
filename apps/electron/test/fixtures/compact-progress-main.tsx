@@ -17,7 +17,8 @@ function Fixture() {
   const [state, setState] = useState<ConversationState>(emptyConversation);
   const [mount, setMount] = useState(0);
   const [agentsOpen, setAgentsOpen] = useState(false);
-  const palette = tokens(true);
+  const [dark, setDark] = useState(false);
+  const palette = tokens(dark);
   Object.assign(window, {
     compactFixture: {
       dispatch(event: ClientEvent) {
@@ -39,6 +40,9 @@ function Fixture() {
       },
       remount() {
         flushSync(() => setMount((current) => current + 1));
+      },
+      setTheme(dark: boolean) {
+        flushSync(() => setDark(dark));
       },
       state() { return state; },
     },

@@ -17,7 +17,8 @@ import SwiftUI
             outputTokens: 0,
             apiCalls: 0,
             sessionDurationSecs: 0,
-            formatted: "$0.00"
+            formatted: "$0.00",
+            byAccount: []
         )
 
         private func makeSource(

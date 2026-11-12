@@ -177,7 +177,7 @@ export function PermissionPrompt({ request, onApprove, onDeny, allowPersistentRu
 
   return (
     <section
-      className="inline-interaction-card permission-prompt-inline"
+      className="inline-interaction-card interaction-prompt permission-prompt-inline"
       style={dialogVariables}
       role="region"
       aria-labelledby="lingxi-permission-heading"

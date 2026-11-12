@@ -116,7 +116,7 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
     } as CSSProperties;
     return (
       <section
-        className="inline-interaction-card computer-access-prompt"
+        className="inline-interaction-card interaction-prompt computer-access-prompt"
         style={variables}
         role="region"
         aria-labelledby="lingxi-computer-access-title"

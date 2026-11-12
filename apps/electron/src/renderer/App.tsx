@@ -739,6 +739,13 @@ export function App() {
                   foldedItemIds={bridge.sessionLoading ? [] : bridge.conversation.foldedItemIds}
                   onVisualizationFollowup={bridge.offerVisualizationFollowup}
                 /></BotProposalAction.Provider>
+                {/* Approval surfaces belong above the composer, never below the input. */}
+                <ComputerAccessPrompt
+                  request={bridge.pendingComputerAccess}
+                  onSubmit={(requestId, response) => { void bridge.approveComputerAccess(requestId, response).catch(() => undefined); }}
+                  onDeny={(requestId) => { void bridge.denyComputerAccess(requestId).catch(() => undefined); }}
+                  onOpenSystemSettings={(pane) => { void bridge.openSystemSettings(pane).catch(() => undefined); }}
+                />
                 <PermissionPrompt
                   request={bridge.pendingPermission}
                   onApprove={(requestId, response) => { void bridge.approve(requestId, response).catch(() => undefined); }}
@@ -806,13 +813,6 @@ export function App() {
           </div>
 
           </div>
-
-          <ComputerAccessPrompt
-            request={bridge.pendingComputerAccess}
-            onSubmit={(requestId, response) => { void bridge.approveComputerAccess(requestId, response).catch(() => undefined); }}
-            onDeny={(requestId) => { void bridge.denyComputerAccess(requestId).catch(() => undefined); }}
-            onOpenSystemSettings={(pane) => { void bridge.openSystemSettings(pane).catch(() => undefined); }}
-          />
 
           </main>
           {page === 'chat' && !bridge.sessionLoading && <>

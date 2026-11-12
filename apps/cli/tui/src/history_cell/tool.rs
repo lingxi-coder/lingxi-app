@@ -61,7 +61,11 @@ pub(crate) fn tool_use_lines(
     let header = StyledLine {
         spans: vec![
             StyledSpan::styled(
-                TOOL_MARKER.to_string(),
+                if tool.eq_ignore_ascii_case("computer") {
+                    "▣ ".to_string()
+                } else {
+                    TOOL_MARKER.to_string()
+                },
                 SpanStyle {
                     fg: theme.success,
                     ..SpanStyle::default()
@@ -152,6 +156,28 @@ pub(crate) fn activity_fold_key(tool: &str, input: &serde_json::Value) -> Option
     None
 }
 
+/// Shared live/replay projection. Interactive tools retain their own rows.
+pub(crate) fn transcript_activity_key(
+    tool: &str,
+    input: &serde_json::Value,
+) -> Option<&'static str> {
+    activity_fold_key(tool, input)
+        .map(|key| if key == "agents" { key } else { "activity" })
+        .or_else(|| {
+            let name = tool.to_ascii_lowercase();
+            (!name.contains("permission")
+                && !matches!(
+                    name.as_str(),
+                    "askuserquestion"
+                        | "localapp"
+                        | "enterplanmode"
+                        | "exitplanmode"
+                        | "submitplan"
+                ))
+            .then_some("activity")
+        })
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ActivityEntry {
     pub id: String,
@@ -165,6 +191,9 @@ pub(crate) struct ActivityEntry {
 #[derive(Debug, Clone)]
 pub(crate) struct ActivityFoldCell {
     pub key: &'static str,
+    pub reasoning: String,
+    pub thinking: bool,
+    pub sealed: bool,
     pub entries: Vec<ActivityEntry>,
 }
 
@@ -187,9 +216,33 @@ impl StyledCell for ActivityFoldCell {
         let running = self
             .entries
             .iter()
-            .filter(|entry| entry.result.is_none())
+            .filter(|entry| !self.sealed && entry.result.is_none())
             .count();
-        let label = if self.key == "agents" {
+        let label = if self.entries.is_empty() || (self.thinking && running == 0) {
+            self.reasoning
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .last()
+                .unwrap_or("Thinking…")
+                .to_owned()
+        } else if self.key == "activity" {
+            let mut names: Vec<String> = Vec::new();
+            for entry in &self.entries {
+                if !names.contains(&entry.tool) {
+                    names.push(entry.tool.clone());
+                }
+            }
+            format!(
+                "{} · {} {}",
+                names.join(", "),
+                self.entries.len(),
+                if self.entries.len() == 1 {
+                    "call"
+                } else {
+                    "calls"
+                }
+            )
+        } else if self.key == "agents" {
             self.entries
                 .iter()
                 .map(|entry| {
@@ -364,6 +417,12 @@ impl StyledCell for ActivityFoldCell {
         }
         let mut lines = vec![StyledLine { spans }];
         if verbose {
+            if !self.reasoning.is_empty() {
+                lines.extend(
+                    crate::history_cell::message::ThinkingCell::new(self.reasoning.clone())
+                        .styled_lines(width, theme, true),
+                );
+            }
             for entry in &self.entries {
                 lines.extend(tool_use_lines(&entry.tool, &entry.input, theme, true));
                 if let Some(result) = &entry.result {
@@ -506,6 +565,9 @@ pub(crate) fn group_tool_use_lines(
             .is_some()
     {
         return ActivityFoldCell {
+            reasoning: String::new(),
+            thinking: false,
+            sealed: false,
             key: activity_fold_key(tool, &entries[0].0).unwrap(),
             entries: entries
                 .iter()
@@ -969,6 +1031,9 @@ mod tests {
         use super::{ActivityEntry, ActivityFoldCell};
         use serde_json::json;
         let cell = ActivityFoldCell {
+            reasoning: String::new(),
+            thinking: false,
+            sealed: false,
             key: "agents",
             entries: (0..6)
                 .map(|i| ActivityEntry {
@@ -1007,6 +1072,9 @@ mod tests {
         use super::{ActivityEntry, ActivityFoldCell};
         use serde_json::json;
         let cell = ActivityFoldCell {
+            reasoning: String::new(),
+            thinking: false,
+            sealed: false,
             key: "tasks",
             entries: vec![
                 ActivityEntry {
@@ -1038,6 +1106,9 @@ mod tests {
         use serde_json::json;
         for delivery in ["withheld", "pending", "flagged"] {
             let cell = ActivityFoldCell {
+                reasoning: String::new(),
+                thinking: false,
+                sealed: false,
                 key: "agents",
                 entries: vec![ActivityEntry {
                     id: "a".into(),

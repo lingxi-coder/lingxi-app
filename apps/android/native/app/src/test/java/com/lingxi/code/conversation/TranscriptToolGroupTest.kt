@@ -98,6 +98,19 @@ class TranscriptToolGroupTest {
         assertTrue(ordinary.last() is ChatRenderItem.Message)
     }
 
+    @Test fun currentLocalAppTitleMatchesWithoutToolBody() {
+        val call = ToolCallUi("skill", "Skill", status = AgentToolStatus.Completed,
+            header = ToolHeaderUi(ToolVerbUi.Skill, "Skill", primary = "local-app", title = "Skill(local-app)"))
+        for (title in listOf("Local apps", "Desktop Local Apps")) {
+            for (newline in listOf("\n", "\r\n")) {
+                val text = "# $title\n\nCreate an application project.".replace("\n", newline)
+                assertTrue(matchesSkillInstructions(call, text))
+                assertFalse(matchesSkillInstructions(call.copy(header = call.header?.copy(primary = "other")), text))
+                assertFalse(matchesSkillInstructions(call.copy(status = AgentToolStatus.Failed), text))
+            }
+        }
+    }
+
     @Test fun skillDirectoryPreamblesMatchWithoutFoldingUnrelatedUserText() {
         val text = "# LingXi API guide\n\nFull instructions."
         val call = ToolCallUi("skill", "Skill", status = AgentToolStatus.Completed, skillBody = text)

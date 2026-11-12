@@ -175,7 +175,7 @@ test('compaction keeps one running label across engine stages and cancellation d
 });
 
 test('compaction progress matches shared hybrid phase boundaries', () => {
-  const runtimeRoot = execFileSync('python3', [
+  const runtimeRoot = execFileSync(process.env.PYTHON || 'python3', [
     fileURLToPath(new URL('../../../scripts/lib/runtime_source.py', import.meta.url)), '--root',
   ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
   const oracle = JSON.parse(readFileSync(join(runtimeRoot, 'crates/client/snapshots/compaction_hybrid_progress.json'), 'utf8'));
@@ -342,7 +342,7 @@ test('assistant slash-like text keeps its literal slash rendering', () => {
   assert.match(html, />\/cron list<\/span>/);
 });
 
-test('active agent thinking shimmers the text without a leading indicator', () => {
+test('active agent thinking shimmers inside the shared collapsed activity header', () => {
   const item = { type: 'thinking', id: 'thinking-1', text: 'Working', streamed: true } as const;
   const html = render(React.createElement(Stage, {
     liveItems: [item],
@@ -350,7 +350,7 @@ test('active agent thinking shimmers the text without a leading indicator', () =
     sessionKey: 'session-a',
   }));
 
-  assert.match(html, /class="transcript-thinking-label running-sweep"[^>]*>Working</);
+  assert.match(html, /class="transcript-activity-label running-sweep"[^>]*>Working</);
   assert.doesNotMatch(html, />Thinking…</);
   assert.doesNotMatch(html, /width:10px;height:10px|border-radius:99px|box-shadow:0 0 0 4px/);
   assert.doesNotMatch(html, /cursor-blink[^>]*>Thinking…|<svg[^>]*>[^<]*Thinking…/);
@@ -366,7 +366,7 @@ test('tool rows use compact adjacency hooks and a system-font transcript type sc
     sessionKey: 'session-a',
   }));
   const runTypes = [...html.matchAll(/data-run-type="([^"]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(runTypes, ['tool']);
+  assert.deepEqual(runTypes, ['activity']);
 
   const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
   assert.match(css, /\.transcript-row \+ \.transcript-row\s*\{[^}]*margin-top:\s*1rem;/s);
@@ -402,10 +402,10 @@ test('a multi-tool group keeps its transcript row wrapper so row spacing stays f
     modUiSessionId: 'session-a',
   }));
   const runTypes = [...html.matchAll(/data-run-type="([^"]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(runTypes, ['tool']);
+  assert.deepEqual(runTypes, ['activity']);
   // Direct child of the feed — not nested inside the site's `.mod-ui-parent-site`
   // wrapper, which is what the `+` sibling margin rules key off.
-  assert.match(html, /class="desktop-stage-feed"[^>]*>\s*<div class="transcript-row" data-row-type="tool-group"[^>]*><div class="transcript-run-item" data-run-type="tool"/);
+  assert.match(html, /class="desktop-stage-feed"[^>]*>\s*<div class="transcript-row" data-row-type="tool-group"[^>]*><div class="transcript-run-item" data-run-type="activity"/);
   assert.doesNotMatch(html, /class="desktop-stage-feed"[^>]*>\s*<div class="mod-ui-parent-site"/);
 });
 
@@ -912,7 +912,7 @@ test('a multi-key permission payload is labelled, redacted, and never dropped', 
   assert.match(html, /\[REDACTED\]/);
 });
 
-test('thinking displays the received content in place without a disclosure', () => {
+test('thinking summarizes received content in the collapsed activity before following prose', () => {
   const html = render(React.createElement(Stage, {
     running: true,
     liveItems: [
@@ -923,7 +923,9 @@ test('thinking displays the received content in place without a disclosure', () 
   assert.match(html, />Reasoning body</);
   assert.match(html, /title="Reasoning body"/);
   assert.match(html, /running-sweep/);
-  assert.doesNotMatch(html, />Thinking…<|aria-expanded/);
+  assert.doesNotMatch(html, />Thinking…</);
+  assert.match(html, /class="[^"]*transcript-activity-trigger"[^>]*aria-expanded="false"/);
+  assert.doesNotMatch(html, /class="transcript-activity-details"/);
   assert.ok(html.indexOf('Reasoning body') < html.indexOf('Following message'));
 });
 
@@ -937,7 +939,7 @@ test('thinking uses the generic label only until nonblank content arrives', () =
   }
 });
 
-test('completed, historical and stopped thinking is hidden regardless of legacy preference', () => {
+test('thinking remains inspectable in a collapsed activity whose animation follows the current turn', () => {
   for (const collapseThoughtsByDefault of [true, false, undefined]) {
     for (const state of [
       { running: true, streamed: true, done: true },
@@ -949,8 +951,12 @@ test('completed, historical and stopped thinking is hidden regardless of legacy 
         collapseThoughtsByDefault,
         liveItems: [{ type: 'thinking', id: 'thought-hidden', text: 'Reasoning body', streamed: state.streamed, done: state.done }],
       }));
-      assert.doesNotMatch(html, /Reasoning body|aria-expanded/);
-      assert.equal(html.includes('data-run-type="thinking"'), state.running);
+      assert.match(html, /data-run-type="activity"/);
+      assert.match(html, /class="[^"]*transcript-activity-trigger"[^>]*aria-expanded="false"/);
+      assert.match(html, />Reasoning body</);
+      assert.doesNotMatch(html, /class="transcript-activity-details"|data-run-type="thinking"/);
+      assert.equal(html.includes('data-active="true"'), state.running);
+      assert.equal(html.includes('running-sweep'), state.running);
     }
   }
 });

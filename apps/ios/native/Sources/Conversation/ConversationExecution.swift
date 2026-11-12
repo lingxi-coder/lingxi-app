@@ -961,7 +961,7 @@ enum ConversationSkillInstructions {
         let text = displayText(message.text)
         let body = tool.skillBody.map(normalizedNewlines)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return (!body.isEmpty && (text == body || text.hasPrefix(body + "\n"))) ||
-            (tool.header?.primary == "local-app" && text.hasPrefix("# Desktop Local Apps\n"))
+            (tool.header?.primary == "local-app" && (text.hasPrefix("# Desktop Local Apps\n") || text.hasPrefix("# Local apps\n")))
     }
 }
 

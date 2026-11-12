@@ -1,5 +1,7 @@
 import { app, BrowserWindow } from 'electron';
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { configureFixtureWindow, waitForFixture } from './electron-test-environment.mjs';
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 async function main() {
@@ -55,6 +57,29 @@ async function main() {
       assert.equal(await run(`document.querySelectorAll('.transcript-activity-details .transcript-tool-row').length`), 2);
       assert.match(await run(`document.querySelector('.transcript-activity-details').textContent`), /Inspect layout/);
       result.push({ count, samples: samples.length, height: base.height, maximumShift: Math.max(...samples.map(value => Math.abs(value.marker - base.marker))) });
+    }
+    for (const dark of [false, true]) {
+      for (const width of [1000, 440]) {
+        window.setSize(width, 800);
+        await run(`window.activityFixture.skill(${dark})`);
+        await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+        const toggle = '.local-app-instructions-toggle';
+        assert.equal(await run(`document.querySelector('${toggle}').getAttribute('aria-expanded')`), 'false');
+        assert.equal(await run(`document.querySelectorAll('.user-message-bubble').length`), 0);
+        assert.equal(await run(`document.querySelector('.local-app-instructions-body').getBoundingClientRect().height`), 0);
+        assert.equal(await run(`document.querySelector('.local-app-instructions').scrollWidth <= document.querySelector('.local-app-instructions').clientWidth`), true);
+        assert.equal(await run(`document.querySelector('.local-app-instructions').getBoundingClientRect().right <= window.innerWidth`), true);
+        await run(`document.querySelector('${toggle}').click()`);
+        assert.equal(await run(`document.querySelector('${toggle}').getAttribute('aria-expanded')`), 'true');
+        const text = await run(`document.querySelector('.local-app-instructions-body').innerText`);
+        assert.match(text, /Choose the execution host and interfaces/);
+        assert.doesNotMatch(text, /Base directory|Resolve relative references/);
+        await run(`document.querySelector('${toggle}').click()`);
+        if (process.env.LINGXI_SKILL_EVIDENCE) {
+          mkdirSync(process.env.LINGXI_SKILL_EVIDENCE, { recursive: true });
+          writeFileSync(join(process.env.LINGXI_SKILL_EVIDENCE, `skill-${dark ? 'dark' : 'light'}-${width}.png`), (await window.webContents.capturePage()).toPNG());
+        }
+      }
     }
     console.log(JSON.stringify(result));
   } finally { window.destroy(); }

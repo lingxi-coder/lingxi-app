@@ -26,7 +26,7 @@ export function skillInstructionNames(items: readonly RunItem[]): ReadonlyMap<st
       const body = output && typeof output === 'object' && !Array.isArray(output) && typeof output.body === 'string'
         ? normalizedText(output.body).trim() : '';
       const text = skillInstructionText(item.text);
-      const knownLocalApp = skill.view.primary === 'local-app' && /^# Desktop Local Apps\r?\n/.test(text);
+      const knownLocalApp = skill.view.primary === 'local-app' && /^# (?:Desktop Local Apps|Local apps)\n/.test(text);
       if ((body && (text === body || text.startsWith(`${body}\n`))) || knownLocalApp) {
         ids.set(item.id, skill.view.primary || skill.view.label);
       }

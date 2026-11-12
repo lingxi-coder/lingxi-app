@@ -95,3 +95,17 @@ test('expanded instructions keep the entire document readable in both themes', (
     assert.doesNotMatch(html, /2.15em|hidden=""/);
   }
 });
+
+test('current local-app document stays collapsed when the tool body is unavailable', () => {
+  const text = '# Local apps\n\nCreate an application project, publish it into this device\'s Apps library, and verify the published application.\n\n## Choose the execution host and interfaces\n\nCurrent instructions.';
+  for (const newline of ['\n', '\r\n']) {
+    const prompt = { ...body, text: text.replace(/\n/g, newline) };
+    const html = render(React.createElement(Stage, { liveItems: [skill, prompt], sessionKey: 'current-local-app' }));
+    assert.match(html, /data-run-type="skill-instructions"/);
+    assert.match(html, /aria-expanded="false"/);
+    assert.doesNotMatch(html, /user-message-bubble|Show more|Choose the execution host/);
+    assert.equal(skillInstructionNames([{ ...skill, view: { ...skill.view, primary: 'another-skill' } }, prompt]).size, 0);
+    assert.equal(skillInstructionNames([{ ...skill, status: 'error' }, prompt]).size, 0);
+    assert.equal(skillInstructionNames([prompt]).size, 0);
+  }
+});

@@ -55,6 +55,21 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         XCTAssertEqual(ids.filter { $0.hasPrefix("agents:") }, ["agents:after:spawn-a"])
     }
 
+    func testCurrentLocalAppTitleMatchesWithoutToolBody() {
+        var trace = ConversationToolTrace(id: "skill", tool: "Skill", status: .completed)
+        trace.header = ConversationToolHeader(verb: .skill, label: "Skill", primary: "local-app", qualifier: nil, count: nil, subLine: nil, title: "Skill(local-app)")
+        for title in ["Local apps", "Desktop Local Apps"] {
+            for newline in ["\n", "\r\n"] {
+                let text = "# \(title)\n\nCreate an application project.".replacingOccurrences(of: "\n", with: newline)
+                XCTAssertTrue(ConversationSkillInstructions.matches(Message(role: .user, text: text), tool: trace))
+                var failed = trace
+                failed.status = .failed
+                XCTAssertFalse(ConversationSkillInstructions.matches(Message(role: .user, text: text), tool: failed))
+                XCTAssertFalse(ConversationSkillInstructions.matches(Message(role: .user, text: "Another request"), tool: trace))
+            }
+        }
+    }
+
     func testSkillPromptRequiresMatchingCompletedToolBody() {
         let body = "# LingXi API guide\n\nFull instructions."
         let trace = ConversationToolTrace(id: "skill", tool: "Skill", status: .completed, skillBody: body)

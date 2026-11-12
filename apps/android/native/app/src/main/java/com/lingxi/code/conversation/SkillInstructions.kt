@@ -44,7 +44,7 @@ internal fun matchesSkillInstructions(call: ToolCallUi, text: String): Boolean {
     val body = call.skillBody?.let(::normalizeSkillNewlines)?.trim().orEmpty()
     val prompt = skillInstructionText(text)
     return (body.isNotEmpty() && (prompt == body || prompt.startsWith("$body\n"))) ||
-        (call.header?.primary == "local-app" && prompt.startsWith("# Desktop Local Apps\n"))
+        (call.header?.primary == "local-app" && (prompt.startsWith("# Desktop Local Apps\n") || prompt.startsWith("# Local apps\n")))
 }
 
 @Composable

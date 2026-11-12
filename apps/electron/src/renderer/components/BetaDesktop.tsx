@@ -1540,8 +1540,7 @@ export function BetaTopBar({ bridge, bot, app, runtimeCenterOpen, onToggleRuntim
   const remote = remoteIndicator(remoteState.sessions, bridge.activeSession?.sessionId);
   const owner = bridge.bootstrap?.conversationSpaces.sessions.find((entry) => entry.sessionId === bridge.activeSession?.sessionId);
   const sourceLabel = owner?.handoff && tr('desktop_handoff_source', owner.handoff.sourceMode === 'chat' ? 'Chat' : 'Code', owner.handoff.sourceSessionId);
-  const targetMode = owner?.mode === 'chat' ? 'Code' : 'Chat';
-  const handoffLabel = bridge.handoffPending ? tr('desktop_handoff_cancel') : bridge.handoffRetryAvailable ? tr('desktop_handoff_retry') : tr('desktop_handoff_continue', targetMode);
+  const handoffLabel = bridge.handoffPending ? tr('desktop_handoff_cancel') : tr('desktop_handoff_retry');
 
   const topbarActionTokens = {
     '--topbar-action-focus': t.surfaceHover,
@@ -1558,7 +1557,7 @@ export function BetaTopBar({ bridge, bot, app, runtimeCenterOpen, onToggleRuntim
         <span className="desktop-topbar-title" style={{ color: t.text }}>{bot?.name || app?.name || sessionTitle || basename(projectPath)}</span>
       </div>
       {sourceLabel && owner?.handoff && <button type="button" className="no-drag desktop-topbar-action" title={sourceLabel} disabled={bridge.sessionLoading} onClick={() => { void bridge.openHandoffSource(owner.handoff!); }} style={{ ...topbarActionTokens, width: 'auto', maxWidth: 220, minWidth: 0, padding: '0 8px', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sourceLabel}</button>}
-      {!bot && !app && owner && <button type="button" className="no-drag desktop-topbar-action"
+      {!bot && !app && owner && (bridge.handoffPending || bridge.handoffRetryAvailable) && <button type="button" className="no-drag desktop-topbar-action"
         disabled={bridge.sessionLoading || (!bridge.connected && !bridge.handoffPending)}
         title={handoffLabel}
         onClick={() => { void (bridge.handoffPending ? bridge.cancelSessionHandoff() : bridge.prepareSessionHandoff()); }}

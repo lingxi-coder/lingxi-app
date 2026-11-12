@@ -66,7 +66,7 @@ function taskView(task, now) {
     epoch: task.epoch, activeSpentMs: task.activeSpentMs,
     ...(task.cancelRequestedAt ? { cancelRequestedAt: task.cancelRequestedAt } : {}),
     ...(task.unverifiedOperations > 0 ? { unverifiedOperations: task.unverifiedOperations } : {}),
-    ...(state === 'waiting' ? { wait: { waitId: task.currentWaitId, kind: 'human_input', recipient: task.requester,
+    ...(state === 'waiting' ? { wait: { waitId: task.currentWaitId, kind: task.currentWaitKind ?? 'human_input', recipient: task.requester,
       expiresAt: task.deadline, messageId: questionIds(task.taskId, task.currentWaitId).messageId } } : {}),
     ...(task.replyId ? { replyId: task.replyId } : {}), ...(task.artifactId ? { artifactId: task.artifactId } : {}),
     ...(task.usage ? { usage: task.usage } : {}) };
@@ -114,7 +114,7 @@ export class SharedBotsStore {
       else if (action === 'startTask') response = await this.start(context);
       else if (action === 'continueTask') response = await this.continueRun(context);
       else if (action === 'pauseTask') response = await this.pauseForWait(context);
-      else if (action === 'answerWait') response = await this.answerWait(context);
+      else if (action === 'answerWait' || action === 'decideWait') response = await this.answerWait(context);
       else if (action === 'cancelTask') response = await this.cancelTask(context);
       else if (action === 'recordOperation') response = await this.recordOperation(context);
       else if (action === 'settleOperation') response = await this.settleOperation(context);
@@ -188,7 +188,7 @@ export class SharedBotsStore {
       return [{ sharedBotId: doc.id, name: b.name, description: b.description, revision: b.identity.revision,
         permitted: activeOwner && identityPermitted(b, identity), ready: activeOwner && b.identity.state === 'published' && !!d?.ready && d.enabled && d.onlineUntil > now,
         maintainer: b.identity.maintainer, usePolicy: b.identity.usePolicy, state: b.identity.state,
-        onlineUntil: d?.onlineUntil ?? 0, quotas: b.quotas, ...(b.sharedList ? { sharedList: { title: b.sharedList.title } } : {}),
+        onlineUntil: d?.onlineUntil ?? 0, quotas: b.quotas, ...(b.sharedList ? { sharedList: { title: b.sharedList.title, ...(b.sharedList.approval === 'requester' ? { approval: 'requester' } : {}) } } : {}),
         ...(ownerOf(b, identity) && d ? { instanceId: d.instanceId } : {}) }];
     }) };
   }
@@ -423,7 +423,8 @@ export class SharedBotsStore {
     }
     const permitId = randomId(), deadline = now + remaining, epoch = task.epoch + 1;
     const physicalDispatchesSpent = Math.max(task.physicalDispatchesSpent, p.dispatchedRequests);
-    const wait = answer ? { waitId: task.resume.waitId, answerMessageId: task.resume.answerMessageId, answerSeq: task.resume.answerSeq } : undefined;
+    const wait = answer ? { waitId: task.resume.waitId, answerMessageId: task.resume.answerMessageId, answerSeq: task.resume.answerSeq,
+      ...(task.resume.decision ? { decision: task.resume.decision } : {}) } : undefined;
     const next = { state: 'running', epoch, attemptStartedAt: now, activeSpentMs: spent, deadline, permitDigest: hash(permitId),
       hostId: p.hostId, accountEpoch: p.accountEpoch, checkpointDigest: p.checkpointDigest, physicalDispatchesSpent };
     tx.update(ref, { ...next, resume: FieldValue.delete() });
@@ -535,6 +536,7 @@ export class SharedBotsStore {
     const lock = (await tx.get(lockRef)).data();
     // Past its deadline another request may own the Chat; a late pause must not take it back.
     if (lock && lock.taskId !== task.taskId && lock.until > now) deny(409, 'TASK_EXPIRED');
+    const proposal = p.kind === 'tool_approval' ? await this.proposal(tx, team, task, bot, deployment, p.approval) : null;
     const gate = await this.outputGate(tx, team, task, bot, p), { sourceCurrent, allowed } = gate;
     if (!allowed) {
       // Same as a refused result: the generic notice is published, no question and no wait exist.
@@ -547,25 +549,45 @@ export class SharedBotsStore {
       return { taskId: task.taskId, state, waitId: p.waitId, messageId: null, expiresAt: null };
     }
     const { messageId, changeId } = questionIds(task.taskId, p.waitId), expiresAt = now + p.expiresInMs;
-    this.botMessage(tx, gate, task, bot, identity, now, { messageId, changeId, text: p.question, fields: { waitId: p.waitId } });
+    this.botMessage(tx, gate, task, bot, identity, now, { messageId, changeId, text: proposal?.text ?? p.question,
+      fields: { waitId: p.waitId, ...(proposal ? { approval: proposal.view } : {}) } });
     tx.create(waitRef, { schemaVersion: 1, waitId: p.waitId, taskId: task.taskId, conversationId: task.conversationId,
       sharedBotId: task.sharedBotId, kind: p.kind, recipient: task.requester, requestDigest: p.requestDigest,
-      checkpointDigest: p.checkpointDigest, messageId, createdAt: now, expiresAt, state: 'pending', pauseDigest });
+      checkpointDigest: p.checkpointDigest, messageId, createdAt: now, expiresAt, state: 'pending', pauseDigest,
+      ...(proposal ? { operationId: proposal.operationId, operationDigest: proposal.operationDigest } : {}) });
     const spent = Math.max(0, Math.min(task.activeBudgetMs - task.activeSpentMs, p.pausedAt - task.attemptStartedAt));
-    tx.update(ref, { state: 'waiting', deadline: expiresAt, activeSpentMs: task.activeSpentMs + spent, currentWaitId: p.waitId,
+    tx.update(ref, { state: 'waiting', deadline: expiresAt, activeSpentMs: task.activeSpentMs + spent, currentWaitId: p.waitId, currentWaitKind: p.kind,
       checkpointDigest: p.checkpointDigest, physicalDispatchesSpent: Math.max(task.physicalDispatchesSpent, p.dispatchedRequests),
       permitDigest: null });
     tx.set(lockRef, { taskId: task.taskId, until: expiresAt });
     return { taskId: task.taskId, state: 'waiting', waitId: p.waitId, messageId, expiresAt };
   }
-  async answerWait({ tx, team, identity, self, command: { payload: p }, now }) {
+  /** One exact change a run asks to make to its Bot's list, checked and described for the member who has to approve it.
+   * The approval is of this operation and these parameters only: `recordOperation` accepts nothing else under it. */
+  async proposal(tx, team, task, bot, deployment, a) {
+    if (bot.sharedList?.approval !== 'requester' || !deployment.capabilities.writeOperations) deny(409, 'APPROVAL_UNSUPPORTED');
+    if (operationIdOf(task, a.logicalStepId, 'store_idempotent') !== a.operationId) deny(400, 'OPERATION_ID_MISMATCH');
+    const list = (await tx.get(team.collection('lists').doc(task.sharedBotId))).data();
+    // The item as it reads now, so the approver sees what would be renamed, ticked or removed. An unknown item is shown by its id.
+    const changes = a.changes.map(change => change.op === 'add' ? { op: 'add', text: change.text.trim() }
+      : { ...change, ...(change.text === undefined ? {} : { text: change.text.trim() }),
+        item: list.items.find(item => item.itemId === change.itemId)?.text ?? null });
+    return { operationId: a.operationId, operationDigest: hash({ expectedDataRevision: a.expectedDataRevision, changes: a.changes }),
+      text: `Asks to change the list “${bot.sharedList.title}” (${changes.length} ${changes.length === 1 ? 'change' : 'changes'}).`,
+      view: { title: bot.sharedList.title, changes } };
+  }
+  /** The requester's reply to what their task waits for: the answer to a question, or the decision on a proposed change. */
+  async answerWait({ tx, team, identity, self, command: { action, payload: p }, now }) {
+    const deciding = action === 'decideWait';
+    if (deciding) p = { ...p, text: p.decision === 'approve' ? 'Approved' : 'Declined' };
     const { ref, value: c } = await this.conversation(tx, team, p.conversationId, identity, true);
     if (p.messageId.startsWith('bot_') || p.changeId.startsWith('bot_')) deny(400, 'INVALID_INPUT');
     const waitRef = team.collection('waits').doc(p.waitId), wait = (await tx.get(waitRef)).data();
     if (!wait || wait.conversationId !== p.conversationId) deny(404, 'WAIT_REQUIRED');
     if (!same(wait.recipient, identity)) deny(403, 'WAIT_RECIPIENT_REQUIRED');
     const [message, change] = await tx.getAll(ref.collection('messages').doc(p.messageId), ref.collection('changes').doc(p.changeId));
-    const digest = hash({ action: 'answerWait', requester: identity, ...p });
+    if ((wait.kind === 'tool_approval') !== deciding) deny(409, 'WAIT_KIND_MISMATCH');
+    const digest = hash({ action, requester: identity, ...p });
     if (message.exists || change.exists) {
       if (change.data()?.submissionDigest !== digest) deny(409, 'MESSAGE_ID_CONFLICT');
       return change.data().submissionReceipt;
@@ -582,15 +604,18 @@ export class SharedBotsStore {
     const response = { messageId: p.messageId, changeId: p.changeId, changeSeq, taskId: task.taskId };
     const author = { kind: 'user', uid: identity.uid, displayName: self.displayName || 'Member' }, at = new Date(now);
     tx.create(ref.collection('messages').doc(p.messageId), { seq, changeSeq, changeId: p.changeId, text: p.text, kind: 'text', author,
-      createdAt: at, replyTo: wait.messageId, waitId: p.waitId, sourceTaskId: task.taskId });
+      createdAt: at, replyTo: wait.messageId, waitId: p.waitId, sourceTaskId: task.taskId, ...(deciding ? { decision: p.decision } : {}) });
     tx.create(ref.collection('changes').doc(p.changeId), { seq: changeSeq, messageId: p.messageId, operation: 'create',
       actorUid: identity.uid, generation: identity.generation, textDigest: createHash('sha256').update(p.text).digest('hex'), at,
       submissionDigest: digest, submissionReceipt: response });
     tx.update(ref, { lastSeq: seq, lastChangeSeq: changeSeq, lastChange: { id: p.changeId, seq: changeSeq },
       lastMessage: { id: p.messageId, seq, at, author, preview: messagePreview(p.text) } });
-    tx.update(waitRef, { state: 'resolved', responseMessageId: p.messageId, responseSeq: seq, resolvedAt: now });
+    // A declined change still continues the task: the Bot is told, and nothing can be recorded under a denied wait.
+    tx.update(waitRef, { state: deciding && p.decision === 'deny' ? 'denied' : 'resolved', responseMessageId: p.messageId, responseSeq: seq,
+      resolvedAt: now, ...(deciding ? { decision: p.decision } : {}) });
     const deadline = now + queueMs;
-    tx.update(taskRef, { state: 'queued', resume: { waitId: p.waitId, answerMessageId: p.messageId, answerSeq: seq }, deadline });
+    tx.update(taskRef, { state: 'queued', deadline,
+      resume: { waitId: p.waitId, answerMessageId: p.messageId, answerSeq: seq, ...(deciding ? { decision: p.decision } : {}) } });
     if (!lock || lock.until <= now || lock.taskId === task.taskId) tx.set(lockRef, { taskId: task.taskId, until: deadline });
     tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
     return response;
@@ -624,6 +649,12 @@ export class SharedBotsStore {
     if (!task || task.deploymentId !== p.deploymentId) deny(404, 'TASK_REQUIRED');
     if (operationIdOf(task, p.logicalStepId, p.category) !== p.operationId) deny(400, 'OPERATION_ID_MISMATCH');
     if (task.state !== 'running' || task.permitDigest !== hash(p.permitId)) deny(403, 'EXECUTION_PERMIT_REQUIRED');
+    if (p.tool.name === listWriteTool && bot.sharedList?.approval === 'requester') {
+      // Only the approved operation with the approved parameters, for the member who approved it, in this task.
+      const wait = p.approvalRef ? (await tx.get(team.collection('waits').doc(p.approvalRef))).data() : null;
+      if (!wait || wait.taskId !== task.taskId || wait.kind !== 'tool_approval' || wait.state !== 'resolved' || wait.decision !== 'approve'
+        || wait.operationId !== p.operationId || wait.operationDigest !== p.digest || !same(wait.recipient, task.requester)) deny(403, 'APPROVAL_REQUIRED');
+    }
     if (existing) {
       const { tool, digest, approvalRef = null } = p;
       if (!same({ tool, digest, approvalRef }, { tool: existing.tool, digest: existing.digest, approvalRef: existing.approvalRef })) deny(409, 'OPERATION_CONFLICT');

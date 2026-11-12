@@ -855,10 +855,10 @@ const digestOf = value => createHash('sha256').update(JSON.stringify(canonical(v
 const groceries = { title: 'Groceries', description: 'What the household needs to buy.' };
 let publication = 1;
 /** Publish the Bot again, with or without its list, on a host that does or does not record writes. */
-async function republish({ sharedList = groceries, writeOperations = true, ...override } = {}) {
+async function republish({ sharedList = groceries, writeOperations = true, durableWait = false, ...override } = {}) {
   const base = publish(); publication += 1;
   const published = await execute('publishSharedBot', { ...base, expectedRevision: publication - 1, ...(sharedList ? { sharedList } : {}),
-    deployment: { ...base.deployment, revision: publication, capabilities: { durableWait: false, writeOperations, delegation: false } }, ...override });
+    deployment: { ...base.deployment, revision: publication, capabilities: { durableWait, writeOperations, delegation: false } }, ...override });
   await execute('heartbeatDeployment', { ...host, ready: true });
   return published;
 }
@@ -867,8 +867,9 @@ const memberWrite = (operationId, expectedDataRevision, changes, actor = member)
   execute('writeList', { sharedBotId: 'sharedbot_01', operationId, expectedDataRevision, changes }, actor);
 const readList = (actor = member) => execute('readList', { sharedBotId: 'sharedbot_01' }, actor);
 /** Record a task's list write in the ledger, as the host does before it sends the write. */
-async function recordWrite(started, step, write, permitId = started.permitId) {
-  const payload = recordPayload(started, { step, category: 'store_idempotent', permitId, tool: { name: 'TeamListWrite', version: '1' }, digest: digestOf(write) });
+async function recordWrite(started, step, write, permitId = started.permitId, approvalRef) {
+  const payload = recordPayload(started, { step, category: 'store_idempotent', permitId, tool: { name: 'TeamListWrite', version: '1' }, digest: digestOf(write),
+    ...(approvalRef ? { approvalRef } : {}) });
   return { payload, recorded: await execute('recordOperation', payload) };
 }
 const taskWrite = (started, operationId, write, permitId = started.permitId) =>
@@ -974,4 +975,123 @@ test('list: a task writes through its ledger operation; the change and the outco
   await execute('cancelTask', { taskId }, member);
   await assert.rejects(taskWrite(started, late.payload.operationId, last, again.permitId), { code: 'TASK_CANCELLED' });
   assert.equal((await readList()).dataRevision, 3);
+});
+
+// M2 Q05: a list change of a run that its requester has to approve first.
+const asking = { ...groceries, approval: 'requester' };
+/** The pause a host sends when its worker stopped at a list change that needs approval. */
+function approvalPause(started, step, write, override = {}) {
+  const { question: _question, ...base } = pausePayload(started);
+  return { ...base, kind: 'tool_approval', approval: { operationId: operationId(started.task.taskId, step, 'store_idempotent'), logicalStepId: step, ...write }, ...override };
+}
+const decide = (n, decision, actor = member, waitId = 'wait_0001') =>
+  execute('decideWait', { conversationId, waitId, messageId: `decide_${n}`, changeId: `decidechg_${n}`, decision }, actor);
+const messageData = async id => (await chatRef().collection('messages').doc(id).get()).data();
+
+test('approval: a run changes the list only after its requester approved exactly that change', options, async () => {
+  publication = 1;
+  await republish({ durableWait: true });
+  const free = await start(), freeStep = `${free.task.taskId}/t0/c0`, bread = { expectedDataRevision: 0, changes: [add('Bread')] };
+  // A list that asks nobody takes no approval request.
+  await assert.rejects(execute('pauseTask', approvalPause(free, freeStep, bread)), { code: 'APPROVAL_UNSUPPORTED' });
+  await execute('completeTask', result(free));
+  await republish({ sharedList: asking, durableWait: true });
+  assert.deepEqual((await execute('listSharedBots', {}, member)).bots[0].sharedList, { title: 'Groceries', approval: 'requester' });
+  await memberWrite('operation_01', 0, [add('Milk')]);
+  const started = await start(), taskId = started.task.taskId, step = `${taskId}/t0/c0`;
+  assert.deepEqual(started.sharedList, asking);
+  const write = { expectedDataRevision: 1, changes: [add(' Bread '), { op: 'remove', itemId: 'item_0001' }, { op: 'update', itemId: 'item_0404', done: true }] };
+  // Nothing is recorded, so nothing can be sent, before the approval exists.
+  await assert.rejects(recordWrite(started, step, write), { code: 'APPROVAL_REQUIRED' });
+  await assert.rejects(recordWrite(started, step, write, started.permitId, 'wait_0001'), { code: 'APPROVAL_REQUIRED' });
+  await assert.rejects(execute('pauseTask', approvalPause(started, step, write, { approval: { operationId: 'e'.repeat(64), logicalStepId: step, ...write } })), { code: 'OPERATION_ID_MISMATCH' });
+  now += 1000;
+  const waiting = await execute('pauseTask', approvalPause(started, step, write));
+  assert.equal(waiting.state, 'waiting');
+  assert.deepEqual(await execute('pauseTask', approvalPause(started, step, write)), waiting);
+  const asked = await messageData(waiting.messageId);
+  // The member sees the items as they read now; an item that does not exist is shown by its id.
+  assert.deepEqual({ text: asked.text, waitId: asked.waitId, approval: asked.approval }, { text: 'Asks to change the list “Groceries” (3 changes).', waitId: 'wait_0001',
+    approval: { title: 'Groceries', changes: [{ op: 'add', text: 'Bread' }, { op: 'remove', itemId: 'item_0001', item: 'Milk' }, { op: 'update', itemId: 'item_0404', done: true, item: null }] } });
+  const view = await execute('getTask', { taskId }, member);
+  assert.deepEqual([view.state, view.wait.kind, view.wait.recipient.uid], ['waiting', 'tool_approval', member.uid]);
+  const stored = await waitData('wait_0001');
+  assert.deepEqual([stored.operationId, stored.operationDigest], [operationId(taskId, step, 'store_idempotent'), digestOf(write)]);
+  // An approval is not an answer, and only the member the run works for may give it.
+  await assert.rejects(execute('answerWait', answerPayload(), member), { code: 'WAIT_KIND_MISMATCH' });
+  await assert.rejects(decide(1, 'approve', other), { code: 'CONVERSATION_REQUIRED' });
+  // A participant of the Chat who is not the requester sees the request and cannot decide it.
+  const chat = (await chatRef().get()).data();
+  await chatRef().update({ memberUids: ['member', 'other', 'owner'], participants: ['user:member', 'user:other', 'shared_bot:sharedbot_01'] });
+  await assert.rejects(decide(1, 'approve', other), { code: 'WAIT_RECIPIENT_REQUIRED' });
+  await chatRef().update({ memberUids: chat.memberUids, participants: chat.participants });
+  assert.equal((await waitData('wait_0001')).state, 'pending');
+  const decided = await decide(2, 'approve');
+  assert.deepEqual(await decide(2, 'approve'), decided);
+  await assert.rejects(decide(3, 'deny'), { code: 'WAIT_CLOSED' });
+  const reply = await messageData('decide_2');
+  assert.deepEqual([reply.text, reply.decision, reply.waitId, reply.replyTo], ['Approved', 'approve', 'wait_0001', waiting.messageId]);
+  const queued = (await execute('listHostTasks', host)).tasks.find(task => task.taskId === taskId);
+  assert.equal(queued.resume.decision, 'approve');
+  const resumed = await execute('continueTask', continuePayload(taskId));
+  assert.equal(resumed.execute, true); assert.equal(resumed.wait.decision, 'approve');
+  // The approval covers this operation with these parameters, nothing else.
+  for (const [at, changed] of [[step, { ...write, changes: [add('Wine')] }], [step, { ...write, expectedDataRevision: 2 }], [`${taskId}/t0/c1`, write]]) {
+    await assert.rejects(recordWrite(started, at, changed, resumed.permitId, 'wait_0001'), { code: 'APPROVAL_REQUIRED' });
+  }
+  await assert.rejects(recordWrite(started, step, write, resumed.permitId), { code: 'APPROVAL_REQUIRED' });
+  const fine = { expectedDataRevision: 1, changes: write.changes.slice(0, 2) };
+  await assert.rejects(recordWrite(started, step, fine, resumed.permitId, 'wait_0001'), { code: 'APPROVAL_REQUIRED' });
+  const { payload, recorded } = await recordWrite(started, step, write, resumed.permitId, 'wait_0001');
+  assert.equal(recorded.dispatch, true);
+  // What was approved names an item that is gone: the write is refused whole and the list is as it was.
+  assert.deepEqual(await taskWrite(started, payload.operationId, write, resumed.permitId),
+    { applied: false, error: 'LIST_ITEM_REQUIRED', dataRevision: 1, items: [{ itemId: 'item_0001', text: 'Milk', done: false }] });
+  await execute('completeTask', result({ ...started, permitId: resumed.permitId }));
+  // A second request, approved and unchanged since: saved once.
+  const next = await start(), nextId = next.task.taskId, nextStep = `${nextId}/t0/c0`, change = { expectedDataRevision: 1, changes: [add('Bread'), { op: 'remove', itemId: 'item_0001' }] };
+  now += 1000;
+  await execute('pauseTask', approvalPause(next, nextStep, change, { waitId: 'wait_0002' }));
+  await decide(4, 'approve', member, 'wait_0002');
+  const go = await execute('continueTask', continuePayload(nextId));
+  // The approval of another task's request opens nothing here.
+  await assert.rejects(recordWrite(next, nextStep, change, go.permitId, 'wait_0001'), { code: 'APPROVAL_REQUIRED' });
+  const approved = await recordWrite(next, nextStep, change, go.permitId, 'wait_0002');
+  assert.deepEqual(await taskWrite(next, approved.payload.operationId, change, go.permitId), { applied: true, dataRevision: 2, items: [{ itemId: 'item_0002', text: 'Bread', done: false }] });
+  assert.equal((await operationData(approved.payload.operationId)).approvalRef, 'wait_0002');
+});
+test('approval: a declined, expired, cancelled or revoked request saves nothing', options, async () => {
+  publication = 1;
+  await republish({ sharedList: asking, durableWait: true });
+  const change = { expectedDataRevision: 0, changes: [add('Bread')] };
+  async function asked(waitId, expiresInMs = 3600000) {
+    const started = await start(), step = `${started.task.taskId}/t0/c0`; now += 1000;
+    assert.equal((await execute('pauseTask', approvalPause(started, step, change, { waitId, expiresInMs }))).state, 'waiting');
+    return { started, step, taskId: started.task.taskId };
+  }
+  // Declined: the task goes on so the Bot can say so, and the ledger takes no record under the denied request.
+  const declined = await asked('wait_0001');
+  await decide(1, 'deny');
+  assert.deepEqual([(await waitData('wait_0001')).state, (await messageData('decide_1')).text], ['denied', 'Declined']);
+  await assert.rejects(decide(2, 'approve'), { code: 'WAIT_CLOSED' });
+  const resumed = await execute('continueTask', continuePayload(declined.taskId));
+  assert.equal(resumed.wait.decision, 'deny');
+  await assert.rejects(recordWrite(declined.started, declined.step, change, resumed.permitId, 'wait_0001'), { code: 'APPROVAL_REQUIRED' });
+  await execute('completeTask', result({ ...declined.started, permitId: resumed.permitId }));
+  // Not decided in time.
+  const late = await asked('wait_0002', 60000); now += 61000;
+  await assert.rejects(decide(3, 'approve', member, 'wait_0002'), { code: 'WAIT_CLOSED' });
+  assert.equal((await execute('getTask', { taskId: late.taskId }, member)).state, 'expired');
+  // Cancelled while it waits.
+  const cancelled = await asked('wait_0003');
+  await execute('cancelTask', { taskId: cancelled.taskId }, member);
+  await assert.rejects(decide(4, 'approve', member, 'wait_0003'), { code: 'WAIT_CLOSED' });
+  assert.equal((await waitData('wait_0003')).state, 'revoked');
+  // The member lost the Bot while the request was open: their approval no longer counts.
+  const revoked = await asked('wait_0004');
+  await republish({ sharedList: asking, durableWait: true, usePolicy: { mode: 'listed', members: [{ uid: other.uid, generation: 1 }] } });
+  await assert.rejects(decide(5, 'approve', member, 'wait_0004'), { code: 'TASK_REVOKED' });
+  assert.equal((await readList(other)).dataRevision, 0);
+  assert.deepEqual((await readList(other)).items, []);
+  assert.equal(revoked.taskId.length > 0, true);
 });

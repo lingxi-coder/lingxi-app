@@ -34,7 +34,9 @@ export const operationCategory = z.enum(['read', 'store_idempotent', 'provider_i
 const logicalStepId = z.string().regex(/^[A-Za-z0-9_.:/-]{1,200}$/u);
 const itemText = z.string().refine(value => value.trim().length > 0 && Buffer.byteLength(value, 'utf8') <= 500 && !value.includes('\0'));
 /** The list a Bot shares with its Team: what it is called and what the Bot is told about it. */
-const sharedList = z.object({ title: z.string().trim().min(1).max(120), description: z.string().trim().min(1).max(2000) }).strict();
+// `approval: 'requester'`: a run's change is saved only after the member it works for has approved exactly that change.
+const sharedList = z.object({ title: z.string().trim().min(1).max(120), description: z.string().trim().min(1).max(2000),
+  approval: z.enum(['none', 'requester']).optional() }).strict();
 /** One write to a shared list: 1 to 20 changes applied together or not at all. */
 export const listChanges = z.array(z.discriminatedUnion('op', [
   z.object({ op: z.literal('add'), text: itemText }).strict(),
@@ -43,6 +45,9 @@ export const listChanges = z.array(z.discriminatedUnion('op', [
   z.object({ op: z.literal('remove'), itemId: executionId }).strict(),
 ])).min(1).max(20);
 const listWrite = { expectedDataRevision: cursor, changes: listChanges };
+const pause = { ...host, ...task, permitId: executionId, waitId: executionId, requestDigest: digest, checkpointDigest: digest,
+  pausedAt: cursor, expiresInMs: z.number().int().min(60000).max(86400000), dispatchedRequests: cursor,
+  inputGrantIds: grantIds, outputAudience };
 const payloads = {
   createConversation: z.object({ ...thread, kind: z.enum(['bot_dm', 'group', 'channel']),
     title: z.string().trim().min(1).max(120), participantUids: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/u)).min(1).max(200).refine(unique),
@@ -80,11 +85,13 @@ const payloads = {
         costMicros: cursor.optional(), currency: z.string().length(3).optional() }).strict(),
     ]),
   }).strict().refine(value => !value.revises || value.document, 'A revision needs its document'),
-  pauseTask: z.object({ ...host, ...task, permitId: executionId, waitId: executionId, kind: z.literal('human_input'),
-    question: z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 2000),
-    requestDigest: digest, checkpointDigest: digest, pausedAt: cursor,
-    expiresInMs: z.number().int().min(60000).max(86400000), dispatchedRequests: cursor,
-    inputGrantIds: grantIds, outputAudience }).strict(),
+  // A question for the requester, or (M2 Q05) one exact list write the requester is asked to approve.
+  pauseTask: z.discriminatedUnion('kind', [
+    z.object({ ...pause, kind: z.literal('human_input'),
+      question: z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 2000) }).strict(),
+    z.object({ ...pause, kind: z.literal('tool_approval'),
+      approval: z.object({ operationId: digest, logicalStepId, ...listWrite }).strict() }).strict(),
+  ]),
   continueTask: z.object({ ...host, ...task, expectedEpoch: positive, checkpointDigest: digest,
     reason: z.enum(['answer', 'recovery']), dispatchedRequests: cursor }).strict(),
   // The operation ledger (M2 Q04). `operationId` is derived from the task and the durable logical step, never from a provider call id.
@@ -102,6 +109,8 @@ const payloads = {
   resolveOperation: z.object({ ...task, operationId: digest, resolution: z.enum(['succeeded', 'failed']) }).strict(),
   listOperations: z.object(task).strict(),
   answerWait: z.object({ ...thread, waitId: executionId, messageId: executionId, changeId: executionId, text }).strict(),
+  decideWait: z.object({ ...thread, waitId: executionId, messageId: executionId, changeId: executionId,
+    decision: z.enum(['approve', 'deny']) }).strict(),
   cancelTask: z.object(task).strict(),
   getTask: z.object(task).strict(),
   listTasks: z.object({ conversationId: executionId.optional(), after: executionId.optional() }).strict(),

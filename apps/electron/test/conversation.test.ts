@@ -25,6 +25,7 @@ import {
   reduceEvent,
   reduceEvents,
   appendPendingUserPrompt,
+  appendRemoteUserPrompt,
   acknowledgePromptDispatch,
   appendUserPrompt,
   type ConversationState,
@@ -589,17 +590,30 @@ test('appendUserPrompt echoes a strong narration line and ignores blank input', 
   assert.equal(line.strong, true);
 });
 
-test('manual compaction immediately adds one visible running status and settles it on completion', () => {
-  const echoed = beginLocalSlashCommand(emptyConversation(), '/compact');
-  let s = beginCompaction(echoed);
+test('compact commands never become user messages through submission or remote echoes', () => {
+  for (const text of ['/compact', ' /Compact keep the tests\nPreserve decisions ']) {
+    const pending = beginSlashCommand(emptyConversation(), text);
+    assert.equal(pending.items.length, 0);
+    assert.equal(reduceEvent(pending, { type: 'turn_started' }).items.length, 0);
+    assert.equal(beginLocalSlashCommand(emptyConversation(), text).items.length, 0);
+    assert.equal(appendRemoteUserPrompt(emptyConversation(), { turnId: 1, text, deviceName: 'Phone' }).items.length, 0);
+  }
+  const ordinary = appendRemoteUserPrompt(emptyConversation(), { turnId: 2, text: '/compactness is a different command', deviceName: 'Phone' });
+  assert.equal(ordinary.items.length, 1);
+});
 
-  assert.deepEqual(s.items.map((item) => item.type), ['narration', 'compaction']);
-  assert.equal((s.items[0] as Narration).text, '/compact');
-  assert.equal(s.activeCompactionId, 'i2');
-  assert.equal((s.items[1] as Compaction).status, 'running');
+test('manual compaction immediately adds one visible running status and settles it on completion', () => {
+  const pending = beginLocalSlashCommand(emptyConversation(), '/compact');
+  assert.equal(pending.items.length, 0);
+  let s = beginCompaction(pending);
+
+  assert.deepEqual(s.items.map((item) => item.type), ['compaction']);
+  assert.equal(s.activeCompactionId, 'i1');
+  assert.equal((s.items[0] as Compaction).status, 'running');
+  assert.equal((s.items[0] as Compaction).automatic, false);
 
   // Re-entering the action while it is already active must not create a
-  // second optimistic row or a second `/compact` echo.
+  // second optimistic row.
   assert.equal(beginCompaction(s), s);
 
   s = reduceEvent(s, {
@@ -609,13 +623,13 @@ test('manual compaction immediately adds one visible running status and settles 
     bytes_saved: 32_768,
     summary: '## Work completed\n\nPreserved the provider routing fix.',
   });
-  const status = s.items[1] as Compaction;
+  const status = s.items[0] as Compaction;
   assert.equal(status.status, 'complete');
   assert.equal(status.messagesBefore, 18);
   assert.equal(status.messagesAfter, 4);
   assert.equal(status.bytesSaved, 32_768);
   assert.deepEqual(s.summaries, [{
-    id: 'i2',
+    id: 'i1',
     content: '## Work completed\n\nPreserved the provider routing fix.',
     messagesBefore: 18,
     messagesAfter: 4,
@@ -634,23 +648,22 @@ test('manual compaction immediately adds one visible running status and settles 
   assert.equal(duplicate, s, 'the production output stream and command reply may report the same compact result');
 });
 
-test('palette compaction echoes /compact and a compact failure settles the same status row', () => {
+test('palette compaction adds no user message and a failure settles the same status row', () => {
   let s = beginCompaction(emptyConversation());
-  assert.deepEqual(s.items.map((item) => item.type), ['narration', 'compaction']);
-  assert.equal((s.items[0] as Narration).text, '/compact');
+  assert.deepEqual(s.items.map((item) => item.type), ['compaction']);
 
   s = reduceEvent(s, {
     type: 'error',
     message: 'force_compact failed: handle action failed: provider rate limited',
   });
-  const status = s.items[1] as Compaction;
+  const status = s.items[0] as Compaction;
   assert.equal(status.status, 'error');
   assert.equal(status.detail, 'provider rate limited');
   assert.equal(s.activeCompactionId, null);
   assert.equal(s.lastError, null, 'the inline status replaces a duplicate global error banner');
   assert.equal(
     s.items.filter((item) => item.type === 'narration').length,
-    1,
+    0,
     'the compact status owns its failure; a duplicate error narration is noise',
   );
 });
@@ -668,6 +681,7 @@ test('compaction phases follow engine events without an automatic command echo',
   let s = reduceEvent(emptyConversation(), { type: 'compaction_status', phase: 'preparing' }, 1_000);
   assert.equal(s.items.length, 1);
   const id = s.activeCompactionId;
+  assert.equal((s.items[0] as Compaction).automatic, true);
   assert.equal((s.items[0] as Compaction).startedAt, 1_000);
   assert.equal((s.items[0] as Compaction).phaseStartedAt, 1_000);
   for (const phase of ['summarizing', 'restoring']) {
@@ -693,10 +707,10 @@ test('compaction phases follow engine events without an automatic command echo',
 test('manual compaction reuses its optimistic row and cancels without claiming success', () => {
   let s = beginCompaction(emptyConversation(), 1_000);
   s = reduceEvent(s, { type: 'compaction_status', phase: 'preparing' }, 2_000);
-  assert.equal(s.items.length, 2);
-  assert.equal((s.items[1] as Compaction).startedAt, 1_000);
+  assert.equal(s.items.length, 1);
+  assert.equal((s.items[0] as Compaction).startedAt, 1_000);
   s = reduceEvent(s, { type: 'compaction_status', phase: 'cancelled', error: 'Compaction canceled.' }, 3_000);
-  assert.equal((s.items[1] as Compaction).status, 'cancelled');
+  assert.equal((s.items[0] as Compaction).status, 'cancelled');
   assert.equal(s.activeCompactionId, null);
   assert.equal(s.pendingSlashName, null);
   assert.equal(s.summaries.length, 0);
@@ -850,6 +864,7 @@ test('session_resumed atomically replaces the transcript with lowered history', 
     session_id: 'abc',
     messages: [
       { role: 'user', blocks: [{ type: 'text', text: 'prior question' }] },
+      { role: 'user', blocks: [{ type: 'text', text: '/compact preserve the API changes' }] },
       {
         role: 'system',
         blocks: [{
@@ -887,7 +902,7 @@ test('session_resumed atomically replaces the transcript with lowered history', 
   assert.equal(s.items.length, 5);
   assert.deepEqual(s.items.map((item) => item.type), [
     'narration',
-    'narration',
+    'compaction',
     'thinking',
     'tool',
     'narration',
@@ -895,9 +910,10 @@ test('session_resumed atomically replaces the transcript with lowered history', 
   const user = s.items[0] as Narration;
   assert.equal(user.text, 'prior question');
   assert.equal(user.strong, true);
-  const boundary = s.items[1] as Narration;
-  assert.equal(boundary.text, 'Conversation compacted (12 messages)');
-  assert.doesNotMatch(boundary.text, /hidden compact summary/);
+  const boundary = s.items[1] as Compaction;
+  assert.equal(boundary.status, 'complete');
+  assert.equal(boundary.messagesBefore, 12);
+  assert.equal(boundary.messagesAfter, 3);
   assert.deepEqual(s.summaries, [{
     id: 'i2',
     content: 'hidden compact summary',

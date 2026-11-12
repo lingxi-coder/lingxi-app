@@ -617,9 +617,9 @@ test('a slash command from a viewer: the allowed few run as commands, the rest a
   const { f, runtime } = await attached({ turnIds: [11, 12, 13, 14] });
   assert.deepEqual(await f.call('prompt.send', { session_id: SESSION_A, text: '/compact keep tests', client_request_id: 'a' }), { turn_id: 11 });
   assert.deepEqual(runtime.callsOf('dispatchCommand')[0], [{ type: 'run_slash_command', raw: '/compact keep tests', images: [], turn_id: 11 }, { origin: 'device', deviceName: 'Test phone' }]);
-  assert.equal(f.echoes.length, 1, '/compact shows a user row');
+  assert.equal(f.echoes.length, 0, '/compact is represented by its lifecycle status');
   await f.call('prompt.send', { session_id: SESSION_A, text: '/model other', client_request_id: 'b' });
-  assert.equal(f.echoes.length, 1, '/model shows none');
+  assert.equal(f.echoes.length, 0, '/model shows none');
   for (const text of ['/login', '/clear', '/mcp add x', '/permissions']) {
     assert.equal(await rpcCode(f.call('prompt.send', { session_id: SESSION_A, text, client_request_id: text })), 'forbidden', text);
   }

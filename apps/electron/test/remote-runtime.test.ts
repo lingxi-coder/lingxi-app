@@ -318,8 +318,9 @@ test('a real runtime: scheduled prompts are journaled as scheduled, slash comman
   client.emitEvent({ type: 'session_resumed', session_id: SESSION_A, messages: [] });
   await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/compact keep this', images: [], turn_id: 5 }, { origin: 'device', deviceName: 'Pixel' });
   await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/effort high', images: [], turn_id: 6 }, { origin: 'device', deviceName: 'Pixel' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/plan keep this', images: [], turn_id: 7 }, { origin: 'device', deviceName: 'Pixel' });
   const prompts = runtime.remoteView().prompts;
-  assert.deepEqual(prompts.map((entry) => [entry.text, entry.origin, entry.deviceName, entry.turnId]), [['/compact keep this', 'device', 'Pixel', 5]]);
+  assert.deepEqual(prompts.map((entry) => [entry.text, entry.origin, entry.deviceName, entry.turnId]), [['/plan keep this', 'device', 'Pixel', 7]]);
   await runtime.dispose();
 });
 

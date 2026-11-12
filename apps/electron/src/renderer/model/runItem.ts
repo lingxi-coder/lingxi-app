@@ -177,6 +177,7 @@ export interface CompactionRunItem {
   readonly type: 'compaction';
   readonly id: string;
   readonly status: 'running' | 'complete' | 'error' | 'cancelled' | 'skipped';
+  readonly automatic?: boolean;
   readonly phase?: string;
   /** High-water mark survives unrecognized future protocol phases. */
   readonly lastKnownPhase?: string;

@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'compact-progress-electron.mjs');
 
-test('real Electron compaction follows engine phases, preserves elapsed time, and settles one row', async () => {
+test('real Electron compaction keeps one minimal row through engine phases and completion', async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-compact-progress-vite-'));
   const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-compact-progress-electron-'));
   const vite = await createServer({
@@ -69,32 +69,30 @@ test('real Electron compaction follows engine phases, preserves elapsed time, an
       });
     });
 
-    const phaseTitles = { preparing: 'Preparing compaction', summarizing: 'Summarizing conversation', restoring: 'Restoring context' };
     for (const phase of ['preparing', 'summarizing', 'restoring']) {
       const progress = result[phase];
       assert.equal(progress.rowCount, 1, `${phase} must reuse one progress row`);
-      assert.equal(progress.progressCount, 1);
-      assert.equal(progress.valueNow, ({ preparing: '0', summarizing: '10', restoring: '85' })[phase]);
-      assert.equal(progress.title, phaseTitles[phase]);
+      assert.equal(progress.progressCount, 0);
+      assert.equal(progress.valueNow, null);
+      assert.equal(progress.elapsed, null);
+      assert.equal(progress.title, 'Compacting context');
       assert.equal(progress.id, result.preparing.id);
       assert.equal(progress.item.status, 'running');
     }
-    assert.match(result.aged.elapsed, /^9[0-9] seconds elapsed$/);
-    assert.match(result.remounted.elapsed, /^9[0-9] seconds elapsed$/);
-    assert.equal(result.aged.valueNow, '99');
-    assert.equal(result.remounted.valueNow, '99');
+    assert.equal(result.aged.title, 'Compacting context');
+    assert.equal(result.remounted.title, 'Compacting context');
+    assert.equal(result.remounted.item.startedAt, result.aged.item.startedAt);
     assert.equal(result.aged.item.phaseStartedAt, result.remounted.item.phaseStartedAt);
     assert.equal(result.complete.progressCount, 0);
-    assert.equal(result.complete.title, 'Compaction finished');
-    assert.match(result.complete.text, /100%/);
+    assert.equal(result.complete.title, 'Context automatically compacted');
+    assert.doesNotMatch(result.complete.text, /%|\d+s|saved/);
     assert.equal(result.complete.rowCount, 1);
     assert.equal(result.complete.id, result.preparing.id);
     assert.doesNotMatch(result.complete.text, /0 → 0|0 B saved/);
     assert.equal(result.summary.rowCount, 1);
-    assert.equal(result.summary.title, 'Context compacted');
+    assert.equal(result.summary.title, 'Context automatically compacted');
     assert.equal(result.summary.id, result.preparing.id);
-    assert.match(result.summary.text, /42 → 7 messages/);
-    assert.match(result.summary.text, /38 KB saved/);
+    assert.doesNotMatch(result.summary.text, /42 → 7|38 KB|saved/);
     assert.equal(result.summary.summaries.length, 1);
     assert.equal(result.summary.summaries[0].content, 'Preserved the actual conversation context.');
     assert.equal(result.summary.layout.compact.left, result.summary.layout.agent.left, 'compact and subagent rows share the conversation rail');

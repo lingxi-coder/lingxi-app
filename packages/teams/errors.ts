@@ -55,6 +55,15 @@ export function messageErrorText(code: string, zh: boolean): string {
       return t('This document has reached its limit of 200 revisions and can no longer be edited.', '此文档已达到 200 个版本的上限，无法继续编辑。');
     case 'ARTIFACT_REVISION_REQUIRED':
       return t('That revision is not available.', '该版本不可用。');
+    case 'LIST_REQUIRED':
+      return t('This list is no longer available.', '此清单已不可用。');
+    case 'LIST_REVISION_CONFLICT':
+    case 'LIST_ITEM_REQUIRED':
+      return t('The list was changed in the meantime. Refresh it and try again.', '清单在此期间已被修改，请刷新后重试。');
+    case 'LIST_LIMIT':
+      return t('The list is full. Remove some items before adding more.', '清单已满，请先移除一些条目再添加。');
+    case 'SHARED_LIST_UNSUPPORTED':
+      return t('This Bot’s model cannot keep a shared list. Choose another model for the Bot, or publish it without the list.', '此 Bot 使用的模型不支持共享清单。请为 Bot 更换模型，或不带清单发布。');
     case 'OPERATION_CONFLICT':
       return t('This was already decided differently. Reload to see the current state.', '此项已有不同的处理结果，请重新加载查看当前状态。');
     case 'OPERATION_REQUIRED':

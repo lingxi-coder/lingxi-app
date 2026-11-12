@@ -34,7 +34,7 @@ export class SharedBotError extends Error {
 function identityPermitted(bot, identity) { return bot && sharedBotPermits(bot.identity, identity); }
 function ownerOf(bot, identity) { return bot && same(bot.identity.maintainer, identity); }
 /** The runtime's name of the list write; the ledger entry of a list write must carry it. */
-const listWriteTool = 'TeamListWrite', listItemLimit = 500;
+const listWriteTool = 'TeamListWrite', listItemLimit = 500, listBytes = 48 * 1024;
 const listView = list => ({ dataRevision: list.dataRevision, items: list.items.map(({ itemId, text, done }) => ({ itemId, text, done })) });
 /** The list after one write, or why nothing is saved. A write is all of its changes or none of them. */
 function applyListChanges(list, { expectedDataRevision, changes }, author, now) {
@@ -51,7 +51,8 @@ function applyListChanges(list, { expectedDataRevision, changes }, author, now) 
           ...(change.done === undefined ? {} : { done: change.done }), updatedBy: author, updatedAt: now });
     }
   }
-  if (items.length > listItemLimit) return { error: 'LIST_LIMIT' };
+  // The whole list is one tool result for the Bot, so it is bounded in bytes as well as in items.
+  if (items.length > listItemLimit || Buffer.byteLength(JSON.stringify(items.map(({ itemId, text, done }) => ({ itemId, text, done }))), 'utf8') > listBytes) return { error: 'LIST_LIMIT' };
   return { ...list, dataRevision: list.dataRevision + 1, items, nextItem, updatedAt: now };
 }
 function taskView(task, now) {

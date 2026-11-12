@@ -51,7 +51,7 @@ scenario('A friendship\'s Bots are shared with the friend alone: no audience cho
   await page.click(page.button('Load local Bots'));
   assert.equal(page.find(n => n.type === 'select').length, 1, 'only the choice of the local Bot: the audience is the friend');
   await page.type(page.find(n => n.type === 'select')[0], 'local-fixture'); await page.type(page.find(n => n.type === 'textarea')[0], 'Help with trips.');
-  assert.equal(page.find(n => n.type === 'input' && n.props.type === 'checkbox').length, 0, 'no member checkboxes');
+  assert.deepEqual(page.find(n => n.type === 'input' && n.props.type === 'checkbox').map(n => textOf(n.parent)), ['Give this assistant a shared list'], 'no member checkboxes');
   await page.submit();
   assert.match(page.text(), /Audience: Bob\./); assert.match(page.text(), /The owner can read every conversation with it\./); assert.doesNotMatch(page.text(), /every current and future team member/);
   await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
@@ -382,4 +382,100 @@ scenario('A task whose outside action is unconfirmed says so; only the maintaine
   assert.match(requester.page.text(), /email\.send · Result unknown/); assert.equal(requester.buttons('It happened').length, 0);
   const stranger = await openChat(context, () => unchecked('bob'), answer, 'owner');
   assert.match(stranger.page.text(), /Needs checking/); assert.equal(stranger.page.has('View actions'), false); assert.equal(stranger.page.has('Review actions'), false);
+});
+/** The Bot directory with a Bot that keeps a shared list. The items live in `store`; `store.lose` drops the answer of the next write after saving it. */
+async function openList(context: Parameters<Parameters<typeof scenario>[1]>[0]) {
+  const store = { dataRevision: 1, next: 2, lose: false, items: [{ itemId: 'item_0001', text: 'Milk', done: false }] }, saved = new Map<string, number>(), sent: any[] = [];
+  const { fake, workspace } = await open(context), inner = fake.messages;
+  fake.messages = async <T>(command: MessageCommand) => {
+    if (!('schemaVersion' in command) || command.action !== 'readList' && command.action !== 'writeList') return inner<T>(command);
+    sent.push(structuredClone(command)); const sharedBotId = command.payload.sharedBotId;
+    if (command.action === 'readList') return { sharedBotId, title: 'Groceries', description: 'What the household needs.', dataRevision: store.dataRevision, items: structuredClone(store.items), updatedAt: 1 } as T;
+    const p = command.payload, again = saved.get(p.operationId); if (again !== undefined) return { sharedBotId, dataRevision: again } as T;
+    if (p.expectedDataRevision !== store.dataRevision) throw new Error('LIST_REVISION_CONFLICT');
+    for (const change of p.changes) {
+      if (change.op === 'add') { store.items.push({ itemId: `item_${String(store.next++).padStart(4, '0')}`, text: change.text.trim(), done: false }); continue; }
+      const index = store.items.findIndex(item => item.itemId === change.itemId); if (index < 0) throw new Error('LIST_ITEM_REQUIRED');
+      if (change.op === 'remove') store.items.splice(index, 1);
+      else Object.assign(store.items[index]!, change.text === undefined ? {} : { text: change.text.trim() }, change.done === undefined ? {} : { done: change.done });
+    }
+    store.dataRevision += 1; saved.set(p.operationId, store.dataRevision);
+    if (store.lose) { store.lose = false; throw new Error('SERVICE_UNAVAILABLE'); }
+    return { sharedBotId, dataRevision: store.dataRevision } as T;
+  };
+  fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, sharedList: { title: 'Groceries' } })]; await workspace.refreshBots(); await until(() => !!workspace.getSnapshot().bots[0]?.sharedList, 'the Bot with a list');
+  const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
+  const writes = () => sent.flatMap(c => c.action === 'writeList' ? [c.payload] : []);
+  const add = { box: () => page.oneByLabel('New item'), form: () => page.oneByClass('tw-list-add') };
+  return { page, store, writes, add, fake, workspace };
+}
+scenario('A shared list opens from its Bot; adding, ticking, renaming and removing each save one change on top of the list that was read', async context => {
+  const list = await openList(context), { page } = list;
+  assert.equal(page.byLabel('New item').length, 0); await page.click(page.button('List: Groceries'));
+  assert.match(page.text(), /Milk/); assert.match(page.text(), /can read and change it too/); assert.equal(page.button('Add').props.disabled, true);
+  await page.type(list.add.box(), ' Bread '); await page.submit(list.add.form());
+  assert.equal(list.add.box().props.value, '', 'the box is ready for the next item'); assert.match(page.text(), /Bread/);
+  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox' && n.props.checked === false)[0]);
+  await page.click(page.oneByLabel('Edit “Bread”')); assert.equal(page.button('Save').props.disabled, true, 'nothing changed yet');
+  await page.type(page.oneByLabel('Item text'), 'Rye bread'); await page.submit(page.oneByLabel('Item text').parent);
+  await page.click(page.oneByLabel('Remove “Milk”'));
+  assert.deepEqual(list.writes().map(({ operationId, sharedBotId, ...rest }) => rest), [
+    { expectedDataRevision: 1, changes: [{ op: 'add', text: ' Bread ' }] }, { expectedDataRevision: 2, changes: [{ op: 'update', itemId: 'item_0001', done: true }] },
+    { expectedDataRevision: 3, changes: [{ op: 'update', itemId: 'item_0002', text: 'Rye bread' }] }, { expectedDataRevision: 4, changes: [{ op: 'remove', itemId: 'item_0001' }] }]);
+  assert.equal(new Set(list.writes().map(write => write.operationId)).size, 4);
+  assert.deepEqual(list.store.items, [{ itemId: 'item_0002', text: 'Rye bread', done: false }]); assert.doesNotMatch(page.text(), /Milk/);
+  await page.type(list.add.box(), 'x'.repeat(501)); assert.match(page.text(), /too long to save/); assert.equal(page.button('Add').props.disabled, true);
+});
+scenario('A change made on an outdated list is not saved: the newer list is shown and what was typed stays for the person to decide', async context => {
+  const list = await openList(context), { page } = list; await page.click(page.button('List: Groceries'));
+  await page.type(list.add.box(), 'Eggs');
+  list.store.items.push({ itemId: 'item_0002', text: 'Bob added oat milk', done: false }); list.store.next = 3; list.store.dataRevision = 2;
+  await page.submit(list.add.form());
+  assert.equal(list.store.items.length, 2, 'nothing was saved'); assert.match(page.text(), /was changed in the meantime, so your change was not saved/); assert.match(page.text(), /Bob added oat milk/);
+  assert.equal(list.add.box().props.value, 'Eggs');
+  await page.submit(list.add.form());
+  assert.deepEqual(list.writes().map(write => write.expectedDataRevision), [1, 2]); assert.notEqual(list.writes()[0].operationId, list.writes()[1].operationId);
+  assert.deepEqual(list.store.items.map(item => item.text), ['Milk', 'Bob added oat milk', 'Eggs']); assert.doesNotMatch(page.text(), /was changed in the meantime/);
+  // An item someone removed cannot be changed: the list is shown again without it.
+  await page.click(page.oneByLabel('Edit “Milk”')); await page.type(page.oneByLabel('Item text'), 'Whole milk');
+  list.store.items.shift(); list.store.dataRevision = 4; await page.submit(page.oneByLabel('Item text').parent);
+  assert.match(page.text(), /was changed in the meantime/); assert.equal(page.byLabel('Item text').length, 0); assert.doesNotMatch(page.text(), /Milk\b(?! )/);
+});
+scenario('A list change whose answer was lost is repeated with the same operation id and saves nothing twice', async context => {
+  const list = await openList(context), { page } = list; await page.click(page.button('List: Groceries'));
+  await page.type(list.add.box(), 'Eggs'); list.store.lose = true; await page.submit(list.add.form());
+  assert.match(page.text(), /Could not sync messages/); assert.equal(list.add.box().props.value, 'Eggs', 'the text is kept');
+  await page.submit(list.add.form());
+  assert.equal(list.writes().length, 2); assert.equal(list.writes()[0].operationId, list.writes()[1].operationId);
+  assert.deepEqual(list.store.items.map(item => item.text), ['Milk', 'Eggs']); assert.equal(list.add.box().props.value, '');
+  assert.doesNotMatch(page.text(), /Could not sync messages/);
+});
+scenario('Publication offers a shared list, names it in the review, and carries an existing list into the next publication', async context => {
+  const published: any[] = [];
+  const { fake, workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-new', name: 'Travel', description: '' }, { instanceId: 'local-fixture', name: 'Fixture', description: '' }], selectSharedFiles: async () => [],
+    publishLocalBot: async input => { published.push(input); return { sharedBotId: input.sharedBotId, revision: input.expectedRevision + 1 }; } });
+  const inner = fake.messages;
+  fake.messages = async <T>(command: MessageCommand) => 'schemaVersion' in command && command.action === 'readList'
+    ? { sharedBotId: command.payload.sharedBotId, title: 'Groceries', description: 'What the household needs.', dataRevision: 0, items: [], updatedAt: 1 } as T : inner<T>(command);
+  const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
+  const listBox = () => page.find(n => n.type === 'input' && n.props.type === 'checkbox' && textOf(n.parent) === 'Give this assistant a shared list')[0];
+  const name = () => page.find(n => n.type === 'input' && n.props.maxLength === 120)[0], purpose = () => page.find(n => n.type === 'textarea' && n.props.maxLength === 2000)[0];
+  const confirm = async () => { await page.submit(); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant')); };
+  await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'local-new'); await page.type(page.find(n => n.type === 'textarea')[0], 'Keep the shopping list.');
+  assert.equal(name(), undefined); await page.check(listBox());
+  assert.equal(page.button('Review publication').props.disabled, true, 'a list needs a name and a purpose');
+  await page.type(name(), ' Groceries '); await page.type(purpose(), ' What the household needs. '); assert.equal(page.button('Review publication').props.disabled, false);
+  await page.submit(); assert.match(page.text(), /Shared list: Groceries/);
+  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
+  assert.deepEqual(published[0].sharedList, { title: 'Groceries', description: 'What the household needs.' });
+  // The Bot that already has a list is published again with it, unless its maintainer switches the list off.
+  fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, instanceId: 'local-fixture', sharedList: { title: 'Groceries' } })]; await workspace.refreshBots(); await until(() => !!workspace.getSnapshot().bots[0]?.sharedList, 'the Bot with a list');
+  await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'local-fixture'); await until(() => purpose()?.props.value === 'What the household needs.', 'the list of the published Bot');
+  assert.equal(listBox().props.checked, true); assert.equal(name().props.value, 'Groceries');
+  await page.type(page.find(n => n.type === 'textarea')[0], 'Keep the shopping list.'); await confirm();
+  assert.deepEqual(published[1].sharedList, { title: 'Groceries', description: 'What the household needs.' });
+  await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'local-fixture'); await until(() => purpose()?.props.value === 'What the household needs.', 'the list of the published Bot');
+  await page.check(listBox(), false); assert.match(page.text(), /Publishing without the list hides it from everyone/);
+  await page.type(page.find(n => n.type === 'textarea')[0], 'Keep the shopping list.'); await confirm();
+  assert.equal(published.length, 3); assert.equal('sharedList' in published[2], false);
 });

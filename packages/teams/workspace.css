@@ -333,6 +333,13 @@
 .tw-doc-history li { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--tw-line); }
 .tw-doc-history li:last-child { border-bottom: 0; padding-bottom: 0; }
 .tw-dialog .teams-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.tw-list-items { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; max-height: 50vh; overflow: auto; }
+.tw-list-items li, .tw-list-items form, .tw-list-add { display: flex; align-items: center; gap: 8px; }
+.tw-list-items form, .tw-list-items label { flex: 1; min-width: 0; }
+.tw-list-items label { display: flex; flex-direction: row; align-items: center; gap: 8px; overflow-wrap: anywhere; }
+.tw-list-items label input { width: auto; flex: none; }
+.tw-list-items [data-done='true'] { color: var(--tw-muted); text-decoration: line-through; }
+.tw-list-items form input, .tw-list-add input { flex: 1; min-width: 0; }
 
 /* ── Friends (FriendsSidebar, FriendsMain and its pages) ── */
 .tw-friends-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 700; }

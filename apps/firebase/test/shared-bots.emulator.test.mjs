@@ -912,6 +912,13 @@ test('list: one list per Bot that members change in turn; an outdated change is 
   let revision = 3;
   for (let i = 0; i < 24; i += 1) revision = (await memberWrite(`operation_fill_${i}`, revision, filled)).dataRevision;
   await assert.rejects(memberWrite('operation_full', revision, filled), { code: 'LIST_LIMIT' });
+  // The whole list is one answer to the Bot, so it is bounded in bytes too: long items fill it sooner.
+  revision = (await memberWrite('operation_empty', revision, (await readList()).items.slice(0, 20).map(item => ({ op: 'remove', itemId: item.itemId })))).dataRevision;
+  const long = Array.from({ length: 19 }, () => add('x'.repeat(500)));
+  for (let i = 0; i < 2; i += 1) revision = (await memberWrite(`operation_long_${i}`, revision, long)).dataRevision;
+  const short = (await readList()).items.slice(0, 20).map(item => ({ op: 'update', itemId: item.itemId, text: 'y'.repeat(500) }));
+  await assert.rejects(memberWrite('operation_long_full', revision, short), { code: 'LIST_LIMIT' });
+  assert.equal((await readList()).items.length, 499);
 });
 test('list: a task writes through its ledger operation; the change and the outcome are saved together and only once', options, async () => {
   publication = 1;

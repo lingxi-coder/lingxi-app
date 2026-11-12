@@ -82,6 +82,9 @@ internal fun requireTeamBotSelections(selected: Collection<String>, bots: List<T
 internal object TeamExecutionContract {
     /** The largest shared document body the service stores, in UTF-8 bytes. */
     const val DOCUMENT_BYTES = 256 * 1024
+    /** The longest text of one shared-list item, in UTF-8 bytes, and the most changes one write carries. */
+    const val LIST_ITEM_BYTES = 500
+    const val LIST_CHANGES = 20
     fun validate(v: JSONObject) {
         fun fail(): Nothing = throw TeamMessageFailure("INVALID_INPUT")
         fun JSONObject.keysSet() = keys().asSequence().toSet()
@@ -110,6 +113,24 @@ internal object TeamExecutionContract {
                 if (title.isEmpty() || title.length > 120 || body.isEmpty() || body.toByteArray(Charsets.UTF_8).size > DOCUMENT_BYTES) fail()
             }
             "listOperations" -> { shape(setOf("taskId")); requireId("taskId") }
+            "readList" -> { shape(setOf("sharedBotId")); requireId("sharedBotId") }
+            "writeList" -> {
+                shape(setOf("sharedBotId", "operationId", "expectedDataRevision", "changes")); requireId("sharedBotId"); requireId("operationId")
+                val changes = p.optJSONArray("changes") ?: fail()
+                if (!integer(p.opt("expectedDataRevision"), 0) || changes.length() !in 1..LIST_CHANGES) fail()
+                fun text(value: Any?) = value is String && value.trim().isNotEmpty() && value.toByteArray(Charsets.UTF_8).size <= LIST_ITEM_BYTES && !value.contains('\u0000')
+                for (index in 0 until changes.length()) {
+                    val change = changes.optJSONObject(index) ?: fail(); val keys = change.keysSet()
+                    val valid = when (change.opt("op")) {
+                        "add" -> keys == setOf("op", "text") && text(change.opt("text"))
+                        "update" -> setOf("op", "itemId", "text", "done").containsAll(keys) && id(change.opt("itemId")) && (change.has("text") || change.has("done")) &&
+                            (!change.has("text") || text(change.opt("text"))) && (!change.has("done") || change.opt("done") is Boolean)
+                        "remove" -> keys == setOf("op", "itemId") && id(change.opt("itemId"))
+                        else -> false
+                    }
+                    if (!valid) fail()
+                }
+            }
             "resolveOperation" -> {
                 shape(setOf("taskId", "operationId", "resolution")); requireId("taskId")
                 val operation = p.opt("operationId"); if (operation !is String || !Regex("^[a-f0-9]{64}$").matches(operation)) fail()

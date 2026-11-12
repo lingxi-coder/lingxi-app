@@ -8,6 +8,8 @@ export interface SharedBotCard {
   revision: number; state: 'draft' | 'published' | 'paused' | 'retired';
   permitted: boolean; ready: boolean; onlineUntil: number; usePolicy: UsePolicy;
   quotas: RequestQuotas; instanceId?: string;
+  /** The Bot keeps a list its members and its runs change together. */
+  sharedList?: { title: string };
 }
 export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'expired' | 'interrupted' | 'authorization_required' | 'revoked' | 'cancelled' | 'needs_reconciliation';
 export type TaskUsage = { status: 'missing' } | { status: 'partial' | 'complete'; inputTokens: number; outputTokens: number; costMicros?: number; currency?: string };
@@ -40,6 +42,12 @@ export interface OperationResolved { taskId: string; state: TaskState; operation
 /** Replays are safe for the other categories; these two need a confirmed outcome before a task may go on. */
 export const operationUnverified = (operation: TaskOperation): boolean =>
   (operation.category === 'queryable' || operation.category === 'unqueryable') && (operation.state === 'dispatched' || operation.state === 'unknown');
+/** A Bot's shared list. Every write names the `dataRevision` it was made from and is refused once the list has moved on. */
+export interface SharedListItem { itemId: string; text: string; done: boolean }
+export type SharedListChange = { op: 'add'; text: string } | { op: 'update'; itemId: string; text?: string; done?: boolean } | { op: 'remove'; itemId: string };
+export interface SharedListWrite { expectedDataRevision: number; changes: SharedListChange[] }
+export interface SharedList { sharedBotId: string; title: string; description: string; dataRevision: number; items: SharedListItem[]; updatedAt: number }
+export interface SharedListWritten { sharedBotId: string; dataRevision: number }
 export interface ExecutionScope { teamId: string; generation: number }
 export interface MemberExecutionPayloads {
   listSharedBots: Record<string, never>;
@@ -55,6 +63,8 @@ export interface MemberExecutionPayloads {
   reviseArtifact: { artifactId: string; expectedRevision: number; operationId: string; document: TeamDocument };
   listOperations: { taskId: string };
   resolveOperation: { taskId: string; operationId: string; resolution: 'succeeded' | 'failed' };
+  readList: { sharedBotId: string };
+  writeList: SharedListWrite & { sharedBotId: string; operationId: string };
   setConversationPolicy: { conversationId: string; expectedRevision: number; targets: string[] };
 }
 export type MemberExecutionAction = keyof MemberExecutionPayloads;
@@ -72,5 +82,7 @@ export interface SelectedSharedFile { token: string; kind: 'file' | 'skill'; nam
 export interface PublishLocalBotInput extends ExecutionScope {
   publicationId: string; sharedBotId: string; instanceId: string; expectedRevision: number;
   role: string; usePolicy: UsePolicy; fileTokens: string[]; resourceBindings?: Record<string, string>; quotas: RequestQuotas;
+  /** Give the Bot a shared list: its title, and what the Bot is told the list is for. */
+  sharedList?: { title: string; description: string };
 }
 export const sharedBotUsable = (card: SharedBotCard): boolean => card.state === 'published' && card.permitted;

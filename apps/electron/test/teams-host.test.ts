@@ -686,3 +686,117 @@ test('the private process reads a checkpoint and a waiting result only for the b
  const finished={version:3,type:'result',status:'completed',cursor:live,text:'Done',finishedAt:1,dispatchedRequests:2,attemptDispatchedRequests:1,deniedTools:0,usage:{status:'missing'}};
  assert.equal(((await runTeamHost({...base,bootstrap:boot('continue'),spawnProcess:frames([finished])})) as any).attemptDispatchedRequests,1);
 });
+
+// M2: the shared list. A write is recorded in the operation ledger before it is sent.
+const groceries={title:'Groceries',description:'What the household needs.'},step='task00001/t0/c1';
+const stepId=(logicalStepId=step)=>digest(JSON.stringify(['task00001','task00001',logicalStepId,'store_idempotent']));
+const milk={itemId:'item_0001',text:'Milk',done:false},bread={itemId:'item_0002',text:'Bread',done:false};
+const addBread={expectedDataRevision:1,changes:[{op:'add',text:'Bread'}]};
+/** A Bot with a shared list on a continuable route, and the server side of the list and its ledger. */
+function listed(t:any,worker:Run,answers:Record<string,(payload:any)=>unknown>={}){
+ const f=durable(t,worker),inner=f.mock.service.hostMessages.bind(f.mock.service);
+ const replies:Record<string,(payload:any)=>unknown>={readTaskList:()=>({dataRevision:1,items:[{...milk,updatedBy:{kind:'user',uid:'member',generation:1},updatedAt:1}]}),
+  recordOperation:p=>({operationId:p.operationId,state:'dispatched',dispatch:true}),writeTaskList:()=>({applied:true,dataRevision:2,items:[milk,bread]}),...answers};
+ f.mock.service.hostMessages=async(c,command)=>{const result:any=await inner(c,command);
+  if(command.action==='startTask'||command.action==='continueTask')return {...result,sharedList:groceries};
+  return replies[command.action as string]?replies[command.action as string]!(command.payload) as any:result;};
+ return {...f,input:{...f.input,sharedList:groceries}};
+}
+test('a Bot reads its shared list and changes it through the ledger: recorded first, then sent once under the id of its step',async t=>{
+ const outcomes:any[]=[];
+ const f=listed(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();
+  outcomes.push(await o.operate!({tool:'list_read'}),await o.operate!({tool:'list_write',logicalStepId:step,arguments:addBread}),
+   await o.operate!({tool:'list_write',logicalStepId:'task00001/t1/c0',arguments:{expectedDataRevision:2,changes:[{op:'remove',itemId:'abc'}]}}));return done();});
+ await f.connector.publishLocalBot('owner',f.input);const published=f.sent('publishSharedBot')[0].payload;
+ assert.deepEqual(published.sharedList,groceries);assert.deepEqual(published.deployment.capabilities,{durableWait:true,writeOperations:true,delegation:false});
+ f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ const b=(await f.privateStore.bindings('owner'))[0]!,host={deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:'permit00001'};
+ assert.deepEqual(f.launches[0]!.bootstrap.sharedList,groceries);
+ assert.deepEqual(outcomes[0],{established:true,succeeded:true,result:{dataRevision:1,items:[milk]}});
+ assert.deepEqual(outcomes[1],{established:true,succeeded:true,result:{dataRevision:2,items:[milk,bread]}});
+ // What the service would refuse is never recorded: the Bot is told, and nothing is sent.
+ assert.deepEqual(outcomes[2],{established:true,succeeded:false,result:{error:'INVALID_LIST_CHANGE'}});
+ assert.deepEqual(f.sent('readTaskList').map(c=>c.payload),[host]);
+ const records=f.sent('recordOperation'),writes=f.sent('writeTaskList');assert.equal(records.length,1);assert.equal(writes.length,1);
+ assert.deepEqual({...records[0].payload,dispatchedAt:0},{...host,operationId:stepId(),logicalStepId:step,category:'store_idempotent',tool:{name:'TeamListWrite',version:'1'},
+  digest:digest(JSON.stringify({changes:[{op:'add',text:'Bread'}],expectedDataRevision:1})),dispatchedAt:0});
+ assert.ok(records[0].payload.dispatchedAt<=Date.now());
+ assert.deepEqual(writes[0].payload,{...host,operationId:stepId(),...addBread});
+ assert.ok(f.mock.commands.indexOf(records[0])<f.mock.commands.indexOf(writes[0]));
+ assert.equal(completions(f)[0].payload.outcome,'completed');
+});
+test('a write nobody can vouch for is not answered; the continued attempt repeats the same step under the same operation id',async t=>{
+ const outcomes:any[]=[];
+ const f=listed(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();
+  const outcome=await o.operate!({tool:'list_write',logicalStepId:step,arguments:addBread});outcomes.push(outcome);if(!outcome.established)throw new TeamHostFailure('WORKER');return done('Bread is on the list');});
+ await f.connector.publishLocalBot('owner',f.input);f.failures.writeTaskList=Array.from({length:3},()=>new TeamsApiError('SERVICE_UNAVAILABLE',503));
+ f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ assert.deepEqual(outcomes,[{established:false,succeeded:false,result:{}},{established:true,succeeded:true,result:{dataRevision:2,items:[milk,bread]}}]);
+ const records=f.sent('recordOperation'),writes=f.sent('writeTaskList');
+ assert.deepEqual(records.map(c=>[c.payload.operationId,c.payload.permitId]),[[stepId(),'permit00001'],[stepId(),'permit00002']]);assert.notEqual(records[0].commandId,records[1].commandId);
+ assert.deepEqual(writes.map(c=>[c.payload.operationId,c.payload.permitId]),[[stepId(),'permit00002']]);
+ assert.deepEqual(f.sent('continueTask').map(c=>c.payload.reason),['recovery']);
+ assert.deepEqual(f.launches.map(o=>[o.bootstrap.type,o.bootstrap.sharedList]),[['run',groceries],['continue',groceries]]);
+ assert.equal(completions(f)[0].payload.text,'Bread is on the list');
+});
+test('a write the ledger refuses is not sent: the Bot hears a refusal it can act on, a write that lost its turn is left open, a cancelled task ends',async t=>{
+ const outcomes:any[]=[];let records=0;
+ const f=listed(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();
+  for(const logicalStepId of [step,'task00001/t0/c2','task00001/t0/c3'])outcomes.push(await o.operate!({tool:'list_write',logicalStepId,arguments:addBread}));return done();},
+  {recordOperation:p=>++records===1?(()=>{throw new TeamsApiError('OPERATION_LIMIT',409);})():records===2?{operationId:p.operationId,state:'dispatched',dispatch:false}:(()=>{throw new TeamsApiError('TASK_CANCELLED',409);})()});
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ assert.deepEqual(outcomes,[{established:true,succeeded:false,result:{error:'OPERATION_LIMIT'}},{established:false,succeeded:false,result:{}}]);
+ assert.equal(f.sent('writeTaskList').length,0);assert.equal(completions(f)[0].payload.outcome,'failed');
+});
+test('a list the service saved differently reaches the Bot as a refusal with the current list',async t=>{
+ const outcomes:any[]=[];
+ const f=listed(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();outcomes.push(await o.operate!({tool:'list_write',logicalStepId:step,arguments:addBread}));return done();},
+  {writeTaskList:()=>({applied:false,error:'DATA_REVISION_CONFLICT',dataRevision:4,items:[bread]})});
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ assert.deepEqual(outcomes,[{established:true,succeeded:false,result:{error:'DATA_REVISION_CONFLICT',dataRevision:4,items:[bread]}}]);
+});
+test('only a Bot on a continuable route is published with a list, and a run that was not offered the list cannot reach it',async t=>{
+ const f=fixture(t);await assert.rejects(f.connector.publishLocalBot('owner',{...f.input,sharedList:groceries}),/SHARED_LIST_UNSUPPORTED/);
+ for(const sharedList of [{title:' ',description:'x'},{title:'x'.repeat(121),description:'x'},{title:'x',description:''},{title:'x',description:'x',items:[]},null])
+  await assert.rejects(f.connector.publishLocalBot('owner',{...f.input,sharedList} as any),/INVALID_INPUT/);
+ await f.connector.publishLocalBot('owner',f.input);const published=f.mock.commands.find(c=>c.action==='publishSharedBot').payload;
+ assert.equal(published.sharedList,undefined);assert.equal(published.deployment.capabilities.writeOperations,false);
+ let refusal:unknown;const g=durable(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();try{await o.operate!({tool:'list_read'});}catch(error){refusal=error;}return done();});
+ await g.connector.publishLocalBot('owner',g.input);g.mock.tasks.push(queued());g.mock.wake();await finished(g);
+ assert.equal(g.launches[0]!.bootstrap.sharedList,undefined);assert.match(String(refusal),/TEAM_HOST_PROTOCOL/);assert.equal(g.sent('readTaskList').length,0);
+});
+/** A host process that sends one frame, then its result once the Desktop has answered (or at once when no answer is due). */
+function conversing(request:unknown,result:unknown,answered=true){const child=new EventEmitter() as ChildProcessWithoutNullStreams,written:any[]=[];
+ Object.assign(child,{stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),exitCode:null,kill:()=>{}});
+ const emit=(line:unknown)=>child.stdout.emit('data',Buffer.from(JSON.stringify(line)+'\n')),end=()=>{emit(result);child.emit('close',0);};
+ child.stdin.on('data',(data:Buffer)=>{for(const line of data.toString().split('\n').filter(Boolean))written.push(JSON.parse(line));
+  if(written.length===1)setImmediate(()=>{emit(request);if(!answered)setTimeout(end,20);});else if(written.length===2)setImmediate(end);});
+ return {spawn:()=>child,written};}
+test('the private process serves list operations only to a run that was offered the list, and says when an outcome is not established',async()=>{
+ const scope={teamId,sharedBotId,conversationId,sessionEpoch:1},live={scope,sessionRevision:1,lastMessageSeq:2,lastChangeSeq:2,bootstrapFromSeq:0};
+ const result={version:3,type:'result',status:'completed',cursor:live,text:'Done',finishedAt:1,dispatchedRequests:2,attemptDispatchedRequests:1,deniedTools:0,usage:{status:'missing'}};
+ const base={executable:'/mock',home:'/private-home',tmp:'/private-tmp',signal:new AbortController().signal,assertCurrent:()=>{}};
+ const boot=(extra:Record<string,unknown>={sharedList:groceries})=>({version:3 as const,type:'run' as const,storageRoot:'/private-root',workerExecutable:'/worker',scope,taskId:'task00001',...extra});
+ const write={version:3,type:'operation',id:'operation-1',tool:'list_write',logicalStepId:step,arguments:addBread},read={version:3,type:'operation',id:'operation-1',tool:'list_read',arguments:{}};
+ const calls:any[]=[];let authorized=0;const authorize=async()=>{authorized++;};
+ const serve=(outcome:any)=>async(operation:any)=>{calls.push(operation);return outcome;};
+ let f=conversing(write,result);
+ assert.equal((await runTeamHost({...base,bootstrap:boot(),authorize,operate:serve({established:true,succeeded:true,result:{dataRevision:2,items:[milk,bread]}}),spawnProcess:f.spawn})).status,'completed');
+ assert.deepEqual(f.written[1],{version:3,type:'operation_result',id:'operation-1',established:true,succeeded:true,result:{dataRevision:2,items:[milk,bread]}});
+ assert.deepEqual(calls,[{tool:'list_write',logicalStepId:step,arguments:addBread}]);assert.equal(authorized,1);
+ f=conversing(read,result);await runTeamHost({...base,bootstrap:boot(),authorize,operate:serve({established:true,succeeded:false,result:{error:'LIST_REQUIRED'}}),spawnProcess:f.spawn});
+ assert.deepEqual(f.written[1],{version:3,type:'operation_result',id:'operation-1',established:true,succeeded:false,result:{error:'LIST_REQUIRED'}});assert.deepEqual(calls[1],{tool:'list_read'});
+ // An outcome that is not established carries no result and is never a success.
+ f=conversing(write,result);await runTeamHost({...base,bootstrap:boot(),authorize,operate:serve({established:false,succeeded:true,result:{dataRevision:9}}),spawnProcess:f.spawn});
+ assert.deepEqual(f.written[1],{version:3,type:'operation_result',id:'operation-1',established:false,succeeded:false,result:{}});
+ const served=calls.length;
+ for(const [bootstrap,frame,operate] of [
+  [boot({}),write,serve({established:true,succeeded:true,result:{}})],[boot(),write,undefined],
+  [boot(),{...write,logicalStepId:'task00002/t0/c1'},serve({established:true,succeeded:true,result:{}})],[boot(),{...write,logicalStepId:'task00001/t0'},serve({established:true,succeeded:true,result:{}})],
+  [boot(),{...write,logicalStepId:undefined},serve({established:true,succeeded:true,result:{}})],[boot(),{...read,logicalStepId:step},serve({established:true,succeeded:true,result:{}})],
+  [boot(),{...read,arguments:{all:true}},serve({established:true,succeeded:true,result:{}})],[boot(),{...read,tool:'list_clear'},serve({established:true,succeeded:true,result:{}})],
+  [boot(),{...read,id:'read_chat-1'},serve({established:true,succeeded:true,result:{}})],[boot(),{...read,retry:true},serve({established:true,succeeded:true,result:{}})],
+  [boot(),read,serve({established:true,succeeded:true,result:{items:'x'.repeat(65*1024)}})],[boot(),read,async()=>{throw new Error('SERVICE_UNAVAILABLE');}],
+ ] as const)await assert.rejects(runTeamHost({...base,bootstrap:bootstrap as any,authorize,operate:operate as any,spawnProcess:conversing(JSON.parse(JSON.stringify(frame)),result,false).spawn}),/TEAM_HOST_PROTOCOL/);
+ assert.equal(calls.length,served+1);
+});

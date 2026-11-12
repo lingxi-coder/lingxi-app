@@ -886,6 +886,372 @@
           "taskId": "task_0001"
         }
       }
+    },
+    {
+      "name": "valid-readList",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "readList",
+        "payload": {
+          "sharedBotId": "sharedbot_01"
+        }
+      }
+    },
+    {
+      "name": "valid-writeList",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "update",
+              "itemId": "item_0001",
+              "done": true
+            },
+            {
+              "op": "update",
+              "itemId": "item_0002",
+              "text": "Rye bread",
+              "done": false
+            },
+            {
+              "op": "remove",
+              "itemId": "item_0003"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-readList-unknown-payload",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "readList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "revision": 1
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-no-changes",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": []
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-too-many-changes",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-blank-text",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "add",
+              "text": "  "
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-long-text",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "add",
+              "text": "\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-empty-update",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "update",
+              "itemId": "item_0001"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-unknown-op",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "clear"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-unknown-change-key",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "remove",
+              "itemId": "item_0001",
+              "text": "Milk"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-missing-revision",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "changes": [
+            {
+              "op": "add",
+              "text": "Milk"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-negative-revision",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": -1,
+          "changes": [
+            {
+              "op": "add",
+              "text": "Milk"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-readTaskList-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "readTaskList",
+        "payload": {
+          "taskId": "task_0001"
+        }
+      }
+    },
+    {
+      "name": "reject-writeTaskList-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeTaskList",
+        "payload": {
+          "taskId": "task_0001"
+        }
+      }
     }
   ],
   "batches": [

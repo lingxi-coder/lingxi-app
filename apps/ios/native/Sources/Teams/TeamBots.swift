@@ -107,6 +107,25 @@ enum TeamBotSelection {
 enum TeamExecutionContract {
     /// The largest shared document body the service stores, in UTF-8 bytes.
     static let documentBytes = 256 * 1024
+    /// The longest text of one shared-list item, in UTF-8 bytes, and the most changes one write carries.
+    static let listItemBytes = 500, listChanges = 20
+    /// One change of a shared-list write exactly as the service accepts it.
+    private static func listChange(_ change: [String: Any]) -> Bool {
+        func text(_ value: Any?) -> Bool {
+            guard let text = value as? String else { return false }
+            return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && text.utf8.count <= listItemBytes && !text.contains("\0")
+        }
+        func flag(_ value: Any?) -> Bool { (value as? NSNumber).map { CFGetTypeID($0) == CFBooleanGetTypeID() } ?? false }
+        let keys = Set(change.keys)
+        switch change["op"] as? String {
+        case "add": return keys == ["op", "text"] && text(change["text"])
+        case "update":
+            return keys.isSubset(of: ["op", "itemId", "text", "done"]) && identifier(change["itemId"]) && (change["text"] != nil || change["done"] != nil)
+                && (change["text"] == nil || text(change["text"])) && (change["done"] == nil || flag(change["done"]))
+        case "remove": return keys == ["op", "itemId"] && identifier(change["itemId"])
+        default: return false
+        }
+    }
     static func validate(_ value: [String: Any]) throws {
         func fail() throws -> Never { throw TeamMessageFailure(code: "INVALID_INPUT") }
         guard Set(value.keys) == ["schemaVersion", "commandId", "teamId", "generation", "action", "payload"],
@@ -136,6 +155,11 @@ enum TeamExecutionContract {
                   case let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty, trimmed.utf16.count <= 120,
                   !body.isEmpty, body.utf8.count <= documentBytes else { try fail() }
         case "listOperations": try shape(["taskId"]); try id("taskId")
+        case "readList": try shape(["sharedBotId"]); try id("sharedBotId")
+        case "writeList":
+            try shape(["sharedBotId", "operationId", "expectedDataRevision", "changes"]); try id("sharedBotId"); try id("operationId")
+            guard integer(payload["expectedDataRevision"], minimum: 0) != nil, let changes = payload["changes"] as? [[String: Any]],
+                  (1...listChanges).contains(changes.count), changes.allSatisfy(listChange) else { try fail() }
         case "resolveOperation":
             try shape(["taskId", "operationId", "resolution"]); try id("taskId")
             guard let operation = payload["operationId"] as? String, operation.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,

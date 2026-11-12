@@ -94,7 +94,8 @@ runtime and host only know a "list service" with read and operation-id write; a 
 - Members (`readList`, `writeList {sharedBotId, operationId, expectedDataRevision, changes}`): whoever may use the Bot, and
   its maintainer. A write is 1–20 changes (`add`, `update`, `remove`) applied together on the revision they were made from;
   otherwise `LIST_REVISION_CONFLICT` and nothing is saved. `operationId` makes a repeated request return what it saved.
-  Other refusals: `LIST_REQUIRED`, `LIST_ITEM_REQUIRED`, `LIST_LIMIT` (500 items), `OPERATION_CONFLICT`.
+  Other refusals: `LIST_REQUIRED`, `LIST_ITEM_REQUIRED`, `LIST_LIMIT` (500 items, or 48 KiB for all items as JSON, so the
+  whole list is always one tool result for the Bot), `OPERATION_CONFLICT`.
 - Tasks (`readTaskList`, `writeTaskList {…host, taskId, permitId, operationId, expectedDataRevision, changes}`): the write
   must already be a `store_idempotent` ledger operation of the task for tool `TeamListWrite` whose digest is the hash of
   `{expectedDataRevision, changes}`. The list change, the stored answer and the ledger outcome (`succeeded`, or `failed` for
@@ -104,6 +105,37 @@ runtime and host only know a "list service" with read and operation-id write; a 
   start frame carries `sharedList`. The write's operation is named by the durable logical step of its call and is sent to
   the host only after that call is on the transcript; a killed worker repeats the same operation on continuation; an
   outcome the host cannot establish ends the process with the call unfinished.
+
+## M2 / Q06 — Desktop host and the list on Web and Desktop
+
+- Publication (`apps/electron/src/main/teams/connector.ts`): `PublishLocalBotInput.sharedList {title, description}` is
+  optional. A deployment publishes `capabilities.writeOperations` exactly when its model route can be continued from a
+  checkpoint (today `open_ai_chat`), because a list write is recorded before it is sent and repeated after an interruption.
+  A list on any other route is refused with `SHARED_LIST_UNSUPPORTED` before anything is published.
+- A run: the `sharedList` the service returns from `startTask`/`continueTask` is kept on the saved execution (`list`) and
+  passed in the `run`/`continue` bootstrap. `runTeamHost` (`process.ts`) accepts `operation` frames only from a bootstrap
+  that carried the list, checks that a write names a step of this task, authorizes, and answers `operation_result`
+  `{established, succeeded, result}`.
+- A write (`TeamConnector.operate`): arguments are checked with the shared validator first (`INVALID_LIST_CHANGE` is told to
+  the Bot and nothing is recorded). Then `recordOperation` with `operationId = sha256([taskId, taskId, logicalStepId,
+  "store_idempotent"])` and the digest of `{expectedDataRevision, changes}`; only then `writeTaskList` under the same id.
+  - `OPERATION_LIMIT`, `OPERATION_CONFLICT`, `WRITE_OPERATIONS_UNSUPPORTED` from the record: nothing was sent, the Bot is told.
+  - Any other definitive refusal of the record ends the run like every refused worker frame (a cancelled task, a lost permit).
+  - A record or a write whose answer never arrives, a record that may not be sent again, a refused write: `established: false`.
+    The worker stops with the call unfinished (`WORKER`, an interruption), and the recovery attempt repeats the same step
+    under the same operation id with its new permit; the service returns what the first one saved.
+- No operation of the list is ever "unverified" (`store_idempotent` is replay-safe), so `continueTask` answers `reconcile`
+  and `needs_reconciliation` are not reachable through it. The host does not act on `reconcile` yet: there is no queryable
+  tool to ask.
+- Clients: `readList` / `writeList` are in the shared member contract (TypeScript, Swift and Kotlin validators, shared
+  vectors) and in the Desktop allowlist. Web and Desktop: the Bot card has a "List: <title>" button for whoever may use the
+  Bot; `SharedListDialog` adds, ticks, renames and removes items, one change per save on top of the revision that was read.
+  A refused save (`LIST_REVISION_CONFLICT`, `LIST_ITEM_REQUIRED`) reads the list again and keeps what was typed; a repeated
+  save reuses its operation id. The publish wizard has the list option, names the list in the review, and carries an existing
+  list into the next publication unless the maintainer switches it off. iOS and Android validate the two commands but have no
+  list screen yet.
+- Known limit: `dispatchedAt` is the host clock (as `pausedAt` is). A host clock ahead of the service, or behind the start of
+  the attempt, makes the record answer `TASK_EXPIRED`, which ends the run.
 
 ## M2 / Q07–Q08 clients — document editing, history and tasks that need checking
 

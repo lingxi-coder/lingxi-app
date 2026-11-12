@@ -17,6 +17,8 @@ export interface TeamHostBootstrap {
   continuation?: TeamContinuation;
   /** Offer the Bot the ask-the-requester tool (`run` and `continue`). */
   askRequester?: boolean;
+  /** Offer the Bot its shared list (`run` and `continue`): the title, and what the Bot is told the list is for. */
+  sharedList?: { title: string; description: string };
   knowledge?: Array<{ id: string; title: string; text: string }>;
   deadlineAt?: number; model?: Omit<TeamModelRoute, 'credential_id'>; credentials?: ProviderAccountEnvelope;
   limits?: { max_turns: number; context_window_tokens: number; output_tokens_per_request: number; physical_dispatches: number };
@@ -46,12 +48,18 @@ function wait(value: unknown): value is TeamTaskWait {
   return typeof value.waitId === 'string' && /^wait_[a-f0-9]{40}$/u.test(value.waitId) && typeof value.logicalStepId === 'string' && value.logicalStepId.length <= 256
     && typeof value.question === 'string' && !!value.question.trim() && Buffer.byteLength(value.question) <= 2000 && typeof value.requestDigest === 'string' && DIGEST.test(value.requestDigest);
 }
+/** One request of the running Bot to its shared list. A write names the durable step it belongs to, which is its identity in the operation ledger. */
+export type TeamOperation = { tool: 'list_read' } | { tool: 'list_write'; logicalStepId: string; arguments: Record<string, unknown> };
+/** `established: false` says nobody knows whether the write happened: the worker then stops with the call unfinished instead of telling the model a guess. */
+export interface TeamOperationOutcome { established: boolean; succeeded: boolean; result: Record<string, unknown> }
+const OPERATION_BYTES = 64 * 1024;
 export class TeamHostFailure extends Error { constructor(readonly code: string) { super('TEAM_HOST_FAILED'); } }
 export interface TeamHostProcessOptions {
   executable: string; home: string; tmp: string; bootstrap: TeamHostBootstrap; signal: AbortSignal;
   assertCurrent(): void;
   accountCredentials?: (request: { accountId: string; identityGeneration: number; credentialRevision: number }) => Promise<ProviderAccountLaunch>;
   readChat?: (query: TeamChatQuery) => Promise<TeamDataRef>;
+  operate?: (operation: TeamOperation) => Promise<TeamOperationOutcome>;
   authorize?: () => Promise<void>;
   spawnProcess?: (executable: string, args: string[], options: Parameters<typeof spawn>[2]) => ChildProcessWithoutNullStreams;
   timeoutMs?: number;
@@ -107,10 +115,11 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
     const frame = (line: Buffer) => {
       options.assertCurrent(); const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(line));
       if (!object(value) || value.version !== 3 || result) throw new Error('TEAM_HOST_PROTOCOL');
-      if (['provider_account_refresh', 'read_chat', 'authorize'].includes(value.type as string)) {
-        exact(value, value.type === 'provider_account_refresh' ? ['version','type','id','account_id','identity_generation','credential_revision'] : value.type === 'read_chat' ? ['version','type','id','query'] : ['version','type','id']);
+      if (['provider_account_refresh', 'read_chat', 'authorize', 'operation'].includes(value.type as string)) {
+        if (value.type === 'operation') exact(value, ['version','type','id','tool','arguments'], ['logicalStepId']);
+        else exact(value, value.type === 'provider_account_refresh' ? ['version','type','id','account_id','identity_generation','credential_revision'] : value.type === 'read_chat' ? ['version','type','id','query'] : ['version','type','id']);
         if (typeof value.id !== 'string') throw new Error('TEAM_HOST_PROTOCOL');
-        const match = /^(provider_account_refresh|read_chat|authorize)-([1-9][0-9]{0,19})$/u.exec(value.id);
+        const match = /^(provider_account_refresh|read_chat|authorize|operation)-([1-9][0-9]{0,19})$/u.exec(value.id);
         if (!match || match[1] !== value.type || BigInt(match[2]!) <= sequence || BigInt(match[2]!) > 18446744073709551615n || requests.size >= 8) throw new Error('TEAM_HOST_PROTOCOL'); sequence = BigInt(match[2]!);
         const request = (async () => {
           if (value.type === 'provider_account_refresh') {
@@ -123,6 +132,15 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
             const q = value.query;
             if (q.kind === 'before') exact(q, ['kind', 'before_seq', 'limit']); else if (q.kind === 'range') exact(q, ['kind', 'from_seq_exclusive', 'to_seq_inclusive']); else if (q.kind === 'by_id') exact(q, ['kind', 'message_id']); else throw new Error('TEAM_HOST_PROTOCOL');
             await options.authorize?.(); const reference = await options.readChat(q as unknown as TeamChatQuery); send({ version: 3, type: 'chat_read', id: value.id, reference });
+          } else if (value.type === 'operation') {
+            const write = value.tool === 'list_write', step = value.logicalStepId, taskId = options.bootstrap.taskId;
+            if (!options.operate || !options.bootstrap.sharedList || !taskId || !object(value.arguments)
+              || (write ? typeof step !== 'string' || !step.startsWith(`${taskId}/t`) || !/^\/t[0-9]{1,10}\/c[0-9]{1,10}$/u.test(step.slice(taskId.length))
+                : value.tool !== 'list_read' || step !== undefined || Object.keys(value.arguments).length > 0)) throw new Error('TEAM_HOST_PROTOCOL');
+            await options.authorize?.();
+            const outcome = await options.operate(write ? { tool: 'list_write', logicalStepId: step as string, arguments: value.arguments } : { tool: 'list_read' });
+            if (!object(outcome.result) || Buffer.byteLength(JSON.stringify(outcome.result)) > OPERATION_BYTES) throw new Error('TEAM_HOST_PROTOCOL');
+            send({ version: 3, type: 'operation_result', id: value.id, established: outcome.established, succeeded: outcome.established && outcome.succeeded, result: outcome.established ? outcome.result : {} });
           } else { if (!options.authorize) throw new Error('TEAM_HOST_PROTOCOL'); await options.authorize(); send({ version: 3, type: 'authorized', id: value.id }); }
         })();
         requests.add(request); void request.catch(() => finish(new Error('TEAM_HOST_PROTOCOL'))).finally(() => requests.delete(request));

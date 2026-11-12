@@ -3,13 +3,14 @@ import { constants } from 'node:fs';
 import { open, lstat } from 'node:fs/promises';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { providerAccountEnvelope, type ProviderAccountLaunch } from '../provider-accounts.js';
-import type { LocalPublishableBot, PublishLocalBotInput, SelectedSharedFile, SharedBotCard, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
+import type { LocalPublishableBot, PublishLocalBotInput, SelectedSharedFile, SharedBotCard, SharedListItem, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
+import { isSharedListWrite } from '../../../../../packages/teams/execution-validation.js';
 import { TeamsApiError, type TeamSummary } from '../../../../../packages/teams/index.js';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source.js';
 import type { BotStore } from '../bots/store.js';
 import { validateBotManifest } from '../bots/package.js';
 import { TeamPrivateStore, digest, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution, type SavedDelivery, type TeamDataRef } from './privateStore.js';
-import { runTeamHost, runResult, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type TeamRunResult, type TeamTaskCheckpoint, type TeamTaskWait, type TeamContinuation, type BotChatScope } from './process.js';
+import { runTeamHost, runResult, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type TeamRunResult, type TeamTaskCheckpoint, type TeamTaskWait, type TeamContinuation, type BotChatScope, type TeamOperation, type TeamOperationOutcome } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
 
 export interface TeamHostApi {
@@ -40,8 +41,20 @@ interface Selected { context: TeamAccountContext; instanceId: string; expires: n
 /** `resume` marks a waiting task whose requester answered: it is queued again and continues from its checkpoint. */
 interface HostTask extends TeamTaskView { messageId: string; messageSeq: number; resume?: { waitId: string; answerMessageId: string; answerSeq: number } }
 interface TaskContext { task: HostTask; messageId: string; messageSeq: number; inputs: Array<{ grantId: string; resourceId: string; digest: string }>;
-  deployment: { deploymentId: string; definitionDigest: string; accountEpoch: number; capabilities?: { durableWait?: boolean } } }
-interface ContinueGrant { execute: boolean; state?: string; permitId?: string; epoch?: number; task?: TeamTaskView; physicalDispatchesSpent?: number }
+  deployment: { deploymentId: string; definitionDigest: string; accountEpoch: number; capabilities?: { durableWait?: boolean } };
+  /** Present when the Bot has a shared list and this deployment records its writes. */ sharedList?: SharedListOffer }
+interface ContinueGrant { execute: boolean; state?: string; permitId?: string; epoch?: number; task?: TeamTaskView; physicalDispatchesSpent?: number; sharedList?: SharedListOffer }
+interface SharedListOffer { title: string; description: string }
+interface TaskListAnswer { applied?: boolean; error?: string; dataRevision: number; items: SharedListItem[] }
+const listOffer = (value: unknown): SharedListOffer | undefined => {
+  const offer = value as Partial<SharedListOffer> | undefined;
+  return offer && typeof offer.title === 'string' && typeof offer.description === 'string' ? { title: offer.title, description: offer.description } : undefined;
+};
+/** The service's digest of a JSON value: object keys in order, so both sides hash the same bytes. */
+const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object'
+  ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, canonical(item)])) : value;
+/** A refusal of the ledger record that the Bot can act on. Nothing was recorded and nothing was sent; any other refusal ends the run like every refused worker frame. */
+const WRITE_REFUSED = ['OPERATION_LIMIT', 'OPERATION_CONFLICT', 'WRITE_OPERATIONS_UNSUPPORTED'];
 type HostPaths = Awaited<ReturnType<TeamPrivateStore['owner']>>;
 interface HostEnvironment { paths: HostPaths; bins: { host: string; worker: string } }
 const id = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{8,64}$/u.test(value);
@@ -171,7 +184,7 @@ export class TeamConnector implements LocalTeamHost {
     this.available(); const context = this.context(uid), key = JSON.stringify([uid, input?.teamId, input?.sharedBotId]);
     if (this.publishing.has(key)) throw new Error('BOT_REVISION_CONFLICT'); this.publishing.add(key);
     try {
-      if (!input || Object.keys(input).some(k => !['teamId','generation','publicationId','sharedBotId','instanceId','expectedRevision','usePolicy','fileTokens','quotas','role','resourceBindings'].includes(k))
+      if (!input || Object.keys(input).some(k => !['teamId','generation','publicationId','sharedBotId','instanceId','expectedRevision','usePolicy','fileTokens','quotas','role','resourceBindings','sharedList'].includes(k))
         || ![input.teamId,input.publicationId,input.sharedBotId,input.instanceId].every(id) || !Number.isSafeInteger(input.generation) || input.generation < 1
         || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0 || typeof input.role !== 'string' || !input.role.trim() || input.role.includes('\0') || Buffer.byteLength(input.role) > 64 * 1024
         || !Array.isArray(input.fileTokens) || input.fileTokens.length > 49 || new Set(input.fileTokens).size !== input.fileTokens.length) throw new Error('INVALID_INPUT');
@@ -184,6 +197,9 @@ export class TeamConnector implements LocalTeamHost {
         || new Set(policy.members.map(m=>m.uid)).size !== policy.members.length)
         || !input.quotas || typeof input.quotas !== 'object' || Object.keys(input.quotas).sort().join(',') !== 'bot,member,team'
         || Object.values(input.quotas).some(n=>!Number.isSafeInteger(n)||n<1||n>10000) || input.sharedBotId === input.instanceId) throw new Error('INVALID_INPUT');
+      const list = input.sharedList;
+      if (list !== undefined && (!list || typeof list !== 'object' || Object.keys(list).sort().join(',') !== 'description,title' || typeof list.title !== 'string' || typeof list.description !== 'string'
+        || !list.title.trim() || list.title.trim().length > 120 || !list.description.trim() || list.description.trim().length > 2000 || `${list.title}${list.description}`.includes('\0'))) throw new Error('INVALID_INPUT');
       const requestDigest = digest(JSON.stringify(input));
       const pending = await this.options.privateStore.publication(uid,input.publicationId); this.assert(context);
       if (pending) {
@@ -194,6 +210,8 @@ export class TeamConnector implements LocalTeamHost {
       }
       this.options.binaries(); const bot = this.options.store.get(input.instanceId), selected = bot.model ?? this.options.defaultModel(); if (!selected) throw new Error('TEAM_MODEL_UNAVAILABLE');
       const route = await this.options.modelRoute(selected); this.assert(context); validateTeamModelRoute(route.route);
+      // A list write is recorded before it is sent and repeated from the checkpoint after an interruption: only a model route that continues can do that.
+      const continues = CONTINUABLE_PROTOCOLS.includes(route.route.model_protocol); if (list && !continues) throw new Error('SHARED_LIST_UNSUPPORTED');
       const accounts = await this.options.modelAccounts(route.route.credential_id, route.route.model_provider, route.profiles); this.assert(context); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
       const documents: PublishedDocument[] = [{ resourceId: digest(JSON.stringify([input.publicationId, 'persona'])), revision: 1, kind: 'persona', name: 'Role', text: input.role, digest: digest(input.role) }];
       for (const token of input.fileTokens) { const selection = this.selections.get(token);
@@ -219,9 +237,10 @@ export class TeamConnector implements LocalTeamHost {
         grantIds: documents.map(d => digest(JSON.stringify([input.sharedBotId,input.expectedRevision+1,d.resourceId]))), sessionEpoch: (existing?.sessionEpoch ?? 0) + 1 };
       const payload = {
         sharedBotId: input.sharedBotId, expectedRevision: input.expectedRevision, name: bot.name, description: bot.description, usePolicy: input.usePolicy, quotas: input.quotas,
+        ...(list ? { sharedList: { title: list.title.trim(), description: list.description.trim() } } : {}),
         deployment: { deploymentId: binding.deploymentId, sharedBotId: binding.sharedBotId, revision: binding.revision, hostId: this.options.privateStore.hostId, owner: { uid, generation: input.generation },
           instanceId: input.instanceId, definitionDigest: snapshotId, capabilitySnapshotDigest: digest(JSON.stringify({ executionVersion: 2, documents: documents.map(d => d.digest) })), executionVersion: 2,
-          capabilities: { durableWait: CONTINUABLE_PROTOCOLS.includes(route.route.model_protocol), writeOperations: false, delegation: false }, accountEpoch: binding.accountEpoch, enabled: true },
+          capabilities: { durableWait: continues, writeOperations: continues, delegation: false }, accountEpoch: binding.accountEpoch, enabled: true },
         inputs: documents.map(d => ({ resourceId: d.resourceId, revision: d.revision, digest: d.digest, kind: d.kind, sourceAudience: { mode: 'team' } })),
       };
       await this.options.privateStore.savePublication(uid,{schemaVersion:1,requestDigest,binding,payload}); this.assert(context);
@@ -468,7 +487,8 @@ export class TeamConnector implements LocalTeamHost {
     }
     this.deferred.delete(record.taskId); this.deferredCodes.delete(record.taskId);
     const { pause: _pause, wait: _wait, ...rest } = record;
-    const next: SavedExecution = { ...rest, epoch: grant.epoch!, deadlineAt: grant.task.deadline, payload: {...record.payload,...this.hostFields(b),permitId:grant.permitId},
+    const { list: _list, ...kept } = rest, offered = CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) ? listOffer(grant.sharedList) : undefined;
+    const next: SavedExecution = { ...kept, ...(offered ? { list: offered } : {}), epoch: grant.epoch!, deadlineAt: grant.task.deadline, payload: {...record.payload,...this.hostFields(b),permitId:grant.permitId},
       dispatched: Math.max(record.dispatched,checkpoint.dispatchesObserved,grant.physicalDispatchesSpent ?? 0), recoveries: record.recoveries + (reason === 'recovery' ? 1 : 0) };
     // The permit is spent: save it before any abort check, as for the first attempt.
     await this.options.privateStore.saveExecution(c.uid,next);
@@ -505,7 +525,8 @@ export class TeamConnector implements LocalTeamHost {
     const record: SavedExecution = { schemaVersion:2, scope, teamId:b.teamId,generation:b.generation,taskId:task.taskId,
       commandId:digest(JSON.stringify([task.taskId,'delivery'])),deadlineAt:started.task.deadline,payload:{...fields,permitId:started.permitId,inputGrantIds:b.grantIds},
       epoch:1,messageSeq:prepared.messageSeq,lastChangeSeq:source.lastChangeSeq,batch:reference,dispatched:0,recoveries:0,
-      ask:started.deployment?.capabilities?.durableWait === true && CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) };
+      ask:started.deployment?.capabilities?.durableWait === true && CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol),
+      ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && listOffer(started.sharedList) ? { list: listOffer(started.sharedList)! } : {}) };
     // The permit is spent: save it before any abort check, so a revoke now ends in a failed result instead of losing the permit.
     // `c` is the account that sent startTask: the execution and its failed delivery stay in that account's private store, never in the current one, and `assert` in the attempt keeps the worker from starting.
     // The stale context can no longer send completeTask; discovery delivers it once that account is current again, or the deadline derives `interrupted`.
@@ -534,8 +555,9 @@ export class TeamConnector implements LocalTeamHost {
       try { assert(); result = runResult(await (this.options.run ?? runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,authorize:frameAuthorize,
         bootstrap:{version:3,type:continuation ? 'continue' : 'run',storageRoot:paths.runtime,workerExecutable:bins.worker,scope:record.scope,taskId:record.taskId,invocationId:randomUUID(),instructions,
           inputBatchRef:record.batch,knowledge:documents.filter(d=>d.kind==='file').map(d=>({id:d.resourceId,title:d.name,text:d.text})),deadlineAt:record.deadlineAt,
-          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),...(continuation ? { continuation } : {}),...(record.ask ? { askRequester: true } : {}),
+          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),...(continuation ? { continuation } : {}),...(record.ask ? { askRequester: true } : {}),...(record.list ? { sharedList: record.list } : {}),
           limits:{max_turns:20,context_window_tokens:2000000,output_tokens_per_request:4096,physical_dispatches:Math.max(1,DISPATCH_LIMIT-record.dispatched)}},
+        operate:operation => this.operate(c,b,record,operation,frame,assert),
         accountCredentials:async request => { await frameAuthorize();
           const permitted = accounts.providerAccountCredentials[request.accountId]; if (!permitted || permitted.identity_generation !== request.identityGeneration) throw new Error('TEAM_MODEL_UNAVAILABLE');
           await this.options.renewModelAccount?.(request.accountId,request.identityGeneration,request.credentialRevision); assert();
@@ -562,6 +584,40 @@ export class TeamConnector implements LocalTeamHost {
       const delivery = await this.saveResult(c,record,result); assert();
       await this.command(c,b,'completeTask',delivery.payload,delivery.commandId); assert(); await this.options.privateStore.delivered(c.uid,record.taskId);
     } finally { clearInterval(interval); await Promise.all(references.map(ref=>this.options.privateStore.releaseDataRef(c.uid,ref))); }
+  }
+  /** One request of the running Bot to its shared list.
+   * A write is first recorded in the operation ledger under an id derived from the task and the durable step, then sent under that id. The service applies it once and settles
+   * the record in the same transaction, so a repeat after a lost answer or in a continued attempt returns what the first one did.
+   * Whenever the outcome is not known here the answer is `established: false`: the worker stops with the call unfinished and the next attempt repeats this same step. */
+  private async operate(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, operation: TeamOperation, frame: <T>(send: () => Promise<T>) => Promise<T>, assert: () => void): Promise<TeamOperationOutcome> {
+    const base = { ...this.hostFields(b), taskId: record.taskId, permitId: record.payload.permitId };
+    const view = (list: TaskListAnswer) => ({ dataRevision: list.dataRevision, items: list.items.map(({ itemId, text, done }) => ({ itemId, text, done })) });
+    if (!record.list) throw new Error('TEAM_HOST_PROTOCOL');
+    if (operation.tool === 'list_read') {
+      const list = await frame(() => this.command<TaskListAnswer>(c,b,'readTaskList',base)); assert();
+      return { established: true, succeeded: true, result: view(list) };
+    }
+    const refused = (error: string): TeamOperationOutcome => ({ established: true, succeeded: false, result: { error } }), unknown: TeamOperationOutcome = { established: false, succeeded: false, result: {} };
+    const write = operation.arguments; if (!isSharedListWrite(write)) return refused('INVALID_LIST_CHANGE');
+    const operationId = digest(JSON.stringify([record.taskId, record.taskId, operation.logicalStepId, 'store_idempotent']));
+    const entry = { ...base, operationId, logicalStepId: operation.logicalStepId, category: 'store_idempotent', tool: { name: 'TeamListWrite', version: '1' },
+      digest: digest(JSON.stringify(canonical({ expectedDataRevision: write.expectedDataRevision, changes: write.changes }))), dispatchedAt: Math.min(this.now(), record.deadlineAt) };
+    let recorded: { state?: string; dispatch?: boolean };
+    try { recorded = await frame(() => this.command(c,b,'recordOperation',entry,digest(JSON.stringify(['recordOperation',operationId,record.epoch])))); }
+    catch (error) {
+      if (!definitive(error)) { this.log('team_operation_unknown', { taskId: record.taskId, step: 'record', code: errorCode(error) }); return unknown; }
+      if (error instanceof TeamsApiError && WRITE_REFUSED.includes(error.code)) return refused(error.code);
+      throw error;
+    }
+    assert();
+    // Recorded but not to be sent again: the task is being cancelled.
+    if (recorded.dispatch !== true && !['succeeded', 'failed'].includes(recorded.state ?? '')) return unknown;
+    let answer: TaskListAnswer;
+    try { answer = await frame(() => this.command<TaskListAnswer>(c,b,'writeTaskList',{ ...base, operationId, expectedDataRevision: write.expectedDataRevision, changes: write.changes },digest(JSON.stringify(['writeTaskList',operationId,record.epoch])))); }
+    catch (error) { this.log('team_operation_unknown', { taskId: record.taskId, step: 'write', code: errorCode(error) }); return unknown; }
+    assert();
+    if (typeof answer.applied !== 'boolean' || !Number.isSafeInteger(answer.dataRevision) || !Array.isArray(answer.items)) return unknown;
+    return answer.applied ? { established: true, succeeded: true, result: view(answer) } : { established: true, succeeded: false, result: { error: answer.error ?? 'ERROR', ...view(answer) } };
   }
   /** The worker stopped at a question for the requester. The request is saved before it is sent, so every retry is the identical request. */
   private async pause(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, stop: { wait: TeamTaskWait; checkpointDigest: string; pausedAt: number; dispatchedRequests: number }) {

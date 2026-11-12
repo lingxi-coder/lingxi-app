@@ -92,18 +92,22 @@
 .local-apps-library-link { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; text-align: left; font-size: 13px !important; }
 .local-apps-library-link[aria-current=page], .local-apps-sidebar-chats button[aria-current=page] { color: var(--apps-accent); background: var(--apps-accent-bg); }
 .local-apps-sidebar-section { margin: 22px 8px 9px; color: var(--apps-muted); font-size: 11px; font-weight: 500; letter-spacing: .02em; }
-.local-apps-sidebar-group { margin: 2px 0 6px; }
-.local-apps-sidebar-app { position: relative; display: flex; align-items: center; border-radius: 8px; }
-.local-apps-sidebar-disclosure { display: flex; align-items: center; gap: 7px; width: 100%; min-width: 0; min-height: 38px; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; text-align: left; }
-.local-apps-sidebar-app:has(.local-apps-sidebar-actions) .local-apps-sidebar-disclosure { padding-right: 60px; }
-.local-apps-sidebar-avatar { display: grid; place-items: center; flex-shrink: 0; width: 23px; height: 23px; border: 1px solid var(--apps-border); border-radius: 6px; font-size: 12px; font-weight: 550; color: var(--apps-accent); }
+.local-apps-sidebar-group { margin: 4px 0 12px; }
+.local-apps-sidebar-app { display: flex; align-items: center; gap: 4px; min-width: 0; border-radius: 9px; }
+.local-apps-sidebar-disclosure { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; min-height: 40px; padding: 7px 10px; border: 0; border-radius: 9px; background: transparent; text-align: left; }
+.local-apps-sidebar-avatar { display: grid; place-items: center; flex-shrink: 0; width: 24px; height: 24px; border: 1px solid var(--apps-border); border-radius: 7px; font-size: 12px; font-weight: 550; color: var(--apps-accent); }
 .local-apps-sidebar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
 .local-apps-draft-dot { width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: var(--apps-muted); }
-.local-apps-sidebar-actions { position: absolute; right: 3px; display: flex; gap: 2px; }
-.local-apps-sidebar-actions button { display: grid; place-items: center; width: 26px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--apps-muted); }
-.local-apps-sidebar-chats { display: grid; gap: 2px; padding: 2px 0 4px 26px; }
-.local-apps-sidebar-chats > button { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 34px; padding: 7px 9px; border: 0; border-radius: 7px; background: transparent; text-align: left; color: var(--apps-muted); font-size: 12px; }
-.local-apps-sidebar-chats > button svg { flex-shrink: 0; }
+.local-apps-sidebar-actions { display: none; flex-shrink: 0; align-items: center; gap: 2px; padding-right: 4px; }
+.local-apps-sidebar-app:hover .local-apps-sidebar-actions, .local-apps-sidebar-app:focus-within .local-apps-sidebar-actions { display: flex; }
+.local-apps-sidebar-disclosure[aria-expanded=true] .local-apps-sidebar-avatar { background: var(--apps-accent-bg); border-color: transparent; }
+.local-apps-sidebar-actions button { display: grid; place-items: center; min-width: 28px; min-height: 28px; padding: 4px 6px; border: 0; border-radius: 6px; background: transparent; color: var(--apps-muted); font-size: 11px; white-space: nowrap; }
+.local-apps-sidebar-chats { display: grid; gap: 2px; margin: 2px 0 0 22px; padding: 0 0 0 12px; border-left: 1px solid var(--apps-border); }
+.local-apps-sidebar-chats > button { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 32px; padding: 6px 9px; border: 0; border-radius: 8px; background: transparent; text-align: left; color: var(--apps-muted); font-size: 12px; line-height: 1.4; }
+.local-apps-sidebar-chats > button[aria-current=page] { font-weight: 500; color: var(--apps-accent); background: var(--apps-accent-bg); }
+@media (hover: none) {
+  .local-apps-sidebar-actions { display: flex; }
+}
 .local-apps-sidebar-chats > button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .local-apps-sidebar-note, .local-apps-sidebar-empty { margin: 10px 8px; color: var(--apps-muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .local-apps-sidebar-empty { padding-top: 10px; }

@@ -1,7 +1,7 @@
 import { currentLocale, tr, translate, type DesktopLocale } from '../../../i18n/locale';
 import { useSettingsDraftGuard } from '../useSettingsDraftGuard';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { publicExtensionFromNavigation, publicExtensionItems, publicExtensionText, type PublicExtensionItem } from '../../../../shared/publicExtensionDirectory';
+import { publicExtensionFromNavigation, publicExtensionItems, publicExtensionNavigationAction, publicExtensionText, type PublicExtensionItem } from '../../../../shared/publicExtensionDirectory';
 import { decidePublicMarketplaceSourceAction, findConflictingPublicMarketplace, githubRepositoryIdentity, publicMarketplacePluginTargetId } from '../../../../shared/publicMarketplace';
 export { decidePublicMarketplaceSourceAction, findConflictingPublicMarketplace, findRegisteredPublicMarketplace, publicMarketplacePluginTargetId } from '../../../../shared/publicMarketplace';
 import { ExtensionGlyph } from './ExtensionHubIcons';
@@ -11,6 +11,7 @@ import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { objectFromLayer } from '../layerFields';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
 import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, extensionHubStyle, useExtensionHubDialogFocus, useExtensionHubNavigation } from './ExtensionHub';
+import { ExtensionDetails } from './ExtensionDetails';
 import {
   adminRecordCommand,
   asRecord,
@@ -61,6 +62,7 @@ interface PluginCatalogEnvelope {
 
 type PluginSelection =
   | { kind: 'list' }
+  | { kind: 'directory'; id: string }
   | { kind: 'plugin'; id: string }
   | { kind: 'available'; id: string }
   | { kind: 'marketplace'; name: string; sourceConflict?: string }
@@ -103,6 +105,7 @@ function publicPluginSearchText(item: (typeof publicExtensionItems)[number]): st
 interface PreparedPluginOperation {
   payload: Record<string, unknown>;
   summary: string;
+  revision: string;
 }
 
 interface PluginConfigField {
@@ -230,9 +233,15 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
 
   useEffect(() => {
     const item = publicExtensionFromNavigation(initialPluginId);
-    if (!item || !bridge.pluginCatalogEvent || appliedDirectoryNavigation.current === initialPluginId) return;
+    const action = publicExtensionNavigationAction(initialPluginId);
+    if (!item || (action !== 'details' && !bridge.pluginCatalogEvent) || appliedDirectoryNavigation.current === initialPluginId) return;
     appliedDirectoryNavigation.current = initialPluginId;
-    setSelection(publicDirectoryPluginSelection(item, catalog));
+    if (action === 'add') setSelection(publicDirectoryPluginSelection(item, catalog));
+    else {
+      setSelection({ kind: 'directory', id: item.id });
+      const target = publicDirectoryPluginSelection(item, catalog);
+      if (action === 'uninstall' && target.kind === 'plugin') previewLifecycle({ action: 'uninstall', plugin: target.id, scope: editingLayer });
+    }
   }, [initialPluginId, bridge.pluginCatalogEvent, catalog, pluginIds.join('\n')]);
 
   useEffect(() => {
@@ -354,7 +363,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     setAddMenuOpen(false);
   };
 
-  const isPluginDetail = selection.kind === 'plugin' || selection.kind === 'available';
+  const isPluginDetail = selection.kind === 'plugin' || selection.kind === 'available' || selection.kind === 'directory';
   const dialogRef = useExtensionHubDialogFocus(selection.kind !== 'list' && !isPluginDetail, () => requestSelection({ kind: 'list' }));
   useEffect(() => {
     if (isPluginDetail) detailPageRef.current?.closest('.settings-content-scroll')?.scrollTo({ top: 0 });
@@ -379,6 +388,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
         setPreparedOperation({
           payload: { action: 'save_config', scope: editingLayer },
           summary: details || tr('desktop_extension_preview_complete'),
+          revision,
         });
       })
       .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_plugin_preview_failed')));
@@ -449,21 +459,21 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
         const details = result && typeof result === 'object' && 'details_json' in result
           ? asString((result as Record<string, unknown>).details_json)
           : '';
-        setPreparedOperation({ payload, summary: details || tr('desktop_extension_operation_preview', pluginActionLabel(asString(payload.action))) });
+        setPreparedOperation({ payload, revision, summary: details || tr('desktop_extension_operation_preview', pluginActionLabel(asString(payload.action))) });
       })
       .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_operation_preview_failed')))
       .finally(() => setBusy(false));
   };
 
   const confirmLifecycle = () => {
-    if (!preparedOperation || preparedOperation.payload.action === 'save_config' || !revision) return;
+    if (!preparedOperation || preparedOperation.payload.action === 'save_config' || !preparedOperation.revision) return;
     setPageError(null);
     setBusy(true);
     void callPluginAdmin(bridge, adminRecordCommand('apply_operation', {
       operation_id: nextConfigurationOperationId(),
-      scope: editingLayer,
-      revision,
-      payload_json: JSON.stringify({ ...preparedOperation.payload, scope: editingLayer, confirmed: true }),
+      scope: asString(preparedOperation.payload.scope, editingLayer),
+      revision: preparedOperation.revision,
+      payload_json: JSON.stringify({ ...preparedOperation.payload, confirmed: true }),
     }))
       .then(async (result: unknown) => {
         if (preparedOperation.payload.action === 'uninstall') {
@@ -528,6 +538,35 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     requestSelection(next);
   };
 
+  const directoryItem = selection.kind === 'directory' ? publicDirectoryPlugins.find((item) => item.id === selection.id) : undefined;
+  const directoryTarget = directoryItem ? publicDirectoryPluginSelection(directoryItem, catalog) : undefined;
+  const directorySource = directoryItem?.marketplace ? decidePublicMarketplaceSourceAction(directoryItem.marketplace, catalog.marketplaces ?? []) : undefined;
+  const operationFeedback = <>
+    {navigationPrompt}
+    <DomainOperationBanner t={t} operation={pluginOperation} fallbackDomainLabel={tr('desktop_extension_plugins')} />
+    {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
+    {secretNotice && <div role="status" style={noteStyle(t, secretNotice.restartRequired ? 'warn' : 'neutral')}>{secretNotice.text}</div>}
+    {pendingSelection && (
+      <div style={noteStyle(t, 'warn')}>
+        {tr('desktop_extension_unsaved_configuration')} <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <button type="button" onClick={() => { setDraftEnabled(enabledPlugins); setDraftConfigs(pluginConfigs); setDraftMarketplaces(marketplaces); setMarketplaceSource(''); setPreparedOperation(null); setSelection(pendingSelection); setPendingSelection(null); }} style={ghostButtonStyle(t)}>{tr('desktop_extension_discard_switch')}</button>
+          <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>{tr('desktop_extension_continue_editing')}</button>
+        </div>
+      </div>
+    )}
+    {preparedOperation && (
+      <div style={noteStyle(t, 'warn')}>
+        <div>{preparedOperation.summary}</div>
+        {preparedOperation.payload.action !== 'save_config' && (
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button type="button" disabled={busy || !preparedOperation.revision} onClick={confirmLifecycle} style={ghostButtonStyle(t, busy)}>{tr('desktop_extension_confirm_operation')}</button>
+            <button type="button" disabled={busy} onClick={() => setPreparedOperation(null)} style={ghostButtonStyle(t, busy, true)}>{tr('common_cancel')}</button>
+          </div>
+        )}
+      </div>
+    )}
+  </>;
+
   return (
     <ExtensionHubLayout>
       {closePrompt}
@@ -578,18 +617,18 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
               const marketplace = entry.marketplace;
               const sourceAction = marketplace ? decidePublicMarketplaceSourceAction(marketplace, catalog.marketplaces ?? []) : null;
               const pluginId = publicMarketplacePluginTargetId(marketplace, sourceAction);
-              const pluginInstalled = pluginId ? pluginIds.includes(pluginId) : false;
+              const pluginInstalled = pluginId ? (catalog.installed ?? []).some((plugin) => plugin.id === pluginId) : false;
               const pluginAvailable = pluginId ? availablePlugins.some((available) => available.id === pluginId) : false;
               const registeredMarketplace = sourceAction?.kind === 'registered';
               const sourceConflict = sourceAction?.kind === 'source-conflict';
               return <div key={entry.id} className="extension-hub-row">
                 <ExtensionIcon />
-                <div className="extension-hub-row-copy">
+                <button type="button" className="extension-hub-row-copy extension-hub-row-open" aria-label={tr('desktop_extension_view_details_named', entry.name)} onClick={() => requestSelection({ kind: 'directory', id: entry.id })}>
                   <span className="extension-hub-row-title">{entry.name}</span>
                   <span className="extension-hub-row-description">{localizedDirectoryText(entry.description)}</span>
                   <span className="extension-hub-row-description">{entry.publisher}{sourceConflict ? ` · ${tr('desktop_extension_marketplace_source_conflict_short')}` : registeredMarketplace && !pluginAvailable ? ` · ${tr('desktop_extension_marketplace_added')}` : ''}</span>
                   {entry.requirements && <span className="extension-hub-row-description">{tr('desktop_extension_requirements')}: {localizedDirectoryText(entry.requirements)}</span>}
-                </div>
+                </button>
                 <div className="extension-hub-row-side">
                   {marketplace ? <button
                     type="button"
@@ -640,13 +679,21 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
           <div className="extension-hub-list">{filteredMarketplaces.map((name) => <button key={name} type="button" className="extension-hub-row extension-hub-row-open" onClick={() => requestSelection({ kind: 'marketplace', name })}><ExtensionIcon /><span className="extension-hub-row-copy"><span className="extension-hub-row-title">{name}</span><span className="extension-hub-row-description">{asString(asRecord(draftMarketplaces[name]).source, tr('settings_parity_marketplace_source'))}</span></span></button>)}</div>
         </details>}
       </>}
-        {selection.kind !== 'list' && <div className={isPluginDetail ? "extension-plugin-detail" : "extension-detail-backdrop"} onMouseDown={(event) => { if (!isPluginDetail && event.target === event.currentTarget) requestSelection({ kind: 'list' }); }}>
+      {directoryItem && <ExtensionDetails item={directoryItem} breadcrumb={tr('desktop_extension_plugins')} onBack={() => requestSelection({ kind: 'list' })} status={directoryTarget?.kind === 'plugin' ? tr('apps_installed') : directorySource?.kind === 'registered' ? tr('desktop_extension_marketplace_added') : undefined} actions={<>
+        {directoryTarget?.kind === 'plugin' ? <>
+          <button type="button" className="extension-hub-icon-text" disabled={busy} onClick={() => requestSelection(directoryTarget)}>{tr('desktop_extension_configuration')}</button>
+          <button type="button" className="extension-hub-danger" disabled={busy || !adminAvailable} onClick={() => previewLifecycle({ action: 'uninstall', plugin: directoryTarget.id, scope: editingLayer })}><ExtensionGlyph name="trash" size={16} />{tr('plugins_action_uninstall')}</button>
+        </> : directoryTarget?.kind === 'available' ? <button type="button" className="extension-hub-primary" disabled={busy || !adminAvailable || !bridge.pluginCatalogEvent} onClick={() => previewLifecycle({ action: 'install', plugin: directoryTarget.id, scope: editingLayer })}><ExtensionGlyph name="plus" size={16} />{tr('desktop_extension_install_plugin')}</button> : directoryItem.marketplace && <button type="button" className="extension-hub-primary" disabled={busy || !adminAvailable || !bridge.pluginCatalogEvent} onClick={() => openPublicDirectoryItem(directoryItem)}>{directorySource?.kind === 'source-conflict' ? tr('desktop_extension_resolve_marketplace_conflict_named', directoryItem.name) : tr(directorySource?.kind === 'registered' ? 'desktop_extension_browse_plugins' : 'desktop_extension_add_marketplace')}</button>}
+        {directorySource?.kind === 'registered' && directoryTarget?.kind !== 'plugin' && <button type="button" className="extension-hub-danger" disabled={busy || !adminAvailable} onClick={() => previewLifecycle({ action: 'marketplace_remove', name: directorySource.marketplace.name, scope: editingLayer })}>{tr('desktop_extension_remove_source')}</button>}
+      </>}>{operationFeedback}</ExtensionDetails>}
+        {selection.kind !== 'list' && selection.kind !== 'directory' && <div className={isPluginDetail ? "extension-plugin-detail" : "extension-detail-backdrop"} onMouseDown={(event) => { if (!isPluginDetail && event.target === event.currentTarget) requestSelection({ kind: 'list' }); }}>
           <section ref={isPluginDetail ? detailPageRef : dialogRef} tabIndex={-1} className={isPluginDetail ? "extension-plugin-page" : "extension-detail-dialog"} role={isPluginDetail ? undefined : "dialog"} aria-modal={isPluginDetail ? undefined : true} aria-label={tr('plugins_detail_title')} style={extensionHubStyle(t)}>
             {isPluginDetail ? <>
               <nav className="extension-breadcrumb" aria-label={tr('desktop_extension_breadcrumb')}><button type="button" onClick={() => requestSelection({ kind: 'list' })}>{tr('desktop_extension_plugins')}</button><ExtensionGlyph name="chevronR" size={15} /><span>{detailName}</span></nav>
               <header className="extension-plugin-hero">
                 <ExtensionIcon large />
                 <div className="extension-plugin-title-row"><h1>{detailName}</h1><div className="extension-hub-toolbar-actions">
+                  {selectedPlugin && <button type="button" className="extension-hub-danger" disabled={busy || !adminAvailable} onClick={() => previewLifecycle({ action: 'uninstall', plugin: selectedPlugin, scope: editingLayer })}><ExtensionGlyph name="trash" size={16} />{tr('plugins_action_uninstall')}</button>}
                   {selectedPlugin ? <button type="button" className="extension-hub-toggle" role="switch" aria-checked={draftEnabled[selectedPlugin] !== false} aria-label={tr(draftEnabled[selectedPlugin] !== false ? 'desktop_extension_disable_named' : 'desktop_extension_enable_named', detailName)} disabled={busy} onClick={() => previewLifecycle({ action: draftEnabled[selectedPlugin] !== false ? 'disable' : 'enable', plugin: selectedPlugin, scope: editingLayer })} /> : <button type="button" disabled={busy || !adminAvailable} className="extension-hub-primary" onClick={() => selectedAvailable && previewLifecycle({ action: selectedAvailable.installed ? 'update' : 'install', plugin: selectedAvailable.id, scope: editingLayer })}><ExtensionGlyph name="plus" size={16} />{selectedAvailable?.installed ? tr('desktop_extension_update_plugin') : tr('desktop_extension_install_plugin')}</button>}
                 </div></div>
                 <p>{detailDescription}</p>
@@ -662,29 +709,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
               <button type="button" className="extension-hub-icon-button" data-dialog-initial-focus aria-label={tr('desktop_extension_close_details')} onClick={() => requestSelection({ kind: 'list' })}><ExtensionGlyph name="x" size={16} /></button>
             </header>}
             <div className="extension-detail-content">
-            {navigationPrompt}
-            <DomainOperationBanner t={t} operation={pluginOperation} fallbackDomainLabel={tr('desktop_extension_plugins')} />
-            {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
-            {secretNotice && <div role="status" style={noteStyle(t, secretNotice.restartRequired ? 'warn' : 'neutral')}>{secretNotice.text}</div>}
-            {pendingSelection && (
-              <div style={noteStyle(t, 'warn')}>
-                {tr('desktop_extension_unsaved_configuration')} <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <button type="button" onClick={() => { setDraftEnabled(enabledPlugins); setDraftConfigs(pluginConfigs); setDraftMarketplaces(marketplaces); setMarketplaceSource(''); setPreparedOperation(null); setSelection(pendingSelection); setPendingSelection(null); }} style={ghostButtonStyle(t)}>{tr('desktop_extension_discard_switch')}</button>
-                  <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>{tr('desktop_extension_continue_editing')}</button>
-                </div>
-              </div>
-            )}
-            {preparedOperation && (
-              <div style={noteStyle(t, 'warn')}>
-                <div>{preparedOperation.summary}</div>
-                {preparedOperation.payload.action !== 'save_config' && (
-                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                    <button type="button" disabled={busy} onClick={confirmLifecycle} style={ghostButtonStyle(t, busy)}>{tr('desktop_extension_confirm_operation')}</button>
-                    <button type="button" disabled={busy} onClick={() => setPreparedOperation(null)} style={ghostButtonStyle(t, busy, true)}>{tr('common_cancel')}</button>
-                  </div>
-                )}
-              </div>
-            )}
+            {operationFeedback}
             {isPluginDetail && <>
               <div className="extension-plugin-showcase"><ExtensionIcon large /><div><strong>{detailName}</strong><p>{detailDescription || tr('desktop_extension_plugin_fallback')}</p></div></div>
               {relatedSkills.length > 0 && <section><h2 className="extension-detail-section-title">{tr('settings_title_skills')} <span>{relatedSkills.length}</span></h2>{relatedSkills.map((skill) => <button type="button" key={skill.id} className="extension-hub-row extension-hub-row-open" onClick={() => requestHubNavigation('skills')}><ExtensionIcon kind="skill" /><span className="extension-hub-row-copy"><span className="extension-hub-row-title">{skill.name}</span><span className="extension-hub-row-description">{skill.description}</span></span><ExtensionGlyph name="chevronR" size={16} /></button>)}</section>}

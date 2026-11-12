@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SkillAdminCommandDto, SkillDto } from '@lingxi/bridge-client';
 import { publicExtensionNavigationId, publicExtensionText, publicSkillRecommendations } from '../../../../shared/publicExtensionDirectory';
 import { isPublicExtensionInstalled } from '../../../../shared/publicMarketplace';
+import { ExtensionDetails } from './ExtensionDetails';
 import { ExtensionGlyph } from './ExtensionHubIcons';
 import { useSettingsDraftGuard } from '../useSettingsDraftGuard';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
@@ -72,6 +73,7 @@ interface SkillDocumentEnvelope {
 
 type SkillSelection =
   | { kind: 'list' }
+  | { kind: 'recommendation'; id: string }
   | { kind: 'skill'; id: string }
   | { kind: 'trash'; id: string }
   | { kind: 'create' };
@@ -200,7 +202,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
     : trashedSkills;
 
   useEffect(() => {
-    if (selection.kind === 'create' || selection.kind === 'list') return;
+    if (selection.kind === 'create' || selection.kind === 'list' || selection.kind === 'recommendation') return;
     const existsInSkills = activeSkills.some((entry) => entry.id === selection.id);
     const existsInTrash = trashedSkills.some((entry) => entry.id === selection.id);
     if (!existsInSkills && !existsInTrash) {
@@ -297,7 +299,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
     setSelection(next);
   };
 
-  const dialogRef = useExtensionHubDialogFocus(selection.kind !== 'list', () => requestSelection({ kind: 'list' }));
+  const dialogRef = useExtensionHubDialogFocus(selection.kind !== 'list' && selection.kind !== 'recommendation', () => requestSelection({ kind: 'list' }));
 
   const discardDrafts = () => {
     if (selectedDocument) {
@@ -599,6 +601,12 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const skillDescription = selectedSkill?.description || selectedSkill?.whenToUse;
   const previewMarkdown = selectedDocument?.markdown.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim() ?? '';
 
+  const recommendation = selection.kind === 'recommendation' ? publicSkillRecommendations.find((item) => item.id === selection.id) : undefined;
+  if (recommendation) {
+    const installed = isPublicExtensionInstalled(recommendation, pluginCatalog);
+    return <ExtensionHubLayout>{closePrompt}<ExtensionDetails item={recommendation} kind="skill" breadcrumb={tr('settings_title_skills')} onBack={() => requestSelection({ kind: 'list' })} status={installed ? tr('apps_installed') : undefined} actions={<button type="button" className={installed ? 'extension-hub-danger' : 'extension-hub-primary'} onClick={() => requestHubNavigation('plugins', publicExtensionNavigationId(recommendation, installed ? 'uninstall' : 'add'))}><ExtensionGlyph name={installed ? 'trash' : 'plus'} size={16} />{tr(installed ? 'plugins_action_uninstall' : 'workspace_confirm_add')}</button>}>{navigationPrompt}</ExtensionDetails></ExtensionHubLayout>;
+  }
+
   return (
     <ExtensionHubLayout>
       {closePrompt}
@@ -620,14 +628,13 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
             const installed = isPublicExtensionInstalled(entry, pluginCatalog);
             return <article key={entry.id} className="extension-hub-row extension-recommendation-row">
             <ExtensionIcon kind="skill" />
-            <div className="extension-hub-row-copy">
+            <button type="button" className="extension-hub-row-copy extension-hub-row-open" aria-label={tr('desktop_extension_view_details_named', entry.name)} onClick={() => requestSelection({ kind: 'recommendation', id: entry.id })}>
               <span className="extension-hub-row-title">{entry.name}</span>
               <span className="extension-hub-row-description">{publicExtensionText(entry.description, locale)}</span>
               <span className="extension-recommendation-meta">{entry.publisher} · {entry.skills!.slice(0, 4).join(', ')}{entry.skills!.length > 4 ? '…' : ''}</span>
-              <a href={entry.documentationUrl} target="_blank" rel="noopener noreferrer" className="extension-recommendation-source">{tr('desktop_extension_open_source')}</a>
-            </div>
-            <button type="button" className="extension-hub-primary" onClick={() => requestHubNavigation('plugins', publicExtensionNavigationId(entry))} aria-label={tr(installed ? 'desktop_extension_manage_named' : 'desktop_extension_add_skill_pack_named', entry.name)}>
-              <ExtensionGlyph name={installed ? 'check' : 'plus'} size={14} />{tr(installed ? 'apps_installed' : 'workspace_confirm_add')}
+            </button>
+            <button type="button" className={installed ? 'extension-hub-danger' : 'extension-hub-primary'} onClick={() => requestHubNavigation('plugins', publicExtensionNavigationId(entry, installed ? 'uninstall' : 'add'))} aria-label={tr(installed ? 'desktop_extension_uninstall_named' : 'desktop_extension_add_skill_pack_named', entry.name)}>
+              <ExtensionGlyph name={installed ? 'trash' : 'plus'} size={14} />{tr(installed ? 'plugins_action_uninstall' : 'workspace_confirm_add')}
             </button>
           </article>; })}
         </div>
@@ -688,7 +695,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
             </> : detail}
           </div>
           {selection.kind === 'skill' && !editingDocument && <footer className="extension-detail-footer">
-            <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable} aria-describedby={uninstallDisabledReason ? 'skill-uninstall-readonly-reason' : undefined} onClick={handleTrashSkill}>{tr('apps_action_uninstall')}</button>
+            <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable && !selectedSkill?.pluginOwner} aria-describedby={uninstallDisabledReason ? 'skill-uninstall-readonly-reason' : undefined} onClick={() => selectedSkill?.pluginOwner ? requestHubNavigation('plugins', selectedSkill.pluginOwner) : handleTrashSkill()}>{tr('apps_action_uninstall')}</button>
             <button type="button" className="extension-hub-primary" disabled={tryingSkill || !!selectedSkill?.parseError || !selectedDocument} onClick={() => {
               if (!selectedSkill) return;
               setTryingSkill(true);

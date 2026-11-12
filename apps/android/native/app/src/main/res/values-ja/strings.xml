@@ -2938,4 +2938,13 @@
     <string name="settings_browser_session_authorized">現在の操作セッションで許可済み</string>
     <string name="settings_browser_saved">次回の操作セッション用に保存済み</string>
     <string name="settings_browser_manage_session">操作セッションを管理</string>
+    <string name="extension_directory_examples">こんな依頼ができます</string>
+    <string name="extension_directory_copy_hint">例をタップするとコピーできます。</string>
+    <string name="extension_directory_example_copied">例をコピーしました</string>
+    <string name="extension_directory_included_skills">含まれる Skills</string>
+    <string name="extension_directory_information">情報</string>
+    <string name="extension_directory_developer">開発者</string>
+    <string name="extension_directory_remove_source">ソースを削除</string>
+    <string name="extension_directory_remove_mcp_note">設定されているスコープからこの MCP 接続を削除しますか？</string>
+    <string name="extension_directory_category">カテゴリー</string>
 </resources>

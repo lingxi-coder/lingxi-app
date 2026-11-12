@@ -240,6 +240,9 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
     val removeTitle = stringResource(R.string.plugins_marketplace_remove_title_fmt)
     val removeBody = stringResource(R.string.plugins_marketplace_remove_body)
     val removeLabel = stringResource(R.string.plugins_marketplace_remove)
+    val uninstallTitle = stringResource(R.string.plugins_uninstall_title_fmt)
+    val uninstallBody = stringResource(R.string.plugins_uninstall_body)
+    val uninstallLabel = stringResource(R.string.plugins_action_uninstall)
     Column(Modifier.fillMaxWidth()) {
         TabRow(selectedTabIndex = selectedDirectoryTab) {
             Tab(
@@ -272,6 +275,30 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
             } else {
                 PublicExtensionDirectory(
                     entries = if (skillsOnly) entries.filter { it.skills.isNotEmpty() } else entries,
+                    installedPluginIds = catalog.installed.map { it.id }.toSet(),
+                    mcpBridge = bridge,
+                    onRemoveExtension = { entry ->
+                        val generation = state.generation
+                        val marketplace = entry.marketplace
+                        val id = marketplace?.let { publicMarketplacePluginId(it, catalog.marketplaces) }
+                        val installed = catalog.installed.firstOrNull { it.id == id }
+                        if (installed != null) {
+                            confirmation = PluginConfirmation(String.format(uninstallTitle, installed.displayName), uninstallBody, uninstallLabel, destructive = true) {
+                                val latest = PluginCatalog.parse(bridge.state.value.catalogs["plugins"])
+                                if (bridge.state.value.generation == generation && marketplace != null && publicMarketplacePluginId(marketplace, latest.marketplaces) == installed.id && latest.installed.any { it.id == installed.id }) {
+                                    run(installed.id, JSONObject().put("action", "uninstall").put("plugin", installed.id))
+                                } else error = context.getString(R.string.plugins_catalog_refresh_first)
+                            }
+                        } else if (marketplace != null) {
+                            val registered = catalog.marketplaces.firstOrNull { marketplaceSourceMatches(marketplace.source, it) }
+                            if (registered != null) confirmation = PluginConfirmation(String.format(removeTitle, registered.name), removeBody, removeLabel, destructive = true) {
+                                val latest = PluginCatalog.parse(bridge.state.value.catalogs["plugins"])
+                                if (bridge.state.value.generation == generation && latest.marketplaces.any { it.name == registered.name && marketplaceSourceMatches(marketplace.source, it) }) {
+                                    run("marketplace:${registered.name}", JSONObject().put("action", "marketplace_remove").put("name", registered.name))
+                                } else error = context.getString(R.string.plugins_catalog_refresh_first)
+                            }
+                        }
+                    },
                     configuredMcpServers = configuredMcps,
                     registeredMarketplaces = catalog.marketplaces,
                     canConfigureMcp = state.connected && mcpCatalogJson != null,

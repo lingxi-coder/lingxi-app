@@ -1,8 +1,16 @@
 package com.lingxi.code.settings
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -62,6 +70,7 @@ internal data class PublicExtensionEntry(
     val mcpName: String?,
     val mcpConfigJson: String?,
     val skills: List<String> = emptyList(),
+    val examples: List<Map<String, String>> = emptyList(),
 )
 
 internal data class PublicExtensionMarketplace(
@@ -125,6 +134,7 @@ internal fun parsePublicExtensionDirectory(rawJson: String, platform: String = "
                 mcpName = mcpName,
                 mcpConfigJson = mcpConfig?.toString(),
                 skills = row.optJSONArray("skills").stringValues(),
+                examples = row.optJSONArray("examples")?.let { array -> (0 until array.length()).map { array.optJSONObject(it).stringMap() } } ?: emptyList(),
             )
         }.getOrNull()?.takeIf { platform in it.platforms }
     }
@@ -305,12 +315,55 @@ internal fun PublicExtensionDirectory(
     canAddMarketplace: Boolean,
     onAddMarketplace: (PublicExtensionEntry) -> Unit,
     onOpenPersonal: (PublicExtensionEntry) -> Unit,
+    installedPluginIds: Set<String> = emptySet(),
+    onRemoveExtension: (PublicExtensionEntry) -> Unit = {},
+    mcpBridge: SettingsEngineBridge? = null,
 ) {
     val context = LocalContext.current
     val languageTag = context.resources.configuration.locales[0].toLanguageTag()
     var query by remember { mutableStateOf("") }
     var category by remember { mutableStateOf("all") }
     var linkError by remember { mutableStateOf(false) }
+    var selectedId by remember { mutableStateOf<String?>(null) }
+    var removeMcp by remember { mutableStateOf<ConfiguredMcpEntry?>(null) }
+    var removeMcpGeneration by remember { mutableStateOf<Long?>(null) }
+    var removing by remember { mutableStateOf(false) }
+    var operationError by remember { mutableStateOf<String?>(null) }
+    val coroutine = rememberCoroutineScope()
+    val mcpState = mcpBridge?.state?.collectAsState()?.value
+    LaunchedEffect(mcpState?.generation) { selectedId = null; removeMcp = null }
+    val selectedEntry = entries.firstOrNull { it.id == selectedId }
+    BackHandler(selectedEntry != null && removeMcp == null) { selectedId = null }
+    removeMcp?.let { target ->
+        AlertDialog(
+            onDismissRequest = { if (!removing) removeMcp = null },
+            title = { Text(stringResource(R.string.settings_parity_remove_server)) },
+            text = { Column { Text("${target.name} · ${target.scope}"); Text(stringResource(R.string.extension_directory_remove_mcp_note)); operationError?.let { Text(it, color = MaterialTheme.colorScheme.error) } } },
+            confirmButton = { TextButton(enabled = !removing, onClick = {
+                coroutine.launch {
+                    removing = true
+                    operationError = null
+                    try {
+                        val bridge = requireNotNull(mcpBridge)
+                        check(bridge.state.value.generation == removeMcpGeneration)
+                        val latest = configuredMcpEntries(bridge.state.value.catalogs["mcp"]).firstOrNull { it.name == target.name && it.scope == target.scope }
+                        check(latest != null && mcpConfigurationMatches(target.configJson, latest.configJson))
+                        val scopes = JSONObject(bridge.state.value.catalogs["mcp"] ?: "{}").getJSONArray("scopes")
+                        val row = (0 until scopes.length()).map { scopes.getJSONObject(it) }.first { it.optString("scope") == target.scope }
+                        val id = bridge.admin("mcp", "remove_server", scope = target.scope, revision = row.getString("revision_sha256"), payload = JSONObject().put("scope", target.scope).put("name", target.name).toString())
+                        check(id != null)
+                        val result = bridge.awaitOperation(id)
+                        check(result.status != com.lingxi.code.bindings.client.ConfigurationOperationStatusDto.FAILED) { result.message ?: "" }
+                        bridge.admin("mcp", "get_snapshot")
+                        removeMcp = null
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (failure: Exception) { operationError = failure.message ?: failure.toString() }
+                    finally { removing = false }
+                }
+            }) { Text(stringResource(R.string.settings_parity_remove_server)) } },
+            dismissButton = { TextButton(enabled = !removing, onClick = { removeMcp = null }) { Text(stringResource(R.string.common_cancel)) } },
+        )
+    }
     val categories = listOf(
         "all" to R.string.extension_directory_category_all,
         "browser" to R.string.extension_directory_category_browser,
@@ -322,14 +375,14 @@ internal fun PublicExtensionDirectory(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        OutlinedTextField(
+        if (selectedEntry == null) OutlinedTextField(
             value = query,
             onValueChange = { query = it },
             label = { Text(stringResource(R.string.extension_directory_search)) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth().testTag("settings.extensions.public.search"),
         )
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (selectedEntry == null) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             categories.forEach { (key, label) ->
                 FilterChip(
                     selected = category == key,
@@ -343,7 +396,7 @@ internal fun PublicExtensionDirectory(
         if (visible.isEmpty()) {
             Text(stringResource(R.string.extension_directory_empty), color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
-            visible.forEach { entry ->
+            (selectedEntry?.let(::listOf) ?: visible).forEach { entry ->
                 val marketplaceAdded = entry.marketplace?.let { publicMarketplace ->
                     registeredMarketplaces.any { marketplace -> marketplaceSourceMatches(publicMarketplace.source, marketplace) }
                 } == true
@@ -352,6 +405,11 @@ internal fun PublicExtensionDirectory(
                         marketplace.name == publicMarketplace.name && !marketplaceSourceMatches(publicMarketplace.source, marketplace)
                     }
                 } == true
+                val installed = entry.marketplace?.let { publicMarketplacePluginId(it, registeredMarketplaces) } in installedPluginIds
+                if (selectedEntry != null) {
+                    TextButton(onClick = { selectedId = null }) { Text(stringResource(R.string.extension_directory_back)) }
+                    Text(entry.name, style = MaterialTheme.typography.headlineMedium)
+                }
                 PublicExtensionCard(
                     entry = entry,
                     languageTag = languageTag,
@@ -364,7 +422,20 @@ internal fun PublicExtensionDirectory(
                     onAddMarketplace = { onAddMarketplace(entry) },
                     onOpenPersonal = { onOpenPersonal(entry) },
                     onOpenUrl = { url -> linkError = !openPublicExtensionUrl(context, url) },
+                    onDetails = if (selectedEntry == null) ({ selectedId = entry.id }) else null,
                 )
+                if ((installed || marketplaceAdded) && entry.marketplace != null) {
+                    OutlinedButton(onClick = { onRemoveExtension(entry) }, enabled = canAddMarketplace, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(if (installed) R.string.plugins_action_uninstall else R.string.extension_directory_remove_source), color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                val configuredTarget = configuredMcpServers.firstOrNull { it.name == entry.mcpName && mcpConfigurationMatches(entry.mcpConfigJson, it.configJson) }
+                if (configuredTarget != null && mcpBridge != null) {
+                    OutlinedButton(onClick = { operationError = null; removeMcpGeneration = mcpBridge.state.value.generation; removeMcp = configuredTarget }, enabled = canConfigureMcp && !removing, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.settings_parity_remove_server), color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                if (selectedEntry != null) PublicExtensionDetailContent(entry, languageTag)
             }
         }
     }
@@ -383,10 +454,11 @@ private fun PublicExtensionCard(
     onAddMarketplace: () -> Unit,
     onOpenPersonal: () -> Unit,
     onOpenUrl: (String) -> Unit,
+    onDetails: (() -> Unit)? = null,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        modifier = Modifier.fillMaxWidth().testTag("settings.extensions.public.item.${entry.id}"),
+        modifier = Modifier.fillMaxWidth().then(if (onDetails != null) Modifier.clickable(onClick = onDetails) else Modifier).testTag("settings.extensions.public.item.${entry.id}"),
     ) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(entry.name, style = MaterialTheme.typography.titleMedium)
@@ -463,6 +535,34 @@ private fun PublicExtensionCard(
     }
 }
 
+
+@Composable
+private fun PublicExtensionDetailContent(entry: PublicExtensionEntry, languageTag: String) {
+    val context = LocalContext.current
+    var copied by remember(entry.id) { mutableStateOf(false) }
+    if (entry.examples.isNotEmpty()) {
+        Column(Modifier.fillMaxWidth().background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.secondaryContainer)), RoundedCornerShape(20.dp)).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(stringResource(R.string.extension_directory_examples), style = MaterialTheme.typography.titleMedium)
+            entry.examples.forEach { example ->
+                val text = example.localized(languageTag)
+                OutlinedButton(onClick = {
+                    (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText(entry.name, text))
+                    copied = true
+                }, modifier = Modifier.fillMaxWidth()) { Text(text) }
+            }
+            Text(stringResource(if (copied) R.string.extension_directory_example_copied else R.string.extension_directory_copy_hint), style = MaterialTheme.typography.bodySmall)
+        }
+    }
+    if (entry.skills.isNotEmpty()) {
+        Text(stringResource(R.string.extension_directory_included_skills), style = MaterialTheme.typography.titleMedium)
+        entry.skills.forEach { Text(it, style = MaterialTheme.typography.bodyMedium) }
+    }
+    Text(stringResource(R.string.extension_directory_information), style = MaterialTheme.typography.titleMedium)
+    Text("${stringResource(R.string.extension_directory_developer)}: ${entry.publisher}")
+    Text("${stringResource(R.string.extension_directory_category)}: ${stringResource(categoryLabel(entry.category))}")
+    entry.version?.let { Text("${stringResource(R.string.plugins_detail_version)}: $it") }
+}
+
 private fun categoryLabel(category: String): Int = when (category) {
     "browser" -> R.string.extension_directory_category_browser
     "development" -> R.string.extension_directory_category_development
@@ -517,6 +617,7 @@ internal fun McpDirectoryPage(bridge: SettingsEngineBridge, runtimeServers: List
                 } else {
                     PublicExtensionDirectory(
                         entries = entries.filter { it.kind == "mcp" },
+                        mcpBridge = bridge,
                         configuredMcpServers = configured,
                         registeredMarketplaces = emptyList(),
                         canConfigureMcp = state.connected && mcpCatalogJson != null,

@@ -1093,7 +1093,7 @@ async function runMacosEditors(window, webContents) {
       const target = page === 'custom-providers' ? [...document.querySelectorAll('button')].find(el => el.textContent.includes('新增 Provider'))
         : page === 'provider-credentials' ? document.querySelector('.settings-provider-row')
         : page === 'fusion' ? document.querySelector('.extension-hub-primary')
-        : page === 'mcp' ? document.querySelector('.extension-hub-row-open')
+        : page === 'mcp' ? document.querySelector('.extension-hub-row-side .extension-hub-icon-button')
         : page === 'skills' ? document.querySelector('.extension-skills-installed .extension-hub-row')
         : [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '添加');
       if (!target) throw new Error('missing editor ' + page);
@@ -1179,7 +1179,16 @@ async function runExtensionRecommendationsScenario(window, webContents) {
   await run('window.__settingsScreenTest.setFieldValue(".extension-search-field input", "xlsx")');
   await waitFor(webContents, 'document.querySelectorAll(".extension-skills-recommended article").length === 1');
   const search = await run('document.querySelector(".extension-skills-recommended article").textContent.includes("Document Skills")');
-  await run('document.querySelector(".extension-skills-recommended article button").click()');
+  await run('document.querySelector(".extension-skills-recommended article .extension-hub-row-open").click()');
+  await waitFor(webContents, 'document.querySelector(".extension-overview h1")?.textContent === "Document Skills"');
+  const details = await run('({examples: document.querySelectorAll(".extension-overview-example").length, skills: document.querySelectorAll(".extension-overview-component").length, noMutations: window.__settingsScreenTest.state().extensionCalls.every(({command}) => command.action === "get_catalog")})');
+  await capture('details');
+  await run('window.lingxi = { ...window.lingxi, copyText: async (text) => { window.__copiedExample = text; } }; document.querySelector(".extension-overview-example").click()');
+  await waitFor(webContents, 'Boolean(window.__copiedExample) && document.querySelector(".extension-overview-copy-status").textContent.includes("已复制")');
+  const copied = await run('document.querySelector(".extension-overview-copy-status").textContent.includes("已复制")');
+  await run('document.querySelector(".extension-breadcrumb button").click()');
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-skills-recommended article .extension-hub-primary"))');
+  await run('document.querySelector(".extension-skills-recommended article .extension-hub-primary").click()');
   await waitFor(webContents, 'Boolean([...document.querySelectorAll(".extension-detail-dialog input")].find(el => el.value === "anthropics/skills"))');
   await capture('source');
   const beforePreview = await run('window.__settingsScreenTest.state().extensionCalls');
@@ -1202,17 +1211,52 @@ async function runExtensionRecommendationsScenario(window, webContents) {
   await run(`window.__settingsScreenTest.setExtensionCatalogs({plugins:${JSON.stringify({...catalog,installed:[{id:available[0].id,name:'document-skills'}]})}})`);
   await run('window.__settingsScreenTest.selectPage("skills")');
   await waitFor(webContents, 'Boolean(document.querySelector(".extension-skills-recommended"))');
-  const installed = await run('[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills"))?.querySelector("button")?.textContent.includes("已安装")');
+  const installed = await run('[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills"))?.querySelector(".extension-hub-danger")?.textContent.includes("卸载")');
+  await run('[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills")).querySelector(".extension-hub-danger").click()');
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-overview")) && [...document.querySelectorAll("button")].some(el => el.textContent.trim() === "确认执行")');
+  await capture('uninstall-confirmation');
+  const beforeUninstall = await run('window.__settingsScreenTest.state().extensionCalls.filter(({command}) => command.action === "apply_operation").length');
+  await clickButton('取消');
+  const cancelUninstall = await run('window.__settingsScreenTest.state().extensionCalls.filter(({command}) => command.action === "apply_operation").length === 2');
+  await clickButton('卸载');
+  await waitFor(webContents, '[...document.querySelectorAll("button")].some(el => el.textContent.trim() === "确认执行")');
+  await clickButton('确认执行');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().extensionCalls.filter(({command}) => command.action === "apply_operation").length === 3');
+  const uninstall = await run('window.__settingsScreenTest.state().extensionCalls.filter(({command}) => command.action === "apply_operation").at(-1).command');
+  const credentialCleanup = await run('window.__settingsScreenTest.state().extensionCalls.some(({domain,command}) => domain === "credential" && command.pluginId === "document-skills@anthropic-agent-skills")');
+  await run(`window.__settingsScreenTest.setExtensionCatalogs({plugins:${JSON.stringify(catalog)}})`);
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-overview-actions .extension-hub-primary")) && !document.querySelector(".extension-overview-status")?.textContent.includes("已安装")');
   window.setContentSize(760, 600);
   await capture('narrow');
   const narrow = await run('document.querySelector(".settings-content-scroll").scrollWidth <= document.querySelector(".settings-content-scroll").clientWidth + 1');
   await run('window.__settingsScreenTest.selectPage("mcp")');
   await waitFor(webContents, 'Boolean([...document.querySelectorAll(".extension-hub-row-title")].find(el => el.textContent === "Notion"))');
   await run('[...document.querySelectorAll(".extension-hub-row-title")].find(el => el.textContent === "Notion").closest(".extension-hub-row").querySelector("button").click()');
+  await waitFor(webContents, 'document.querySelector(".extension-overview h1")?.textContent === "Notion"');
+  await capture('mcp-details');
+  await run('document.querySelector(".extension-overview-actions .extension-hub-primary").click()');
   await waitFor(webContents, 'Boolean([...document.querySelectorAll("input")].find(el => el.value === "https://mcp.notion.com/mcp"))');
   const mcpTemplate = await run('[...document.querySelectorAll("input")].some(el => el.value === "notion")');
   await capture('mcp');
-  return { initial, search, beforePreview, beforeConfirmation, selectedPackage, completed, installed, narrow, mcpTemplate };
+  await run('document.querySelector(".configuration-back").click()');
+  const mcpSnapshot = { scopes: [
+    {scope:'user',revision_sha256:'u'.repeat(64),raw_json:JSON.stringify({mcpServers:{notion:{type:'http',url:'https://different.example/mcp'}}})},
+    {scope:'project',revision_sha256:'p'.repeat(64),raw_json:JSON.stringify({mcpServers:{notion:{type:'http',url:'https://mcp.notion.com/mcp'}}})},
+  ] };
+  await run(`window.__settingsScreenTest.setExtensionCatalogs({mcp:${JSON.stringify(mcpSnapshot)}})`);
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-hub-row-title"))');
+  await run('[...document.querySelectorAll(".extension-hub-row-title")].find(el => el.textContent === "Notion").closest(".extension-hub-row").querySelector("button").click()');
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-overview-actions .extension-hub-danger"))');
+  await run('document.querySelector(".extension-overview-actions .extension-hub-danger").click()');
+  await waitFor(webContents, 'Boolean(document.querySelector("[role=alertdialog]"))');
+  await run('document.querySelector("[role=alertdialog] [data-dialog-initial-focus]").click()');
+  const cancelMcp = await run('!window.__settingsScreenTest.state().extensionCalls.some(({command}) => command.action === "remove_server")');
+  await run('document.querySelector(".extension-overview-actions .extension-hub-danger").click()');
+  await waitFor(webContents, 'Boolean(document.querySelector("[role=alertdialog]"))');
+  await run('document.querySelector("[role=alertdialog] .extension-hub-danger").click()');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().extensionCalls.some(({command}) => command.action === "remove_server")');
+  const removeMcp = await run('window.__settingsScreenTest.state().extensionCalls.find(({command}) => command.action === "remove_server").command');
+  return { initial, search, details, copied, beforePreview, beforeConfirmation, selectedPackage, completed, installed, narrow, mcpTemplate, beforeUninstall, cancelUninstall, uninstall, credentialCleanup, cancelMcp, removeMcp };
 }
 
 async function runRecommendationCatalogSafetyScenario(webContents) {
@@ -1224,7 +1268,7 @@ async function runRecommendationCatalogSafetyScenario(webContents) {
   await run(`window.__settingsScreenTest.setExtensionCatalogs({plugins:${JSON.stringify(aliasCatalog)}})`);
   await run('window.__settingsScreenTest.selectPage("skills")');
   await waitFor(webContents, 'Boolean(document.querySelector(".extension-skills-recommended"))');
-  const installed = '[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills"))?.querySelector("button")?.textContent.includes("已安装")';
+  const installed = '[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills"))?.querySelector(".extension-hub-danger")?.textContent.includes("卸载")';
   await waitFor(webContents, installed);
   const aliasInstalled = await run(installed);
   const refreshed = await run('window.__settingsScreenTest.state().extensionCalls.some(call => call.domain === "plugin" && call.command.action === "get_catalog")');
@@ -1234,7 +1278,7 @@ async function runRecommendationCatalogSafetyScenario(webContents) {
   const differentSourceNotInstalled = await run(`!(${installed})`);
   await run('window.__settingsScreenTest.setExtensionCatalogs({plugins:null})');
   await waitFor(webContents, '!window.__settingsScreenTest.state().pluginCatalogReady');
-  await run('[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills")).querySelector("button").click()');
+  await run('[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills")).querySelector(".extension-hub-primary").click()');
   await waitFor(webContents, 'Boolean(document.querySelector(".extension-hub-toolbar-actions details"))');
   await run('document.querySelector(".extension-hub-toolbar-actions details summary").click()');
   await run('[...document.querySelectorAll(".extension-hub-toolbar-actions details button")].at(-1).click()');

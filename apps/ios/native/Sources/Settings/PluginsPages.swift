@@ -176,6 +176,42 @@ struct PluginsPage: View {
         return publicMarketplaceRegistration(marketplace, registered: catalog.marketplaces)
     }
 
+    private func installedRecommendation(_ item: PublicExtensionItem) -> InstalledPlugin? {
+        guard let marketplace = item.marketplace,
+              let id = publicMarketplacePluginID(marketplace, registered: catalog.marketplaces) else { return nil }
+        return catalog.installed.first { $0.id == id }
+    }
+
+    private func removeRecommendation(_ item: PublicExtensionItem) {
+        let generation = repository.sourceGeneration
+        if let plugin = installedRecommendation(item) {
+            confirmation = PluginConfirmation(
+                title: String(localized: "plugins_uninstall_title \(plugin.displayName)"),
+                body: String(localized: "plugins_uninstall_body"),
+                confirm: String(localized: "plugins_action_uninstall"), destructive: true
+            ) {
+                guard repository.sourceGeneration == generation, installedRecommendation(item)?.id == plugin.id else {
+                    error = String(localized: "plugins_catalog_refresh_first")
+                    return
+                }
+                run(plugin.id, ["action": "uninstall", "plugin": plugin.id])
+            }
+        } else if case .some(.registered(let name)) = marketplaceRegistration(for: item) {
+            confirmation = PluginConfirmation(
+                title: String(localized: "public_extensions_remove_source"),
+                body: String(localized: "plugins_marketplace_remove_body"),
+                confirm: String(localized: "plugins_marketplace_remove"), destructive: true
+            ) {
+                guard repository.sourceGeneration == generation,
+                      marketplaceRegistration(for: item) == .registered(name: name) else {
+                    error = String(localized: "plugins_catalog_refresh_first")
+                    return
+                }
+                run("marketplace:\(name)", ["action": "marketplace_remove", "name": name])
+            }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             blurb(String(localized: "plugins_blurb"))
@@ -301,7 +337,13 @@ struct PluginsPage: View {
                             && !marketplace.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     }
                     return URL(string: item.documentationURL)?.scheme?.lowercased() == "https"
-                }
+                },
+                removalTitle: { item in
+                    if installedRecommendation(item) != nil { return String(localized: "plugins_action_uninstall") }
+                    if case .some(.registered(_)) = marketplaceRegistration(for: item) { return String(localized: "public_extensions_remove_source") }
+                    return nil
+                },
+                remove: removeRecommendation
             )
         }
     }

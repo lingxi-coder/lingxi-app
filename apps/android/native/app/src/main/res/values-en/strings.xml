@@ -2938,4 +2938,13 @@
     <string name="settings_browser_session_authorized">Authorized in the active control session</string>
     <string name="settings_browser_saved">Saved for the next control session</string>
     <string name="settings_browser_manage_session">Manage control session</string>
+    <string name="extension_directory_examples">Try asking</string>
+    <string name="extension_directory_copy_hint">Tap an example to copy it.</string>
+    <string name="extension_directory_example_copied">Example copied</string>
+    <string name="extension_directory_included_skills">Included Skills</string>
+    <string name="extension_directory_information">Information</string>
+    <string name="extension_directory_developer">Developer</string>
+    <string name="extension_directory_remove_source">Remove source</string>
+    <string name="extension_directory_remove_mcp_note">Remove this MCP connection from its configured scope?</string>
+    <string name="extension_directory_category">Category</string>
 </resources>

@@ -144,6 +144,7 @@ private enum MCPAdminDirectoryTab: String, Hashable {
 private enum PendingPublicMCPAction {
     case useTemplate(PublicExtensionItem)
     case openExisting(name: String)
+    case removeExisting(name: String, scope: String, revision: String, generation: Int)
 }
 
 struct DesktopMCPAdminPage: View {
@@ -234,6 +235,17 @@ struct DesktopMCPAdminPage: View {
                         case .none:
                             openOfficialDocumentation(for: item)
                         }
+                    },
+                    canAct: { item in item.mcpConfig == nil || (repository.connected && !repository.saving && scopeRow["revision_sha256"] != nil) },
+                    removalTitle: { item in templateMatch(item) == .sameConfiguration ? String(localized: "settings_parity_remove_server") : nil },
+                    remove: { item in
+                        guard templateMatch(item) == .sameConfiguration,
+                              let name = item.mcpName,
+                              let revision = scopeRow["revision_sha256"] as? String else { return }
+                        pendingPublicMCPAction = .removeExisting(name: name, scope: scope, revision: revision, generation: repository.sourceGeneration)
+                        directoryConfirmationTitle = String(localized: "settings_parity_remove_server")
+                        directoryConfirmationMessage = String(localized: "public_extensions_remove_mcp_note")
+                        confirmsTemplateReplacement = true
                     }
                 )
             } else {
@@ -310,6 +322,12 @@ struct DesktopMCPAdminPage: View {
                 case .some(.openExisting(let name)):
                     select(name)
                     directoryTab = .personal
+                case .some(.removeExisting(let name, let targetScope, let revision, let generation)):
+                    Task {
+                        guard generation == repository.sourceGeneration else { return }
+                        await repository.admin(domain: "mcp", action: "remove_server", target: name, scope: targetScope,
+                                               revision: revision, payload: DesktopSettingsRepository.json(["name": name, "scope": targetScope]), mutation: true)
+                    }
                 case .none: break
                 }
                 pendingPublicMCPAction = nil

@@ -252,6 +252,11 @@ struct PublicExtensionItem: Identifiable {
     let mcpConfig: [String: Any]?
     let marketplace: PublicExtensionMarketplace?
     let skills: [String]
+    var examples: [[String: String]] = []
+
+    func localizedExamples(locale: Locale) -> [String] {
+        examples.map { localized($0, locale: locale, fallback: "") }.filter { !$0.isEmpty }
+    }
 
     func localizedDescription(locale: Locale) -> String {
         localized(description, locale: locale, fallback: name)
@@ -337,7 +342,8 @@ struct PublicExtensionDirectory {
             mcpName: mcpName,
             mcpConfig: mcpConfig,
             marketplace: marketplace,
-            skills: value["skills"] as? [String] ?? []
+            skills: value["skills"] as? [String] ?? [],
+            examples: value["examples"] as? [[String: String]] ?? []
         )
     }
 }
@@ -349,25 +355,33 @@ struct PublicExtensionDirectoryList: View {
     let actionTitle: (PublicExtensionItem) -> String
     let action: (PublicExtensionItem) -> Void
     let canAct: (PublicExtensionItem) -> Bool
+    let removalTitle: (PublicExtensionItem) -> String?
+    let remove: (PublicExtensionItem) -> Void
 
     @Environment(\.theme) private var theme
     @Environment(LocalizationManager.self) private var localization
     @State private var directory = PublicExtensionDirectory.load()
     @State private var search = ""
     @State private var category: PublicExtensionCategory?
+    @State private var selectedItem: PublicExtensionItem?
+    @State private var pendingDetailAction: (() -> Void)?
 
     init(
         kind: PublicExtensionKind,
         skillsOnly: Bool = false,
         actionTitle: @escaping (PublicExtensionItem) -> String,
         action: @escaping (PublicExtensionItem) -> Void,
-        canAct: @escaping (PublicExtensionItem) -> Bool = { _ in true }
+        canAct: @escaping (PublicExtensionItem) -> Bool = { _ in true },
+        removalTitle: @escaping (PublicExtensionItem) -> String? = { _ in nil },
+        remove: @escaping (PublicExtensionItem) -> Void = { _ in }
     ) {
         self.kind = kind
         self.skillsOnly = skillsOnly
         self.actionTitle = actionTitle
         self.action = action
         self.canAct = canAct
+        self.removalTitle = removalTitle
+        self.remove = remove
     }
 
     private var locale: Locale { localization.effectiveLocale() }
@@ -384,6 +398,7 @@ struct PublicExtensionDirectoryList: View {
                     item.localizedRequirements(locale: locale) ?? "", item.skills.joined(separator: " ")]
                 .contains { $0.localizedStandardContains(query) }
         }
+
     }
 
     var body: some View {
@@ -412,12 +427,34 @@ struct PublicExtensionDirectoryList: View {
                 }
             }
         }
+        .sheet(item: $selectedItem, onDismiss: {
+            let next = pendingDetailAction
+            pendingDetailAction = nil
+            next?()
+        }) { item in
+            NavigationStack {
+                PublicExtensionDetail(
+                    item: item, locale: locale, actionTitle: actionTitle(item), canAct: canAct(item),
+                    action: { pendingDetailAction = { action(item) }; selectedItem = nil },
+                    removalTitle: removalTitle(item),
+                    remove: { pendingDetailAction = { remove(item) }; selectedItem = nil }
+                )
+                .toolbar { ToolbarItem(placement: .cancellationAction) {
+                    Button(String(localized: "common_close")) { selectedItem = nil }
+                } }
+            }
+        }
     }
 
     private func itemRow(_ item: PublicExtensionItem) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
-                Text(item.name).font(.body.weight(.medium)).foregroundStyle(theme.text)
+                Button { selectedItem = item } label: {
+                    HStack {
+                        Text(item.name).font(.body.weight(.medium))
+                        Image(systemName: "chevron.right").font(.caption)
+                    }.foregroundStyle(theme.text)
+                }.buttonStyle(.plain)
                 Spacer(minLength: 8)
                 if let version = item.version, !version.isEmpty {
                     Text(version).font(.caption.monospaced()).foregroundStyle(.secondary)
@@ -437,15 +474,100 @@ struct PublicExtensionDirectoryList: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Button(actionTitle(item)) { action(item) }
+            HStack {
+                Button(actionTitle(item)) { action(item) }
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(theme.accent)
                 .padding(.top, 2)
                 .disabled(!canAct(item))
+                if let title = removalTitle(item) {
+                    Spacer()
+                    Button(title, role: .destructive) { remove(item) }.disabled(!canAct(item))
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(13)
         .background(theme.surface, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(theme.border, lineWidth: 0.5))
+    }
+}
+
+private struct PublicExtensionDetail: View {
+    let item: PublicExtensionItem
+    let locale: Locale
+    let actionTitle: String
+    let canAct: Bool
+    let action: () -> Void
+    let removalTitle: String?
+    let remove: () -> Void
+    @Environment(\.theme) private var theme
+    @State private var copiedExample: Int?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                HStack(alignment: .top, spacing: 16) {
+                    Image(systemName: item.kind == .mcp ? "server.rack" : "puzzlepiece.extension")
+                        .font(.largeTitle).foregroundStyle(theme.accent)
+                        .frame(width: 64, height: 64).background(theme.surface, in: RoundedRectangle(cornerRadius: 16))
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(item.name).font(.title2.weight(.semibold))
+                        Text(item.publisher).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 16) { actions }
+                    VStack(alignment: .leading, spacing: 12) { actions }
+                }
+                let examples = item.localizedExamples(locale: locale)
+                if !examples.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("public_extensions_examples").font(.headline)
+                        ForEach(Array(examples.enumerated()), id: \.offset) { index, example in
+                            Button {
+                                UIPasteboard.general.string = example
+                                copiedExample = index
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Text(example).multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+                                    Image(systemName: copiedExample == index ? "checkmark" : "doc.on.doc")
+                                }.padding(14).foregroundStyle(theme.text)
+                                    .background(theme.surface, in: RoundedRectangle(cornerRadius: 16))
+                            }.buttonStyle(.plain)
+                        }
+                        Text(copiedExample == nil ? "public_extensions_copy_hint" : "public_extensions_example_copied").font(.caption).foregroundStyle(.secondary)
+                    }.padding(20)
+                        .background(LinearGradient(colors: [theme.accent.opacity(0.16), Color.purple.opacity(0.12)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 22))
+                }
+                Text(item.localizedDescription(locale: locale)).fixedSize(horizontal: false, vertical: true)
+                if let requirements = item.localizedRequirements(locale: locale) {
+                    Text(requirements).font(.footnote).foregroundStyle(.secondary)
+                }
+                if !item.skills.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("public_extensions_included_skills").font(.headline)
+                        ForEach(item.skills, id: \.self) { skill in Label(skill, systemImage: "shippingbox").font(.subheadline) }
+                    }
+                }
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("public_extensions_information").font(.headline)
+                    LabeledContent(String(localized: "public_extensions_developer"), value: item.publisher)
+                    LabeledContent(String(localized: "public_extensions_category"), value: item.category.displayName)
+                    if let version = item.version { LabeledContent(String(localized: "plugins_detail_version"), value: version) }
+                    if let url = URL(string: item.documentationURL), url.scheme == "https" {
+                        Link(String(localized: "public_extensions_open_documentation"), destination: url)
+                    }
+                    if let url = URL(string: item.sourceURL), url.scheme == "https" {
+                        Link(String(localized: "extension_directory_source"), destination: url)
+                    }
+                }.font(.subheadline)
+            }.frame(maxWidth: 720, alignment: .leading).padding(24).frame(maxWidth: .infinity)
+        }.navigationTitle(item.name).navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder private var actions: some View {
+        Button(actionTitle, action: action).buttonStyle(.borderedProminent).disabled(!canAct)
+        if let removalTitle { Button(removalTitle, role: .destructive, action: remove).buttonStyle(.bordered).disabled(!canAct) }
     }
 }

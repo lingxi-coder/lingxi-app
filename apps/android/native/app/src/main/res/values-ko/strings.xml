@@ -2938,4 +2938,13 @@
     <string name="settings_browser_session_authorized">현재 제어 세션에서 허용됨</string>
     <string name="settings_browser_saved">다음 제어 세션을 위해 저장됨</string>
     <string name="settings_browser_manage_session">제어 세션 관리</string>
+    <string name="extension_directory_examples">이렇게 요청해 보세요</string>
+    <string name="extension_directory_copy_hint">예시를 누르면 복사됩니다.</string>
+    <string name="extension_directory_example_copied">예시를 복사했습니다</string>
+    <string name="extension_directory_included_skills">포함된 Skills</string>
+    <string name="extension_directory_information">정보</string>
+    <string name="extension_directory_developer">개발자</string>
+    <string name="extension_directory_remove_source">소스 제거</string>
+    <string name="extension_directory_remove_mcp_note">설정된 범위에서 이 MCP 연결을 제거할까요?</string>
+    <string name="extension_directory_category">카테고리</string>
 </resources>

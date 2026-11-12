@@ -6,6 +6,7 @@ import {
   publicExtensionText,
   publicExtensionFromNavigation,
   publicExtensionNavigationId,
+  publicExtensionNavigationAction,
   publicSkillRecommendations,
 } from '../src/shared/publicExtensionDirectory';
 
@@ -91,5 +92,24 @@ test('remote recommendations have usable HTTPS templates without placeholder cre
     assert.equal(url.password, '');
     assert(!url.href.includes('${'));
     assert(item.requirements?.en);
+  }
+});
+
+test('extension details keep localized examples and explicit installation intents separate', () => {
+  const item = publicSkillRecommendations[0]!;
+  assert.equal(publicExtensionNavigationAction(publicExtensionNavigationId(item)), 'details');
+  for (const action of ['details', 'add', 'uninstall'] as const) {
+    const id = publicExtensionNavigationId(item, action);
+    assert.equal(publicExtensionFromNavigation(id), item);
+    assert.equal(publicExtensionNavigationAction(id), action);
+  }
+  assert.equal(publicExtensionNavigationAction(`directory:${item.id}`), 'details');
+  assert.equal(publicExtensionNavigationAction(undefined), 'details');
+  for (const entry of publicExtensionItems) {
+    for (const example of entry.examples ?? []) {
+      for (const locale of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
+        assert(example[locale]?.trim(), `${entry.id} example lacks ${locale}`);
+      }
+    }
   }
 });

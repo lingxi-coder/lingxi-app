@@ -31,6 +31,7 @@ final class PublicExtensionDirectoryTests: XCTestCase {
               "requirements": {"en": "Optional API key"},
               "sourceUrl": "https://example.test/source",
               "documentationUrl": "https://example.test/docs",
+              "examples": [{"en": "Find current documentation", "zh-Hans": "查询最新文档"}],
               "mcp": {
                 "name": "context7",
                 "config": {
@@ -75,6 +76,8 @@ final class PublicExtensionDirectoryTests: XCTestCase {
         let mcp = try XCTUnwrap(directory.items.first)
         XCTAssertEqual(mcp.mcpName, "context7")
         XCTAssertEqual(mcp.localizedDescription(locale: Locale(identifier: "zh-Hans")), "文档")
+        XCTAssertEqual(mcp.localizedExamples(locale: Locale(identifier: "zh-Hans")), ["查询最新文档"])
+        XCTAssertEqual(mcp.localizedExamples(locale: Locale(identifier: "de-DE")), ["Find current documentation"])
         let config = try XCTUnwrap(mcp.mcpConfig)
         XCTAssertEqual(config["url"] as? String, "https://example.test/mcp")
         XCTAssertEqual(config["headers"] as? [String: String], ["Authorization": "Bearer ${CONTEXT7_API_KEY}"])

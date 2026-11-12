@@ -2938,4 +2938,13 @@
     <string name="settings_browser_session_authorized">已授权给当前控制会话</string>
     <string name="settings_browser_saved">已保存，等待下次启动控制会话</string>
     <string name="settings_browser_manage_session">管理控制会话</string>
+    <string name="extension_directory_examples">可以这样使用</string>
+    <string name="extension_directory_copy_hint">点击示例可复制到剪贴板。</string>
+    <string name="extension_directory_example_copied">示例已复制</string>
+    <string name="extension_directory_included_skills">包含的 Skills</string>
+    <string name="extension_directory_information">信息</string>
+    <string name="extension_directory_developer">开发者</string>
+    <string name="extension_directory_remove_source">移除来源</string>
+    <string name="extension_directory_remove_mcp_note">是否从该作用域移除此 MCP 连接配置？</string>
+    <string name="extension_directory_category">分类</string>
 </resources>

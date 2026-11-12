@@ -229,7 +229,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                     catch (error: CancellationException) { throw error }
                     catch (error: Exception) {
                         val code = (error as? TeamMessageFailure)?.code ?: "SERVICE_UNAVAILABLE"
-                        val permanent = code in setOf("MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "INVALID_INPUT")
+                        val permanent = code in setOf("MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "INVALID_INPUT", "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED")
                         commit(life) { it.copy(outbox = it.outbox.map { value -> if ((value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) == id) JSONObject(value.toString()).also { it.remove("leaseUntil"); if (permanent) it.put("error", code) } else value }) }
                         if (!permanent) throw error
                     }
@@ -289,6 +289,12 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         val task = TeamTask.parse(execute("getTask", JSONObject().put("taskId", taskId), lifecycle))
         mutable.update { if (it.selected == selection) it.copy(tasks = if (it.tasks.any { old -> old.taskId == taskId }) it.tasks.map { old -> if (old.taskId == taskId) task else old } else it.tasks + task) else it }
     }
+    /** Stops a task: at once while it is queued or waiting, at the worker's next check while the Bot is working. A task that has already ended stays as it is. */
+    fun cancelTask(taskId: String) = launchOperation {
+        try { execute("cancelTask", JSONObject().put("taskId", taskId), lifecycle) }
+        catch (error: TeamMessageFailure) { if (error.code != "TASK_FINISHED") throw error }
+        refreshTask(taskId)
+    }
     fun openArtifact(artifactId: String) = launchOperation {
         val selection = mutable.value.selected
         val artifact = TeamArtifact.parse(execute("readArtifact", JSONObject().put("artifactId", artifactId), lifecycle))
@@ -304,12 +310,20 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         commit(lifecycle) { if (it.creation != null) throw TeamMessageFailure("CREATION_PENDING"); it.copy(creation = intent) }
         select(id); onSuccess()
     }
-    fun queue(operation: String, text: String, messageId: String? = null, replyTo: String? = null, targets: List<String> = emptyList(), onSuccess: () -> Unit = {}) {
+    /** [waitId] makes a new message the answer to a Bot's question: it is sent as `answerWait`, asks no Bot and starts no task. */
+    fun queue(operation: String, text: String, messageId: String? = null, replyTo: String? = null, targets: List<String> = emptyList(), waitId: String? = null, onSuccess: () -> Unit = {}) {
         if (mutable.value.submitting) return
         mutable.update { it.copy(submitting = true) }; val life = lifecycle
         launchOperation {
             try {
                 if (!active || mutable.value.revoked || mutable.value.selected.isEmpty() || (operation != "recall" && (text.isBlank() || text.toByteArray(Charsets.UTF_8).size > 8192))) throw TeamMessageFailure("INVALID_INPUT")
+                if (waitId != null) {
+                    if (operation != "create") throw TeamMessageFailure("INVALID_INPUT")
+                    val changeId = UUID.randomUUID().toString()
+                    val payload = JSONObject().put("conversationId", mutable.value.selected).put("waitId", waitId).put("messageId", UUID.randomUUID().toString()).put("changeId", changeId).put("text", text)
+                    commit(life) { it.copy(outbox = it.outbox + executionCommand("answerWait", payload, changeId)) }; onSuccess(); refresh()
+                    return@launchOperation
+                }
                 val targetsForSubmit = if (operation == "create") {
                     val conversation = mutable.value.cache?.conversations?.find { it.id == mutable.value.selected } ?: throw TeamMessageFailure("CONVERSATION_REQUIRED")
                     if (conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1) throw TeamMessageFailure("BOT_SELECTION_STALE")
@@ -358,7 +372,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         if (!active) return
         val cache = mutable.value.cache ?: return
         val pending = (cache.outbox + cache.commands + listOfNotNull(cache.creation)).filter { !it.has("error") }
-        val earliest = (pending.map { it.optLong("leaseUntil") } + if (mutable.value.tasks.any { !it.terminal }) listOf(System.currentTimeMillis() + 3000) else emptyList()).minOrNull() ?: return
+        val earliest = (pending.map { it.optLong("leaseUntil") } + if (mutable.value.tasks.any { it.busy }) listOf(System.currentTimeMillis() + 3000) else emptyList()).minOrNull() ?: return
         val wait = maxOf(retryDelay, earliest - System.currentTimeMillis()); retryDelay = minOf(30000L, retryDelay * 2)
         retry = scope.launch { delay(wait); refresh() }
     }

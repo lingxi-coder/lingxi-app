@@ -11,6 +11,8 @@ enum TeamsBotText {
         case "interrupted": "teams_task_interrupted"
         case "authorization_required": "teams_task_authorization_required"
         case "revoked": "teams_run_revoked"
+        case "waiting": "teams_task_waiting"
+        case "cancelled": "teams_task_cancelled"
         default: "chat_status_unknown"
         }
     }
@@ -67,5 +69,5 @@ enum TeamsBotText {
         return [prefix, strings.tokens(usage.inputTokens ?? 0, usage.outputTokens ?? 0), cost].joined(separator: " · ")
     }
 
-    static let allKeys = ["cron_status_queued", "teams_run_processing", "chat_status_completed", "chat_status_failed", "teams_task_expired", "teams_task_interrupted", "teams_task_authorization_required", "teams_run_revoked", "chat_status_unknown"]
+    static let allKeys = ["cron_status_queued", "teams_run_processing", "chat_status_completed", "chat_status_failed", "teams_task_expired", "teams_task_interrupted", "teams_task_authorization_required", "teams_run_revoked", "teams_task_waiting", "teams_task_cancelled", "chat_status_unknown"]
 }

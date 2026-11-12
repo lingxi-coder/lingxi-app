@@ -17,6 +17,15 @@ struct TeamConversationContext {
     /// chat itself: a Bot DM on the same pair workspace is an ordinary Bot DM (D22), headed by the Bot.
     let pair: PairTeam?
 
+    /// The signed-in member as commands and tasks name them.
+    var viewer: TeamMemberRef { TeamMemberRef(uid: uid, generation: team.generation) }
+    /// The wait a reply to `message` would answer: `message` is a Bot's question whose task still waits for the viewer.
+    @MainActor
+    func answerableWait(of message: TeamMessage) -> String? {
+        guard let waitId = message.waitId, let taskId = message.taskId, message.author.kind != "user" else { return nil }
+        let pending = Set((model.cache?.outbox ?? []).compactMap(\.waitId))
+        return TeamTaskActions.answerableWait(model.tasks.first { $0.taskId == taskId }, viewer: viewer, pendingWaitIds: pending) == waitId ? waitId : nil
+    }
     /// The viewer may send here (a Bot's owner reading someone else's Bot DM only observes).
     var participant: Bool { conversation.participants.isEmpty || conversation.participants.contains("user:\(uid)") }
 
@@ -230,7 +239,10 @@ struct TeamMessageCell: View {
         let ids = message.taskId.map { [$0] } ?? message.taskIds ?? []
         ForEach(ids, id: \.self) { taskId in
             if let task = context.model.tasks.first(where: { $0.taskId == taskId }) {
-                TeamTaskCard(task: task, botName: context.bots.first { $0.sharedBotId == task.sharedBotId }?.name ?? context.strings.bot)
+                let bot = context.bots.first { $0.sharedBotId == task.sharedBotId }
+                TeamTaskCard(task: task, botName: bot?.name ?? context.strings.bot, viewer: context.viewer, maintainer: bot?.maintainer,
+                             recipientName: task.wait.map { context.userName($0.recipient.uid) } ?? "",
+                             onReply: context.answerableWait(of: message) == nil ? nil : onReply.map { reply in { reply(message) } })
                     .padding(.top, 4)
             } else {
                 Button("teams_task_view") { Task { try? await context.model.refreshTask(taskId) } }

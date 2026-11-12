@@ -55,19 +55,61 @@ struct TeamTaskCard: View {
     @Environment(TeamsWorkspace.self) private var workspace
     let task: TeamTask
     let botName: String
+    /// The signed-in member, and the Bot's maintainer when its card is known: they decide who may cancel.
+    let viewer: TeamMemberRef
+    var maintainer: TeamMemberRef? = nil
+    /// The name of the member a waiting task waits for (not needed when that is the viewer).
+    var recipientName: String = ""
+    /// Starts the answer to the Bot's question. Set only on the question itself, while it can still be answered by the viewer.
+    var onReply: (() -> Void)? = nil
+    @State private var cancelling = false
+
+    private var canCancel: Bool { TeamTaskActions.canCancel(task, viewer: viewer, maintainer: maintainer) }
+    private var waitLine: String? {
+        guard task.state == "waiting", let wait = task.wait else { return nil }
+        let expires = TeamsBotText.expiryText(at: wait.expiresAt, now: Date().timeIntervalSince1970 * 1000)
+        return wait.recipient == viewer ? String(localized: "teams_task_waiting_you \(expires)") : String(localized: "teams_task_waiting_member \(recipientName) \(expires)")
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(botName).font(.subheadline.weight(.semibold))
             Button {
                 Task { await workspace.run { try await workspace.messaging?.refreshTask(task.taskId) } }
             } label: {
-                Label(LocalizedStringKey(TeamsBotText.stateKey(task.state)), systemImage: "arrow.clockwise")
+                Label(LocalizedStringKey(task.cancelling ? "teams_task_cancelling" : TeamsBotText.stateKey(task.state)), systemImage: "arrow.clockwise")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
-            Text(TeamsBotText.usageLine(task.usage, strings: .current))
-                .font(.caption).foregroundStyle(.secondary)
-                .accessibilityIdentifier("teams.task.usage.\(task.taskId)")
+            if let waitLine {
+                Text(waitLine).font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("teams.task.wait.\(task.taskId)")
+            }
+            // A task cancelled before any model call has nothing to report.
+            if !(task.state == "cancelled" && task.usage == nil) {
+                Text(TeamsBotText.usageLine(task.usage, strings: .current))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("teams.task.usage.\(task.taskId)")
+            }
+            if onReply != nil || canCancel {
+                HStack(spacing: 10) {
+                    if let onReply {
+                        Button("teams_message_reply", systemImage: "arrowshape.turn.up.left", action: onReply)
+                            .buttonStyle(.borderedProminent)
+                            .accessibilityIdentifier("teams.task.reply.\(task.taskId)")
+                    }
+                    if canCancel {
+                        Button("teams_task_cancel", role: .destructive) {
+                            guard !cancelling else { return }
+                            cancelling = true
+                            Task { await workspace.run { try await workspace.messaging?.cancelTask(task.taskId) }; cancelling = false }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(cancelling)
+                        .accessibilityIdentifier("teams.task.cancel.\(task.taskId)")
+                    }
+                }
+                .controlSize(.small)
+            }
             if let artifactId = task.artifactId {
                 Button("teams_artifact_open", systemImage: "doc.text") {
                     Task { await workspace.openArtifact(artifactId) }

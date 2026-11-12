@@ -69,6 +69,53 @@ class TeamMessagingQueueTest {
         }
     }
 
+    @Test fun anAnswerToABotQuestionIsSentAsAnswerWaitAndAsksNoBot() = runBlocking {
+        Harness(bot = true).use { h ->
+            h.start()
+            withContext(h.dispatcher) { h.model.queue("create", "Blue", replyTo = "question_0001", waitId = WAIT) }
+            h.awaitDelivery()
+            val sent = h.sent.single()
+            TeamExecutionContract.validate(sent)
+            assertEquals("answerWait", sent.getString("action"))
+            assertEquals(GENERATION, sent.getLong("generation"))
+            val payload = sent.getJSONObject("payload")
+            assertEquals(setOf("conversationId", "waitId", "messageId", "changeId", "text"), payload.keys().asSequence().toSet())
+            assertEquals(CHAT, payload.getString("conversationId")); assertEquals(WAIT, payload.getString("waitId")); assertEquals("Blue", payload.getString("text"))
+            assertEquals(sent.getString("commandId"), payload.getString("changeId"))
+            assertTrue(h.durableBeforeAck.get())
+        }
+    }
+
+    @Test fun aClosedWaitKeepsTheAnswerAsAFailedDraftAndIsNotRetried() = runBlocking {
+        Harness(bot = true).use { h ->
+            h.start()
+            h.fail["answerWait"] = "WAIT_CLOSED"
+            withContext(h.dispatcher) { h.model.queue("create", "Blue", replyTo = "question_0001", waitId = WAIT) }
+            eventually { h.storage.load(MEMBER, TEAM, GENERATION).outbox.singleOrNull()?.optString("error") == "WAIT_CLOSED" }
+            val refused = h.refused.size
+            withContext(h.dispatcher) { h.model.refresh() }
+            delay(150)
+            assertEquals(refused, h.refused.size)
+            assertFalse(h.model.state.value.revoked)
+        }
+    }
+
+    @Test fun cancellingATaskAsksOnceAndShowsTheTasksNewState() = runBlocking {
+        Harness(bot = true).use { h ->
+            h.start()
+            withContext(h.dispatcher) { h.model.cancelTask(TASK) }
+            eventually { h.model.state.value.tasks.singleOrNull()?.state == "cancelled" }
+            assertEquals(listOf("cancelTask", "getTask"), h.asked.map { it.getString("action") })
+            for (command in h.asked) { TeamExecutionContract.validate(command); assertEquals(TASK, command.getJSONObject("payload").getString("taskId")) }
+            assertEquals("", h.model.state.value.error)
+            // A task that ended before the request arrived is only refreshed.
+            h.asked.clear(); h.fail["cancelTask"] = "TASK_FINISHED"
+            withContext(h.dispatcher) { h.model.cancelTask(TASK) }
+            eventually { h.asked.any { it.getString("action") == "getTask" } }
+            assertEquals("", h.model.state.value.error)
+        }
+    }
+
     @Test fun accountChangeWhileTokenIsPendingCannotDeliverTheQueuedCommand() = runBlocking {
         Harness().use { h ->
             h.start()
@@ -144,6 +191,9 @@ class TeamMessagingQueueTest {
         private lateinit var directoryListener: EventListener<QuerySnapshot>
         private lateinit var messageListener: EventListener<QuerySnapshot>
         val sent = CopyOnWriteArrayList<JSONObject>()
+        /** The task commands the model sent, in order, and every request the server refused. */
+        val asked = CopyOnWriteArrayList<JSONObject>()
+        val refused = CopyOnWriteArrayList<JSONObject>()
         val durableBeforeAck = AtomicBoolean(false)
         /** An action the server refuses with HTTP 403 and this error code, set by a test after the model has started. */
         val fail = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -180,10 +230,13 @@ class TeamMessagingQueueTest {
                 }
                 val input = JSONObject(String(stream.readNBytes(length), Charsets.UTF_8))
                 val refusal = fail[input.getString("action")]
+                if (refusal != null) refused += input
                 val result = if (refusal != null) JSONObject().put("error", JSONObject().put("code", refusal)) else when (input.getString("action")) {
                     "listSharedBots" -> JSONObject().put("bots", JSONArray().also { if (bot) it.put(botCard()) })
                     "listTasks" -> JSONObject().put("tasks", JSONArray()).put("next", JSONObject.NULL)
-                    "mutate", "submit" -> {
+                    "cancelTask" -> { asked += input; JSONObject().put("taskId", TASK).put("state", "cancelled") }
+                    "getTask" -> { asked += input; JSONObject("""{"taskId":"$TASK","conversationId":"$CHAT","sharedBotId":"$BOT","requester":{"uid":"$MEMBER","generation":$GENERATION},"state":"cancelled","createdAt":1,"deadline":2,"replyId":null,"artifactId":null}""") }
+                    "mutate", "submit", "answerWait" -> {
                         val change = input.optJSONObject("payload")?.getString("changeId") ?: input.getString("changeId")
                         durableBeforeAck.set(storage.load(MEMBER, TEAM, GENERATION).outbox.any {
                             (it.optJSONObject("payload")?.getString("changeId") ?: it.getString("changeId")) == change
@@ -245,6 +298,8 @@ class TeamMessagingQueueTest {
         private const val CHAT = "chat_test01"
         private const val BOT = "sharedbot_01"
         private const val GENERATION = 7L
+        private const val TASK = "task_test01"
+        private const val WAIT = "wait_0123456789abcdef0123456789abcdef01234567"
         private suspend fun eventually(test: () -> Boolean) = withTimeout(5000) { while (!test()) delay(10) }
         private fun anyMetadata() = eq(MetadataChanges.INCLUDE) ?: MetadataChanges.INCLUDE
         private fun <T> anyListener(): EventListener<T> = any<EventListener<T>>() ?: EventListener { _, _ -> }

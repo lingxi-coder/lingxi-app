@@ -6,6 +6,7 @@ import Observation
 private struct TeamBotList: Decodable { let bots: [TeamBotCard] }
 private struct TeamBotAck: Decodable {}
 private struct TeamTaskList: Decodable, Sendable { let tasks: [TeamTask]; let next: String? }
+private struct TeamTaskCancellation: Decodable, Sendable { let taskId: String; let state: String }
 private struct TeamMessageAck: Decodable, Sendable { let lastReadSeq: Int?; let conversationId: String? }
 final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
@@ -14,7 +15,7 @@ final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchec
 @MainActor @Observable
 final class TeamMessagingModel {
     static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "sharedBotId"]
-    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "targets", "taskId", "taskIds", "artifactId"]
+    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "targets", "taskId", "taskIds", "artifactId", "waitId"]
     private(set) var cache: TeamMessageProjection?
     private(set) var offline = true
     private(set) var error = ""
@@ -311,7 +312,7 @@ final class TeamMessagingModel {
                         try await commit { $0.outbox.removeAll { $0.id == intent.id } }
                     } catch {
                         let code = (error as? TeamMessageFailure)?.code ?? "SERVICE_UNAVAILABLE"
-                        let permanent = ["MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "BOT_PARTICIPANT_REQUIRED", "INVALID_BOT_TARGET", "INVALID_INPUT"].contains(code)
+                        let permanent = ["MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "BOT_PARTICIPANT_REQUIRED", "INVALID_BOT_TARGET", "INVALID_INPUT", "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED"].contains(code)
                         try await commit { value in if let index = value.outbox.firstIndex(where: { $0.id == intent.id }) { value.outbox[index].leaseUntil = nil; if permanent { value.outbox[index].error = code } } }
                         if !permanent { throw error }
                     }
@@ -374,6 +375,12 @@ final class TeamMessagingModel {
         guard selected == selection else { return }
         if let index = tasks.firstIndex(where: { $0.taskId == taskId }) { tasks[index] = result } else { tasks.append(result) }
     }
+    /// Stops a task: at once while it is queued or waiting, at the worker's next check while the Bot is working. A task that has already ended stays as it is.
+    func cancelTask(_ taskId: String) async throws {
+        do { let _: TeamTaskCancellation = try await execute("cancelTask", payload: ["taskId": taskId], life: lifecycle) }
+        catch let failure as TeamMessageFailure where failure.code == "TASK_FINISHED" {}
+        try await refreshTask(taskId)
+    }
     func openArtifact(_ artifactId: String) async throws {
         let selection = selected
         let result: TeamArtifact = try await execute("readArtifact", payload: ["artifactId": artifactId], life: lifecycle)
@@ -387,8 +394,14 @@ final class TeamMessagingModel {
         try await commit { value in guard value.creation == nil else { throw TeamMessageFailure(code: "CREATION_PENDING") }; value.creation = intent }
         select(id)
     }
-    func queue(operation: String, text: String, messageId: String? = nil, replyTo: String? = nil, targets: [String] = []) async throws {
+    /// `waitId` makes a new message the answer to a Bot's question: it asks no Bot and starts no task.
+    func queue(operation: String, text: String, messageId: String? = nil, replyTo: String? = nil, targets: [String] = [], waitId: String? = nil) async throws {
         guard active, !revoked, !selected.isEmpty, operation == "recall" || (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && text.utf8.count <= 8192) else { throw TeamMessageFailure(code: "INVALID_INPUT") }
+        if let waitId {
+            guard operation == "create" else { throw TeamMessageFailure(code: "INVALID_INPUT") }
+            let intent = TeamMessageIntent(teamId: teamId, generation: generation, conversationId: selected, messageId: messageId ?? UUID().uuidString, changeId: UUID().uuidString, operation: operation, text: text, replyTo: replyTo, waitId: waitId)
+            try await commit { $0.outbox.append(intent) }; refresh(); return
+        }
         if operation == "create" {
             guard let conversation = cache?.conversations.first(where: { $0.id == selected }), TeamBotSelection.canSend(in: conversation, selected: Set(targets), cards: bots) else { throw TeamMessageFailure(code: "BOT_USE_REQUIRED") }
         }
@@ -457,7 +470,7 @@ final class TeamMessagingModel {
         var leases = cache.outbox.filter { $0.error == nil }.map { $0.leaseUntil ?? 0 }
         leases.append(contentsOf: (cache.commands ?? []).filter { $0.error == nil }.map { $0.leaseUntil ?? 0 })
         if let creation = cache.creation, creation.error == nil { leases.append(creation.leaseUntil ?? 0) }
-        if tasks.contains(where: { !$0.terminal }) { leases.append(Date().timeIntervalSince1970 * 1000 + 3000) }
+        if tasks.contains(where: \.busy) { leases.append(Date().timeIntervalSince1970 * 1000 + 3000) }
         guard let earliest = leases.min() else { return }
         let delay = max(retryDelay, (earliest - Date().timeIntervalSince1970 * 1000) / 1000)
         retryDelay = min(30, retryDelay * 2)

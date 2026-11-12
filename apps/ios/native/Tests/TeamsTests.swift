@@ -28,7 +28,8 @@ final class TeamsTests: XCTestCase {
             (["REQUEST_QUOTA_EXCEEDED"], "teams_error_request_quota"),
             (["MESSAGE_LISTENER_FAILED"], "teams_error_sync_failed"),
             (["MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT",
-              "BOT_REVISION_CONFLICT", "MAINTAINER_REQUIRED", "MESSAGE_IN_FLIGHT", "REPLY_REQUIRED"], "teams_message_failed"),
+              "BOT_REVISION_CONFLICT", "MAINTAINER_REQUIRED", "MESSAGE_IN_FLIGHT", "REPLY_REQUIRED",
+              "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED"], "teams_message_failed"),
             (["INVITE_UNAVAILABLE"], "teams_invite_error"),
             (["STORAGE_FAILED", "MESSAGE_STORAGE_FULL"], "teams_messages_storage_error"),
             (["SERVICE_UNAVAILABLE", "UNKNOWN", "SOMETHING_NEW", ""], "teams_error"),
@@ -56,12 +57,13 @@ final class TeamsTests: XCTestCase {
         let states: [String: String] = [
             "queued": "cron_status_queued", "running": "teams_run_processing", "completed": "chat_status_completed", "failed": "chat_status_failed",
             "expired": "teams_task_expired", "interrupted": "teams_task_interrupted", "authorization_required": "teams_task_authorization_required", "revoked": "teams_run_revoked",
+            "waiting": "teams_task_waiting", "cancelled": "teams_task_cancelled",
         ]
         for (state, key) in states { XCTAssertEqual(TeamsBotText.stateKey(state), key, state) }
-        for retired in ["pending", "claimed", "recovery", "recovered", "missed", "cancelled"] { XCTAssertEqual(TeamsBotText.stateKey(retired), "chat_status_unknown") }
+        for retired in ["pending", "claimed", "recovery", "recovered", "missed"] { XCTAssertEqual(TeamsBotText.stateKey(retired), "chat_status_unknown") }
         XCTAssertEqual(Set(TeamsBotText.allKeys), Set(states.values).union(["chat_status_unknown"]))
         let catalogue = try Catalogue.load()
-        for key in TeamsBotText.allKeys {
+        for key in TeamsBotText.allKeys + ["teams_task_cancelling", "teams_task_cancel", "teams_task_waiting_you %@", "teams_task_waiting_member %@ %@"] {
             XCTAssertFalse((catalogue.value(key, "en") ?? "").isEmpty, "\(key) has no English text")
             XCTAssertFalse((catalogue.value(key, "zh-Hans") ?? "").isEmpty, "\(key) has no Chinese text")
         }

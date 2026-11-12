@@ -35,7 +35,9 @@ internal data class TeamMessageConversation(val id: String, val kind: String, va
 }
 internal data class TeamMessage(val id: String, val seq: Long, val authorUid: String, val authorKind: String, val text: String,
     val changeSeq: Long, val changeId: String, val recalled: Boolean, val replyTo: String?, val editedAt: String?, val kind: String = "text",
-    val sharedBotId: String? = null, val taskId: String? = null, val artifactId: String? = null, val targets: List<String> = emptyList(), val createdAt: String? = null, val taskIds: List<String> = emptyList(), val authorDisplayName: String? = null) {
+    val sharedBotId: String? = null, val taskId: String? = null, val artifactId: String? = null, val targets: List<String> = emptyList(), val createdAt: String? = null, val taskIds: List<String> = emptyList(), val authorDisplayName: String? = null,
+    /** On a Bot's question and on the answer to it: the wait they belong to. */
+    val waitId: String? = null) {
     val createdAtMs: Long? get() = createdAt?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrNull() }
     companion object { fun parse(v: JSONObject): TeamMessage {
         val author = v.getJSONObject("author"); val authorKind = author.getString("kind")
@@ -43,7 +45,7 @@ internal data class TeamMessage(val id: String, val seq: Long, val authorUid: St
         return TeamMessage(v.getString("id"), v.getLong("seq"), if (authorKind == "user") author.getString("uid") else "", authorKind,
             v.getString("text"), v.getLong("changeSeq"), v.getString("changeId"), v.optBoolean("recalled"), v.stringOrNull("replyTo"),
             v.stringOrNull("editedAt"), v.getString("kind"), if (authorKind == "shared_bot") author.getString("sharedBotId") else null,
-            v.stringOrNull("taskId"), v.stringOrNull("artifactId"), v.optJSONArray("targets")?.strings() ?: emptyList(), v.stringOrNull("createdAt"), v.optJSONArray("taskIds")?.strings() ?: emptyList(), author.stringOrNull("displayName"))
+            v.stringOrNull("taskId"), v.stringOrNull("artifactId"), v.optJSONArray("targets")?.strings() ?: emptyList(), v.stringOrNull("createdAt"), v.optJSONArray("taskIds")?.strings() ?: emptyList(), author.stringOrNull("displayName"), v.stringOrNull("waitId"))
     } }
 }
 internal data class TeamMessageThread(val messages: List<TeamMessage> = emptyList())

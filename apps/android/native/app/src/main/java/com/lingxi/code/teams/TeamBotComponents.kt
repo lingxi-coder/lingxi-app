@@ -9,7 +9,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import android.icu.text.RelativeDateTimeFormatter
+import android.icu.util.ULocale
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -19,6 +23,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
@@ -37,6 +42,8 @@ internal fun teamTaskStateRes(state: String): Int = when (state) {
     "interrupted" -> R.string.teams_task_interrupted
     "authorization_required" -> R.string.teams_task_authorization_required
     "revoked" -> R.string.teams_run_revoked
+    "waiting" -> R.string.teams_task_waiting
+    "cancelled" -> R.string.teams_task_cancelled
     else -> R.string.chat_status_unknown
 }
 
@@ -61,12 +68,50 @@ internal fun rememberTeamBotLinkOpener(): (String) -> Unit {
     return remember(handler) { { link: String -> if (TeamsBotText.allowsLink(link)) runCatching { handler.openUri(link.trim()) } } }
 }
 
+/** "in 4 minutes" in the UI language, for a wait's expiry. */
 @Composable
-internal fun TeamTaskCard(task: TeamTask, botName: String, onArtifact: (String) -> Unit, onRefresh: (String) -> Unit = {}) {
+internal fun teamWaitExpiryText(expiresAt: Long): String {
+    val locale = LocalConfiguration.current.locales[0]
+    val (value, unit) = TeamTaskActions.expiry(expiresAt, System.currentTimeMillis())
+    return remember(locale, value, unit) {
+        RelativeDateTimeFormatter.getInstance(ULocale.forLocale(locale)).format(value.toDouble(), RelativeDateTimeFormatter.Direction.NEXT, when (unit) {
+            TeamTaskActions.ExpiryUnit.MINUTES -> RelativeDateTimeFormatter.RelativeUnit.MINUTES
+            TeamTaskActions.ExpiryUnit.HOURS -> RelativeDateTimeFormatter.RelativeUnit.HOURS
+            TeamTaskActions.ExpiryUnit.DAYS -> RelativeDateTimeFormatter.RelativeUnit.DAYS
+        })
+    }
+}
+
+/**
+ * [viewer] is the signed-in member and [maintainer] the Bot's maintainer when its card is known: they decide who may cancel.
+ * [recipientName] names the member a waiting task waits for (not needed when that is the viewer). [onReply] starts the answer
+ * to the Bot's question: set only on the question itself, while the viewer can still answer it.
+ */
+@Composable
+internal fun TeamTaskCard(
+    task: TeamTask, botName: String, onArtifact: (String) -> Unit, onRefresh: (String) -> Unit, viewer: TeamMemberRef?, maintainer: TeamMemberRef?,
+    recipientName: String, onCancel: (String) -> Unit, onReply: (() -> Unit)? = null,
+) {
+    var cancelAsked by remember(task.taskId, task.state, task.cancelRequestedAt) { mutableStateOf(false) }
+    val canCancel = TeamTaskActions.canCancel(task, viewer, maintainer)
     Column(Modifier.fillMaxWidth().padding(12.dp).testTag("teams.task.${task.taskId}"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(botName, style = MaterialTheme.typography.titleSmall)
-        TextButton(onClick = { onRefresh(task.taskId) }) { Text(stringResource(teamTaskStateRes(task.state)), style = MaterialTheme.typography.bodySmall) }
-        Text(TeamsBotText.usageLine(task.usage, rememberTeamUsageStrings()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.task.usage.${task.taskId}"))
+        TextButton(onClick = { onRefresh(task.taskId) }) { Text(stringResource(if (task.cancelling) R.string.teams_task_cancelling else teamTaskStateRes(task.state)), style = MaterialTheme.typography.bodySmall) }
+        task.wait?.takeIf { task.state == "waiting" }?.let { wait ->
+            val expires = teamWaitExpiryText(wait.expiresAt)
+            Text(
+                if (wait.recipient == viewer) stringResource(R.string.teams_task_waiting_you_fmt, expires) else stringResource(R.string.teams_task_waiting_member_fmt, recipientName, expires),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.task.wait.${task.taskId}"),
+            )
+        }
+        // A task cancelled before any model call has nothing to report.
+        if (!(task.state == "cancelled" && task.usage == null)) Text(TeamsBotText.usageLine(task.usage, rememberTeamUsageStrings()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.task.usage.${task.taskId}"))
+        if (onReply != null || canCancel) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (onReply != null) Button(onClick = onReply, modifier = Modifier.testTag("teams.task.reply.${task.taskId}")) { Text(stringResource(R.string.teams_message_reply)) }
+            if (canCancel) OutlinedButton(onClick = { cancelAsked = true; onCancel(task.taskId) }, enabled = !cancelAsked, modifier = Modifier.testTag("teams.task.cancel.${task.taskId}")) {
+                Text(stringResource(R.string.teams_task_cancel), color = MaterialTheme.colorScheme.error)
+            }
+        }
         task.artifactId?.let { id -> TextButton(onClick = { onArtifact(id) }) { Text(stringResource(R.string.teams_artifact_open)) } }
     }
 }

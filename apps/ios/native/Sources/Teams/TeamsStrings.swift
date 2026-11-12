@@ -14,6 +14,24 @@ extension TeamsBotText.UsageStrings {
     }
 }
 
+extension TeamsBotText {
+    /// "in 4 minutes" in the UI language, for a wait's expiry.
+    static func expiryText(at: Double, now: Double) -> String {
+        let expiry = TeamTaskActions.expiry(at: at, now: now)
+        var components = DateComponents()
+        switch expiry.unit {
+        case .minutes: components.minute = expiry.value
+        case .hours: components.hour = expiry.value
+        case .days: components.day = expiry.value
+        }
+        let formatter = RelativeDateTimeFormatter()
+        let language = Bundle._lxCurrentLanguageID.withLock { $0 }
+        if !language.isEmpty { formatter.locale = Locale(identifier: language) }
+        formatter.unitsStyle = .full
+        return formatter.localizedString(from: components)
+    }
+}
+
 extension TeamsListStrings {
     /// The vocabulary of labels and previews in the UI language. The separators are code, not resources:
     /// `、` and `：` when the UI language is Chinese, `, ` and `: ` otherwise (spec §6.1).

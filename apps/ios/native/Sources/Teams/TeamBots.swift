@@ -29,6 +29,14 @@ struct TeamTaskUsage: Decodable, Equatable, Sendable {
     var costMicros: Double? = nil
     var currency: String? = nil
 }
+/// The answer a waiting task is blocked on; present only while `state` is `waiting`. `messageId` is the Bot's question.
+struct TeamTaskWait: Decodable, Equatable, Sendable {
+    let waitId: String
+    let kind: String
+    let recipient: TeamMemberRef
+    let expiresAt: Double
+    let messageId: String
+}
 struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
     let taskId: String
     let conversationId: String
@@ -36,12 +44,39 @@ struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
     let requester: TeamMemberRef
     let state: String
     let createdAt: Double
+    /// Ends the current phase: the pick-up limit while queued, the running budget while running, the wait's expiry while waiting.
     let deadline: Double
     let replyId: String?
     let artifactId: String?
     var usage: TeamTaskUsage? = nil
+    var cancelRequestedAt: Double? = nil
+    var wait: TeamTaskWait? = nil
     var id: String { taskId }
-    var terminal: Bool { state != "queued" && state != "running" }
+    var terminal: Bool { !["queued", "running", "waiting"].contains(state) }
+    /// A worker has it or is about to: its state changes within seconds. A waiting task changes only with its answer or its expiry.
+    var busy: Bool { state == "queued" || state == "running" }
+    /// Cancellation was asked while the Bot was working; the task ends at the worker's next check.
+    var cancelling: Bool { state == "running" && cancelRequestedAt != nil }
+}
+/// What the viewer may do with a task (Desktop `BotRun`).
+enum TeamTaskActions {
+    enum ExpiryUnit: Equatable, Sendable { case minutes, hours, days }
+    /// The requester and the Bot's maintainer may stop a task that has not ended.
+    static func canCancel(_ task: TeamTask, viewer: TeamMemberRef, maintainer: TeamMemberRef?) -> Bool {
+        !task.terminal && !task.cancelling && (task.requester == viewer || maintainer == viewer)
+    }
+    /// The wait an answer from the viewer would resolve: the task waits for exactly this viewer and no answer to it is already on its way.
+    static func answerableWait(_ task: TeamTask?, viewer: TeamMemberRef, pendingWaitIds: Set<String>) -> String? {
+        guard let task, task.state == "waiting", let wait = task.wait, wait.recipient == viewer, !pendingWaitIds.contains(wait.waitId) else { return nil }
+        return wait.waitId
+    }
+    /// How long until `at` (both in milliseconds), rounded up to whole minutes, hours (under 48) or days; never less than one minute.
+    static func expiry(at: Double, now: Double) -> (value: Int, unit: ExpiryUnit) {
+        let minutes = max(1, Int(((at - now) / 60_000).rounded(.up)))
+        if minutes < 60 { return (minutes, .minutes) }
+        let hours = Int((Double(minutes) / 60).rounded(.up))
+        return hours < 48 ? (hours, .hours) : (Int((Double(hours) / 24).rounded(.up)), .days)
+    }
 }
 struct TeamArtifact: Decodable, Equatable, Identifiable, Sendable {
     struct Document: Decodable, Equatable, Sendable { let title: String; let body: String }

@@ -298,6 +298,8 @@ private fun ConversationBody(
     fun personName(id: String) = members.firstOrNull { it.uid == id }?.displayName?.takeIf { it.isNotEmpty() } ?: if (id == uid) strings.you else strings.member
     fun authorOf(message: TeamMessage): String = if (message.authorKind == "shared_bot") message.authorDisplayName ?: bots.firstOrNull { it.sharedBotId == message.sharedBotId }?.name ?: strings.bot else personName(message.authorUid)
     val copyText = rememberCopyToClipboard("LingXi team message")
+    val viewer = TeamMemberRef(uid, team.generation)
+    val pendingWaits = remember(outbox) { TeamTaskActions.pendingWaitIds(outbox) }
 
     Column(modifier) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -311,10 +313,10 @@ private fun ConversationBody(
                         is StreamItem.Day -> Text(dayLabelText(item.row.kind, item.row.atMs), Modifier.fillMaxWidth().padding(vertical = 8.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                         StreamItem.NewMessages -> NewMessagesDivider()
                         is StreamItem.Msg -> MessageCell(
-                            item, uid, conversation, bots, members, strings, messaging, tick, byId, ::authorOf,
+                            item, uid, viewer, pendingWaits, ::personName, conversation, bots, members, strings, messaging, tick, byId, ::authorOf,
                             onReply = { setDraft(draft.copy(replyToId = it.id)); editingId = null },
                             onEdit = { editingId = it.id; setDraft(draft.copy(replyToId = null)) },
-                            onRecall = onRecall, onCopy = { copyText(it.text) }, onArtifact = { workspace.messagingModel.openArtifact(it) }, onRefreshTask = { workspace.messagingModel.refreshTask(it) },
+                            onRecall = onRecall, onCopy = { copyText(it.text) }, onArtifact = { workspace.messagingModel.openArtifact(it) }, onRefreshTask = { workspace.messagingModel.refreshTask(it) }, onCancelTask = { workspace.messagingModel.cancelTask(it) },
                         )
                         is StreamItem.Local -> LocalCommandRow(item, tick, onDiscard = {
                             workspace.messagingModel.discard((item.intent.optJSONObject("payload") ?: item.intent).getString("changeId"))
@@ -334,7 +336,9 @@ private fun ConversationBody(
             onDraft = ::setDraft, onCancelReply = { setDraft(draft.copy(replyToId = null)) }, onCancelEdit = { editingId = null },
             onSend = { text, targets, done ->
                 val editingMessage = editing
-                workspace.messagingModel.queue(if (editingMessage == null) "create" else "edit", text, editingMessage?.id, if (editingMessage == null) draft.replyToId else null, targets) {
+                // A reply to a Bot's question that still waits for the viewer is its answer: it continues that task and asks no Bot.
+                val waitId = if (editingMessage == null) TeamTaskActions.answerableWait(draft.replyToId?.let { byId[it] }, messaging.tasks, viewer, pendingWaits) else null
+                workspace.messagingModel.queue(if (editingMessage == null) "create" else "edit", text, editingMessage?.id, if (editingMessage == null) draft.replyToId else null, if (waitId == null) targets else emptyList(), waitId) {
                     done()
                     if (editingMessage != null) editingId = null else setDraft(ComposerDraft())
                 }
@@ -373,10 +377,10 @@ private fun NewMessagesDivider() {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageCell(
-    item: StreamItem.Msg, uid: String, conversation: TeamMessageConversation, bots: List<TeamBotCard>, members: List<TeamMember>, strings: TeamsListStrings,
+    item: StreamItem.Msg, uid: String, viewer: TeamMemberRef, pendingWaits: Set<String>, personName: (String) -> String, conversation: TeamMessageConversation, bots: List<TeamBotCard>, members: List<TeamMember>, strings: TeamsListStrings,
     messaging: TeamMessagingState, tick: androidx.compose.runtime.State<Long>, byId: Map<String, TeamMessage>, authorOf: (TeamMessage) -> String,
     onReply: (TeamMessage) -> Unit, onEdit: (TeamMessage) -> Unit, onRecall: (TeamMessage) -> Unit, onCopy: (TeamMessage) -> Unit,
-    onArtifact: (String) -> Unit, onRefreshTask: (String) -> Unit,
+    onArtifact: (String) -> Unit, onRefreshTask: (String) -> Unit, onCancelTask: (String) -> Unit,
 ) {
     val message = item.message
     var menu by remember { mutableStateOf(false) }
@@ -427,7 +431,14 @@ private fun MessageCell(
                 val taskIds = message.taskId?.let { listOf(it) } ?: message.taskIds
                 taskIds.forEach { taskId ->
                     val task = messaging.tasks.firstOrNull { it.taskId == taskId }
-                    if (task != null) TeamTaskCard(task, bots.firstOrNull { it.sharedBotId == task.sharedBotId }?.name ?: strings.bot, onArtifact, onRefreshTask)
+                    if (task != null) {
+                        val bot = bots.firstOrNull { it.sharedBotId == task.sharedBotId }
+                        val answerable = TeamTaskActions.answerableWait(message, messaging.tasks, viewer, pendingWaits) != null
+                        TeamTaskCard(
+                            task, bot?.name ?: strings.bot, onArtifact, onRefreshTask, viewer = viewer, maintainer = bot?.maintainer,
+                            recipientName = task.wait?.let { personName(it.recipient.uid) }.orEmpty(), onCancel = onCancelTask, onReply = if (answerable) ({ onReply(message) }) else null,
+                        )
+                    }
                     else TextButton(onClick = { onRefreshTask(taskId) }) { Text(stringResource(R.string.teams_task_view)) }
                 }
                 if (taskIds.isEmpty()) message.artifactId?.let { id -> TextButton(onClick = { onArtifact(id) }) { Text(stringResource(R.string.teams_artifact_open)) } }

@@ -37,6 +37,90 @@ class TeamsBotTextTest {
         assertNull(TeamTask.parse(JSONObject("$base}")).usage)
     }
 
+    // Waiting and cancelling (M2)
+
+    private fun task(state: String, extra: String = "") = TeamTask.parse(JSONObject(
+        """{"taskId":"t","conversationId":"c","sharedBotId":"b","requester":{"uid":"asker","generation":3},"state":"$state","createdAt":1,"deadline":2$extra}"""))
+    private val wait = ""","wait":{"waitId":"wait_1","kind":"human_input","recipient":{"uid":"asker","generation":3},"expiresAt":9000000,"messageId":"question"}"""
+    private val asker = TeamMemberRef("asker", 3)
+    private val keeper = TeamMemberRef("keeper", 3)
+    private val other = TeamMemberRef("other", 3)
+
+    @Test fun aWaitingTaskIsNeitherFinishedNorPolled() {
+        val waiting = task("waiting", wait)
+        assertEquals(TeamTaskWait("wait_1", "human_input", asker, 9_000_000, "question"), waiting.wait)
+        assertFalse(waiting.terminal); assertFalse(waiting.busy)
+        for (state in listOf("queued", "running")) { assertTrue(state, task(state).busy); assertFalse(state, task(state).terminal) }
+        for (state in listOf("completed", "failed", "expired", "interrupted", "authorization_required", "revoked", "cancelled")) {
+            assertTrue(state, task(state).terminal); assertFalse(state, task(state).busy)
+        }
+        assertNull(task("running").wait); assertNull(task("running").cancelRequestedAt)
+        assertNull(task("running", ""","cancelRequestedAt":null,"wait":null""").wait)
+    }
+
+    @Test fun onlyTheRequesterAndTheMaintainerMayCancelAnUnfinishedTask() {
+        for (state in listOf("queued", "running", "waiting")) {
+            val live = task(state, if (state == "waiting") wait else "")
+            assertTrue(state, TeamTaskActions.canCancel(live, asker, keeper))
+            assertTrue(state, TeamTaskActions.canCancel(live, keeper, keeper))
+            assertFalse(state, TeamTaskActions.canCancel(live, other, keeper))
+            assertFalse(state, TeamTaskActions.canCancel(live, other, null))
+            assertFalse(state, TeamTaskActions.canCancel(live, null, null))
+        }
+        // The same person after rejoining is another member.
+        assertFalse(TeamTaskActions.canCancel(task("queued"), TeamMemberRef("asker", 4), null))
+        for (state in listOf("completed", "failed", "cancelled", "expired")) assertFalse(state, TeamTaskActions.canCancel(task(state), asker, keeper))
+        val stopping = task("running", ""","cancelRequestedAt":5""")
+        assertTrue(stopping.cancelling)
+        assertFalse(TeamTaskActions.canCancel(stopping, asker, keeper))
+        assertFalse(task("cancelled", ""","cancelRequestedAt":5""").cancelling)
+    }
+
+    @Test fun onlyTheMemberATaskWaitsForMayAnswerItAndOnlyOnce() {
+        val waiting = task("waiting", wait)
+        assertEquals("wait_1", TeamTaskActions.answerableWait(waiting, asker, emptySet()))
+        assertNull(TeamTaskActions.answerableWait(waiting, keeper, emptySet()))
+        assertNull(TeamTaskActions.answerableWait(waiting, null, emptySet()))
+        assertNull(TeamTaskActions.answerableWait(waiting, TeamMemberRef("asker", 4), emptySet()))
+        assertNull(TeamTaskActions.answerableWait(waiting, asker, setOf("wait_1")))
+        assertEquals("wait_1", TeamTaskActions.answerableWait(waiting, asker, setOf("wait_0")))
+        assertNull(TeamTaskActions.answerableWait(task("running", wait), asker, emptySet()))
+        assertNull(TeamTaskActions.answerableWait(task("waiting"), asker, emptySet()))
+        assertNull(TeamTaskActions.answerableWait(null as TeamTask?, asker, emptySet()))
+    }
+
+    @Test fun onlyTheBotsQuestionOfAWaitingTaskIsAnswerable() {
+        fun message(kind: String, taskId: String?, waitId: String?) = TeamMessage("m", 1, if (kind == "user") "asker" else "", kind, "Which colour?", 1, "change", false, null, null, taskId = taskId, waitId = waitId)
+        val tasks = listOf(task("waiting", wait))
+        assertEquals("wait_1", TeamTaskActions.answerableWait(message("shared_bot", "t", "wait_1"), tasks, asker, emptySet()))
+        // An earlier question of the same task, the requester's own answer, a message without a task and an unknown task are not.
+        assertNull(TeamTaskActions.answerableWait(message("shared_bot", "t", "wait_0"), tasks, asker, emptySet()))
+        assertNull(TeamTaskActions.answerableWait(message("user", "t", "wait_1"), tasks, asker, emptySet()))
+        assertNull(TeamTaskActions.answerableWait(message("shared_bot", null, "wait_1"), tasks, asker, emptySet()))
+        assertNull(TeamTaskActions.answerableWait(message("shared_bot", "t", null), tasks, asker, emptySet()))
+        assertNull(TeamTaskActions.answerableWait(message("shared_bot", "gone", "wait_1"), tasks, asker, emptySet()))
+        assertNull(TeamTaskActions.answerableWait(message("shared_bot", "t", "wait_1"), tasks, keeper, emptySet()))
+        assertNull(TeamTaskActions.answerableWait(null as TeamMessage?, tasks, asker, emptySet()))
+        val outbox = listOf(JSONObject("""{"action":"answerWait","payload":{"waitId":"wait_1","changeId":"c1"}}"""), JSONObject("""{"action":"mutate","changeId":"c2"}"""), JSONObject("""{"action":"submit","payload":{"changeId":"c3"}}"""))
+        assertEquals(setOf("wait_1"), TeamTaskActions.pendingWaitIds(outbox))
+        assertNull(TeamTaskActions.answerableWait(message("shared_bot", "t", "wait_1"), tasks, asker, TeamTaskActions.pendingWaitIds(outbox)))
+    }
+
+    @Test fun aWaitExpiryIsRoundedUpToMinutesHoursOrDays() {
+        fun expiry(ms: Long) = TeamTaskActions.expiry(1_000_000 + ms, 1_000_000).let { "${it.first} ${it.second}" }
+        assertEquals("1 MINUTES", expiry(-5))
+        assertEquals("1 MINUTES", expiry(1))
+        assertEquals("1 MINUTES", expiry(60_000))
+        assertEquals("2 MINUTES", expiry(60_001))
+        assertEquals("59 MINUTES", expiry(59 * 60_000L))
+        assertEquals("1 HOURS", expiry(60 * 60_000L))
+        assertEquals("2 HOURS", expiry(61 * 60_000L))
+        assertEquals("24 HOURS", expiry(24 * 3_600_000L))
+        assertEquals("47 HOURS", expiry(47 * 3_600_000L))
+        assertEquals("2 DAYS", expiry(48 * 3_600_000L))
+        assertEquals("3 DAYS", expiry(49 * 3_600_000L))
+    }
+
     @Test fun onlySharedBotMessagesAreMarkdown() {
         assertTrue(TeamsBotText.rendersMarkdown("shared_bot", false))
         assertFalse(TeamsBotText.rendersMarkdown("user", false))

@@ -144,6 +144,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                         onMessageBot = { id -> messageBot(workspace, messaging, uid, id) { openConversation(it) } },
                         onArtifact = { workspace.messagingModel.openArtifact(it) },
                         onRefreshTask = { workspace.messagingModel.refreshTask(it) },
+                        onCancelTask = { workspace.messagingModel.cancelTask(it) },
                         onDiscardCommand = { workspace.messagingModel.discardCommand(it) },
                         onReconnect = workspace::reconnect, onDiscardCreation = { workspace.messagingModel.discardCreation() }, modifier = m,
                     )

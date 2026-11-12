@@ -2802,6 +2802,12 @@
     <string name="teams_task_expired">Request expired</string>
     <string name="teams_task_interrupted">Request interrupted; send a new request</string>
     <string name="teams_task_authorization_required">Maintainer action required</string>
+    <string name="teams_task_waiting">답장 대기 중</string>
+    <string name="teams_task_cancelled">취소됨</string>
+    <string name="teams_task_cancelling">취소 중…</string>
+    <string name="teams_task_waiting_you_fmt">내 답장 대기 중 · %1$s 만료</string>
+    <string name="teams_task_waiting_member_fmt">%1$s 님의 답장 대기 중 · %2$s 만료</string>
+    <string name="teams_task_cancel">작업 취소</string>
     <string name="teams_error_request_quota">Request limit reached. Try later or contact the maintainer.</string>
     <string name="teams_task_view">View task status</string>
     <string name="teams_usage_missing">사용량 없음 · 비용 알 수 없음</string>

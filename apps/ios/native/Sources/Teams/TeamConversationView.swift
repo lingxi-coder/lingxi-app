@@ -394,8 +394,12 @@ struct TeamConversationView: View {
     private func send(_ context: TeamConversationContext) async {
         let body = draft.text, reply = draft.replyToID, targets = draft.targets, changing = editing
         guard TeamsComposeLogic.canSendText(body) else { return }
+        // A reply to a Bot's question that still waits for the viewer is its answer: it continues that task and asks no Bot.
+        let question = changing == nil ? reply.flatMap { id in context.model.cache?.threads[context.conversation.id]?.messages.first { $0.id == id } } : nil
+        let waitId = question.flatMap { context.answerableWait(of: $0) }
         let sent = await workspace.run {
             let model = context.model
+            if let waitId { try await model.queue(operation: "create", text: body, replyTo: reply, waitId: waitId); return }
             // A Bot the viewer picked may have been revoked since: the draft is never sent with a stale target.
             if changing == nil, targets.contains(where: { key in !model.bots.contains { $0.sharedBotId == key && $0.selectable } }) {
                 throw TeamMessageFailure(code: "BOT_USE_REQUIRED")

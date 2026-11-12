@@ -21,11 +21,50 @@ internal data class TeamBotCard(val sharedBotId: String, val name: String, val d
 internal data class TeamTaskUsage(val status: String, val inputTokens: Long = 0, val outputTokens: Long = 0, val costMicros: Double? = null, val currency: String? = null) {
     companion object { fun parse(v: JSONObject) = TeamTaskUsage(v.getString("status"), v.optLong("inputTokens"), v.optLong("outputTokens"), if (v.has("costMicros") && !v.isNull("costMicros")) v.getDouble("costMicros") else null, v.stringOrNull("currency")) }
 }
+/** The answer a waiting task is blocked on; present only while `state` is `waiting`. `messageId` is the Bot's question. */
+internal data class TeamTaskWait(val waitId: String, val kind: String, val recipient: TeamMemberRef, val expiresAt: Long, val messageId: String) {
+    companion object { fun parse(v: JSONObject) = TeamTaskWait(v.getString("waitId"), v.getString("kind"), TeamMemberRef.parse(v.getJSONObject("recipient")), v.getLong("expiresAt"), v.getString("messageId")) }
+}
+/** `deadline` ends the current phase: the pick-up limit while queued, the running budget while running, the wait's expiry while waiting. */
 internal data class TeamTask(val taskId: String, val conversationId: String, val sharedBotId: String, val requester: TeamMemberRef,
-    val state: String, val createdAt: Long, val deadline: Long, val replyId: String?, val artifactId: String?, val usage: TeamTaskUsage? = null) {
-    val terminal get() = state !in setOf("queued", "running")
+    val state: String, val createdAt: Long, val deadline: Long, val replyId: String?, val artifactId: String?, val usage: TeamTaskUsage? = null,
+    val cancelRequestedAt: Long? = null, val wait: TeamTaskWait? = null) {
+    val terminal get() = state !in setOf("queued", "running", "waiting")
+    /** A worker has it or is about to: its state changes within seconds. A waiting task changes only with its answer or its expiry. */
+    val busy get() = state == "queued" || state == "running"
+    /** Cancellation was asked while the Bot was working; the task ends at the worker's next check. */
+    val cancelling get() = state == "running" && cancelRequestedAt != null
     companion object { fun parse(v: JSONObject) = TeamTask(v.getString("taskId"), v.getString("conversationId"), v.getString("sharedBotId"),
-        TeamMemberRef.parse(v.getJSONObject("requester")), v.getString("state"), v.getLong("createdAt"), v.getLong("deadline"), v.stringOrNull("replyId"), v.stringOrNull("artifactId"), v.optJSONObject("usage")?.let(TeamTaskUsage::parse)) }
+        TeamMemberRef.parse(v.getJSONObject("requester")), v.getString("state"), v.getLong("createdAt"), v.getLong("deadline"), v.stringOrNull("replyId"), v.stringOrNull("artifactId"), v.optJSONObject("usage")?.let(TeamTaskUsage::parse),
+        if (v.has("cancelRequestedAt") && !v.isNull("cancelRequestedAt")) v.getLong("cancelRequestedAt") else null, v.optJSONObject("wait")?.let(TeamTaskWait::parse)) }
+}
+/** What the viewer may do with a task (Desktop `BotRun`). */
+internal object TeamTaskActions {
+    enum class ExpiryUnit { MINUTES, HOURS, DAYS }
+    /** The requester and the Bot's maintainer may stop a task that has not ended. */
+    fun canCancel(task: TeamTask, viewer: TeamMemberRef?, maintainer: TeamMemberRef?): Boolean =
+        viewer != null && !task.terminal && !task.cancelling && (task.requester == viewer || maintainer == viewer)
+    /** The wait an answer from the viewer would resolve: the task waits for exactly this viewer and no answer to it is already on its way. */
+    fun answerableWait(task: TeamTask?, viewer: TeamMemberRef?, pendingWaitIds: Set<String>): String? {
+        val wait = task?.wait ?: return null
+        return if (task.state == "waiting" && viewer != null && wait.recipient == viewer && wait.waitId !in pendingWaitIds) wait.waitId else null
+    }
+    /** The wait a reply to [message] would answer: [message] is a Bot's question whose task still waits for the viewer. */
+    fun answerableWait(message: TeamMessage?, tasks: List<TeamTask>, viewer: TeamMemberRef?, pendingWaitIds: Set<String>): String? {
+        val waitId = message?.waitId ?: return null
+        if (message.authorKind == "user" || message.taskId == null) return null
+        return answerableWait(tasks.firstOrNull { it.taskId == message.taskId }, viewer, pendingWaitIds).takeIf { it == waitId }
+    }
+    /** The waits whose answers are saved on this device and not yet confirmed. */
+    fun pendingWaitIds(outbox: List<JSONObject>): Set<String> =
+        outbox.mapNotNull { it.optJSONObject("payload")?.optString("waitId")?.takeIf(String::isNotEmpty) }.toSet()
+    /** How long until [at] (both in milliseconds), rounded up to whole minutes, hours (under 48) or days; never less than one minute. */
+    fun expiry(at: Long, now: Long): Pair<Int, ExpiryUnit> {
+        val minutes = maxOf(1L, Math.ceil((at - now) / 60_000.0).toLong())
+        if (minutes < 60) return minutes.toInt() to ExpiryUnit.MINUTES
+        val hours = (minutes + 59) / 60
+        return if (hours < 48) hours.toInt() to ExpiryUnit.HOURS else ((hours + 23) / 24).toInt() to ExpiryUnit.DAYS
+    }
 }
 internal data class TeamArtifact(val artifactId: String, val revision: Long, val digest: String, val title: String, val body: String) {
     companion object { fun parse(v: JSONObject) = TeamArtifact(v.getString("artifactId"), v.getLong("revision"), v.getString("digest"), v.getJSONObject("document").getString("title"), v.getJSONObject("document").getString("body")) }

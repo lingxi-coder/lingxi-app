@@ -69,6 +69,8 @@ struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     var taskIds: [String]? = nil
     var taskId: String? = nil
     var artifactId: String? = nil
+    /// On a Bot's question and on the answer to it: the wait they belong to.
+    var waitId: String? = nil
 
 }
 struct TeamMessageIntent: Codable, Equatable, Identifiable, Sendable {
@@ -82,6 +84,9 @@ struct TeamMessageIntent: Codable, Equatable, Identifiable, Sendable {
     let text: String
     let replyTo: String?
     var targets: [String]? = nil
+    /// Set when the message answers a Bot's question: it is sent as `answerWait` and continues that task instead of starting one.
+    /// `replyTo` then names the question only for the pending bubble; the server links the answer itself.
+    var waitId: String? = nil
     var error: String?
     var leaseUntil: Double?
     var attempted: Bool?
@@ -89,6 +94,10 @@ struct TeamMessageIntent: Codable, Equatable, Identifiable, Sendable {
     var body: [String: Any] {
         let targets = targets ?? []
         var payload: [String: Any] = ["conversationId": conversationId, "messageId": messageId, "changeId": changeId, "text": text]
+        if let waitId {
+            payload["waitId"] = waitId
+            return ["schemaVersion": 1, "commandId": changeId, "teamId": teamId, "generation": generation, "action": "answerWait", "payload": payload]
+        }
         if let replyTo { payload["replyTo"] = replyTo }
         if operation == "create", !targets.isEmpty {
             payload["targets"] = targets

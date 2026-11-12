@@ -2802,6 +2802,12 @@
     <string name="teams_task_expired">Request expired</string>
     <string name="teams_task_interrupted">Request interrupted; send a new request</string>
     <string name="teams_task_authorization_required">Maintainer action required</string>
+    <string name="teams_task_waiting">Waiting for a reply</string>
+    <string name="teams_task_cancelled">Cancelled</string>
+    <string name="teams_task_cancelling">Cancelling…</string>
+    <string name="teams_task_waiting_you_fmt">Waiting for you · expires %1$s</string>
+    <string name="teams_task_waiting_member_fmt">Waiting for %1$s · expires %2$s</string>
+    <string name="teams_task_cancel">Cancel task</string>
     <string name="teams_error_request_quota">Request limit reached. Try later or contact the maintainer.</string>
     <string name="teams_task_view">View task status</string>
     <string name="teams_usage_missing">Missing usage · cost unknown</string>

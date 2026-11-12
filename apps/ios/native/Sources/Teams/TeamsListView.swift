@@ -72,7 +72,9 @@ struct TeamsListView: View {
                 if let model, !model.tasks.isEmpty {
                     Section("teams_recent_tasks") {
                         ForEach(model.tasks) { task in
-                            TeamTaskCard(task: task, botName: bots.first { $0.sharedBotId == task.sharedBotId }?.name ?? strings.bot)
+                            TeamTaskCard(task: task, botName: bots.first { $0.sharedBotId == task.sharedBotId }?.name ?? strings.bot, viewer: TeamMemberRef(uid: uid, generation: team.generation),
+                                         maintainer: bots.first { $0.sharedBotId == task.sharedBotId }?.maintainer,
+                                         recipientName: task.wait.flatMap { wait in members.first { $0.uid == wait.recipient.uid }?.displayName } ?? strings.member)
                         }
                     }
                 }

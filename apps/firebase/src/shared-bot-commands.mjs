@@ -27,6 +27,8 @@ const outputAudience = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('published_inputs') }).strict(),
 ]);
 const grantIds = z.array(executionId).max(50).refine(unique);
+const artifactDocument = z.object({ title: z.string().trim().min(1).max(120), body: z.string().min(1)
+  .refine(value => Buffer.byteLength(value, 'utf8') <= 256 * 1024) }).strict();
 /** How an interrupted operation may be recovered (detailed design 12.3). */
 export const operationCategory = z.enum(['read', 'store_idempotent', 'provider_idempotent', 'queryable', 'unqueryable']);
 const logicalStepId = z.string().regex(/^[A-Za-z0-9_.:/-]{1,200}$/u);
@@ -56,14 +58,15 @@ const payloads = {
   completeTask: z.object({ ...host, ...task, permitId: executionId,
     outcome: z.enum(['completed', 'failed']), text, finishedAt: cursor,
     inputGrantIds: grantIds, outputAudience,
-    document: z.object({ title: z.string().trim().min(1).max(120), body: z.string().min(1)
-      .refine(value => Buffer.byteLength(value, 'utf8') <= 256 * 1024) }).strict().optional(),
+    document: artifactDocument.optional(),
+    // The document is the next revision of an existing artifact of this Bot in this Chat, not a new artifact.
+    revises: z.object({ artifactId: executionId, expectedRevision: positive }).strict().optional(),
     usage: z.discriminatedUnion('status', [
       z.object({ status: z.literal('missing') }).strict(),
       z.object({ status: z.enum(['partial', 'complete']), inputTokens: cursor, outputTokens: cursor,
         costMicros: cursor.optional(), currency: z.string().length(3).optional() }).strict(),
     ]),
-  }).strict(),
+  }).strict().refine(value => !value.revises || value.document, 'A revision needs its document'),
   pauseTask: z.object({ ...host, ...task, permitId: executionId, waitId: executionId, kind: z.literal('human_input'),
     question: z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 2000),
     requestDigest: digest, checkpointDigest: digest, pausedAt: cursor,
@@ -84,7 +87,10 @@ const payloads = {
   cancelTask: z.object(task).strict(),
   getTask: z.object(task).strict(),
   listTasks: z.object({ conversationId: executionId.optional(), after: executionId.optional() }).strict(),
-  readArtifact: z.object({ artifactId: executionId }).strict(),
+  readArtifact: z.object({ artifactId: executionId, revision: positive.optional() }).strict(),
+  listArtifactRevisions: z.object({ artifactId: executionId }).strict(),
+  // A member's edit of a shared document. `expectedRevision` is the revision the edit was made from.
+  reviseArtifact: z.object({ artifactId: executionId, expectedRevision: positive, operationId: executionId, document: artifactDocument }).strict(),
   setConversationPolicy: z.object({ ...thread, expectedRevision: cursor,
     targets: z.array(executionId).max(8).refine(unique) }).strict(),
 };

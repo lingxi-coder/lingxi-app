@@ -752,3 +752,98 @@ test('operations: cancelling or running out of time never hides an operation tha
   assert.equal((await execute('resolveOperation', { taskId: nextId, operationId: abandoned.operationId, resolution: 'failed' })).state, 'interrupted');
   assert.equal((await execute('getTask', { taskId: nextId }, member)).state, 'interrupted');
 });
+
+// ---- Shared documents: revisions, conflicts and history (M2 Q07) ----
+const revisionData = async (artifactId, revision) => (await db.doc(`teams/${teamId}/artifacts/${artifactId}/revisions/${revision}`).get()).data();
+const edit = (artifactId, expectedRevision, body, operation = `edit_${++serial}_op`, actor = member, commandId) =>
+  execute('reviseArtifact', { artifactId, expectedRevision, operationId: operation, document: { title: 'Packing list', body } }, actor, commandId);
+async function delivered() {
+  const started = await start(), done = await execute('completeTask', result(started));
+  return { started, taskId: started.task.taskId, artifactId: done.artifactId };
+}
+test('documents: three edits of one document give one document at revision 4 that every reader sees', options, async () => {
+  const { artifactId, taskId } = await delivered();
+  assert.deepEqual(await revisionData(artifactId, 1), { schemaVersion: 1, artifactId, revision: 1, parentRevision: null,
+    operationId: createHash('sha256').update(JSON.stringify([taskId, 'document'])).digest('hex'),
+    digest: (await execute('readArtifact', { artifactId }, member)).digest, document: { title: 'Packing list', body: 'Pack your passports.' },
+    author: { kind: 'shared_bot', sharedBotId: 'sharedbot_01' }, sourceTaskId: taskId, createdAt: now });
+  for (const [i, body] of ['Passports, chargers.', 'Passports, chargers, adapters.', 'Passports, chargers, adapters, tickets.'].entries()) {
+    now += 1000;
+    const saved = await edit(artifactId, i + 1, body);
+    assert.equal(saved.revision, i + 2); assert.match(saved.digest, /^[a-f0-9]{64}$/u);
+  }
+  assert.equal((await db.collection(`teams/${teamId}/artifacts`).get()).size, 1);
+  for (const reader of [member, owner]) {
+    const head = await execute('readArtifact', { artifactId }, reader);
+    assert.equal(head.revision, 4); assert.equal(head.currentRevision, 4); assert.equal(head.document.body, 'Passports, chargers, adapters, tickets.');
+  }
+  const first = await execute('readArtifact', { artifactId, revision: 1 }, member);
+  assert.equal(first.document.body, 'Pack your passports.'); assert.equal(first.revision, 1); assert.equal(first.currentRevision, 4);
+  await assert.rejects(execute('readArtifact', { artifactId, revision: 9 }, member), { code: 'ARTIFACT_REVISION_REQUIRED' });
+  const history = await execute('listArtifactRevisions', { artifactId }, member);
+  assert.equal(history.currentRevision, 4);
+  assert.deepEqual(history.revisions.map(r => [r.revision, r.parentRevision, r.author.kind, r.sourceTaskId ?? null]),
+    [[4, 3, 'user', null], [3, 2, 'user', null], [2, 1, 'user', null], [1, null, 'shared_bot', taskId]]);
+  assert.deepEqual(history.revisions[0].author, { kind: 'user', uid: member.uid, generation: 1 });
+  assert.equal(history.revisions[0].document, undefined);
+});
+test('documents: two edits made from the same revision never overwrite each other', options, async () => {
+  const { artifactId } = await delivered();
+  const outcomes = await Promise.allSettled([edit(artifactId, 1, 'Version A'), edit(artifactId, 1, 'Version B')]);
+  const saved = outcomes.filter(o => o.status === 'fulfilled'), refused = outcomes.filter(o => o.status === 'rejected');
+  assert.equal(saved.length, 1); assert.equal(refused.length, 1); assert.equal(refused[0].reason.code, 'ARTIFACT_REVISION_CONFLICT');
+  const head = await execute('readArtifact', { artifactId }, member);
+  assert.equal(head.revision, 2); assert.ok(['Version A', 'Version B'].includes(head.document.body));
+  // The loser reads the current revision and saves onto it.
+  assert.equal((await edit(artifactId, 2, 'Merged version')).revision, 3);
+  await assert.rejects(edit(artifactId, 1, 'Late'), { code: 'ARTIFACT_REVISION_CONFLICT' });
+  assert.equal((await execute('readArtifact', { artifactId }, member)).document.body, 'Merged version');
+});
+test('documents: a repeated edit returns the revision it made; an edit needs a change, a participant and a reader', options, async () => {
+  const { artifactId } = await delivered();
+  const saved = await edit(artifactId, 1, 'Passports and visas.', 'edit_operation_1', member, 'command_edit_1');
+  assert.deepEqual(await edit(artifactId, 1, 'Passports and visas.', 'edit_operation_1', member, 'command_edit_1'), saved);
+  // The response was lost and the client asks again with a new command: same operation, same revision, nothing new.
+  assert.deepEqual(await edit(artifactId, 1, 'Passports and visas.', 'edit_operation_1'), saved);
+  assert.equal((await execute('readArtifact', { artifactId }, member)).revision, 2);
+  await assert.rejects(edit(artifactId, 1, 'Something else.', 'edit_operation_1'), { code: 'OPERATION_CONFLICT' });
+  await assert.rejects(edit(artifactId, 2, 'Passports and visas.', 'edit_operation_1'), { code: 'OPERATION_CONFLICT' });
+  await assert.rejects(edit(artifactId, 2, 'Passports and visas.'), { code: 'ARTIFACT_UNCHANGED' });
+  // The Bot's owner reads this Bot DM without taking part in it; an outsider reads nothing.
+  await assert.rejects(edit(artifactId, 2, 'Owner edit', undefined, owner), { code: 'CONVERSATION_REQUIRED' });
+  for (const action of ['readArtifact', 'listArtifactRevisions']) await assert.rejects(execute(action, { artifactId }, other), { code: 'ARTIFACT_READ_REQUIRED' });
+  await assert.rejects(edit(artifactId, 2, 'Outsider edit', undefined, other), { code: 'ARTIFACT_READ_REQUIRED' });
+  await assert.rejects(execute('reviseArtifact', { artifactId, expectedRevision: 2, operationId: 'edit_operation_2', document: { title: ' ', body: 'x' } }, member));
+  assert.equal((await execute('readArtifact', { artifactId }, member)).revision, 2);
+});
+test('documents: a Bot revises the document it read, and a revision of a stale copy is not saved', options, async () => {
+  const { artifactId } = await delivered();
+  const second = await start(), revised = result(second, { text: 'Added the adapters.', document: { title: 'Packing list', body: 'Passports, adapters.' },
+    revises: { artifactId, expectedRevision: 1 } });
+  const done = await execute('completeTask', revised);
+  assert.deepEqual({ state: done.state, artifactId: done.artifactId }, { state: 'completed', artifactId });
+  assert.deepEqual(await execute('completeTask', revised), done);
+  assert.equal((await db.collection(`teams/${teamId}/artifacts`).get()).size, 1);
+  const head = await execute('readArtifact', { artifactId }, member);
+  assert.equal(head.revision, 2); assert.equal(head.document.body, 'Passports, adapters.');
+  const stored = await revisionData(artifactId, 2);
+  assert.deepEqual({ parent: stored.parentRevision, author: stored.author, source: stored.sourceTaskId },
+    { parent: 1, author: { kind: 'shared_bot', sharedBotId: 'sharedbot_01' }, source: second.task.taskId });
+  assert.equal((await chatRef().collection('messages').doc(done.replyId).get()).data().artifactId, artifactId);
+  // A member edits while the Bot works from revision 2: the Bot's revision is refused, the reply says so and nothing is saved.
+  const third = await start();
+  await edit(artifactId, 2, 'Passports, adapters, tickets.');
+  const late = await execute('completeTask', result(third, { text: 'Added sunscreen.', document: { title: 'Packing list', body: 'Passports, adapters, sunscreen.' },
+    revises: { artifactId, expectedRevision: 2 } }));
+  assert.deepEqual({ state: late.state, artifactId: late.artifactId }, { state: 'failed', artifactId: null });
+  const notice = (await chatRef().collection('messages').doc(late.replyId).get()).data();
+  assert.notEqual(notice.text, 'Added sunscreen.'); assert.equal(notice.artifactId, undefined);
+  const kept = await execute('readArtifact', { artifactId }, member);
+  assert.equal(kept.revision, 3); assert.equal(kept.document.body, 'Passports, adapters, tickets.');
+  // A revision of a document of another Chat, an unknown document, or without a document is refused the same way or by the contract.
+  const fourth = await start();
+  const unknown = await execute('completeTask', result(fourth, { revises: { artifactId: 'artifact_unknown', expectedRevision: 1 } }));
+  assert.deepEqual({ state: unknown.state, artifactId: unknown.artifactId }, { state: 'failed', artifactId: null });
+  const fifth = await start();
+  await assert.rejects(execute('completeTask', result(fifth, { document: undefined, revises: { artifactId, expectedRevision: 3 } })));
+});

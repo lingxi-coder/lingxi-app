@@ -12,7 +12,9 @@ const same = (left, right) => hash(left) === hash(right);
 const randomId = () => randomBytes(24).toString('base64url');
 const nowDay = now => new Date(now).toISOString().slice(0, 10);
 const memberIdentity = (uid, member) => ({ uid, generation: member.generation });
-const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations']);
+const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations']);
+const revisionLimit = 200;
+const byUid = members => [...members].sort((a, b) => a.uid.localeCompare(b.uid));
 /** An interrupted operation of these categories may be sent again: the receiver returns the same receipt. */
 const replaySafe = new Set(['read', 'store_idempotent', 'provider_idempotent']);
 const operationLimit = 64;
@@ -100,6 +102,8 @@ export class SharedBotsStore {
       else if (action === 'completeTask') response = await this.complete(context);
       else if (action === 'getTask' || action === 'listTasks') response = await this.tasks(context);
       else if (action === 'readArtifact') response = await this.artifact(context);
+      else if (action === 'listArtifactRevisions') response = await this.artifactRevisions(context);
+      else if (action === 'reviseArtifact') response = await this.reviseArtifact(context);
       else if (action === 'setConversationPolicy') response = await this.conversationPolicy(context);
       else deny(400, 'INVALID_INPUT');
       if (!readActions.has(action)) {
@@ -445,16 +449,30 @@ export class SharedBotsStore {
       if (lock?.taskId === p.taskId) tx.delete(lockRef);
       return { taskId: task.taskId, state: 'cancelled', replyId: null, artifactId: null };
     }
-    const gate = await this.outputGate(tx, team, task, bot, p), { readers, sourceCurrent, allowed } = gate;
+    const gate = await this.outputGate(tx, team, task, bot, p), { readers, sourceCurrent } = gate;
     const replyId = botId([p.taskId, 'reply']), changeId = botId([p.taskId, 'reply-change']);
-    const artifactId = allowed && p.document ? hash([p.taskId, 'document']) : null;
-    this.botMessage(tx, gate, task, bot, identity, now, { messageId: replyId, changeId, text: allowed ? p.text : gate.refusal,
+    // A revision is saved only onto the revision the Bot read, of a document of this Bot in this Chat whose readers are
+    // the Chat's readers; otherwise nothing is saved and the reply says so instead of the result.
+    const base = gate.allowed && p.revises ? (await tx.get(team.collection('artifacts').doc(p.revises.artifactId))).data() : null;
+    const stale = Boolean(gate.allowed && p.revises) && (!base || base.conversationId !== task.conversationId || base.sharedBotId !== task.sharedBotId
+      || base.botRevision !== task.botRevision || !same(byUid(base.readers), byUid(readers)) || base.revision !== p.revises.expectedRevision
+      || base.revision >= revisionLimit || base.digest === hash(p.document));
+    const allowed = gate.allowed && !stale;
+    const artifactId = !allowed || !p.document ? null : p.revises ? p.revises.artifactId : hash([p.taskId, 'document']);
+    this.botMessage(tx, gate, task, bot, identity, now, { messageId: replyId, changeId,
+      text: allowed ? p.text : stale ? '文档已被修改或不可用，本次修改未保存。请重新提问。' : gate.refusal,
       fields: { deliveryId: hash([task.taskId, 'delivery']), ...(artifactId ? { artifactId } : {}) } });
-    if (artifactId) tx.create(team.collection('artifacts').doc(artifactId), { schemaVersion: 1, artifactId, taskId: task.taskId,
-      sharedBotId: task.sharedBotId, conversationId: task.conversationId, botRevision: task.botRevision,
-      revision: 1, digest: hash(p.document), document: p.document, inputGrantIds: task.inputGrantIds,
-      readers, createdAt: now });
-    const settled = allowed ? p.outcome : sourceCurrent ? 'authorization_required' : 'failed';
+    if (artifactId) {
+      const artifactRef = team.collection('artifacts').doc(artifactId), revision = p.revises ? base.revision + 1 : 1, digest = hash(p.document);
+      if (p.revises) tx.update(artifactRef, { revision, digest, document: p.document, updatedAt: now });
+      else tx.create(artifactRef, { schemaVersion: 1, artifactId, taskId: task.taskId,
+        sharedBotId: task.sharedBotId, conversationId: task.conversationId, botRevision: task.botRevision,
+        revision, digest, document: p.document, inputGrantIds: task.inputGrantIds, readers, createdAt: now });
+      tx.create(artifactRef.collection('revisions').doc(String(revision)), { schemaVersion: 1, artifactId, revision,
+        parentRevision: p.revises ? base.revision : null, operationId: hash([p.taskId, 'document']), digest, document: p.document,
+        author: { kind: 'shared_bot', sharedBotId: task.sharedBotId }, sourceTaskId: task.taskId, createdAt: now });
+    }
+    const settled = allowed ? p.outcome : stale ? 'failed' : sourceCurrent ? 'authorization_required' : 'failed';
     // A run that ends while an operation's outcome is unknown is not finished: a person has to check it first.
     const state = task.unverifiedOperations > 0 ? 'needs_reconciliation' : settled;
     // No restricted body, document or diagnostic trace is persisted in shared projections/receipts.
@@ -680,14 +698,53 @@ export class SharedBotsStore {
     for (const [i, doc] of docs.entries()) if (chats[i].data()?.memberUids.includes(identity.uid)) visible.push(taskView(doc.data(), now));
     return { tasks: visible, next: page.size > 100 ? docs.at(-1).id : null };
   }
-  async artifact({ tx, team, identity, command: { payload: p } }) {
-    const artifact = (await tx.get(team.collection('artifacts').doc(p.artifactId))).data();
+  /** A member reads a shared document only while they are one of its readers, still read its Chat, and may see every input of the Bot. */
+  async artifactAccess(tx, team, identity, artifactId, mustParticipate = false) {
+    const ref = team.collection('artifacts').doc(artifactId), artifact = (await tx.get(ref)).data();
     if (!artifact || !artifact.readers.some(member => same(member, identity))) deny(403, 'ARTIFACT_READ_REQUIRED');
-    await this.conversation(tx, team, artifact.conversationId, identity);
+    await this.conversation(tx, team, artifact.conversationId, identity, mustParticipate);
     const bot = (await tx.get(team.collection('sharedBots').doc(artifact.sharedBotId))).data();
     if ((!identityPermitted(bot, identity) && !ownerOf(bot, identity)) || artifact.botRevision !== bot.identity.revision
       || bot.grants.some(grant => !this.grantPermits(grant, identity))) deny(403, 'ARTIFACT_READ_REQUIRED');
-    return { artifactId: p.artifactId, revision: artifact.revision, digest: artifact.digest, document: artifact.document };
+    return { ref, artifact };
+  }
+  async artifact({ tx, team, identity, command: { payload: p } }) {
+    const { ref, artifact } = await this.artifactAccess(tx, team, identity, p.artifactId);
+    if (p.revision === undefined || p.revision === artifact.revision) return { artifactId: p.artifactId, revision: artifact.revision,
+      digest: artifact.digest, document: artifact.document, currentRevision: artifact.revision };
+    const old = (await tx.get(ref.collection('revisions').doc(String(p.revision)))).data();
+    if (!old) deny(404, 'ARTIFACT_REVISION_REQUIRED');
+    return { artifactId: p.artifactId, revision: old.revision, digest: old.digest, document: old.document, currentRevision: artifact.revision };
+  }
+  /** Who changed a shared document and from which task, newest first; the bodies are read one revision at a time. */
+  async artifactRevisions({ tx, team, identity, command: { payload: p } }) {
+    const { ref, artifact } = await this.artifactAccess(tx, team, identity, p.artifactId);
+    const rows = (await tx.get(ref.collection('revisions'))).docs.map(doc => doc.data()).sort((a, b) => b.revision - a.revision);
+    return { artifactId: p.artifactId, currentRevision: artifact.revision, revisions: rows.map(r => ({ revision: r.revision,
+      parentRevision: r.parentRevision, digest: r.digest, title: r.document.title, author: r.author, createdAt: r.createdAt,
+      ...(r.sourceTaskId ? { sourceTaskId: r.sourceTaskId } : {}) })) };
+  }
+  /** A member's edit becomes the next revision only when it was made from the current one. The edit and its
+   * operation id are one transaction, so a repeated request returns the revision it already created. */
+  async reviseArtifact({ tx, team, identity, command: { payload: p }, now }) {
+    const { ref, artifact } = await this.artifactAccess(tx, team, identity, p.artifactId, true);
+    const operationRef = ref.collection('operations').doc(p.operationId), digest = hash(p.document);
+    const operation = (await tx.get(operationRef)).data();
+    if (operation) {
+      if (operation.digest !== digest || operation.expectedRevision !== p.expectedRevision || !same(operation.author, identity)) deny(409, 'OPERATION_CONFLICT');
+      return { artifactId: p.artifactId, revision: operation.revision, digest };
+    }
+    if (artifact.revision !== p.expectedRevision) deny(409, 'ARTIFACT_REVISION_CONFLICT');
+    if (artifact.digest === digest) deny(409, 'ARTIFACT_UNCHANGED');
+    if (artifact.revision >= revisionLimit) deny(409, 'ARTIFACT_REVISION_LIMIT');
+    const revision = artifact.revision + 1;
+    tx.update(ref, { revision, digest, document: p.document, updatedAt: now });
+    tx.create(ref.collection('revisions').doc(String(revision)), { schemaVersion: 1, artifactId: p.artifactId, revision,
+      parentRevision: artifact.revision, operationId: p.operationId, digest, document: p.document,
+      author: { kind: 'user', ...identity }, createdAt: now });
+    tx.create(operationRef, { schemaVersion: 1, operationId: p.operationId, revision, digest, expectedRevision: p.expectedRevision, author: identity, createdAt: now });
+    tx.set(team.collection('signals').doc(artifact.sharedBotId), { updatedAt: new Date(now) });
+    return { artifactId: p.artifactId, revision, digest };
   }
   async conversationPolicy({ tx, team, self, identity, command: { payload: p } }) {
     if (!['owner', 'admin'].includes(self.role)) deny(403, 'MANAGER_REQUIRED');

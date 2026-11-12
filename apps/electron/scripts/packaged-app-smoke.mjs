@@ -1343,7 +1343,7 @@ async function createPackagedLocalAppSourceSession(page, creatorSessionId, confi
   return sourceSession;
 }
 
-async function assertColdSessionOpen(page, sessionId) {
+async function assertColdSessionOpen(page, sessionId, activateWindow) {
   const cycles = Number(process.env.LINGXI_COLD_RELOAD_CYCLES ?? 10);
   assert(Number.isSafeInteger(cycles) && cycles >= 10 && cycles <= 100, 'cold reload cycles must be an integer from 10 to 100');
   const evidence = [];
@@ -1475,8 +1475,19 @@ async function assertColdSessionOpen(page, sessionId) {
   }
   // State restoration and visible painting are separate assertions. A real
   // foreground viewport must show the reply as well as retaining its DOM row.
+  // CDP focuses WebContents, but cannot raise an occluded native macOS window.
+  // Exercise the app's ordinary second-launch activation before asking a
+  // content-visibility:auto row to paint. Focus emulation is not visibility.
+  await activateWindow();
   await page.send('Page.bringToFront');
-  await waitFor(() => evaluate(page, `document.body.innerText.includes('Custom provider verified.')`), { label: 'cold-open foreground transcript painted' });
+  try {
+    await waitFor(() => evaluate(page, `document.visibilityState === 'visible'`), { label: 'cold-open native window visible' });
+    await waitFor(() => evaluate(page, `document.body.innerText.includes('Custom provider verified.')`), { label: 'cold-open foreground transcript painted' });
+  } catch (error) {
+    evidence.push({ foreground: false, ...await capture() });
+    save();
+    throw error;
+  }
   evidence.push({ foreground: true, ...await capture() });
   save();
   assert.equal(await evaluate(page, `document.body.textContent.includes('This chat is being resumed')`), false,
@@ -1941,7 +1952,16 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     await monitorRenderer(page);
     await waitFor(() => evaluate(page, 'window.lingxi?.bootstrap().then(b => b.connection?.status === "connected")'), { label: 'restarted custom provider app' });
     await assertScheduledPersistenceAfterRestart(page, scheduledRecords, join(tempHome, '.lingxi-workspaces'));
-    await assertColdSessionOpen(page, coldSession);
+    await assertColdSessionOpen(page, coldSession, async () => {
+      const activation = spawnPackagedApp(copiedAppPath, env, cdpPort, runtimePaths.userDataDir);
+      try {
+        await waitForPackagedAppExit(activation.child, async () => {});
+        assert.equal(activation.child.exitCode, 0, 'second launch must hand off to the existing instance');
+        assert.equal(child.exitCode, null, 'second launch must preserve the original packaged process');
+      } finally {
+        if (activation.child.exitCode === null && activation.child.signalCode === null) activation.child.kill('SIGTERM');
+      }
+    });
     const customSession = await prepareCustomProvider(page, customProbe, true);
     await assertCustomProviderRequest(page, customProbe, customSession);
     await assertPackagedLocalApps(page, customProbe, customSession, cdpPort, join(tempHome, '.lingxi'));

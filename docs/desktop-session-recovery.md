@@ -12,11 +12,12 @@ longer does not make an offscreen row paint.
 The real Electron regression in `apps/electron/test/cold-restore-interaction.test.mjs`
 mounts the production `useBridge` and `Stage`, imports the production stylesheet,
 and replays the saved two-message conversation. It covers successful IPC, a
-rejected first request, and a stalled first request. It then moves the restored
-Stage outside the viewport without changing the messages. The old condition
+rejected first request, and a stalled first request. It then hides the native
+window and reloads without changing the messages. The old condition
 times out at its original 20-second deadline while both saved items and the
-assistant DOM text remain present. Returning the Stage to the viewport makes
-the same reply appear in `innerText` again.
+assistant DOM text remain present. A normal second launch activates the existing
+native window and makes the same reply appear in `innerText` again. CDP focus
+alone leaves a hidden native window hidden.
 
 Commit `7d26fb58856ecb3523efff152e322c37de172ed3` changed the smoke's text
 lookup. The stronger check now requires an assistant row in the active Stage,
@@ -42,6 +43,7 @@ The ordinary Desktop diagnostics now include `session_recovery` events:
 | `preload_subscribe`, `preload_request`, `preload_retry`, `preload_received`, `preload_failed`, `preload_dispose` | Document/subscription identity, attempt, request duration and returned-event count |
 | `renderer_base` | The renderer received the base for this session and sequence |
 | `renderer_connection`, `renderer_bootstrap` | Connection transitions and accepted bootstrap revision |
+| `renderer_visibility` | Document visibility and focus, including hidden windows that retain focus |
 | `renderer_commit` | Committed item count, previous count, session key and connection |
 | `stage_commit` | Presented item and row counts |
 
@@ -79,3 +81,17 @@ checks, viewport geometry and recovery trace. On failure,
 for the generated fixture conversation. State restoration and foreground
 painting have separate assertions, so a missing transcript cannot pass merely
 because the runtime connected or an unrelated page contains the same text.
+
+During signed-package verification of the diagnostics build, 33 of 50 cycle
+samples had `document.visibilityState === 'hidden'` while
+`document.hasFocus() === true`. All 50 had two recovered items and two Stage
+rows, including the complete assistant DOM text. The original CDP-only final
+paint check timed out after 20 seconds. This is a captured instance of the
+false-timeout mechanism, with native replay, renderer commits and DOM evidence.
+
+The foreground check now uses the product's ordinary single-instance second
+launch to show/focus its existing native window, verifies that the temporary
+activation process exits while the original process remains alive, and requires
+actual document visibility before checking painted text. It does not substitute
+focus emulation for visibility. Recovery samples also record visibility and
+focus on document/window transitions and message commits.

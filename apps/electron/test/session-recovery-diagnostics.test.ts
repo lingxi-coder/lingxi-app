@@ -12,6 +12,7 @@ test('recovery diagnostics accept counters and bounded identities without messag
     connection: 'connected', itemCount: 2, previousItemCount: 0 };
   assert.deepEqual(parseSessionRecoveryDiagnostic(input), input);
   assert.notEqual(parseSessionRecoveryDiagnostic(input), input);
+  assert.ok(parseSessionRecoveryDiagnostic({ phase: 'renderer_visibility', visibility: 'hidden', focused: true }));
   for (const phase of ['preload_request', 'preload_retry', 'preload_received', 'preload_failed']) {
     assert.ok(parseSessionRecoveryDiagnostic({ phase, attempt: 2, durationMs: 2000, eventCount: 1 }));
   }
@@ -25,6 +26,7 @@ test('renderer recovery logging refuses content, paths, arbitrary strings and in
     { phase: 'renderer_base', messageCount: NaN }, { phase: 'renderer_base', sequence: 1.5 },
     { phase: 'renderer_base', connection: 'arbitrary message' }, { phase: 'renderer_base', eventType: 'text_delta' },
     { phase: 'renderer_base', loading: 'true' },
+    { phase: 'renderer_visibility', visibility: 'private text' }, { phase: 'renderer_visibility', focused: 'true' },
   ]) assert.equal(parseSessionRecoveryDiagnostic(sample), undefined, JSON.stringify(sample));
 });
 

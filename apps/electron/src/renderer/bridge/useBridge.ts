@@ -452,12 +452,26 @@ export function useBridge(): UseBridge {
   const conversation = runtime?.conversation ?? emptyConversation();
   const reportedRecovery = useRef(new Map<string, { signature: string; itemCount: number }>());
   useEffect(() => {
+    const reportVisibility = () => host?.reportSessionRecovery?.({ phase: 'renderer_visibility',
+      visibility: document.visibilityState, focused: document.hasFocus() });
+    reportVisibility();
+    document.addEventListener('visibilitychange', reportVisibility);
+    window.addEventListener('focus', reportVisibility);
+    window.addEventListener('blur', reportVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', reportVisibility);
+      window.removeEventListener('focus', reportVisibility);
+      window.removeEventListener('blur', reportVisibility);
+    };
+  }, [host]);
+  useEffect(() => {
     for (const [sessionId, state] of runtimeStates) {
       const signature = JSON.stringify([state.connection.status, state.conversation.sessionKey, state.conversation.items.length]);
       const previous = reportedRecovery.current.get(sessionId);
       if (previous?.signature === signature) continue;
       host?.reportSessionRecovery?.({ phase: 'renderer_commit', sessionId, sessionKey: state.conversation.sessionKey,
-        connection: state.connection.status, itemCount: state.conversation.items.length, previousItemCount: previous?.itemCount ?? 0 });
+        connection: state.connection.status, itemCount: state.conversation.items.length, previousItemCount: previous?.itemCount ?? 0,
+        visibility: document.visibilityState, focused: document.hasFocus() });
       reportedRecovery.current.set(sessionId, { signature, itemCount: state.conversation.items.length });
     }
     for (const id of reportedRecovery.current.keys()) if (!runtimeStates.has(id)) reportedRecovery.current.delete(id);

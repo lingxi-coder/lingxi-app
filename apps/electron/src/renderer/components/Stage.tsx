@@ -467,7 +467,8 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
   const windowing = useTranscriptWindow({ rows: presentationRows, sessionKey, viewport: stageRef, feed: feedRef, following: followTail });
   useEffect(() => {
     window.lingxi?.reportSessionRecovery?.({ phase: 'stage_commit', sessionKey,
-      itemCount: liveItems.length, rowCount: presentationRows.length });
+      itemCount: liveItems.length, rowCount: presentationRows.length,
+      visibility: document.visibilityState, focused: document.hasFocus() });
   }, [sessionKey, liveItems.length, presentationRows.length]);
   const planContentToken = useMemo(() => ({ submittedPlans, onOpenPlan }), [submittedPlans, onOpenPlan]);
 

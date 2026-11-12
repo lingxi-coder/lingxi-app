@@ -19,7 +19,7 @@
 .extension-overview { width: min(100%, 900px); margin-inline: auto; }
 .extension-overview-header { display: flex; align-items: center; gap: 16px; margin: 28px 0; }
 .extension-overview-heading { min-width: 0; flex: 1; }
-.extension-overview-heading h1:focus { outline: none; }
+.settings-screen .extension-overview-heading h1[tabindex="-1"]:focus { outline: none !important; }
 .extension-overview-heading h1 { margin: 0; outline: none; font-size: 24px; font-weight: 600; line-height: 1.25; letter-spacing: -.025em; }
 .extension-overview-heading p { margin: 7px 0 0; color: var(--hub-muted); font-size: 12.5px; line-height: 1.6; }
 .extension-overview-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }

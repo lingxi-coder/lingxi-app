@@ -111,6 +111,16 @@ test('shared Chat source: original timestamps are mandatory, same-named authors 
   const human = chatSourceMessage(m.id, { ...m.value, author: { kind: 'user', uid: 'retained_human' } });
   assert.equal(human.author.displayName, 'retained_human'); f.reader.close();
 });
+test('shared Chat source: a Bot question and the human answer to it carry the wait and task ids', () => {
+  const f = fixture(), m = f.messages[0]!;
+  const question = chatSourceMessage(m.id, { ...m.value, author: { kind: 'shared_bot', sharedBotId: 'shared_bot_01', displayName: 'Bot' }, taskId: 'task_0001', waitId: 'wait_0001' });
+  assert.deepEqual([question.sourceTaskId, question.waitId], ['task_0001', 'wait_0001']);
+  const answer = chatSourceMessage(m.id, { ...m.value, sourceTaskId: 'task_0001', waitId: 'wait_0001' });
+  assert.deepEqual([answer.sourceTaskId, answer.waitId], ['task_0001', 'wait_0001']);
+  assert.equal('waitId' in chatSourceMessage(m.id, m.value), false);
+  assert.throws(() => chatSourceMessage(m.id, { ...m.value, waitId: 'short' }), /INVALID_DATA/u);
+  assert.throws(() => chatSourceMessage(m.id, { ...m.value, sourceTaskId: 7 }), /INVALID_DATA/u); f.reader.close();
+});
 test('shared Chat source: independent change watermark returns old edits and blank recalls without consuming future messages', async () => {
   const f = fixture(); f.edit(1, 'Corrected old detail'); f.edit(2, '', true); f.edit(600, 'Future for this task');
   const changed = await f.reader.read({ ...f.scope, mode: 'changes', afterChangeSeq: 650, throughMessageSeq: 300 });

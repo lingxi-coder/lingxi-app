@@ -5,7 +5,7 @@ import type { TeamsApi } from '../../../packages/teams';
 import type { MessageCommand } from '../../../packages/teams/messages';
 import { FakeTeams, botCard, conversation, memoryStorage, message, team, until } from './support/fakeTeams';
 import { loadTeamsModule } from './support/loadTeamsModule';
-import { mount, scenario, textOf, withDom } from './support/workspacePage';
+import { classes, mount, scenario, textOf, withDom } from './support/workspacePage';
 const { BotDirectory } = loadTeamsModule<typeof import('../../../packages/teams/BotDirectory')>('BotDirectory');
 const { TeamConversationView } = loadTeamsModule<typeof import('../../../packages/teams/TeamConversationView')>('TeamConversationView');
 const { usageText } = loadTeamsModule<typeof import('../../../packages/teams/BotRunCards')>('BotRunCards');
@@ -155,4 +155,117 @@ scenario('Publication keeps successive native selections and cancellation, inclu
   await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1));
   await page.click(page.button('Publish assistant'));
   assert.deepEqual((published[0] as Record<string, unknown>).fileTokens, ['notes-token', 'skill-one', 'skill-two']);
+});
+
+// ── Waiting tasks, answers and cancellation ──
+const botAuthor = { kind: 'shared_bot' as const, sharedBotId: 'assistant-fixture', displayName: 'Fixture Bot' };
+const waitTask = (more: Record<string, unknown> = {}, recipient = { uid: 'alice', generation: 1 }) => ({
+  taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: recipient, state: 'waiting', createdAt: 1, deadline: Date.now() + 240000, epoch: 1, activeSpentMs: 1000,
+  wait: { waitId: 'wait-test', kind: 'human_input', recipient, expiresAt: Date.now() + 240000, messageId: 'message-2' }, ...more,
+});
+/** A Bot DM with a Bot question in it and `tasks()` as the task list; `handle` answers every other command. The caller has set up the DOM once (`withDom`). */
+async function openChat(context: Parameters<Parameters<typeof scenario>[1]>[0], tasks: () => unknown[], handle: (command: MessageCommand) => unknown = () => ({}), maintainer = 'alice', zh = false) {
+  const fake = new FakeTeams('alice'); fake.teams = [team('team-test', { role: 'owner' })]; const sent: MessageCommand[] = [];
+  const workspace = new TeamsWorkspace(fake.api, 'alice', { storage: memoryStorage, environment: new EventTarget() }); context.after(() => workspace.close());
+  fake.bots = [botCard({ maintainer: { uid: maintainer, generation: 1 } })];
+  fake.messages = async <T>(command: MessageCommand) => {
+    sent.push(structuredClone(command));
+    if (command.action === 'listTasks') return { tasks: tasks() } as T;
+    if (command.action === 'listSharedBots') return { bots: fake.bots } as T;
+    return handle(command) as T;
+  };
+  fake.conversations.set('team-test', [conversation('test-chat', { kind: 'bot_dm', participants: ['user:alice', 'shared_bot:assistant-fixture'], lastSeq: 2 })]);
+  fake.threads.set('test-chat', [message(1, { text: 'Plan my trip', author: { kind: 'user', uid: 'alice' } }), message(2, { text: 'Which city?', author: botAuthor, waitId: 'wait-test', taskId: 'task-test' })]);
+  await workspace.refresh(); await workspace.refreshBots(); workspace.selectConversation('test-chat');
+  await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat' && workspace.getSnapshot().messages.length === 2 && workspace.getSnapshot().botsLoaded, 'the chat');
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh })); context.after(() => page.unmount());
+  const buttons = (text: string) => page.find(n => n.type === 'button' && textOf(n) === text);
+  const box = () => page.find(n => n.type === 'textarea')[0];
+  return { fake, workspace, page, sent, buttons, box };
+}
+scenario('A waiting task names who it waits for and when the wait ends; only that person is offered Reply', async context => {
+  withDom(context);
+  const mine = await openChat(context, () => [waitTask()]);
+  assert.match(mine.page.text(), /Waiting for a reply/); assert.match(mine.page.text(), /Waiting for you · expires in 4 min/);
+  assert.equal(mine.buttons('Reply').length, 2, 'on the card and on the question');
+  assert.ok(mine.page.find(n => n.type === 'span' && classes(n).includes('tw-tag') && textOf(n) === 'Question').length === 1, 'the question is marked');
+  const other = await openChat(context, () => [waitTask({}, { uid: 'bob', generation: 1 })]);
+  assert.match(other.page.text(), /Waiting for Bob · expires in 4 min/); assert.equal(other.buttons('Reply').length, 0);
+  const stale = await openChat(context, () => [waitTask({}, { uid: 'alice', generation: 9 })]);
+  assert.match(stale.page.text(), /Waiting for Alice/, 'the same account at another membership generation is not the recipient'); assert.equal(stale.buttons('Reply').length, 0);
+  const chinese = await openChat(context, () => [waitTask({}, { uid: 'bob', generation: 1 })], () => ({}), 'alice', true);
+  assert.match(chinese.page.text(), /等待 Bob 回复 · 4 分钟后过期/); assert.doesNotMatch(chinese.page.text(), /Waiting for/);
+  const mineZh = await openChat(context, () => [waitTask()], () => ({}), 'alice', true);
+  assert.match(mineZh.page.text(), /等待你回复/); assert.match(mineZh.page.text(), /回复/); assert.ok(mineZh.buttons('回复').length === 2 && mineZh.buttons('取消').length === 1);
+});
+scenario('Replying to a question answers its wait with fresh ids and never submits a Bot request', async context => {
+  withDom(context);
+  const chat = await openChat(context, () => [waitTask()]);
+  await chat.page.click(chat.buttons('Reply')[0]);
+  assert.match(chat.page.text(), /Replying to Fixture Bot’s question: Which city\?/);
+  await chat.page.type(chat.box(), '@Fixture Bot Lisbon');
+  await chat.page.submit();
+  const answers = chat.sent.filter(c => c.action === 'answerWait');
+  assert.equal(answers.length, 1); assert.equal(chat.sent.filter(c => c.action === 'submit').length, 0, 'the text names a Bot, and still asks nothing');
+  const command = answers[0]!; if (command.action !== 'answerWait') return;
+  assert.deepEqual([command.payload.conversationId, command.payload.waitId, command.payload.text], ['test-chat', 'wait-test', '@Fixture Bot Lisbon']);
+  assert.notEqual(command.payload.messageId, command.payload.changeId);
+  assert.doesNotMatch(chat.page.text(), /Replying to/, 'answer mode ends once the answer is accepted'); assert.equal(chat.box().props.value, '');
+});
+scenario('The question message offers the same Reply, and Escape or the dismiss control leaves answer mode', async context => {
+  withDom(context);
+  const chat = await openChat(context, () => [waitTask()]);
+  await chat.page.click(chat.buttons('Reply')[1]); assert.match(chat.page.text(), /Replying to Fixture Bot’s question/);
+  await chat.page.click(chat.page.oneByLabel('Cancel reply')); assert.doesNotMatch(chat.page.text(), /Replying to/);
+  await chat.page.click(chat.buttons('Reply')[0]); assert.match(chat.page.text(), /Replying to/);
+  assert.equal(await chat.page.key(chat.box(), 'Escape'), true); assert.doesNotMatch(chat.page.text(), /Replying to/);
+});
+scenario('A closed wait ends answer mode, keeps the typed text and says why', async context => {
+  withDom(context);
+  const chat = await openChat(context, () => [waitTask()], command => { if (command.action === 'answerWait') throw new Error('WAIT_CLOSED'); return {}; });
+  await chat.page.click(chat.buttons('Reply')[0]); await chat.page.type(chat.box(), 'Lisbon'); await chat.page.submit();
+  assert.doesNotMatch(chat.page.text(), /Replying to/); assert.equal(chat.box().props.value, 'Lisbon');
+  assert.match(chat.page.text(), /This question is no longer waiting for a reply/);
+  assert.equal(chat.page.find(n => n.props.className?.includes?.('tw-pending')).length, 0, 'a refused answer is not left in the queue');
+});
+scenario('Answer mode ends by itself when the task stops waiting', async context => {
+  withDom(context);
+  let state = 'waiting';
+  const chat = await openChat(context, () => [state === 'waiting' ? waitTask() : waitTask({ state: 'queued', wait: undefined })]);
+  await chat.page.click(chat.buttons('Reply')[0]); await chat.page.type(chat.box(), 'Lisbon'); assert.match(chat.page.text(), /Replying to/);
+  state = 'queued'; chat.fake.signal({ conversationId: 'test-chat' }); await chat.page.during(() => undefined);
+  assert.doesNotMatch(chat.page.text(), /Replying to/); assert.equal(chat.buttons('Reply').length, 0); assert.equal(chat.box().props.value, 'Lisbon');
+});
+scenario('Cancel is for the requester and the Bot maintainer on a queued, running or waiting task', async context => {
+  withDom(context);
+  const task = (state: string, requester = 'alice', more: Record<string, unknown> = {}) => ({ ...waitTask({ state, ...more }, { uid: requester, generation: 1 }), ...(state === 'waiting' ? {} : { wait: undefined }) });
+  for (const state of ['queued', 'running', 'waiting']) {
+    const chat = await openChat(context, () => [task(state)], () => ({}), 'owner');
+    assert.equal(chat.buttons('Cancel').length, 1, `the requester can cancel a ${state} task`);
+  }
+  const maintained = await openChat(context, () => [task('running', 'bob')], () => ({}), 'alice');
+  assert.equal(maintained.buttons('Cancel').length, 1, 'the maintainer can cancel another member’s task');
+  const stranger = await openChat(context, () => [task('running', 'bob')], () => ({}), 'owner');
+  assert.equal(stranger.buttons('Cancel').length, 0);
+  for (const state of ['completed', 'failed', 'expired', 'cancelled', 'interrupted']) assert.equal((await openChat(context, () => [task(state)])).buttons('Cancel').length, 0, `no Cancel on a ${state} task`);
+});
+scenario('Cancel sends cancelTask; a task being cancelled says so without a button; a finished task is refreshed quietly', async context => {
+  withDom(context);
+  let result: unknown = { taskId: 'task-test', state: 'running' }, failure = '';
+  const chat = await openChat(context, () => [waitTask({ state: 'running', wait: undefined })], command => { if (command.action === 'cancelTask') { if (failure) throw new Error(failure); return result; } return {}; });
+  await chat.page.click(chat.buttons('Cancel')[0]);
+  assert.deepEqual(chat.sent.filter(c => c.action === 'cancelTask').map(c => c.action === 'cancelTask' ? c.payload : null), [{ taskId: 'task-test' }]);
+  const before = chat.sent.filter(c => c.action === 'listTasks').length; failure = 'TASK_FINISHED';
+  await chat.page.click(chat.buttons('Cancel')[0]); assert.equal(chat.page.find(n => n.props.role === 'alert').length, 0);
+  assert.ok(chat.sent.filter(c => c.action === 'listTasks').length > before, 'the tasks were fetched again');
+  failure = 'TASK_CANCEL_FORBIDDEN'; await chat.page.click(chat.buttons('Cancel')[0]); assert.match(chat.page.text(), /Only the person who asked, or the Bot’s maintainer, can cancel this task/);
+  const stopping = await openChat(context, () => [waitTask({ state: 'running', wait: undefined, cancelRequestedAt: Date.now() })]);
+  assert.match(stopping.page.text(), /Cancelling…/); assert.doesNotMatch(stopping.page.text(), /Processing/); assert.equal(stopping.buttons('Cancel').length, 0);
+});
+scenario('A cancelled task reads Cancelled and shows its usage only when it has one', async context => {
+  withDom(context);
+  const plain = await openChat(context, () => [waitTask({ state: 'cancelled', wait: undefined })]);
+  assert.match(plain.page.text(), /Cancelled/); assert.doesNotMatch(plain.page.text(), /usage/);
+  const used = await openChat(context, () => [waitTask({ state: 'cancelled', wait: undefined, usage: { status: 'partial', inputTokens: 3, outputTokens: 4 } })]);
+  assert.match(used.page.text(), /Cancelled/); assert.match(used.page.text(), /Partial usage · 3 \/ 4 tokens/);
 });

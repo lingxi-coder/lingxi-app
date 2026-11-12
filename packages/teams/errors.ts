@@ -53,6 +53,15 @@ export function messageErrorText(code: string, zh: boolean): string {
     case 'INPUT_GRANT_REQUIRED':
     case 'INPUT_AUDIENCE_NARROWER':
       return t('The selected resources cannot be shared with this audience. Choose authorized resources or a narrower audience.', '选定资料无法向此受众共享，请选择有权共享的资料或缩小受众。');
+    case 'WAIT_CLOSED':
+    case 'WAIT_REQUIRED':
+      return t('This question is no longer waiting for a reply.', '此问题已不再等待回复。');
+    case 'WAIT_RECIPIENT_REQUIRED':
+      return t('Only the person who asked the Bot can answer this question.', '只有向 Bot 提出请求的人才能回答此问题。');
+    case 'TASK_REVOKED':
+      return t('The Bot task lost its authorization, so it cannot continue.', '此 Bot 任务的授权已失效，无法继续。');
+    case 'TASK_CANCEL_FORBIDDEN':
+      return t('Only the person who asked, or the Bot’s maintainer, can cancel this task.', '只有发起请求的人或 Bot 维护者可以取消此任务。');
     case 'BOT_REVISION_CONFLICT':
       return t('Bot settings changed. Refresh before saving again.', 'Bot 设置已变化，请刷新后重试。');
     case 'MESSAGE_RECALLED':

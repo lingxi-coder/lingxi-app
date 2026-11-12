@@ -106,6 +106,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
   const minute = Math.floor((now === undefined ? Date.now() : typeof now === 'number' ? now : now.getTime()) / 60_000);
   const [startId, setStartId] = useState<string>();
   const [editing, setEditing] = useState<TeamMessage>(), [reply, setReply] = useState<TeamMessage>(), [recall, setRecall] = useState<TeamMessage>();
+  const [answerWait, setAnswerWait] = useState<string>();
   const [focusToken, setFocusToken] = useState(0);
   const [pinned, setPinned] = useState(true);
   const [seen, setSeen] = useState(() => messages[messages.length - 1]?.seq ?? 0);
@@ -123,6 +124,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
   const lock = composerLock({ uid, conversation, bots: snapshot.bots, botsLoaded: snapshot.botsLoaded, botsUnverified: snapshot.botsUnverified }, zh);
   const participant = !conversation.participants.length || conversation.participants.includes(`user:${uid}`);
   const nameOf = (id: string) => snapshot.directory.find(member => member.uid === id)?.displayName || (id === uid ? t('You', '你') : t('Member', '成员'));
+  const isViewer = (who: { uid: string; generation: number }) => who.uid === uid && who.generation === team.generation;
   const authorOf = (message: TeamMessage): Identity => {
     if (message.author.kind === 'user') return { kind: 'user', id: message.author.uid, name: nameOf(message.author.uid) };
     const author = message.author;
@@ -137,13 +139,21 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
     if (!target) return { author: '', text: t('Reply to an earlier message', '回复早前的消息') };
     return { author: authorOf(target).name, text: target.recalled ? t('Recalled message', '已撤回消息') : snippet(target.text, 140) };
   };
+  const scope = { teamId: team.id, generation: team.generation };
+  // Answer mode ends by itself once the task is not waiting for this viewer on that question any more.
+  const answerTask = answerWait ? runs.tasks.find(task => task.state === 'waiting' && task.wait?.waitId === answerWait && isViewer(task.wait.recipient)) : undefined;
+  useEffect(() => { if (answerWait && !answerTask) setAnswerWait(undefined); }, [answerWait, answerTask]);
+  const answerable = (task: TeamTaskView | undefined) => !lock && !!task?.wait && isViewer(task.wait.recipient);
+  const answerPending = (waitId: string) => snapshot.pending.some(item => { const payload = pendingPayload(item); return 'waitId' in payload && payload.waitId === waitId; });
   const lastOwn = [...messages].reverse().find(message => isMine(message) && !message.recalled);
   const unseen = pinned ? 0 : messages.filter(message => message.seq > seen && !isMine(message)).length;
   // A task gets a reply message only once it is delivered. Until then (queued, running, failed, expired, …)
   // it has no message to sit under, so it is shown as its own Bot row placed by time among the messages.
   const unanswered = useMemo(() => placeTasks(visible, runs.tasks.filter(task => !task.replyId).reverse(), start > 0), [visible, runs.tasks, start]);
+  const botRun = (task: TeamTaskView) => <BotRun task={task} api={workspace.api} scope={scope} zh={zh} renderMarkdown={renderMarkdown} snapshot={snapshot}
+    onReply={answerable(task) ? startAnswer : undefined} onChanged={runs.refresh} />;
   const taskRow = (task: TeamTaskView) => <TaskRow key={`task:${task.taskId}`} task={task} author={botIdentity(task.sharedBotId)} renderAvatar={renderAvatar}>
-    <div className="tw-embed"><BotRun task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} renderMarkdown={renderMarkdown} /></div>
+    <div className="tw-embed">{botRun(task)}</div>
   </TaskRow>;
   let afterTask = unanswered.head.length > 0;
   const loadingMessages = !messages.length && conversation.lastSeq > 0;
@@ -202,8 +212,9 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
     setStartId(messages[Math.max(0, start - WINDOW_SIZE)]?.id);
   };
 
-  const answer = (message: TeamMessage) => { setReply(message); setEditing(undefined); setFocusToken(token => token + 1); };
-  const edit = (message: TeamMessage) => { setEditing(message); setReply(undefined); setFocusToken(token => token + 1); };
+  const answer = (message: TeamMessage) => { setReply(message); setEditing(undefined); setAnswerWait(undefined); setFocusToken(token => token + 1); };
+  const edit = (message: TeamMessage) => { setEditing(message); setReply(undefined); setAnswerWait(undefined); setFocusToken(token => token + 1); };
+  function startAnswer(task: TeamTaskView): void { setAnswerWait(task.wait?.waitId); setReply(undefined); setEditing(undefined); setFocusToken(token => token + 1); }
   const confirmRecall = async () => {
     const target = recall;
     if (!target) return;
@@ -248,13 +259,19 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
             if (row.type === 'unread') return <li key={row.key} className="tw-unread" data-unread-divider=""><span>{t('New messages', '新消息')}</span></li>;
             const message = row.message, author = authorOf(message), mine = isMine(message);
             const tasks = runs.tasks.filter(task => task.replyId === message.id);
-            const placed = unanswered.after.get(message.id), grouped = row.grouped && !afterTask;
+            // A Bot's question; while its task still waits for this viewer, Reply on it answers instead of quoting.
+            const question = message.author.kind === 'shared_bot' && message.waitId !== undefined;
+            const waiting = question ? runs.tasks.find(task => task.state === 'waiting' && task.wait?.waitId === message.waitId) : undefined;
+            const answering = answerable(waiting) ? waiting : undefined;
+            const placed = unanswered.after.get(message.id), grouped = row.grouped && !afterTask && !question;
             afterTask = !!placed;
             return <Fragment key={row.key}><MessageItem message={message} grouped={grouped} author={author} mine={mine} owner={message.author.kind === 'shared_bot' ? nameOf(snapshot.bots.find(bot => bot.sharedBotId === (message.author as Extract<TeamMessage['author'], { kind: 'shared_bot' }>).sharedBotId)?.maintainer.uid ?? '') : ''}
-              quote={quoteOf(message)} locale={tag} zh={zh} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown}
-              onReply={lock ? undefined : answer} onEdit={mine && participant ? edit : undefined} onRecall={mine && participant ? setRecall : undefined}>
-              {message.artifactId && !tasks.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} artifactId={message.artifactId} zh={zh} renderMarkdown={renderMarkdown} /> : null}
-              {tasks.map(task => <div className="tw-embed" key={task.taskId}><BotRun task={task} api={workspace.api} scope={{ teamId: team.id, generation: team.generation }} zh={zh} renderMarkdown={renderMarkdown} /></div>)}
+              quote={quoteOf(message)} locale={tag} zh={zh} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} question={question}
+              onReply={lock ? undefined : answering ? () => startAnswer(answering) : answer} onEdit={mine && participant ? edit : undefined} onRecall={mine && participant ? setRecall : undefined}>
+              {answering && !answerPending(message.waitId!)
+                ? <div className="tw-embed"><div className="teams-row-actions"><button type="button" aria-label={t('Reply to the Bot’s question', '回复 Bot 的问题')} onClick={() => startAnswer(answering)}>{t('Reply', '回复')}</button></div></div> : null}
+              {message.artifactId && !tasks.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={scope} artifactId={message.artifactId} zh={zh} renderMarkdown={renderMarkdown} /> : null}
+              {tasks.map(task => <div className="tw-embed" key={task.taskId}>{botRun(task)}</div>)}
             </MessageItem>{placed?.map(taskRow)}</Fragment>;
           })}
           {unanswered.tail.map(taskRow)}
@@ -283,6 +300,8 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
 
     <Composer workspace={workspace} snapshot={snapshot} conversation={conversation} label={label} zh={zh} renderAvatar={renderAvatar}
       editing={editing} reply={reply ? { message: reply, author: authorOf(reply).name } : undefined} focusToken={focusToken}
+      answering={answerTask ? { waitId: answerTask.wait!.waitId, author: botIdentity(answerTask.sharedBotId).name, question: byId.get(answerTask.wait!.messageId) } : undefined}
+      onClearAnswering={() => setAnswerWait(undefined)} onAnswered={runs.refresh}
       onClearEditing={() => setEditing(undefined)} onClearReply={() => setReply(undefined)} onEditLast={() => { if (lastOwn && participant) edit(lastOwn); }} />
 
     {recall ? <Dialog role="alertdialog" title={t('Recall this message for everyone?', '为所有人撤回此消息？')} onClose={() => setRecall(undefined)}>
@@ -309,8 +328,8 @@ function TaskRow({ task, author, renderAvatar, children }: { task: TeamTaskView;
   </li>;
 }
 
-function MessageItem({ message, grouped, author, mine, owner, quote, locale, zh, renderAvatar, renderMarkdown, onReply, onEdit, onRecall, children }: {
-  message: TeamMessage; grouped: boolean; author: Identity; mine: boolean; owner: string; quote?: { author: string; text: string }; locale: string; zh: boolean; renderAvatar?: RenderAvatar; renderMarkdown?: RenderMarkdown;
+function MessageItem({ message, grouped, author, mine, owner, quote, question, locale, zh, renderAvatar, renderMarkdown, onReply, onEdit, onRecall, children }: {
+  message: TeamMessage; grouped: boolean; author: Identity; mine: boolean; owner: string; quote?: { author: string; text: string }; question?: boolean; locale: string; zh: boolean; renderAvatar?: RenderAvatar; renderMarkdown?: RenderMarkdown;
   onReply?(message: TeamMessage): void; onEdit?(message: TeamMessage): void; onRecall?(message: TeamMessage): void; children?: ReactNode;
 }): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
@@ -326,6 +345,7 @@ function MessageItem({ message, grouped, author, mine, owner, quote, locale, zh,
       {!grouped ? <div className="tw-msg-head">
         <b className="tw-msg-author">{author.name}</b>
         {author.kind === 'bot' ? <span className="tw-tag">Bot</span> : null}
+        {question ? <span className="tw-tag">{t('Question', '提问')}</span> : null}
         {owner ? <small>{t('Owner', '所有者')}: {owner}</small> : null}
         {time}
       </div> : null}

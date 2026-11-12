@@ -5,7 +5,7 @@ export type ChatSourceAuthor = { kind: 'user'; uid: string; displayName: string 
 export interface ChatSourceMessage {
   messageId: string; seq: number; changeSeq: number; changeId: string; author: ChatSourceAuthor;
   createdAt: number; editedAt?: number; text: string; replyTo?: string; recalled?: boolean;
-  sourceTaskId?: string; deliveryId?: string; artifactId?: string;
+  sourceTaskId?: string; deliveryId?: string; artifactId?: string; waitId?: string;
 }
 export type ChatReadRequest = { teamId: string; generation: number; conversationId: string } & (
   | { mode: 'recent'; throughSeq: number }
@@ -40,7 +40,10 @@ export function chatSourceMessage(messageId: string, data: DocumentData): ChatSo
   return { messageId, seq: data.seq, changeSeq: data.changeSeq, changeId: data.changeId, text: data.text, author,
     createdAt: millis(data.createdAt), ...(data.editedAt !== undefined ? { editedAt: millis(data.editedAt) } : {}),
     ...(data.replyTo !== undefined ? { replyTo: data.replyTo } : {}), ...(data.recalled !== undefined ? { recalled: data.recalled } : {}),
-    ...(data.taskId !== undefined ? { sourceTaskId: id(data.taskId) ? data.taskId : fail('INVALID_DATA') } : {}),
+    // A Bot's message names its task as `taskId`; the human answer to a Bot's question stores it as `sourceTaskId`.
+    ...(data.taskId !== undefined ? { sourceTaskId: id(data.taskId) ? data.taskId : fail('INVALID_DATA') }
+      : data.sourceTaskId !== undefined ? { sourceTaskId: id(data.sourceTaskId) ? data.sourceTaskId : fail('INVALID_DATA') } : {}),
+    ...(data.waitId !== undefined ? { waitId: id(data.waitId) ? data.waitId : fail('INVALID_DATA') } : {}),
     ...(data.deliveryId !== undefined ? { deliveryId: id(data.deliveryId) ? data.deliveryId : fail('INVALID_DATA') } : {}),
     ...(data.artifactId !== undefined ? { artifactId: id(data.artifactId) ? data.artifactId : fail('INVALID_DATA') } : {}) };
 }

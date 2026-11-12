@@ -13,6 +13,8 @@ export interface TeamMessage {
   kind: string; text: string; replyTo?: string; createdAt: string | null; editedAt?: string | null;
   recalled?: boolean; changeSeq: number; changeId: string;
   taskId?: string; taskIds?: string[]; artifactId?: string;
+  /** Set on a Bot's question and on the human answer to it. */
+  waitId?: string;
   mentions?: string[];
 }
 export interface MessageScope { teamId: string; generation: number }
@@ -36,7 +38,7 @@ export type MessageSnapshot = MessageScope & { uid: string; fromCache: boolean }
 );
 interface CommandMetadata { error?: string; leaseUntil?: number; attempted?: boolean; retryDelay?: number }
 type CreationCommand = Extract<MessageCommand, { action: 'create' | 'createConversation' }>;
-type OutboxCommand = MessageMutation | Extract<MemberExecutionCommand, { action: 'submit' }>;
+type OutboxCommand = MessageMutation | Extract<MemberExecutionCommand, { action: 'submit' | 'answerWait' }>;
 export interface PendingCommand<C> extends CommandMetadata { command: C }
 export interface PendingCommands {
   version: 2; uid: string; teamId: string; generation: number;
@@ -101,8 +103,10 @@ function failedCommand<T extends CommandMetadata>(intent: T, error: unknown, per
   const retryDelay = Math.min(30000, Math.max(500, intent.retryDelay ?? 500) * 2);
   return { ...intent, leaseUntil: Date.now() + retryDelay, retryDelay };
 }
+/** Server verdicts that end an answer to a Bot's question for good: the wait is over, is not the viewer's, or the task lost its authority. */
+export const ANSWER_REFUSED = ['WAIT_CLOSED', 'WAIT_RECIPIENT_REQUIRED', 'WAIT_REQUIRED', 'TASK_REVOKED'];
 const isRevokedAccessError = (error: unknown) => error instanceof Error && ['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED', 'CONVERSATION_REQUIRED'].includes(error.message);
-const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'HOST_UNAVAILABLE', 'REQUEST_QUOTA_EXCEEDED', 'CONVERSATION_POLICY_REQUIRED', 'INPUT_GRANT_REQUIRED', 'BOT_RETIRED', 'COMMAND_ID_CONFLICT'].includes(error.message);
+const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'HOST_UNAVAILABLE', 'REQUEST_QUOTA_EXCEEDED', 'CONVERSATION_POLICY_REQUIRED', 'INPUT_GRANT_REQUIRED', 'BOT_RETIRED', 'COMMAND_ID_CONFLICT', ...ANSWER_REFUSED].includes(error.message);
 /** Persist command identities before transport; Firestore owns message history. */
 export class TeamMessaging {
   state: MessageProjection;
@@ -144,7 +148,7 @@ export class TeamMessaging {
     const command = value.command;
     if (command.teamId !== this.scope.teamId || command.generation !== this.scope.generation) return false;
     if ('schemaVersion' in command) return isMemberExecutionCommand(command)
-      && (kind === 'creation' ? command.action === 'createConversation' : command.action === 'submit');
+      && (kind === 'creation' ? command.action === 'createConversation' : command.action === 'submit' || command.action === 'answerWait');
     // Human-message commands retain the existing transport; no execution targets are accepted here.
     const fields = kind === 'creation' ? ['action', 'teamId', 'generation', 'conversationId', 'kind', 'title', 'participantUids']
       : ['action', 'teamId', 'generation', 'conversationId', 'messageId', 'changeId', 'operation', 'text', 'replyTo'];
@@ -231,6 +235,20 @@ export class TeamMessaging {
       : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...(replyTo ? { replyTo } : {}) };
     await this.commit(old => ({ ...old, outbox: [...old.outbox, { command }] }));
     void this.refresh();
+  }
+  /**
+   * Answer a Bot's question. The command (with its fresh message and change ids) is stored before it is sent, so a retry after a
+   * lost response repeats the same ids. A refused answer is dropped from the queue and thrown, so the caller keeps the text;
+   * any other failure stays queued and is retried like a message.
+   */
+  async answer(waitId: string, text: string) {
+    if (this.closed || !this.selected || !text.trim() || new TextEncoder().encode(text).length > 8192) throw new Error('INVALID_INPUT');
+    const changeId = crypto.randomUUID();
+    const command = executionCommand(this.scope, 'answerWait', { conversationId: this.selected, waitId, messageId: crypto.randomUUID(), changeId, text });
+    await this.commit(old => ({ ...old, outbox: [...old.outbox, { command }] }));
+    await this.refresh();
+    const refused = this.state.outbox.find(item => pendingPayload(item).changeId === changeId)?.error;
+    if (refused && ANSWER_REFUSED.includes(refused)) { await this.discard(changeId); throw new Error(refused); }
   }
   async discard(changeId: string) { await this.commit(old => { if (old.outbox.some(item => pendingPayload(item).changeId === changeId && ((item.attempted && !item.error) || (item.leaseUntil ?? 0) > Date.now()))) throw new Error('MESSAGE_IN_FLIGHT'); return { ...old, outbox: old.outbox.filter(item => pendingPayload(item).changeId !== changeId) }; }); }
   /** Retry an explicit host-unavailable verdict with the original idempotent command. */

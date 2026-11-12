@@ -324,6 +324,15 @@
 .tw-member-home > ol > li { padding: 16px 0; border-bottom: 1px solid var(--teams-border, #626873); }
 .tw-home { margin: 8px; text-align: start; }
 .tw-artifact { max-height: 75vh; overflow: auto; padding: 20px; }
+.tw-artifact .tw-dialog-actions { margin-top: 14px; }
+.tw-dialog:has(.tw-artifact, .tw-doc-edit) { max-width: 720px; }
+.tw-dialog textarea { width: 100%; min-height: 220px; padding: 8px 10px; color: inherit; background: transparent; border: 1px solid var(--teams-border, #626873); border-radius: 8px; font: inherit; line-height: 1.5; resize: vertical; }
+.tw-doc-conflict { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--tw-danger); border-radius: 10px; max-height: 40vh; overflow: auto; }
+.tw-doc-conflict h3 { margin: 0; font-size: 14px; }
+.tw-doc-history { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.tw-doc-history li { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--tw-line); }
+.tw-doc-history li:last-child { border-bottom: 0; padding-bottom: 0; }
+.tw-dialog .teams-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* ── Friends (FriendsSidebar, FriendsMain and its pages) ── */
 .tw-friends-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 700; }

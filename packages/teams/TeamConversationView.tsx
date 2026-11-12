@@ -270,7 +270,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
               onReply={lock ? undefined : answering ? () => startAnswer(answering) : answer} onEdit={mine && participant ? edit : undefined} onRecall={mine && participant ? setRecall : undefined}>
               {answering && !answerPending(message.waitId!)
                 ? <div className="tw-embed"><div className="teams-row-actions"><button type="button" aria-label={t('Reply to the Bot’s question', '回复 Bot 的问题')} onClick={() => startAnswer(answering)}>{t('Reply', '回复')}</button></div></div> : null}
-              {message.artifactId && !tasks.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={scope} artifactId={message.artifactId} zh={zh} renderMarkdown={renderMarkdown} /> : null}
+              {message.artifactId && !tasks.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={scope} artifactId={message.artifactId} zh={zh} renderMarkdown={renderMarkdown} people={snapshot} /> : null}
               {tasks.map(task => <div className="tw-embed" key={task.taskId}>{botRun(task)}</div>)}
             </MessageItem>{placed?.map(taskRow)}</Fragment>;
           })}

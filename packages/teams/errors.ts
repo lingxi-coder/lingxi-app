@@ -47,6 +47,23 @@ export function messageErrorText(code: string, zh: boolean): string {
       return t('The daily request quota is exhausted. Ask the maintainer to review quotas or try after the UTC day resets.', '每日请求额度已用尽，请联系维护者检查额度或在 UTC 日期切换后重试。');
     case 'ARTIFACT_READ_REQUIRED':
       return t('You no longer have access to this document. Ask the maintainer to review its audience.', '你已无权访问此文档，请联系维护者检查受众。');
+    case 'ARTIFACT_REVISION_CONFLICT':
+      return t('This document was changed by someone else. Open it again to see the latest version.', '此文档已被其他人修改，请重新打开查看最新版本。');
+    case 'ARTIFACT_UNCHANGED':
+      return t('There are no changes to save.', '没有需要保存的修改。');
+    case 'ARTIFACT_REVISION_LIMIT':
+      return t('This document has reached its limit of 200 revisions and can no longer be edited.', '此文档已达到 200 个版本的上限，无法继续编辑。');
+    case 'ARTIFACT_REVISION_REQUIRED':
+      return t('That revision is not available.', '该版本不可用。');
+    case 'OPERATION_CONFLICT':
+      return t('This was already decided differently. Reload to see the current state.', '此项已有不同的处理结果，请重新加载查看当前状态。');
+    case 'OPERATION_REQUIRED':
+    case 'OPERATION_READ_FORBIDDEN':
+      return t('These actions are not available to you.', '你无法查看这些操作。');
+    case 'MAINTAINER_REQUIRED':
+      return t('Only the Bot’s maintainer can confirm what happened.', '只有 Bot 维护者可以确认实际结果。');
+    case 'TASK_RUNNING':
+      return t('The task is still running and may report the result itself. Try again after it stops.', '任务仍在运行，可能会自行报告结果。请在任务停止后重试。');
     case 'PUBLICATION_CONFIRMATION_REQUIRED':
       return t('Review and confirm the publication before continuing.', '请检查并确认发布内容后继续。');
     case 'PUBLISHED_INPUT_REQUIRED':

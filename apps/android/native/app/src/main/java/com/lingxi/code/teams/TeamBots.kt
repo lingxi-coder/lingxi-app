@@ -80,6 +80,8 @@ internal fun requireTeamBotSelections(selected: Collection<String>, bots: List<T
 
 /** Strict execution-2 member envelope. The transport never adapts retired commands. */
 internal object TeamExecutionContract {
+    /** The largest shared document body the service stores, in UTF-8 bytes. */
+    const val DOCUMENT_BYTES = 256 * 1024
     fun validate(v: JSONObject) {
         fun fail(): Nothing = throw TeamMessageFailure("INVALID_INPUT")
         fun JSONObject.keysSet() = keys().asSequence().toSet()
@@ -98,7 +100,21 @@ internal object TeamExecutionContract {
         when (v.opt("action")) {
             "listSharedBots" -> shape(emptySet())
             "getTask" -> { shape(setOf("taskId")); requireId("taskId") }
-            "readArtifact" -> { shape(setOf("artifactId")); requireId("artifactId") }
+            "readArtifact" -> { shape(setOf("artifactId"), setOf("revision")); requireId("artifactId"); if (p.has("revision") && !integer(p.opt("revision"), 1)) fail() }
+            "listArtifactRevisions" -> { shape(setOf("artifactId")); requireId("artifactId") }
+            "reviseArtifact" -> {
+                shape(setOf("artifactId", "expectedRevision", "operationId", "document")); requireId("artifactId"); requireId("operationId")
+                if (!integer(p.opt("expectedRevision"), 1)) fail()
+                val document = p.optJSONObject("document") ?: fail(); if (document.keysSet() != setOf("title", "body")) fail()
+                val title = (document.opt("title") as? String ?: fail()).trim(); val body = document.opt("body") as? String ?: fail()
+                if (title.isEmpty() || title.length > 120 || body.isEmpty() || body.toByteArray(Charsets.UTF_8).size > DOCUMENT_BYTES) fail()
+            }
+            "listOperations" -> { shape(setOf("taskId")); requireId("taskId") }
+            "resolveOperation" -> {
+                shape(setOf("taskId", "operationId", "resolution")); requireId("taskId")
+                val operation = p.opt("operationId"); if (operation !is String || !Regex("^[a-f0-9]{64}$").matches(operation)) fail()
+                if (p.opt("resolution") !in setOf("succeeded", "failed")) fail()
+            }
             "cancelTask" -> { shape(setOf("taskId")); requireId("taskId") }
             "answerWait" -> {
                 shape(setOf("conversationId", "waitId", "messageId", "changeId", "text"))

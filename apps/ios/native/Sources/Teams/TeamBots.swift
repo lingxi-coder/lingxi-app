@@ -105,6 +105,8 @@ enum TeamBotSelection {
 /// Member commands are validated independently of storage/execution versions.
 /// Unknown fields and retired actions cannot enter the transport through a journal replay.
 enum TeamExecutionContract {
+    /// The largest shared document body the service stores, in UTF-8 bytes.
+    static let documentBytes = 256 * 1024
     static func validate(_ value: [String: Any]) throws {
         func fail() throws -> Never { throw TeamMessageFailure(code: "INVALID_INPUT") }
         guard Set(value.keys) == ["schemaVersion", "commandId", "teamId", "generation", "action", "payload"],
@@ -123,7 +125,21 @@ enum TeamExecutionContract {
         switch action {
         case "listSharedBots": try shape([])
         case "getTask": try shape(["taskId"]); try id("taskId")
-        case "readArtifact": try shape(["artifactId"]); try id("artifactId")
+        case "readArtifact":
+            try shape(["artifactId"], ["revision"]); try id("artifactId")
+            if payload["revision"] != nil { guard integer(payload["revision"], minimum: 1) != nil else { try fail() } }
+        case "listArtifactRevisions": try shape(["artifactId"]); try id("artifactId")
+        case "reviseArtifact":
+            try shape(["artifactId", "expectedRevision", "operationId", "document"]); try id("artifactId"); try id("operationId")
+            guard integer(payload["expectedRevision"], minimum: 1) != nil, let document = payload["document"] as? [String: Any],
+                  Set(document.keys) == ["title", "body"], let title = document["title"] as? String, let body = document["body"] as? String,
+                  case let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty, trimmed.utf16.count <= 120,
+                  !body.isEmpty, body.utf8.count <= documentBytes else { try fail() }
+        case "listOperations": try shape(["taskId"]); try id("taskId")
+        case "resolveOperation":
+            try shape(["taskId", "operationId", "resolution"]); try id("taskId")
+            guard let operation = payload["operationId"] as? String, operation.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+                  let resolution = payload["resolution"] as? String, ["succeeded", "failed"].contains(resolution) else { try fail() }
         case "cancelTask": try shape(["taskId"]); try id("taskId")
         case "answerWait":
             try shape(["conversationId", "waitId", "messageId", "changeId", "text"])

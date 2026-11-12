@@ -57,7 +57,7 @@ final class TeamsTests: XCTestCase {
         let states: [String: String] = [
             "queued": "cron_status_queued", "running": "teams_run_processing", "completed": "chat_status_completed", "failed": "chat_status_failed",
             "expired": "teams_task_expired", "interrupted": "teams_task_interrupted", "authorization_required": "teams_task_authorization_required", "revoked": "teams_run_revoked",
-            "waiting": "teams_task_waiting", "cancelled": "teams_task_cancelled",
+            "waiting": "teams_task_waiting", "cancelled": "teams_task_cancelled", "needs_reconciliation": "teams_task_needs_checking",
         ]
         for (state, key) in states { XCTAssertEqual(TeamsBotText.stateKey(state), key, state) }
         for retired in ["pending", "claimed", "recovery", "recovered", "missed"] { XCTAssertEqual(TeamsBotText.stateKey(retired), "chat_status_unknown") }

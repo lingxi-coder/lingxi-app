@@ -617,6 +617,275 @@
           "taskId": "task_0001"
         }
       }
+    },
+    {
+      "name": "valid-readArtifact-revision",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "readArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "revision": 2
+        }
+      }
+    },
+    {
+      "name": "valid-listArtifactRevisions",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listArtifactRevisions",
+        "payload": {
+          "artifactId": "artifact_01"
+        }
+      }
+    },
+    {
+      "name": "valid-reviseArtifact",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "reviseArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "expectedRevision": 1,
+          "operationId": "operation_01",
+          "document": {
+            "title": "Trip plan",
+            "body": "# Trip plan\n\nPack passports."
+          }
+        }
+      }
+    },
+    {
+      "name": "valid-listOperations",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listOperations",
+        "payload": {
+          "taskId": "task_0001"
+        }
+      }
+    },
+    {
+      "name": "valid-resolveOperation",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "resolveOperation",
+        "payload": {
+          "taskId": "task_0001",
+          "operationId": "abababababababababababababababababababababababababababababababab",
+          "resolution": "failed"
+        }
+      }
+    },
+    {
+      "name": "reject-readArtifact-revision-0",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "readArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "revision": 0
+        }
+      }
+    },
+    {
+      "name": "reject-reviseArtifact-no-expected-revision",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "reviseArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "operationId": "operation_01",
+          "document": {
+            "title": "Trip plan",
+            "body": "# Trip plan\n\nPack passports."
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-reviseArtifact-empty-body",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "reviseArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "expectedRevision": 1,
+          "operationId": "operation_01",
+          "document": {
+            "title": "Trip plan",
+            "body": ""
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-reviseArtifact-blank-title",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "reviseArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "expectedRevision": 1,
+          "operationId": "operation_01",
+          "document": {
+            "title": "   ",
+            "body": "x"
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-reviseArtifact-long-title",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "reviseArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "expectedRevision": 1,
+          "operationId": "operation_01",
+          "document": {
+            "title": "ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+            "body": "x"
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-reviseArtifact-unknown-document-key",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "reviseArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "expectedRevision": 1,
+          "operationId": "operation_01",
+          "document": {
+            "title": "Trip plan",
+            "body": "# Trip plan\n\nPack passports.",
+            "format": "html"
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-listOperations-unknown-payload",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listOperations",
+        "payload": {
+          "taskId": "task_0001",
+          "all": true
+        }
+      }
+    },
+    {
+      "name": "reject-resolveOperation-short-operation",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "resolveOperation",
+        "payload": {
+          "taskId": "task_0001",
+          "operationId": "operation_01",
+          "resolution": "failed"
+        }
+      }
+    },
+    {
+      "name": "reject-resolveOperation-unknown-resolution",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "resolveOperation",
+        "payload": {
+          "taskId": "task_0001",
+          "operationId": "abababababababababababababababababababababababababababababababab",
+          "resolution": "unknown"
+        }
+      }
+    },
+    {
+      "name": "reject-recordOperation-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "recordOperation",
+        "payload": {
+          "taskId": "task_0001"
+        }
+      }
+    },
+    {
+      "name": "reject-settleOperation-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "settleOperation",
+        "payload": {
+          "taskId": "task_0001"
+        }
+      }
     }
   ],
   "batches": [

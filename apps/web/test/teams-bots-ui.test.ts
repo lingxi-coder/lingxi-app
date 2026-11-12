@@ -17,13 +17,13 @@ const directory = (workspace: TeamsWorkspace) => (s: ReturnType<TeamsWorkspace['
 const friendDirectory = (workspace: TeamsWorkspace) => (s: ReturnType<TeamsWorkspace['getSnapshot']>) => createElement(BotDirectory, { api: workspace.api, uid: s.uid, team: s.team!, members: s.directory, bots: s.bots, zh: false, busy: s.messageBusy, status: '', attempt: workspace.attempt, onOpen: bot => workspace.startBotDm(bot), onChanged: workspace.refreshBots, friend: 'Bob' });
 scenario('Member home requires no model setup and reopens document with Missing usage', async context => {
   const { fake, workspace } = await open(context); const calls: MessageCommand[] = []; fake.conversations.set('team-test', [conversation('test-chat')]);
-  fake.messages = async <T>(command: MessageCommand) => { calls.push(command); if (command.action === 'listTasks') return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state: 'completed', createdAt: 1, deadline: 2, artifactId: 'artifact-test' }] } as T; if (command.action === 'readArtifact') return { artifactId: 'artifact-test', revision: 1, digest: 'a'.repeat(64), document: { title: 'Trip preparation', body: 'Pack passports' } } as T; return { bots: fake.bots } as T; };
+  fake.messages = async <T>(command: MessageCommand) => { calls.push(command); if (command.action === 'listTasks') return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state: 'completed', createdAt: 1, deadline: 2, artifactId: 'artifact-test' }] } as T; if (command.action === 'readArtifact') return { artifactId: 'artifact-test', revision: 1, digest: 'a'.repeat(64), document: { title: 'Trip preparation', body: 'Pack passports' }, currentRevision: 1 } as T; return { bots: fake.bots } as T; };
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount()); assert.match(page.text(), /No model or API key setup/); assert.match(page.text(), /Missing usage · cost unknown/);
   await page.click(page.button('Reopen document')); assert.match(page.text(), /Trip preparation/); assert.match(page.text(), /Pack passports/); await page.click(page.button('Close')); await page.click(page.button('Reopen document')); assert.equal(calls.filter(c => c.action === 'readArtifact').length, 2);
 });
 scenario('The Bot document dialog renders its body through the host Markdown renderer, else as plain text', async context => {
   const { fake, workspace } = await open(context); fake.conversations.set('team-test', [conversation('test-chat')]);
-  fake.messages = async <T>(command: MessageCommand) => { if (command.action === 'listTasks') return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state: 'completed', createdAt: 1, deadline: 2, artifactId: 'artifact-test' }] } as T; if (command.action === 'readArtifact') return { artifactId: 'artifact-test', revision: 1, digest: 'a'.repeat(64), document: { title: 'Trip preparation', body: '# Pack\n- passports' } } as T; return { bots: fake.bots } as T; };
+  fake.messages = async <T>(command: MessageCommand) => { if (command.action === 'listTasks') return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state: 'completed', createdAt: 1, deadline: 2, artifactId: 'artifact-test' }] } as T; if (command.action === 'readArtifact') return { artifactId: 'artifact-test', revision: 1, digest: 'a'.repeat(64), document: { title: 'Trip preparation', body: '# Pack\n- passports' }, currentRevision: 1 } as T; return { bots: fake.bots } as T; };
   const rendered: string[] = [];
   const renderMarkdown = (text: string) => { rendered.push(text); return createElement('div', { className: 'host-md' }, 'rendered:' + text); };
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false, renderMarkdown })); context.after(() => page.unmount());
@@ -268,4 +268,118 @@ scenario('A cancelled task reads Cancelled and shows its usage only when it has 
   assert.match(plain.page.text(), /Cancelled/); assert.doesNotMatch(plain.page.text(), /usage/);
   const used = await openChat(context, () => [waitTask({ state: 'cancelled', wait: undefined, usage: { status: 'partial', inputTokens: 3, outputTokens: 4 } })]);
   assert.match(used.page.text(), /Cancelled/); assert.match(used.page.text(), /Partial usage · 3 \/ 4 tokens/);
+});
+/** A finished task with a shared document whose revisions live in `store`; every command goes through `handle` first. */
+async function openDocument(context: Parameters<Parameters<typeof scenario>[1]>[0], handle: (command: MessageCommand) => unknown = () => undefined) {
+  const store = { revisions: [{ title: 'Trip preparation', body: 'Pack passports' }] }, saved = new Map<string, number>();
+  const view = (revision = store.revisions.length) => ({ artifactId: 'artifact-test', revision, digest: 'a'.repeat(64), document: store.revisions[revision - 1], currentRevision: store.revisions.length });
+  const chat = await openChat(context, () => [waitTask({ state: 'completed', wait: undefined, artifactId: 'artifact-test' })], command => {
+    const handled = handle(command); if (handled !== undefined) return handled;
+    if (command.action === 'readArtifact') return view(command.payload.revision);
+    if (command.action === 'reviseArtifact') {
+      const again = saved.get(command.payload.operationId); if (again) return { artifactId: 'artifact-test', revision: again, digest: 'b'.repeat(64) };
+      if (command.payload.expectedRevision !== store.revisions.length) throw new Error('ARTIFACT_REVISION_CONFLICT');
+      store.revisions.push(command.payload.document); saved.set(command.payload.operationId, store.revisions.length); return { artifactId: 'artifact-test', revision: store.revisions.length, digest: 'b'.repeat(64) };
+    }
+    if (command.action === 'listArtifactRevisions') return { artifactId: 'artifact-test', currentRevision: store.revisions.length, revisions: store.revisions.map((document, i) => ({ revision: i + 1, parentRevision: i || null, digest: 'c'.repeat(64), title: document.title, author: i ? { kind: 'user', uid: 'alice', generation: 1 } : { kind: 'shared_bot', sharedBotId: 'assistant-fixture' }, createdAt: 1700000000000 + i })).reverse() };
+    return {};
+  });
+  await chat.page.click(chat.page.button('Reopen document'));
+  const editor = () => ({ title: chat.page.find(n => n.type === 'input' && n.props.maxLength === 120)[0], body: chat.page.find(n => n.type === 'textarea' && n.props.rows === 14)[0], form: chat.page.find(n => n.type === 'form' && classes(n).includes('tw-doc-edit'))[0] });
+  const revised = () => chat.sent.flatMap(c => c.action === 'reviseArtifact' ? [c.payload] : []);
+  return { ...chat, store, editor, revised };
+}
+scenario('A shared document is edited on top of the revision that was read and shows the saved revision', async context => {
+  withDom(context);
+  const doc = await openDocument(context);
+  assert.match(doc.page.text(), /Revision 1/); await doc.page.click(doc.page.button('Edit'));
+  assert.equal(doc.page.button('Save').props.disabled, true, 'nothing changed yet');
+  await doc.page.type(doc.editor().body, 'Pack passports and chargers'); await doc.page.submit(doc.editor().form);
+  assert.deepEqual(doc.revised().map(({ operationId, ...rest }) => rest), [{ artifactId: 'artifact-test', expectedRevision: 1, document: { title: 'Trip preparation', body: 'Pack passports and chargers' } }]);
+  assert.match(doc.page.text(), /Revision 2/); assert.match(doc.page.text(), /Pack passports and chargers/); assert.equal(doc.editor().form, undefined, 'back to reading');
+});
+scenario('A save whose answer was lost is repeated with the same operation id; a different text gets a new one', async context => {
+  withDom(context);
+  let lose = false;
+  const doc = await openDocument(context, command => { if (command.action === 'readArtifact' && lose) { lose = false; throw new Error('SERVICE_UNAVAILABLE'); } return undefined; });
+  await doc.page.click(doc.page.button('Edit')); await doc.page.type(doc.editor().body, 'Second'); lose = true; await doc.page.submit(doc.editor().form);
+  assert.match(doc.page.text(), /Could not sync messages/); assert.equal(doc.editor().body.props.value, 'Second', 'the text is kept');
+  await doc.page.submit(doc.editor().form);
+  assert.equal(doc.revised().length, 2); assert.equal(doc.revised()[0].operationId, doc.revised()[1].operationId);
+  assert.equal(doc.store.revisions.length, 2, 'one revision was created'); assert.match(doc.page.text(), /Revision 2/);
+  await doc.page.click(doc.page.button('Edit')); await doc.page.type(doc.editor().body, 'Third'); await doc.page.submit(doc.editor().form);
+  assert.notEqual(doc.revised()[2].operationId, doc.revised()[0].operationId); assert.equal(doc.revised()[2].expectedRevision, 2);
+});
+scenario('An edit made on an outdated revision is not saved: the text stays beside the newer version until the person decides', async context => {
+  withDom(context);
+  const doc = await openDocument(context);
+  await doc.page.click(doc.page.button('Edit')); await doc.page.type(doc.editor().body, 'My packing list');
+  doc.store.revisions.push({ title: 'Trip preparation', body: 'Bob changed this' });
+  await doc.page.submit(doc.editor().form);
+  assert.equal(doc.store.revisions.length, 2, 'nothing was overwritten');
+  assert.match(doc.page.text(), /was changed while you were editing \(now revision 2\)/); assert.match(doc.page.text(), /Bob changed this/);
+  assert.equal(doc.editor().body.props.value, 'My packing list');
+  assert.equal(doc.page.button('Save over revision 2').props.disabled, false); await doc.page.submit(doc.editor().form);
+  assert.equal(doc.revised().at(-1)!.expectedRevision, 2); assert.notEqual(doc.revised().at(-1)!.operationId, doc.revised()[0].operationId);
+  assert.match(doc.page.text(), /Revision 3/); assert.match(doc.page.text(), /My packing list/);
+  await doc.page.click(doc.page.button('Edit')); await doc.page.type(doc.editor().body, 'Lost on purpose');
+  doc.store.revisions.push({ title: 'Trip preparation', body: 'Carol changed this' }); await doc.page.submit(doc.editor().form);
+  await doc.page.click(doc.page.button('Discard my changes'));
+  assert.match(doc.page.text(), /Revision 4/); assert.match(doc.page.text(), /Carol changed this/); assert.equal(doc.store.revisions.length, 4);
+});
+scenario('Closing a document with unsaved changes asks first; an invalid edit cannot be saved', async context => {
+  withDom(context);
+  const doc = await openDocument(context);
+  await doc.page.click(doc.page.button('Edit')); await doc.page.type(doc.editor().title, '   ');
+  assert.equal(doc.page.button('Save').props.disabled, true, 'a blank title');
+  await doc.page.type(doc.editor().title, 'Trip'); await doc.page.type(doc.editor().body, 'x'.repeat(256 * 1024 + 1));
+  assert.equal(doc.page.button('Save').props.disabled, true); assert.match(doc.page.text(), /too long to save/);
+  await doc.page.type(doc.editor().body, 'Shorter');
+  const dialog = doc.page.find(n => n.type === 'dialog')[0];
+  await doc.page.during(() => dialog.props.onCancel({ preventDefault() {} }));
+  assert.match(doc.page.text(), /You have unsaved changes/); await doc.page.click(doc.page.button('Keep editing')); assert.equal(doc.editor().body.props.value, 'Shorter');
+  await doc.page.during(() => doc.page.find(n => n.type === 'dialog')[0].props.onCancel({ preventDefault() {} })); await doc.page.click(doc.page.button('Discard changes'));
+  assert.equal(doc.page.find(n => n.type === 'dialog').length, 0); assert.equal(doc.revised().length, 0);
+});
+scenario('Document history names who wrote each revision; an earlier revision is read-only', async context => {
+  withDom(context);
+  const doc = await openDocument(context);
+  doc.store.revisions.push({ title: 'Trip preparation', body: 'Second version' });
+  await doc.page.click(doc.page.button('History'));
+  assert.match(doc.page.text(), /Document history/); assert.match(doc.page.text(), /Alice · .* · current/); assert.match(doc.page.text(), /Fixture Bot · /);
+  await doc.page.click(doc.page.oneByLabel('Open revision 1'));
+  assert.match(doc.page.text(), /Revision 1 of 2 · an earlier version/); assert.match(doc.page.text(), /Pack passports/); assert.equal(doc.page.has('Edit'), false);
+  await doc.page.click(doc.page.button('Show latest')); assert.match(doc.page.text(), /Second version/); assert.equal(doc.page.has('Edit'), true);
+  assert.deepEqual(doc.sent.flatMap(c => c.action === 'readArtifact' ? [c.payload] : []), [{ artifactId: 'artifact-test' }, { artifactId: 'artifact-test', revision: 1 }, { artifactId: 'artifact-test' }]);
+});
+scenario('A task whose outside action is unconfirmed says so; only the maintainer confirms what happened', async context => {
+  withDom(context);
+  const unchecked = (requester = 'alice') => [waitTask({ state: 'needs_reconciliation', wait: undefined, unverifiedOperations: 1 }, { uid: requester, generation: 1 })];
+  const operations = [
+    { operationId: 'a'.repeat(64), logicalStepId: 'task-test/t1/c0', category: 'store_idempotent', tool: { name: 'shared_list.add', version: '1' }, state: 'succeeded', epoch: 1, dispatchedAt: 1700000000000, settledAt: 1700000000500 },
+    { operationId: 'b'.repeat(64), logicalStepId: 'task-test/t2/c0', category: 'unqueryable', tool: { name: 'email.send', version: '1' }, state: 'unknown', epoch: 1, dispatchedAt: 1700000001000 },
+  ];
+  let failure = '';
+  const answer = (command: MessageCommand) => {
+    if (command.action === 'listOperations') return { taskId: 'task-test', operations };
+    if (command.action === 'resolveOperation') { if (failure) throw new Error(failure); operations[1] = { ...operations[1]!, state: command.payload.resolution, resolvedBy: { uid: 'alice', generation: 1 }, resolvedAt: 1 } as never; return { taskId: 'task-test', state: 'interrupted', operationId: command.payload.operationId, operationState: command.payload.resolution }; }
+    return {};
+  };
+  const maintainer = await openChat(context, () => unchecked('bob'), answer, 'alice');
+  assert.match(maintainer.page.text(), /Needs checking/); assert.match(maintainer.page.text(), /Check it and confirm the result/); assert.equal(maintainer.buttons('Cancel').length, 0);
+  await maintainer.page.click(maintainer.page.button('Review actions'));
+  assert.match(maintainer.page.text(), /email\.send · Result unknown/); assert.match(maintainer.page.text(), /shared_list\.add · Happened/);
+  assert.equal(maintainer.buttons('It happened').length, 1, 'only the unconfirmed action is decided');
+  failure = 'TASK_RUNNING'; await maintainer.page.click(maintainer.page.button('It did not happen')); assert.match(maintainer.page.text(), /still running and may report the result itself/);
+  failure = ''; const before = maintainer.sent.filter(c => c.action === 'listTasks').length;
+  await maintainer.page.click(maintainer.page.button('It did not happen'));
+  assert.deepEqual(maintainer.sent.flatMap(c => c.action === 'resolveOperation' ? [c.payload] : []).at(-1), { taskId: 'task-test', operationId: 'b'.repeat(64), resolution: 'failed' });
+  assert.match(maintainer.page.text(), /email\.send · Did not happen/); assert.match(maintainer.page.text(), /confirmed by Alice/); assert.equal(maintainer.buttons('It happened').length, 0);
+  assert.ok(maintainer.sent.filter(c => c.action === 'listTasks').length > before, 'the task is fetched again');
+  operations[1] = { ...operations[1]!, state: 'unknown' }; delete (operations[1] as Record<string, unknown>).resolvedBy;
+  const requester = await openChat(context, () => unchecked('alice'), answer, 'owner');
+  assert.match(requester.page.text(), /The Bot’s maintainer needs to confirm it/); await requester.page.click(requester.page.button('View actions'));
+  assert.match(requester.page.text(), /email\.send · Result unknown/); assert.equal(requester.buttons('It happened').length, 0);
+  const stranger = await openChat(context, () => unchecked('bob'), answer, 'owner');
+  assert.match(stranger.page.text(), /Needs checking/); assert.equal(stranger.page.has('View actions'), false); assert.equal(stranger.page.has('Review actions'), false);
 });

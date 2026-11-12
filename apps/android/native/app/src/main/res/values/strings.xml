@@ -2944,4 +2944,6 @@
     <string name="settings_browser_session_authorized">已授权给当前控制会话</string>
     <string name="settings_browser_saved">已保存，等待下次启动控制会话</string>
     <string name="settings_browser_manage_session">管理控制会话</string>
+    <string name="teams_task_needs_checking">需要核实</string>
+    <string name="teams_task_needs_checking_hint">会话之外的某个操作可能已执行，也可能没有。需要 Bot 维护者在 Desktop 或网页端确认。</string>
 </resources>

@@ -80,6 +80,30 @@ Implemented in `apps/ios/native/Sources/Teams/` (`TeamBots.swift`, `TeamBotViews
 
 Target: detailed design 0.5 and development plan 1.4, M0 then M1a/M1b.
 
+## M2 / Q07–Q08 clients — document editing, history and tasks that need checking
+
+Member commands added to the shared contract (`packages/teams/contracts/execution-vectors.json`, validated identically by the
+TypeScript, Swift and Kotlin validators): `readArtifact {artifactId, revision?}`, `listArtifactRevisions`, `reviseArtifact`,
+`listOperations`, `resolveOperation`. `recordOperation` and `settleOperation` stay host-only and are rejected as member commands.
+The Desktop main process allows the new member commands through `TeamsService.messages`.
+
+Web and Desktop (`packages/teams`):
+
+- `DocumentDialog.tsx` reads a shared document, edits its title and Markdown body, and lists its history. An edit is sent as
+  `reviseArtifact` with the revision it was made from. One operation id belongs to one exact edit: a save whose answer was lost
+  is repeated with the same id and creates no second revision; changed text or a changed base gets a new id.
+- When someone saved first (`ARTIFACT_REVISION_CONFLICT`) nothing is saved. The person's text stays in the editor, the newer
+  revision is shown under it, and the choice is "Save over revision N" or "Discard my changes". Closing with unsaved text asks first.
+- History names the author of each revision (member or Bot) and opens any revision read-only; only the latest can be edited.
+- A task in `needs_reconciliation` is labelled "Needs checking". Its requester and the Bot's maintainer can open the list of
+  outside actions (`OperationsDialog`); only the maintainer gets "It happened" / "It did not happen" (`resolveOperation`).
+
+iOS and Android label the state and explain that the maintainer confirms it on Desktop or the web. They do not edit documents
+or resolve operations yet.
+
+`resources/translations/*.json` now contains the 22 `settings_browser_*` keys that had been added to the generated iOS and
+Android files only, so `generate.py` is lossless again.
+
 ## Current integration status, 2026-11-05
 
 The sections below record earlier increments and their failures; this table supersedes their pending source-work statements. M0/M1 release acceptance remains open.

@@ -9,7 +9,7 @@ export interface SharedBotCard {
   permitted: boolean; ready: boolean; onlineUntil: number; usePolicy: UsePolicy;
   quotas: RequestQuotas; instanceId?: string;
 }
-export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'expired' | 'interrupted' | 'authorization_required' | 'revoked' | 'cancelled';
+export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'expired' | 'interrupted' | 'authorization_required' | 'revoked' | 'cancelled' | 'needs_reconciliation';
 export type TaskUsage = { status: 'missing' } | { status: 'partial' | 'complete'; inputTokens: number; outputTokens: number; costMicros?: number; currency?: string };
 /** The human question a waiting task is blocked on; present only while `state` is `waiting`. */
 export interface TaskWait { waitId: string; kind: 'human_input'; recipient: MemberRef; expiresAt: number; messageId: string }
@@ -17,9 +17,29 @@ export interface TeamTaskView {
   taskId: string; conversationId: string; sharedBotId: string; requester: MemberRef;
   /** `deadline` ends the current phase: pick-up limit while queued, running budget while running, wait expiry while waiting. */
   state: TaskState; createdAt: number; deadline: number; epoch: number; activeSpentMs: number; cancelRequestedAt?: number;
+  /** Outside actions whose outcome nobody has confirmed yet; absent when there are none. */
+  unverifiedOperations?: number;
   wait?: TaskWait; replyId?: string; artifactId?: string; usage?: TaskUsage;
 }
-export interface TeamArtifact { artifactId: string; revision: number; digest: string; document: { title: string; body: string } }
+export interface TeamDocument { title: string; body: string }
+/** One revision of a shared document. `currentRevision` is the newest one, so `revision < currentRevision` is history. */
+export interface TeamArtifact { artifactId: string; revision: number; digest: string; document: TeamDocument; currentRevision: number }
+export type RevisionAuthor = { kind: 'user'; uid: string; generation: number } | { kind: 'shared_bot'; sharedBotId: string };
+export interface ArtifactRevision { revision: number; parentRevision: number | null; digest: string; title: string; author: RevisionAuthor; createdAt: number; sourceTaskId?: string }
+export interface ArtifactRevisions { artifactId: string; currentRevision: number; revisions: ArtifactRevision[] }
+export interface ArtifactRevised { artifactId: string; revision: number; digest: string }
+export type OperationCategory = 'read' | 'store_idempotent' | 'provider_idempotent' | 'queryable' | 'unqueryable';
+export type OperationState = 'dispatched' | 'succeeded' | 'failed' | 'unknown';
+/** One outside action of a task. Its parameters and result stay with the Bot's host. */
+export interface TaskOperation {
+  operationId: string; logicalStepId: string; category: OperationCategory; tool: { name: string; version: string };
+  state: OperationState; epoch: number; dispatchedAt: number; settledAt?: number; resolvedBy?: MemberRef; resolvedAt?: number;
+}
+export interface TaskOperations { taskId: string; operations: TaskOperation[] }
+export interface OperationResolved { taskId: string; state: TaskState; operationId: string; operationState: 'succeeded' | 'failed' }
+/** Replays are safe for the other categories; these two need a confirmed outcome before a task may go on. */
+export const operationUnverified = (operation: TaskOperation): boolean =>
+  (operation.category === 'queryable' || operation.category === 'unqueryable') && (operation.state === 'dispatched' || operation.state === 'unknown');
 export interface ExecutionScope { teamId: string; generation: number }
 export interface MemberExecutionPayloads {
   listSharedBots: Record<string, never>;
@@ -30,7 +50,11 @@ export interface MemberExecutionPayloads {
   cancelTask: { taskId: string };
   getTask: { taskId: string };
   listTasks: { conversationId?: string; after?: string };
-  readArtifact: { artifactId: string };
+  readArtifact: { artifactId: string; revision?: number };
+  listArtifactRevisions: { artifactId: string };
+  reviseArtifact: { artifactId: string; expectedRevision: number; operationId: string; document: TeamDocument };
+  listOperations: { taskId: string };
+  resolveOperation: { taskId: string; operationId: string; resolution: 'succeeded' | 'failed' };
   setConversationPolicy: { conversationId: string; expectedRevision: number; targets: string[] };
 }
 export type MemberExecutionAction = keyof MemberExecutionPayloads;

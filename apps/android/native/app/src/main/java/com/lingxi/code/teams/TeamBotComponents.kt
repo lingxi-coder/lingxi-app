@@ -44,6 +44,7 @@ internal fun teamTaskStateRes(state: String): Int = when (state) {
     "revoked" -> R.string.teams_run_revoked
     "waiting" -> R.string.teams_task_waiting
     "cancelled" -> R.string.teams_task_cancelled
+    "needs_reconciliation" -> R.string.teams_task_needs_checking
     else -> R.string.chat_status_unknown
 }
 
@@ -104,6 +105,8 @@ internal fun TeamTaskCard(
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.task.wait.${task.taskId}"),
             )
         }
+        // An outside action of unknown outcome: the maintainer confirms it where the review screen is.
+        if (task.state == "needs_reconciliation") Text(stringResource(R.string.teams_task_needs_checking_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.task.checking.${task.taskId}"))
         // A task cancelled before any model call has nothing to report.
         if (!(task.state == "cancelled" && task.usage == null)) Text(TeamsBotText.usageLine(task.usage, rememberTeamUsageStrings()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.task.usage.${task.taskId}"))
         if (onReply != null || canCancel) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

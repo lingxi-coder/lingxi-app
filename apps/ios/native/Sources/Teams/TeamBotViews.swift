@@ -84,6 +84,11 @@ struct TeamTaskCard: View {
                 Text(waitLine).font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("teams.task.wait.\(task.taskId)")
             }
+            // An outside action of unknown outcome: the maintainer confirms it where the review screen is.
+            if task.state == "needs_reconciliation" {
+                Text("teams_task_needs_checking_hint").font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("teams.task.checking.\(task.taskId)")
+            }
             // A task cancelled before any model call has nothing to report.
             if !(task.state == "cancelled" && task.usage == nil) {
                 Text(TeamsBotText.usageLine(task.usage, strings: .current))

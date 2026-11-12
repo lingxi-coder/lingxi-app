@@ -7,10 +7,14 @@ const integer: Check = v => typeof v === 'number' && Number.isSafeInteger(v) && 
 const positive: Check = v => integer(v) && (v as number) > 0;
 const uid: Check = v => typeof v === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(v);
 const optional = (check: Check): Check => v => v === undefined || check(v);
+const oneOf = (...values: string[]): Check => v => typeof v === 'string' && values.includes(v);
+const bytes = (v: string) => new TextEncoder().encode(v).length;
 const list = (check: Check, min: number, max: number): Check => v => Array.isArray(v) && v.length >= min && v.length <= max && new Set(v).size === v.length && v.every(check);
 function shape(fields: Record<string, Check>): Check {
   return v => record(v) && Object.keys(v).every(key => Object.prototype.hasOwnProperty.call(fields, key)) && Object.entries(fields).every(([key, check]) => check(v[key]));
 }
+/** The largest shared document body the service stores, in UTF-8 bytes. */
+export const DOCUMENT_BYTES = 256 * 1024;
 const payloads: Record<string, Check> = {
   listSharedBots: shape({}),
   createConversation: shape({ conversationId: id, kind: v => ['bot_dm', 'group', 'channel'].includes(String(v)), title: v => typeof v === 'string' && v.trim().length >= 1 && v.trim().length <= 120, participantUids: list(uid, 1, 200), sharedBotIds: list(id, 1, 8) }),
@@ -20,7 +24,13 @@ const payloads: Record<string, Check> = {
   cancelTask: shape({ taskId: id }),
   getTask: shape({ taskId: id }),
   listTasks: shape({ conversationId: optional(id), after: optional(id) }),
-  readArtifact: shape({ artifactId: id }),
+  readArtifact: shape({ artifactId: id, revision: optional(positive) }),
+  listArtifactRevisions: shape({ artifactId: id }),
+  reviseArtifact: shape({ artifactId: id, expectedRevision: positive, operationId: id, document: shape({
+    title: v => typeof v === 'string' && v.trim().length >= 1 && v.trim().length <= 120,
+    body: v => typeof v === 'string' && v.length >= 1 && bytes(v) <= DOCUMENT_BYTES }) }),
+  listOperations: shape({ taskId: id }),
+  resolveOperation: shape({ taskId: id, operationId: v => typeof v === 'string' && /^[a-f0-9]{64}$/u.test(v), resolution: oneOf('succeeded', 'failed') }),
   setConversationPolicy: shape({ conversationId: id, expectedRevision: integer, targets: list(id, 0, 8) }),
 };
 /** Only the current member execution envelope. Unknown fields and retired commands fail closed. */

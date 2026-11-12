@@ -139,3 +139,17 @@ test('The message model carries a waitId from Firestore, and the client has the 
   const { messageErrorText } = await import('../../../packages/teams/errors');
   for (const code of ['WAIT_CLOSED', 'WAIT_RECIPIENT_REQUIRED', 'WAIT_REQUIRED', 'TASK_REVOKED', 'TASK_CANCEL_FORBIDDEN']) for (const zh of [false, true]) assert.doesNotMatch(messageErrorText(code, zh), /Could not sync|消息同步未完成/, `${code} has its own text`);
 });
+test('document and operation member commands are strict; ledger writes belong to the host', () => {
+  const document = { title: 'Trip plan', body: '# Trip plan' }, revise = { artifactId: 'artifact_01', expectedRevision: 1, operationId: 'operation_01', document };
+  assert.deepEqual(executionCommand(scope, 'reviseArtifact', revise, 'command001').payload, revise);
+  assert.deepEqual(executionCommand(scope, 'readArtifact', { artifactId: 'artifact_01', revision: 3 }, 'command001').payload, { artifactId: 'artifact_01', revision: 3 });
+  assert.throws(() => executionCommand(scope, 'readArtifact', { artifactId: 'artifact_01', revision: 0 }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'reviseArtifact', { ...revise, expectedRevision: 0 }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'reviseArtifact', { ...revise, document: { title: ' ', body: 'x' } }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'reviseArtifact', { ...revise, document: { title: 'T', body: 'x'.repeat(256 * 1024 + 1) } }, 'command001'));
+  assert.doesNotThrow(() => executionCommand(scope, 'reviseArtifact', { ...revise, document: { title: 'T', body: 'x'.repeat(256 * 1024) } }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'resolveOperation', { taskId: 'task_0001', operationId: 'operation_01', resolution: 'failed' }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'resolveOperation', { taskId: 'task_0001', operationId: 'a'.repeat(64), resolution: 'unknown' as never }, 'command001'));
+  assert.equal(executionCommand(scope, 'listOperations', { taskId: 'task_0001' }, 'command001').action, 'listOperations');
+  for (const action of ['recordOperation', 'settleOperation']) assert.equal(isMemberExecutionCommand({ schemaVersion: 1, commandId: 'command001', ...scope, action, payload: { taskId: 'task_0001' } }), false, action);
+});

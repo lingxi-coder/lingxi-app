@@ -2944,4 +2944,6 @@
     <string name="settings_browser_session_authorized">已授權給目前的控制對話</string>
     <string name="settings_browser_saved">已儲存，等待下次啟動控制對話</string>
     <string name="settings_browser_manage_session">管理控制對話</string>
+    <string name="teams_task_needs_checking">需要核實</string>
+    <string name="teams_task_needs_checking_hint">會話之外的某個操作可能已執行，也可能沒有。需要 Bot 維護者在 Desktop 或網頁端確認。</string>
 </resources>

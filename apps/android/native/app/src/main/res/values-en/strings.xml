@@ -2944,4 +2944,6 @@
     <string name="settings_browser_session_authorized">Authorized in the active control session</string>
     <string name="settings_browser_saved">Saved for the next control session</string>
     <string name="settings_browser_manage_session">Manage control session</string>
+    <string name="teams_task_needs_checking">Needs checking</string>
+    <string name="teams_task_needs_checking_hint">An action outside the chat may or may not have gone through. The Bot’s maintainer confirms it on Desktop or the web.</string>
 </resources>

@@ -2944,4 +2944,6 @@
     <string name="settings_browser_session_authorized">現在の操作セッションで許可済み</string>
     <string name="settings_browser_saved">次回の操作セッション用に保存済み</string>
     <string name="settings_browser_manage_session">操作セッションを管理</string>
+    <string name="teams_task_needs_checking">確認が必要</string>
+    <string name="teams_task_needs_checking_hint">チャット外の操作が実行されたかどうか確認できていません。Bot の管理者が Desktop または Web で確認します。</string>
 </resources>

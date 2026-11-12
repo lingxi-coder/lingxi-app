@@ -152,6 +152,18 @@ INTENTIONAL_IDENTICAL_TO_BASE = {
     ("zh-Hant", "friends_bots_title"): "共享的 Bot",
     ("zh-Hant", "friends_bots_none"): "此聊天中尚未共享 Bot。",
     ("zh-Hant", "friends_share_bot_stop"): "停止共享",
+    # Teams UI polish: the same characters in both Chinese variants, or the product word "Bot".
+    ("zh-Hant", "teams_you"): "你",
+    ("zh-Hant", "teams_confirm_remove_button"): "移除",
+    ("zh-Hant", "teams_bot_disabled"): "已停止共享",
+    ("zh-Hant", "teams_usage_tokens_total %@"): "%@ tokens",
+    ("zh-Hant", "teams_usage_tokens_total_fmt"): "%1$s tokens",
+    ("en", "teams_usage_tokens_total %@"): "%@ tokens",
+    ("en", "teams_usage_tokens_total_fmt"): "%1$s tokens",
+    ("zh-Hant", "teams_bot_tag"): "Bot",
+    ("en", "teams_bot_tag"): "Bot",
+    ("ja", "teams_bot_tag"): "Bot",
+    ("ko", "teams_bot_tag"): "Bot",
 }
 
 

@@ -12,7 +12,7 @@ const same = (left, right) => hash(left) === hash(right);
 const randomId = () => randomBytes(24).toString('base64url');
 const nowDay = now => new Date(now).toISOString().slice(0, 10);
 const memberIdentity = (uid, member) => ({ uid, generation: member.generation });
-const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations']);
+const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations', 'readTaskList', 'readList']);
 const revisionLimit = 200;
 const byUid = members => [...members].sort((a, b) => a.uid.localeCompare(b.uid));
 /** An interrupted operation of these categories may be sent again: the receiver returns the same receipt. */
@@ -33,6 +33,27 @@ export class SharedBotError extends Error {
 }
 function identityPermitted(bot, identity) { return bot && sharedBotPermits(bot.identity, identity); }
 function ownerOf(bot, identity) { return bot && same(bot.identity.maintainer, identity); }
+/** The runtime's name of the list write; the ledger entry of a list write must carry it. */
+const listWriteTool = 'TeamListWrite', listItemLimit = 500;
+const listView = list => ({ dataRevision: list.dataRevision, items: list.items.map(({ itemId, text, done }) => ({ itemId, text, done })) });
+/** The list after one write, or why nothing is saved. A write is all of its changes or none of them. */
+function applyListChanges(list, { expectedDataRevision, changes }, author, now) {
+  if (list.dataRevision !== expectedDataRevision) return { error: 'DATA_REVISION_CONFLICT' };
+  let items = list.items, nextItem = list.nextItem;
+  for (const change of changes) {
+    if (change.op === 'add') {
+      items = [...items, { itemId: `item_${String(nextItem).padStart(4, '0')}`, text: change.text.trim(), done: false, updatedBy: author, updatedAt: now }];
+      nextItem += 1;
+    } else {
+      if (!items.some(item => item.itemId === change.itemId)) return { error: 'LIST_ITEM_REQUIRED' };
+      items = change.op === 'remove' ? items.filter(item => item.itemId !== change.itemId)
+        : items.map(item => item.itemId !== change.itemId ? item : { ...item, ...(change.text === undefined ? {} : { text: change.text.trim() }),
+          ...(change.done === undefined ? {} : { done: change.done }), updatedBy: author, updatedAt: now });
+    }
+  }
+  if (items.length > listItemLimit) return { error: 'LIST_LIMIT' };
+  return { ...list, dataRevision: list.dataRevision + 1, items, nextItem, updatedAt: now };
+}
 function taskView(task, now) {
   const over = task.deadline <= now;
   const state = over && ['queued', 'waiting'].includes(task.state) ? 'expired'
@@ -98,6 +119,10 @@ export class SharedBotsStore {
       else if (action === 'settleOperation') response = await this.settleOperation(context);
       else if (action === 'resolveOperation') response = await this.resolveOperation(context);
       else if (action === 'listOperations') response = await this.operations(context);
+      else if (action === 'readTaskList') response = await this.taskList(context);
+      else if (action === 'writeTaskList') response = await this.writeTaskList(context);
+      else if (action === 'readList') response = await this.list(context);
+      else if (action === 'writeList') response = await this.writeList(context);
       else if (action === 'prepareTask' || action === 'validateTask') response = await this.taskContext(context);
       else if (action === 'completeTask') response = await this.complete(context);
       else if (action === 'getTask' || action === 'listTasks') response = await this.tasks(context);
@@ -142,7 +167,11 @@ export class SharedBotsStore {
     const identityRecord = { schemaVersion: 1, sharedBotId: p.sharedBotId, teamId: team.id, maintainer: identity,
       revision: p.expectedRevision + 1, state: 'published', usePolicy: p.usePolicy, activeDeploymentId: d.deploymentId };
     if (Buffer.byteLength(JSON.stringify({ identity: identityRecord, name: p.name, description: p.description, grants })) > 750000) deny(400, 'PUBLICATION_TOO_LARGE');
-    tx.set(ref, { identity: identityRecord, name: p.name, description: p.description, grants, quotas: p.quotas, publishedAt: now });
+    // One data identity per Bot: publishing again never replaces the items.
+    const listRef = team.collection('lists').doc(p.sharedBotId), newList = !!p.sharedList && !(await tx.get(listRef)).exists;
+    tx.set(ref, { identity: identityRecord, name: p.name, description: p.description, grants, quotas: p.quotas,
+      sharedList: p.sharedList ?? null, publishedAt: now });
+    if (newList) tx.create(listRef, { schemaVersion: 1, listId: p.sharedBotId, dataRevision: 0, items: [], nextItem: 1, updatedAt: now });
     tx.set(deploymentRef, { ...d, ready: false, onlineUntil: 0 });
     tx.set(team.collection('signals').doc(p.sharedBotId), { updatedAt: new Date(now) });
     return { sharedBotId: p.sharedBotId, revision: identityRecord.revision, grantIds: grants.map(g => g.grantId) };
@@ -158,7 +187,7 @@ export class SharedBotsStore {
       return [{ sharedBotId: doc.id, name: b.name, description: b.description, revision: b.identity.revision,
         permitted: activeOwner && identityPermitted(b, identity), ready: activeOwner && b.identity.state === 'published' && !!d?.ready && d.enabled && d.onlineUntil > now,
         maintainer: b.identity.maintainer, usePolicy: b.identity.usePolicy, state: b.identity.state,
-        onlineUntil: d?.onlineUntil ?? 0, quotas: b.quotas,
+        onlineUntil: d?.onlineUntil ?? 0, quotas: b.quotas, ...(b.sharedList ? { sharedList: { title: b.sharedList.title } } : {}),
         ...(ownerOf(b, identity) && d ? { instanceId: d.instanceId } : {}) }];
     }) };
   }
@@ -346,7 +375,7 @@ export class SharedBotsStore {
     tx.update(ref, started);
     tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
     return { execute: true, permitId, task: taskView({ ...task, ...started }, now), deployment,
-      inputs: bot.grants, messageId: task.messageId, messageSeq: task.messageSeq };
+      inputs: bot.grants, messageId: task.messageId, messageSeq: task.messageSeq, ...this.listOffer(bot, deployment) };
   }
   async continueRun({ tx, team, identity, command: { payload: p }, now }) {
     const { deployment, bot } = await this.checkHost(tx, team, identity, p);
@@ -401,7 +430,8 @@ export class SharedBotsStore {
     tx.set(signals, { updatedAt: new Date(now) });
     const { resume: _resume, ...rest } = task;
     return { execute: true, permitId, epoch, task: taskView({ ...rest, ...next }, now), deployment, inputs: bot.grants,
-      messageId: task.messageId, messageSeq: task.messageSeq, remainingActiveMs: remaining, physicalDispatchesSpent, ...(wait ? { wait } : {}) };
+      messageId: task.messageId, messageSeq: task.messageSeq, remainingActiveMs: remaining, physicalDispatchesSpent, ...(wait ? { wait } : {}),
+      ...this.listOffer(bot, deployment) };
   }
   /** The result/question audience gate. A model-produced text enters a shared Chat only when
    * the source is still current and every present reader may see every published input. */
@@ -674,6 +704,72 @@ export class SharedBotsStore {
       .map(o => ({ operationId: o.operationId, logicalStepId: o.logicalStepId, category: o.category, tool: o.tool, state: o.state,
         epoch: o.epoch, dispatchedAt: o.dispatchedAt, ...(o.settledAt ? { settledAt: o.settledAt } : {}),
         ...(o.resolvedBy ? { resolvedBy: o.resolvedBy, resolvedAt: o.resolvedAt } : {}) })) };
+  }
+  /** A run is offered the Bot's list only on a host that records its writes in the ledger. */
+  listOffer(bot, deployment) {
+    return bot.sharedList && deployment.capabilities.writeOperations ? { sharedList: bot.sharedList } : {};
+  }
+  /** The running task of this host, for one read or write of the Bot's list. */
+  async listTask(tx, team, identity, p) {
+    const { deployment, bot } = await this.checkHost(tx, team, identity, p);
+    const ref = team.collection('tasks').doc(p.taskId), task = (await tx.get(ref)).data();
+    if (!task || task.deploymentId !== p.deploymentId) deny(404, 'TASK_REQUIRED');
+    if (task.state !== 'running' || task.permitDigest !== hash(p.permitId)) deny(403, 'EXECUTION_PERMIT_REQUIRED');
+    if (!bot.sharedList || !deployment.capabilities.writeOperations) deny(404, 'LIST_REQUIRED');
+    if (!this.requesterAuthorized(bot, task)) deny(403, 'TASK_REVOKED');
+    return { task, listRef: team.collection('lists').doc(task.sharedBotId) };
+  }
+  async taskList({ tx, team, identity, command: { payload: p } }) {
+    const { listRef } = await this.listTask(tx, team, identity, p);
+    return listView((await tx.get(listRef)).data());
+  }
+  /** Apply a task's recorded write once. The list change, the stored answer and the ledger outcome are one
+   * transaction, so the operation is never dispatched-but-unsettled in this store and a repeat returns the same answer. */
+  async writeTaskList({ tx, team, identity, command: { payload: p }, now }) {
+    const { task, listRef } = await this.listTask(tx, team, identity, p);
+    const operationRef = team.collection('operations').doc(p.operationId), answerRef = listRef.collection('operations').doc(`task_${p.operationId}`);
+    const [operationSnapshot, answerSnapshot, listSnapshot] = await tx.getAll(operationRef, answerRef, listRef);
+    const operation = operationSnapshot.data(), list = listSnapshot.data();
+    const digest = hash({ expectedDataRevision: p.expectedDataRevision, changes: p.changes });
+    if (!operation || operation.taskId !== task.taskId || operation.category !== 'store_idempotent'
+      || operation.tool.name !== listWriteTool || operation.digest !== digest) deny(409, 'OPERATION_REQUIRED');
+    if (answerSnapshot.exists) return { ...answerSnapshot.data().answer, items: listView(list).items };
+    if (operation.state !== 'dispatched') deny(409, 'OPERATION_CONFLICT');
+    if (task.cancelRequestedAt) deny(409, 'TASK_CANCELLED');
+    const next = applyListChanges(list, p, { kind: 'shared_bot', sharedBotId: task.sharedBotId, taskId: task.taskId }, now);
+    const answer = next.error ? { applied: false, error: next.error, dataRevision: list.dataRevision } : { applied: true, dataRevision: next.dataRevision };
+    if (!next.error) tx.set(listRef, next);
+    tx.create(answerRef, { schemaVersion: 1, operationId: p.operationId, taskId: task.taskId, digest, answer, createdAt: now });
+    tx.update(operationRef, { state: answer.applied ? 'succeeded' : 'failed', resultDigest: hash(answer), reference: null, settledAt: now, settledRecordedAt: now });
+    if (answer.applied) tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
+    return { ...answer, items: listView(next.error ? list : next).items };
+  }
+  /** A Bot's list is read and changed by the members who may use the Bot, and by its maintainer. */
+  async listAccess(tx, team, identity, sharedBotId) {
+    const bot = (await tx.get(team.collection('sharedBots').doc(sharedBotId))).data();
+    if (!bot?.sharedList || bot.identity.state === 'retired' || (!identityPermitted(bot, identity) && !ownerOf(bot, identity))) deny(404, 'LIST_REQUIRED');
+    const ref = team.collection('lists').doc(sharedBotId);
+    return { bot, ref, list: (await tx.get(ref)).data() };
+  }
+  async list({ tx, team, identity, command: { payload: p } }) {
+    const { bot, list } = await this.listAccess(tx, team, identity, p.sharedBotId);
+    return { sharedBotId: p.sharedBotId, title: bot.sharedList.title, description: bot.sharedList.description, ...listView(list), updatedAt: list.updatedAt };
+  }
+  /** A member's change is saved only on top of the revision it was made from; a repeated request returns what it already saved. */
+  async writeList({ tx, team, identity, command: { payload: p }, now }) {
+    const { ref, list } = await this.listAccess(tx, team, identity, p.sharedBotId);
+    const answerRef = ref.collection('operations').doc(`member_${p.operationId}`), saved = (await tx.get(answerRef)).data();
+    const digest = hash({ expectedDataRevision: p.expectedDataRevision, changes: p.changes });
+    if (saved) {
+      if (saved.digest !== digest || !same(saved.author, identity)) deny(409, 'OPERATION_CONFLICT');
+      return { sharedBotId: p.sharedBotId, dataRevision: saved.dataRevision };
+    }
+    const next = applyListChanges(list, p, { kind: 'user', ...identity }, now);
+    if (next.error) deny(409, next.error === 'DATA_REVISION_CONFLICT' ? 'LIST_REVISION_CONFLICT' : next.error);
+    tx.set(ref, next);
+    tx.create(answerRef, { schemaVersion: 1, operationId: p.operationId, digest, author: identity, dataRevision: next.dataRevision, createdAt: now });
+    tx.set(team.collection('signals').doc(p.sharedBotId), { updatedAt: new Date(now) });
+    return { sharedBotId: p.sharedBotId, dataRevision: next.dataRevision };
   }
   async tasks({ tx, team, identity, command: { action, payload: p }, now }) {
     if (action === 'getTask') {

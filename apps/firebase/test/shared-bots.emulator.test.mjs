@@ -847,3 +847,124 @@ test('documents: a Bot revises the document it read, and a revision of a stale c
   const fifth = await start();
   await assert.rejects(execute('completeTask', result(fifth, { document: undefined, revises: { artifactId, expectedRevision: 3 } })));
 });
+
+// ---- Shared list (M2 Q06) ----
+const canonical = value => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object'
+  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+const digestOf = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+const groceries = { title: 'Groceries', description: 'What the household needs to buy.' };
+let publication = 1;
+/** Publish the Bot again, with or without its list, on a host that does or does not record writes. */
+async function republish({ sharedList = groceries, writeOperations = true, ...override } = {}) {
+  const base = publish(); publication += 1;
+  const published = await execute('publishSharedBot', { ...base, expectedRevision: publication - 1, ...(sharedList ? { sharedList } : {}),
+    deployment: { ...base.deployment, revision: publication, capabilities: { durableWait: false, writeOperations, delegation: false } }, ...override });
+  await execute('heartbeatDeployment', { ...host, ready: true });
+  return published;
+}
+const add = text => ({ op: 'add', text });
+const memberWrite = (operationId, expectedDataRevision, changes, actor = member) =>
+  execute('writeList', { sharedBotId: 'sharedbot_01', operationId, expectedDataRevision, changes }, actor);
+const readList = (actor = member) => execute('readList', { sharedBotId: 'sharedbot_01' }, actor);
+/** Record a task's list write in the ledger, as the host does before it sends the write. */
+async function recordWrite(started, step, write, permitId = started.permitId) {
+  const payload = recordPayload(started, { step, category: 'store_idempotent', permitId, tool: { name: 'TeamListWrite', version: '1' }, digest: digestOf(write) });
+  return { payload, recorded: await execute('recordOperation', payload) };
+}
+const taskWrite = (started, operationId, write, permitId = started.permitId) =>
+  execute('writeTaskList', { ...host, taskId: started.task.taskId, permitId, operationId, ...write });
+
+test('list: one list per Bot that members change in turn; an outdated change is refused and nothing is duplicated', options, async () => {
+  publication = 1;
+  await assert.rejects(readList(), { code: 'LIST_REQUIRED' });
+  await republish();
+  assert.deepEqual((await execute('listSharedBots', {}, member)).bots[0].sharedList, { title: 'Groceries' });
+  assert.deepEqual(await readList(), { sharedBotId: 'sharedbot_01', ...groceries, dataRevision: 0, items: [], updatedAt: now });
+  now += 1000;
+  assert.deepEqual(await memberWrite('operation_01', 0, [add('  Milk ')]), { sharedBotId: 'sharedbot_01', dataRevision: 1 });
+  // A request whose answer was lost is answered again and adds nothing.
+  assert.deepEqual(await memberWrite('operation_01', 0, [add('  Milk ')]), { sharedBotId: 'sharedbot_01', dataRevision: 1 });
+  await assert.rejects(memberWrite('operation_01', 0, [add('Bread')]), { code: 'OPERATION_CONFLICT' });
+  await assert.rejects(memberWrite('operation_01', 0, [add('  Milk ')], other), { code: 'OPERATION_CONFLICT' });
+  // Someone who still looks at revision 0 saves nothing.
+  await assert.rejects(memberWrite('operation_02', 0, [add('Bread')], other), { code: 'LIST_REVISION_CONFLICT' });
+  await assert.rejects(memberWrite('operation_03', 1, [{ op: 'remove', itemId: 'item_9999' }], other), { code: 'LIST_ITEM_REQUIRED' });
+  await assert.rejects(memberWrite('operation_04', 1, [add('Bread'), { op: 'update', itemId: 'item_9999', done: true }], other), { code: 'LIST_ITEM_REQUIRED' });
+  assert.deepEqual((await readList(other)).items, [{ itemId: 'item_0001', text: 'Milk', done: false }]);
+  assert.equal((await memberWrite('operation_05', 1, [add('Bread'), { op: 'update', itemId: 'item_0001', done: true }], other)).dataRevision, 2);
+  assert.equal((await memberWrite('operation_06', 2, [{ op: 'remove', itemId: 'item_0001' }, { op: 'update', itemId: 'item_0002', text: 'Rye bread' }], owner)).dataRevision, 3);
+  const list = await readList();
+  assert.deepEqual({ dataRevision: list.dataRevision, items: list.items }, { dataRevision: 3, items: [{ itemId: 'item_0002', text: 'Rye bread', done: false }] });
+  for (const invalid of [[], [add('')], [add('x'.repeat(501))], [{ op: 'update', itemId: 'item_0002' }], [{ op: 'clear' }], Array.from({ length: 21 }, () => add('x'))]) {
+    await assert.rejects(memberWrite(`operation_bad_${++serial}`, 3, invalid));
+  }
+  // Publishing again keeps the items; a publication without the list hides them without deleting them.
+  await republish({ sharedList: { title: 'Shopping', description: 'Renamed.' } });
+  assert.deepEqual({ title: (await readList()).title, items: (await readList()).items }, { title: 'Shopping', items: list.items });
+  await republish({ sharedList: null });
+  await assert.rejects(readList(), { code: 'LIST_REQUIRED' });
+  await assert.rejects(memberWrite('operation_07', 3, [add('Eggs')]), { code: 'LIST_REQUIRED' });
+  await republish({ usePolicy: { mode: 'listed', members: [{ uid: member.uid, generation: 1 }] } });
+  assert.deepEqual((await readList()).items, list.items);
+  await assert.rejects(readList(other), { code: 'LIST_REQUIRED' });
+  assert.equal((await readList(owner)).dataRevision, 3);
+  const filled = Array.from({ length: 20 }, (_, i) => add(`Item ${i}`));
+  let revision = 3;
+  for (let i = 0; i < 24; i += 1) revision = (await memberWrite(`operation_fill_${i}`, revision, filled)).dataRevision;
+  await assert.rejects(memberWrite('operation_full', revision, filled), { code: 'LIST_LIMIT' });
+});
+test('list: a task writes through its ledger operation; the change and the outcome are saved together and only once', options, async () => {
+  publication = 1;
+  const plain = await start();
+  assert.equal(Object.hasOwn(plain, 'sharedList'), false);
+  await execute('completeTask', result(plain));
+  await republish({ writeOperations: false });
+  const unsupported = await start();
+  assert.equal(Object.hasOwn(unsupported, 'sharedList'), false);
+  await assert.rejects(execute('readTaskList', { ...host, taskId: unsupported.task.taskId, permitId: unsupported.permitId }), { code: 'LIST_REQUIRED' });
+  await execute('completeTask', result(unsupported));
+  await republish();
+  await memberWrite('operation_01', 0, [add('Milk')]);
+  const started = await start(), taskId = started.task.taskId;
+  assert.deepEqual(started.sharedList, groceries);
+  assert.deepEqual(await execute('readTaskList', { ...host, taskId, permitId: started.permitId }), { dataRevision: 1, items: [{ itemId: 'item_0001', text: 'Milk', done: false }] });
+  await assert.rejects(execute('readTaskList', { ...host, taskId, permitId: 'permit_other' }), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  const write = { expectedDataRevision: 1, changes: [add('Bread'), { op: 'update', itemId: 'item_0001', done: true }] };
+  // Without its ledger record the write is not accepted, and a record for other parameters does not cover it.
+  await assert.rejects(taskWrite(started, operationId(taskId, `${taskId}/t0/c0`, 'store_idempotent'), write), { code: 'OPERATION_REQUIRED' });
+  const { payload, recorded } = await recordWrite(started, `${taskId}/t0/c0`, write);
+  assert.equal(recorded.dispatch, true);
+  await assert.rejects(taskWrite(started, payload.operationId, { ...write, changes: [add('Wine')] }), { code: 'OPERATION_REQUIRED' });
+  now += 1000;
+  const items = [{ itemId: 'item_0001', text: 'Milk', done: true }, { itemId: 'item_0002', text: 'Bread', done: false }];
+  assert.deepEqual(await taskWrite(started, payload.operationId, write), { applied: true, dataRevision: 2, items });
+  const settled = await operationData(payload.operationId);
+  assert.deepEqual({ state: settled.state, resultDigest: settled.resultDigest, settledAt: settled.settledAt },
+    { state: 'succeeded', resultDigest: digestOf({ applied: true, dataRevision: 2 }), settledAt: now });
+  // The answer was lost: the same write again changes nothing, and the ledger gives a receipt instead of a licence.
+  assert.deepEqual(await taskWrite(started, payload.operationId, write), { applied: true, dataRevision: 2, items });
+  assert.equal((await execute('recordOperation', payload)).dispatch, false);
+  assert.equal((await readList()).dataRevision, 2);
+  assert.equal((await execute('getTask', { taskId }, member)).unverifiedOperations, undefined);
+  // A write made from an outdated read saves nothing and is settled as failed.
+  const stale = { expectedDataRevision: 1, changes: [add('Eggs')] }, second = await recordWrite(started, `${taskId}/t1/c0`, stale);
+  assert.deepEqual(await taskWrite(started, second.payload.operationId, stale), { applied: false, error: 'DATA_REVISION_CONFLICT', dataRevision: 2, items });
+  assert.equal((await operationData(second.payload.operationId)).state, 'failed');
+  assert.deepEqual(await taskWrite(started, second.payload.operationId, stale), { applied: false, error: 'DATA_REVISION_CONFLICT', dataRevision: 2, items });
+  // The worker died after the record: the next attempt repeats the same operation and it is applied once.
+  const third = { expectedDataRevision: 2, changes: [add('Eggs')] }, pending = await recordWrite(started, `${taskId}/t2/c0`, third);
+  const again = await recover(taskId);
+  assert.equal(again.execute, true); assert.deepEqual(again.sharedList, groceries);
+  await assert.rejects(taskWrite(started, pending.payload.operationId, third), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  now += 1000;
+  assert.equal((await execute('recordOperation', { ...pending.payload, permitId: again.permitId, dispatchedAt: now })).dispatch, true);
+  assert.equal((await taskWrite(started, pending.payload.operationId, third, again.permitId)).dataRevision, 3);
+  assert.equal((await taskWrite(started, pending.payload.operationId, third, again.permitId)).dataRevision, 3);
+  // What the Bot saved is what the members see.
+  assert.deepEqual((await readList(other)).items.map(item => item.text), ['Milk', 'Bread', 'Eggs']);
+  // A cancelled task changes nothing more.
+  const last = { expectedDataRevision: 3, changes: [add('Wine')] }, late = await recordWrite(started, `${taskId}/t3/c0`, last, again.permitId);
+  await execute('cancelTask', { taskId }, member);
+  await assert.rejects(taskWrite(started, late.payload.operationId, last, again.permitId), { code: 'TASK_CANCELLED' });
+  assert.equal((await readList()).dataRevision, 3);
+});

@@ -32,6 +32,17 @@ const artifactDocument = z.object({ title: z.string().trim().min(1).max(120), bo
 /** How an interrupted operation may be recovered (detailed design 12.3). */
 export const operationCategory = z.enum(['read', 'store_idempotent', 'provider_idempotent', 'queryable', 'unqueryable']);
 const logicalStepId = z.string().regex(/^[A-Za-z0-9_.:/-]{1,200}$/u);
+const itemText = z.string().refine(value => value.trim().length > 0 && Buffer.byteLength(value, 'utf8') <= 500 && !value.includes('\0'));
+/** The list a Bot shares with its Team: what it is called and what the Bot is told about it. */
+const sharedList = z.object({ title: z.string().trim().min(1).max(120), description: z.string().trim().min(1).max(2000) }).strict();
+/** One write to a shared list: 1 to 20 changes applied together or not at all. */
+export const listChanges = z.array(z.discriminatedUnion('op', [
+  z.object({ op: z.literal('add'), text: itemText }).strict(),
+  z.object({ op: z.literal('update'), itemId: executionId, text: itemText.optional(), done: z.boolean().optional() }).strict()
+    .refine(value => value.text !== undefined || value.done !== undefined, 'An update changes the text or the done state'),
+  z.object({ op: z.literal('remove'), itemId: executionId }).strict(),
+])).min(1).max(20);
+const listWrite = { expectedDataRevision: cursor, changes: listChanges };
 const payloads = {
   createConversation: z.object({ ...thread, kind: z.enum(['bot_dm', 'group', 'channel']),
     title: z.string().trim().min(1).max(120), participantUids: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/u)).min(1).max(200).refine(unique),
@@ -42,6 +53,8 @@ const payloads = {
     deployment: deploymentRecord,
     inputs: z.array(publishedInput).min(1).max(50).refine(values => unique(values.map(value => value.resourceId))),
     quotas: z.object({ team: quota, member: quota, bot: quota }).strict(),
+    // The Bot keeps one list for the Team. Publishing again keeps its items; leaving this out stops sharing it.
+    sharedList: sharedList.optional(),
   }).strict().refine(value => value.inputs.filter(input => input.kind === 'persona').length === 1, 'Exactly one published persona required'),
   listSharedBots: z.object({}).strict(),
   pauseSharedBot: z.object({ sharedBotId: executionId, expectedRevision: positive }).strict(),
@@ -81,6 +94,11 @@ const payloads = {
   settleOperation: z.object({ ...host, ...task, permitId: executionId, operationId: digest,
     outcome: z.enum(['succeeded', 'failed', 'unknown']), resultDigest: digest,
     reference: z.string().min(1).max(200).optional(), settledAt: cursor }).strict(),
+  // The shared list (M2 Q06). A task's write is the ledger operation `operationId`, recorded before this command.
+  readTaskList: z.object({ ...host, ...task, permitId: executionId }).strict(),
+  writeTaskList: z.object({ ...host, ...task, permitId: executionId, operationId: digest, ...listWrite }).strict(),
+  readList: z.object({ sharedBotId: executionId }).strict(),
+  writeList: z.object({ sharedBotId: executionId, operationId: executionId, ...listWrite }).strict(),
   resolveOperation: z.object({ ...task, operationId: digest, resolution: z.enum(['succeeded', 'failed']) }).strict(),
   listOperations: z.object(task).strict(),
   answerWait: z.object({ ...thread, waitId: executionId, messageId: executionId, changeId: executionId, text }).strict(),

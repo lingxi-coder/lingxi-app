@@ -80,6 +80,31 @@ Implemented in `apps/ios/native/Sources/Teams/` (`TeamBots.swift`, `TeamBotViews
 
 Target: detailed design 0.5 and development plan 1.4, M0 then M1a/M1b.
 
+## M2 / Q06 — the shared list (Firebase backend) and its runtime tools
+
+**Deviation from the detailed design, to be confirmed.** Design §14.3 puts the list in the maintainer's Local App
+instance and reaches it through `serviceBroker`/`remoteGateway` with a new TeamAppGrant. That gateway work is not built.
+The list is instead one server-owned document per shared Bot (`teams/{team}/lists/{sharedBotId}`), so members see the same
+data on every client without the maintainer's Desktop being online, and so the write can be verified in the emulator. The
+runtime and host only know a "list service" with read and operation-id write; a Local App adapter can replace the store later.
+
+- Publication: `publishSharedBot.sharedList {title, description}` (optional). The first publication with a list creates it
+  empty; later publications keep its items; a publication without it stops sharing but deletes nothing. The Bot card carries
+  `sharedList.title`. `startTask`/`continueTask` return `sharedList` only when the deployment has `capabilities.writeOperations`.
+- Members (`readList`, `writeList {sharedBotId, operationId, expectedDataRevision, changes}`): whoever may use the Bot, and
+  its maintainer. A write is 1–20 changes (`add`, `update`, `remove`) applied together on the revision they were made from;
+  otherwise `LIST_REVISION_CONFLICT` and nothing is saved. `operationId` makes a repeated request return what it saved.
+  Other refusals: `LIST_REQUIRED`, `LIST_ITEM_REQUIRED`, `LIST_LIMIT` (500 items), `OPERATION_CONFLICT`.
+- Tasks (`readTaskList`, `writeTaskList {…host, taskId, permitId, operationId, expectedDataRevision, changes}`): the write
+  must already be a `store_idempotent` ledger operation of the task for tool `TeamListWrite` whose digest is the hash of
+  `{expectedDataRevision, changes}`. The list change, the stored answer and the ledger outcome (`succeeded`, or `failed` for
+  a conflict or a missing item) are one transaction, so the store never holds a dispatched-but-unsettled write and a repeat
+  returns the first answer. A cancelled task writes nothing (`TASK_CANCELLED`).
+- Runtime (SDK branch `claude/teams-m2-runtime-20261111`): `TeamListRead` / `TeamListWrite` tools, registered when the host
+  start frame carries `sharedList`. The write's operation is named by the durable logical step of its call and is sent to
+  the host only after that call is on the transcript; a killed worker repeats the same operation on continuation; an
+  outcome the host cannot establish ends the process with the call unfinished.
+
 ## M2 / Q07–Q08 clients — document editing, history and tasks that need checking
 
 Member commands added to the shared contract (`packages/teams/contracts/execution-vectors.json`, validated identically by the

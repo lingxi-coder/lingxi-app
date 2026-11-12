@@ -8,6 +8,28 @@ import SwiftUI
 /// `ForEach` id, SwiftUI tears the row down and rebuilds it, which moves the
 /// scroll position under the reader.
 final class ConversationTimelineSegmentsTests: XCTestCase {
+    @MainActor
+    func testThinkingFirstAndMixedToolsRenderOneStableActivityHeader() throws {
+        let thought = ConversationTimelineGroup(id: "thought", runID: "R1",
+            rows: [.reasoning(runID: "R1", activityID: "r", text: String(repeating: "Inspect spacing.\n", count: 40))], status: .running)
+        let read = ConversationToolTrace(id: "read", tool: "Read", status: .running)
+        let shell = ConversationToolTrace(id: "shell", tool: "Bash", status: .running)
+        let phases = [[thought], [thought, toolGroup([read])], [thought, toolGroup([read, shell])],
+                      [thought, toolGroup([ConversationToolTrace(id: "read", tool: "Read", status: .completed),
+                                           ConversationToolTrace(id: "shell", tool: "Bash", status: .failed)])]]
+        var height: CGFloat?
+        for groups in phases {
+            let ids = ConversationTimelineView.projectedSegmentIDs(groups: groups,
+                transcriptAgents: [], transcriptAgentAnchors: [:], streaming: true)
+            XCTAssertEqual(ids, ["activity:after:start"])
+            let renderer = ImageRenderer(content: ConversationTimelineView(groups: groups,
+                messageDetails: [:], expandedToolCalls: [], onToggleToolCall: { _ in }, streaming: true).frame(width: 320))
+            let current = try XCTUnwrap(renderer.uiImage).size.height
+            if let height { XCTAssertEqual(current, height, accuracy: 0.5) } else { height = current }
+            XCTAssertGreaterThanOrEqual(current, 44)
+        }
+    }
+
     func testTaskCoordinationFoldsWithoutAbsorbingInteractiveTools() {
         let calls = ["TaskList", "TaskUpdate", "SendMessage", "ToolSearch"]
         for tool in calls.prefix(3) {
@@ -49,11 +71,11 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
             ConversationTimelineGroup(id: "message-\(index)", runID: nil, rows: [.message(message)], status: nil)
         }
         let hidden = ConversationTimelineView.projectedSegmentSpacings(groups: groups, showThinking: false)
-        XCTAssertEqual(hidden, [0, 16, 12, 8])
+        XCTAssertEqual(hidden, [0, 16, 12])
         XCTAssertEqual(hidden, ConversationTimelineView.projectedSegmentSpacings(groups: groups, streaming: true))
         let withTools = groups + [toolGroup([trace("t1")])]
-        XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: withTools), [0, 16, 12, 8, 8])
-        XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: [groups[0]]), [0, 16])
+        XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: withTools), [0, 16, 12, 8])
+        XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: [groups[0]]), [0])
     }
 
     func testAgentRowsUseActivitySpacingAndPreserveUserTurnBoundaries() {
@@ -66,13 +88,13 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
             let agent = ConversationAgentSummary(id: "child", name: "Child", agentType: "worker", status: status)
             XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(
                 groups: groups, transcriptAgents: [agent], transcriptAgentAnchors: [agent.id: "before"]
-            ), [0, 8, 8, 16, 16])
+            ), [0, 8, 8, 16])
             XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(
                 groups: groups, transcriptAgents: [agent], transcriptAgentAnchors: [agent.id: "user"]
-            ), [0, 12, 16, 16, 8])
+            ), [0, 12, 16, 16])
             XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(
                 groups: groups, transcriptAgents: [agent]
-            ), [0, 8, 12, 16, 16])
+            ), [0, 8, 12, 16])
         }
     }
 
@@ -88,7 +110,7 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
             return try XCTUnwrap(renderer.uiImage).size.height
         }
         let visible = try height(streaming: true, showThinking: true)
-        XCTAssertGreaterThan(visible, 40)
+        XCTAssertGreaterThan(visible, 0)
         XCTAssertEqual(visible, try height(streaming: true, showThinking: false), accuracy: 0.5)
         XCTAssertEqual(visible, try height(streaming: false, showThinking: true), accuracy: 0.5)
     }
@@ -168,7 +190,7 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
                 XCTAssertEqual(ConversationTimelineView.projectedSegmentIDs(
                     groups: [tools, thought], transcriptAgents: [], transcriptAgentAnchors: [:],
                     streaming: streaming
-                ), ["timeline-tools:tool", "thought:bottom-slot"])
+                ), ["activity:after:start"])
             }
         }
     }
@@ -179,10 +201,10 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         ).isEmpty)
         XCTAssertEqual(ConversationTimelineView.projectedSegmentIDs(
             groups: [], transcriptAgents: [], transcriptAgentAnchors: [:], streaming: true
-        ), ["thought:bottom-slot"])
+        ), ["activity:after:start"])
     }
 
-    func testThinkingSlotRemainsAfterCompletionAndWhileThinkingIsSuppressed() {
+    func testCompletedReasoningRemainsInspectableWithoutAHiddenSlot() {
         let historical = ConversationTimelineGroup(
             id: "thought", runID: "R1",
             rows: [.reasoning(runID: "R1", activityID: "reasoning", text: "private reasoning")],
@@ -190,10 +212,10 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         )
         XCTAssertEqual(ConversationTimelineView.projectedSegmentIDs(
             groups: [historical], transcriptAgents: [], transcriptAgentAnchors: [:], hasLiveOwner: false
-        ), ["thought:bottom-slot"])
-        XCTAssertEqual(ConversationTimelineView.projectedSegmentIDs(
+        ), ["activity:after:start"])
+        XCTAssertTrue(ConversationTimelineView.projectedSegmentIDs(
             groups: [historical], transcriptAgents: [], transcriptAgentAnchors: [:], showThinking: false
-        ), ["thought:bottom-slot"])
+        ).isEmpty)
     }
 
     func testConsecutiveActivityGroupsKeepInvocationOrder() {
@@ -299,7 +321,7 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
                 transcriptAgents: model.orderedAgentSummaries,
                 transcriptAgentAnchors: model.transcriptAgentAnchors
             ),
-            ["agents:after:spawn-tool", "timeline-tools:later-tool", "thought:bottom-slot"]
+            ["agents:after:spawn-tool", "activity:after:agents:after:spawn-tool"]
         )
         XCTAssertEqual(model.transcriptAgentAnchors["child"], "spawn-tool")
         XCTAssertEqual(ConversationTimelineView.toolDestinationID(toolID: "spawn-tool",
@@ -337,11 +359,10 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         XCTAssertEqual(model.transcriptAgentAnchors["child"], initialAnchor)
         XCTAssertEqual(model.orderedAgentSummaries.map(\.id), ["main", "child", "other"])
         XCTAssertEqual(rendered, [
-            "timeline-tools:first-tool",
+            "activity:after:start",
             "agents:after:first-tool",
-            "timeline-tools:new-tool",
+            "activity:after:agents:after:first-tool",
             "agents:after:new-tool",
-            "thought:bottom-slot",
         ])
     }
 

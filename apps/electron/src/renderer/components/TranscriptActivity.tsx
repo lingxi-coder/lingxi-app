@@ -1,0 +1,56 @@
+import type { CSSProperties } from 'react';
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
+import { useT } from '../theme/ThemeContext';
+import { Disclosure } from './Disclosure';
+import { ToolCall, toolIconName } from './ToolCall';
+import { ToolActivityIcon } from './ToolActivityIcon';
+import { MarkdownContent } from './MarkdownContent';
+import { ApiRetryNotice, type ApiRetryStatus } from './ApiRetryNotice';
+import { toolGroupSummary } from './toolPresentation';
+import type { TranscriptActivity as Activity } from './transcriptActivities';
+import './TranscriptActivity.css';
+
+export function TranscriptActivity({ activity, open, toolOpen, onSetOpen, modUiSessionId, retry }: {
+  activity: Activity;
+  open: boolean;
+  toolOpen(id: string): boolean | undefined;
+  onSetOpen(id: string, next: boolean): void;
+  modUiSessionId?: string;
+  retry?: ApiRetryStatus;
+}) {
+  const t = useT();
+  useI18n();
+  const running = activity.tools.filter(tool => tool.status === 'running').length;
+  const thought = activity.thoughts.at(-1);
+  const thinking = activity.active && !running;
+  const thoughtLabel = thought?.text.trim().slice(-240).replace(/[\r\n]+/g, ' ');
+  const label = retry ? `Retrying… attempt ${retry.attempt}/${retry.max_retries} · ${retry.message}`
+    : thinking && thoughtLabel ? thoughtLabel
+    : activity.tools.length ? toolGroupSummary(activity.tools)
+    : thoughtLabel || (activity.active ? 'Thinking…' : tr('desktop_activity'));
+  const failed = activity.tools.filter(tool => tool.status === 'error').length;
+  const runningState = running > 0 ? tr('desktop_ui_running_count', running) : '';
+  const failedState = failed > 0 ? tr('desktop_ui_tool_call_unsuccessful_count', failed) : '';
+  const first = activity.tools[0];
+  return <div className="transcript-activity" data-activity-id={activity.id} data-active={activity.active || undefined}
+    style={{ '--activity-text': t.text3, '--activity-highlight': t.text, '--activity-ring': t.accent,
+      '--activity-border': t.border, '--activity-danger': t.danger } as CSSProperties}>
+    <Disclosure id={activity.id} open={open} onToggle={() => onSetOpen(activity.id, !open)}
+      buttonClassName="transcript-activity-trigger" buttonStyle={{ fontSize: 13, lineHeight: '20px' }} label={[label, runningState, failedState].filter(Boolean).join(' · ')}
+      summary={<>
+        <ToolActivityIcon name={first ? toolIconName(first.view.verb, first.tool, first.view.icon) : 'spark'} />
+        <span className={`transcript-activity-label${activity.active && !retry ? ' running-sweep' : ''}`}
+          role={activity.active && !retry ? 'status' : undefined} title={label}
+          style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>{retry ? <ApiRetryNotice retry={retry} inline /> : label}</span>
+        {runningState && <span className="transcript-activity-state">{runningState}</span>}
+        {failedState && <span className="transcript-activity-failed">{failedState}</span>}
+      </>}>
+      <div className="transcript-activity-details">
+        {activity.tools.map(tool => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId}
+          open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
+        {activity.thoughts.map(thought => thought.text.trim() && <MarkdownContent key={thought.id} text={thought.text} />)}
+      </div>
+    </Disclosure>
+  </div>;
+}

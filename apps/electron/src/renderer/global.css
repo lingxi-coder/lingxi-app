@@ -2536,7 +2536,12 @@ textarea, input, select { font-family: inherit; }
  * a fallback: without one, a dropped property would be invalid at
  * computed-value time and silently inherit instead of failing visibly.
  */
-.transcript-user-message { position: relative; }
+.transcript-user-message {
+  position: relative;
+  /* Its action footer extends into the inter-message gap. */
+  content-visibility: visible;
+  contain-intrinsic-size: none;
+}
 .user-message-actions {
   position: absolute;
   top: 100%;

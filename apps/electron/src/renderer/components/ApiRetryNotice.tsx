@@ -28,7 +28,7 @@ export function secondsRemaining(delayMs: number, elapsedMs: number): number {
  * to minutes, and a frozen "Retrying in 60s…" would be wrong for all but its
  * first second.
  */
-export function ApiRetryNotice({ retry }: { retry: ApiRetryStatus }) {
+export function ApiRetryNotice({ retry, inline = false }: { retry: ApiRetryStatus; inline?: boolean }) {
   const t = useT();
   // Keyed on the event, so a second retry restarts the countdown rather than
   // continuing to run down the first one's clock.
@@ -40,12 +40,13 @@ export function ApiRetryNotice({ retry }: { retry: ApiRetryStatus }) {
     return () => clearInterval(id);
   }, [retry]);
   const left = secondsRemaining(retry.delay_ms, elapsed);
+  const Container = inline ? 'span' : 'div';
   return (
     // Coloured as an error, not as neutral progress: this row exists because a
     // call FAILED, and the retry is the recovery attempt. Rendering it in the
     // same grey as "Thinking…" reads as ordinary work in progress, which is the
     // impression that made a rate-limited turn look like nothing was wrong.
-    <div className="transcript-run-item transcript-api-retry" data-run-type="api-retry" role="status">
+    <Container className={inline ? 'transcript-api-retry' : 'transcript-run-item transcript-api-retry'} data-run-type="api-retry" role="status">
       <span
         className="running-sweep"
         style={{
@@ -62,6 +63,6 @@ export function ApiRetryNotice({ retry }: { retry: ApiRetryStatus }) {
       <span style={{ color: t.danger, fontSize: 13, marginLeft: 8 }}>
         {`attempt ${retry.attempt}/${retry.max_retries} · ${retry.message}`}
       </span>
-    </div>
+    </Container>
   );
 }

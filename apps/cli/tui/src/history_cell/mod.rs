@@ -515,7 +515,10 @@ mod tests {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(collapsed.contains("ctrl+o to expand"), "got: {collapsed}");
+        assert!(
+            collapsed.is_empty(),
+            "reasoning has no separate collapsed row: {collapsed}"
+        );
         assert!(!collapsed.contains("secret reasoning"), "got: {collapsed}");
         let expanded: String = cell
             .display_lines(

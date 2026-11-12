@@ -53,7 +53,6 @@ use crate::bottom_pane::{
     FusionSetupAction, PermissionAction, PluginAction, TaskAction,
 };
 use crate::history_cell::message::AssistantTextCell;
-use crate::history_cell::message::ThinkingCell;
 use crate::renderable::Renderable;
 use crate::session::SessionInfo;
 use crate::spinner;
@@ -1480,7 +1479,9 @@ impl ChatWidget {
     /// Seal the open fold: drop the live active cell and commit the finalized
     /// (is_active = false) collapsed variant. No-op when no fold is open.
     fn finalize_activity_fold(&mut self) {
-        if let Some(fold) = self.activity_fold.take() {
+        if let Some(mut fold) = self.activity_fold.take() {
+            fold.thinking = false;
+            fold.sealed = true;
             self.transcript.set_active(Box::new(fold));
             self.transcript.flush_active();
         }
@@ -1869,37 +1870,28 @@ impl ChatWidget {
                 }
             }
             TurnEvent::ThinkingDelta(delta) => {
-                self.finalize_collapse_group();
                 self.response_chars = self
                     .response_chars
                     .saturating_add(delta.chars().count() as u64);
-                // M5 cc2.1.198 thinking streaming: append to the active
-                // ThinkingCell (collapsed by default; Ctrl-O reveals the body),
-                // mirroring the TextDelta path. A non-thinking active cell is
-                // flushed first so a fresh collapsed thinking block opens; a
-                // following TextDelta likewise flushes this thinking cell and
-                // opens the assistant reply.
-                let appended = self
-                    .transcript
-                    .mutate_active(|cell| {
-                        if let Some(thinking) = cell.as_any_mut().downcast_mut::<ThinkingCell>() {
-                            thinking.append(&delta);
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .unwrap_or(false);
-                // Only OPEN a new thinking cell for real reasoning text. An empty
-                // thinking chunk (some providers open a thinking block with no
-                // content) must not flush the active reply or leave a bodyless
-                // `∴ Thinking (ctrl+o to expand)` cell — claude-code shows
-                // thinking only when there is text.
-                if !appended && !delta.trim().is_empty() {
-                    self.flush_or_discard_active();
-                    self.transcript
-                        .set_active(Box::new(ThinkingCell::new(delta)));
+                if delta.trim().is_empty() && self.activity_fold.is_none() {
+                    return;
                 }
+                if self.activity_fold.is_none() {
+                    self.finalize_collapse_group();
+                    self.flush_or_discard_active();
+                    self.activity_fold = Some(crate::history_cell::tool::ActivityFoldCell {
+                        key: "activity",
+                        reasoning: String::new(),
+                        thinking: true,
+                        sealed: false,
+                        entries: Vec::new(),
+                    });
+                }
+                if let Some(fold) = &mut self.activity_fold {
+                    fold.reasoning.push_str(&delta);
+                    fold.thinking = true;
+                }
+                self.render_activity_fold();
             }
             TurnEvent::ToolUseStart { id, tool, input } => {
                 let block_uuid = self
@@ -1931,17 +1923,17 @@ impl ChatWidget {
                 }
                 // Commit any streamed assistant text ABOVE the tool call, then
                 // render the tool-use header (`● {tool}` + input) into the
-                // transcript — claude-code parity: each tool invocation shows
-                // as its own scrollback cell between the assistant's text
-                // segments. Without this flush the whole turn's text merged
-                // into one active cell and every tool call was invisible.
+                // transcript. Consecutive reasoning and calls share a disclosure;
+                // assistant prose still seals that activity at its visible boundary.
                 // Remember the input so the paired result can render the
                 // Edit/Write diff (see `ToolUseResult`).
-                if let Some(key) = crate::history_cell::tool::activity_fold_key(&tool, &input) {
+                let activity_key =
+                    crate::history_cell::tool::transcript_activity_key(&tool, &input);
+                if let Some(key) = activity_key {
                     if self
                         .activity_fold
                         .as_ref()
-                        .is_some_and(|fold| fold.key != key)
+                        .is_some_and(|fold| !fold.entries.is_empty() && fold.key != key)
                     {
                         self.finalize_activity_fold();
                     }
@@ -1950,11 +1942,16 @@ impl ChatWidget {
                         self.flush_or_discard_active();
                         self.activity_fold = Some(crate::history_cell::tool::ActivityFoldCell {
                             key,
+                            reasoning: String::new(),
+                            thinking: false,
+                            sealed: false,
                             entries: Vec::new(),
                         });
                     }
                     self.tool_inputs.insert(id.clone(), input.clone());
                     if let Some(fold) = &mut self.activity_fold {
+                        fold.key = key;
+                        fold.thinking = false;
                         fold.entries.push(crate::history_cell::tool::ActivityEntry {
                             id: id.to_string(),
                             tool,
@@ -5173,6 +5170,7 @@ impl ChatWidget {
     /// message (the same path `/export` uses). `is_error` renders it in the
     /// error color.
     fn show_system_text(&mut self, text: &str, is_error: bool) -> ChatOutcome {
+        self.finalize_collapse_group();
         self.transcript.push_message(RenderedMessage::SystemText {
             body: text.to_string(),
             timestamp: 0,
@@ -11355,9 +11353,52 @@ mod tests {
         terminal
     }
 
-    /// A tool call with NO preamble text (the common agentic case) renders the
-    /// tool-use + result cells and does NOT leave a stray empty assistant
-    /// placeholder — the `TurnStarted` empty cell is discarded, not committed.
+    /// Reasoning and mixed tool calls update one active row until prose seals it.
+    #[test]
+    fn activity_fold_owns_thinking_and_mixed_tools_without_extra_history_rows() {
+        use crate::history_cell::StyledCell;
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let committed = widget.transcript.committed_cells().len();
+        widget.apply_turn_event(TurnEvent::ThinkingDelta("Inspect layout".into()));
+        for (name, input) in [
+            ("Read", serde_json::json!({"file_path":"Stage.tsx"})),
+            ("Bash", serde_json::json!({"command":"check layout"})),
+        ] {
+            let id = lingxi_core::types::ToolUseId::from(format!("shared-{name}"));
+            widget.apply_turn_event(TurnEvent::ToolUseStart {
+                id: id.clone(),
+                tool: name.into(),
+                input,
+            });
+            assert_eq!(widget.transcript.committed_cells().len(), committed);
+            let fold = widget.activity_fold.as_ref().unwrap();
+            for width in [20, 80] {
+                assert_eq!(fold.styled_lines(width, &Theme::dark(), false).len(), 1);
+            }
+            widget.apply_turn_event(TurnEvent::ToolUseResult {
+                id,
+                tool: name.into(),
+                result: serde_json::json!({"output":"retained result"}),
+            });
+            widget.apply_turn_event(TurnEvent::ThinkingDelta("\nCheck another operation".into()));
+            assert_eq!(widget.transcript.committed_cells().len(), committed);
+        }
+        let fold = widget.activity_fold.as_ref().unwrap();
+        assert_eq!(fold.entries.len(), 2);
+        let details = fold
+            .styled_lines(80, &Theme::dark(), true)
+            .into_iter()
+            .flat_map(|line| line.spans)
+            .map(|span| span.text)
+            .collect::<String>();
+        assert!(details.contains("Inspect layout"));
+        assert!(details.contains("retained result"));
+        widget.apply_turn_event(TurnEvent::TextDelta("Final reply".into()));
+        assert!(widget.activity_fold.is_none());
+        assert_eq!(widget.transcript.committed_cells().len(), committed + 1);
+    }
+
     #[test]
     fn activity_fold_keeps_task_results_and_seals_on_prose() {
         let mut widget = widget();
@@ -11390,7 +11431,7 @@ mod tests {
 
     #[test]
     fn tool_first_turn_renders_tool_cells_without_empty_placeholder() {
-        use crate::history_cell::tool::{ToolResultCell, ToolUseCell};
+        use crate::history_cell::tool::ActivityFoldCell;
         let mut widget = widget();
         submit_command(&mut widget, "run it");
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -11410,13 +11451,11 @@ mod tests {
         widget.apply_turn_event(TurnEvent::TurnEnded(
             lingxi_core::host::TurnOutcome::EndTurn,
         ));
-        // Exactly: user "run it" · ● Bash · ⎿ result — NO empty assistant cell.
-        assert_eq!(widget.transcript.committed_cells().len(), 3);
-        assert_eq!(cell::<ToolUseCell>(&widget, 1).tool(), "Bash");
-        assert!(cells(&widget)[2]
-            .as_any()
-            .downcast_ref::<ToolResultCell>()
-            .is_some());
+        // User request followed by one activity containing Bash and its result.
+        assert_eq!(widget.transcript.committed_cells().len(), 2);
+        let activity = cell::<ActivityFoldCell>(&widget, 1);
+        assert_eq!(activity.entries[0].tool, "Bash");
+        assert_eq!(activity.entries[0].result, Some(serde_json::json!("hi")));
         // The (empty) placeholder must not survive as an assistant cell.
         assert!(cells(&widget)
             .iter()
@@ -11428,8 +11467,8 @@ mod tests {
     /// user's "collapse consecutive tools to one line" request. A breaker
     /// (`TurnEnded`) seals the group.
     #[test]
-    fn different_tool_types_keep_separate_ordered_cells() {
-        use crate::history_cell::tool::{CollapsedReadSearchCell, ToolUseCell};
+    fn different_tool_types_keep_their_order_inside_one_activity() {
+        use crate::history_cell::tool::{ActivityFoldCell, ToolUseCell};
         let mut widget = widget();
         submit_command(&mut widget, "look");
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -11452,19 +11491,25 @@ mod tests {
             lingxi_core::host::TurnOutcome::EndTurn,
         ));
         // User prose followed by Read and Grep, each at its invocation position.
-        assert_eq!(widget.transcript.committed_cells().len(), 3);
-        assert!(cells(&widget)[1]
-            .as_any()
-            .downcast_ref::<CollapsedReadSearchCell>()
-            .is_some());
+        assert_eq!(widget.transcript.committed_cells().len(), 2);
+        let activity = cell::<ActivityFoldCell>(&widget, 1);
+        assert_eq!(
+            activity
+                .entries
+                .iter()
+                .map(|entry| entry.tool.as_str())
+                .collect::<Vec<_>>(),
+            ["Read", "Grep"]
+        );
+        assert!(activity.entries.iter().all(|entry| entry.result.is_some()));
         assert!(cells(&widget)
             .iter()
             .all(|c| c.as_any().downcast_ref::<ToolUseCell>().is_none()));
     }
 
     #[test]
-    fn fullscreen_bash_and_tool_search_keep_separate_summaries() {
-        use crate::history_cell::tool::CollapsedReadSearchCell;
+    fn fullscreen_discovery_and_commands_share_one_activity() {
+        use crate::history_cell::tool::ActivityFoldCell;
 
         let mut widget = widget();
         widget.set_collapse_fullscreen(true);
@@ -11518,27 +11563,22 @@ mod tests {
             lingxi_core::host::TurnOutcome::EndTurn,
         ));
 
-        assert_eq!(widget.transcript.committed_cells().len(), 3);
-        assert!(cells(&widget)[1]
-            .as_any()
-            .downcast_ref::<CollapsedReadSearchCell>()
-            .is_some());
-        let summary = cells(&widget)[2]
-            .display_lines(
-                80,
-                &Theme::dark(),
-                crate::history_cell::RenderMode::default(),
-            )
-            .into_iter()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(summary.contains("Bash · 1 call"), "{summary}");
+        assert_eq!(widget.transcript.committed_cells().len(), 2);
+        let activity = cell::<ActivityFoldCell>(&widget, 1);
+        assert_eq!(
+            activity
+                .entries
+                .iter()
+                .map(|entry| entry.tool.as_str())
+                .collect::<Vec<_>>(),
+            ["ToolSearch", "Bash"]
+        );
+        assert_eq!(activity.entries[1].result, Some(serde_json::json!("hi")));
     }
 
     #[test]
     fn fullscreen_silent_meta_commits_and_replays_in_verbose() {
-        use crate::history_cell::tool::CollapsedReadSearchCell;
+        use crate::history_cell::tool::ActivityFoldCell;
 
         let mut widget = widget();
         widget.set_collapse_fullscreen(true);
@@ -11561,7 +11601,7 @@ mod tests {
         assert_eq!(widget.transcript.committed_cells().len(), 2);
         let cell = cells(&widget)[1]
             .as_any()
-            .downcast_ref::<CollapsedReadSearchCell>()
+            .downcast_ref::<ActivityFoldCell>()
             .expect("finalized silent group must stay in transcript for verbose replay");
         assert!(!cell
             .display_lines(
@@ -11587,8 +11627,8 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_mutating_mcp_breaks_fold_but_search_mcp_still_folds() {
-        use crate::history_cell::tool::{CollapsedReadSearchCell, ToolUseCell};
+    fn fullscreen_activity_preserves_read_and_mutating_mcp_details() {
+        use crate::history_cell::tool::ActivityFoldCell;
 
         let mut widget = widget();
         widget.set_collapse_fullscreen(true);
@@ -11613,31 +11653,37 @@ mod tests {
             lingxi_core::host::TurnOutcome::EndTurn,
         ));
 
-        let committed = cells(&widget);
-        assert!(committed.iter().any(|cell| {
-            cell.as_any()
-                .downcast_ref::<CollapsedReadSearchCell>()
-                .is_some()
-        }));
-        assert!(committed.iter().any(|cell| {
-            cell.as_any()
-                .downcast_ref::<ToolUseCell>()
-                .is_some_and(|tool| {
-                    tool.display_lines(
-                        80,
-                        &Theme::dark(),
-                        crate::history_cell::RenderMode::default(),
-                    )
-                    .into_iter()
-                    .map(|line| line.to_string())
-                    .any(|line| line.contains("create_issue"))
-                })
-        }));
+        let activity = cell::<ActivityFoldCell>(&widget, 1);
+        assert_eq!(
+            activity
+                .entries
+                .iter()
+                .map(|entry| entry.tool.as_str())
+                .collect::<Vec<_>>(),
+            ["mcp__filesystem__read_file", "mcp__github__create_issue"]
+        );
+        let expanded = activity
+            .display_lines(
+                120,
+                &Theme::dark(),
+                crate::history_cell::RenderMode {
+                    verbose: true,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            expanded.contains("create_issue"),
+            "mutating calls remain inspectable: {expanded}"
+        );
     }
 
     #[test]
     fn switching_fullscreen_seals_the_existing_group_before_new_rules_apply() {
-        use crate::history_cell::tool::CollapsedReadSearchCell;
+        use crate::history_cell::tool::ActivityFoldCell;
 
         let mut widget = widget();
         submit_command(&mut widget, "mixed");
@@ -11672,7 +11718,7 @@ mod tests {
         assert_eq!(widget.transcript.committed_cells().len(), 3);
         let first = cells(&widget)[1]
             .as_any()
-            .downcast_ref::<CollapsedReadSearchCell>()
+            .downcast_ref::<ActivityFoldCell>()
             .expect("inline read fold committed before the mode switch");
         let first_summary = first
             .display_lines(
@@ -11688,7 +11734,7 @@ mod tests {
 
         let second = cells(&widget)[2]
             .as_any()
-            .downcast_ref::<CollapsedReadSearchCell>()
+            .downcast_ref::<ActivityFoldCell>()
             .expect("fullscreen bash fold committed after the mode switch");
         let second_summary = second
             .display_lines(
@@ -11813,7 +11859,7 @@ mod tests {
         // The "Hello" reply flushed to a committed cell; the tool-use cell
         // renders after it (cells: user, Hello, ● Bash).
         assert_eq!(
-            cell::<crate::history_cell::tool::ToolUseCell>(&widget, 2).tool(),
+            cell::<crate::history_cell::tool::ActivityFoldCell>(&widget, 2).entries[0].tool,
             "Bash"
         );
         widget.apply_turn_event(TurnEvent::ToolUseResult {
@@ -11830,8 +11876,8 @@ mod tests {
         assert!(!widget.turn_running());
         assert!(widget.turn_started_at.is_none());
         assert!(widget.transcript.active_cell().is_none(), "cell flushed");
-        // user "hi" · assistant "Hello" · ● Bash tool-use · ⎿ Bash result = 4.
-        assert_eq!(widget.transcript.committed_cells().len(), 4);
+        // User request, assistant prose, then one activity with the call/result.
+        assert_eq!(widget.transcript.committed_cells().len(), 3);
     }
 
     #[test]

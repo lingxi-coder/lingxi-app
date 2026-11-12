@@ -1,0 +1,15 @@
+.transcript-run-item[data-run-type='activity'] { content-visibility: visible; contain-intrinsic-size: none; }
+.transcript-activity { min-width: 0; display: flex; flex-direction: column; color: var(--activity-text); }
+.transcript-activity > .transcript-activity-trigger {
+  width: 100%; max-width: 100%; min-width: 0; min-height: 28px;
+  gap: 9px !important; padding: 2px 0 !important; font-size: 13px; line-height: 20px;
+}
+.transcript-activity-trigger > svg { width: 20px; height: 20px; flex: none; }
+.transcript-activity-label { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transcript-activity-state, .transcript-activity-failed { flex: none; font-size: 12px; white-space: nowrap; }
+.transcript-activity-failed { color: var(--activity-danger); }
+.transcript-activity-trigger > .transcript-disclosure-chevron { flex: none; opacity: .6; }
+.transcript-activity-trigger:is(:hover, :focus-visible) { color: var(--activity-highlight) !important; }
+.transcript-activity-trigger:focus-visible { outline: 2px solid var(--activity-ring); outline-offset: 2px; border-radius: 4px; }
+.transcript-activity-details { margin: 4px 0 4px 9px; padding-left: 19px; border-left: 1px solid var(--activity-border); }
+@media (pointer: coarse) { .transcript-activity > .transcript-activity-trigger { min-height: 44px; } }

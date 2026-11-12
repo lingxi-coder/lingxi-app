@@ -78,20 +78,13 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
     assert.ok(result.resizeGap <= 1, `async child resize bottom gap: ${result.resizeGap}`);
     assert.ok(result.shrinkGap <= 1, `async child shrink bottom gap: ${result.shrinkGap}`);
     assert.equal(result.finalAncestorScroll, 0);
-    for (const layout of result.thinkingLayouts) {
-      assert.deepEqual(layout, result.thinkingLayouts[0], 'thinking visibility must preserve tail height and scroll position');
+    for (const layout of result.activityLayouts) {
+      assert.deepEqual(layout, result.activityLayouts[0], 'thinking and tool states preserve the activity layout');
+      assert.equal(layout.toolHeight, 28, 'activity has one compact header in every state');
+      assert.equal(layout.hasThinkingSlot, false, 'there is no independent thinking spacer');
+      assert.equal(layout.toolGap, 12, 'activity retains its spacing from prose');
     }
-    for (const [index, layout] of result.activityLayouts.entries()) {
-      if (index !== 4) assert.deepEqual(layout, result.activityLayouts[0], 'tool results, completed groups and streaming reasoning preserve activity layout');
-      assert.equal(layout.toolHeight, index === 4 ? 62 : 28, 'the active group shows its running tool; other activity remains compact');
-      assert.equal(layout.slotHeight, 40, 'the persistent thinking slot retains its reserved height');
-      assert.equal(layout.toolGap, 12, 'the message wrapper must retain compact activity spacing');
-      assert.equal(layout.thinkingGap, 12, 'hidden and visible thinking slots have the same activity spacing');
-    }
-    assert.deepEqual(result.runningGroup, { expanded: 'false', activeCalls: 1 }, 'the closed group exposes its one active tool');
-    const activityBase = result.activityLayouts[0], activeGroup = result.activityLayouts[4];
-    assert.equal(activeGroup.scrollHeight - activityBase.scrollHeight, activeGroup.toolHeight - activityBase.toolHeight, 'only the running tool expands the transcript');
-    assert.ok(Math.abs((activeGroup.scrollTop - activityBase.scrollTop) - (activeGroup.scrollHeight - activityBase.scrollHeight)) <= 1, 'the tail follows the expanded running group');
+    assert.deepEqual(result.runningGroup, { expanded: 'false', activeCalls: 0 }, 'running calls remain inside the disclosure');
 
     for (const offset of [0, 4]) {
       const baseline = result.deliveryLayouts[offset];

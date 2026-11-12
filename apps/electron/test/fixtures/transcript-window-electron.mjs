@@ -77,9 +77,9 @@ async function main() {
     const nativeHistoricalRenders = await run(groupCount) - before;
     await run('window.transcriptFixture.updateTool()');
     await settle();
-    const toolUpdated = await run(`window.transcriptFixture.renders().some(entry => entry.instance === 'tool-group:tool-group:row-10-a' && entry.props.calls?.some(call => call.isErrored))`);
-    await click('[data-tool-group-id="tool-group:row-10-a"] .tool-group-trigger');
-    assert.equal(await run(`document.querySelector('[data-tool-group-id="tool-group:row-10-a"] .tool-group-trigger').getAttribute('aria-expanded')`), 'true');
+    const toolUpdated = await run(`window.transcriptFixture.renders().some(entry => entry.instance === 'tool-group:activity:after:row-9' && entry.props.calls?.some(call => call.isErrored))`);
+    await click('[data-activity-id="activity:after:row-9"] .transcript-activity-trigger');
+    assert.equal(await run(`document.querySelector('[data-activity-id="activity:after:row-9"] .transcript-activity-trigger').getAttribute('aria-expanded')`), 'true');
     await run(`window.transcriptFixture.plan('# Initial plan')`);
     await settle();
     await run(`window.transcriptFixture.plan('# Updated plan content')`);
@@ -159,7 +159,7 @@ async function main() {
     const revealed = await run(`(() => { const row = document.querySelector('[data-message-uuid="uuid-25"]'); const bounds = document.querySelector('.desktop-stage').getBoundingClientRect(); const rect = row.getBoundingClientRect(); return rect.bottom > bounds.top && rect.top < bounds.bottom; })()`);
     await run(`window.transcriptFixture.reveal('uuid-row-120-b')`);
     await wait('window.transcriptFixture.located() === true', 'grouped tool UUID alias did not materialize');
-    assert.ok(await run(`Boolean(document.querySelector('[data-message-uuid="uuid-row-120-b"] [data-tool-group-id="tool-group:row-120-a"]'))`), 'a grouped tool result reveals its containing history row');
+    assert.ok(await run(`Boolean(document.querySelector('[data-message-uuid="uuid-row-120-b"] [data-activity-id="activity:after:row-119"]'))`), 'a grouped tool result reveals its containing history row');
 
     await run(`window.transcriptFixture.load(500, 'second')`);
     await settle();

@@ -12,7 +12,7 @@ export interface TranscriptToolGroup {
 export type TranscriptRow = Exclude<RunItem, ToolRunItem> | TranscriptToolGroup;
 
 /** Adjacent, related tools share a group; prose and deliverables retain their place. */
-export function transcriptRows(items: readonly RunItem[], running: boolean, hasPendingActivity = false): TranscriptRow[] {
+export function transcriptRows(items: readonly RunItem[], running: boolean, hasPendingActivity = false, includeThinking = false): TranscriptRow[] {
   const rows: TranscriptRow[] = [];
   let group: TranscriptToolGroup | undefined;
   // Only the latest unfinished reasoning block can be active.
@@ -25,7 +25,7 @@ export function transcriptRows(items: readonly RunItem[], running: boolean, hasP
   }
   for (const item of items) {
     if (item.type === 'thinking') {
-      if (item === activeThinking) rows.push(item);
+      if (includeThinking || item === activeThinking) rows.push(item);
       continue;
     }
     if (item.type === 'tool') {

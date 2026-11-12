@@ -12,7 +12,13 @@ const same = (left, right) => hash(left) === hash(right);
 const randomId = () => randomBytes(24).toString('base64url');
 const nowDay = now => new Date(now).toISOString().slice(0, 10);
 const memberIdentity = (uid, member) => ({ uid, generation: member.generation });
-const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask']);
+const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations']);
+/** An interrupted operation of these categories may be sent again: the receiver returns the same receipt. */
+const replaySafe = new Set(['read', 'store_idempotent', 'provider_idempotent']);
+const operationLimit = 64;
+/** An operation whose outcome nobody has established: it blocks every further model execution of its task. */
+const unverified = operation => !replaySafe.has(operation.category) && (operation.state === 'dispatched' || operation.state === 'unknown');
+const operationIdOf = (task, logicalStepId, category) => hash([task.rootTaskId, task.taskId, logicalStepId, category]);
 const grantsCapability = action => action === 'startTask' || action === 'continueTask';
 const queueMs = 300000, minRunMs = 1000;
 const botId = parts => `bot_${hash(parts).slice(0, 60)}`;
@@ -28,12 +34,14 @@ function ownerOf(bot, identity) { return bot && same(bot.identity.maintainer, id
 function taskView(task, now) {
   const over = task.deadline <= now;
   const state = over && ['queued', 'waiting'].includes(task.state) ? 'expired'
-    // A cancelled run the host never closed ends as cancelled, not interrupted: nothing can be published after the deadline.
-    : over && task.state === 'running' ? (task.cancelRequestedAt ? 'cancelled' : 'interrupted') : task.state;
+    // A run the host never closed: with an operation of unknown outcome it must be checked by a person; a cancelled one
+    // ends as cancelled, not interrupted, because nothing can be published after the deadline.
+    : over && task.state === 'running' ? (task.unverifiedOperations > 0 ? 'needs_reconciliation' : task.cancelRequestedAt ? 'cancelled' : 'interrupted') : task.state;
   return { taskId: task.taskId, conversationId: task.conversationId, sharedBotId: task.sharedBotId,
     requester: task.requester, state, createdAt: task.createdAt, deadline: task.deadline,
     epoch: task.epoch, activeSpentMs: task.activeSpentMs,
     ...(task.cancelRequestedAt ? { cancelRequestedAt: task.cancelRequestedAt } : {}),
+    ...(task.unverifiedOperations > 0 ? { unverifiedOperations: task.unverifiedOperations } : {}),
     ...(state === 'waiting' ? { wait: { waitId: task.currentWaitId, kind: 'human_input', recipient: task.requester,
       expiresAt: task.deadline, messageId: questionIds(task.taskId, task.currentWaitId).messageId } } : {}),
     ...(task.replyId ? { replyId: task.replyId } : {}), ...(task.artifactId ? { artifactId: task.artifactId } : {}),
@@ -84,6 +92,10 @@ export class SharedBotsStore {
       else if (action === 'pauseTask') response = await this.pauseForWait(context);
       else if (action === 'answerWait') response = await this.answerWait(context);
       else if (action === 'cancelTask') response = await this.cancelTask(context);
+      else if (action === 'recordOperation') response = await this.recordOperation(context);
+      else if (action === 'settleOperation') response = await this.settleOperation(context);
+      else if (action === 'resolveOperation') response = await this.resolveOperation(context);
+      else if (action === 'listOperations') response = await this.operations(context);
       else if (action === 'prepareTask' || action === 'validateTask') response = await this.taskContext(context);
       else if (action === 'completeTask') response = await this.complete(context);
       else if (action === 'getTask' || action === 'listTasks') response = await this.tasks(context);
@@ -231,7 +243,8 @@ export class SharedBotsStore {
         conversationId: p.conversationId, messageId: p.messageId, changeId: p.changeId, messageSeq: seq,
         requester: identity, botRevision: b.identity.revision, deploymentId: b.identity.activeDeploymentId,
         state: 'queued', createdAt: now, deadline: Math.max(now, locks[i].data()?.until ?? 0) + queueMs, inputGrantIds: b.grants.map(g => g.grantId),
-        epoch: 0, attemptStartedAt: 0, activeBudgetMs: 300000, activeSpentMs: 0, physicalDispatchesSpent: 0 });
+        epoch: 0, attemptStartedAt: 0, activeBudgetMs: 300000, activeSpentMs: 0, physicalDispatchesSpent: 0,
+        rootTaskId: target.taskId, operationCount: 0, unverifiedOperations: 0 });
     }
     for (const [i, quotaRef] of quotaRefs.entries()) tx.set(quotaRef, { day, used: (quotas[i].data()?.used ?? 0) + increments[i], limit: limits[i] });
     return response;
@@ -344,6 +357,19 @@ export class SharedBotsStore {
       return refused;
     }
     if (answer && task.checkpointDigest !== p.checkpointDigest) deny(409, 'CHECKPOINT_MISMATCH');
+    if (task.unverifiedOperations > 0) {
+      // No model execution is created over a side effect whose outcome is not established (detailed design 12.4 step 3).
+      const open = (await tx.get(team.collection('operations').where('taskId', '==', task.taskId))).docs.map(doc => doc.data()).filter(unverified);
+      const reconcile = open.filter(operation => operation.category === 'queryable' && operation.state === 'dispatched');
+      // The host can still ask the outside system about these and settle them under the permit it holds.
+      if (reconcile.length === open.length) return { ...refused, reconcile: reconcile.map(operation => operation.operationId).sort() };
+      const lockRef = team.collection('chatExecutionLocks').doc(hash([task.sharedBotId, task.conversationId]));
+      const lock = (await tx.get(lockRef)).data();
+      tx.update(ref, { state: 'needs_reconciliation', finishedAt: now, resume: FieldValue.delete() });
+      if (lock?.taskId === task.taskId) tx.delete(lockRef);
+      tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
+      return { ...refused, state: 'needs_reconciliation' };
+    }
     if (task.botRevision !== bot.identity.revision) deny(403, 'TASK_REVOKED');
     const { lockRef, lock, free } = await this.admitRun(tx, team, task, bot, deployment, task.inputLastChangeSeq, now);
     if (answer) {
@@ -413,7 +439,8 @@ export class SharedBotsStore {
     const lockRef = team.collection('chatExecutionLocks').doc(hash([task.sharedBotId, task.conversationId]));
     const lock = (await tx.get(lockRef)).data();
     if (task.cancelRequestedAt) {
-      // The one accepted completion of a cancelled task records usage but publishes nothing.
+      // The one accepted completion of a cancelled task records usage but publishes nothing. Operations already sent keep
+      // their real or unknown outcome: the view carries `unverifiedOperations`, cancelling never claims a rollback.
       tx.update(ref, { state: 'cancelled', resultDigest, replyId: null, artifactId: null, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now });
       if (lock?.taskId === p.taskId) tx.delete(lockRef);
       return { taskId: task.taskId, state: 'cancelled', replyId: null, artifactId: null };
@@ -427,9 +454,12 @@ export class SharedBotsStore {
       sharedBotId: task.sharedBotId, conversationId: task.conversationId, botRevision: task.botRevision,
       revision: 1, digest: hash(p.document), document: p.document, inputGrantIds: task.inputGrantIds,
       readers, createdAt: now });
-    const state = allowed ? p.outcome : sourceCurrent ? 'authorization_required' : 'failed';
+    const settled = allowed ? p.outcome : sourceCurrent ? 'authorization_required' : 'failed';
+    // A run that ends while an operation's outcome is unknown is not finished: a person has to check it first.
+    const state = task.unverifiedOperations > 0 ? 'needs_reconciliation' : settled;
     // No restricted body, document or diagnostic trace is persisted in shared projections/receipts.
-    tx.update(ref, { state, resultDigest, replyId, artifactId, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now });
+    tx.update(ref, { state, resultDigest, replyId, artifactId, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now,
+      ...(state === settled ? {} : { reconciledState: settled }) });
     if (lock?.taskId === p.taskId) tx.delete(lockRef);
     return { taskId: task.taskId, state, replyId, artifactId };
   }
@@ -535,6 +565,97 @@ export class SharedBotsStore {
     }
     tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
     return { taskId: task.taskId, state: state === 'running' ? 'running' : 'cancelled' };
+  }
+  /** The durable `prepared -> dispatched` record. Only `dispatch: true` lets the host call out; the record is never
+   * written after the call. A second attempt gets `dispatch` again only for a category that is safe to send twice. */
+  async recordOperation({ tx, team, identity, command: { payload: p }, now }) {
+    const { deployment, bot } = await this.checkHost(tx, team, identity, p);
+    const ref = team.collection('tasks').doc(p.taskId), operationRef = team.collection('operations').doc(p.operationId);
+    const [snapshot, operationSnapshot] = await tx.getAll(ref, operationRef), task = snapshot.data(), existing = operationSnapshot.data();
+    if (!task || task.deploymentId !== p.deploymentId) deny(404, 'TASK_REQUIRED');
+    if (operationIdOf(task, p.logicalStepId, p.category) !== p.operationId) deny(400, 'OPERATION_ID_MISMATCH');
+    if (task.state !== 'running' || task.permitDigest !== hash(p.permitId)) deny(403, 'EXECUTION_PERMIT_REQUIRED');
+    if (existing) {
+      const { tool, digest, approvalRef = null } = p;
+      if (!same({ tool, digest, approvalRef }, { tool: existing.tool, digest: existing.digest, approvalRef: existing.approvalRef })) deny(409, 'OPERATION_CONFLICT');
+      if (existing.state !== 'dispatched') return { operationId: p.operationId, state: existing.state, dispatch: false,
+        ...(existing.resultDigest ? { resultDigest: existing.resultDigest } : {}), ...(existing.reference ? { reference: existing.reference } : {}) };
+      if (!replaySafe.has(existing.category) || task.cancelRequestedAt) return { operationId: p.operationId, state: 'dispatched', dispatch: false };
+      tx.update(operationRef, { epoch: task.epoch, hostId: p.hostId, dispatchedAt: p.dispatchedAt, recordedAt: now });
+      return { operationId: p.operationId, state: 'dispatched', dispatch: true };
+    }
+    if (task.cancelRequestedAt) deny(409, 'TASK_CANCELLED');
+    if (p.dispatchedAt < task.attemptStartedAt || p.dispatchedAt > task.deadline || p.dispatchedAt > now || task.deadline <= now) deny(409, 'TASK_EXPIRED');
+    if (p.category !== 'read' && !deployment.capabilities.writeOperations) deny(409, 'WRITE_OPERATIONS_UNSUPPORTED');
+    if (!this.requesterAuthorized(bot, task)) deny(403, 'TASK_REVOKED');
+    await this.validateTask(tx, team, task);
+    if (task.operationCount >= operationLimit) deny(409, 'OPERATION_LIMIT');
+    tx.create(operationRef, { schemaVersion: 1, operationId: p.operationId, rootTaskId: task.rootTaskId, taskId: task.taskId,
+      logicalStepId: p.logicalStepId, category: p.category, tool: p.tool, digest: p.digest, approvalRef: p.approvalRef ?? null,
+      sharedBotId: task.sharedBotId, conversationId: task.conversationId, deploymentId: task.deploymentId, hostId: p.hostId,
+      requester: task.requester, epoch: task.epoch, state: 'dispatched', dispatchedAt: p.dispatchedAt, recordedAt: now });
+    tx.update(ref, { operationCount: task.operationCount + 1,
+      unverifiedOperations: task.unverifiedOperations + (replaySafe.has(p.category) ? 0 : 1) });
+    return { operationId: p.operationId, state: 'dispatched', dispatch: true };
+  }
+  /** The established outcome of a recorded operation. `unknown` keeps the task blocked; only a queryable
+   * operation may leave `unknown` through the host, everything else needs the maintainer. */
+  async settleOperation({ tx, team, identity, command: { payload: p }, now }) {
+    await this.checkHost(tx, team, identity, p);
+    const ref = team.collection('tasks').doc(p.taskId), operationRef = team.collection('operations').doc(p.operationId);
+    const [snapshot, operationSnapshot] = await tx.getAll(ref, operationRef), task = snapshot.data(), operation = operationSnapshot.data();
+    if (!task || task.deploymentId !== p.deploymentId) deny(404, 'TASK_REQUIRED');
+    if (task.permitDigest !== hash(p.permitId)) deny(403, 'EXECUTION_PERMIT_REQUIRED');
+    if (!operation || operation.taskId !== task.taskId) deny(404, 'OPERATION_REQUIRED');
+    const reference = p.reference ?? null;
+    if (operation.state === p.outcome && operation.resultDigest === p.resultDigest && (operation.reference ?? null) === reference) return { operationId: p.operationId, state: operation.state };
+    const open = operation.state === 'dispatched' || (operation.state === 'unknown' && operation.category === 'queryable' && p.outcome !== 'unknown');
+    if (!open || operation.resolvedBy) deny(409, 'OPERATION_CONFLICT');
+    if (p.settledAt < operation.dispatchedAt || p.settledAt > now) deny(409, 'OPERATION_CONFLICT');
+    const before = unverified(operation), next = { ...operation, state: p.outcome };
+    tx.update(operationRef, { state: p.outcome, resultDigest: p.resultDigest, reference, settledAt: p.settledAt, settledRecordedAt: now });
+    if (before !== unverified(next)) this.verified(tx, team, ref, task, now);
+    return { operationId: p.operationId, state: p.outcome };
+  }
+  /** One operation of the task left the unverified set. A task that was only waiting for that is closed with the state
+   * its completion had earned, or as interrupted when it never completed. */
+  verified(tx, team, ref, task, now) {
+    const remaining = task.unverifiedOperations - 1;
+    const closes = remaining === 0 && task.state === 'needs_reconciliation';
+    tx.update(ref, { unverifiedOperations: remaining,
+      ...(closes ? { state: task.reconciledState ?? 'interrupted', reconciledAt: now, reconciledState: FieldValue.delete() } : {}) });
+    tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
+    return closes ? task.reconciledState ?? 'interrupted' : null;
+  }
+  /** The Bot's maintainer states what really happened to an operation nobody could verify automatically. */
+  async resolveOperation({ tx, team, identity, command: { payload: p }, now }) {
+    const ref = team.collection('tasks').doc(p.taskId), operationRef = team.collection('operations').doc(p.operationId);
+    const [snapshot, operationSnapshot] = await tx.getAll(ref, operationRef), task = snapshot.data(), operation = operationSnapshot.data();
+    if (!task) deny(404, 'TASK_REQUIRED');
+    const bot = (await tx.get(team.collection('sharedBots').doc(task.sharedBotId))).data();
+    if (!ownerOf(bot, identity)) deny(403, 'MAINTAINER_REQUIRED');
+    if (!operation || operation.taskId !== task.taskId) deny(404, 'OPERATION_REQUIRED');
+    const view = state => ({ taskId: task.taskId, state, operationId: p.operationId, operationState: p.resolution });
+    if (operation.state === p.resolution && operation.resolvedBy) return view(taskView(task, now).state);
+    if (!unverified(operation)) deny(409, 'OPERATION_CONFLICT');
+    // While the run could still report by itself the maintainer does not overrule it.
+    if (task.state === 'running' && task.deadline > now) deny(409, 'TASK_RUNNING');
+    tx.update(operationRef, { state: p.resolution, resolvedBy: identity, resolvedAt: now });
+    const closed = this.verified(tx, team, ref, task, now);
+    return view(closed ?? taskView({ ...task, unverifiedOperations: task.unverifiedOperations - 1 }, now).state);
+  }
+  /** What a task did outside the Chat, for its requester and the Bot's maintainer. Parameters and results stay with the host. */
+  async operations({ tx, team, identity, command: { payload: p } }) {
+    const task = (await tx.get(team.collection('tasks').doc(p.taskId))).data();
+    if (!task) deny(404, 'TASK_REQUIRED');
+    await this.conversation(tx, team, task.conversationId, identity);
+    const bot = (await tx.get(team.collection('sharedBots').doc(task.sharedBotId))).data();
+    if (!same(task.requester, identity) && !ownerOf(bot, identity)) deny(403, 'OPERATION_READ_FORBIDDEN');
+    const rows = (await tx.get(team.collection('operations').where('taskId', '==', task.taskId))).docs.map(doc => doc.data());
+    return { taskId: task.taskId, operations: rows.sort((a, b) => a.dispatchedAt - b.dispatchedAt || a.operationId.localeCompare(b.operationId))
+      .map(o => ({ operationId: o.operationId, logicalStepId: o.logicalStepId, category: o.category, tool: o.tool, state: o.state,
+        epoch: o.epoch, dispatchedAt: o.dispatchedAt, ...(o.settledAt ? { settledAt: o.settledAt } : {}),
+        ...(o.resolvedBy ? { resolvedBy: o.resolvedBy, resolvedAt: o.resolvedAt } : {}) })) };
   }
   async tasks({ tx, team, identity, command: { action, payload: p }, now }) {
     if (action === 'getTask') {

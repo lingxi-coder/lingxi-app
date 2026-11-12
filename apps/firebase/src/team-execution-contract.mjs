@@ -20,7 +20,7 @@ export const deploymentRecord = z.object({
   deploymentId: id, sharedBotId: id, revision: positive, hostId: id, owner: memberRef,
   instanceId: id, definitionDigest: z.string().regex(/^[a-f0-9]{64}$/u),
   capabilitySnapshotDigest: z.string().regex(/^[a-f0-9]{64}$/u), executionVersion: z.literal(2),
-  capabilities: z.object({ durableWait: z.boolean(), writeOperations: z.literal(false), delegation: z.literal(false) }).strict(),
+  capabilities: z.object({ durableWait: z.boolean(), writeOperations: z.boolean(), delegation: z.literal(false) }).strict(),
   accountEpoch: positive, enabled: z.boolean(),
 }).strict();
 

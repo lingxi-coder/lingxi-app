@@ -27,6 +27,9 @@ const outputAudience = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('published_inputs') }).strict(),
 ]);
 const grantIds = z.array(executionId).max(50).refine(unique);
+/** How an interrupted operation may be recovered (detailed design 12.3). */
+export const operationCategory = z.enum(['read', 'store_idempotent', 'provider_idempotent', 'queryable', 'unqueryable']);
+const logicalStepId = z.string().regex(/^[A-Za-z0-9_.:/-]{1,200}$/u);
 const payloads = {
   createConversation: z.object({ ...thread, kind: z.enum(['bot_dm', 'group', 'channel']),
     title: z.string().trim().min(1).max(120), participantUids: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/u)).min(1).max(200).refine(unique),
@@ -68,6 +71,15 @@ const payloads = {
     inputGrantIds: grantIds, outputAudience }).strict(),
   continueTask: z.object({ ...host, ...task, expectedEpoch: positive, checkpointDigest: digest,
     reason: z.enum(['answer', 'recovery']), dispatchedRequests: cursor }).strict(),
+  // The operation ledger (M2 Q04). `operationId` is derived from the task and the durable logical step, never from a provider call id.
+  recordOperation: z.object({ ...host, ...task, permitId: executionId, operationId: digest, logicalStepId,
+    category: operationCategory, tool: z.object({ name: z.string().min(1).max(128), version: z.string().min(1).max(64) }).strict(),
+    digest, approvalRef: executionId.optional(), dispatchedAt: cursor }).strict(),
+  settleOperation: z.object({ ...host, ...task, permitId: executionId, operationId: digest,
+    outcome: z.enum(['succeeded', 'failed', 'unknown']), resultDigest: digest,
+    reference: z.string().min(1).max(200).optional(), settledAt: cursor }).strict(),
+  resolveOperation: z.object({ ...task, operationId: digest, resolution: z.enum(['succeeded', 'failed']) }).strict(),
+  listOperations: z.object(task).strict(),
   answerWait: z.object({ ...thread, waitId: executionId, messageId: executionId, changeId: executionId, text }).strict(),
   cancelTask: z.object(task).strict(),
   getTask: z.object(task).strict(),

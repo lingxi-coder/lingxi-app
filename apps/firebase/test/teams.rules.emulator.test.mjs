@@ -210,7 +210,7 @@ test('teams: text limit is UTF-8 bytes and read watermarks never move backwards'
 test('teams: unimplemented App, task, invite and epoch writes remain denied', options, async () => {
   const alice = user('alice');
   for (const path of ['appGrants/example_alice', 'appOpens/example01', 'tasks/example01', 'invites/example01', 'membershipEpochs/alice',
-    'sharedBots/example01', 'deployments/example01', 'executionReceipts/example01', 'requestQuotas/example01', 'chatExecutionLocks/example01', 'artifacts/example01', 'waits/example01']) {
+    'sharedBots/example01', 'deployments/example01', 'executionReceipts/example01', 'requestQuotas/example01', 'chatExecutionLocks/example01', 'artifacts/example01', 'waits/example01', 'operations/example01']) {
     await assertFails(setDoc(ref(alice, path), { uid: 'alice' }));
     await assertFails(getDoc(ref(alice, path)));
   }

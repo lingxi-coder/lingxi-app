@@ -601,3 +601,154 @@ test('wait: start sets the running phase deadline and refuses a task that alread
   await taskRef(taskId).update({ state: 'queued' });
   assert.equal((await execute('startTask', { ...host, taskId })).execute, false);
 });
+
+// ---- Operation ledger (M2 Q04) ----
+const enableWrites = () => db.doc(`teams/${teamId}/deployments/${host.deploymentId}`).update({ 'capabilities.writeOperations': true });
+const operationId = (taskId, step, category) => createHash('sha256').update(JSON.stringify([taskId, taskId, step, category])).digest('hex');
+const operationData = async id => (await db.doc(`teams/${teamId}/operations/${id}`).get()).data();
+const recordPayload = (started, { step = 'step/t1/c0', category = 'unqueryable', permitId = started.permitId, ...override } = {}) => ({ ...host,
+  taskId: started.task.taskId, permitId, operationId: operationId(started.task.taskId, step, category), logicalStepId: step, category,
+  tool: { name: 'shared_list.add', version: '1' }, digest: '1'.repeat(64), dispatchedAt: now, ...override });
+const settlePayload = (started, recorded, override = {}) => ({ ...host, taskId: started.task.taskId, permitId: started.permitId,
+  operationId: recorded.operationId, outcome: 'succeeded', resultDigest: '2'.repeat(64), settledAt: now, ...override });
+const recover = (taskId, expectedEpoch = 1) => execute('continueTask', continuePayload(taskId, { reason: 'recovery', expectedEpoch }));
+
+test('operations: the record is the only licence to dispatch, and its identity and digest never change', options, async () => {
+  await enableWrites();
+  const started = await start(), taskId = started.task.taskId, payload = recordPayload(started);
+  await assert.rejects(execute('recordOperation', { ...payload, operationId: '9'.repeat(64) }), { code: 'OPERATION_ID_MISMATCH' });
+  await assert.rejects(execute('recordOperation', { ...payload, permitId: 'permit_other' }), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  await assert.rejects(execute('recordOperation', { ...payload, dispatchedAt: now + 1 }), { code: 'TASK_EXPIRED' });
+  assert.equal(await operationData(payload.operationId), undefined);
+  const first = await execute('recordOperation', payload, owner, 'command_record_1');
+  assert.deepEqual(first, { operationId: payload.operationId, state: 'dispatched', dispatch: true });
+  // The same command (a lost response) is answered again; a second request for a non-repeatable operation is not a licence.
+  assert.deepEqual(await execute('recordOperation', payload, owner, 'command_record_1'), first);
+  assert.deepEqual(await execute('recordOperation', payload), { operationId: payload.operationId, state: 'dispatched', dispatch: false });
+  await assert.rejects(execute('recordOperation', { ...payload, digest: '3'.repeat(64) }), { code: 'OPERATION_CONFLICT' });
+  await assert.rejects(execute('recordOperation', { ...payload, tool: { name: 'shared_list.add', version: '2' } }), { code: 'OPERATION_CONFLICT' });
+  await assert.rejects(execute('recordOperation', { ...payload, approvalRef: 'approval_01' }), { code: 'OPERATION_CONFLICT' });
+  assert.deepEqual(await operationData(payload.operationId), { schemaVersion: 1, operationId: payload.operationId, rootTaskId: taskId, taskId,
+    logicalStepId: 'step/t1/c0', category: 'unqueryable', tool: { name: 'shared_list.add', version: '1' }, digest: '1'.repeat(64), approvalRef: null,
+    sharedBotId: 'sharedbot_01', conversationId, deploymentId: host.deploymentId, hostId: host.hostId, requester: { uid: member.uid, generation: 1 },
+    epoch: 1, state: 'dispatched', dispatchedAt: now, recordedAt: now });
+  assert.equal((await execute('getTask', { taskId }, member)).unverifiedOperations, 1);
+  assert.equal((await taskData(taskId)).operationCount, 1);
+  now += 1000;
+  await assert.rejects(execute('settleOperation', settlePayload(started, payload, { permitId: 'permit_other' })), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  await assert.rejects(execute('settleOperation', settlePayload(started, payload, { operationId: '9'.repeat(64) })), { code: 'OPERATION_REQUIRED' });
+  await assert.rejects(execute('settleOperation', settlePayload(started, payload, { settledAt: now - 2000 })), { code: 'OPERATION_CONFLICT' });
+  const settled = settlePayload(started, payload, { reference: 'row-17' });
+  assert.deepEqual(await execute('settleOperation', settled), { operationId: payload.operationId, state: 'succeeded' });
+  assert.deepEqual(await execute('settleOperation', settled), { operationId: payload.operationId, state: 'succeeded' });
+  await assert.rejects(execute('settleOperation', { ...settled, outcome: 'failed' }), { code: 'OPERATION_CONFLICT' });
+  await assert.rejects(execute('settleOperation', { ...settled, resultDigest: '4'.repeat(64) }), { code: 'OPERATION_CONFLICT' });
+  assert.equal((await execute('getTask', { taskId }, member)).unverifiedOperations, undefined);
+  // A later attempt that reaches the same step gets the receipt instead of a licence.
+  assert.deepEqual(await execute('recordOperation', payload), { operationId: payload.operationId, state: 'succeeded', dispatch: false,
+    resultDigest: '2'.repeat(64), reference: 'row-17' });
+  assert.equal((await execute('completeTask', result(started))).state, 'completed');
+});
+test('operations: writes need the deployment capability and a task has a bounded number of operations', options, async () => {
+  const started = await start();
+  for (const category of ['store_idempotent', 'provider_idempotent', 'queryable', 'unqueryable']) {
+    await assert.rejects(execute('recordOperation', recordPayload(started, { category })), { code: 'WRITE_OPERATIONS_UNSUPPORTED' });
+  }
+  for (let i = 0; i < 64; i += 1) assert.equal((await execute('recordOperation', recordPayload(started, { step: `step/t1/c${i}`, category: 'read' }))).dispatch, true);
+  await assert.rejects(execute('recordOperation', recordPayload(started, { step: 'step/t1/c64', category: 'read' })), { code: 'OPERATION_LIMIT' });
+  assert.equal((await execute('getTask', { taskId: started.task.taskId }, member)).unverifiedOperations, undefined);
+});
+test('operations: a recovered attempt may repeat a replay-safe operation; an unqueryable one sends the task to a person', options, async () => {
+  await enableWrites();
+  const started = await start(), taskId = started.task.taskId;
+  const safe = recordPayload(started, { category: 'store_idempotent' });
+  assert.equal((await execute('recordOperation', safe)).dispatch, true);
+  const second = await recover(taskId);
+  assert.equal(second.execute, true);
+  await assert.rejects(execute('recordOperation', safe), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  now += 1000;
+  assert.deepEqual(await execute('recordOperation', { ...safe, permitId: second.permitId, dispatchedAt: now }), { operationId: safe.operationId, state: 'dispatched', dispatch: true });
+  assert.equal((await operationData(safe.operationId)).epoch, 2);
+  now += 1000;
+  const risky = recordPayload(started, { step: 'step/t2/c0', permitId: second.permitId });
+  assert.equal((await execute('recordOperation', risky)).dispatch, true);
+  assert.deepEqual(await recover(taskId, 2), { execute: false, taskId, state: 'needs_reconciliation' });
+  assert.equal((await lockRefFor().get()).exists, false);
+  const view = await execute('getTask', { taskId }, member);
+  assert.equal(view.state, 'needs_reconciliation'); assert.equal(view.unverifiedOperations, 1);
+  assert.equal((await execute('listHostTasks', host)).tasks.length, 0);
+  assert.equal((await recover(taskId, 2)).execute, false);
+  await assert.rejects(execute('cancelTask', { taskId }, member), { code: 'TASK_FINISHED' });
+  await assert.rejects(execute('completeTask', result({ ...started, permitId: second.permitId })), { code: 'TASK_EXPIRED' });
+  // Only the Bot's maintainer says what happened.
+  const resolve = { taskId, operationId: risky.operationId, resolution: 'failed' };
+  await assert.rejects(execute('resolveOperation', resolve, member), { code: 'MAINTAINER_REQUIRED' });
+  await assert.rejects(execute('resolveOperation', { ...resolve, operationId: '9'.repeat(64) }), { code: 'OPERATION_REQUIRED' });
+  await assert.rejects(execute('resolveOperation', { ...resolve, operationId: safe.operationId }), { code: 'OPERATION_CONFLICT' });
+  now += 5000;
+  assert.deepEqual(await execute('resolveOperation', resolve), { taskId, state: 'interrupted', operationId: risky.operationId, operationState: 'failed' });
+  assert.deepEqual(await execute('resolveOperation', resolve), { taskId, state: 'interrupted', operationId: risky.operationId, operationState: 'failed' });
+  await assert.rejects(execute('resolveOperation', { ...resolve, resolution: 'succeeded' }), { code: 'OPERATION_CONFLICT' });
+  const after = await execute('getTask', { taskId }, member);
+  assert.equal(after.state, 'interrupted'); assert.equal(after.unverifiedOperations, undefined);
+  const listed = await execute('listOperations', { taskId }, member);
+  assert.deepEqual(listed.operations.map(o => [o.logicalStepId, o.category, o.state, o.epoch]),
+    [['step/t1/c0', 'store_idempotent', 'dispatched', 2], ['step/t2/c0', 'unqueryable', 'failed', 2]]);
+  assert.deepEqual(listed.operations[1].resolvedBy, { uid: owner.uid, generation: 1 });
+  assert.deepEqual(Object.keys(listed.operations[0]).sort(), ['category', 'dispatchedAt', 'epoch', 'logicalStepId', 'operationId', 'state', 'tool']);
+  assert.equal((await execute('listOperations', { taskId })).operations.length, 2);
+  await assert.rejects(execute('listOperations', { taskId }, other));
+});
+test('operations: a queryable operation is settled by the host that still holds the permit before the task continues', options, async () => {
+  await enableWrites();
+  const started = await start(), taskId = started.task.taskId, payload = recordPayload(started, { category: 'queryable' });
+  await execute('recordOperation', payload);
+  assert.deepEqual(await recover(taskId), { execute: false, taskId, reconcile: [payload.operationId] });
+  assert.equal((await taskData(taskId)).state, 'running'); assert.equal((await taskData(taskId)).epoch, 1);
+  // The outside system could not say yet: the task stays blocked, and a later definite answer still closes it.
+  assert.equal((await execute('settleOperation', settlePayload(started, payload, { outcome: 'unknown' }))).state, 'unknown');
+  assert.equal((await execute('getTask', { taskId }, member)).unverifiedOperations, 1);
+  assert.equal((await execute('settleOperation', settlePayload(started, payload, { reference: 'order-9' }))).state, 'succeeded');
+  const second = await recover(taskId);
+  assert.equal(second.execute, true); assert.equal(second.epoch, 2);
+  assert.equal((await execute('completeTask', result({ ...started, permitId: second.permitId }))).state, 'completed');
+});
+test('operations: a result delivered over an unknown outcome waits for the maintainer and then takes the state it earned', options, async () => {
+  await enableWrites();
+  const started = await start(), taskId = started.task.taskId, payload = recordPayload(started);
+  await execute('recordOperation', payload);
+  assert.equal((await execute('settleOperation', settlePayload(started, payload, { outcome: 'unknown' }))).state, 'unknown');
+  // An unqueryable unknown cannot be upgraded by the host.
+  await assert.rejects(execute('settleOperation', settlePayload(started, payload)), { code: 'OPERATION_CONFLICT' });
+  const delivered = await execute('completeTask', result(started));
+  assert.equal(delivered.state, 'needs_reconciliation'); assert.ok(delivered.replyId);
+  assert.equal((await chatRef().collection('messages').doc(delivered.replyId).get()).data().text, 'Pack your passports.');
+  assert.deepEqual(await execute('completeTask', result(started)), delivered);
+  assert.equal((await lockRefFor().get()).exists, false);
+  assert.deepEqual(await execute('resolveOperation', { taskId, operationId: payload.operationId, resolution: 'succeeded' }),
+    { taskId, state: 'completed', operationId: payload.operationId, operationState: 'succeeded' });
+  const closed = await taskData(taskId);
+  assert.equal(closed.state, 'completed'); assert.equal(closed.unverifiedOperations, 0); assert.equal(closed.reconciledState, undefined); assert.equal(closed.reconciledAt, now);
+});
+test('operations: cancelling or running out of time never hides an operation that was already sent', options, async () => {
+  await enableWrites();
+  const started = await start(), taskId = started.task.taskId, payload = recordPayload(started);
+  await execute('recordOperation', payload);
+  await assert.rejects(execute('resolveOperation', { taskId, operationId: payload.operationId, resolution: 'succeeded' }), { code: 'TASK_RUNNING' });
+  assert.equal((await execute('cancelTask', { taskId }, member)).state, 'running');
+  await assert.rejects(execute('recordOperation', recordPayload(started, { step: 'step/t2/c0' })), { code: 'TASK_CANCELLED' });
+  assert.deepEqual(await execute('recordOperation', payload), { operationId: payload.operationId, state: 'dispatched', dispatch: false });
+  const ended = await execute('completeTask', result(started, { outcome: 'failed', document: undefined }));
+  assert.equal(ended.state, 'cancelled');
+  const view = await execute('getTask', { taskId }, member);
+  assert.equal(view.state, 'cancelled'); assert.equal(view.unverifiedOperations, 1);
+  assert.equal((await execute('resolveOperation', { taskId, operationId: payload.operationId, resolution: 'succeeded' })).state, 'cancelled');
+  assert.equal((await execute('getTask', { taskId }, member)).unverifiedOperations, undefined);
+  // A run the host abandoned: the deadline turns it into a task to check, and into an interrupted one once checked.
+  const next = await start(), nextId = next.task.taskId, abandoned = recordPayload(next);
+  await execute('recordOperation', abandoned);
+  now = next.task.deadline;
+  assert.equal((await execute('getTask', { taskId: nextId }, member)).state, 'needs_reconciliation');
+  assert.equal((await execute('resolveOperation', { taskId: nextId, operationId: abandoned.operationId, resolution: 'failed' })).state, 'interrupted');
+  assert.equal((await execute('getTask', { taskId: nextId }, member)).state, 'interrupted');
+});

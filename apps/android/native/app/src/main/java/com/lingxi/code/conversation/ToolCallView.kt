@@ -111,6 +111,9 @@ internal fun ToolCallView(
     // Desktop parity: every result starts collapsed; the engine still owns
     // body/diff truncation and the client owns disclosure presentation.
     val collapsible = display != null && display.hasExpandableContent
+    val headlineInTitle = call.tool == "LocalApp" && call.status != AgentToolStatus.Failed &&
+        (call.header?.primary == null || call.header.primary == headline)
+    val rowTitle = if (!collapsible && !requiresCode && headline != null && !headlineInTitle) "$title · $headline" else title
     val showsContent = display != null &&
         display.hasExpandableContent &&
         expanded
@@ -127,7 +130,7 @@ internal fun ToolCallView(
                 .then(if (collapsible) Modifier.clickable(interactionSource = interaction, indication = LocalIndication.current, onClick = openDetail) else Modifier)
                 .then(if (collapsible) Modifier.testTag(UiTags.TOOL_CALL_TOGGLE) else Modifier)
                 .semantics(mergeDescendants = true) {
-                    contentDescription = "$statusLabel $title"
+                    contentDescription = "$statusLabel $rowTitle"
                     if (collapsible) role = Role.Button
                 },
             verticalAlignment = Alignment.CenterVertically,
@@ -143,14 +146,14 @@ internal fun ToolCallView(
             Spacer(Modifier.width(9.dp))
             Column(modifier = Modifier.weight(1f, fill = false)) {
                 Text(
-                    text = title,
+                    text = rowTitle,
                     color = if (isSkill) t.text2 else t.text3,
                     fontSize = 13.sp,
                     fontWeight = if (isSkill) FontWeight.Normal else FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (isSkill && headline != null) {
+                if (isSkill && headline != null && collapsible) {
                     Text(headline, color = if (call.status == AgentToolStatus.Failed) t.danger else t.text3,
                         fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }

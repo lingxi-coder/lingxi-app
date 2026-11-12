@@ -33,6 +33,11 @@ export function TranscriptActivity({ activity, open, toolOpen, onSetOpen, modUiS
   const runningState = running > 0 ? tr('desktop_ui_running_count', running) : '';
   const failedState = failed > 0 ? tr('desktop_ui_tool_call_unsuccessful_count', failed) : '';
   const first = activity.tools[0];
+  // A lone tool owns its details; another disclosure only repeats its header.
+  if (activity.tools.length === 1 && first && !activity.thoughts.some(thought => thought.text.trim()) && !retry) {
+    return <ToolCall item={first} modUiSessionId={modUiSessionId}
+      open={toolOpen(first.id)} onSetOpen={onSetOpen} />;
+  }
   return <div className="transcript-activity" data-activity-id={activity.id} data-active={activity.active || undefined}
     style={{ '--activity-text': t.text3, '--activity-highlight': t.text, '--activity-ring': t.accent,
       '--activity-border': t.border, '--activity-danger': t.danger } as CSSProperties}>

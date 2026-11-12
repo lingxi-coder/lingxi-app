@@ -223,7 +223,12 @@ data class ToolResultDisplayUi(
 ) {
     /** True when there is anything to reveal behind a collapse toggle. */
     val hasExpandableContent: Boolean
-        get() = !body.isNullOrEmpty() || (diff?.rows?.isNotEmpty() == true)
+        get() {
+            if (diff != null || bodyTruncated) return true
+            val text = body?.takeIf { it.isNotEmpty() } ?: return false
+            val content = text.trim()
+            return bodyLines > 1 || content.contains('\n') || content.contains('\r') || content != headline?.trim()
+        }
 }
 
 // MARK: - Plan -------------------------------------------------------------

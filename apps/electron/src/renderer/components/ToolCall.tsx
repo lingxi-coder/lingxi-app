@@ -221,7 +221,10 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       ? 'x'
       : 'info';
 
-  const showResponse = !(isLocalApp && item.status !== 'error') && !(presentation && item.status === 'done' && body !== undefined);
+  // Without a detail body, the result must remain visible in this row.
+  const responseInTitle = presentation?.argument === summaryResponse;
+  const showResponse = !(isLocalApp && item.status !== 'error' && (expandable || responseInTitle))
+    && !(presentation && item.status === 'done' && body !== undefined && expandable);
   const diffStats = item.status === 'done' && !permissionRequest && diff && ['update', 'create'].includes(view.verb) ? diff : undefined;
   const summary = (
     <span className="tool-call-summary" style={requiresCode ? { flexWrap: 'wrap', overflow: 'visible' } : undefined}>

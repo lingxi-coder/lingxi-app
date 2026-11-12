@@ -197,9 +197,146 @@ pub(crate) struct ActivityFoldCell {
     pub entries: Vec<ActivityEntry>,
 }
 
+fn fit_tool_text(text: &str, budget: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let flat = text.replace(['\n', '\r', '\t'], " ");
+    if flat.width() <= budget {
+        return flat;
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in flat.chars() {
+        let size = c.width().unwrap_or(0);
+        if used + size > budget.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+        used += size;
+    }
+    if budget > 0 {
+        out.push('…');
+    }
+    out
+}
+
+fn single_tool_lines(
+    entry: &ActivityEntry,
+    width: usize,
+    theme: &Theme,
+    verbose: bool,
+    sealed: bool,
+) -> Vec<StyledLine> {
+    use unicode_width::UnicodeWidthStr;
+    let header = tool_display::tool_header(&entry.tool, &entry.input);
+    let mut summary = header.title();
+    if header.primary.is_none() {
+        if let Some(sub) = &header.sub_line {
+            summary.push_str(&format!(" · {} {}", sub.prefix, sub.text));
+        } else if !entry.input.is_null()
+            && entry
+                .input
+                .as_object()
+                .is_none_or(|input| !input.is_empty())
+        {
+            summary.push_str(&format!(" · {}", entry.input));
+        }
+    }
+    let failed = entry
+        .result
+        .as_ref()
+        .is_some_and(tool_display::result_is_error);
+    let headline = entry.result.as_ref().and_then(|result| {
+        tool_display::result_headline(&entry.tool, Some(&entry.input), result, failed)
+    });
+    let body = entry
+        .result
+        .as_ref()
+        .and_then(|result| tool_display::result_body(&entry.tool, result))
+        .map(|body| tool_display::result::clamp_body(&body));
+    let (old, new, path) = tool_display::diff_inputs_for(&entry.tool, &entry.input);
+    let has_details = old.is_some()
+        || new.is_some()
+        || body.as_ref().is_some_and(|body| {
+            let content = body.text.trim();
+            !content.is_empty()
+                && (body.truncated
+                    || body.total_lines > 1
+                    || content.contains(['\n', '\r'])
+                    || Some(content) != headline.as_deref().map(str::trim))
+        });
+    if let Some(headline) = &headline {
+        summary.push_str(" · ");
+        summary.push_str(headline);
+    } else if entry.result.is_none() && !sealed {
+        summary.push_str(" · running");
+    }
+    let marker = if entry.tool.eq_ignore_ascii_case("computer") {
+        "▣ "
+    } else {
+        TOOL_MARKER
+    };
+    let suffix = if has_details {
+        if verbose {
+            " ⌄"
+        } else {
+            " ›"
+        }
+    } else {
+        ""
+    };
+    // A summary-only result stays complete, wrapping naturally in a narrow terminal.
+    let shown = if has_details {
+        fit_tool_text(
+            &summary,
+            width.saturating_sub(marker.width() + suffix.width()),
+        )
+    } else {
+        summary.replace(['\n', '\r', '\t'], " ")
+    };
+    let mut lines = vec![StyledLine {
+        spans: vec![StyledSpan::styled(
+            format!("{marker}{shown}{suffix}"),
+            SpanStyle {
+                fg: if failed { theme.error } else { theme.dim },
+                ..SpanStyle::default()
+            },
+        )],
+    }];
+    if verbose && has_details {
+        lines.extend(
+            tool_use_lines(&entry.tool, &entry.input, theme, true)
+                .into_iter()
+                .skip(1),
+        );
+        if old.is_some() || new.is_some() {
+            lines.extend(edit_write_diff_lines(
+                old.as_deref(),
+                new.as_deref(),
+                path.as_deref(),
+                width,
+                theme,
+            ));
+        }
+        if let Some(body) = body {
+            lines.extend(body.text.lines().map(|line| StyledLine {
+                spans: vec![dim_span(format!("  {line}"), theme)],
+            }));
+            if body.truncated {
+                lines.push(StyledLine {
+                    spans: vec![dim_span("  … output truncated".into(), theme)],
+                });
+            }
+        }
+    }
+    lines
+}
+
 impl StyledCell for ActivityFoldCell {
     fn styled_lines(&self, width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine> {
         use unicode_width::UnicodeWidthStr;
+        if self.key != "agents" && self.entries.len() == 1 && self.reasoning.trim().is_empty() {
+            return single_tool_lines(&self.entries[0], width, theme, verbose, self.sealed);
+        }
         let failed = self
             .entries
             .iter()
@@ -359,27 +496,7 @@ impl StyledCell for ActivityFoldCell {
             "☷ ".into()
         };
         // Reserve the status and adjacent arrow before truncating long names.
-        fn fit(text: &str, budget: usize) -> String {
-            use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-            let flat = text.replace(['\n', '\r', '\t'], " ");
-            if flat.width() <= budget {
-                return flat;
-            }
-            let mut out = String::new();
-            let mut used = 0;
-            for c in flat.chars() {
-                let size = c.width().unwrap_or(0);
-                if used + size > budget.saturating_sub(1) {
-                    break;
-                }
-                out.push(c);
-                used += size;
-            }
-            if budget > 0 {
-                out.push('…');
-            }
-            out
-        }
+        let fit = fit_tool_text;
         let state = fit(&state, width.saturating_sub(marker.width() + 3));
         let suffix = format!(
             "{} {}",
@@ -558,6 +675,22 @@ pub(crate) fn group_tool_use_lines(
     theme: &Theme,
     verbose: bool,
 ) -> Vec<StyledLine> {
+    if let [(input, result)] = entries {
+        if activity_fold_key(tool, input) != Some("agents") {
+            return single_tool_lines(
+                &ActivityEntry {
+                    id: String::new(),
+                    tool: tool.to_owned(),
+                    input: input.clone(),
+                    result: Some(result.clone()),
+                },
+                100,
+                theme,
+                verbose,
+                true,
+            );
+        }
+    }
     if !verbose
         && entries
             .first()
@@ -1025,6 +1158,112 @@ mod tests {
             key("ToolSearch", &json!({"query":"select:TaskList,Read"})),
             None
         );
+    }
+
+    #[test]
+    fn lone_summary_only_tools_render_once_without_disclosure() {
+        use super::{ActivityEntry, ActivityFoldCell};
+        use serde_json::json;
+        for (tool, input, result) in [
+            (
+                "Skill",
+                json!({"skill":"local-app"}),
+                json!("Launching skill: local-app"),
+            ),
+            (
+                "Bash",
+                json!({"command":"echo ready"}),
+                json!({"stdout":"Ready","stderr":""}),
+            ),
+            (
+                "mcp__docs__search",
+                json!({"query":"help"}),
+                json!({"error":"Unavailable"}),
+            ),
+        ] {
+            let cell = ActivityFoldCell {
+                key: "activity",
+                reasoning: String::new(),
+                thinking: false,
+                sealed: true,
+                entries: vec![ActivityEntry {
+                    id: "one".into(),
+                    tool: tool.into(),
+                    input,
+                    result: Some(result),
+                }],
+            };
+            for width in [20, 80] {
+                let collapsed = cell.styled_lines(width, &Theme::dark(), false);
+                let expanded = cell.styled_lines(width, &Theme::dark(), true);
+                assert_eq!(collapsed, expanded);
+                assert_eq!(collapsed.len(), 1);
+                let text: String = collapsed[0]
+                    .spans
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect();
+                assert!(
+                    !text.contains('›') && !text.contains('⌄') && !text.contains("1 call"),
+                    "{text}"
+                );
+                assert!(
+                    text.contains(if tool == "Skill" {
+                        "Launching skill"
+                    } else if tool == "Bash" {
+                        "Ready"
+                    } else {
+                        "Unavailable"
+                    }),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lone_tool_disclosure_preserves_multiline_output_and_diffs() {
+        use super::{ActivityEntry, ActivityFoldCell};
+        use serde_json::json;
+        for (tool, input, result, expected) in [
+            (
+                "Bash",
+                json!({"command":"printf output"}),
+                json!({"stdout":"first\nsecond","stderr":""}),
+                "second",
+            ),
+            (
+                "Write",
+                json!({"file_path":"test.txt","content":"new content"}),
+                json!({}),
+                "new content",
+            ),
+        ] {
+            let cell = ActivityFoldCell {
+                key: "activity",
+                reasoning: String::new(),
+                thinking: false,
+                sealed: true,
+                entries: vec![ActivityEntry {
+                    id: "one".into(),
+                    tool: tool.into(),
+                    input,
+                    result: Some(result),
+                }],
+            };
+            let collapsed = cell.styled_lines(80, &Theme::dark(), false);
+            assert_eq!(collapsed.len(), 1);
+            assert!(collapsed[0]
+                .spans
+                .iter()
+                .any(|span| span.text.ends_with('›')));
+            let expanded = cell.styled_lines(80, &Theme::dark(), true);
+            assert!(expanded.len() > 1);
+            assert!(expanded
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.text.contains(expected)));
+        }
     }
     #[test]
     fn collapsed_agents_and_verbose_details() {

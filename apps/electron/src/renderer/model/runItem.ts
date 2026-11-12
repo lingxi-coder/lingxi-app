@@ -431,7 +431,14 @@ export function commandDefaultOpen(item: CommandRunItem): boolean {
  * lie, and `Read`-style calls with an empty result are common.
  */
 export function toolHasBody(item: ToolRunItem): boolean {
-  return Boolean(item.result?.diff) || Boolean(item.result?.body);
+  const result = item.result;
+  if (result?.diff) return true;
+  if (!result?.body) return false;
+  // A one-line result repeated in the summary has no additional detail.
+  const body = result.body.trim();
+  if (!result.body_truncated && !(result.body_lines > 1)
+    && !/[\r\n]/.test(body) && body === result.headline?.trim()) return false;
+  return true;
 }
 
 /**

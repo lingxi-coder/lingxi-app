@@ -52,6 +52,14 @@ internal fun AgentRunTimeline(
     onToggleToolCall: (String) -> Unit = {},
     agents: List<SessionAgentUi> = emptyList(),
 ) {
+    val singleTool = state.tools.singleOrNull()
+    if (singleTool != null && !isAgentLaunchTool(singleTool.tool) && state.reasoning.isBlank() && !state.reasoningTruncated &&
+        state.notices.isEmpty() && state.activeWorkers == 0 && state.teamName == null &&
+        state.usage == null && state.formattedCost == null) {
+        ToolCallView(singleTool.toToolCall(), singleTool.id in expandedToolCalls, { onToggleToolCall(singleTool.id) },
+            modifier = modifier.testTag(UiTags.AGENT_RUN_TIMELINE))
+        return
+    }
     // Keep one fixed header; execution phases only replace its content.
     var expanded by rememberSaveable(state.turnId) { mutableStateOf(false) }
     val title = when (state.outcome) {

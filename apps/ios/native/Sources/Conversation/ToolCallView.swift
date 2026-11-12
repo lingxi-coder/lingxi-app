@@ -71,7 +71,7 @@ struct ToolCallView: View {
             if !compactPresentation, let sub = trace.header?.subLine, !sub.text.isEmpty {
                 subLineRow(sub)
             }
-            if !compactPresentation || isExpanded {
+            if !compactPresentation || (isExpanded && isCollapsible) {
                 resultBlock
                 syntheticShellDetails
             }
@@ -134,8 +134,10 @@ struct ToolCallView: View {
 
     private var compactSummary: String {
         var summary = ConversationDesktopTimeline.summary([trace])
-        if trace.tool == "LocalApp" && !showsRequiresCodeMessage { return summary }
         if let display = trace.display, let headline = ToolDisplayText.headline(display, trace: trace) {
+            let headlineInTitle = trace.status != .failed
+                && (trace.header?.primary == nil || trace.header?.primary == headline)
+            if trace.tool == "LocalApp" && !showsRequiresCodeMessage && (isCollapsible || headlineInTitle) { return summary }
             summary += " · " + headline
         }
         return summary
@@ -300,12 +302,10 @@ struct ToolCallView: View {
     /// keeps the interaction consistent for short and long outputs alike.
     private var isCollapsible: Bool {
         guard let display = trace.display else { return !(trace.inputSummary ?? "").isEmpty }
-        return display.diff != nil
-            || !(display.body ?? "").isEmpty
-            || display.bodyTruncated
+        return display.hasExpandableContent
     }
 
-    private var showsDetail: Bool { isExpanded }
+    private var showsDetail: Bool { isExpanded && isCollapsible }
 
     private var statusColor: Color {
         switch trace.status {

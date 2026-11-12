@@ -483,7 +483,7 @@ private struct ConversationToolBatchRow: View {
                     ToolCallView(trace: trace, isExpanded: expandedToolCalls.contains(trace.id), compact: true,
                                  onToggle: { onToggleTool(trace.id) })
                 }
-            } else if !unified, ordinaryTools.count == 1, let trace = ordinaryTools.first {
+            } else if ordinaryTools.count == 1, reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let trace = ordinaryTools.first {
                 ToolCallView(trace: trace, isExpanded: expandedToolCalls.contains(trace.id), compact: true,
                              onToggle: { onToggleTool(trace.id) })
             } else if unified || !ordinaryTools.isEmpty {

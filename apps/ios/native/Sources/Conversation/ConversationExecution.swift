@@ -410,6 +410,15 @@ struct ConversationToolResultDisplay: Equatable, Hashable {
     let bodyTruncated: Bool
     /// The body exceeds the inline budget — render it collapsed.
     let collapsed: Bool
+
+    /// A result already shown in the summary needs no second disclosure.
+    var hasExpandableContent: Bool {
+        if diff != nil || bodyTruncated { return true }
+        guard let body, !body.isEmpty else { return false }
+        let content = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return bodyLines > 1 || content.contains("\n") || content.contains("\r")
+            || content != headline?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 /// Lifecycle state of one plan item. Mirrors `PlanTaskStateDto`.

@@ -493,10 +493,6 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     () => (settings?.projects ?? []).filter((path) => path !== scheduledWorkspace && !localAppProjects.includes(path) && spaces?.projects[path]?.includes(currentSpace)),
     [scheduledWorkspace, settings?.projects, spaces?.projects, currentSpace, localAppProjects],
   );
-  const visibleDrafts = (spaces?.drafts ?? []).filter((draft) => draft.mode === currentSpace
-    && (draft.projectId === null || projects.includes(draft.projectId))
-    && !bridge.bootstrap?.projectCatalogs?.[draft.projectPath]?.sessions.some((row) =>
-      row.uuid === draft.sessionId && row.mode === draft.mode && row.message_count > 0));
   const generalPaths = useMemo(() => [...new Set([globalWorkspace, scheduledWorkspace].filter((path): path is string => Boolean(path)))], [globalWorkspace, scheduledWorkspace]);
   const ownedPaths = useMemo(() => [...new Set((spaces?.sessions ?? []).filter((owner) => owner.mode === currentSpace
     && (owner.projectId === null || projects.includes(owner.projectId))).map((owner) => owner.projectPath))], [spaces?.sessions, currentSpace, projects]);
@@ -1042,17 +1038,6 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           </section>
         ) : null}
 
-        {visibleDrafts.length > 0 && <section aria-label={tr('desktop_chat_drafts')} style={{ marginBottom: 12 }}>
-          <h2 style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600 }}>{tr('desktop_chat_drafts')}</h2>
-          {visibleDrafts.filter((draft) => matchesSearch(draft.sessionId) || matchesSearch(tr('desktop_chat_drafts'))).map((draft) =>
-            <button key={draft.sessionId} type="button" data-session-id={draft.sessionId}
-              aria-current={!scheduled && visibleSession?.sessionId === draft.sessionId ? 'page' : undefined}
-              onClick={() => openSidebarSession(draft.projectPath, draft.sessionId)}
-              style={{ display: 'block', width: '100%', padding: '7px 9px', border: 0, borderRadius: 7, textAlign: 'left',
-                background: visibleSession?.sessionId === draft.sessionId ? t.surfaceActive : 'transparent', color: t.text, cursor: 'pointer' }}>
-              {draft.handoff ? tr('desktop_handoff_source', draft.handoff.sourceMode === 'chat' ? 'Chat' : 'Code', draft.handoff.sourceSessionId.slice(0, 8)) : tr('desktop_chat_drafts')}
-            </button>)}
-        </section>}
         {globalSessions.length > 0 && <section aria-label={tr('drawer_search_section_sessions')}>
           <h2 style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>{tr('drawer_search_section_sessions')}</h2>
           {(normalizedSearch ? globalSessions.filter(({ session }) => matchesSearch(session.title || tr('remote_untitled'))) : showAllSessions['global'] ? globalSessions : globalSessions.slice(0, 5)).map(({ projectPath: workspace, session }) => {

@@ -1,4 +1,6 @@
 //! Read older display rows backwards from an exact transcript. No engine or account IO.
+use lingxi_core::types::utf16_json::JsonValueView;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -111,6 +113,8 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
         return Err("History source changed. Reopen this chat to reload history.".into());
     }
     let mut found = cursor.offset.is_some();
+    let mut ancestors = HashSet::new();
+    let mut groups = HashSet::new();
     if let Some(offset) = cursor.offset {
         if offset >= opened.len() {
             return Err("History cursor is no longer valid".into());
@@ -123,13 +127,14 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
             .read_until(b'\n', &mut line)
             .map_err(|error| error.to_string())?;
         let source = String::from_utf8(line).map_err(|_| "Invalid history cursor".to_string())?;
-        if !session::jsonl::route_lines(&source)
+        let loaded = session::jsonl::route_lines(&source);
+        let anchor = loaded
             .messages_in_order
             .iter()
-            .any(|row| row.uuid == cursor.uuid)
-        {
-            return Err("History moved since the previous page. Reopen this chat.".into());
-        }
+            .find(|row| row.uuid == cursor.uuid)
+            .ok_or("History moved since the previous page. Reopen this chat.")?;
+        ancestors.extend(anchor.parent_uuid.iter().cloned());
+        groups.extend(assistant_group(anchor));
     }
     let mut reader = ReverseLines {
         file,
@@ -137,6 +142,10 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
         buffer: Vec::new(),
     };
     let mut rows = Vec::new();
+    let mut pending_siblings = HashMap::<_, Vec<(u64, session::jsonl::JsonlMessage)>>::new();
+    let mut pending_calls = HashSet::new();
+    let mut pending_summary = false;
+    let mut safe_offsets = Vec::new();
     let mut bytes = 0;
     let mut before = None;
     while let Some((offset, line)) = reader.next()? {
@@ -151,25 +160,75 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
         if !found {
             if row.uuid == cursor.uuid {
                 found = true;
+                ancestors.extend(row.parent_uuid.iter().cloned());
+                groups.extend(assistant_group(&row));
             }
             continue;
         }
-        if bytes + line.len() > MAX_PAGE_BYTES && !rows.is_empty() {
+        if bytes + line.len() > MAX_PAGE_BYTES {
+            if !truncate_complete_page(&mut rows, &safe_offsets, &pending_siblings) {
+                return Err("One history activity exceeds the page size limit".into());
+            }
             break;
         }
         bytes += line.len();
-        before = Some(Cursor {
-            uuid: row.uuid.clone(),
-            offset: Some(offset),
-            identity: Some(source_identity.clone()),
-        });
-        rows.push(row);
-        if rows.len() >= PAGE_ROWS {
+        let group = assistant_group(&row);
+        let owned = uuid::Uuid::parse_str(
+            row.session_id
+                .strip_prefix("sess:")
+                .unwrap_or(&row.session_id),
+        )
+        .ok()
+            == Some(session_id);
+        if !owned
+            && !ancestors.contains(&row.uuid)
+            && !group.as_ref().is_some_and(|group| groups.contains(group))
+        {
+            // A foreign assistant sibling may precede its proven ancestor in
+            // reverse order. Keep it bounded by this page's byte budget until
+            // that ancestor proves the whole assistant group belongs here.
+            if let Some(group) = group {
+                pending_siblings
+                    .entry(group)
+                    .or_default()
+                    .push((offset, row));
+            }
+            continue;
+        }
+        ancestors.extend(row.parent_uuid.iter().cloned());
+        if let Some(group) = group {
+            groups.insert(group.clone());
+            if let Some(siblings) = pending_siblings.remove(&group) {
+                for sibling in siblings {
+                    ancestors.extend(sibling.1.parent_uuid.iter().cloned());
+                    update_activity(&sibling.1, &mut pending_calls, &mut pending_summary);
+                    rows.push(sibling);
+                }
+                rows.sort_by_key(|(offset, _)| std::cmp::Reverse(*offset));
+            }
+        }
+        update_activity(&row, &mut pending_calls, &mut pending_summary);
+        rows.push((offset, row));
+        if pending_calls.is_empty() && !pending_summary {
+            safe_offsets.push(offset);
+        }
+        if rows.len() >= PAGE_ROWS
+            && truncate_complete_page(&mut rows, &safe_offsets, &pending_siblings)
+        {
+            // Keep a call/result activity together, allowing a larger single
+            // batch within the byte budget rather than dropping raw results.
             break;
         }
     }
     if !found {
         return Err("History anchor is unavailable. Reopen this chat.".into());
+    }
+    if let Some((offset, row)) = rows.last() {
+        before = Some(Cursor {
+            uuid: row.uuid.clone(),
+            offset: Some(*offset),
+            identity: Some(source_identity.clone()),
+        });
     }
     if before
         .as_ref()
@@ -179,6 +238,7 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
         before = None;
     }
     rows.reverse();
+    let rows = rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>();
     let state = orchestrator::resume::state_from_messages(session_id, &rows);
     let results = orchestrator::resume::client_state_tool_results_from_messages(&rows);
     let timestamps = rows
@@ -201,9 +261,330 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
     Ok(Page { messages, before })
 }
 
+type AssistantGroup = (String, String, String);
+type HistoryRow = (u64, session::jsonl::JsonlMessage);
+
+fn truncate_complete_page(
+    rows: &mut Vec<HistoryRow>,
+    safe_offsets: &[u64],
+    pending_siblings: &HashMap<AssistantGroup, Vec<HistoryRow>>,
+) -> bool {
+    let pending_offset = pending_siblings
+        .values()
+        .flatten()
+        .map(|(offset, _)| *offset)
+        .max();
+    let Some(cut) = safe_offsets
+        .iter()
+        .rev()
+        .find(|offset| pending_offset.is_none_or(|pending| **offset > pending))
+    else {
+        return false;
+    };
+    // An unproven sibling must stay on the older side of the cursor so the
+    // next page can still discover its ancestor and recover it.
+    rows.retain(|(offset, _)| offset >= cut);
+    true
+}
+
+fn assistant_group(row: &session::jsonl::JsonlMessage) -> Option<AssistantGroup> {
+    (row.message_type == "assistant").then(|| {
+        Some((
+            uuid::Uuid::parse_str(
+                row.session_id
+                    .strip_prefix("sess:")
+                    .unwrap_or(&row.session_id),
+            )
+            .map_or_else(|_| row.session_id.clone(), |owner| owner.to_string()),
+            row.message.string_at("/id")?.to_string(),
+            row.extra.string_at("/agentId").unwrap_or("").to_string(),
+        ))
+    })?
+}
+
+fn update_activity(
+    row: &session::jsonl::JsonlMessage,
+    pending_calls: &mut HashSet<String>,
+    pending_summary: &mut bool,
+) {
+    if row
+        .extra
+        .at_pointer("/isCompactSummary")
+        .and_then(JsonValueView::as_bool)
+        == Some(true)
+    {
+        *pending_summary = true;
+    }
+    if row.message_type == "system" && row.extra.string_at("/subtype") == Some("compact_boundary") {
+        *pending_summary = false;
+    }
+    if let Some(content) = row.message.at_pointer("/content") {
+        for index in 0..content.array_len().unwrap_or(0) {
+            let Some(block) = content.get_index(index) else {
+                continue;
+            };
+            match block.get_property("type").and_then(JsonValueView::as_str) {
+                Some("tool_result") => {
+                    if let Some(id) = block
+                        .get_property("tool_use_id")
+                        .and_then(JsonValueView::as_str)
+                    {
+                        pending_calls.insert(id.to_string());
+                    }
+                }
+                Some("tool_use") => {
+                    if let Some(id) = block.get_property("id").and_then(JsonValueView::as_str) {
+                        pending_calls.remove(id);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use client::protocol::message::MessageBlockDto;
+
+    fn saved_rows(
+        rows: Vec<serde_json::Value>,
+        id: uuid::Uuid,
+    ) -> (tempfile::TempDir, std::path::PathBuf, Cursor) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(format!("{id}.jsonl"));
+        let mut parent = None;
+        let mut source = String::new();
+        for mut row in rows {
+            let uuid = row
+                .get("uuid")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            row["uuid"] = uuid.clone().into();
+            if row.get("sessionId").is_none() {
+                row["sessionId"] = id.to_string().into();
+            }
+            if row.get("parentUuid").is_none() {
+                row["parentUuid"] = serde_json::json!(parent);
+            }
+            row["timestamp"] = "2026-11-12T00:00:00Z".into();
+            parent = Some(uuid);
+            source.push_str(&format!("{row}\n"));
+        }
+        std::fs::write(&path, source).unwrap();
+        (
+            root,
+            path,
+            Cursor {
+                uuid: parent.unwrap(),
+                offset: None,
+                identity: None,
+            },
+        )
+    }
+
+    fn text_row(text: &str) -> serde_json::Value {
+        serde_json::json!({"type":"user","message":{"role":"user","content":text}})
+    }
+
+    fn agent_call(id: &str) -> serde_json::Value {
+        serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":id,"name":"Agent","input":{"description":"inspect"}}]}})
+    }
+
+    fn agent_result(id: &str) -> serde_json::Value {
+        serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"model text"}]},"toolUseResult":{"agentId":"saved-worker","status":"completed"}})
+    }
+
+    #[test]
+    fn pages_keep_calls_with_structured_results_at_the_soft_row_limit() {
+        let id = uuid::Uuid::new_v4();
+        let mut rows = vec![agent_call("agent"), agent_result("agent")];
+        rows.extend((0..60).map(|_| text_row("newer")));
+        let (_root, path, cursor) = saved_rows(rows, id);
+        let first = read(&path, id, cursor).unwrap();
+        assert_eq!(first.messages.len(), 59);
+        let second = read(&path, id, first.before.unwrap()).unwrap();
+        assert_eq!(second.messages.len(), 2);
+        let result = second
+            .messages
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .find_map(|block| match block {
+                MessageBlockDto::ToolResult {
+                    tool, result_json, ..
+                } => Some((tool, result_json)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(result.0, "Agent");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(result.1).unwrap()["agentId"],
+            "saved-worker"
+        );
+        assert!(second.before.is_none());
+    }
+
+    #[test]
+    fn a_single_parallel_activity_can_exceed_the_soft_row_limit() {
+        let id = uuid::Uuid::new_v4();
+        let calls = (0..65).map(|index|serde_json::json!({"type":"tool_use","id":format!("call-{index}"),"name":"Agent","input":{}})).collect::<Vec<_>>();
+        let mut rows = vec![
+            serde_json::json!({"type":"assistant","message":{"role":"assistant","content":calls}}),
+        ];
+        rows.extend((0..65).map(|index| agent_result(&format!("call-{index}"))));
+        rows.push(text_row("anchor"));
+        let (_root, path, cursor) = saved_rows(rows, id);
+        let page = read(&path, id, cursor).unwrap();
+        assert_eq!(page.messages.len(), 66);
+        assert_eq!(
+            page.messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .filter(
+                    |block| matches!(block,MessageBlockDto::ToolResult { tool,.. } if tool=="Agent")
+                )
+                .count(),
+            65
+        );
+        assert!(page.before.is_none());
+    }
+
+    #[test]
+    fn compact_summary_and_boundary_are_never_split_between_pages() {
+        let id = uuid::Uuid::new_v4();
+        let mut summary = text_row("Summary body");
+        summary["isCompactSummary"] = true.into();
+        let mut rows = vec![
+            serde_json::json!({"type":"system","subtype":"compact_boundary","content":"compact","compactMetadata":{}}),
+            summary,
+        ];
+        rows.extend((0..60).map(|_| text_row("newer")));
+        let (_root, path, cursor) = saved_rows(rows, id);
+        let first = read(&path, id, cursor).unwrap();
+        assert_eq!(first.messages.len(), 59);
+        let older = read(&path, id, first.before.unwrap()).unwrap();
+        assert_eq!(older.messages.len(), 1);
+        assert!(older.messages[0].blocks.iter().any(|block|matches!(block,MessageBlockDto::CompactBoundary { summary,.. } if summary.contains("Summary body"))));
+    }
+
+    #[test]
+    fn foreign_rows_cannot_supply_tool_results_but_proven_parallel_ancestors_survive() {
+        let id = uuid::Uuid::new_v4();
+        let ancestor = uuid::Uuid::new_v4();
+        let first = uuid::Uuid::new_v4();
+        let mut a = agent_call("first");
+        a["uuid"] = first.to_string().into();
+        a["sessionId"] = ancestor.to_string().into();
+        a["message"]["id"] = "parallel".into();
+        let mut b = agent_call("second");
+        b["sessionId"] = ancestor.to_string().into();
+        b["message"]["id"] = "parallel".into();
+        let mut result = agent_result("first");
+        result["parentUuid"] = first.to_string().into();
+        result["message"]["content"].as_array_mut().unwrap().push(serde_json::json!({"type":"tool_result","tool_use_id":"second","content":"second result"}));
+        result.as_object_mut().unwrap().remove("toolUseResult");
+        let mut foreign = agent_result("first");
+        foreign["sessionId"] = uuid::Uuid::new_v4().to_string().into();
+        foreign["parentUuid"] = serde_json::Value::Null;
+        let mut anchor = text_row("anchor");
+        anchor["parentUuid"] = first.to_string().into();
+        let (_root, path, cursor) = saved_rows(vec![a, b, result, foreign, anchor], id);
+        let page = read(&path, id, cursor).unwrap();
+        assert_eq!(
+            page.messages.len(),
+            2,
+            "parallel assistant blocks share one DTO row"
+        );
+        assert_eq!(
+            page.messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .filter(
+                    |block| matches!(block,MessageBlockDto::ToolUse { tool,.. } if tool=="Agent")
+                )
+                .count(),
+            2
+        );
+        assert_eq!(
+            page.messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .filter(|block| matches!(block, MessageBlockDto::ToolResult { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn byte_budget_returns_a_complete_newer_page_and_rejects_one_oversized_activity() {
+        let id = uuid::Uuid::new_v4();
+        let mut huge = agent_result("agent");
+        huge["message"]["content"][0]["content"] = "x".repeat(MAX_PAGE_BYTES).into();
+        let (_root, path, cursor) = saved_rows(
+            vec![
+                agent_call("agent"),
+                huge,
+                text_row("kept newer row"),
+                text_row("anchor"),
+            ],
+            id,
+        );
+        let newer = read(&path, id, cursor).unwrap();
+        assert_eq!(newer.messages.len(), 1);
+        assert!(read(&path, id, newer.before.unwrap())
+            .err()
+            .unwrap()
+            .contains("page size limit"));
+    }
+
+    #[test]
+    fn a_page_cursor_never_skips_a_parallel_sibling_awaiting_ancestor_proof() {
+        let id = uuid::Uuid::new_v4();
+        let ancestor = uuid::Uuid::new_v4();
+        let first = uuid::Uuid::new_v4();
+        let child = uuid::Uuid::new_v4();
+        let mut a = agent_call("first");
+        a["uuid"] = first.to_string().into();
+        a["sessionId"] = ancestor.to_string().into();
+        a["message"]["id"] = "parallel".into();
+        let mut d = text_row("child of the ancestor");
+        d["uuid"] = child.to_string().into();
+        d["parentUuid"] = first.to_string().into();
+        let mut c = serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"parallel sibling prose"}]}});
+        c["sessionId"] = format!("sess:{ancestor}").into();
+        c["message"]["id"] = "parallel".into();
+        let mut rows = vec![a, d, c];
+        for index in 0..59 {
+            let mut row = text_row("newer");
+            if index == 0 {
+                row["parentUuid"] = child.to_string().into();
+            }
+            rows.push(row);
+        }
+        rows.push(text_row("anchor"));
+        let (_root, path, cursor) = saved_rows(rows, id);
+        let newer = read(&path, id, cursor).unwrap();
+        assert_eq!(newer.messages.len(), 59);
+        let older = read(&path, id, newer.before.unwrap()).unwrap();
+        assert_eq!(older.messages.len(), 3);
+        assert_eq!(
+            older
+                .messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .filter(
+                    |block| matches!(block,MessageBlockDto::ToolUse { tool,.. } if tool=="Agent")
+                )
+                .count(),
+            1
+        );
+        assert!(serde_json::to_string(&older.messages)
+            .unwrap()
+            .contains("parallel sibling prose"));
+        assert!(older.before.is_none());
+    }
 
     fn transcript(
         count: usize,

@@ -1,4 +1,5 @@
 import type { ClientEvent, MessageDto, PermissionRequest } from '@lingxi/bridge-client';
+import type { RunItem } from '../model/runItem';
 
 export interface SubmittedPlan {
   readonly id: string;
@@ -144,6 +145,23 @@ export function reduceSubmittedPlanMessages(
     }
   }
   return next;
+}
+
+/** Older history adds documents without replacing current live approvals. */
+export function prependSubmittedPlanMessages(state: SubmittedPlanState, messages: readonly MessageDto[], sessionId: string, items: readonly RunItem[] = []): SubmittedPlanState {
+  let older = reduceSubmittedPlanMessages(emptySubmittedPlanState(), messages, sessionId);
+  // A compact display cut can leave the result in the current tail and its
+  // call in this older page. The merged tool retains that structured result.
+  const ids = new Set(older.calls.map(call => call.id));
+  for (const item of items) {
+    if (item.type === 'tool' && item.tool === 'ExitPlanMode' && ids.has(item.id) && item.nativeOutput !== undefined) {
+      older = result(older, item.id, JSON.stringify(item.nativeOutput), item.status === 'error', true);
+    }
+  }
+  if (older.calls.length === 0) return state;
+  const current = new Set(state.calls.map(call => call.id));
+  const additions = older.calls.filter(call => !current.has(call.id));
+  return additions.length ? { ...state, calls: [...additions, ...state.calls] } : state;
 }
 export function reduceSubmittedPlanEvent(
   state: SubmittedPlanState, event: ClientEvent, sessionId: string,

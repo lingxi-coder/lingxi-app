@@ -1338,6 +1338,14 @@ impl ActiveTurnControl {
     }
 
     fn begin(&self, turn_id: Option<u64>) -> (u64, CancellationToken) {
+        self.begin_with_session(turn_id, None)
+    }
+
+    fn begin_with_session(
+        &self,
+        turn_id: Option<u64>,
+        session_id: Option<String>,
+    ) -> (u64, CancellationToken) {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let cancel = CancellationToken::new();
         let previous = self
@@ -1349,7 +1357,9 @@ impl ActiveTurnControl {
                 turn_id,
                 cancel: cancel.clone(),
                 terminal: false,
-                permission_owner_id: self.gate().map(|gate| gate.begin_main_turn(None, turn_id)),
+                permission_owner_id: self
+                    .gate()
+                    .map(|gate| gate.begin_main_turn(session_id, turn_id)),
             });
         // A scheduled execution may replace a native owner without entering
         // the ordinary command lane. Signal it before it can keep the SDK
@@ -4716,6 +4726,12 @@ impl BridgeConnection {
                 }
                 self.stop_loop_for_session_transition().await;
                 if let Some(router) = &self.router {
+                    let resume_lease =
+                        if let ClientCommand::ResumeSession { session_id, .. } = &command {
+                            Some(self.begin_resume_interaction(Some(session_id)))
+                        } else {
+                            None
+                        };
                     // Session transitions have no active turn. Their restored
                     // usage and notices are connection snapshots, not live
                     // model output. Keep the normal event sink owner-scoped so
@@ -4727,6 +4743,16 @@ impl BridgeConnection {
                             self.unscoped_event_sink(),
                         )
                         .await;
+                    if let Some(lease) = resume_lease {
+                        if self.finish_resume_interaction(lease).await {
+                            self.unscoped_event_sink()
+                                .emit(ClientEvent::Error {
+                                    kind: ErrorKindDto::Rejected,
+                                    message: "session resume was cancelled".into(),
+                                })
+                                .await;
+                        }
+                    }
                 }
                 if let (Some(rpc), Some(driver)) =
                     (self.media_service_rpc.as_ref(), self.driver.as_ref())
@@ -5185,6 +5211,34 @@ impl BridgeConnection {
             .active_turn_task
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(task);
+    }
+
+    fn begin_resume_interaction(&self, session_id: Option<&str>) -> ResumeInteractionLease {
+        let (generation, cancel) = self
+            .resume_interactions
+            .begin_with_session(None, session_id.map(str::to_owned));
+        ResumeInteractionLease {
+            owner: self.resume_interactions.clone(),
+            generation,
+            cancel,
+        }
+    }
+
+    async fn finish_resume_interaction(&self, lease: ResumeInteractionLease) -> bool {
+        let cancelled = self.resume_interactions.begin_terminal().unwrap_or(true);
+        TurnInteractions {
+            gate: self.gate.clone(),
+            computer_access_broker: self.computer_access_broker.clone(),
+            ask_user_question_broker: self.ask_user_question_broker.clone(),
+            tool_names: self.tool_names.clone(),
+        }
+        .drain(
+            self.resume_interactions
+                .permission_owner_id(lease.generation),
+        )
+        .await;
+        drop(lease);
+        cancelled
     }
 
     async fn cancel_active_turn(&self, turn_id: Option<u64>) {
@@ -5782,29 +5836,14 @@ impl FramePump for BridgeConnection {
                             }
                             Some(router) if method == "resume_selected_session" => {
                                 self.refresh_permission_session().await;
-                                let (generation, cancel) = self.resume_interactions.begin(None);
-                                let lease = ResumeInteractionLease {
-                                    owner: self.resume_interactions.clone(),
-                                    generation,
-                                    cancel,
-                                };
+                                let lease = self.begin_resume_interaction(None);
                                 let sink = Arc::new(ResumeEventSink {
                                     out: self.out.clone(),
                                     owner: self.resume_interactions.clone(),
                                     handshaken: self.handshaken.clone(),
                                 });
                                 let result = router.resume_selected_session(params, sink).await;
-                                let cancelled =
-                                    self.resume_interactions.begin_terminal().unwrap_or(true);
-                                TurnInteractions {
-                                    gate: self.gate.clone(),
-                                    computer_access_broker: self.computer_access_broker.clone(),
-                                    ask_user_question_broker: self.ask_user_question_broker.clone(),
-                                    tool_names: self.tool_names.clone(),
-                                }
-                                .drain(self.resume_interactions.permission_owner_id(generation))
-                                .await;
-                                drop(lease);
+                                let cancelled = self.finish_resume_interaction(lease).await;
                                 if cancelled {
                                     Err("session resume was cancelled".into())
                                 } else {

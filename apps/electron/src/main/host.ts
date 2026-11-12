@@ -579,6 +579,9 @@ export class HostController {
   private registered = false;
   private navigationQueue: Promise<void> = Promise.resolve();
   private readonly sessionOpenings = new Map<string, Promise<unknown>>();
+  private readonly sessionOpenEpochs = new Map<string, number>();
+  private sessionArchiveEpoch = 0;
+  private readonly sessionArchivals = new Map<string, Promise<unknown>>();
   private navigationGeneration = 0;
   private modeNavigation?: { mode: ConversationSpace; pending: Promise<BootstrapState> };
   private readonly handoffs = new Map<string, AbortController>();
@@ -1148,13 +1151,15 @@ export class HostController {
       const confirmed = displayed ? this.settings.conversationSpaces.find(displayed)?.mode
         ?? this.settings.conversationSpaces.snapshot().activeMode : this.settings.conversationSpaces.snapshot().activeMode;
       const generation = ++this.navigationGeneration;
+      const target = this.draftSelections.get(value) ?? this.settings.conversationSpaces.snapshot().navigation[value].session;
+      const publicationCurrent = target ? this.captureSessionOpen(target.sessionId) : () => true;
       // Reserve intent before awaiting disk or the navigation lane. Otherwise
       // a rapid Code -> Chat request sees the still-committed Chat snapshot.
       const pending = this.enqueueNavigation(async () => {
-        if (generation === this.navigationGeneration) await this.settings.conversationSpaces.setMode(value);
+        if (generation === this.navigationGeneration && publicationCurrent()) await this.settings.conversationSpaces.setMode(value);
       }).then(async () => {
         if (generation !== this.navigationGeneration) return this.bootstrap();
-        try { return await this.switchConversationSpace(value, generation); }
+        try { return await this.switchConversationSpace(value, generation, publicationCurrent); }
         catch (error) {
           if (generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === value) {
             await this.settings.conversationSpaces.setMode(confirmed);
@@ -1291,7 +1296,7 @@ export class HostController {
       this.draftAdmissionGenerations.delete(expectedMode);
       const project = this.requireProject(projectPath);
       if (!isSessionId(sessionId)) throw new Error('invalid session id');
-      return this.enqueueSessionOpen(sessionId, async () => {
+      return this.enqueueSessionOpen(sessionId, async (publicationCurrent) => {
         const ref = { projectPath: project, sessionId } satisfies SessionRef;
         const authoring = authoringAppId === undefined ? undefined : await this.captureLocalAppAuthoring?.(authoringAppId as string, ref, authoringVersion as number);
         if (authoringAppId !== undefined && !authoring) throw new Error('The Local App authoring host is unavailable');
@@ -1306,16 +1311,16 @@ export class HostController {
           }
           selected = { scope: sessionCatalogScope(input.scope), ...(typeof input.transcriptPath === 'string' ? { transcriptPath: input.transcriptPath } : {}) };
         }
-        if (linkedMode === undefined) return this.openSessionAndActivateInternal(ref, selected, generation, expectedMode);
+        if (linkedMode === undefined) return this.openSessionAndActivateInternal(ref, selected, generation, expectedMode, undefined, publicationCurrent);
         const known = this.settings.conversationSpaces.findBySessionId(sessionId);
         if (!known) throw new Error('The session has no authenticated conversation scope.');
         if (known.mode !== linkedMode) throw new Error('The session belongs to a different conversation space.');
         if (generation !== this.navigationGeneration) return this.bootstrap();
         const previousMode = this.settings.conversationSpaces.snapshot().activeMode;
         await this.enqueueNavigation(async () => {
-          if (generation === this.navigationGeneration) await this.settings.conversationSpaces.setMode(linkedMode);
+          if (generation === this.navigationGeneration && publicationCurrent()) await this.settings.conversationSpaces.setMode(linkedMode);
         });
-        try { return await this.openSessionAndActivateInternal(ref, selected, generation, linkedMode, authoring); }
+        try { return await this.openSessionAndActivateInternal(ref, selected, generation, linkedMode, authoring, publicationCurrent); }
         catch (error) {
           if (generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === linkedMode) {
             await this.settings.conversationSpaces.setMode(previousMode);
@@ -1380,10 +1385,11 @@ export class HostController {
         });
         const previousMode = this.settings.conversationSpaces.snapshot().activeMode;
         const mode = ref.mode ?? previousMode;
-        return this.enqueueNavigation(async () => {
-          if (generation !== this.navigationGeneration) return this.bootstrap();
-          await this.settings.conversationSpaces.setMode(mode);
-          try { return await this.openSessionAndActivateInternal(ref, undefined, generation, mode); }
+        return this.enqueueSessionOpen(ref.sessionId, async (publicationCurrent) => {
+          await this.enqueueNavigation(async () => {
+            if (generation === this.navigationGeneration && publicationCurrent()) await this.settings.conversationSpaces.setMode(mode);
+          });
+          try { return await this.openSessionAndActivateInternal(ref, undefined, generation, mode, undefined, publicationCurrent); }
           catch (error) {
             if (generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === mode) {
               await this.settings.conversationSpaces.setMode(previousMode);
@@ -1417,17 +1423,28 @@ export class HostController {
     this.ipc.handle(CH_SESSION_ARCHIVE, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, selection?: unknown) => {
       this.assertSender(event);
       const ref = this.archiveRef(projectPath, sessionId);
-      const captured = await this.metadataSource(ref, metadataSelection(selection), event.sender);
-      return this.enqueueNavigation(async () => {
-        try {
-          const result = await this.archiveSessionInternal(ref, captured);
-          this.releaseMetadataSource(captured.selection.sourceToken);
-          return result;
-        } catch (error) {
-          if (this.settings.isSessionArchived(captured.source.ref)) this.releaseMetadataSource(captured.selection.sourceToken);
-          throw error;
-        }
-      });
+      const key = ref.sessionId.toLowerCase();
+      // Revoke admitted opens now; a slow catalog/engine must not restore a
+      // chat after this newer lifecycle action has archived it.
+      this.sessionOpenEpochs.set(key, ++this.sessionArchiveEpoch);
+      const archival = (async () => {
+        const captured = await this.metadataSource(ref, metadataSelection(selection), event.sender);
+        return this.enqueueNavigation(async () => {
+          try {
+            const result = await this.archiveSessionInternal(ref, captured);
+            this.releaseMetadataSource(captured.selection.sourceToken);
+            return result;
+          } catch (error) {
+            if (this.settings.isSessionArchived(captured.source.ref)) this.releaseMetadataSource(captured.selection.sourceToken);
+            throw error;
+          }
+        });
+      })();
+      this.sessionArchivals.set(key, archival);
+      void archival.finally(() => {
+        if (this.sessionArchivals.get(key) === archival) this.sessionArchivals.delete(key);
+      }).catch(() => undefined);
+      return archival;
     });
     this.ipc.handle(CH_SESSION_CLEAR, async (event: IpcMainInvokeEvent, sessionId: unknown, name?: unknown) => {
       this.assertSender(event);
@@ -2141,11 +2158,18 @@ export class HostController {
     return run;
   }
 
-  /** Different engines prepare concurrently; competing copies of one UUID share a lane. */
-  private enqueueSessionOpen<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+  private captureSessionOpen(sessionId: string, admittedEpoch = this.sessionArchiveEpoch): () => boolean {
     const key = sessionId.toLowerCase();
+    return () => (this.sessionOpenEpochs.get(key) ?? 0) <= admittedEpoch;
+  }
+
+  /** Different engines prepare concurrently; competing copies of one UUID share a lane. */
+  private enqueueSessionOpen<T>(sessionId: string, operation: (current: () => boolean) => Promise<T>): Promise<T> {
+    const key = sessionId.toLowerCase();
+    const current = this.captureSessionOpen(sessionId);
     const previous = this.sessionOpenings.get(key) ?? Promise.resolve();
-    const run = previous.then(operation, operation);
+    const archival = this.sessionArchivals.get(key) ?? Promise.resolve();
+    const run = Promise.allSettled([previous, archival]).then(() => operation(current));
     this.sessionOpenings.set(key, run);
     void run.finally(() => {
       if (this.sessionOpenings.get(key) === run) this.sessionOpenings.delete(key);
@@ -2401,8 +2425,8 @@ export class HostController {
     return this.settings.conversationSpaces.find(active)?.mode === mode ? mode : undefined;
   }
 
-  private async switchConversationSpace(space: ConversationSpace, generation: number): Promise<BootstrapState> {
-    const current = () => generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === space;
+  private async switchConversationSpace(space: ConversationSpace, generation: number, publicationCurrent = () => true): Promise<BootstrapState> {
+    const current = () => publicationCurrent() && generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === space;
     if (!current()) return this.bootstrap();
     const draft = this.draftSelections.get(space);
     if (draft) {
@@ -2415,7 +2439,8 @@ export class HostController {
       return this.bootstrap();
     }
     const navigation = this.settings.conversationSpaces.snapshot().navigation[space];
-    if (navigation.session) return this.openSessionAndActivateInternal(navigation.session, undefined, generation, space);
+    if (navigation.session) return this.enqueueSessionOpen(navigation.session.sessionId,
+      admitted => this.openSessionAndActivateInternal(navigation.session!, undefined, generation, space, undefined, () => admitted() && publicationCurrent()));
     // An empty space still needs a live draft: the composer controls require
     // an active engine even before the first message is sent.
     const projectPath = this.settings.conversationSpaces.globalWorkspaces[space];
@@ -2762,7 +2787,7 @@ export class HostController {
 
   async openSessionAndActivate(ref: SessionRef, selection?: SessionOpenSelection): Promise<BootstrapState> {
     const generation = ++this.navigationGeneration;
-    return this.enqueueSessionOpen(ref.sessionId, () => this.openSessionAndActivateInternal(ref, selection, generation));
+    return this.enqueueSessionOpen(ref.sessionId, current => this.openSessionAndActivateInternal(ref, selection, generation, undefined, undefined, current));
   }
 
   async updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null> {
@@ -2916,16 +2941,19 @@ export class HostController {
   }
 
   private async openSessionAndActivateInternal(ref: SessionRef, selection?: SessionOpenSelection, generation?: number, expectedMode?: ConversationSpace,
-    authoring?: CapturedLocalAppAuthoring): Promise<BootstrapState> {
+    authoring?: CapturedLocalAppAuthoring, publicationCurrent?: () => boolean): Promise<BootstrapState> {
     if (!isSessionId(ref.sessionId)) throw new Error('invalid session id');
+    const admitted = publicationCurrent ?? this.captureSessionOpen(ref.sessionId);
+    if (!admitted() || (generation !== undefined && (generation !== this.navigationGeneration
+      || (expectedMode !== undefined && this.settings.conversationSpaces.snapshot().activeMode !== expectedMode)))) return this.bootstrap();
     const project = this.requireProject(ref.projectPath);
     ref = { projectPath: project, sessionId: ref.sessionId.toLowerCase() };
     if (this.isProjectClosing(project)) throw new Error('project is closing');
     const draft = !selection && this.bridge.hasOwnedDraft?.(ref) ? this.settings.conversationSpaces.find(ref) : undefined;
     if (draft) {
       if (expectedMode && draft.mode !== expectedMode) throw new Error('The session belongs to a different conversation space.');
-      const current = () => generation === undefined || (generation === this.navigationGeneration
-        && (expectedMode === undefined || this.settings.conversationSpaces.snapshot().activeMode === expectedMode));
+      const current = () => admitted() && (generation === undefined || (generation === this.navigationGeneration
+        && (expectedMode === undefined || this.settings.conversationSpaces.snapshot().activeMode === expectedMode)));
       if (authoring && draft.projectPath !== authoring.sourceDirectory) throw new Error('The Local App authoring workspace changed');
       await this.bridge.reopenOwnedDraft(draft, () => !authoring && current());
       const activate = () => {
@@ -2993,6 +3021,7 @@ export class HostController {
     }
     try {
       await this.trustSessionSource({ projectPath: source, sessionId: ref.sessionId });
+      if (!admitted()) return this.bootstrap();
       if (this.isProjectClosing(source)) throw new Error('project is closing');
       if (releaseCopy && existing) {
         releaseCopy();
@@ -3002,6 +3031,10 @@ export class HostController {
       releasePublication = this.bridge.retainBackgroundSession?.(canonical);
       await this.bridge.openSession(canonical, session?.empty_session === true, session?.resume_model,
         false, selection ? session?.path : undefined);
+      if (!admitted()) {
+        if (!existing || releaseCopy || this.settings.isSessionArchived(canonical)) await this.bridge.closeSession(canonical);
+        return this.bootstrap();
+      }
       if (generation !== undefined && (generation !== this.navigationGeneration
         || (expectedMode !== undefined && this.settings.conversationSpaces.snapshot().activeMode !== expectedMode))) return this.bootstrap();
       if (authoring) {
@@ -3010,7 +3043,7 @@ export class HostController {
           throw new Error('The Local App authoring workspace changed');
         }
       }
-      const current = () => !this.isProjectClosing(source) && (generation === undefined || (generation === this.navigationGeneration
+      const current = () => admitted() && !this.isProjectClosing(source) && (generation === undefined || (generation === this.navigationGeneration
         && (expectedMode === undefined || this.settings.conversationSpaces.snapshot().activeMode === expectedMode)));
       const result = await this.settings.conversationSpaces.select(known, source, (recorded) => {
         // Capture volatile/runtime state in the same final fence as settings.
@@ -3205,7 +3238,9 @@ export class HostController {
 
   restoreProjectSession(projectPath: string, activeSession?: SessionRef): Promise<SessionRef> {
     const generation = this.navigationGeneration;
-    return this.enqueueNavigation(() => this.restoreProjectSessionInternal(projectPath, activeSession, generation));
+    const admittedEpoch = this.sessionArchiveEpoch;
+    const current = activeSession ? this.captureSessionOpen(activeSession.sessionId) : () => true;
+    return this.restoreProjectSessionInternal(projectPath, activeSession, generation, current, admittedEpoch);
   }
 
   /** Restore the selected space without deriving project ownership from cwd. */
@@ -3214,7 +3249,7 @@ export class HostController {
     const snapshot = this.settings.conversationSpaces.snapshot();
     const session = snapshot.navigation[snapshot.activeMode].session;
     if (session) await this.enqueueSessionOpen(session.sessionId,
-      () => this.openSessionAndActivateInternal(session, undefined, generation, session.mode));
+      current => this.openSessionAndActivateInternal(session, undefined, generation, session.mode, undefined, current));
     else await this.switchConversationSpace(snapshot.activeMode, generation);
   }
 
@@ -3227,7 +3262,7 @@ export class HostController {
     const botId = this.botsUi?.botIdFor(ref.projectPath);
     if (botId === undefined) {
       const generation = ++this.navigationGeneration;
-      await this.enqueueNavigation(async () => {
+      await this.enqueueSessionOpen(ref.sessionId, async (publicationCurrent) => {
         const projectPath = this.requireProject(ref.projectPath);
         const requested = { ...ref, projectPath };
         const owner = this.settings.conversationSpaces.findBySessionId(ref.sessionId);
@@ -3245,10 +3280,12 @@ export class HostController {
         }
         if (generation !== this.navigationGeneration) return;
         const previousMode = this.settings.conversationSpaces.snapshot().activeMode;
-        await this.settings.conversationSpaces.setMode(mode);
+        await this.enqueueNavigation(async () => {
+          if (generation === this.navigationGeneration && publicationCurrent()) await this.settings.conversationSpaces.setMode(mode);
+        });
         try {
-          const snapshot = await this.openSessionAndActivateInternal(requested, undefined, generation, mode);
-          if (generation === this.navigationGeneration) this.sendToWindows(CH_CONVERSATION_SHOWN, snapshot);
+          const snapshot = await this.openSessionAndActivateInternal(requested, undefined, generation, mode, undefined, publicationCurrent);
+          if (generation === this.navigationGeneration && publicationCurrent()) this.sendToWindows(CH_CONVERSATION_SHOWN, snapshot);
         } catch (error) {
           if (generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === mode) {
             await this.settings.conversationSpaces.setMode(previousMode);
@@ -3262,10 +3299,12 @@ export class HostController {
     this.sendToWindows(CH_BOTS_SESSION_SHOWN, shown);
   }
 
-  private async restoreProjectSessionInternal(projectPath: string, activeSession?: SessionRef, generation = this.navigationGeneration): Promise<SessionRef> {
+  private async restoreProjectSessionInternal(projectPath: string, activeSession?: SessionRef, generation = this.navigationGeneration, publicationCurrent = () => true, admittedEpoch = this.sessionArchiveEpoch): Promise<SessionRef> {
     const project = this.requireProject(projectPath);
     if (activeSession?.projectPath === project) {
-      await this.openSessionAndActivateInternal(activeSession, undefined, generation, this.settings.conversationSpaces.snapshot().activeMode);
+      const mode = this.settings.conversationSpaces.snapshot().activeMode;
+      await this.enqueueSessionOpen(activeSession.sessionId,
+        current => this.openSessionAndActivateInternal(activeSession, undefined, generation, mode, undefined, () => current() && publicationCurrent()));
       const active = this.settings.getPublic().activeSession;
       if (!active || active.sessionId !== activeSession.sessionId) throw new Error('restored session is no longer active');
       return active;
@@ -3303,7 +3342,9 @@ export class HostController {
       : await this.bridge.newSession(project, undefined, { mode, projectId: project,
         activate: () => generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === mode });
     if (first) {
-      await this.openSessionAndActivateInternal(ref, { scope: 'current', transcriptPath: first.path }, generation, mode);
+      const admitted = this.captureSessionOpen(ref.sessionId, admittedEpoch);
+      await this.enqueueSessionOpen(ref.sessionId,
+        current => this.openSessionAndActivateInternal(ref, { scope: 'current', transcriptPath: first.path }, generation, mode, undefined, () => current() && admitted()));
       const active = this.settings.getPublic().activeSession;
       if (!active || active.sessionId !== ref.sessionId) throw new Error('restored session is no longer active');
       this.terminals?.migrateScope({ projectPath: project, sessionId: TERMINAL_DRAFT_SESSION }, active);
@@ -3398,7 +3439,7 @@ export class HostController {
   }
 
   flushConversationSpaces(): Promise<void> {
-    return Promise.allSettled([this.navigationQueue, ...this.sessionOpenings.values()])
+    return Promise.allSettled([this.navigationQueue, ...this.sessionOpenings.values(), ...this.sessionArchivals.values()])
       .then(() => this.settings.conversationSpaces.flush());
   }
 

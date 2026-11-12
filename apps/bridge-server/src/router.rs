@@ -1025,7 +1025,7 @@ impl EngineCommandRouter {
                 return Err(format!("resume plan mode failed: {error}"));
             }
         }
-        if let Err(error) = self
+        let resume_result = self
             .handle
             .resume_session(
                 lingxi_core::types::SessionId::from_uuid(uuid),
@@ -1042,17 +1042,23 @@ impl EngineCommandRouter {
                 }),
                 runtime_snapshot,
             )
-            .await
-        {
-            if resume_plan_mode {
-                let _ = self.handle.set_plan_mode(previous_plan_mode).await;
-                let _ = self
-                    .handle
-                    .set_permission_mode(&previous_permission_mode)
-                    .await;
+            .await;
+        let committed_failure = match resume_result {
+            Ok(()) => None,
+            Err(error @ lingxi_core::host::HandleError::ResumeCommitted { .. }) => Some(format!(
+                "Session restored, but follow-up restoration failed: {error}"
+            )),
+            Err(error) => {
+                if resume_plan_mode {
+                    let _ = self.handle.set_plan_mode(previous_plan_mode).await;
+                    let _ = self
+                        .handle
+                        .set_permission_mode(&previous_permission_mode)
+                        .await;
+                }
+                return Err(format!("resume_session failed: {error}"));
             }
-            return Err(format!("resume_session failed: {error}"));
-        }
+        };
         if let Some(expected) = pinned_fork_source {
             let mut pending = self
                 .pending_fork_sources
@@ -1087,8 +1093,24 @@ impl EngineCommandRouter {
             )
             .await;
 
-        self.emit_resumed_session(uuid, messages, restored_usage, presence_warning, sink)
+        self.emit_resumed_session(
+            uuid,
+            messages,
+            restored_usage,
+            presence_warning,
+            sink.clone(),
+        )
+        .await;
+        // The durable identity is already mounted. A rejected acknowledgment
+        // would make hosts roll back their selected source to the old writer.
+        // Report the failed follow-up without rejecting the completed mount.
+        if let Some(message) = committed_failure {
+            sink.emit(ClientEvent::SystemNotice {
+                message: message.into(),
+                is_error: true,
+            })
             .await;
+        }
         Ok(())
     }
 

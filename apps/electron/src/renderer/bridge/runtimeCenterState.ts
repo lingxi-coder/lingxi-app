@@ -1,4 +1,4 @@
-import type { TurnFileChange } from '../model/runItem';
+import type { RunItem, TurnFileChange } from '../model/runItem';
 import type {
   AttachmentDto,
   ClientEvent,
@@ -11,7 +11,7 @@ import type {
   TaskRowDto,
 } from '@lingxi/bridge-client';
 import { fileMentionsFromPrompt } from './fileMentions';
-import { emptySubmittedPlanState, latestSubmittedPlan, reduceSubmittedPlanEvent, reduceSubmittedPlanPermission, type SubmittedPlan, type SubmittedPlanState } from './submittedPlan';
+import { emptySubmittedPlanState, latestSubmittedPlan, prependSubmittedPlanMessages, reduceSubmittedPlanEvent, reduceSubmittedPlanPermission, type SubmittedPlan, type SubmittedPlanState } from './submittedPlan';
 
 export type RuntimeCenterSection = 'tasks' | 'agents' | 'todos' | 'resources' | 'plan' | 'review';
 
@@ -473,6 +473,14 @@ export function resourcesFromRestoredMessages(
     }
   });
   return resources;
+}
+
+export function prependRuntimeHistory(state: RuntimeCenterState, sessionId: string, messages: readonly MessageDto[], items: readonly RunItem[] = []): RuntimeCenterState {
+  const next = addRuntimeResources(state, resourcesFromRestoredMessages(sessionId, messages));
+  const submittedPlanState = prependSubmittedPlanMessages(next.submittedPlanState, messages, sessionId, items);
+  return submittedPlanState === next.submittedPlanState ? next : {
+    ...next, submittedPlanState, submittedPlan: latestSubmittedPlan(submittedPlanState),
+  };
 }
 
 const terminalAgentStatuses = new Set(['completed', 'failed', 'killed', 'cancelled']);

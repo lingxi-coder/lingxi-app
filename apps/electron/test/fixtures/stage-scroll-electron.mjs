@@ -345,8 +345,8 @@ async function main() {
     result.foldControlAfter = await run('Boolean(document.querySelector(".desktop-stage-jump"))');
 
     result.historyPages = [];
-    for (const count of [40, 140, 180, 181, 182]) {
-      await run(`window.stageScrollFixture.historySetup(${count}, ${count >= 181})`); await settle();
+    for (const [count, olderUser] of [[40, false], [140, false], [180, false], [181, false], [182, false], [40, true], [181, true]]) {
+      await run(`window.stageScrollFixture.historySetup(${count}, ${count >= 181}, ${olderUser})`); await settle();
       await run(`(() => { const stage = document.querySelector('.desktop-stage'); stage.scrollTop = stage.scrollHeight; stage.dispatchEvent(new Event('scroll')); })()`); await settle();
       assert.equal(await run('window.stageScrollFixture.historyRequests()'), 0, 'opening at the bottom must not fetch the entire archive');
       await run(`(() => { const stage = document.querySelector('.desktop-stage'); stage.scrollTop = ${count === 182 ? 0 : 120}; stage.dispatchEvent(new Event('scroll')); })()`); await settle();
@@ -363,7 +363,12 @@ async function main() {
         return row?.getBoundingClientRect().top - stage.getBoundingClientRect().top; })()`);
       assert.ok(Number.isFinite(afterOffset) && Math.abs(afterOffset - held.offset) <= 2, `prepend keeps the same reading row for ${count} rows: ${held.offset} -> ${afterOffset}`);
       assert.equal(await run('Boolean(document.querySelector(".transcript-history-loader"))'), false, 'exhausted history has no further loader');
-      result.historyPages.push({ count, offsetDelta: afterOffset - held.offset });
+      result.historyPages.push({ count, olderUser, offsetDelta: afterOffset - held.offset });
+      if (olderUser) {
+        assert.ok((await run(metrics)).gap > 24, 'loading an older user prompt keeps the reader detached');
+        await run('window.stageScrollFixture.sendPrompt()'); await settle();
+        assert.ok((await run(metrics)).gap <= 1, 'a newly sent prompt still re-engages following after history loads');
+      }
     }
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally { window.destroy(); app.quit(); }

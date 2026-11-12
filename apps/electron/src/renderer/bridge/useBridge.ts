@@ -1,6 +1,7 @@
 import type { SessionMetadataSelection } from '../../shared/sessionWorkspace.js';
 import { EMPTY_TRANSCRIPT_HISTORY, initialHistory, recentTranscript } from '../../shared/sessionHistory.js';
 import { prependHistory } from './conversation.js';
+import { prependRuntimeHistory } from './runtimeCenterState.js';
 import type { ProviderAccountsApi } from '../../shared/providerAccounts';
 import { COMPACT_DURING_TURN, isCompactTurnRejection } from './compactRejection';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
@@ -2879,10 +2880,14 @@ export function useBridge(): UseBridge {
     const loading = Promise.resolve().then(async () => {
       try {
         const page = await host.loadSessionHistory(sessionId, before);
-        updateRuntime(sessionId, state => state.history?.before !== before ? state : {
-          ...state, conversation: prependHistory(state.conversation, page.messages, `${before.uuid}:${before.offset ?? 'initial'}`),
-          runtimeCenter: addRuntimeResources(state.runtimeCenter, resourcesFromRestoredMessages(sessionId, page.messages)),
-          history: { before: page.before, loading: false },
+        updateRuntime(sessionId, state => {
+          if (state.history?.before !== before) return state;
+          const conversation = prependHistory(state.conversation, page.messages, `${before.uuid}:${before.offset ?? 'initial'}`);
+          return {
+            ...state, conversation,
+            runtimeCenter: prependRuntimeHistory(state.runtimeCenter, sessionId, page.messages, conversation.items),
+            history: { before: page.before, loading: false },
+          };
         });
       } catch (cause) {
         updateRuntime(sessionId, state => state.history?.before !== before ? state : {

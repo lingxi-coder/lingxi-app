@@ -402,6 +402,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
   const scrollSession = useRef(sessionKey);
   /** The newest prompt seen, so a freshly sent one can re-arm the tail. */
   const lastPromptId = useRef<string | null>(null);
+  const lastTailId = useRef<string | null>(null);
 
   /**
    * Explicit open/closed choices, keyed by the item's STABLE id WITHIN a
@@ -612,10 +613,16 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
   }, [sessionKey, newestPromptId]);
 
   useLayoutEffect(() => {
+    const previousTail = lastTailId.current;
+    lastTailId.current = liveItems.at(-1)?.id ?? null;
     if (!newestPromptId || newestPromptId === lastPromptId.current) return;
     lastPromptId.current = newestPromptId;
+    // A newly discovered historical prompt is before the previous tail. Only
+    // an appended prompt expresses an intent to follow new output.
+    if (previousTail && liveItems.findIndex(item => item.id === newestPromptId)
+      <= liveItems.findIndex(item => item.id === previousTail)) return;
     armTail();
-  }, [newestPromptId, armTail]);
+  }, [newestPromptId, liveItems, armTail]);
 
   useLayoutEffect(() => {
     if (!messageTarget) { locatedMessage.current = null; revealInFlight.current = null; return; }

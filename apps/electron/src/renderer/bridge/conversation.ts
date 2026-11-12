@@ -1522,7 +1522,8 @@ export function prependHistory(state: ConversationState, messages: readonly Mess
     const previous = previousTools.get(item.id);
     if (item.type !== 'tool' || previous?.type !== 'tool') return item;
     const restored = item.nativeInput === undefined && previous.nativeInput !== undefined
-      ? { ...item, view: previous.view, nativeInput: previous.nativeInput } : item;
+      ? { ...item, tool: item.tool || previous.tool, view: previous.view, nativeInput: previous.nativeInput,
+        agentId: item.agentId ?? spawnResultAgentId(previous.tool, JSON.stringify(item.nativeOutput)) } : item;
     return transcriptRowUuids(previous).reduce((tool, uuid) => attachTranscriptRowUuid(tool, uuid), restored);
   });
   if (older.length === 0 && currentItems.every((item, index) => item === state.items[index])) return state;

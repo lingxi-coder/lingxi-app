@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, appendFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, appendFileSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -9,6 +9,7 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 
 import { ProjectSessionCatalog } from '../src/main/session-catalog.js';
+import { conversationFromMessages, prependHistory } from '../src/renderer/bridge/conversation.js';
 
 const uuid = '11111111-2222-4333-8444-555555555555';
 const row = (id = uuid, title = '会话😀\ud800') => ({ uuid: id, title, modified_rfc3339: '', message_count: 1,
@@ -339,6 +340,36 @@ test('real bridge history worker pages across compacts without gaps while the so
     }
     assert.deepEqual(pages.flat(), ids.slice(0, 161));
     assert.equal(spawns, 1, 'all pages share a worker without account or runtime initialization');
+  });
+
+test('real history worker preserves Agent payloads and child identity across the page boundary',
+  { skip: !process.env.LINGXI_SESSION_CATALOG_TEST_BIN, timeout: 60_000 }, async t => {
+    const cwd = project(t), path = join(cwd, `${uuid}.jsonl`);
+    const ids = Array.from({ length: 62 }, (_, index) => `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`);
+    const rows = ids.map((id, index) => ({ uuid: id, sessionId: uuid, parentUuid: index ? ids[index - 1] : null,
+      timestamp: '2026-11-12T00:00:00Z',
+      ...(index === 0 ? { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'agent', name: 'Agent', input: { description: 'Inspect source' } }] } }
+        : index === 1 ? { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'agent', content: 'model-facing text' }] }, toolUseResult: { agentId: 'saved-child', status: 'completed' } }
+          : { type: 'user', message: { role: 'user', content: `message ${index}` } }),
+    }));
+    const source = rows.map(row => JSON.stringify(row)).join('\n') + '\n';
+    writeFileSync(path, source);
+    const catalog = new ProjectSessionCatalog({ serverBin: process.env.LINGXI_SESSION_CATALOG_TEST_BIN, configHome: join(cwd, 'isolated-home') });
+    t.after(() => catalog.dispose());
+    const newer = await catalog.readHistory(cwd, uuid, path, { uuid: ids[61] });
+    assert.equal(newer.messages.length, 59);
+    assert.ok(newer.before);
+    const older = await catalog.readHistory(cwd, uuid, path, newer.before);
+    assert.equal(older.messages.length, 2);
+    assert.equal(older.before, null);
+    const item = prependHistory(conversationFromMessages(newer.messages), older.messages, 'older').items.find(item => item.id === 'agent');
+    assert.equal(item?.type, 'tool');
+    if (item?.type !== 'tool') return;
+    assert.equal(item.tool, 'Agent');
+    assert.equal(item.agentId, 'saved-child');
+    assert.deepEqual(item.nativeInput, { description: 'Inspect source' });
+    assert.deepEqual(item.nativeOutput, { agentId: 'saved-child', status: 'completed' });
+    assert.equal(readFileSync(path, 'utf8'), source, 'display paging cannot change the durable agent transcript');
   });
 
 test('real bridge worker refreshes over 128 saved sessions and revalidates additions, revisions and removals',

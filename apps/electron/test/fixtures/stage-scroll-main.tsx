@@ -44,6 +44,7 @@ function Fixture() {
   const [sessionKey, setSessionKey] = useState('scroll-fixture');
   const historyRequests = useRef(0);
   const historyToolHead = useRef(false);
+  const historyUser = useRef(false);
   const historyResolve = useRef<(() => void) | null>(null);
   const loadHistory = async () => {
     historyRequests.current++;
@@ -52,7 +53,7 @@ function Fixture() {
     flushSync(() => {
       setItems(previous => [...Array.from({ length: 60 }, (_, index): RunItem => index === 59 && historyToolHead.current
         ? { type: 'tool', id: 'older-tool', tool: 'Read', status: 'done', view: { verb: 'read', label: 'Read', title: 'Read older.ts', primary: 'older.ts' } }
-        : { type: 'narration', id: `older-${index}`, role: 'assistant', text: `Older saved message ${index}` }), ...previous]);
+        : { type: 'narration', id: `older-${index}`, role: historyUser.current && index === 0 ? 'user' : 'assistant', text: `Older saved message ${index}` }), ...previous]);
       setHistory({ before: null, loading: false });
     });
   };
@@ -69,9 +70,10 @@ function Fixture() {
   // screen (to click something pinned to it) raise this.
   const [ancestorHeight, setAncestorHeight] = useState(300);
   Object.assign(window, { stageScrollFixture: {
-    historySetup(count: number, toolHead = false) {
+    historySetup(count: number, toolHead = false, olderUser = false) {
       historyRequests.current = 0;
       historyToolHead.current = toolHead;
+      historyUser.current = olderUser;
       flushSync(() => {
         setSessionKey(`history-fixture-${count}`);
         setItems([

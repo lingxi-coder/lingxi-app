@@ -340,7 +340,7 @@ async fn fork_source_real_runtime_publishes_and_mounts_exact_target() {
     let target = loop {
         match next_frame(&mut socket).await {
             Frame::Event(ClientEvent::SessionForked { session_id, .. }) => {
-                break uuid::Uuid::parse_str(&session_id).unwrap()
+                break uuid::Uuid::parse_str(&session_id).unwrap();
             }
             Frame::Event(ClientEvent::Error { message, .. }) => {
                 panic!(
@@ -485,18 +485,27 @@ async fn private_resume_owns_foreground_adapter_approval_without_a_chat_turn() {
 }
 
 #[tokio::test]
-async fn private_resume_cancel_and_disconnect_deny_parked_and_later_tools() {
-    use client::protocol::commands::ClientCommand;
-    use client::protocol::permission::PermissionResponseDto;
-    use lingxi_core::types::{ContentBlock, ConversationMessage};
+async fn public_resume_asks_before_executing_and_publishes_committed_failures() {
+    use client::protocol::{
+        commands::ClientCommand, listings::SessionModeDto, permission::PermissionResponseDto,
+    };
     let _serial = crate::driver::LOOP_KA_TEST_SERIAL
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    for disconnect in [false, true] {
+    for failure in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().canonicalize().unwrap();
-        let (cfg, selected, markers) = pending_bash_config(&cwd, 2);
-        let id = cfg.session_id_override.clone().unwrap();
+        let (mut cfg, _selected, markers) = pending_bash_config(&cwd, 1);
+        let target = cfg.session_id_override.clone().unwrap();
+        cfg.session_id_override = Some(uuid::Uuid::new_v4().to_string());
+        cfg.session_transcript_path = None;
+        if failure {
+            std::fs::write(
+                cfg.lingxi_home.join("deferred-tool-replay"),
+                b"not a directory",
+            )
+            .unwrap();
+        }
         let bound = Box::pin(assemble(cfg)).await.unwrap();
         let runtime = bound.runtime.clone();
         let lifecycle = bound.session_lifecycle();
@@ -504,8 +513,193 @@ async fn private_resume_cancel_and_disconnect_deny_parked_and_later_tools() {
         send(
             &mut socket,
             2,
-            "resume_selected_session",
-            projection(serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"})),
+            "command",
+            client_command(ClientCommand::ResumeSession {
+                session_id: target.clone(),
+                cwd: None,
+                expected_mode: SessionModeDto::Code,
+            }),
+        )
+        .await;
+        let mut permissions = 0;
+        let mut resumed = false;
+        let mut status_matches = false;
+        loop {
+            match next_frame(&mut socket).await {
+                Frame::PermissionRequest(request) => {
+                    assert!(!failure);
+                    permissions += 1;
+                    assert_eq!(
+                        request
+                            .owner
+                            .as_ref()
+                            .and_then(|owner| owner.session_id.as_deref()),
+                        Some(target.as_str())
+                    );
+                    assert!(!markers[0].exists());
+                    send(
+                        &mut socket,
+                        3,
+                        "command",
+                        client_command(ClientCommand::ApprovePermission {
+                            request_id: request.request_id,
+                            response: PermissionResponseDto::AllowOnce,
+                        }),
+                    )
+                    .await;
+                }
+                Frame::Event(ClientEvent::SessionResumed { session_id, .. }) => {
+                    assert_eq!(session_id, target);
+                    resumed = true;
+                }
+                Frame::Event(ClientEvent::StatusSnapshot { snapshot }) => {
+                    status_matches = snapshot.session_id.trim_start_matches("sess:") == target;
+                }
+                Frame::Event(ClientEvent::SystemNotice {
+                    message,
+                    is_error: true,
+                }) if failure => {
+                    assert!(
+                        resumed && status_matches,
+                        "committed identity and baseline must precede failure: {message:?}"
+                    );
+                    break;
+                }
+                Frame::Event(ClientEvent::FastModeChanged { .. }) if resumed && !failure => break,
+                Frame::Event(ClientEvent::Error { message, .. }) => {
+                    panic!("unexpected rejection: {message:?}")
+                }
+                Frame::Event(ClientEvent::TurnStarted { .. } | ClientEvent::TurnEnded { .. }) => {
+                    panic!("resume is not a chat turn")
+                }
+                _ => {}
+            }
+        }
+        assert!(resumed && status_matches);
+        assert_eq!(
+            runtime
+                .orchestrator
+                .current_session_id()
+                .await
+                .as_uuid()
+                .to_string(),
+            target
+        );
+        if failure {
+            assert_eq!(permissions, 0);
+            assert!(!markers[0].exists());
+        } else {
+            assert_eq!(permissions, 1);
+            assert_eq!(std::fs::read_to_string(&markers[0]).unwrap(), "x");
+        }
+        socket.close(None).await.unwrap();
+        endpoint.shutdown().await;
+        let report = lifecycle.shutdown_and_drain().await;
+        assert!(report.complete, "{:?}", report.errors);
+    }
+}
+
+#[tokio::test]
+async fn committed_private_resume_keeps_the_new_physical_source_and_acknowledges_the_mount() {
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let (cfg, old, markers) = pending_bash_config(&cwd, 1);
+    let id = cfg.session_id_override.clone().unwrap();
+    let copy_workspace = cwd.join("copy-workspace");
+    std::fs::create_dir_all(&copy_workspace).unwrap();
+    let selected =
+        session::jsonl::session_path(&cfg.lingxi_home, &copy_workspace.to_string_lossy(), &id);
+    std::fs::create_dir_all(selected.parent().unwrap()).unwrap();
+    std::fs::copy(&old, &selected).unwrap();
+    std::fs::write(
+        cfg.lingxi_home.join("deferred-tool-replay"),
+        b"not a directory",
+    )
+    .unwrap();
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let runtime = bound.runtime.clone();
+    let lifecycle = bound.session_lifecycle();
+    let before = std::fs::read(&old).unwrap();
+    let (endpoint, mut socket) = connect(bound.connection).await;
+    let (events, response) = call(
+        &mut socket,
+        2,
+        "resume_selected_session",
+        projection(
+            serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"}),
+        ),
+    )
+    .await;
+    assert!(response.error.is_none(), "{response:?}");
+    let resumed = events
+        .iter()
+        .position(|event| matches!(event, ClientEvent::SessionResumed { .. }))
+        .unwrap();
+    let notice = events
+        .iter()
+        .position(|event| matches!(event, ClientEvent::SystemNotice { is_error: true, .. }))
+        .unwrap();
+    assert!(resumed < notice);
+    assert!(events[..notice]
+        .iter()
+        .any(|event| matches!(event, ClientEvent::StatusSnapshot { .. })));
+    assert_eq!(
+        runtime
+            .orchestrator
+            .session_transcript_writer()
+            .unwrap()
+            .active_transcript_authority()
+            .unwrap()
+            .path(),
+        selected
+    );
+    runtime
+        .orchestrator
+        .append_external_history_message(lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "after committed resume".into(),
+        ))
+        .await;
+    assert_eq!(std::fs::read(&old).unwrap(), before);
+    assert!(std::fs::read_to_string(&selected)
+        .unwrap()
+        .contains("after committed resume"));
+    assert!(!markers[0].exists());
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
+}
+
+#[tokio::test]
+async fn public_and_private_resume_cancel_and_disconnect_deny_parked_and_later_tools() {
+    use client::protocol::commands::ClientCommand;
+    use client::protocol::permission::PermissionResponseDto;
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for (public, disconnect) in [(false, false), (false, true), (true, false), (true, true)] {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().canonicalize().unwrap();
+        let (mut cfg, selected, markers) = pending_bash_config(&cwd, 2);
+        let id = cfg.session_id_override.clone().unwrap();
+        if public {
+            cfg.session_id_override = Some(uuid::Uuid::new_v4().to_string());
+            cfg.session_transcript_path = None;
+        }
+        let bound = Box::pin(assemble(cfg)).await.unwrap();
+        let runtime = bound.runtime.clone();
+        let lifecycle = bound.session_lifecycle();
+        let (endpoint, mut socket) = connect(bound.connection).await;
+        send(
+            &mut socket,
+            2,
+            if public { "command" } else { "resume_selected_session" },
+            if public { client_command(ClientCommand::ResumeSession { session_id:id.clone(),cwd:None,expected_mode:client::protocol::listings::SessionModeDto::Code }) } else { projection(serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"})) },
         )
         .await;
         let (_, permission) = wait_for_permission(&mut socket).await;
@@ -521,14 +715,37 @@ async fn private_resume_cancel_and_disconnect_deny_parked_and_later_tools() {
             .await;
             // The reply follows durable recording of both denied results.
             // Match next_frame's debug-build deadline rather than timing disk I/O.
-            let (events, response) =
-                tokio::time::timeout(Duration::from_secs(15), settle(&mut socket, 2))
-                    .await
-                    .expect("cancel must unblock a parked resume");
-            assert!(response.error.is_some());
-            assert!(!events
-                .iter()
-                .any(|event| matches!(event, ClientEvent::SessionResumed { .. })));
+            if public {
+                let mut baseline = false;
+                loop {
+                    match next_frame(&mut socket).await {
+                        Frame::Event(ClientEvent::SessionResumed { session_id, .. }) => {
+                            assert_eq!(session_id, id);
+                            baseline = true;
+                        }
+                        Frame::Event(ClientEvent::Error { message, .. }) => {
+                            assert!(
+                                baseline,
+                                "the mounted target baseline must precede cancellation"
+                            );
+                            assert!(
+                                String::from_utf16_lossy(&message.code_units).contains("cancelled")
+                            );
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                let (events, response) =
+                    tokio::time::timeout(Duration::from_secs(15), settle(&mut socket, 2))
+                        .await
+                        .expect("cancel must unblock a parked resume");
+                assert!(response.error.is_some());
+                assert!(!events
+                    .iter()
+                    .any(|event| matches!(event, ClientEvent::SessionResumed { .. })));
+            }
             send(
                 &mut socket,
                 4,

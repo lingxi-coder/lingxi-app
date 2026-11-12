@@ -6,7 +6,8 @@ import ts from 'typescript';
 import type { MessageDto } from '@lingxi/bridge-client';
 import { historyCursor, initialHistory, recentTranscript } from '../src/shared/sessionHistory';
 import { conversationFromMessages, emptyConversation, prependHistory, reduceEvent } from '../src/renderer/bridge/conversation';
-import { addRuntimeResources, emptyRuntimeCenterState, resourcesFromRestoredMessages } from '../src/renderer/bridge/runtimeCenterState';
+import { addRuntimeResources, emptyRuntimeCenterState, prependRuntimeHistory, resourcesFromRestoredMessages, reduceRuntimeCenterEvent } from '../src/renderer/bridge/runtimeCenterState';
+import { conversationPlans } from '../src/renderer/bridge/planDocuments';
 import { transcriptRowUuids } from '../src/renderer/model/runItem';
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, '0')}`;
@@ -57,6 +58,18 @@ test('history cursors reject invalid offsets and mismatched identity carriers', 
     { uuid: uuid(1), offset: 3 }, { uuid: uuid(1), offset: 4, identity: 'file', path: '/secret' }]) assert.throws(() => historyCursor(value));
 });
 
+test('an Agent result crossing the compact display cut recovers its name and child identity', () => {
+  const result: MessageDto = { role: 'user', transcript_uuid: uuid(2), blocks: [{ type: 'tool_result', id: 'agent', tool: '', result_json: '{"agentId":"saved-child","status":"completed"}', is_error: false, display: { body_lines: 1, body: 'completed' } }] };
+  const call: MessageDto = { role: 'assistant', transcript_uuid: uuid(1), blocks: [{ type: 'tool_use', id: 'agent', tool: 'Agent', input_json: '{"description":"Inspect"}', header: { verb: 'agent', label: 'Agent', title: 'Inspect' } }] };
+  const state = prependHistory(conversationFromMessages([result]), [call], 'older');
+  const item = state.items[0];
+  assert.equal(item.type, 'tool');
+  if (item.type !== 'tool') return;
+  assert.equal(item.tool, 'Agent');
+  assert.equal(item.agentId, 'saved-child');
+  assert.deepEqual(item.nativeOutput, { agentId: 'saved-child', status: 'completed' });
+});
+
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: Error) => void;
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
@@ -68,7 +81,7 @@ function loader() {
   let reads = 0;
   const context: any = {
     useCallback: (fn: unknown) => fn, Promise, prependHistory, messageFrom: String,
-    addRuntimeResources, resourcesFromRestoredMessages,
+    addRuntimeResources, resourcesFromRestoredMessages, prependRuntimeHistory,
     activeSessionIdRef: { current: uuid(100) }, sessionLoadingRef: { current: false },
     runtimeStatesRef: { current: states }, historyFlights: { current: new Map() },
     updateRuntime: (id: string, update: (state: any) => any) => states.set(id, update(states.get(id))),
@@ -122,4 +135,40 @@ test('images restored from separate pages keep distinct resource identities', as
   const resources = f.states.get(uuid(100))!.runtimeCenter.resources;
   assert.equal(resources.length, 2);
   assert.notEqual(resources[0].id, resources[1].id);
+});
+
+test('loading an older approved plan restores its card without replacing the current approval', async () => {
+  const f = loader(), current = f.states.get(uuid(100))!;
+  current.runtimeCenter = reduceRuntimeCenterEvent(current.runtimeCenter, {
+    type: 'tool_use_started', id: 'current-plan', tool: 'ExitPlanMode', input_json: '{"plan":"Current plan"}',
+  } as any, uuid(100));
+  const pending = f.context.load();
+  f.response.resolve({ messages: [
+    { role: 'assistant', transcript_uuid: uuid(1), blocks: [{ type: 'tool_use', id: 'old-plan', tool: 'ExitPlanMode', input_json: '{}', header: { verb: 'plan', label: 'Plan', title: 'Submit plan' } }] },
+    { role: 'user', transcript_uuid: uuid(2), blocks: [{ type: 'tool_result', id: 'old-plan', tool: 'ExitPlanMode', result_json: '{"plan":"Historical plan","model_content":"User has approved your plan."}', is_error: false, display: { body: 'approved', body_lines: 1 } }] },
+  ], before: null });
+  await pending;
+  const state = f.states.get(uuid(100))!;
+  const plans = conversationPlans(state.conversation.items, state.runtimeCenter.submittedPlanState.calls);
+  assert.equal(plans.find(plan => plan.id === 'old-plan')?.content, 'Historical plan');
+  assert.equal(plans.find(plan => plan.id === 'old-plan')?.status, 'approved');
+  assert.equal(state.runtimeCenter.submittedPlan?.id, 'current-plan');
+  assert.equal(state.runtimeCenter.submittedPlanState.calls.at(-1)?.status, 'submitted');
+  const repeated = prependRuntimeHistory(state.runtimeCenter, uuid(100), []);
+  assert.equal(repeated, state.runtimeCenter);
+});
+
+test('loading a pre-compact plan call recovers the approved plan from the current tail result', async () => {
+  const f = loader(), current = f.states.get(uuid(100))!;
+  const result: MessageDto = { role: 'user', transcript_uuid: uuid(12), blocks: [{ type: 'tool_result', id: 'cross-plan', tool: '', result_json: '{"plan":"Plan read from a file","model_content":"User has approved your plan."}', is_error: false, display: { body: 'approved', body_lines: 1 } }] };
+  current.conversation = conversationFromMessages([boundary(10), result]);
+  current.runtimeCenter = reduceRuntimeCenterEvent(current.runtimeCenter, { type: 'session_resumed', session_id: uuid(100), messages: [boundary(10), result] } as any, uuid(100));
+  const pending = f.context.load();
+  f.response.resolve({ messages: [{ role: 'assistant', transcript_uuid: uuid(1), blocks: [{ type: 'tool_use', id: 'cross-plan', tool: 'ExitPlanMode', input_json: '{}', header: { verb: 'plan', label: 'Plan', title: 'Submit plan' } }] }], before: null });
+  await pending;
+  const state = f.states.get(uuid(100))!;
+  const plan = conversationPlans(state.conversation.items, state.runtimeCenter.submittedPlanState.calls).find(plan => plan.id === 'cross-plan');
+  assert.equal(plan?.content, 'Plan read from a file');
+  assert.equal(plan?.status, 'approved');
+  assert.equal(state.runtimeCenter.submittedPlan?.id, 'cross-plan');
 });

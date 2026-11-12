@@ -2916,4 +2916,26 @@
     <string name="chat_agent_finished">완료</string>
     <string name="chat_tool_group_tasks">작업 진행 상황</string>
     <string name="chat_tool_group_coordination">작업 조율</string>
+    <string name="settings_browser_title">브라우저</string>
+    <string name="settings_browser_manage">브라우저 권한 관리</string>
+    <string name="settings_browser_opening">웹페이지 열기</string>
+    <string name="settings_browser_system_default">시스템 기본 브라우저</string>
+    <string name="settings_browser_default_description">외부 웹페이지는 시스템 기본 브라우저로 열립니다. Local App에서는 앱별로 다른 열기 방식도 선택할 수 있습니다. 기본 브라우저 설정은 자동화 권한을 부여하지 않습니다.</string>
+    <string name="settings_browser_open_default_settings">시스템 설정에서 기본 브라우저 변경</string>
+    <string name="settings_browser_ios_default_settings">iOS 시스템 설정에서 기본 브라우저를 선택하세요.</string>
+    <string name="settings_browser_open_settings_error">기본 앱 설정을 열 수 없습니다. 시스템 설정에서 기본 브라우저를 변경하세요.</string>
+    <string name="settings_browser_automation">브라우저 자동화</string>
+    <string name="settings_browser_desktop_note">데스크톱 브라우저 연결은 컴퓨터의 Settings → Computer use → Browser에서 관리합니다. 이 연결로 휴대전화의 브라우저를 제어할 수는 없습니다.</string>
+    <string name="settings_browser_android_control">이 Android 기기의 브라우저 제어</string>
+    <string name="settings_browser_android_supported">접근성 서비스를 통해 허용된 브라우저 앱을 관찰하거나 제어합니다. 이 클라이언트는 데스크톱 확장 프로그램 연결과 사이트별 권한 설정을 제공하지 않습니다.</string>
+    <string name="settings_browser_android_unavailable">이 배포판은 휴대전화 앱 제어를 제공하지 않습니다. 외부 웹페이지는 시스템 기본 브라우저로 열 수 있습니다.</string>
+    <string name="settings_browser_ios_control">이 iPhone 또는 iPad의 브라우저 제어</string>
+    <string name="settings_browser_ios_unavailable">이 iOS 클라이언트는 기기의 브라우저에 연결하거나 제어하는 도구를 제공하지 않습니다. 웹페이지를 여는 것은 자동화 연결을 의미하지 않으며 데스크톱 브라우저 확장 프로그램도 여기에서 연결할 수 없습니다.</string>
+    <string name="settings_browser_unavailable">이 버전에서 사용할 수 없음</string>
+    <string name="settings_browser_saved_note">이 선택은 Computer use 앱 권한과 공유됩니다. 저장된 선택은 다음 세션에 적용되며 직접 제어 세션을 시작해야 권한이 부여됩니다.</string>
+    <string name="settings_browser_stop_to_change">브라우저 권한을 변경하려면 현재 제어 세션을 먼저 중지하세요.</string>
+    <string name="settings_browser_no_installed">권한을 부여할 수 있는 설치된 브라우저를 찾지 못했습니다.</string>
+    <string name="settings_browser_session_authorized">현재 제어 세션에서 허용됨</string>
+    <string name="settings_browser_saved">다음 제어 세션을 위해 저장됨</string>
+    <string name="settings_browser_manage_session">제어 세션 관리</string>
 </resources>

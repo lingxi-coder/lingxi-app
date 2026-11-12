@@ -67,6 +67,14 @@ class SettingsGroupsTest {
         assertFalse(SettingsRoutes.COMPUTER_USE in settingsGroupEntries(false).map { it.route })
     }
 
+    @Test
+    fun `browser settings remain discoverable when native control is unavailable`() {
+        assertTrue(SettingsRoutes.BROWSER in settingsGroupEntries(false).map { it.route })
+        for (query in listOf("browser", "chrome", "chromium", "firefox", "brave", "浏览器")) {
+            assertTrue(query, search(query).any { it.route == SettingsRoutes.BROWSER })
+        }
+    }
+
     private fun search(query: String) = searchSettingsEntries(
         entries = all,
         query = query,

@@ -616,6 +616,7 @@ data class ComputerUseSetupStatus(
     val accessibilityEnabled: Boolean,
     val browserAuthorized: Boolean,
     val sessionActive: Boolean,
+    val sessionStarting: Boolean = false,
 ) {
     val ready: Boolean
         get() = accessibilityEnabled && browserAuthorized && sessionActive
@@ -640,7 +641,11 @@ data class ComputerUseSetupStatus(
                 add(strings.resolve(R.string.chat_computer_use_missing_browser, "授权浏览器"))
             }
             if (!sessionActive) {
-                add(strings.resolve(R.string.settings_cu_start_session, "启动控制会话"))
+                add(if (sessionStarting) {
+                    strings.resolve(R.string.settings_cu_state_starting, "启动中")
+                } else {
+                    strings.resolve(R.string.settings_cu_start_session, "启动控制会话")
+                })
             }
         }.joinToString("、")
 }

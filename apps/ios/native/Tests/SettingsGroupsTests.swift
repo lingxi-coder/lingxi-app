@@ -51,7 +51,7 @@ final class SettingsGroupsTests: XCTestCase {
         let ids = Set(phoneEntries.map(\.id))
         for id in [
             "language", "notifications", "input", "app-integration", "web-search", "web-fetch",
-            "linux-runtime", "dream", "typescript-lsp", "privacy",
+            "linux-runtime", "dream", "typescript-lsp", "privacy", "browser",
         ] {
             XCTAssertTrue(ids.contains(id), "\(id) is no longer reachable")
         }
@@ -62,6 +62,15 @@ final class SettingsGroupsTests: XCTestCase {
         XCTAssertTrue(DesktopSettingsEntry.search("siri").contains { $0.id == "app-integration" })
         XCTAssertTrue(DesktopSettingsEntry.search("dark").contains { $0.id == "appearance" })
         XCTAssertEqual(DesktopSettingsEntry.search("").count, phoneEntries.count)
+    }
+
+    func testBrowserSettingsAreDiscoverableAcrossBrowserNames() throws {
+        let entry = try XCTUnwrap(phoneEntries.first { $0.id == "browser" })
+        XCTAssertEqual(entry.page, .browser)
+        XCTAssertEqual(entry.mobileGroup, .phone)
+        for query in ["browser", "Safari", "Chrome", "Chromium", "Firefox", "浏览器", "extension"] {
+            XCTAssertTrue(DesktopSettingsEntry.search(query).contains { $0.page == .browser }, query)
+        }
     }
 
     func testStableAccessibilityIdentifiersSurvive() {

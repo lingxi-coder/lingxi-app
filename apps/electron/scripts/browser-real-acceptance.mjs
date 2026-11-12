@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * Opt-in real Chrome extension/native-relay acceptance. Never uses a personal profile.
+ * Opt-in real browser extension/native-relay acceptance. Never uses a personal profile.
  * From apps/electron:
  * node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs \
  *   scripts/browser-real-acceptance.mjs --chrome /path/to/chrome \
- *   --relay /path/to/bridge-server --receipt /path/to/receipt.json
+ *   --browser-id chrome --relay /path/to/bridge-server --receipt /path/to/receipt.json
  * LINGXI_BROWSER_ACCEPTANCE_CHROME / _RELAY / _OUTPUT may replace CLI paths.
  * The relay must implement --browser-native-host; no model credentials are used.
  */
@@ -24,11 +24,12 @@ function options() {
     output: process.env.LINGXI_BROWSER_ACCEPTANCE_OUTPUT,
     receipt: undefined,
     scale: '2',
+    browserId: process.env.LINGXI_BROWSER_ACCEPTANCE_BROWSER_ID ?? 'chrome',
   };
   const args = process.argv.slice(2);
   for (let index = 0; index < args.length; index++) {
-    const key = args[index]?.replace(/^--/, '');
-    if (!Object.hasOwn(result, key) || !args[index]?.startsWith('--') || !args[index+1]) throw new Error('Use --chrome <executable> --relay <executable> [--output <new-directory>] [--receipt <json>] [--scale <1|2>]');
+    const key = args[index]?.replace(/^--/, '').replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+    if (!Object.hasOwn(result, key) || !args[index]?.startsWith('--') || !args[index+1]) throw new Error('Use --chrome <browser-executable> --browser-id <chrome|edge|brave|chromium> --relay <executable> [--output <new-directory>] [--receipt <json>] [--scale <1|2>]');
     result[key] = args[++index];
   }
   if (!result.chrome || !result.relay) throw new Error('The Chrome and native relay executable paths are required');
@@ -64,6 +65,9 @@ function writeReceipt(path,receipt) {
 async function run(opts) {
   // Node's repository tsx loader is intentionally supplied explicitly by the caller.
   const { BrowserIntegration } = await import('../src/main/browserIntegration.ts');
+  const { browserDefinition } = await import('../src/shared/browserCatalog.ts');
+  const selectedBrowser = browserDefinition(opts.browserId);
+  if (!selectedBrowser?.profileDirectory) throw new Error('Choose a supported browser adapter for acceptance');
   const root = opts.output ? resolve(opts.output) : mkdtempSync(join(tmpdir(),'lingxi-browser-real-'));
   if (opts.output) { if (existsSync(root)) throw new Error('The acceptance output directory must be new'); mkdirSync(root,{ recursive:true,mode:0o700 }); }
   const profile = join(root,'profile'); mkdirSync(profile,{ mode:0o700 });
@@ -73,7 +77,9 @@ async function run(opts) {
   const sourceRoot = fileURLToPath(new URL('../../../',import.meta.url));
   const sources = [
     'apps/electron/src/main/browserIntegration.ts',
+    'apps/electron/src/shared/browserCatalog.ts',
     'apps/electron/browser-extension/worker.js',
+    'apps/electron/browser-extension/browserIdentity.js',
     'apps/electron/browser-extension/policy.js',
     'apps/electron/browser-extension/manifest.json',
     'apps/bridge-server/src/browser_native_host.rs',
@@ -81,8 +87,9 @@ async function run(opts) {
   ];
   const receipt = {
     status:'running',
+    selectedBrowser: { id: selectedBrowser.id, name: selectedBrowser.name },
     runAtUtc:new Date().toISOString(),
-    chromeVersion:execFileSync(opts.chrome,['--version'],{ encoding:'utf8',timeout:5000,maxBuffer:4096,env:privateEnvironment() }).trim().slice(0,128),
+    browserVersion:execFileSync(opts.chrome,['--version'],{ encoding:'utf8',timeout:5000,maxBuffer:4096,env:privateEnvironment() }).trim().slice(0,128),
     requestedDeviceScaleFactor:Number(opts.scale),
     profile:'new temporary profile; no personal browser profile or account',
     nativeRegistration:'inside temporary profile only',
@@ -94,7 +101,7 @@ async function run(opts) {
     alignmentScope:'LingXi adapter behavior against the Claude Code 2.1.310 reference; not full Anthropic extension protocol equality',
     limitations:[
       'Downloads requested through LingXi are bounded same-origin downloads; autonomous website blob/data downloads are not controlled browser-wide.',
-      'This acceptance uses a real Chrome extension and native relay, not a signed Desktop package.',
+      'This acceptance uses a real browser extension and native relay, not a signed Desktop package.',
     ],
   };
   let requestsA = 0; let requestsB = 0;
@@ -117,7 +124,7 @@ async function run(opts) {
     response.end('<!doctype html><title>LingXi native browser acceptance</title><style>body{background:#eef4fb}input{position:absolute;left:20px;top:20px;width:220px;height:40px;font-size:18px}h1{position:absolute;top:100px;font:24px sans-serif}</style><input id="entry" value=""><h1>LingXi native extension acceptance</h1>');
   });
   originA = await listen(serverA);
-  let policy = { revision:randomUUID(),enabled:true,apps:[],browser:{ history:'ask',siteTools:true,fullCdp:true,defaultBrowsing:'ask',defaultDownloads:'ask',sites:[{ origin:originB,browsing:'deny',downloads:'deny' },{ origin:originC,browsing:'allow',downloads:'deny' }] } };
+  let policy = { revision:randomUUID(),enabled:true,apps:[],browser:{ selectedBrowser:opts.browserId,history:'ask',siteTools:true,fullCdp:true,defaultBrowsing:'ask',defaultDownloads:'ask',sites:[{ origin:originB,browsing:'deny',downloads:'deny' },{ origin:originC,browsing:'allow',downloads:'deny' }] } };
   const service = new BrowserIntegration({ policy:()=>policy,descriptorPath:join(root,'connection.json'),nativeHostPath:join(root,'native-host'),bridgeExecutable:opts.relay,extensionDirectory:extension,nativeManifestPath:manifest });
   let browser;
   let stage = 'initialization';

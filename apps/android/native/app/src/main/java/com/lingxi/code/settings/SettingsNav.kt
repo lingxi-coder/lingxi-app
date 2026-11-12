@@ -43,6 +43,7 @@ object SettingsRoutes {
     const val LINUX_RUNTIME = "settings/linux-runtime"
     const val TYPESCRIPT_LSP = "settings/typescript-lsp"
     const val COMPUTER_USE = "settings/computer-use"
+    const val BROWSER = "settings/browser"
     const val DREAM = "settings/dream"
 
     // Device settings
@@ -82,6 +83,7 @@ object SettingsTitles {
     val LINUX_RUNTIME = R.string.settings_linux_runtime
     val TYPESCRIPT_LSP = R.string.settings_typescript_lsp_title
     val COMPUTER_USE = R.string.settings_title_computer_use
+    val BROWSER = R.string.settings_browser_title
     val DREAM = R.string.settings_dream_mode
 }
 

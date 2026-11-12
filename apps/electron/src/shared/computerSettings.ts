@@ -1,3 +1,5 @@
+import type { BrowserId } from './browserCatalog.js';
+
 export const CH_COMPUTER_SETTINGS = 'lingxi:computer-settings';
 export const CH_COMPUTER_SETTINGS_CHANGED = 'lingxi:computer-settings:changed';
 export type ComputerPermission = 'ask' | 'allow' | 'deny';
@@ -12,6 +14,8 @@ export interface BrowserSitePermission {
   downloads: ComputerPermission;
 }
 export interface BrowserPermissionSettings {
+  /** Chosen Desktop adapter. New installations require an explicit selection. */
+  selectedBrowser: BrowserId | null;
   history: ComputerPermission;
   siteTools: boolean;
   fullCdp: boolean;
@@ -27,12 +31,13 @@ export interface ComputerDevicePolicy {
 }
 export interface ComputerSettingsSnapshot extends ComputerDevicePolicy {
   error?: string;
-  browserStatus: { connected: boolean; installed: boolean; extensionDirectory: string; error?: string };
+  browserStatus: { browserId: BrowserId | null; connected: boolean; installed: boolean; extensionDirectory: string; error?: string };
   capabilities: { computer: boolean; browser: boolean; lockedUse: boolean; excel: boolean };
 }
 export type ComputerSettingsCommand =
   | { action: 'get' }
   | { action: 'setEnabled'; revision: string; enabled: boolean }
+  | { action: 'selectBrowser'; revision: string; browserId: BrowserId }
   | { action: 'setApplication'; revision: string; bundleId: string; permission: ComputerPermission }
   | { action: 'removeApplication'; revision: string; bundleId: string }
   | { action: 'setBrowser'; revision: string; key: 'history' | 'siteTools' | 'fullCdp' | 'defaultBrowsing' | 'defaultDownloads'; value: ComputerPermission | boolean }

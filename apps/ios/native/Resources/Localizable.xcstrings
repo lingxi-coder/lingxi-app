@@ -2,6 +2,754 @@
   "sourceLanguage": "zh-Hans",
   "version": "1.0",
   "strings": {
+    "settings_browser_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "浏览器"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "瀏覽器"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Browser"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ブラウザ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "브라우저"
+          }
+        }
+      }
+    },
+    "settings_browser_manage": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "管理浏览器权限"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "管理瀏覽器權限"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage browser permissions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ブラウザ権限を管理"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "브라우저 권한 관리"
+          }
+        }
+      }
+    },
+    "settings_browser_opening": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开网页"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "開啟網頁"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opening webpages"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ウェブページを開く"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "웹페이지 열기"
+          }
+        }
+      }
+    },
+    "settings_browser_system_default": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统默认浏览器"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系統預設瀏覽器"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "System default browser"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "システムのデフォルトブラウザ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "시스템 기본 브라우저"
+          }
+        }
+      }
+    },
+    "settings_browser_default_description": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "外部网页使用系统默认浏览器；Local App 还可在各应用中选择其他打开方式。默认浏览器设置不会授予自动化权限。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "外部網頁使用系統預設瀏覽器；Local App 還可在各應用程式中選擇其他開啟方式。預設瀏覽器設定不會授予自動化權限。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "External webpages use the system default browser. Local Apps also offer other opening methods in each app. The default browser setting does not grant automation access."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "外部ウェブページはシステムのデフォルトブラウザで開きます。Local Appではアプリごとに別の開き方も選べます。デフォルトブラウザの設定で自動操作の権限は付与されません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "외부 웹페이지는 시스템 기본 브라우저로 열립니다. Local App에서는 앱별로 다른 열기 방식도 선택할 수 있습니다. 기본 브라우저 설정은 자동화 권한을 부여하지 않습니다."
+          }
+        }
+      }
+    },
+    "settings_browser_open_default_settings": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在系统设置中更改默认浏览器"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在系統設定中更改預設瀏覽器"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Change the default browser in system settings"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "システム設定でデフォルトブラウザを変更"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "시스템 설정에서 기본 브라우저 변경"
+          }
+        }
+      }
+    },
+    "settings_browser_ios_default_settings": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在 iOS 系统设置中选择默认浏览器。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在 iOS 系統設定中選擇預設瀏覽器。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose the default browser in iOS system settings."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iOSのシステム設定でデフォルトブラウザを選んでください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iOS 시스템 설정에서 기본 브라우저를 선택하세요."
+          }
+        }
+      }
+    },
+    "settings_browser_open_settings_error": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法打开系统默认应用设置，请在系统设置中手动更改。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法開啟系統預設應用程式設定，請在系統設定中手動更改。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not open default app settings. Change the default browser in system settings."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デフォルトアプリの設定を開けません。システム設定で変更してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기본 앱 설정을 열 수 없습니다. 시스템 설정에서 기본 브라우저를 변경하세요."
+          }
+        }
+      }
+    },
+    "settings_browser_automation": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "浏览器自动化"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "瀏覽器自動化"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Browser automation"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ブラウザの自動操作"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "브라우저 자동화"
+          }
+        }
+      }
+    },
+    "settings_browser_desktop_note": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "桌面浏览器连接在电脑上的 Settings → Computer use → Browser 中管理，不会连接手机中的浏览器。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "桌面瀏覽器連線在電腦上的 Settings → Computer use → Browser 中管理，不會連線手機中的瀏覽器。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage Desktop browser connections on the computer in Settings → Computer use → Browser. That connection does not control browsers on this phone."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デスクトップのブラウザ接続はパソコンのSettings → Computer use → Browserで管理します。この接続でスマートフォンのブラウザは操作できません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "데스크톱 브라우저 연결은 컴퓨터의 Settings → Computer use → Browser에서 관리합니다. 이 연결로 휴대전화의 브라우저를 제어할 수는 없습니다."
+          }
+        }
+      }
+    },
+    "settings_browser_android_control": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此 Android 设备上的浏览器控制"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此 Android 裝置上的瀏覽器控制"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Browser control on this Android device"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このAndroid端末のブラウザ操作"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 Android 기기의 브라우저 제어"
+          }
+        }
+      }
+    },
+    "settings_browser_android_supported": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通过无障碍服务观察或操作已授权的浏览器应用。桌面扩展连接和按站点权限设置在此客户端不可用。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "透過無障礙服務觀察或操作已授權的瀏覽器應用程式。桌面擴充功能連線及網站權限設定在此用戶端無法使用。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Observe or control authorized browser apps through Accessibility. Desktop extension connections and per-site permissions are not available in this client."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ユーザーが許可したブラウザアプリをユーザー補助で確認・操作します。このクライアントにはデスクトップ拡張機能の接続やサイト別の権限設定はありません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "접근성 서비스를 통해 허용된 브라우저 앱을 관찰하거나 제어합니다. 이 클라이언트는 데스크톱 확장 프로그램 연결과 사이트별 권한 설정을 제공하지 않습니다."
+          }
+        }
+      }
+    },
+    "settings_browser_android_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前发行版未提供手机应用控制。外部网页仍可使用系统默认浏览器打开。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前發行版未提供手機應用程式控制。外部網頁仍可使用系統預設瀏覽器開啟。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This distribution does not provide control of phone apps. External webpages can still open in the system default browser."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この配布版にはスマートフォンのアプリ操作機能はありません。外部ウェブページは引き続きシステムのデフォルトブラウザで開けます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 배포판은 휴대전화 앱 제어를 제공하지 않습니다. 외부 웹페이지는 시스템 기본 브라우저로 열 수 있습니다."
+          }
+        }
+      }
+    },
+    "settings_browser_ios_control": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此 iPhone 或 iPad 上的浏览器控制"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此 iPhone 或 iPad 上的瀏覽器控制"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Browser control on this iPhone or iPad"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このiPhone・iPadのブラウザ操作"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 iPhone 또는 iPad의 브라우저 제어"
+          }
+        }
+      }
+    },
+    "settings_browser_ios_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前 iOS 客户端未提供连接或操控手机浏览器的工具。打开网页不代表已建立自动化连接，桌面浏览器扩展也不能在这里连接。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前 iOS 用戶端未提供連線或操作手機瀏覽器的工具。開啟網頁不代表已建立自動化連線，桌面瀏覽器擴充功能也無法在此連線。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This iOS client does not provide tools to connect to or control browsers on this device. Opening a webpage does not establish an automation connection, and Desktop browser extensions cannot connect here."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このiOSクライアントには端末のブラウザへの接続・操作ツールはありません。ウェブページを開いても自動操作には接続されず、デスクトップのブラウザ拡張機能も接続できません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 iOS 클라이언트는 기기의 브라우저에 연결하거나 제어하는 도구를 제공하지 않습니다. 웹페이지를 여는 것은 자동화 연결을 의미하지 않으며 데스크톱 브라우저 확장 프로그램도 여기에서 연결할 수 없습니다."
+          }
+        }
+      }
+    },
+    "settings_browser_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此版本不可用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此版本無法使用"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not available in this version"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このバージョンでは利用不可"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 버전에서 사용할 수 없음"
+          }
+        }
+      }
+    },
+    "settings_browser_saved_note": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这里的选择与 Computer use 的应用权限共用。保存的选择仅用于下次会话；必须由你启动控制会话后才会生效。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此處的選擇與 Computer use 的應用程式權限共用。儲存的選擇僅用於下次對話，必須由你啟動控制對話後才會生效。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "These choices share the Computer use app permissions. Saved choices apply to the next session and grant access only after you start a control session."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この選択はComputer useのアプリ権限と共通です。保存した選択は次回のセッション用で、ユーザーが操作セッションを開始して初めて有効になります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 선택은 Computer use 앱 권한과 공유됩니다. 저장된 선택은 다음 세션에 적용되며 직접 제어 세션을 시작해야 권한이 부여됩니다."
+          }
+        }
+      }
+    },
+    "settings_browser_stop_to_change": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先停止当前控制会话，再更改浏览器权限。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請先停止目前的控制對話，再更改瀏覽器權限。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stop the current control session before changing browser permissions."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在の操作セッションを停止してからブラウザ権限を変更してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "브라우저 권한을 변경하려면 현재 제어 세션을 먼저 중지하세요."
+          }
+        }
+      }
+    },
+    "settings_browser_no_installed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未找到可授权的已安装浏览器。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未找到可授權的已安裝瀏覽器。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No installed browsers available for authorization were found."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "許可できるインストール済みブラウザが見つかりません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "권한을 부여할 수 있는 설치된 브라우저를 찾지 못했습니다."
+          }
+        }
+      }
+    },
+    "settings_browser_session_authorized": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已授权给当前控制会话"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已授權給目前的控制對話"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Authorized in the active control session"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在の操作セッションで許可済み"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "현재 제어 세션에서 허용됨"
+          }
+        }
+      }
+    },
+    "settings_browser_saved": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已保存，等待下次启动控制会话"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已儲存，等待下次啟動控制對話"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved for the next control session"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "次回の操作セッション用に保存済み"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다음 제어 세션을 위해 저장됨"
+          }
+        }
+      }
+    },
+    "settings_browser_manage_session": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "管理控制会话"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "管理控制對話"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manage control session"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "操作セッションを管理"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "제어 세션 관리"
+          }
+        }
+      }
+    },
     "CFBundleDisplayName": {
       "localizations": {
         "zh-Hans": {

@@ -476,7 +476,15 @@ fun SettingsHost(
                         onOpenAudioSettings = {
                             navController.navigate(SettingsRoutes.VOICE)
                         },
+                        onOpenBrowserSettings = { navController.navigate(SettingsRoutes.BROWSER) },
                     )
+                }
+                page(SettingsRoutes.BROWSER) {
+                    BrowserSettingsPage(onOpenComputerUse = {
+                        if (!navController.popBackStack(SettingsRoutes.COMPUTER_USE, false)) {
+                            navController.navigate(SettingsRoutes.COMPUTER_USE)
+                        }
+                    })
                 }
                 page(SettingsRoutes.MCP_EDIT) { entry -> McpConfigurationPage(engineBridge, initialName = entry.arguments?.getString("id"), initialScope = entry.arguments?.getString("scope")?.takeUnless { it == "_" }) }
                 page(SettingsRoutes.DREAM) { GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding) }
@@ -540,6 +548,7 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
         SettingsRoutes.MCP_LIST -> stringResource(SettingsTitles.MCP)
         SettingsRoutes.LINUX_RUNTIME -> stringResource(SettingsTitles.LINUX_RUNTIME)
         SettingsRoutes.COMPUTER_USE -> stringResource(SettingsTitles.COMPUTER_USE)
+        SettingsRoutes.BROWSER -> stringResource(SettingsTitles.BROWSER)
         SettingsRoutes.DREAM -> stringResource(SettingsTitles.DREAM)
         SettingsRoutes.GROUP ->
             SettingsGroup.fromKey(entry.arguments?.getString("group"))

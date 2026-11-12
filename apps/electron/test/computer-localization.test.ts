@@ -5,11 +5,12 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { ComputerAccessRequestDto } from '@lingxi/bridge-client';
 import { ComputerAccessPrompt } from '../src/renderer/components/ComputerAccessPrompt';
 import { ComputerUse } from '../src/renderer/components/settings/pages/ComputerUse';
-import { GoogleChromeSettings } from '../src/renderer/components/settings/pages/ComputerUseBrowser';
+import { BrowserSettings } from '../src/renderer/components/settings/pages/ComputerUseBrowser';
 import { computerCatalog } from '../src/renderer/i18n/computerCatalog';
 import { DESKTOP_LOCALES, LANGUAGE_STORAGE_KEY, translate, type DesktopLocale } from '../src/renderer/i18n/locale';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
+import type { ComputerSettingsSnapshot } from '../src/shared/computerSettings';
 
 (globalThis as { React?: typeof React }).React = React;
 
@@ -38,7 +39,8 @@ test('computer and browser settings render localized copy and preserve app/user 
     const settings = renderInLocale(locale, React.createElement(ComputerUse));
     assert.ok(settings.includes(`<h1>${translate('desktop_computer_title', locale)}</h1>`), locale);
     assert.ok(settings.includes(translate('desktop_computer_add_installed_app', locale)), locale);
-    const browser = renderInLocale(locale, React.createElement(GoogleChromeSettings, { settings: controller, onBack: () => {} }));
+    assert.ok(settings.includes(translate('desktop_computer_browser_title', locale)), locale);
+    const browser = renderInLocale(locale, React.createElement(BrowserSettings, { settings: controller, onBack: () => {} }));
     assert.ok(browser.includes(translate('desktop_computer_website_permissions', locale)), locale);
     assert.ok(browser.includes(translate('desktop_computer_full_cdp_description', locale)), locale);
     assert.ok(browser.includes(translate('desktop_computer_downloads_scope', locale)), locale);
@@ -54,6 +56,22 @@ test('computer and browser settings render localized copy and preserve app/user 
       assert.doesNotMatch(browser, /Choose default permissions and add exceptions/);
       assert.doesNotMatch(prompt, /Allowing LingXi to use apps/);
     }
+  }
+});
+
+test('browser instructions use the confirmed browser and extension page in all five languages', () => {
+  const state: ComputerSettingsSnapshot = {
+    revision: 'edge', enabled: true, apps: [],
+    browser: { selectedBrowser: 'edge', history: 'ask', siteTools: false, fullCdp: false, defaultBrowsing: 'ask', defaultDownloads: 'ask', sites: [] },
+    browserStatus: { browserId: 'edge', installed: true, connected: false, extensionDirectory: '/test/extension' },
+    capabilities: { computer: true, browser: true, lockedUse: false, excel: false },
+  };
+  const settings = { state, pending: false, error: null, refresh: async () => {}, execute: async () => false };
+  for (const locale of DESKTOP_LOCALES) {
+    const markup = renderInLocale(locale, React.createElement(BrowserSettings, { settings, onBack: () => {} }));
+    assert.ok(markup.includes('Microsoft Edge'), locale);
+    assert.ok(markup.includes('edge://extensions'), locale);
+    assert.doesNotMatch(markup, /chrome:\/\/extensions|%\d+\$s|desktop_computer_/);
   }
 });
 

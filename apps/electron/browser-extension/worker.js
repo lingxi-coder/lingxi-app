@@ -1,7 +1,9 @@
 import { originOf, permitsNavigation, permittedCdpMethod, keyDescription } from './policy.js';
+import { browserIdentity } from './browserIdentity.js';
 
 const PROTOCOL = 'lingxi-browser/1';
 const HOST = 'com.lingxi.browser';
+const browserId = browserIdentity(globalThis.navigator);
 const peerId = crypto.randomUUID();
 const sessions = new Map();
 const attached = new Set();
@@ -13,7 +15,7 @@ let port;
 let epoch = 0;
 let revision;
 
-function send(message) { port?.postMessage({ ...message,protocol:PROTOCOL,extensionId:chrome.runtime.id,peerId }); }
+function send(message) { port?.postMessage({ ...message,protocol:PROTOCOL,extensionId:chrome.runtime.id,peerId,browserId }); }
 function session(id) {
   if (!sessions.has(id)) sessions.set(id,{ tabs:new Set(),activeTab:undefined,groupId:undefined,policy:undefined,generation:0,downloads:new Set() });
   return sessions.get(id);
@@ -71,7 +73,7 @@ async function ensureAttached(tabId,check) {
       await chrome.debugger.sendCommand({ tabId },'Page.enable'); check();
       await chrome.debugger.sendCommand({ tabId },'Fetch.enable',{ patterns:[{ urlPattern:'*',requestStage:'Request' },{ urlPattern:'*',requestStage:'Response' }] }); check();
       await chrome.debugger.sendCommand({ tabId },'Target.setAutoAttach',{ autoAttach:true,waitForDebuggerOnStart:true,flatten:true }); check();
-    } catch (error) { await detach(tabId); throw new Error(`Chrome could not enable browser permission guards: ${error.message}`); }
+    } catch (error) { await detach(tabId); throw new Error(`The browser could not enable permission guards: ${error.message}`); }
   })();
   attaching.set(tabId,setup);
   try { await setup; } finally { if (attaching.get(tabId) === setup) attaching.delete(tabId); }
@@ -94,7 +96,7 @@ async function viewport(tabId) {
   const metrics = await chrome.debugger.sendCommand({ tabId },'Page.getLayoutMetrics');
   const value = metrics.cssVisualViewport;
   const result = { width:value?.clientWidth,height:value?.clientHeight,offsetX:value?.offsetX,offsetY:value?.offsetY,pageX:value?.pageX,pageY:value?.pageY,scale:value?.scale };
-  if (!Object.values(result).every(Number.isFinite) || result.width <= 0 || result.height <= 0 || result.width > 32768 || result.height > 32768 || result.width*result.height > 67_108_864 || result.scale <= 0 || result.scale > 100) throw new Error('Chrome did not return a supported CSS viewport');
+  if (!Object.values(result).every(Number.isFinite) || result.width <= 0 || result.height <= 0 || result.width > 32768 || result.height > 32768 || result.width*result.height > 67_108_864 || result.scale <= 0 || result.scale > 100) throw new Error('The browser did not return a supported CSS viewport');
   return result;
 }
 function sameViewport(left,right) { return Object.keys(left).every(key => left[key] === right[key]); }
@@ -156,7 +158,7 @@ async function execute(message) {
     state.lastViewport = undefined;
     if (input.tabId === undefined && state.activeTab === undefined) {
       check(); tab = await chrome.tabs.create({ url:'about:blank',active:false });
-      if (!Number.isSafeInteger(tab.id)) throw new Error('Chrome did not create a tab');
+      if (!Number.isSafeInteger(tab.id)) throw new Error('The browser did not create a tab');
       state.tabs.add(tab.id); state.activeTab = tab.id; tabSessions.set(tab.id,input.sessionId);
       check(); const groupId = await chrome.tabs.group({ tabIds:[tab.id],...(state.groupId !== undefined ? { groupId:state.groupId } : {}) });
       state.groupId = groupId; await chrome.tabGroups.update(groupId,{ title:`LingXi · ${input.sessionId.slice(0,8)}`,color:'blue' });
@@ -202,7 +204,7 @@ async function execute(message) {
   } else if (input.action === 'site_tools') {
     if (!state.policy.siteTools) throw new Error('Site tools are disabled');
     const name = input.toolName;
-    const expression = `(async()=>{const api=document.modelContext;if(!api?.getTools||!api?.executeTool)throw new Error('WebMCP is unavailable on this site or Chrome version');const tools=await api.getTools();${typeof name === 'string' ? `const tool=tools.find(t=>t.name===${JSON.stringify(name)}&&t.origin===location.origin);if(!tool)throw new Error('Same-origin site tool not found');return api.executeTool(tool,${JSON.stringify(input.arguments ?? {})});` : "return tools.filter(t=>t.origin===location.origin).map(({name,description,inputSchema,annotations})=>({name,description,inputSchema,annotations}));"}})()`;
+    const expression = `(async()=>{const api=document.modelContext;if(!api?.getTools||!api?.executeTool)throw new Error('WebMCP is unavailable on this site or browser version');const tools=await api.getTools();${typeof name === 'string' ? `const tool=tools.find(t=>t.name===${JSON.stringify(name)}&&t.origin===location.origin);if(!tool)throw new Error('Same-origin site tool not found');return api.executeTool(tool,${JSON.stringify(input.arguments ?? {})});` : "return tools.filter(t=>t.origin===location.origin).map(({name,description,inputSchema,annotations})=>({name,description,inputSchema,annotations}));"}})()`;
     result = { data:await evaluate(tab.id,expression) };
   } else if (input.action === 'cdp') {
     if (!state.policy.fullCdp || !permittedCdpMethod(input.method)) throw new Error('This CDP method is unavailable or would escape the authorized target');
@@ -243,7 +245,7 @@ chrome.debugger.onDetach.addListener(source => { attached.delete(source.tabId); 
 chrome.tabs.onRemoved.addListener(tabId => { attached.delete(tabId); const id = tabSessions.get(tabId); tabSessions.delete(tabId); const state = sessions.get(id); state?.tabs.delete(tabId); if (state?.activeTab === tabId) state.activeTab = [...state.tabs][0]; });
 
 function connect() {
-  if (port) return;
+  if (port || !browserId) return;
   try {
     const connection = chrome.runtime.connectNative(HOST);
     port = connection;

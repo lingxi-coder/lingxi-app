@@ -176,7 +176,7 @@ private fun NoteRow(text: String) {
  * configuration stays one tap away under Advanced.
  */
 @Composable
-internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Unit, onAdvanced: () -> Unit) {
+internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Unit, onAdvanced: () -> Unit, skillsOnly: Boolean = false) {
     val t = LingXiTheme.palette
     val state by bridge.state.collectAsState()
     val context = LocalContext.current
@@ -191,6 +191,10 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
     var busy by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var marketplaceConflictNotice by remember(state.generation) { mutableStateOf<String?>(null) }
+    var focusedRecommendation by remember(state.generation) { mutableStateOf<PublicExtensionMarketplace?>(null) }
+    val focusedPluginId = focusedRecommendation?.let { publicMarketplacePluginId(it, catalog.marketplaces) }
+    val installedPlugins = if (focusedRecommendation == null) catalog.installed else catalog.installed.filter { it.id == focusedPluginId }
+    val installablePlugins = if (focusedRecommendation == null) catalog.installable else catalog.installable.filter { it.id == focusedPluginId }
     var confirmation by remember { mutableStateOf<PluginConfirmation?>(null) }
     var menuFor by remember { mutableStateOf<String?>(null) }
     var addingMarketplace by remember { mutableStateOf(false) }
@@ -240,13 +244,13 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
         TabRow(selectedTabIndex = selectedDirectoryTab) {
             Tab(
                 selected = selectedDirectoryTab == 0,
-                onClick = { selectedDirectoryTab = 0; mcpEditor = null },
+                onClick = { selectedDirectoryTab = 0; mcpEditor = null; focusedRecommendation = null },
                 text = { Text(stringResource(R.string.extension_directory_public)) },
                 modifier = Modifier.testTag("settings.extensions.tab.public"),
             )
             Tab(
                 selected = selectedDirectoryTab == 1,
-                onClick = { selectedDirectoryTab = 1; mcpEditor = null },
+                onClick = { selectedDirectoryTab = 1; mcpEditor = null; focusedRecommendation = null },
                 text = { Text(settingsLabel("Personal")) },
                 modifier = Modifier.testTag("settings.extensions.tab.personal"),
             )
@@ -267,7 +271,7 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
                 Text(stringResource(R.string.extension_directory_load_failed), color = t.text3)
             } else {
                 PublicExtensionDirectory(
-                    entries = entries,
+                    entries = if (skillsOnly) entries.filter { it.skills.isNotEmpty() } else entries,
                     configuredMcpServers = configuredMcps,
                     registeredMarketplaces = catalog.marketplaces,
                     canConfigureMcp = state.connected && mcpCatalogJson != null,
@@ -295,9 +299,11 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
                                 it.name == marketplace.name && !marketplaceSourceMatches(marketplace.source, it)
                             }
                             if (sameNameDifferentSource) {
+                                focusedRecommendation = null
                                 selectedDirectoryTab = 1
                                 marketplaceConflictNotice = String.format(marketplaceNameConflictFmt, marketplace.name)
                             } else if (sourceAlreadyRegistered) {
+                                focusedRecommendation = marketplace.takeIf { it.pluginId != null }
                                 selectedDirectoryTab = 1
                             } else {
                                 confirmation = PluginConfirmation(
@@ -312,10 +318,12 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
                                     }
                                     when {
                                         latestConflict -> {
+                                            focusedRecommendation = null
                                             marketplaceConflictNotice = String.format(marketplaceNameConflictFmt, marketplace.name)
                                             selectedDirectoryTab = 1
                                         }
                                         latestCatalog.marketplaces.any { marketplaceSourceMatches(marketplace.source, it) } -> {
+                                            focusedRecommendation = marketplace.takeIf { it.pluginId != null }
                                             marketplaceConflictNotice = null
                                             selectedDirectoryTab = 1
                                         }
@@ -324,6 +332,7 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
                                             JSONObject().put("action", "marketplace_add").put("source", marketplace.source),
                                         ) {
                                             marketplaceConflictNotice = null
+                                            focusedRecommendation = marketplace.takeIf { it.pluginId != null }
                                             selectedDirectoryTab = 1
                                         }
                                     }
@@ -332,6 +341,7 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
                         }
                     },
                     onOpenPersonal = { entry ->
+                        focusedRecommendation = null
                         entry.marketplace?.let { marketplace ->
                             marketplaceConflictNotice = String.format(marketplaceNameConflictFmt, marketplace.name)
                         }
@@ -355,6 +365,7 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
                 }
                 error?.let { Text(String.format(failedFmt, it), color = t.danger, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 12.dp)) }
 
+                if (!skillsOnly && focusedRecommendation == null) {
                 SettingsSection(label = stringResource(R.string.settings_mcp_servers)) {
                     if (mcpCatalogJson == null) {
                         NoteRow(stringResource(R.string.settings_mcp_wait_scope))
@@ -380,17 +391,18 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
                     )
                 }
                 Text(stringResource(R.string.extension_directory_configured_note), color = t.text3, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                }
 
                 SettingsSection(label = stringResource(R.string.plugins_section_installed)) {
-                    if (catalog.installed.isEmpty()) NoteRow(stringResource(R.string.plugins_installed_empty))
-                    catalog.installed.forEachIndexed { index, plugin ->
+                    if (installedPlugins.isEmpty()) NoteRow(stringResource(R.string.plugins_installed_empty))
+                    installedPlugins.forEachIndexed { index, plugin ->
                         SettingsRow(
                             label = plugin.displayName,
                             modifier = Modifier.testTag("settings.plugins.installed.${plugin.id}"),
                             icon = pluginIcon(plugin.id),
                             sub = pluginSubtitle(vendors[plugin.id], plugin.version),
                             chevron = false,
-                            isLast = index == catalog.installed.lastIndex,
+                            isLast = index == installedPlugins.lastIndex,
                             onTap = { onDetail(plugin.id) },
                             trailing = {
                                 if (busy == plugin.id) Busy()
@@ -406,7 +418,7 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
                     }
                 }
 
-                val installable = catalog.installable
+                val installable = installablePlugins
                 SettingsSection(label = stringResource(R.string.plugins_section_available)) {
                     if (installable.isEmpty()) {
                         NoteRow(stringResource(if (catalog.marketplaces.isEmpty()) R.string.plugins_marketplaces_empty else R.string.plugins_available_empty))

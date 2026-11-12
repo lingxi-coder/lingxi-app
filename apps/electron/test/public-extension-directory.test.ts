@@ -4,6 +4,9 @@ import {
   publicExtensionItems,
   publicExtensionsForPlatform,
   publicExtensionText,
+  publicExtensionFromNavigation,
+  publicExtensionNavigationId,
+  publicSkillRecommendations,
 } from '../src/shared/publicExtensionDirectory';
 
 test('public directory links are HTTPS and configuration drafts contain no credentials', () => {
@@ -60,4 +63,33 @@ test('directory text follows explicit Chinese script and falls back to English',
   assert.equal(publicExtensionText(text, 'ja-JP'), '日本語');
   assert.equal(publicExtensionText(text, 'de-DE'), 'English');
   assert.equal(publicExtensionText(undefined), '');
+});
+
+test('recommended skills link to complete upstream packages on every supported platform', () => {
+  assert(publicSkillRecommendations.length >= 3);
+  for (const item of publicSkillRecommendations) {
+    assert.equal(item.kind, 'plugin');
+    assert(item.marketplace?.plugin, `${item.id} needs an installable package`);
+    assert.equal(new Set(item.skills).size, item.skills!.length);
+    assert.equal(publicExtensionFromNavigation(publicExtensionNavigationId(item)), item);
+    for (const platform of ['macos', 'windows', 'linux', 'android', 'ios'] as const) {
+      assert(publicExtensionsForPlatform(platform).includes(item));
+    }
+  }
+  assert.equal(publicExtensionFromNavigation('secure@acme'), undefined);
+  assert.equal(publicExtensionFromNavigation('directory:missing'), undefined);
+  assert.equal(publicExtensionFromNavigation('directory:context7'), undefined);
+});
+
+test('remote recommendations have usable HTTPS templates without placeholder credentials', () => {
+  for (const id of ['notion', 'linear', 'figma', 'supabase']) {
+    const item = publicExtensionItems.find((entry) => entry.id === id)!;
+    assert.equal(item.mcp?.config.type, 'http');
+    const url = new URL(String(item.mcp?.config.url));
+    assert.equal(url.protocol, 'https:');
+    assert.equal(url.username, '');
+    assert.equal(url.password, '');
+    assert(!url.href.includes('${'));
+    assert(item.requirements?.en);
+  }
 });

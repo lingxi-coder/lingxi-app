@@ -61,6 +61,7 @@ internal data class PublicExtensionEntry(
     val marketplace: PublicExtensionMarketplace?,
     val mcpName: String?,
     val mcpConfigJson: String?,
+    val skills: List<String> = emptyList(),
 )
 
 internal data class PublicExtensionMarketplace(
@@ -123,6 +124,7 @@ internal fun parsePublicExtensionDirectory(rawJson: String, platform: String = "
                 marketplace = marketplace,
                 mcpName = mcpName,
                 mcpConfigJson = mcpConfig?.toString(),
+                skills = row.optJSONArray("skills").stringValues(),
             )
         }.getOrNull()?.takeIf { platform in it.platforms }
     }
@@ -249,8 +251,16 @@ internal fun filterPublicExtensions(
                 entry.category,
                 entry.localizedDescription(languageTag),
                 entry.localizedRequirements(languageTag),
+                entry.skills.joinToString(" "),
             ).any { it.contains(needle, ignoreCase = true) })
     }
+}
+
+internal fun publicMarketplacePluginId(candidate: PublicExtensionMarketplace, registered: List<PluginMarketplace>): String? {
+    val plugin = candidate.pluginId ?: return null
+    if (registered.any { it.name == candidate.name && !marketplaceSourceMatches(candidate.source, it) }) return null
+    val marketplace = registered.firstOrNull { marketplaceSourceMatches(candidate.source, it) } ?: return null
+    return "$plugin@${marketplace.name}"
 }
 
 internal fun openPublicExtensionUrl(context: Context, url: String): Boolean {
@@ -380,6 +390,7 @@ private fun PublicExtensionCard(
     ) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(entry.name, style = MaterialTheme.typography.titleMedium)
+            if (entry.skills.isNotEmpty()) Text(entry.skills.joinToString(", "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
                 listOfNotNull(entry.publisher, entry.version).joinToString(" · "),
                 style = MaterialTheme.typography.bodySmall,
@@ -421,6 +432,9 @@ private fun PublicExtensionCard(
                     }
                 } else if (marketplaceAdded) {
                     Text(stringResource(R.string.extension_directory_marketplace_added), color = MaterialTheme.colorScheme.tertiary)
+                    OutlinedButton(onClick = onAddMarketplace, enabled = canAddMarketplace, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.extension_directory_manage_personal))
+                    }
                 } else {
                     Button(
                         enabled = canAddMarketplace,

@@ -2,6 +2,8 @@ import { useI18n } from '../../../i18n/useI18n';
 import { tr } from '../../../i18n/locale';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SkillAdminCommandDto, SkillDto } from '@lingxi/bridge-client';
+import { publicExtensionNavigationId, publicExtensionText, publicSkillRecommendations } from '../../../../shared/publicExtensionDirectory';
+import { isPublicExtensionInstalled } from '../../../../shared/publicMarketplace';
 import { ExtensionGlyph } from './ExtensionHubIcons';
 import { useSettingsDraftGuard } from '../useSettingsDraftGuard';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
@@ -173,6 +175,12 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   useEffect(() => {
     void (adminAvailable ? callSkillAdmin(bridge, { action: 'get_catalog' }) : bridge.refreshSkills());
   }, [adminAvailable, bridge.refreshSkills, bridge.skillAdmin]);
+
+  useEffect(() => {
+    if (typeof bridge.pluginAdmin === 'function') {
+      void bridge.pluginAdmin({ action: 'get_catalog' }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_refresh_plugins_failed')));
+    }
+  }, [bridge.pluginAdmin]);
 
   useEffect(() => {
     setSyncDraft(syncEnabled);
@@ -578,6 +586,11 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const sources = [...new Set(activeSkills.map((entry) => entry.source))];
   const activeSource = sources.includes(sourceFilter) ? sourceFilter : sources[0];
   const sourceSkills = filteredSkills.filter((entry) => entry.source === activeSource);
+  const recommendedSkills = publicSkillRecommendations.filter((entry) => !visibleQuery || [
+    entry.name, entry.publisher, ...(entry.skills ?? []), publicExtensionText(entry.description, locale),
+    publicExtensionText(entry.requirements, locale),
+  ].join(' ').toLowerCase().includes(visibleQuery));
+  const pluginCatalog = parseEventEnvelope<{ marketplaces?: Array<{ name: string; source_json?: string }>; installed?: Array<{ id: string }> }>(bridge.pluginCatalogEvent?.catalog_json, {});
   const skillRows = (entries: SkillCatalogItem[]) => <div className="extension-hub-list">{entries.map((entry) => <button className="extension-hub-row extension-hub-row-open" type="button" key={entry.id} onClick={() => requestSelection({ kind: 'skill', id: entry.id })}>
     <ExtensionIcon kind="skill" />
     <span className="extension-hub-row-copy"><span className="extension-hub-row-title">{entry.name}</span><span className="extension-hub-row-description">{entry.description || entry.whenToUse || tr('desktop_extension_skill_fallback')}</span></span>
@@ -599,6 +612,27 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel={tr('settings_title_skills')} />
       {pageError && selection.kind === 'list' && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
       {selection.kind === 'list' && navigationPrompt}
+      <section className="extension-catalog-section extension-skills-recommended" aria-labelledby="recommended-skills-title">
+        <h2 id="recommended-skills-title" className="extension-hub-group-title">{tr('desktop_extension_recommended_skills')}</h2>
+        <p className="extension-recommendations-note">{tr('desktop_extension_skill_pack_note')}</p>
+        <div className="extension-hub-list">
+          {recommendedSkills.map((entry) => {
+            const installed = isPublicExtensionInstalled(entry, pluginCatalog);
+            return <article key={entry.id} className="extension-hub-row extension-recommendation-row">
+            <ExtensionIcon kind="skill" />
+            <div className="extension-hub-row-copy">
+              <span className="extension-hub-row-title">{entry.name}</span>
+              <span className="extension-hub-row-description">{publicExtensionText(entry.description, locale)}</span>
+              <span className="extension-recommendation-meta">{entry.publisher} · {entry.skills!.slice(0, 4).join(', ')}{entry.skills!.length > 4 ? '…' : ''}</span>
+              <a href={entry.documentationUrl} target="_blank" rel="noopener noreferrer" className="extension-recommendation-source">{tr('desktop_extension_open_source')}</a>
+            </div>
+            <button type="button" className="extension-hub-primary" onClick={() => requestHubNavigation('plugins', publicExtensionNavigationId(entry))} aria-label={tr(installed ? 'desktop_extension_manage_named' : 'desktop_extension_add_skill_pack_named', entry.name)}>
+              <ExtensionGlyph name={installed ? 'check' : 'plus'} size={14} />{tr(installed ? 'apps_installed' : 'workspace_confirm_add')}
+            </button>
+          </article>; })}
+        </div>
+        {!recommendedSkills.length && <div className="extension-hub-empty">{tr('desktop_extension_no_skill_results')}</div>}
+      </section>
       <section className="extension-catalog-section extension-skills-installed">
         <h2 className="extension-hub-group-title">{tr('apps_installed')}</h2>
         {skillRows(showAllInstalled || search ? filteredSkills : filteredSkills.slice(0, 6))}

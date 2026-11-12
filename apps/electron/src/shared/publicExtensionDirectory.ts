@@ -15,12 +15,27 @@ export interface PublicExtensionItem {
   sourceUrl: string;
   documentationUrl: string;
   version?: string;
+  /** Discoverable skills supplied by the original, complete plugin package. */
+  skills?: readonly string[];
   mcp?: { name: string; config: Readonly<Record<string, unknown>> };
   marketplace?: { source: string; name: string; plugin?: string };
 }
 
 /** Bundled discovery metadata. Reading the directory never installs or enables anything. */
 export const publicExtensionItems: readonly PublicExtensionItem[] = directory.items as PublicExtensionItem[];
+
+export const publicSkillRecommendations = publicExtensionItems.filter((item) => item.skills?.length);
+
+const DIRECTORY_NAVIGATION_PREFIX = 'directory:';
+
+export function publicExtensionNavigationId(item: PublicExtensionItem): string {
+  return `${DIRECTORY_NAVIGATION_PREFIX}${item.id}`;
+}
+
+export function publicExtensionFromNavigation(id: string | undefined): PublicExtensionItem | undefined {
+  if (!id?.startsWith(DIRECTORY_NAVIGATION_PREFIX)) return undefined;
+  return publicExtensionItems.find((item) => item.id === id.slice(DIRECTORY_NAVIGATION_PREFIX.length) && item.marketplace);
+}
 
 export function publicExtensionsForPlatform(platform: PublicExtensionPlatform): readonly PublicExtensionItem[] {
   return publicExtensionItems.filter((item) => item.platforms.includes(platform));

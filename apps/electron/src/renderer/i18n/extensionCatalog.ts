@@ -1,4 +1,25 @@
 export const extensionCatalog: Record<string, Record<string, string>> = {
+  "desktop_extension_recommended_skills": {
+    "zh-Hans": "推荐 Skills",
+    "zh-Hant": "推薦 Skills",
+    "en": "Recommended skills",
+    "ja": "おすすめのスキル",
+    "ko": "추천 스킬"
+  },
+  "desktop_extension_skill_pack_note": {
+    "zh-Hans": "选一个技能包开始，添加后可用于个人或当前项目。",
+    "zh-Hant": "選一個技能包開始，新增後可用於個人或目前專案。",
+    "en": "Start with a complete skill pack for yourself or the current project.",
+    "ja": "スキルパックを選び、個人用または現在のプロジェクト用に追加できます。",
+    "ko": "개인 또는 현재 프로젝트에서 사용할 전체 스킬 팩을 선택하세요."
+  },
+  "desktop_extension_add_skill_pack_named": {
+    "zh-Hans": "添加技能包 %1$s",
+    "zh-Hant": "新增技能包 %1$s",
+    "en": "Add skill pack %1$s",
+    "ja": "スキルパック %1$s を追加",
+    "ko": "스킬 팩 %1$s 추가"
+  },
   "desktop_extension_unsaved_mcp": {
     "zh-Hans": "MCP 更改尚未保存。丢弃后切换标签页？",
     "zh-Hant": "MCP 變更尚未儲存。捨棄後切換分頁？",

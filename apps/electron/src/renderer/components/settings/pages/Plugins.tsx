@@ -1,7 +1,9 @@
 import { currentLocale, tr, translate, type DesktopLocale } from '../../../i18n/locale';
 import { useSettingsDraftGuard } from '../useSettingsDraftGuard';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { publicExtensionItems, publicExtensionText, type PublicExtensionItem } from '../../../../shared/publicExtensionDirectory';
+import { publicExtensionFromNavigation, publicExtensionItems, publicExtensionText, type PublicExtensionItem } from '../../../../shared/publicExtensionDirectory';
+import { decidePublicMarketplaceSourceAction, findConflictingPublicMarketplace, githubRepositoryIdentity, publicMarketplacePluginTargetId } from '../../../../shared/publicMarketplace';
+export { decidePublicMarketplaceSourceAction, findConflictingPublicMarketplace, findRegisteredPublicMarketplace, publicMarketplacePluginTargetId } from '../../../../shared/publicMarketplace';
 import { ExtensionGlyph } from './ExtensionHubIcons';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
@@ -62,7 +64,7 @@ type PluginSelection =
   | { kind: 'plugin'; id: string }
   | { kind: 'available'; id: string }
   | { kind: 'marketplace'; name: string; sourceConflict?: string }
-  | { kind: 'marketplace-add'; source?: string }
+  | { kind: 'marketplace-add'; source?: string; directoryItemId?: string }
   | { kind: 'policies' };
 
 const DESKTOP_PLATFORMS = new Set(['macos', 'windows', 'linux']);
@@ -92,6 +94,7 @@ function publicPluginSearchText(item: (typeof publicExtensionItems)[number]): st
     localizedDirectoryText(item.requirements),
     item.marketplace?.name,
     item.marketplace?.plugin,
+    ...(item.skills ?? []),
     item.sourceUrl,
     item.documentationUrl,
   ].filter(Boolean).join(' ').toLowerCase();
@@ -127,127 +130,25 @@ function pluginActionLabel(action: string): string {
   return keys[action] ? tr(keys[action]!) : action;
 }
 
-function validGithubSegment(value: string): boolean {
-  return /^[a-z0-9_.-]+$/i.test(value) && value !== '.' && value !== '..';
-}
 
-function githubShorthandIdentity(source: string): string | null {
-  const match = source.trim().match(/^([a-z0-9_.-]+)\/([a-z0-9_.-]+)(?:\.git)?$/i);
-  if (!match || !validGithubSegment(match[1]!) || !validGithubSegment(match[2]!)) return null;
-  return `${match[1]!.toLowerCase()}/${match[2]!.replace(/\.git$/i, '').toLowerCase()}`;
-}
-
-/** Canonicalize only a root GitHub remote. Reject credentials, refs, queries and subpaths. */
-function githubRemoteIdentity(source: string): string | null {
-  const value = source.trim();
-  if (value.includes('?') || value.includes('#')) return null;
-  const scp = value.match(/^git@github\.com:([a-z0-9_.-]+)\/([a-z0-9_.-]+)(?:\.git)?$/i);
-  if (scp && validGithubSegment(scp[1]!) && validGithubSegment(scp[2]!)) {
-    return `${scp[1]!.toLowerCase()}/${scp[2]!.replace(/\.git$/i, '').toLowerCase()}`;
+export function publicDirectoryPluginSelection(
+  item: PublicExtensionItem,
+  catalog: Pick<PluginCatalogEnvelope, 'marketplaces' | 'available' | 'installed'>,
+): PluginSelection {
+  const marketplace = item.marketplace;
+  if (!marketplace) return { kind: 'list' };
+  const sourceAction = decidePublicMarketplaceSourceAction(marketplace, catalog.marketplaces ?? []);
+  if (sourceAction.kind === 'source-conflict') {
+    return { kind: 'marketplace', name: sourceAction.marketplace.name, sourceConflict: marketplace.source };
   }
-  if (value.includes('\\')) return null;
-  const rawRemote = value.match(/^(?:https|ssh):\/\/[^/?#]*(\/[^?#]*)?$/i);
-  if (!rawRemote) return null;
-  const rawPath = rawRemote[1] ?? '';
-  if (rawPath.includes('%')) return null;
-  const rawPathSegments = rawPath.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
-  if (rawPathSegments.some((segment) => segment === '.' || segment === '..')) return null;
-
-  try {
-    const url = new URL(value);
-    const protocol = url.protocol.toLowerCase();
-    if (url.hostname.toLowerCase() !== 'github.com'
-      || url.search !== ''
-      || url.hash !== '') return null;
-    if (protocol === 'https:') {
-      if (value.includes('@') || url.username !== '' || url.password !== '' || (url.port !== '' && url.port !== '443')) return null;
-    } else if (protocol === 'ssh:') {
-      if ((url.username !== '' && url.username !== 'git') || url.password !== '' || (url.port !== '' && url.port !== '22')) return null;
-      const authority = value.match(/^ssh:\/\/([^/]+)/i)?.[1] ?? '';
-      const userInfo = authority.includes('@') ? authority.slice(0, authority.indexOf('@')) : null;
-      if (userInfo !== null && userInfo !== 'git') return null;
-    } else {
-      return null;
-    }
-    const path = url.pathname.replace(/^\/+|\/+$/g, '');
-    const parts = path.split('/');
-    if (parts.length !== 2) return null;
-    const owner = parts[0]!;
-    const repo = parts[1]!.replace(/\.git$/i, '');
-    if (!validGithubSegment(owner) || !validGithubSegment(repo)) return null;
-    return `${owner.toLowerCase()}/${repo.toLowerCase()}`;
-  } catch {
-    return null;
+  // Only a validated, registered source can supply the chosen plugin.
+  if (sourceAction.kind === 'registered') {
+    const id = publicMarketplacePluginTargetId(marketplace, sourceAction);
+    if (id && catalog.installed?.some((entry) => entry.id === id)) return { kind: 'plugin', id };
+    if (id && catalog.available?.some((entry) => entry.id === id)) return { kind: 'available', id };
+    return { kind: 'marketplace', name: sourceAction.marketplace.name };
   }
-}
-
-/** `marketplace_add` accepts shorthand or a root remote; the stored DTO keeps its discriminator. */
-function githubRepositoryIdentity(source: string): string | null {
-  return githubShorthandIdentity(source) ?? githubRemoteIdentity(source);
-}
-
-function marketplaceSourceMatches(source: string, sourceJson?: string): boolean {
-  if (!sourceJson) return false;
-  try {
-    const sourceRecord = JSON.parse(sourceJson) as Record<string, unknown>;
-    const expectedRepo = githubRepositoryIdentity(source);
-    if (!expectedRepo || typeof sourceRecord.source !== 'string') return false;
-    const keys = Object.keys(sourceRecord).sort().join(',');
-    if (sourceRecord.source === 'github' && keys === 'repo,source' && typeof sourceRecord.repo === 'string') {
-      return githubShorthandIdentity(sourceRecord.repo) === expectedRepo;
-    }
-    if (sourceRecord.source === 'git' && keys === 'source,url' && typeof sourceRecord.url === 'string') {
-      return githubRemoteIdentity(sourceRecord.url) === expectedRepo;
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-export function findRegisteredPublicMarketplace(
-  marketplace: PublicExtensionItem['marketplace'],
-  registry: readonly { name: string; source_json?: string }[],
-) {
-  if (!marketplace) return undefined;
-  return registry.find((entry) => (
-    marketplaceSourceMatches(marketplace.source, entry.source_json)
-  ));
-}
-
-export function findConflictingPublicMarketplace(
-  marketplace: PublicExtensionItem['marketplace'],
-  registry: readonly { name: string; source_json?: string }[],
-) {
-  if (!marketplace) return undefined;
-  return registry.find((entry) => (
-    entry.name === marketplace.name && !marketplaceSourceMatches(marketplace.source, entry.source_json)
-  ));
-}
-
-export type PublicMarketplaceSourceAction =
-  | { kind: 'registered'; marketplace: { name: string; source_json?: string } }
-  | { kind: 'source-conflict'; marketplace: { name: string; source_json?: string } }
-  | { kind: 'add' };
-
-export function decidePublicMarketplaceSourceAction(
-  marketplace: NonNullable<PublicExtensionItem['marketplace']>,
-  registry: readonly { name: string; source_json?: string }[],
-): PublicMarketplaceSourceAction {
-  const conflict = findConflictingPublicMarketplace(marketplace, registry);
-  if (conflict) return { kind: 'source-conflict', marketplace: conflict };
-  const registered = findRegisteredPublicMarketplace(marketplace, registry);
-  if (registered) return { kind: 'registered', marketplace: registered };
-  return { kind: 'add' };
-}
-
-export function publicMarketplacePluginTargetId(
-  marketplace: PublicExtensionItem['marketplace'],
-  sourceAction: PublicMarketplaceSourceAction | null,
-): string | null {
-  if (!marketplace?.plugin) return null;
-  const registeredName = sourceAction?.kind === 'registered' ? sourceAction.marketplace.name : marketplace.name;
-  return `${marketplace.plugin}@${registeredName}`;
+  return { kind: 'marketplace-add', source: marketplace.source, directoryItemId: item.id };
 }
 
 function callPluginAdmin(bridge: PageContentProps['bridge'], command: unknown) {
@@ -294,7 +195,9 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   const marketplaceNames = [...new Set([...Object.keys(marketplaces), ...(catalog.marketplaces ?? []).map((entry) => entry.name)])].sort();
 
   const appliedLink = useRef<string>();
-  const [selection, setSelection] = useState<PluginSelection>(initialPluginId ? { kind: 'plugin', id: initialPluginId } : { kind: 'list' });
+  const appliedDirectoryNavigation = useRef<string>();
+  const [pendingDirectoryItemId, setPendingDirectoryItemId] = useState<string | null>(null);
+  const [selection, setSelection] = useState<PluginSelection>(initialPluginId && !publicExtensionFromNavigation(initialPluginId) ? { kind: 'plugin', id: initialPluginId } : { kind: 'list' });
   const [search, setSearch] = useState('');
   const [draftEnabled, setDraftEnabled] = useState(enabledPlugins);
   const [draftConfigs, setDraftConfigs] = useState(pluginConfigs);
@@ -324,6 +227,21 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   useEffect(() => {
     if (adminAvailable) void callPluginAdmin(bridge, adminRecordCommand('get_catalog'));
   }, [adminAvailable, bridge.pluginAdmin]);
+
+  useEffect(() => {
+    const item = publicExtensionFromNavigation(initialPluginId);
+    if (!item || !bridge.pluginCatalogEvent || appliedDirectoryNavigation.current === initialPluginId) return;
+    appliedDirectoryNavigation.current = initialPluginId;
+    setSelection(publicDirectoryPluginSelection(item, catalog));
+  }, [initialPluginId, bridge.pluginCatalogEvent, catalog, pluginIds.join('\n')]);
+
+  useEffect(() => {
+    if (!pendingDirectoryItemId || busy) return;
+    const item = publicDirectoryPlugins.find((entry) => entry.id === pendingDirectoryItemId);
+    if (!item?.marketplace || decidePublicMarketplaceSourceAction(item.marketplace, catalog.marketplaces ?? []).kind === 'add') return;
+    setSelection(publicDirectoryPluginSelection(item, catalog));
+    setPendingDirectoryItemId(null);
+  }, [pendingDirectoryItemId, busy, catalog, publicDirectoryPlugins, pluginIds.join('\n')]);
 
   useEffect(() => {
     setDraftEnabled(enabledPlugins);
@@ -424,10 +342,13 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   });
 
   const requestSelection = (next: PluginSelection) => {
+    // A manual choice supersedes an initial recommendation that is still waiting for its catalog.
+    appliedDirectoryNavigation.current = initialPluginId;
     if (guardedDirty) {
       setPendingSelection(next);
       return;
     }
+    setPendingDirectoryItemId(null);
     setPreparedOperation(null);
     setSelection(next);
     setAddMenuOpen(false);
@@ -556,6 +477,13 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
         setPreparedOperation(null);
         setMarketplaceSource('');
         if (marketplaceAdded || conflictMarketplaceRemoved) {
+          const recommendation = selection.kind === 'marketplace-add'
+            ? publicDirectoryPlugins.find((entry) => entry.id === selection.directoryItemId)
+            : undefined;
+          if (marketplaceAdded && recommendation?.marketplace
+            && githubRepositoryIdentity(asString(preparedOperation.payload.source)) === githubRepositoryIdentity(recommendation.marketplace.source)) {
+            setPendingDirectoryItemId(recommendation.id);
+          }
           setSelection({ kind: 'list' });
           setCatalogTab('public');
           return callPluginAdmin(bridge, adminRecordCommand('get_catalog'));
@@ -594,32 +522,10 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
       .finally(() => setBusy(false));
   };
   const openPublicDirectoryItem = (item: (typeof publicExtensionItems)[number]) => {
-    const marketplace = item.marketplace;
-    if (!marketplace) return;
-
-    const sourceAction = decidePublicMarketplaceSourceAction(marketplace, catalog.marketplaces ?? []);
-    if (sourceAction.kind === 'source-conflict') {
-      requestSelection({ kind: 'marketplace', name: sourceAction.marketplace.name, sourceConflict: marketplace.source });
-      return;
-    }
-
-    const pluginId = publicMarketplacePluginTargetId(marketplace, sourceAction);
-    if (pluginId && pluginIds.includes(pluginId)) {
-      requestSelection({ kind: 'plugin', id: pluginId });
-      return;
-    }
-    const available = pluginId ? availablePlugins.find((entry) => entry.id === pluginId) : undefined;
-    if (available) {
-      requestSelection({ kind: 'available', id: available.id });
-      return;
-    }
-
-    if (sourceAction.kind === 'registered') {
-      refreshCatalog();
-      requestSelection({ kind: 'marketplace', name: sourceAction.marketplace.name });
-      return;
-    }
-    requestSelection({ kind: 'marketplace-add', source: marketplace.source });
+    if (!item.marketplace) return;
+    const next = publicDirectoryPluginSelection(item, catalog);
+    if (next.kind === 'marketplace' && !next.sourceConflict) refreshCatalog();
+    requestSelection(next);
   };
 
   return (

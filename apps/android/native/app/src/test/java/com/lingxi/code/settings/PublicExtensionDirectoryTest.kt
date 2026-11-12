@@ -8,6 +8,17 @@ import com.lingxi.code.plugins.PluginMarketplace
 
 class PublicExtensionDirectoryTest {
     @Test
+    fun recommendedPluginTargetFollowsVerifiedMarketplaceAliases() {
+        val candidate = PublicExtensionMarketplace("anthropics/skills", "anthropic-agent-skills", "document-skills")
+        val alias = PluginMarketplace("my-skills", """{"source":"github","repo":"anthropics/skills"}""", null, null)
+        assertEquals("document-skills@my-skills", publicMarketplacePluginId(candidate, listOf(alias)))
+        assertEquals(null, publicMarketplacePluginId(candidate, emptyList()))
+        val conflict = PluginMarketplace("anthropic-agent-skills", """{"source":"github","repo":"other/skills"}""", null, null)
+        assertEquals(null, publicMarketplacePluginId(candidate, listOf(alias, conflict)))
+        assertEquals(null, publicMarketplacePluginId(candidate.copy(pluginId = null), listOf(alias)))
+    }
+
+    @Test
     fun directoryFiltersForAndroidAndResolvesFiveLanguageKeys() {
         val entries = parsePublicExtensionDirectory(
             """{"schemaVersion":1,"items":[

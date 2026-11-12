@@ -41,6 +41,13 @@
 .extension-hub-row-actions { display: flex; align-items: center; gap: 8px; }
 .extension-skill-installed { margin-left: auto; color: var(--hub-subtle); }
 .extension-skills-installed .extension-hub-group-title { margin-bottom: 10px; }
+.extension-recommendations-note { margin: -2px 0 14px; max-width: 64ch; color: var(--hub-muted); font-size: 12.5px; line-height: 1.6; }
+.extension-recommendation-row { align-items: flex-start; }
+.extension-recommendation-row .extension-hub-row-description { white-space: normal; }
+.extension-recommendation-row > .extension-hub-primary { align-self: center; }
+.extension-recommendation-meta { margin-top: 7px; color: var(--hub-muted); font-size: 11.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.extension-recommendation-source { width: fit-content; margin-top: 6px; color: var(--hub-accent); font-size: 11.5px; line-height: 1.5; text-decoration: none; }
+.extension-recommendation-source:hover { text-decoration: underline; }
 .extension-skills-sources .extension-catalog-tabs { margin-bottom: 16px; }
 .extension-see-more { display: flex; align-items: center; gap: 6px; margin: 14px 0 0; padding: 4px 0; border: 0; border-radius: 4px; background: transparent; color: var(--hub-accent); font: inherit; font-size: 12.5px; cursor: pointer; }
 .extension-see-more:hover { color: var(--hub-text); }

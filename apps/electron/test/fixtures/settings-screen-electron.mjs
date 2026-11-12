@@ -1094,7 +1094,7 @@ async function runMacosEditors(window, webContents) {
         : page === 'provider-credentials' ? document.querySelector('.settings-provider-row')
         : page === 'fusion' ? document.querySelector('.extension-hub-primary')
         : page === 'mcp' ? document.querySelector('.extension-hub-row-open')
-        : page === 'skills' ? document.querySelector('.extension-hub-row')
+        : page === 'skills' ? document.querySelector('.extension-skills-installed .extension-hub-row')
         : [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '添加');
       if (!target) throw new Error('missing editor ' + page);
       target.click();
@@ -1159,6 +1159,93 @@ async function runLocalizationScenario(window, webContents) {
   return { rows, localizedSearch, restored, system, synced: await run('document.documentElement.lang') };
 }
 
+async function runExtensionRecommendationsScenario(window, webContents) {
+  const run = expression => webContents.executeJavaScript(expression);
+  const clickButton = async text => {
+    await run(`(() => { const button = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === ${JSON.stringify(text)}); if (!button) throw new Error('missing button ' + ${JSON.stringify(text)}); button.click(); })()`);
+  };
+  const capture = async name => {
+    const dir = process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
+    if (!dir) return;
+    mkdirSync(dir, { recursive: true });
+    window.showInactive();
+    await delay(100);
+    writeFileSync(join(dir, `${new URL(url).searchParams.get('theme') || 'light'}-recommendations-${name}.png`), (await window.capturePage()).toPNG());
+  };
+  await run('window.__settingsScreenTest.selectPage("skills")');
+  await waitFor(webContents, 'document.querySelectorAll(".extension-skills-recommended article").length === 4');
+  await capture('skills');
+  const initial = await run('({count: document.querySelectorAll(".extension-skills-recommended article").length, overflow: document.querySelector(".settings-content-scroll").scrollWidth > document.querySelector(".settings-content-scroll").clientWidth + 1})');
+  await run('window.__settingsScreenTest.setFieldValue(".extension-search-field input", "xlsx")');
+  await waitFor(webContents, 'document.querySelectorAll(".extension-skills-recommended article").length === 1');
+  const search = await run('document.querySelector(".extension-skills-recommended article").textContent.includes("Document Skills")');
+  await run('document.querySelector(".extension-skills-recommended article button").click()');
+  await waitFor(webContents, 'Boolean([...document.querySelectorAll(".extension-detail-dialog input")].find(el => el.value === "anthropics/skills"))');
+  await capture('source');
+  const beforePreview = await run('window.__settingsScreenTest.state().extensionCalls');
+  await clickButton('预检添加');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().extensionCalls.some(({command}) => command.action === "preview_operation")');
+  const beforeConfirmation = await run('window.__settingsScreenTest.state().extensionCalls');
+  await clickButton('确认执行');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().extensionCalls.some(({command}) => command.action === "apply_operation")');
+  const available = [{ id: 'document-skills@anthropic-agent-skills', name: 'document-skills', marketplace: 'anthropic-agent-skills', description: 'Word, Excel, PowerPoint and PDF skills.', installed: false }];
+  const catalog = { installed: [], available, marketplaces: [{ name: 'anthropic-agent-skills', source_json: JSON.stringify({ source: 'github', repo: 'anthropics/skills' }) }], revisions: { user: 'b'.repeat(64), project: 'c'.repeat(64) } };
+  await run(`window.__settingsScreenTest.setExtensionCatalogs({plugins:${JSON.stringify(catalog)}})`);
+  await waitFor(webContents, 'document.querySelector(".extension-plugin-title-row h1")?.textContent === "document-skills"');
+  const selectedPackage = await run('window.__settingsScreenTest.state().extensionCalls');
+  await capture('package');
+  await clickButton('安装插件');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().extensionCalls.some(({command}) => command.action === "preview_operation" && JSON.parse(command.payload_json).action === "install")');
+  await clickButton('确认执行');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().extensionCalls.filter(({command}) => command.action === "apply_operation").length === 2');
+  const completed = await run('window.__settingsScreenTest.state().extensionCalls');
+  await run(`window.__settingsScreenTest.setExtensionCatalogs({plugins:${JSON.stringify({...catalog,installed:[{id:available[0].id,name:'document-skills'}]})}})`);
+  await run('window.__settingsScreenTest.selectPage("skills")');
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-skills-recommended"))');
+  const installed = await run('[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills"))?.querySelector("button")?.textContent.includes("已安装")');
+  window.setContentSize(760, 600);
+  await capture('narrow');
+  const narrow = await run('document.querySelector(".settings-content-scroll").scrollWidth <= document.querySelector(".settings-content-scroll").clientWidth + 1');
+  await run('window.__settingsScreenTest.selectPage("mcp")');
+  await waitFor(webContents, 'Boolean([...document.querySelectorAll(".extension-hub-row-title")].find(el => el.textContent === "Notion"))');
+  await run('[...document.querySelectorAll(".extension-hub-row-title")].find(el => el.textContent === "Notion").closest(".extension-hub-row").querySelector("button").click()');
+  await waitFor(webContents, 'Boolean([...document.querySelectorAll("input")].find(el => el.value === "https://mcp.notion.com/mcp"))');
+  const mcpTemplate = await run('[...document.querySelectorAll("input")].some(el => el.value === "notion")');
+  await capture('mcp');
+  return { initial, search, beforePreview, beforeConfirmation, selectedPackage, completed, installed, narrow, mcpTemplate };
+}
+
+async function runRecommendationCatalogSafetyScenario(webContents) {
+  const run = expression => webContents.executeJavaScript(expression);
+  const aliasCatalog = {
+    marketplaces: [{ name: 'my-skills', source_json: JSON.stringify({ source: 'github', repo: 'anthropics/skills' }) }],
+    installed: [{ id: 'document-skills@my-skills', name: 'document-skills' }], available: [], revisions: { user: 'a'.repeat(64) },
+  };
+  await run(`window.__settingsScreenTest.setExtensionCatalogs({plugins:${JSON.stringify(aliasCatalog)}})`);
+  await run('window.__settingsScreenTest.selectPage("skills")');
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-skills-recommended"))');
+  const installed = '[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills"))?.querySelector("button")?.textContent.includes("已安装")';
+  await waitFor(webContents, installed);
+  const aliasInstalled = await run(installed);
+  const refreshed = await run('window.__settingsScreenTest.state().extensionCalls.some(call => call.domain === "plugin" && call.command.action === "get_catalog")');
+  const conflict = { ...aliasCatalog, marketplaces: [{ name: 'anthropic-agent-skills', source_json: JSON.stringify({ source: 'github', repo: 'other/skills' }) }], installed: [{ id: 'document-skills@anthropic-agent-skills', name: 'document-skills' }] };
+  await run(`window.__settingsScreenTest.setExtensionCatalogs({plugins:${JSON.stringify(conflict)}})`);
+  await waitFor(webContents, `!(${installed})`);
+  const differentSourceNotInstalled = await run(`!(${installed})`);
+  await run('window.__settingsScreenTest.setExtensionCatalogs({plugins:null})');
+  await waitFor(webContents, '!window.__settingsScreenTest.state().pluginCatalogReady');
+  await run('[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills")).querySelector("button").click()');
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-hub-toolbar-actions details"))');
+  await run('document.querySelector(".extension-hub-toolbar-actions details summary").click()');
+  await run('[...document.querySelectorAll(".extension-hub-toolbar-actions details button")].at(-1).click()');
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-detail-dialog input"))');
+  await run('window.__settingsScreenTest.setFieldValue(".extension-detail-dialog input", "my/own-plugins")');
+  await run('window.__settingsScreenTest.setExtensionCatalogs({plugins:{installed:[],available:[],marketplaces:[],revisions:{user:"a".repeat(64)}}})');
+  await waitFor(webContents, 'window.__settingsScreenTest.state().pluginCatalogReady');
+  const retainedManualDraft = await run('document.querySelector(".extension-detail-dialog input")?.value === "my/own-plugins"');
+  return { aliasInstalled, refreshed, differentSourceNotInstalled, retainedManualDraft };
+}
+
 async function main() {
   await app.whenReady();
   const window = new BrowserWindow({ show: false, width: 1000, height: 720, webPreferences: { sandbox: true } });
@@ -1168,7 +1255,9 @@ async function main() {
     webContents.focus();
     await waitFor(webContents, 'Boolean(window.__settingsScreenTest?.state().settingsSnapshotReady && document.querySelector(\'[role="dialog"]\'))');
     const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
-    const result = scenario === 'localization' ? await runLocalizationScenario(window, webContents)
+    const result = scenario === 'recommendation-catalog-safety' ? await runRecommendationCatalogSafetyScenario(webContents)
+      : scenario === 'extension-recommendations' ? await runExtensionRecommendationsScenario(window, webContents)
+      : scenario === 'localization' ? await runLocalizationScenario(window, webContents)
       : scenario === 'macos-editors' ? await runMacosEditors(window, webContents)
       : scenario === 'macos-controls' ? await runMacosControls(window, webContents)
       : scenario === 'macos-audit' ? await runMacosAudit(window, webContents)

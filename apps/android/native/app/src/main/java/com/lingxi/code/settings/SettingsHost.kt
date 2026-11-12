@@ -316,13 +316,21 @@ fun SettingsHost(
                 }
                 page(SettingsRoutes.ENGINE_MCP) { McpDirectoryPage(engineBridge, runtimeMcpServers) }
                 (layeredPageKeys.keys.filter { it != SettingsRoutes.PROJECTS && it != SettingsRoutes.PLUGINS } + SettingsRoutes.DIAGNOSTICS).forEach { engineRoute ->
-                    page(engineRoute) { EngineSettingsPage(engineRoute, engineBridge, reconnectSafely) }
+                    page(engineRoute) { EngineSettingsPage(engineRoute, engineBridge, reconnectSafely, onBrowseSkills = { navController.navigate(SettingsRoutes.SKILL_DIRECTORY) }) }
                 }
                 page(SettingsRoutes.PLUGINS) {
                     PluginsPage(
                         bridge = engineBridge,
                         onDetail = { id -> navController.navigate(SettingsRoutes.pluginDetail(id)) },
                         onAdvanced = { navController.navigate(SettingsRoutes.PLUGINS_ADVANCED) },
+                    )
+                }
+                page(SettingsRoutes.SKILL_DIRECTORY) {
+                    PluginsPage(
+                        bridge = engineBridge,
+                        onDetail = { id -> navController.navigate(SettingsRoutes.pluginDetail(id)) },
+                        onAdvanced = { navController.navigate(SettingsRoutes.PLUGINS_ADVANCED) },
+                        skillsOnly = true,
                     )
                 }
                 page(SettingsRoutes.PLUGIN_DETAIL) {
@@ -455,6 +463,7 @@ fun SettingsHost(
                         state = state,
                         store = resolvedStore,
                         onDetail = { id -> navController.navigate(SettingsRoutes.skillDetail(id)) },
+                        onBrowse = { navController.navigate(SettingsRoutes.SKILL_DIRECTORY) },
                     )
                 }
                 page(SettingsRoutes.SKILL_DETAIL) {
@@ -543,6 +552,7 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
         SettingsRoutes.TYPESCRIPT_LSP -> stringResource(SettingsTitles.TYPESCRIPT_LSP)
         SettingsRoutes.OPEN_SOURCE -> stringResource(SettingsTitles.OPEN_SOURCE)
         SettingsRoutes.SKILLS -> stringResource(SettingsTitles.SKILLS)
+        SettingsRoutes.SKILL_DIRECTORY -> stringResource(R.string.skills_browse_store)
         SettingsRoutes.PLUGIN_DETAIL -> stringResource(R.string.plugins_detail_title)
         SettingsRoutes.PLUGINS_ADVANCED -> stringResource(R.string.plugins_advanced)
         SettingsRoutes.MCP_LIST -> stringResource(SettingsTitles.MCP)

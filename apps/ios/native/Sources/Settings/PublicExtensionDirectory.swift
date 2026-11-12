@@ -105,6 +105,12 @@ enum PublicMarketplaceRegistration: Equatable {
     case nameConflict(existingName: String)
 }
 
+func publicMarketplacePluginID(_ candidate: PublicExtensionMarketplace, registered: [PluginMarketplace]) -> String? {
+    guard let plugin = candidate.plugin,
+          case .registered(let name) = publicMarketplaceRegistration(candidate, registered: registered) else { return nil }
+    return "\(plugin)@\(name)"
+}
+
 /// Compare the curated GitHub shorthand with the engine's actual marketplace
 /// DTO. `name` alone is insufficient: the registry can already contain that
 /// name for a different source, in which case `marketplace_add` keeps the old
@@ -245,6 +251,7 @@ struct PublicExtensionItem: Identifiable {
     let mcpName: String?
     let mcpConfig: [String: Any]?
     let marketplace: PublicExtensionMarketplace?
+    let skills: [String]
 
     func localizedDescription(locale: Locale) -> String {
         localized(description, locale: locale, fallback: name)
@@ -329,7 +336,8 @@ struct PublicExtensionDirectory {
             version: version,
             mcpName: mcpName,
             mcpConfig: mcpConfig,
-            marketplace: marketplace
+            marketplace: marketplace,
+            skills: value["skills"] as? [String] ?? []
         )
     }
 }
@@ -337,6 +345,7 @@ struct PublicExtensionDirectory {
 /// Shared search/category list for the public MCP and plugin sources.
 struct PublicExtensionDirectoryList: View {
     let kind: PublicExtensionKind
+    let skillsOnly: Bool
     let actionTitle: (PublicExtensionItem) -> String
     let action: (PublicExtensionItem) -> Void
     let canAct: (PublicExtensionItem) -> Bool
@@ -349,11 +358,13 @@ struct PublicExtensionDirectoryList: View {
 
     init(
         kind: PublicExtensionKind,
+        skillsOnly: Bool = false,
         actionTitle: @escaping (PublicExtensionItem) -> String,
         action: @escaping (PublicExtensionItem) -> Void,
         canAct: @escaping (PublicExtensionItem) -> Bool = { _ in true }
     ) {
         self.kind = kind
+        self.skillsOnly = skillsOnly
         self.actionTitle = actionTitle
         self.action = action
         self.canAct = canAct
@@ -365,11 +376,12 @@ struct PublicExtensionDirectoryList: View {
         guard let items = directory?.items else { return [] }
         return items.filter { item in
             guard item.kind == kind,
+                  !skillsOnly || !item.skills.isEmpty,
                   category.map({ item.category == $0 }) ?? true else { return false }
             guard !search.isEmpty else { return true }
             let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
             return [item.name, item.publisher, item.localizedDescription(locale: locale),
-                    item.localizedRequirements(locale: locale) ?? ""]
+                    item.localizedRequirements(locale: locale) ?? "", item.skills.joined(separator: " ")]
                 .contains { $0.localizedStandardContains(query) }
         }
     }
@@ -413,6 +425,10 @@ struct PublicExtensionDirectoryList: View {
             }
             Text("\(item.publisher) · \(item.category.displayName)")
                 .font(.caption).foregroundStyle(.secondary)
+            if !item.skills.isEmpty {
+                Text(item.skills.joined(separator: ", "))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Text(item.localizedDescription(locale: locale))
                 .font(.footnote).foregroundStyle(theme.text2)
                 .fixedSize(horizontal: false, vertical: true)

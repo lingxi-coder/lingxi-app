@@ -10,7 +10,7 @@ enum SettingsPage: Hashable {
     case voice, linuxRuntime, browser, knowledge, memory, workflows
     case appearance, language, notifications, input, appIntegration, privacy, permissionMode, typescriptLsp
     case skills, skillDetail(String)
-    case pluginDetail(String), pluginsAdvanced
+    case pluginDetail(String), pluginsAdvanced, skillDirectory
     case mcpList, mcpEdit(String)
     case linkedMcp(String, scope: String?), linkedSkill(String, scope: String?), linkedProvider(String, scope: String?)
     case dream
@@ -263,7 +263,7 @@ struct SettingsHost: View {
     private func showsEngineApplyAction(_ page: SettingsPage) -> Bool {
         switch page {
         case .customProviders, .linkedProvider, .permissions, .toolsAgent, .skills, .mcpList, .hooks, .plugins, .pluginDetail,
-             .pluginsAdvanced, .diagnostics, .projectsTrust:
+             .pluginsAdvanced, .skillDirectory, .diagnostics, .projectsTrust:
             true
         case .providerList(let kind): kind.kind == .llm
         default: false
@@ -388,6 +388,7 @@ struct SettingsHost: View {
         case .pluginDetail(let id):
             return DesktopSettingsRepository.shared.pluginCatalog.installed(id)?.displayName ?? String(localized: "plugins_detail_title")
         case .pluginsAdvanced: return String(localized: "plugins_advanced")
+        case .skillDirectory: return String(localized: "skills_browse_store")
         case .diagnostics: return String(localized: "settings_parity_diagnostics")
         case .about: return String(localized: "settings_section_about")
         case .archivedChats: return String(localized: "settings_parity_archived")

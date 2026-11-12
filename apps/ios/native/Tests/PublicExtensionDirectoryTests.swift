@@ -5,6 +5,16 @@ import XCTest
 
 @MainActor
 final class PublicExtensionDirectoryTests: XCTestCase {
+    func testRecommendedPluginTargetFollowsVerifiedMarketplaceAliases() {
+        let candidate = PublicExtensionMarketplace(source: "anthropics/skills", name: "anthropic-agent-skills", plugin: "document-skills")
+        let alias = PluginMarketplace(name: "my-skills", sourceJSON: #"{"source":"github","repo":"anthropics/skills"}"#, installLocation: nil, lastUpdated: nil)
+        XCTAssertEqual(publicMarketplacePluginID(candidate, registered: [alias]), "document-skills@my-skills")
+        XCTAssertNil(publicMarketplacePluginID(candidate, registered: []))
+        let conflict = PluginMarketplace(name: "anthropic-agent-skills", sourceJSON: #"{"source":"github","repo":"other/skills"}"#, installLocation: nil, lastUpdated: nil)
+        XCTAssertNil(publicMarketplacePluginID(candidate, registered: [alias, conflict]))
+        XCTAssertNil(publicMarketplacePluginID(PublicExtensionMarketplace(source: candidate.source, name: candidate.name, plugin: nil), registered: [alias]))
+    }
+
     func testParsesIOSItemsAndKeepsUnknownMCPConfigFields() throws {
         let json = """
         {

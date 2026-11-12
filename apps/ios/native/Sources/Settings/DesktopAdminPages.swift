@@ -397,6 +397,8 @@ struct DesktopMCPAdminPage: View {
 struct DesktopSkillsAdminPage: View {
     var initialID: String? = nil
     var initialScope: String? = nil
+    var onBrowseSkills: (() -> Void)? = nil
+    @State private var confirmBrowse = false
     @State private var initialSkillError: String?
     @State private var openedInitialID = false
     @State private var repository = DesktopSettingsRepository.shared
@@ -408,6 +410,11 @@ struct DesktopSkillsAdminPage: View {
     @State private var writable = false
     private var entries: [SkillAdminCatalogEntry] { repository.skillCatalog?.entries ?? [] }
     private var trash: [SkillAdminTrashEntry] { repository.skillCatalog?.trash ?? [] }
+    private var hasSkillChanges: Bool {
+        guard let target else { return !name.isEmpty || !markdown.isEmpty }
+        guard let document = repository.skillDocument, document.matches(selectedIdentity: target) else { return false }
+        return name != document.name.displayValue || markdown != document.markdown
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsConnectionStatus()
@@ -415,6 +422,11 @@ struct DesktopSkillsAdminPage: View {
                 ContentUnavailableView(String(localized: "skills_unavailable"), systemImage: "link", description: Text(initialSkillError ?? String(localized: "skills_local_missing")))
             }
             HStack {
+                if let onBrowseSkills {
+                    Button("skills_browse_store") {
+                        if hasSkillChanges { confirmBrowse = true } else { onBrowseSkills() }
+                    }
+                }
                 Button("settings_parity_refresh_catalog") { Task { await load() } }.disabled(!repository.connected)
                 Button("settings_parity_create_skill") { target = nil; name = ""; markdown = ""; revision = nil; writable = true }
                     .disabled(!repository.connected)
@@ -458,7 +470,7 @@ struct DesktopSkillsAdminPage: View {
             }
             LayeredSettingsPage(keys: ["syncClaudeAiSkills"])
         }.task(id: repository.sourceGeneration) { await load() }
-        .onChange(of: repository.sourceGeneration) { _, _ in target = nil; markdown = ""; revision = nil; writable = false }
+        .onChange(of: repository.sourceGeneration) { _, _ in target = nil; name = ""; markdown = ""; revision = nil; writable = false; confirmBrowse = false }
         .onChange(of: repository.skillCatalog) { _, catalog in
             openInitialSkill()
             if let target, catalog?.entries.contains(where: { $0.identity == target }) != true {
@@ -473,6 +485,19 @@ struct DesktopSkillsAdminPage: View {
             scope = document.source
             revision = document.revision
             writable = document.writable
+        }
+        .alert(String(localized: "cron_discard_title"), isPresented: $confirmBrowse) {
+            Button("cron_discard", role: .destructive) {
+                if let document = repository.skillDocument, document.matches(selectedIdentity: target) {
+                    name = document.name.displayValue
+                    markdown = document.markdown
+                } else {
+                    name = ""
+                    markdown = ""
+                }
+                onBrowseSkills?()
+            }
+            Button("common_cancel", role: .cancel) { }
         }
     }
     private func load() async { await repository.admin(domain: "skill", action: "get_catalog"); openInitialSkill() }

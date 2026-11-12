@@ -37,6 +37,7 @@ object SettingsRoutes {
 
     // Mobile capabilities and legacy routes
     const val SKILLS = "settings/skills"
+    const val SKILL_DIRECTORY = "settings/skill-directory"
     const val SKILL_DETAIL = "settings/skills/{id}"
     const val MCP_LIST = "settings/mcp"
     const val MCP_EDIT = "settings/mcp/{id}/{scope}"

@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import { AccountSignInContext } from '../src/renderer/bridge/useAccountState';
 import { unreadBadgeText } from '../src/renderer/bridge/teamsUnread';
+import { agentAvatarIndex } from '../src/renderer/components/agentAvatarArt';
 import { teamBotAvatarId } from '../src/renderer/components/TeamAvatar';
 import { TeamsSignIn } from '../src/renderer/components/TeamsSignIn';
 import { tr } from '../src/renderer/i18n/locale';
@@ -44,6 +45,20 @@ test('a Bot has the avatar of its id in the Teams views as in the Bots sidebar, 
   assert.equal(teamBotAvatarId('bot:owner-uid:host-1:3f2b8c10-1c0e-4c7f-9d2e-5a1b6e7f8a90'), '3f2b8c10-1c0e-4c7f-9d2e-5a1b6e7f8a90');
   assert.equal(teamBotAvatarId('planner'), 'planner', 'a card id is its own');
   assert.equal(teamBotAvatarId(teamBotAvatarId('bot:u:h:planner')), 'planner', 'and the same Bot is the same either way');
+});
+
+test('the avatar of a Bot is the same on every client: the id it is looked up by and the index it maps to follow the shared vectors', () => {
+  const fixtures = new URL('../../../packages/bridge-client/fixtures/', import.meta.url);
+  const vectors = JSON.parse(readFileSync(new URL('mobile-team-bot-vectors.json', fixtures), 'utf8')) as {
+    avatars: { teamBotAvatarId: [string, string][]; indexPrefixed: { agentId: string; repeat?: { char: string; count: number }; expect: number }[] };
+  };
+  assert.ok(vectors.avatars.teamBotAvatarId.length >= 3 && vectors.avatars.indexPrefixed.length >= 8, 'the vectors are there');
+  for (const [input, expected] of vectors.avatars.teamBotAvatarId) assert.equal(teamBotAvatarId(input), expected, input);
+  // The file stores a long id as one character and a count.
+  for (const row of vectors.avatars.indexPrefixed) assert.equal(agentAvatarIndex(row.repeat ? row.repeat.char.repeat(row.repeat.count) : row.agentId), row.expect, row.agentId);
+  const identities = JSON.parse(readFileSync(new URL('agent-avatar-identities.json', fixtures), 'utf8')) as { id: string; index: number }[];
+  assert.ok(identities.length >= 30);
+  for (const row of identities) assert.equal(agentAvatarIndex(row.id), row.index, JSON.stringify(row.id));
 });
 
 // --- theming ---------------------------------------------------------------------------------------------------

@@ -47,4 +47,4 @@ export { isPermissionModeId } from '@lingxi/electron/shared/permission';
 export { anchorTranscriptAgents, placeTranscriptAgents } from '@lingxi/electron/renderer/components/transcriptAgentPlacement';
 export type { AgentAnchors, AgentTranscriptRow } from '@lingxi/electron/renderer/components/transcriptAgentPlacement';
 export { isTaskProgressTool, isTaskWorkflowTool, transcriptToolKey } from '@lingxi/electron/renderer/components/toolPresentation';
-export { AGENT_AVATARS, agentAvatarIndex } from '@lingxi/electron/renderer/components/agentAvatarArt';
+export { AGENT_AVATARS, agentAvatarIndex, teamBotAvatarId } from '@lingxi/electron/renderer/components/agentAvatarArt';

@@ -2,6 +2,7 @@ import { FriendsMain } from '../../../../../packages/teams/FriendsMain';
 import type { UseFriends } from '../../../../../packages/teams/useFriendsWorkspace';
 import { tr } from '../i18n/locale';
 import { FriendsSignIn } from './FriendsSignIn';
+import { renderTeamAvatar } from './TeamAvatar';
 import { renderTeamMarkdown } from './TeamsMain';
 
 /**
@@ -12,5 +13,5 @@ export function FriendsPage({ friends, zh, locale }: { friends: UseFriends; zh: 
   const { workspace, snapshot, signedIn } = friends;
   if (!signedIn) return <FriendsSignIn />;
   if (!workspace || !snapshot) return <p role="status" style={{ margin: 'auto' }}>{tr('friends_loading')}</p>;
-  return <div className="friends-page"><FriendsMain workspace={workspace} snapshot={snapshot} zh={zh} locale={locale} renderMarkdown={renderTeamMarkdown} /></div>;
+  return <div className="friends-page"><FriendsMain workspace={workspace} snapshot={snapshot} zh={zh} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderTeamMarkdown} /></div>;
 }

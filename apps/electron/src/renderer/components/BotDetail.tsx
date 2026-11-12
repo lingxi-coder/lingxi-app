@@ -1,5 +1,5 @@
 import { BotMarketPanel } from './BotMarketPanel';
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState, type KeyboardEvent } from 'react';
 import type { BotUi, BotsApi } from '../../shared/bots';
 import { tr } from '../i18n/locale';
 import { botDraftProblems, botPeers, hasBotDraftProblems } from '../bridge/botForm';
@@ -14,6 +14,7 @@ import { botRemoteAvailability, useRemoteControl } from '../bridge/remoteControl
 import type { BotsController } from '../bridge/botsStore';
 import type { UseBridge } from '../bridge/bridgeTypes';
 import { AgentAvatar } from './AgentAvatar';
+import { rovingIndex } from './rovingIndex';
 import { BotMemoryPanel, BotRoutinesPanel, BotSkillsPanel, BotTasksPanel } from './BotPanels';
 import {
   BotAcceptField,
@@ -130,6 +131,7 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
   const known = useObservable(bots);
   const remoteAvailability = botRemoteAvailability(useRemoteControl().status);
   const [tab, setTab] = useState<BotTab>('general');
+  const tabsId = useId();
   const [opening, setOpening] = useState<string | undefined>();
   const [openError, setOpenError] = useState('');
   const [deleting, setDeleting] = useState<{ busy: boolean; error: string } | undefined>(() => deleteRequest === undefined ? undefined : { busy: false, error: '' });
@@ -179,6 +181,14 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
     const outcome = await removeBot(onDelete);
     if (!outcome.ok) setDeleting({ busy: false, error: outcome.message });
   };
+  // The arrow keys go round the tabs, Home and End to the first and the last; the tab they reach is shown, as the Teams details do.
+  const tabKey = (event: KeyboardEvent<HTMLDivElement>) => {
+    const to = rovingIndex(TABS.length, TABS.indexOf(tab), event.key, { prev: 'ArrowLeft', next: 'ArrowRight', wrap: true });
+    if (to === undefined) return;
+    event.preventDefault();
+    setTab(TABS[to]!);
+    queueMicrotask(() => document.getElementById(`${tabsId}-tab-${TABS[to]}`)?.focus());
+  };
 
   return <div className="bots-detail">
     <button type="button" className="bots-back" data-variant="quiet" onClick={() => guard.leave(onBack)}>← {tr('bots_back')}</button>
@@ -204,9 +214,10 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
     {openError ? <p role="alert" className="bots-problem">{openError}</p> : null}
     {state.phase === 'failed' ? <p role="alert" className="bots-problem">{tr('bots_detail_failed', state.loadError ?? '')} <button type="button" onClick={() => void editor.load()}>{tr('common_retry')}</button></p> : null}
     {state.phase === 'loading' ? <p role="status" className="bots-muted">{tr('bots_detail_loading')}</p> : null}
-    <nav className="bots-tabs" aria-label={tr('bots_sections_label')}>
-      {TABS.map((id) => <button key={id} type="button" aria-current={tab === id ? 'page' : undefined} onClick={() => setTab(id)}>{tabLabel(id)}</button>)}
-    </nav>
+    <div className="bots-tabs" role="tablist" aria-label={tr('bots_sections_label')} onKeyDown={tabKey}>
+      {TABS.map((id) => <button key={id} type="button" role="tab" id={`${tabsId}-tab-${id}`} aria-selected={tab === id} aria-controls={`${tabsId}-panel`} tabIndex={tab === id ? 0 : -1} onClick={() => setTab(id)}>{tabLabel(id)}</button>)}
+    </div>
+    <div className="bots-tabpanel" role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-tab-${tab}`} tabIndex={0}>
     {tab === 'routines' ? <BotRoutinesPanel controller={routines} scopeId={routineScope} onNew={onNewRoutine} onOpen={onOpenRoutine} /> : null}
     {tab === 'tasks' ? <BotTasksPanel controller={tasks} opening={opening} disabled={sessionLoading}
       onOpen={(task) => void openWith(task.taskId, () => onOpenTaskChat(task.botId, task.sessionId))} /> : null}
@@ -224,6 +235,7 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
       </> : null}
       <BotSaveBar state={state} dirty={dirty} problems={hasBotDraftProblems(problems)} onSave={() => void editor.save()} onReload={() => void editor.load()} />
     </> : null}
+    </div>
     {leaving.asking ? <BotConfirm title={tr('bots_discard_title')} icon="info" danger={false} confirmLabel={tr('bots_discard_confirm')} onCancel={() => guard.cancel()} onConfirm={() => guard.confirm()}>
       <p>{tr('bots_discard_body')}</p>
     </BotConfirm> : null}

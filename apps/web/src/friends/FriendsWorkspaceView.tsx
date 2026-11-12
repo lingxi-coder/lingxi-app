@@ -8,6 +8,7 @@ import { FriendsMain } from '../../../../packages/teams/FriendsMain';
 import { FriendsSidebar } from '../../../../packages/teams/FriendsSidebar';
 import type { RenderMarkdown } from '../../../../packages/teams/ui';
 import { useFriendsWorkspace } from '../../../../packages/teams/useFriendsWorkspace';
+import { renderTeamAvatar } from '../teams/teamAvatar';
 import '../teams/teams-web.css';
 
 /** A Bot's messages in a friend chat use the Markdown renderer of Web's own chat, as in a Team. */
@@ -42,7 +43,7 @@ export function FriendsWorkspaceView({ friends, teams, uid, zh, route, chat, cod
       <div className="teams-web-sidebar"><FriendsSidebar workspace={workspace} snapshot={snapshot} zh={zh} /></div>
       <div className="teams-web-conversation">
         <button type="button" className="teams-web-back" onClick={() => workspace.show('home')}>{zh ? '‹ 好友' : '‹ Friends'}</button>
-        <FriendsMain workspace={workspace} snapshot={snapshot} zh={zh} renderMarkdown={renderMarkdown} />
+        <FriendsMain workspace={workspace} snapshot={snapshot} zh={zh} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} />
       </div>
       {code ? <FriendLinkDialog workspace={workspace} zh={zh} code={code} onClose={onCodeHandled} /> : null}
     </div>

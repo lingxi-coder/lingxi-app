@@ -13,6 +13,14 @@ export function mixColors(from: string, to: string, weight: number): string {
 }
 
 /**
+ * The outline of a control (a button, a field, a card that is pressed): the text color weighed 55% against the surface
+ * it sits on, which reads at 3:1 or more in both palettes where the Desktop's hairline `t.border` gives about 1.2:1. The
+ * hairline stays the color of dividers and of frames that hold controls without being one. Teams and Bots outline their
+ * controls alike.
+ */
+export const controlBorder = (t: Pick<Tokens, 'text' | 'surface'>): string => mixColors(t.text, t.surface, 0.55);
+
+/**
  * The public variables of `packages/teams/workspace.css`, from a palette. Pairs that carry text meet 4.5:1 and
  * outlines and fills 3:1 against the surfaces they sit on, in both palettes (see teams-desktop.test.ts).
  */
@@ -26,7 +34,7 @@ export function teamsThemeVariables(t: Tokens): Record<string, string> {
     // A selected row is the darkest surface text sits on; this is the muted text that still reads there.
     '--teams-muted': t.text3OnActive,
     // Outlines of controls need 3:1, which the Desktop's hairline border does not give; the hairline is for dividers.
-    '--teams-border': mixColors(t.text, t.surface, 0.55),
+    '--teams-border': controlBorder(t),
     '--teams-line': t.border,
     '--teams-hover': t.surfaceHover,
     '--teams-selected': t.surfaceActive,

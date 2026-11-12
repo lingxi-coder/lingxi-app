@@ -11,6 +11,7 @@ import type { DrawerTab, RenderMarkdown } from '../../../../packages/teams/ui';
 import { useTeamsWorkspace, type UseTeams } from '../../../../packages/teams/useTeamsWorkspace';
 import { InviteFriends } from '../friends/InviteFriends';
 import { MemberFriend } from '../friends/MemberFriend';
+import { renderTeamAvatar } from './teamAvatar';
 import './teams-web.css';
 
 /** A shared Bot's messages and documents use the Markdown renderer of Web's own chat (`Transcript`): React elements only, links limited to http(s) and mailto. */
@@ -47,16 +48,16 @@ export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, zh, invit
   return (
     <div className="teams-web-body" data-pane={pane ?? (snapshot.team ? 'conversation' : 'list')}>
       <div className="teams-web-sidebar">
-        <TeamSidebar workspace={workspace} snapshot={snapshot} zh={zh} initialInvite={invite} onInviteHandled={onInviteHandled} onInviteResolved={() => { setPane('conversation'); onInviteResolved?.(); }}
+        <TeamSidebar workspace={workspace} snapshot={snapshot} zh={zh} renderAvatar={renderTeamAvatar} initialInvite={invite} onInviteHandled={onInviteHandled} onInviteResolved={() => { setPane('conversation'); onInviteResolved?.(); }}
           onOpenSettings={tab => setDrawer(current => ({ open: true, tab: tab ?? current.tab }))} onConversationSelected={() => setPane('conversation')} />
       </div>
       <div className="teams-web-conversation">
         <button type="button" className="teams-web-back" onClick={() => setPane('list')}>{zh ? '‹ 会话列表' : '‹ Conversations'}</button>
         {invited ? <InviteNotice names={invited} zh={zh} onDone={() => setInvited(undefined)} /> : null}
-        <TeamConversationView workspace={workspace} snapshot={snapshot} zh={zh} renderMarkdown={renderMarkdown} detailsOpen={drawer.open}
+        <TeamConversationView workspace={workspace} snapshot={snapshot} zh={zh} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} detailsOpen={drawer.open}
           onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />
       </div>
-      {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} zh={zh} tab={drawer.tab}
+      {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} zh={zh} renderAvatar={renderTeamAvatar} tab={drawer.tab}
         onTabChange={tab => setDrawer(current => ({ ...current, tab }))} onClose={() => setDrawer(current => ({ ...current, open: false }))} onAddFriend={friends ? setAdding : undefined} onInviteFriends={friends ? () => setInviting(true) : undefined} /> : null}
       {adding && friends && snapshot.team ? <MemberFriend friends={friends} teams={workspace.api} uid={snapshot.uid} teamId={snapshot.team.id} member={adding} zh={zh} onClose={() => setAdding(undefined)} /> : null}
       {inviting && friends && snapshot.team ? <InviteFriends friends={friends} teams={workspace.api} uid={snapshot.uid} team={snapshot.team} members={snapshot.directory} zh={zh}

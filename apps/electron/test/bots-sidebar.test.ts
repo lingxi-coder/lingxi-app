@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -259,6 +260,114 @@ test('a Bot at work or waiting for the owner is marked, and a Bot at rest is not
   assert.match(html, /Alpha[\s\S]*?role="img" aria-label="Working"/);
   assert.match(html, /Beta[\s\S]*?role="img" aria-label="Needs you"/);
   assert.equal([...html.matchAll(/role="img"/g)].length, 2, 'Gamma is at rest');
+  // The words are on the marks, and the marks differ in shape (below) and not only in color.
+  assert.match(html, /<span role="img" aria-label="Working" title="Working" data-state="working" class="bots-sidebar-activity"><\/span>/);
+  assert.match(html, /<span role="img" aria-label="Needs you" title="Needs you" data-state="waiting" class="bots-sidebar-activity"><\/span>/);
+});
+
+const sidebarCss = readFileSync(new URL('../src/renderer/components/BotsSidebar.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+/** What the stylesheet declares for a selector, as a map of property to value. */
+function declared(selector: string): Map<string, string> {
+  const rule = [...sidebarCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find((match) => match[1]!.split(',').map((part) => part.trim()).includes(selector));
+  assert.ok(rule, `${selector} is styled`);
+  return new Map(rule[2]!.split(';').map((declaration) => declaration.split(/:(.*)/s)).filter((pair) => pair.length > 1).map(([name, value]) => [name!.trim(), value!.trim()] as const));
+}
+
+test('a working Bot is marked with a filled dot and one that waits for the owner with a ring, the same size, so the two are told apart without color', () => {
+  const working = declared(".bots-sidebar-activity[data-state='working']");
+  const waiting = declared(".bots-sidebar-activity[data-state='waiting']");
+  assert.match(working.get('background') ?? '', /^var\(--bots-sidebar-ok\)$/, 'filled');
+  assert.ok(!working.has('border'), 'with no ring');
+  assert.match(waiting.get('border') ?? '', /^1\.5px solid var\(--bots-sidebar-warn\)$/, 'a ring of 1.5px');
+  assert.ok(!waiting.has('background'), 'and hollow');
+  const base = declared('.bots-sidebar-activity');
+  assert.equal(base.get('width'), base.get('height'));
+  assert.equal(base.get('box-sizing'), 'border-box', 'the ring is inside the same box as the dot');
+  assert.equal(base.get('border-radius'), '50%');
+  // Where the palette is replaced both keep their shape, in the text color.
+  assert.match(sidebarCss, /@media \(forced-colors: active\)/);
+});
+
+test('the sidebar is styled by BotsSidebar.css: its elements carry classes, and the one style on them is the theme\'s variables on its root', async () => {
+  const runtime = (sessionId: string, botId: string, turnActive: boolean) => ({ sessionId, botId, projectPath: `/data/bots/${botId}/workspace`, turnActive, pendingInteractions: 0, pendingAskUserQuestions: 0 });
+  const html = await sidebar({
+    bots: [bot('a', { name: 'Alpha' }), bot('b', { name: 'Beta' })], chats: { a: [chat('s1', 5, 'First'), ...Array.from({ length: 6 }, (_, index) => chat(`x${index}`, 10 + index))] }, expanded: ['a'],
+    bridge: { bootstrap: { runtimes: [runtime('r-a', 'a', true)], settings: { sidebar: { expandedBots: ['a'] } } } },
+  });
+  const tags = [...html.matchAll(/<(?:nav|div|button|span|h2|p)\b[^>]*\bclass="[^"]*\bbots-sidebar[\w-]*[^"]*"[^>]*>/g)].map((match) => match[0]);
+  assert.ok(tags.length >= 12, `${tags.length} elements of the sidebar`);
+  for (const tag of tags) {
+    const style = /\bstyle="([^"]*)"/.exec(tag)?.[1];
+    if (style !== undefined) assert.ok(style.split(';').every((declaration) => declaration.startsWith('--bots-sidebar-')), tag);
+  }
+  assert.match(tags[0]!, /^<nav class="no-drag desktop-sidebar-list bots-sidebar" aria-label="Bots" style="--bots-sidebar-text:#f5f5f7;/);
+  // Every class the markup uses is in the stylesheet.
+  for (const name of new Set(tags.flatMap((tag) => (/class="([^"]*)"/.exec(tag)?.[1] ?? '').split(' ')).filter((name) => name.startsWith('bots-sidebar')))) {
+    assert.ok(sidebarCss.includes(`.${name}`), `.${name} is in BotsSidebar.css`);
+  }
+});
+
+test('no text in the Bots sidebar, nor in the rows of its chats, is below 11px', async () => {
+  const sizes = [...sidebarCss.matchAll(/font-size:\s*([\d.]+)px/g)].map((match) => Number(match[1]));
+  assert.ok(sizes.length >= 4, 'the stylesheet sets sizes');
+  assert.deepEqual(sizes.filter((size) => size < 11), [], 'in the stylesheet');
+  const html = await sidebar({ bots: [bot('a', { name: 'Alpha' })], chats: { a: [chat('s1', 5, 'First')] }, expanded: ['a'] });
+  const inline = [...html.matchAll(/font-size:([\d.]+)px/g)].map((match) => Number(match[1]));
+  assert.ok(inline.length >= 2, 'a chat row sets its own sizes');
+  assert.deepEqual(inline.filter((size) => size < 11), [], 'in a chat row');
+  assert.match(html, /class="sidebar-session-metadata" style="[^"]*font-size:11px/, 'its metadata is 11px');
+});
+
+/** The rows of the list the arrow keys move through, in the order they are drawn: what names each, and whether Tab reaches it. */
+const rowsOf = (html: string) => [...html.matchAll(/<button\b[^>]*\bdata-row="([^"]+)"[^>]*>/g)].map((match) => ({ row: match[1]!, tabindex: /\btabindex="(-?\d+)"/.exec(match[0])?.[1] }));
+const tabindexOf = (html: string, label: string) => new RegExp(`<button\\b[^>]*aria-label="${label}"[^>]*>`).exec(html)?.[0]?.match(/\btabindex="(-?\d+)"/)?.[1];
+
+test('each Bot and each chat under it is a row of one list the arrow keys move through, and Tab reaches only one of them', async () => {
+  const bots = [bot('a', { name: 'Alpha', lastActivityAt: NOW - MINUTES }), bot('b', { name: 'Beta', lastActivityAt: NOW - 5 * MINUTES })];
+  const chats = { a: [chat('s1', 5, 'First'), chat('s2', 6, 'Second')], b: [chat('t1', 7, 'Third')] };
+  const html = await sidebar({ bots, chats, expanded: ['a'] });
+  assert.deepEqual(rowsOf(html), [
+    { row: 'bot/a', tabindex: '0' }, { row: 'chat/a/s1', tabindex: '-1' }, { row: 'chat/a/s2', tabindex: '-1' }, { row: 'bot/b', tabindex: '-1' },
+  ], 'a Bot, its chats, then the next Bot; the first row is the stop');
+  assert.match(html, /<button type="button" class="bots-sidebar-toggle" aria-expanded="true" aria-controls="bot-chats-a" data-row="bot\/a" tabindex="0"/);
+  // The buttons that show on a Bot's row go with it: Tab reaches them from the row that is the stop and not from the others.
+  assert.equal(tabindexOf(html, 'New chat with Alpha'), '0');
+  assert.equal(tabindexOf(html, 'Actions for Alpha'), '0');
+  assert.equal(tabindexOf(html, 'New chat with Beta'), '-1');
+  assert.equal(tabindexOf(html, 'Actions for Beta'), '-1');
+});
+
+test('the stop is the chat on screen while the chat view shows one, and the first row otherwise', async () => {
+  const options = { bots: [bot('a', { name: 'Alpha' }), bot('b', { name: 'Beta' })], chats: { a: [chat('s1', 5, 'First'), chat('s2', 6, 'Second')] }, expanded: ['a'] };
+  const active = { activeBotId: 'a', activeSession: { projectPath: '/data/bots/a/workspace', sessionId: 's2' } };
+  const onScreen = rowsOf(await sidebar({ ...options, bridge: active, chatVisible: true }));
+  assert.deepEqual(onScreen.filter((row) => row.tabindex === '0').map((row) => row.row), ['chat/a/s2']);
+  assert.equal(onScreen.length, 4);
+  const elsewhere = rowsOf(await sidebar({ ...options, bridge: active, chatVisible: false }));
+  assert.deepEqual(elsewhere.filter((row) => row.tabindex === '0').map((row) => row.row), ['bot/a'], 'a chat that is not on screen is not the stop');
+  assert.equal(rowsOf(await sidebar({ bots: [], chats: {} })).length, 0, 'no rows, no stop');
+});
+
+test('the rows are the ones that are drawn: a search narrows them, and Show more adds none that are not listed', async () => {
+  const bots = [bot('a', { name: 'Alpha' }), bot('b', { name: 'Beta' })];
+  const chats = { a: [chat('a1', 5, 'Plan the launch'), chat('a2', 6, 'Weekly notes')], b: [chat('b1', 5, 'Launch party')] };
+  const searched = rowsOf(await sidebar({ bots, chats, expanded: ['a', 'b'], query: 'launch' }));
+  assert.deepEqual(searched.map((row) => row.row).sort(), ['bot/a', 'bot/b', 'chat/a/a1', 'chat/b/b1']);
+  assert.equal(searched.filter((row) => row.tabindex === '0').length, 1);
+  const many = Array.from({ length: 8 }, (_, index) => chat(`m${index}`, index + 1, `Chat ${index}`));
+  const folded = rowsOf(await sidebar({ bots: [bot('a')], chats: { a: many }, expanded: ['a'] }));
+  assert.equal(folded.length, 1 + 5, 'the Bot and the five chats that are listed; the three behind Show more are not rows');
+  assert.ok(!folded.some((row) => row.row.endsWith('/m7')));
+});
+
+test('a list of chats drawn on its own leaves each row to Tab', async () => {
+  const sessions = await sessionsOf({ a: [chat('s1', 5, 'First'), chat('s2', 6, 'Second')] });
+  const html = render(React.createElement(BotChatList, {
+    bot: bot('a'), entry: sessions.getSnapshot().entries.a, query: '', all: false, matches: () => true, visibleChat: undefined, opening: undefined,
+    bridge: bridgeStub(), onOpen: noop, onMenu: noop, onToggleAll: noop, onRetry: noop,
+  }));
+  assert.ok(html.includes('data-session-id="s1"') && html.includes('data-session-id="s2"'));
+  assert.ok(!html.includes('data-row') && !html.includes('tabindex'));
 });
 
 test('a Bot\'s menu offers a new chat, its settings and its deletion; a chat\'s offers to open it', () => {

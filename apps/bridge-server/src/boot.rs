@@ -120,6 +120,8 @@ mod workspace_resume_tests;
 
 #[path = "catalog_worker.rs"]
 mod catalog_worker;
+#[path = "history_page.rs"]
+mod history_page;
 
 /// Serve bounded metadata requests without resolving providers or building an engine.
 pub async fn run_session_catalog_worker() -> Result<(), String> {
@@ -3435,7 +3437,10 @@ mod tests {
         cfg.restore_draft = true;
         cfg.initial_conversation_mode = Some(ConversationMode::Chat);
         prepare_draft_boot_session(&mut cfg).await.unwrap();
-        assert_eq!(cfg.session_transcript_path.as_ref(), Some(&path));
+        assert_eq!(
+            cfg.session_transcript_path.as_ref(),
+            Some(&path.canonicalize().unwrap())
+        );
         assert_eq!(
             cfg.session_resume_snapshot
                 .as_ref()
@@ -4867,25 +4872,26 @@ mod tests {
         );
     }
 
-    // `block_on` polls the root future on its calling thread; size both that
-    // thread and Tokio's workers to the supported desktop runtime budget.
-    fn run_on_supported_runtime_stack<F, Fut>(test: F)
+    // Debug builds retain larger execution futures than optimized Desktop
+    // builds. Give both the polling thread and spawned workers a test budget.
+    fn run_runtime_test<F, Fut>(test: F)
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()>,
     {
         let worker = std::thread::Builder::new()
             .name("desktop-runtime-test".into())
-            .stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
+            .stack_size(64 * 1024 * 1024)
             .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
-                    .thread_stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
+                    .worker_threads(2)
+                    .thread_stack_size(64 * 1024 * 1024)
                     .build()
-                    .expect("build supported-stack Tokio runtime");
+                    .expect("build debug test Tokio runtime");
                 runtime.block_on(test());
             })
-            .expect("spawn supported-stack test thread");
+            .expect("spawn debug runtime test thread");
         if let Err(panic) = worker.join() {
             std::panic::resume_unwind(panic);
         }
@@ -4896,7 +4902,7 @@ mod tests {
     /// than display-only output, regardless of the user's `/goal` policy.
     #[test]
     fn assembled_bridge_runs_injected_local_command_as_owned_turn() {
-        run_on_supported_runtime_stack(|| async {
+        run_runtime_test(|| async {
             use bridge::wire::Frame;
             use bridge::{BridgeRequest, Capabilities, ClientHello, BRIDGE_PROTOCOL_VERSION};
             use client::protocol::{commands::ClientCommand, events::ClientEvent};

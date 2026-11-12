@@ -177,78 +177,54 @@ test('pending resume approval callbacks route all decisions to the target runtim
   assert.equal(calls.length, 6, 'retired target callbacks cannot resolve a different runtime');
 });
 
-test('all hook navigation entry points retain the pending resume owner until its acknowledgement', async () => {
-  const response = deferred<unknown>(), calls: unknown[] = [], snapshots: unknown[] = [];
-  let visible: unknown;
-  const context: any = {
-    useCallback: (fn: unknown) => fn, nextOperationId,
-    navigationOperationRef: { current: 0 }, pendingSessionRef: { current: null }, sessionLoadingRef: { current: false },
-    removedRuntimeIds: { current: new Set() }, setSessionReady() {}, setError() {},
-    setPendingSession: (session: unknown) => { visible = session; },
-    bootstrap: { settings: { activeProject: '/old' } }, desktop: {},
-    patchBootstrap() {}, applyBootstrap: (snapshot: unknown) => snapshots.push(snapshot),
-    isCurrentNavigationOperation: (operation: number) => operation === context.navigationOperationRef.current,
-    capture: (error: unknown) => { throw error; },
-    host: { openSession: (...args: unknown[]) => { calls.push(['open', ...args]); return response.promise; },
-      pickWorkspace: () => { calls.push('pick'); }, setWorkspace: () => { calls.push('activate'); },
-      removeProject: () => { calls.push('remove'); }, archiveSession: () => { calls.push('archive'); },
-      newSession: () => { calls.push('new'); }, bootstrap() {}, settings() {} },
-  };
-  evaluate('globalThis.beginNavigationOperation = ' + initializer(bridgeSource, 'beginNavigationOperation'), context);
-  for (const callback of ['openSession', 'addProject', 'activateProject', 'removeProject', 'archiveSession', 'newSession']) {
-    evaluate(`globalThis.${callback} = ` + initializer(bridgeSource, callback), context);
+test('a newer session open supersedes a pending load and ignores its late success or failure', async () => {
+  for (const failure of [false, true]) {
+    const first = deferred<any>(), second = deferred<any>(), snapshots: any[] = [], errors: unknown[] = [];
+    const calls: unknown[] = [];
+    const context: any = {
+      useCallback: (fn: unknown) => fn, nextOperationId,
+      navigationOperationRef: { current: 0 }, pendingSessionRef: { current: null }, sessionLoadingRef: { current: false },
+      removedRuntimeIds: { current: new Set() }, setSessionReady() {}, setPendingSession() {}, setError() {},
+      applyBootstrap: (snapshot: unknown) => snapshots.push(snapshot), capture: (error: unknown) => errors.push(error),
+      isCurrentNavigationOperation: (operation: number) => operation === context.navigationOperationRef.current,
+      host: { openSession: (_path: string, id: string) => { calls.push(id); return id === 'A' ? first.promise : second.promise; } },
+    };
+    evaluate('globalThis.beginNavigationOperation = ' + initializer(bridgeSource, 'beginNavigationOperation'), context);
+    evaluate('globalThis.openSession = ' + initializer(bridgeSource, 'openSession'), context);
+    const openingA = context.openSession('/target', 'A');
+    const openingB = context.openSession('/other', 'B');
+    assert.deepEqual(calls, ['A', 'B']);
+    assert.equal(context.pendingSessionRef.current.sessionId, 'B');
+    const snapshot = { revision: 2, activeSession: { projectPath: '/other', sessionId: 'B' } };
+    second.resolve(snapshot); await openingB;
+    assert.equal(context.sessionLoadingRef.current, false);
+    if (failure) first.reject(new Error('old load failed'));
+    else first.resolve({ revision: 1, activeSession: { projectPath: '/target', sessionId: 'A' } });
+    assert.equal(await openingA, false);
+    assert.deepEqual(snapshots, [snapshot]);
+    assert.deepEqual(errors, []);
   }
-  const opening = context.openSession('/target', 'A');
-  const owner = context.pendingSessionRef.current;
-  assert.equal(owner.sessionId, 'A'); assert.equal(visible, owner);
-  for (const [callback, args] of [
-    ['openSession', ['/other', 'B']], ['addProject', []], ['activateProject', ['/other']],
-    ['removeProject', ['/target']], ['archiveSession', ['/target', 'A']],
-  ] as Array<[string, string[]]>) {
-    await assert.rejects(context[callback](...args), /finish opening before navigating/, callback);
-    assert.equal(context.pendingSessionRef.current, owner, callback);
-    assert.equal(visible, owner, callback);
-    assert.equal(context.sessionLoadingRef.current, true, callback);
-    assert.equal(context.navigationOperationRef.current, 1, callback);
-  }
-  assert.equal(await context.newSession('/other'), undefined);
-  assert.deepEqual(calls, [['open', '/target', 'A']]);
-  response.resolve({ revision: 5, activeSession: { projectPath: '/target', sessionId: 'A' } }); await opening;
-  assert.equal(context.pendingSessionRef.current, null);
-  assert.equal(context.sessionLoadingRef.current, false);
-  assert.deepEqual(snapshots, [{ revision: 5, activeSession: { projectPath: '/target', sessionId: 'A' } }]);
-  await context.openSession('/other', 'B');
-  assert.deepEqual(calls, [['open', '/target', 'A'], ['open', '/other', 'B']]);
 });
 
-test('App page, settings, local app and picker navigation use the latest loading guard', () => {
+test('page navigation stays available during session loading and respects an open project dialog', () => {
   const calls: unknown[] = [];
   const context: any = {
-    useCallback: (fn: unknown) => fn, localAppBridge: { current: { sessionLoading: false } },
+    useCallback: (fn: unknown) => fn, localAppBridge: { current: { sessionLoading: true, projectCreationOpen: false } },
     cancelLocalAppNavigation: () => calls.push('cancel-local'), setPage: (page: string) => calls.push(['page', page]),
-    setLocalAppNavigationError() {},
-    setSidebarMode: (mode: string) => calls.push(['sidebar', mode]),
-    setSettingsRoute: (route: unknown) => calls.push(['settings', route]),
   };
   evaluate('globalThis.sessionNavigationBlocked = ' + initializer(appSource, 'sessionNavigationBlocked'), context);
-  for (const callback of ['openPage', 'openSettings', 'openLocalAppChat', 'openPicker']) {
-    evaluate(`globalThis.${callback} = ` + initializer(appSource, callback), context);
-  }
-  // Keep the callback closures from the earlier render; the current bridge
-  // ref changes before a deferred host action can navigate the old page.
-  context.localAppBridge.current = { sessionLoading: true };
-  context.openPage('apps'); context.openPage('scheduled'); context.openPage('chat');
-  context.openSettings(); context.openLocalAppChat(); context.openPicker({ detail: { query: 'B' } });
-  assert.deepEqual(calls, []);
-  context.localAppBridge.current = { sessionLoading: false };
-  context.openPage('apps');
-  assert.deepEqual(calls, ['cancel-local', ['page', 'apps']]);
+  evaluate('globalThis.openPage = ' + initializer(appSource, 'openPage'), context);
+  context.openPage('apps'); context.openPage('scheduled');
+  assert.deepEqual(calls, ['cancel-local', ['page', 'apps'], 'cancel-local', ['page', 'scheduled']]);
+  context.localAppBridge.current = { sessionLoading: true, projectCreationOpen: true };
+  context.openPage('chat');
+  assert.equal(calls.length, 4);
 });
 
-test('sidebar capture and direct session or project callbacks cannot navigate during a resume', () => {
+test('sidebar callbacks allow another session to open during a pending resume', async () => {
   const calls: unknown[] = [];
   const context: any = { useCallback: (fn: unknown) => fn, Element: class Element {},
-    bridge: { sessionLoading: true, openSession: () => calls.push('open'), newSession: () => calls.push('new') },
+    bridge: { sessionLoading: true, projectCreationOpen: false, openSession: async () => calls.push('open'), newSession: async () => calls.push('new') },
     onOpenChat: () => calls.push('chat'), setOpeningSessionKey: () => calls.push('opening'),
     setExpandedProjects: () => calls.push('expand'), setEditingProject: () => calls.push('editing'),
   };
@@ -257,14 +233,16 @@ test('sidebar capture and direct session or project callbacks cannot navigate du
   }
   const event = { preventDefault: () => calls.push('prevent'), stopPropagation: () => calls.push('stop') };
   context.blockNavigation(event);
-  context.openSidebarSession('/other', 'B'); context.editProject('/other');
-  assert.deepEqual(calls, ['prevent', 'stop']);
-  context.bridge.sessionLoading = false;
-  context.blockNavigation(event);
+  context.openSidebarSession('/other', 'B');
+  assert.deepEqual(calls, ['chat', 'opening', 'open']);
+  await Promise.resolve(); await Promise.resolve();
+  calls.length = 0;
+  context.bridge.projectCreationOpen = true;
+  context.blockNavigation(event); context.openSidebarSession('/other', 'C'); context.editProject('/other');
   assert.deepEqual(calls, ['prevent', 'stop']);
 });
 
-test('sidebar navigation groups become inert during resume without locking the conversation and draft', () => {
+test('session loading leaves the sidebar and rail interactive; only a modal or collapse makes them inert', () => {
   let effect: ts.Expression | undefined;
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && node.expression.getText(composerSource) === 'useLayoutEffect'
@@ -273,18 +251,16 @@ test('sidebar navigation groups become inert during resume without locking the c
   };
   visit(composerSource); assert.ok(effect);
   const flags = new Map<string, boolean>();
-  const ref = (name: string) => ({ current: { toggleAttribute: (attribute: string, active: boolean) => {
-    assert.equal(attribute, 'inert'); flags.set(name, active);
-  } } });
-  const context: any = { bridge: { sessionLoading: true }, sidebarCollapsed: false,
-    asideRef: ref('sidebar'), railRef: ref('rail'), toolbarRef: ref('toolbar') };
-  evaluate('globalThis.lockNavigation = ' + effect.getText(composerSource), context);
-  context.lockNavigation();
-  assert.deepEqual([...flags], [['sidebar', true], ['rail', true]]);
-  context.bridge.sessionLoading = false; context.lockNavigation();
+  const ref = (name: string) => ({ current: { toggleAttribute: (_attribute: string, active: boolean) => flags.set(name, active) } });
+  const context: any = { bridge: { sessionLoading: true, projectCreationOpen: false }, sidebarCollapsed: false,
+    asideRef: ref('sidebar'), railRef: ref('rail') };
+  evaluate('globalThis.updateNavigation = ' + effect.getText(composerSource), context);
+  context.updateNavigation();
   assert.deepEqual([...flags], [['sidebar', false], ['rail', false]]);
-  context.sidebarCollapsed = true; context.lockNavigation();
+  context.sidebarCollapsed = true; context.updateNavigation();
   assert.deepEqual([...flags], [['sidebar', true], ['rail', false]]);
+  context.bridge.projectCreationOpen = true; context.updateNavigation();
+  assert.deepEqual([...flags], [['sidebar', true], ['rail', true]]);
 });
 
 test('a deep link fetched before resume admission cannot navigate after the target becomes pending', async () => {

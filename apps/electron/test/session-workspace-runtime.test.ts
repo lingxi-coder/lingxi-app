@@ -173,6 +173,78 @@ function resumeProof(client: WorkspaceClient, id = sessionId) {
   client.emit('event', { type: 'model_changed', model: 'anthropic/restored-model' });
 }
 
+test('history resume completes while account hydration remains pending', async t => {
+  const f = selectedResumeRuntime(t), internal = f.runtime as any;
+  const credentials = deferred<void>();
+  let waiting = false;
+  internal.opts.resolveProviderAccounts = async () => { waiting = true; await credentials.promise; return undefined; };
+  delete internal.ensureModelProviderCredential;
+  const hydration = f.runtime.refreshProviderAccounts();
+  assert.equal(waiting, true);
+  const resuming = f.runtime.resumeOwnedSession('/saved/selected.jsonl');
+  resumeProof(f.client); f.acknowledgement.resolve(undefined);
+  await resuming;
+  assert.equal(f.runtime.needsSessionResume, false);
+  assert.deepEqual(f.restored, ['model', 'permission', 'fast']);
+  credentials.resolve(undefined); await hydration;
+});
+
+test('a prompt joins background credential hydration and dispatches only after engine acknowledgement', async t => {
+  const f = connectedRuntime(t), internal = f.runtime as any;
+  const credentials = deferred<any>();
+  let reads = 0;
+  internal.opts.resolveProviderAccounts = () => { reads++; return credentials.promise; };
+  internal.credentialRoutingSettings = {};
+  internal.selectedModelReference = 'provider/model';
+  const warmup = f.runtime.refreshProviderAccounts();
+  const prompt = f.runtime.sendPrompt('hello');
+  await nextTurn();
+  assert.equal(reads, 1);
+  assert.equal(f.client.calls.length, 0, 'no prompt can reach the engine before account hydration');
+  credentials.resolve({ providerAccounts: { accounts: [] }, providerAccountCredentials: {} });
+  await nextTurn();
+  const update = f.client.calls.find((row: any) => row[1]?.type === 'provider_accounts') as any;
+  assert.ok(update);
+  assert.equal(f.client.calls.some((row: any) => row[0] === 'prompt'), false);
+  f.client.emit('event', { type: 'provider_accounts_updated', operation_id: update[1].operation_id });
+  await warmup; await prompt;
+  assert.equal(f.client.calls.filter((row: any) => row[0] === 'prompt').length, 1);
+});
+
+test('account hydration cannot inject into a replacement connection after an asynchronous read', async t => {
+  const f = connectedRuntime(t), internal = f.runtime as any;
+  const credentials = deferred<any>();
+  internal.opts.resolveProviderAccounts = () => credentials.promise;
+  const hydration = f.runtime.refreshProviderAccounts();
+  const rejected = assert.rejects(hydration, /interrupted/);
+  internal.generation++;
+  internal.client = new WorkspaceClient();
+  credentials.resolve({ providerAccounts: { accounts: [] }, providerAccountCredentials: {} });
+  await rejected;
+  assert.deepEqual(f.client.calls, []);
+  assert.deepEqual(internal.client.calls, []);
+});
+
+test('an account mutation refreshes after an older background read instead of reusing stale credentials', async t => {
+  const f = connectedRuntime(t), internal = f.runtime as any;
+  const oldCredentials = deferred<any>();
+  const launch = (revision: number) => ({ providerAccounts: { accounts: [], configRevision: revision }, providerAccountCredentials: {} });
+  let reads = 0;
+  internal.opts.resolveProviderAccounts = () => ++reads === 1 ? oldCredentials.promise : Promise.resolve(launch(2));
+  const send = f.client.sendCommand.bind(f.client);
+  f.client.sendCommand = (command: any) => {
+    send(command);
+    if (command.type === 'provider_accounts') queueMicrotask(() => f.client.emit('event', { type: 'provider_accounts_updated', operation_id: command.operation_id }));
+  };
+  const warmup = f.runtime.refreshProviderAccounts();
+  const changed = f.runtime.refreshProviderAccounts(true);
+  assert.equal(reads, 1);
+  oldCredentials.resolve(launch(1));
+  await warmup; await changed;
+  assert.equal(reads, 2);
+  assert.deepEqual(f.client.calls.map((row: any) => JSON.parse(row[1].request_json).configRevision), [1, 2]);
+});
+
 test('a manager-captured source is used by automatic recovery of that runtime', async (t) => {
   const ref = { projectPath: '/project', sessionId, mode: 'code' as const };
   const selectedPath = '/saved/selected-copy.jsonl', selectedCalls: string[] = [];

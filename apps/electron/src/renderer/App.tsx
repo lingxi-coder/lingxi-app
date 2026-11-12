@@ -146,7 +146,7 @@ export function App() {
     seenBotScopes.current = botScopes;
     if (before !== undefined && before !== botScopes) refreshScheduledScopes();
   }, [botScopes, refreshScheduledScopes]);
-  const sessionNavigationBlocked = useCallback(() => localAppBridge.current.sessionLoading || localAppBridge.current.projectCreationOpen, []);
+  const sessionNavigationBlocked = useCallback(() => localAppBridge.current.projectCreationOpen, []);
   const openLocalAppChat = useCallback((app?: LocalAppEditRequest) => {
     if (sessionNavigationBlocked()) return;
     const nonce = ++localAppNavigation.current;
@@ -716,6 +716,8 @@ export function App() {
             <div className="desktop-message-list-view">
                 {/* The transcript keeps all remaining height; Todos live in Summary. */}
                 <BotProposalAction.Provider value={botsAvailable ? reviewBotProposal : undefined}><Stage
+                  history={bridge.sessionLoading ? undefined : bridge.history}
+                  onLoadMoreHistory={bridge.loadMoreHistory}
                   messageTarget={!bridge.sessionLoading && (!messageRequest || bridge.conversation.sessionKey === messageRequest.sessionId) ? messageTarget : null}
                   onMessageLocated={onMessageLocated}
                   activityView={activityView}

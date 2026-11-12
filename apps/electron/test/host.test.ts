@@ -32,6 +32,31 @@ function fakeConversationSpaces() {
     find: () => undefined };
 }
 
+test('Host disposal keeps credential publication available until account cleanup settles', async () => {
+  for (const failed of [false, true]) {
+    const drain = deferred();
+    let disposed = false;
+    let published = false;
+    const catalog = {
+      dispose: () => { disposed = true; },
+      publishProviderAccountCredentialVersion: async () => {
+        assert.equal(disposed, false, 'an admitted credential write must retain its metadata helper');
+        published = true;
+      },
+    };
+    const host = new HostController({} as any, {} as any, new DiagnosticBuffer(), catalog as any,
+      { handle: () => {}, removeHandler: () => {} } as any);
+    host.dispose(drain.promise);
+    assert.equal(disposed, false);
+    await catalog.publishProviderAccountCredentialVersion();
+    if (failed) drain.reject(new Error('account cleanup failed after publication'));
+    else drain.resolve();
+    await drain.promise.catch(() => {});
+    assert.equal(published, true);
+    assert.equal(disposed, true, 'the helper is retired after either cleanup outcome');
+  }
+});
+
 test('workspace preview is bounded UTF-8 and rejects traversal, binary content, and symlinks', () => {
   const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-preview-project-'));
   const outsideDirectory = mkdtempSync(join(tmpdir(), 'lingxi-preview-outside-'));
@@ -469,7 +494,7 @@ test('failed session resume does not change the selected project or active sessi
   }
 });
 
-test('navigation mutations execute in invocation order and the last open wins', async () => {
+test('different session loads overlap and the latest selection wins before the older load finishes', async () => {
   let activated: string | undefined;
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-ordered-navigation-settings-'));
   const projectDirectoryA = mkdtempSync(join(tmpdir(), 'lingxi-ordered-navigation-a-'));
@@ -516,14 +541,13 @@ test('navigation mutations execute in invocation order and the last open wins', 
     await new Promise<void>((resolve) => setImmediate(resolve));
     const second = host.openSessionAndActivate({ projectPath: projectB, sessionId: sessionB, projectId: projectB, mode: 'code' }, { scope: 'current', transcriptPath: row(projectB, sessionB).path });
     await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.deepEqual(calls, [sessionA]);
-
-    gates.get(sessionA)?.resolve();
-    await first;
-    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.deepEqual(calls, [sessionA, sessionB]);
     gates.get(sessionB)?.resolve();
     await second;
+
+    assert.equal(settings.getPublic().activeSession?.sessionId, sessionB, 'B publishes while A is still loading');
+    gates.get(sessionA)?.resolve();
+    await first;
 
     assert.equal(settings.getPublic().activeProject, projectB);
     assert.deepEqual(settings.getPublic().activeSession, { projectPath: projectB, sessionId: sessionB, projectId: projectB, mode: 'code' });
@@ -969,6 +993,27 @@ test('bootstrap returns the canonical provider account snapshot', async () => {
   const bootstrap = await (host as any).bootstrap();
   assert.deepEqual(bootstrap.providerAccountSnapshot, accountSnapshot);
   assert.equal('providerCredentials' in bootstrap, false);
+});
+
+test('bootstrap returns while an account status read is pending and shares the background read', async () => {
+  const status = deferred<void>();
+  const accountSnapshot = { storeScope: 'test-scope', configRevision: 4, accounts: [], health: [] };
+  let reads = 0;
+  const settings = {
+    conversationSpaces: fakeConversationSpaces(), getWorkspace: () => '/workspace',
+    getTrust: () => ({ trusted: true }),
+    getPublic: () => ({ version: 1, projects: ['/workspace'], pinnedSessions: [] }),
+  };
+  const host = new HostController(settings as any, { get: () => undefined, runtimeSummaries: [] } as any,
+    new DiagnosticBuffer(), undefined, undefined, undefined, {} as any);
+  host.attachProviderAccounts({ cancel() {}, latestSnapshot: accountSnapshot, snapshot: async () => { reads++; await status.promise; return accountSnapshot; } } as any);
+  try {
+    const first = await (host as any).bootstrap();
+    const second = await (host as any).bootstrap();
+    assert.equal(reads, 1);
+    assert.deepEqual(first.providerAccountSnapshot, accountSnapshot);
+    assert.equal(second.revision, first.revision + 1);
+  } finally { status.resolve(); await (host as any).brokerStatusRefresh; host.dispose(); }
 });
 
 test('settings model, voice and Thought patches persist without restarting a live session', async () => {

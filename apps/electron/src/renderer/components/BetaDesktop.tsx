@@ -529,15 +529,15 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const normalizedSearch = searchQuery.trim().toLocaleLowerCase();
   const matchesSearch = (value: string) => !normalizedSearch || value.toLocaleLowerCase().includes(normalizedSearch);
   useLayoutEffect(() => {
-    asideRef.current?.toggleAttribute('inert', sidebarCollapsed || bridge.sessionLoading);
-    railRef.current?.toggleAttribute('inert', bridge.sessionLoading);
-  }, [bridge.sessionLoading, sidebarCollapsed]);
+    asideRef.current?.toggleAttribute('inert', sidebarCollapsed || bridge.projectCreationOpen);
+    railRef.current?.toggleAttribute('inert', bridge.projectCreationOpen);
+  }, [bridge.projectCreationOpen, sidebarCollapsed]);
   const blockNavigation = useCallback((event: { target: EventTarget | null; preventDefault(): void; stopPropagation(): void }) => {
-    if (!bridge.sessionLoading) return;
+    if (!bridge.projectCreationOpen) return;
     if (event.target instanceof Element && event.target.closest('[data-conversation-space]')) return;
     event.preventDefault();
     event.stopPropagation();
-  }, [bridge.sessionLoading]);
+  }, [bridge.projectCreationOpen]);
   // Without a parent to keep the workspace mode, Home returns to the chat.
   const selectMode = (mode: SidebarMode) => {
     if (onSelectSidebarMode) onSelectSidebarMode(mode);
@@ -771,7 +771,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     [pinnedSessions],
   );
   const openSidebarSession = useCallback((projectPath: string, sessionId: string) => {
-    if (bridge.sessionLoading) return;
+    if (bridge.projectCreationOpen) return;
     onOpenChat?.();
     const key = `${projectPath}\0${sessionId}`;
     setOpeningSessionKey(key);
@@ -782,16 +782,16 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     void opening
       .catch(() => undefined)
       .finally(() => setOpeningSessionKey((current) => current === key ? null : current));
-  }, [bridge.bootstrap?.projectCatalogs, bridge.openSession, bridge.sessionLoading, onOpenChat]);
+  }, [bridge.bootstrap?.projectCatalogs, bridge.openSession, bridge.projectCreationOpen, onOpenChat]);
   const editProject = useCallback((projectPath: string) => {
-    if (bridge.sessionLoading) return;
+    if (bridge.projectCreationOpen) return;
     onOpenChat?.();
     setExpandedProjects((current) => current.has(projectPath) ? current : new Set([...current, projectPath]));
     setEditingProject(projectPath);
     void bridge.newSession(projectPath)
       .catch(() => undefined)
       .finally(() => setEditingProject((current) => current === projectPath ? null : current));
-  }, [bridge.newSession, bridge.sessionLoading, onOpenChat]);
+  }, [bridge.newSession, bridge.projectCreationOpen, onOpenChat]);
   const pinInput = (projectPath: string, sessionId: string, title: string) => ({ projectPath, sessionId, title });
   const manualSessionOrder = settings?.sidebar?.manualSessionOrder ?? {};
   const sortedSessions = useCallback((projectPath: string, sessions: readonly SessionRowDto[]) => {
@@ -930,7 +930,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   return (
     <>
     <div className="desktop-navigation" data-collapsed={sidebarCollapsed || undefined} data-workspace={children ? 'true' : undefined} style={{ '--rail-material': t.sidebarBg, '--sidebar-material': t.sidebarPanelBg, '--desktop-surface': t.stageBg, '--desktop-sidebar-width': `${sidebarWidth}px`, '--sidebar-button-surface': t.surface, '--desktop-accent': t.accent, '--text': t.text, '--text3': t.text3, '--nav-panel-border': t.border } as CSSProperties}>
-      <div ref={toolbarRef} className="drag-region desktop-window-toolbar" aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
+      <div ref={toolbarRef} className="drag-region desktop-window-toolbar" aria-disabled={bridge.projectCreationOpen || undefined} onClickCapture={blockNavigation}>
         <div className="desktop-sidebar-brand">
           <button type="button" className="desktop-rail-button desktop-rail-toggle" aria-label={sidebarCollapsed ? tr('desktop_show_sidebar') : tr('desktop_hide_sidebar')} aria-controls="desktop-session-sidebar" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? tr('desktop_show_sidebar') : tr('desktop_hide_sidebar')} onClick={() => setSidebarCollapsed(!sidebarCollapsed)}><DesktopIcon name="sidebar" size={19} /></button>
           <strong style={{ color: t.text, fontSize: 17, fontWeight: 650, letterSpacing: '-.035em', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>LingXi</strong>
@@ -947,7 +947,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         {topbar}
       </div>
       <div className="desktop-body">
-      <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
+      <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.projectCreationOpen || undefined} onClickCapture={blockNavigation}>
         <button type="button" className="desktop-rail-button" data-active={!scheduled && !changes && sidebarMode === 'home' || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={() => selectMode('home')}><DesktopIcon name="home" size={20} /></button>
         {botsAvailable && <button type="button" className="desktop-rail-button" data-active={!scheduled && !changes && sidebarMode === 'bots' || undefined} aria-label={tr('bots_title')} title={tr('bots_title')} onClick={() => selectMode('bots')}><Icon name="bot" size={21} stroke={1.7} /></button>}
         <button type="button" className="desktop-rail-button desktop-rail-teams" data-active={!scheduled && !changes && sidebarMode === 'teams' || undefined} aria-label={teamsRailLabel} title={teamsRailLabel} onClick={() => selectMode('teams')}>
@@ -971,7 +971,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       className="desktop-sidebar"
       ref={asideRef}
       aria-hidden={sidebarCollapsed || undefined}
-      aria-disabled={bridge.sessionLoading || undefined}
+      aria-disabled={bridge.projectCreationOpen || undefined}
       onClickCapture={blockNavigation}
       data-resizing={resizingSidebar || undefined}
       style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', '--desktop-accent': t.accent } as CSSProperties}
@@ -983,12 +983,12 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         <button
           className="sidebar-primary-action sidebar-new-chat"
           type="button"
-          disabled={bridge.sessionLoading || editingProject !== null}
+          disabled={bridge.projectCreationOpen || editingProject !== null}
           onClick={() => { onOpenChat?.(); invoke(() => bridge.newSession()); }}
           style={{
             width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
             padding: '8px 10px', borderRadius: 10, border: 0, background: 'transparent',
-            color: t.text, cursor: bridge.sessionLoading || editingProject !== null ? 'wait' : 'pointer', opacity: bridge.sessionLoading || editingProject !== null ? .5 : 1,
+            color: t.text, cursor: bridge.projectCreationOpen || editingProject !== null ? 'wait' : 'pointer', opacity: bridge.projectCreationOpen || editingProject !== null ? .5 : 1,
             textAlign: 'left', fontSize: 14, fontWeight: 500,
           }}
         >

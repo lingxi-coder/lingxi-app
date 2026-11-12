@@ -60,6 +60,26 @@ function processes() {
   return { calls, spawnProcess, get live() { return live; }, get peak() { return peak; } };
 }
 
+test('history pages reuse the metadata worker and validate that cursors advance', async t => {
+  const cwd = project(t), process = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess });
+  t.after(() => catalog.dispose());
+  const before = { uuid }, path = `/source/${uuid}.jsonl`;
+  const page = catalog.readHistory(cwd, uuid, path, before);
+  await nextTurn();
+  const worker = process.calls[0];
+  assert.equal(worker.queries[0].transcriptPath, path);
+  assert.deepEqual(worker.queries[0].historyBefore, before);
+  const next = { uuid: '22222222-3333-4444-8555-666666666666', offset: 10, identity: '1:2' };
+  worker.reply(JSON.stringify({ messages: [], before: next }));
+  assert.deepEqual(await page, { messages: [], before: next });
+  const invalid = catalog.readHistory(cwd, uuid, path, next);
+  await nextTurn();
+  assert.equal(process.calls.length, 1);
+  worker.reply(JSON.stringify({ messages: [], before: next }));
+  await assert.rejects(invalid, /cursor did not advance/);
+});
+
 test('default metadata worker survives expired TTL and preserves source/scope/UTF-16 payloads', async (t) => {
   const cwd = project(t), process = processes();
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess,
@@ -291,6 +311,35 @@ test('disposal cancels retries on exit and queued writers still wait for close',
   assert.equal(process.peak, 2);
   await assert.rejects(readers[0].find(cwd, uuid), /disposed/);
 });
+
+test('real bridge history worker pages across compacts without gaps while the source grows',
+  { skip: !process.env.LINGXI_SESSION_CATALOG_TEST_BIN, timeout: 60_000 }, async t => {
+    const cwd = project(t), home = join(cwd, 'isolated-home'), path = join(cwd, `${uuid}.jsonl`);
+    const ids = Array.from({ length: 182 }, (_, index) => `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`);
+    const rows = ids.map((id, index) => ({
+      uuid: id, sessionId: uuid, timestamp: '2026-11-12T00:00:00Z', parentUuid: index ? ids[index - 1] : null,
+      ...(index === 80 || index === 161
+        ? { type: 'system', subtype: 'compact_boundary', content: 'compact', compactMetadata: {} }
+        : { type: 'user', message: { role: 'user', content: `message ${index} 中文` } }),
+    }));
+    writeFileSync(path, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+    let spawns = 0;
+    const catalog = new ProjectSessionCatalog({ serverBin: process.env.LINGXI_SESSION_CATALOG_TEST_BIN, configHome: home,
+      spawnProcess: ((...args: Parameters<typeof spawn>) => { spawns++; return spawn(...args); }) as typeof spawn });
+    t.after(() => catalog.dispose());
+    let before: { uuid: string; offset?: number | null; identity?: string | null } | null = { uuid: ids[161] };
+    const pages: string[][] = [];
+    while (before) {
+      assert.ok(pages.length < 8, 'pagination must terminate');
+      const page = await catalog.readHistory(cwd, uuid, path, before);
+      pages.unshift(page.messages.map(message => message.transcript_uuid!));
+      assert.ok(page.messages.every(message => message.sent_at_ms === Date.parse('2026-11-12T00:00:00Z')));
+      before = page.before;
+      if (pages.length === 1) appendFileSync(path, JSON.stringify({ type: 'custom-title', sessionId: uuid, customTitle: 'still streaming' }) + '\n');
+    }
+    assert.deepEqual(pages.flat(), ids.slice(0, 161));
+    assert.equal(spawns, 1, 'all pages share a worker without account or runtime initialization');
+  });
 
 test('real bridge worker refreshes over 128 saved sessions and revalidates additions, revisions and removals',
   { skip: !process.env.LINGXI_SESSION_CATALOG_TEST_BIN, timeout: 60_000 }, async (t) => {

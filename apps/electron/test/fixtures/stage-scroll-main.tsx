@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import type { TranscriptHistoryState } from '../../src/shared/sessionHistory';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { Stage } from '../../src/renderer/components/Stage';
@@ -39,6 +40,22 @@ const initialItems: RunItem[] = [
   { type: 'thinking', id: 'thinking-tail', text: 'Working', streamed: true },
 ];
 function Fixture() {
+  const [history, setHistory] = useState<TranscriptHistoryState>({ before: null, loading: false });
+  const [sessionKey, setSessionKey] = useState('scroll-fixture');
+  const historyRequests = useRef(0);
+  const historyToolHead = useRef(false);
+  const historyResolve = useRef<(() => void) | null>(null);
+  const loadHistory = async () => {
+    historyRequests.current++;
+    setHistory(previous => ({ ...previous, loading: true }));
+    await new Promise<void>(resolve => { historyResolve.current = resolve; });
+    flushSync(() => {
+      setItems(previous => [...Array.from({ length: 60 }, (_, index): RunItem => index === 59 && historyToolHead.current
+        ? { type: 'tool', id: 'older-tool', tool: 'Read', status: 'done', view: { verb: 'read', label: 'Read', title: 'Read older.ts', primary: 'older.ts' } }
+        : { type: 'narration', id: `older-${index}`, role: 'assistant', text: `Older saved message ${index}` }), ...previous]);
+      setHistory({ before: null, loading: false });
+    });
+  };
   const [inspector, setInspector] = useState(false);
   const [items, setItems] = useState(initialItems);
   const [thinkingVisible, setThinkingVisible] = useState(true);
@@ -52,6 +69,20 @@ function Fixture() {
   // screen (to click something pinned to it) raise this.
   const [ancestorHeight, setAncestorHeight] = useState(300);
   Object.assign(window, { stageScrollFixture: {
+    historySetup(count: number, toolHead = false) {
+      historyRequests.current = 0;
+      historyToolHead.current = toolHead;
+      flushSync(() => {
+        setSessionKey(`history-fixture-${count}`);
+        setItems([
+          ...(toolHead ? [{ type: 'tool' as const, id: 'current-tool', transcriptUuid: 'current-tool', tool: 'Read', status: 'done' as const, view: { verb: 'read', label: 'Read', title: 'Read current.ts', primary: 'current.ts' } }] : []),
+          ...Array.from({ length: count }, (_, index): RunItem => ({ type: 'narration', id: `history-current-${index}`, transcriptUuid: `history-current-${index}`, role: 'assistant', text: `Current history ${index}: a stable row while earlier messages load.` })),
+        ]);
+        setHistory({ before: { uuid: '00000000-0000-4000-8000-000000000001' }, loading: false });
+      });
+    },
+    historyRequests: () => historyRequests.current,
+    completeHistory: () => historyResolve.current?.(),
     thinking(visible: boolean) { flushSync(() => setThinkingVisible(visible)); },
     activity(phase: 'running' | 'empty-result' | 'result' | 'reasoning' | 'next-tool' | 'group-result' | 'long-reasoning') {
       const read: ToolRunItem = { type: 'tool', id: 'activity-read', tool: 'Read', status: phase === 'running' ? 'running' : 'done',
@@ -130,7 +161,7 @@ function Fixture() {
     <div id="scroll-ancestor" style={{ height: ancestorHeight, overflowY: 'auto' }}>
       <div style={{ display: 'flex' }}>
         <div style={{ flex: viewport.width ? 'none' : 1, minWidth: 0, width: viewport.width || undefined, height: viewport.height, display: 'flex', flexDirection: 'column' }}>
-          <Stage modUiSessionId="scroll-fixture" pendingActivity={thinkingVisible ? undefined : 'Working'} liveItems={thinkingVisible ? items : items.filter(item => item.type !== 'thinking')} running={items[0]?.id !== 'delivery-message'} sessionKey="scroll-fixture" foldedItemIds={foldedItems} />
+          <Stage history={history} onLoadMoreHistory={loadHistory} modUiSessionId="scroll-fixture" pendingActivity={thinkingVisible ? undefined : 'Working'} liveItems={thinkingVisible ? items : items.filter(item => item.type !== 'thinking')} running={items[0]?.id !== 'delivery-message'} sessionKey={sessionKey} foldedItemIds={foldedItems} />
         </div>
         {inspector && <aside className="runtime-inspector" style={{ width: 390 }}>Inspector</aside>}
       </div>

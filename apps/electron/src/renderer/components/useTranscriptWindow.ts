@@ -82,6 +82,13 @@ export function useTranscriptWindow<T extends WindowRow>({ rows, sessionKey, vie
       const height = cache.current.viewportHeight || 720;
       const tail = transcriptWindowRange(layout.offsets, Math.max(0, layout.offsets[rows.length]! - height), height);
       range = { start: Math.min(tail.start, Math.max(0, rows.length - INITIAL_TAIL_ROWS)), end: rows.length };
+    } else if (window.sessionKey === sessionKey && window.end > 0
+      && !layout.indices.has(window.firstId ?? '') && layout.indices.has(window.lastId ?? '')) {
+      // A prepended tool can merge with the first activity and change its row
+      // id. Keep the surviving end of the current window mounted so Stage can
+      // restore its reading anchor before refreshing the measured range.
+      const end = layout.indices.get(window.lastId!)! + 1;
+      range = { start: Math.max(0, end - (window.end - window.start) - OVERSCAN), end };
     } else if (window.sessionKey !== sessionKey || window.end === 0 || !layout.indices.has(window.firstId ?? '')) {
       // Crossing the threshold while backscrolling must keep the old reading
       // row mounted on the very first virtualized commit, before any effects.

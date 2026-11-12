@@ -174,7 +174,7 @@ export class SessionRuntimeManager {
 
   async refreshProviderAccounts(): Promise<void> {
     await Promise.all([...this.runtimes.values()].filter(runtime => runtime.connectionState.status === 'connected')
-      .map(runtime => runtime.refreshProviderAccounts()));
+      .map(runtime => runtime.refreshProviderAccounts(true)));
   }
 
   async applyProviderSettings(): Promise<void> {

@@ -142,6 +142,8 @@ export interface UseBridge {
   /** The Bot whose chat is displayed. A Bot's folder is not a project, so project-only parts of the window leave such a chat alone. */
   readonly activeBotId: string | undefined;
   readonly sessionLoading: boolean;
+  readonly history: import('../../shared/sessionHistory.js').TranscriptHistoryState;
+  loadMoreHistory(): Promise<void>;
   readonly connection: ConnectionState;
   readonly connected: boolean;
   readonly conversation: ConversationState;

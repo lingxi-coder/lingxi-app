@@ -77,8 +77,9 @@ test('custom plan and file-summary anchors preserve their own component styles',
 
 test('retry and agent components participate in the shared feed spacing contract', () => {
   const retryHtml = render({ liveItems: [{ type: 'thinking', id: 'thinking', text: 'Working', done: false, streamed: true, transcriptUuid: 'retry-message' }, tool], running: true, apiRetry: { message: 'Backoff', attempt: 1, max_retries: 3, delay_ms: 2000 } });
-  assert.match(anchorTag(retryHtml, 'retry-message'), /class="transcript-row" data-row-type="thinking"/);
-  assert.match(anchorContents(retryHtml, 'retry-message'), /^<div class="transcript-run-item transcript-api-retry"/);
+  assert.match(anchorTag(retryHtml, 'retry-message'), /class="transcript-row" data-row-type="tool-group"/);
+  assert.match(anchorContents(retryHtml, 'retry-message'), /^<div class="transcript-run-item" data-run-type="activity"/);
+  assert.match(retryHtml, /Retrying… attempt 1\/3 · Backoff/);
   const agentsHtml = render({ agents: [{ agent_id: 'worker', name: 'Worker', status: 'running', agent_type: 'explorer' }] });
   assert.match(agentsHtml, /class="desktop-stage-feed"[^>]*><div class="transcript-row" data-row-type="agents"><div class="transcript-agents"/);
 });

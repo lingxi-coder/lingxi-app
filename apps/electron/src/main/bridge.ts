@@ -420,7 +420,7 @@ export class SessionRuntime {
     const model = this.opts.getSavedModel?.();
     if (!model || model === this.selectedModelReference) return;
     try {
-      await this.switchModel(model, false);
+      await this.switchModel(model, false, undefined, undefined, false);
     } catch (error) {
       const message = `Could not restore model: ${sanitizeDiagnostic(error)}`;
       this.diagnostics.add('warn', 'host', message);
@@ -428,7 +428,7 @@ export class SessionRuntime {
     }
   }
 
-  private switchModel(model: string, persist = true, slashCommand?: Extract<ClientCommand, { type: 'run_slash_command' }>, authorize?: () => void): Promise<void> {
+  private switchModel(model: string, persist = true, slashCommand?: Extract<ClientCommand, { type: 'run_slash_command' }>, authorize?: () => void, hydrateCredentials = true): Promise<void> {
     if (this.pendingModelSwitch) return Promise.reject(new Error('A model switch is already in progress.'));
     const generation = this.generation;
     const client = this.requireClient();
@@ -459,7 +459,7 @@ export class SessionRuntime {
     this.notifyActivityChanged();
     void (async () => {
       try {
-        await this.ensureModelProviderCredential(model);
+        if (hydrateCredentials) await this.ensureModelProviderCredential(model);
         if (this.pendingModelSwitch !== pending) return;
         if (generation !== this.generation || client !== this.client || this.archiving) {
           throw new Error('Model switch was interrupted.');
@@ -1736,6 +1736,11 @@ export class SessionRuntime {
       if (this.startPromise === completion) this.startPromise = null;
     });
     this.startPromise = completion;
+    // Account IO may involve Keychain, OAuth and other processes. It must
+    // never hold the engine handshake or transcript replay open.
+    void completion.then(() => this.refreshProviderAccounts()).catch((error: unknown) => {
+      this.diagnostics.add('warn', 'host', `background account loading failed: ${sanitizeDiagnostic(error)}`);
+    });
     return completion;
   }
 
@@ -2542,7 +2547,7 @@ export class SessionRuntime {
             }));
             return;
           }
-          try { await this.refreshProviderAccounts(); }
+          try { await this.refreshProviderAccounts(true); }
           catch {
             this.diagnostics.add('warn', 'host', diagnosticEvent('provider_account_refresh_failed', {
               accountId, identityGeneration, rejectedRevision, stage: 'inject', reason: 'injection_failed',
@@ -3801,13 +3806,33 @@ export class SessionRuntime {
 
   private nextProviderAccountsOperation = Date.now();
   private accountBindings = new Set<string>();
-  async refreshProviderAccounts(): Promise<void> {
-    if (this.state.status !== 'connected' || !this.opts.resolveProviderAccounts) return;
-    const launch = await this.opts.resolveProviderAccounts();
-    if (!launch) return;
-    for (const account of launch.providerAccounts.accounts) this.accountBindings.add(account.executionBindingId);
+  private providerAccountsRefresh?: { client: BridgeClient; generation: number; promise: Promise<void> };
+  refreshProviderAccounts(force = false): Promise<void> {
+    if (this.state.status !== 'connected' || !this.opts.resolveProviderAccounts) return Promise.resolve();
     const client = this.requireClient();
     const generation = this.generation;
+    const pending = this.providerAccountsRefresh;
+    if (pending?.client === client && pending.generation === generation) {
+      if (!force) return pending.promise;
+      // A credential mutation must observe a read admitted after that change,
+      // even when an earlier background warmup is still in flight.
+      return pending.promise.catch(() => undefined).then(() => {
+        if (generation !== this.generation || client !== this.client || this.disposed) throw new Error('Account update interrupted.');
+        return this.refreshProviderAccounts();
+      });
+    }
+    const promise = this.loadProviderAccounts(client, generation).finally(() => {
+      if (this.providerAccountsRefresh?.promise === promise) this.providerAccountsRefresh = undefined;
+    });
+    this.providerAccountsRefresh = { client, generation, promise };
+    return promise;
+  }
+
+  private async loadProviderAccounts(client: BridgeClient, generation: number): Promise<void> {
+    const launch = await this.opts.resolveProviderAccounts?.();
+    if (!launch) return;
+    if (generation !== this.generation || client !== this.client || this.disposed) throw new Error('Account update interrupted.');
+    for (const account of launch.providerAccounts.accounts) this.accountBindings.add(account.executionBindingId);
     const operationId = ++this.nextProviderAccountsOperation;
     await new Promise<void>((resolve, reject) => {
       const finish = (error?: Error) => { clearTimeout(timer); client.off('event', onEvent); error ? reject(error) : resolve(); };
@@ -3910,11 +3935,9 @@ export class SessionRuntime {
     if (!pending?.sessionResumed || !pending.responseReceived || !pending.model || pending.hydrationStarted
       || pending.activeTools.size > 0 || this.pendingInteractions > 0 || this.permissionScopeChecks.size > 0) return;
     pending.hydrationStarted = true;
-    // A credential that cannot be read does not keep the chat closed: the
-    // next prompt that needs it loads it again or fails saying why.
-    void this.ensureModelProviderCredential(pending.model).catch((error: unknown) => {
-      this.diagnostics.add('warn', 'host', `failed to load model provider credential: ${sanitizeDiagnostic(error)}`);
-    }).then(() => this.resolvePendingSessionResume(pending));
+    // The engine has proved the selected transcript and model. Account
+    // hydration runs independently and is awaited by credential consumers.
+    this.resolvePendingSessionResume(pending);
   }
 
   async restoreOwnedSessionIfNeeded(): Promise<void> {

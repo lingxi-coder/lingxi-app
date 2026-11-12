@@ -344,6 +344,27 @@ async function main() {
     result.foldAfter = await run(metrics);
     result.foldControlAfter = await run('Boolean(document.querySelector(".desktop-stage-jump"))');
 
+    result.historyPages = [];
+    for (const count of [40, 140, 180, 181, 182]) {
+      await run(`window.stageScrollFixture.historySetup(${count}, ${count >= 181})`); await settle();
+      await run(`(() => { const stage = document.querySelector('.desktop-stage'); stage.scrollTop = stage.scrollHeight; stage.dispatchEvent(new Event('scroll')); })()`); await settle();
+      assert.equal(await run('window.stageScrollFixture.historyRequests()'), 0, 'opening at the bottom must not fetch the entire archive');
+      await run(`(() => { const stage = document.querySelector('.desktop-stage'); stage.scrollTop = ${count === 182 ? 0 : 120}; stage.dispatchEvent(new Event('scroll')); })()`); await settle();
+      assert.equal(await run('window.stageScrollFixture.historyRequests()'), 1, 'near-top scrolling requests older history');
+      assert.equal(await run('Boolean(document.querySelector(".transcript-history-loader [role=status]"))'), true);
+      const held = await run(`(() => { const stage = document.querySelector('.desktop-stage'), top = stage.getBoundingClientRect().top;
+        const row = [...document.querySelectorAll('[data-message-uuid]')].find(row => row.getBoundingClientRect().bottom > top + 10);
+        return { id: row.dataset.messageUuid, offset: row.getBoundingClientRect().top - top }; })()`);
+      await run(`document.querySelector('.desktop-stage').dispatchEvent(new Event('scroll'))`);
+      assert.equal(await run('window.stageScrollFixture.historyRequests()'), 1, 'duplicate scroll events join the pending page');
+      await run('window.stageScrollFixture.completeHistory()'); await settle();
+      const afterOffset = await run(`(() => { const stage = document.querySelector('.desktop-stage');
+        const row = [...document.querySelectorAll('[data-message-uuid]')].find(row => row.dataset.messageUuid === ${JSON.stringify(held.id)});
+        return row?.getBoundingClientRect().top - stage.getBoundingClientRect().top; })()`);
+      assert.ok(Number.isFinite(afterOffset) && Math.abs(afterOffset - held.offset) <= 2, `prepend keeps the same reading row for ${count} rows: ${held.offset} -> ${afterOffset}`);
+      assert.equal(await run('Boolean(document.querySelector(".transcript-history-loader"))'), false, 'exhausted history has no further loader');
+      result.historyPages.push({ count, offsetDelta: afterOffset - held.offset });
+    }
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally { window.destroy(); app.quit(); }
 }

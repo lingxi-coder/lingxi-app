@@ -519,8 +519,10 @@ async fn private_resume_cancel_and_disconnect_deny_parked_and_later_tools() {
                 client_command(ClientCommand::Cancel { turn_id: None }),
             )
             .await;
+            // The reply follows durable recording of both denied results.
+            // Match next_frame's debug-build deadline rather than timing disk I/O.
             let (events, response) =
-                tokio::time::timeout(Duration::from_secs(3), settle(&mut socket, 2))
+                tokio::time::timeout(Duration::from_secs(15), settle(&mut socket, 2))
                     .await
                     .expect("cancel must unblock a parked resume");
             assert!(response.error.is_some());
@@ -599,7 +601,7 @@ fn assert_structured_result(events: &[ClientEvent]) {
             _ => None,
         })
         .expect("deferred card result is in the settled transcript");
-    assert_eq!(result.string_at("/id"), Some("deferred-plot"));
+    assert_eq!(result.string_at("/id"), Some("deferred-plot"), "{result:?}");
     assert_eq!(result.string_at("/title"), Some("deferred-result"));
 }
 
@@ -756,7 +758,9 @@ async fn cold_selected_boot_confirmation_keeps_live_state_and_is_consumed_once()
         .unwrap()
         .contains("deferred-result"));
     assert_structured_result(&events);
-    assert_eq!(std::fs::read_to_string(&dispatches).unwrap(), "xx");
+    // Another source copy still describes the same completed logical call.
+    // Restore its checkpoint payload without repeating its side effect.
+    assert_eq!(std::fs::read_to_string(&dispatches).unwrap(), "x");
     assert_eq!(
         runtime
             .orchestrator

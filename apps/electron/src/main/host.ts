@@ -1,6 +1,7 @@
 import { CH_DECISION } from '../shared/decision.js';
 import type { DecisionHost } from './decision.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
+import { CH_SESSION_HISTORY, historyCursor } from '../shared/sessionHistory.js';
 import { CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, type ProviderAccountCommand } from '../shared/providerAccounts.js';
 import type { DesktopProviderAccounts } from './provider-accounts.js';
 import { CH_ACCOUNT, CH_ACCOUNT_CHANGED } from '../shared/account.js';
@@ -577,6 +578,7 @@ export class HostController {
   private readonly terminalDeliveries = new Map<WebContents, TerminalDelivery>();
   private registered = false;
   private navigationQueue: Promise<void> = Promise.resolve();
+  private readonly sessionOpenings = new Map<string, Promise<unknown>>();
   private navigationGeneration = 0;
   private modeNavigation?: { mode: ConversationSpace; pending: Promise<BootstrapState> };
   private readonly handoffs = new Map<string, AbortController>();
@@ -600,6 +602,8 @@ export class HostController {
   private readonly catalogRequestGenerations = new Map<string, number>();
   private catalogEpoch = 0;
   private brokerStorageError: string | undefined;
+  private brokerStatusRefresh?: Promise<void>;
+  private brokerStatusCheckedAt = 0;
   private readonly credentialMutations = new Map<string, Promise<unknown>>();
   private offNativeAudio?: () => void;
   private scheduled?: ScheduledTaskService;
@@ -1036,11 +1040,11 @@ export class HostController {
     });
     this.ipc.handle(CH_WORKSPACE_PICK, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
-      ++this.navigationGeneration;
+      const generation = ++this.navigationGeneration;
       return this.enqueueNavigation(async () => {
         const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'], securityScopedBookmarks: false });
         if (result.canceled || !result.filePaths[0]) return null;
-        return this.selectWorkspaceInternal(result.filePaths[0], true);
+        return this.selectWorkspaceInternal(result.filePaths[0], true, true, undefined, generation);
       });
     });
     this.ipc.handle(CH_PROJECT_APPS_DEFAULT, async (event: IpcMainInvokeEvent) => {
@@ -1080,7 +1084,7 @@ export class HostController {
       if (selection.localApp && this.currentConversationMode() !== 'code') {
         throw new Error(nativeTr('local_app_development_requires_code'));
       }
-      ++this.navigationGeneration;
+      const generation = ++this.navigationGeneration;
       return this.enqueueNavigation(async () => {
         this.assertSender(event);
         if (this.projectFolderSelections.get(event.sender) !== selection) throw new Error('The source folder selection has changed.');
@@ -1103,7 +1107,7 @@ export class HostController {
           }
         } else if (directoryName !== undefined) throw new Error('An existing folder uses its directory name.');
         try {
-          const workspace = await this.selectWorkspaceInternal(path, true, !selection.localApp, selection.localApp ? 'code' : undefined);
+          const workspace = await this.selectWorkspaceInternal(path, true, !selection.localApp, selection.localApp ? 'code' : undefined, generation);
           if (this.projectFolderSelections.get(event.sender) === selection) this.projectFolderSelections.delete(event.sender);
           return workspace;
         } catch (error) {
@@ -1121,12 +1125,12 @@ export class HostController {
     });
     this.ipc.handle(CH_WORKSPACE_SET, async (event: IpcMainInvokeEvent, workspace: unknown) => {
       this.assertSender(event);
-      ++this.navigationGeneration;
+      const generation = ++this.navigationGeneration;
       return this.enqueueNavigation(async () => {
         if (typeof workspace !== 'string') throw new Error('invalid workspace path');
         const canonical = canonicalWorkspace(workspace);
         if (!this.settings.hasProject(canonical)) throw new Error('project is not in the project list');
-        return this.selectWorkspaceInternal(canonical, false);
+        return this.selectWorkspaceInternal(canonical, false, true, undefined, generation);
       });
     });
     this.ipc.handle(CH_PROJECT_SESSIONS_LIST, async (event: IpcMainInvokeEvent, projectPath: unknown, scope: unknown) => {
@@ -1147,7 +1151,8 @@ export class HostController {
       // Reserve intent before awaiting disk or the navigation lane. Otherwise
       // a rapid Code -> Chat request sees the still-committed Chat snapshot.
       const pending = this.enqueueNavigation(async () => {
-        await this.settings.conversationSpaces.setMode(value);
+        if (generation === this.navigationGeneration) await this.settings.conversationSpaces.setMode(value);
+      }).then(async () => {
         if (generation !== this.navigationGeneration) return this.bootstrap();
         try { return await this.switchConversationSpace(value, generation); }
         catch (error) {
@@ -1284,9 +1289,9 @@ export class HostController {
       const generation = ++this.navigationGeneration;
       const expectedMode = linkedMode ?? this.modeNavigation?.mode ?? this.settings.conversationSpaces.snapshot().activeMode;
       this.draftAdmissionGenerations.delete(expectedMode);
-      return this.enqueueNavigation(async () => {
-        const project = this.requireProject(projectPath);
-        if (!isSessionId(sessionId)) throw new Error('invalid session id');
+      const project = this.requireProject(projectPath);
+      if (!isSessionId(sessionId)) throw new Error('invalid session id');
+      return this.enqueueSessionOpen(sessionId, async () => {
         const ref = { projectPath: project, sessionId } satisfies SessionRef;
         const authoring = authoringAppId === undefined ? undefined : await this.captureLocalAppAuthoring?.(authoringAppId as string, ref, authoringVersion as number);
         if (authoringAppId !== undefined && !authoring) throw new Error('The Local App authoring host is unavailable');
@@ -1307,7 +1312,9 @@ export class HostController {
         if (known.mode !== linkedMode) throw new Error('The session belongs to a different conversation space.');
         if (generation !== this.navigationGeneration) return this.bootstrap();
         const previousMode = this.settings.conversationSpaces.snapshot().activeMode;
-        await this.settings.conversationSpaces.setMode(linkedMode);
+        await this.enqueueNavigation(async () => {
+          if (generation === this.navigationGeneration) await this.settings.conversationSpaces.setMode(linkedMode);
+        });
         try { return await this.openSessionAndActivateInternal(ref, selected, generation, linkedMode, authoring); }
         catch (error) {
           if (generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === linkedMode) {
@@ -1316,6 +1323,20 @@ export class HostController {
           throw error;
         }
       });
+    });
+    this.ipc.handle(CH_SESSION_HISTORY, async (event: IpcMainInvokeEvent, sessionId: unknown, before: unknown) => {
+      this.assertSender(event);
+      if (!isSessionId(sessionId)) throw new Error('Invalid history session');
+      const cursor = historyCursor(before);
+      const ref = this.settings.getPublic().activeSession;
+      const runtime = this.bridge.get(sessionId);
+      if (!ref || ref.sessionId !== sessionId || !runtime || runtime.projectPath !== ref.projectPath) throw new Error('This chat is no longer active');
+      const state = await runtime.getWorkspaceState();
+      if (!state.transcript_path) throw new Error('History source is unavailable');
+      const page = await this.sessionCatalog.readHistory(ref.projectPath, sessionId, state.transcript_path, cursor);
+      this.assertSender(event);
+      if (this.bridge.get(sessionId) !== runtime || this.settings.getPublic().activeSession?.sessionId !== sessionId) throw new Error('This chat is no longer active');
+      return page;
     });
     this.ipc.handle(CH_SESSION_WORKSPACE, async (event: IpcMainInvokeEvent, sessionId: unknown, operation: unknown) => {
       this.assertSender(event);
@@ -1449,6 +1470,7 @@ export class HostController {
     });
     this.ipc.handle(CH_PROJECT_REMOVE, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
       this.assertSender(event);
+      ++this.navigationGeneration;
       return this.enqueueNavigation(async () => {
         // Remove the saved list entry even if its directory has moved or now
         // resolves through a symlink to a different path. Cleanup uses this key.
@@ -1868,15 +1890,15 @@ export class HostController {
 
   private async bootstrap(): Promise<BootstrapState> {
     const bootstrapStartedAt = Date.now();
-    if (this.credentialBroker) {
+    if (this.credentialBroker && !this.brokerStatusRefresh
+      && Date.now() - this.brokerStatusCheckedAt >= CREDENTIAL_STATUS_CACHE_TTL_MS) {
       const credentialStatusStartedAt = Date.now();
-      try {
-        await this.refreshCredentialBrokerStatus();
+      const refresh = this.refreshCredentialBrokerStatus().then(() => {
         this.diagnostics.add('info', 'host', diagnosticEvent('bootstrap_phase_completed', {
           durationMs: Date.now() - credentialStatusStartedAt,
           phase: 'credential_broker_status',
         }));
-      } catch (error) {
+      }, (error: unknown) => {
         const diagnostic = sanitizeDiagnostic(error);
         this.brokerStorageError = credentialBrokerDisplayError(diagnostic);
         this.diagnostics.add('warn', 'host', `credential broker status refresh failed: ${diagnostic}`);
@@ -1885,7 +1907,11 @@ export class HostController {
           error: diagnostic,
           phase: 'credential_broker_status',
         }));
-      }
+      }).finally(() => {
+        this.brokerStatusCheckedAt = Date.now();
+        if (this.brokerStatusRefresh === refresh) this.brokerStatusRefresh = undefined;
+      });
+      this.brokerStatusRefresh = refresh;
     }
     const revision = ++this.bootstrapRevision;
     const activeSession = this.settings.getPublic().activeSession;
@@ -2112,6 +2138,18 @@ export class HostController {
   private enqueueNavigation<T>(operation: () => Promise<T>): Promise<T> {
     const run = this.navigationQueue.then(operation, operation);
     this.navigationQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /** Different engines prepare concurrently; competing copies of one UUID share a lane. */
+  private enqueueSessionOpen<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const key = sessionId.toLowerCase();
+    const previous = this.sessionOpenings.get(key) ?? Promise.resolve();
+    const run = previous.then(operation, operation);
+    this.sessionOpenings.set(key, run);
+    void run.finally(() => {
+      if (this.sessionOpenings.get(key) === run) this.sessionOpenings.delete(key);
+    }).catch(() => undefined);
     return run;
   }
 
@@ -2393,11 +2431,12 @@ export class HostController {
   }
 
   private async selectWorkspace(input: string, addProject: boolean): Promise<WorkspaceMetadata> {
-    return this.enqueueNavigation(() => this.selectWorkspaceInternal(input, addProject));
+    const generation = ++this.navigationGeneration;
+    return this.enqueueNavigation(() => this.selectWorkspaceInternal(input, addProject, true, undefined, generation));
   }
 
   private async selectWorkspaceInternal(input: string, addProject: boolean, createInitialSession = true,
-    admittedMode?: ConversationSpace): Promise<WorkspaceMetadata> {
+    admittedMode?: ConversationSpace, generation = this.navigationGeneration): Promise<WorkspaceMetadata> {
     const workspace = canonicalWorkspace(input);
     if (this.closingProjects.has(workspace)) throw new Error('project is closing');
     this.workspaceFiles.invalidate();
@@ -2408,18 +2447,21 @@ export class HostController {
       await this.settings.conversationSpaces.addProject(workspace, admittedMode ?? this.settings.conversationSpaces.snapshot().activeMode);
       // General project creation supplies the first draft. App creation only
       // adds metadata; the renderer explicitly admits its one authoring chat.
-      if (wasEmpty && createInitialSession) {
+      if (wasEmpty && createInitialSession && generation === this.navigationGeneration) {
         const mode = this.settings.conversationSpaces.snapshot().activeMode;
-        const ref = await this.bridge.newSession(workspace, undefined, { mode, projectId: workspace });
+        const current = () => generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === mode;
+        const ref = await this.bridge.newSession(workspace, undefined, { mode, projectId: workspace, activate: current });
         const owned: OwnedConversation = { ...ref, mode, projectId: workspace };
         await this.settings.conversationSpaces.register(owned);
-        this.draftSelections.set(mode, owned);
-        this.settings.activateProject(workspace);
-        this.settings.setActiveSessionDraft(owned);
+        if (current()) {
+          this.draftSelections.set(mode, owned);
+          this.settings.activateProject(workspace);
+          this.settings.setActiveSessionDraft(owned);
+        }
       }
     } else {
       await this.settings.conversationSpaces.addProject(workspace, this.settings.conversationSpaces.snapshot().activeMode);
-      this.settings.activateProject(workspace);
+      if (generation === this.navigationGeneration) this.settings.activateProject(workspace);
     }
     let fingerprint: string | undefined;
     try { fingerprint = this.settings.getTrust(workspace).fingerprint; }
@@ -2719,8 +2761,8 @@ export class HostController {
   }
 
   async openSessionAndActivate(ref: SessionRef, selection?: SessionOpenSelection): Promise<BootstrapState> {
-    ++this.navigationGeneration;
-    return this.enqueueNavigation(() => this.openSessionAndActivateInternal(ref, selection));
+    const generation = ++this.navigationGeneration;
+    return this.enqueueSessionOpen(ref.sessionId, () => this.openSessionAndActivateInternal(ref, selection, generation));
   }
 
   async updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null> {
@@ -2883,7 +2925,7 @@ export class HostController {
     if (draft) {
       if (expectedMode && draft.mode !== expectedMode) throw new Error('The session belongs to a different conversation space.');
       const current = () => generation === undefined || (generation === this.navigationGeneration
-        && this.settings.conversationSpaces.snapshot().activeMode === expectedMode);
+        && (expectedMode === undefined || this.settings.conversationSpaces.snapshot().activeMode === expectedMode));
       if (authoring && draft.projectPath !== authoring.sourceDirectory) throw new Error('The Local App authoring workspace changed');
       await this.bridge.reopenOwnedDraft(draft, () => !authoring && current());
       const activate = () => {
@@ -2951,6 +2993,7 @@ export class HostController {
     }
     try {
       await this.trustSessionSource({ projectPath: source, sessionId: ref.sessionId });
+      if (this.isProjectClosing(source)) throw new Error('project is closing');
       if (releaseCopy && existing) {
         releaseCopy();
         await this.bridge.closeSession({ projectPath: existing.projectPath, sessionId: existing.sessionId }, { replacing: true });
@@ -2960,15 +3003,15 @@ export class HostController {
       await this.bridge.openSession(canonical, session?.empty_session === true, session?.resume_model,
         false, selection ? session?.path : undefined);
       if (generation !== undefined && (generation !== this.navigationGeneration
-        || this.settings.conversationSpaces.snapshot().activeMode !== expectedMode)) return this.bootstrap();
+        || (expectedMode !== undefined && this.settings.conversationSpaces.snapshot().activeMode !== expectedMode))) return this.bootstrap();
       if (authoring) {
         const runtime = this.bridge.get(ref.sessionId);
         if (!runtime || runtime.sessionMode !== 'code' || canonicalWorkspace((await runtime.getWorkspaceState()).cwd) !== authoring.sourceDirectory) {
           throw new Error('The Local App authoring workspace changed');
         }
       }
-      const current = () => generation === undefined || (generation === this.navigationGeneration
-        && this.settings.conversationSpaces.snapshot().activeMode === expectedMode);
+      const current = () => !this.isProjectClosing(source) && (generation === undefined || (generation === this.navigationGeneration
+        && (expectedMode === undefined || this.settings.conversationSpaces.snapshot().activeMode === expectedMode)));
       const result = await this.settings.conversationSpaces.select(known, source, (recorded) => {
         // Capture volatile/runtime state in the same final fence as settings.
         // Target preparation does not select it or evict the previous owner.
@@ -3161,19 +3204,18 @@ export class HostController {
   }
 
   restoreProjectSession(projectPath: string, activeSession?: SessionRef): Promise<SessionRef> {
-    return this.enqueueNavigation(() => this.restoreProjectSessionInternal(projectPath, activeSession));
+    const generation = this.navigationGeneration;
+    return this.enqueueNavigation(() => this.restoreProjectSessionInternal(projectPath, activeSession, generation));
   }
 
   /** Restore the selected space without deriving project ownership from cwd. */
-  restoreConversationNavigation(): Promise<void> {
+  async restoreConversationNavigation(): Promise<void> {
     const generation = this.navigationGeneration;
-    return this.enqueueNavigation(async () => {
-      if (generation !== this.navigationGeneration) return;
-      const snapshot = this.settings.conversationSpaces.snapshot();
-      const session = snapshot.navigation[snapshot.activeMode].session;
-      if (session) await this.openSessionAndActivateInternal(session, undefined, undefined, session.mode);
-      else await this.switchConversationSpace(snapshot.activeMode, generation);
-    });
+    const snapshot = this.settings.conversationSpaces.snapshot();
+    const session = snapshot.navigation[snapshot.activeMode].session;
+    if (session) await this.enqueueSessionOpen(session.sessionId,
+      () => this.openSessionAndActivateInternal(session, undefined, generation, session.mode));
+    else await this.switchConversationSpace(snapshot.activeMode, generation);
   }
 
   /**
@@ -3220,10 +3262,10 @@ export class HostController {
     this.sendToWindows(CH_BOTS_SESSION_SHOWN, shown);
   }
 
-  private async restoreProjectSessionInternal(projectPath: string, activeSession?: SessionRef): Promise<SessionRef> {
+  private async restoreProjectSessionInternal(projectPath: string, activeSession?: SessionRef, generation = this.navigationGeneration): Promise<SessionRef> {
     const project = this.requireProject(projectPath);
     if (activeSession?.projectPath === project) {
-      await this.openSessionAndActivateInternal(activeSession);
+      await this.openSessionAndActivateInternal(activeSession, undefined, generation, this.settings.conversationSpaces.snapshot().activeMode);
       const active = this.settings.getPublic().activeSession;
       if (!active || active.sessionId !== activeSession.sessionId) throw new Error('restored session is no longer active');
       return active;
@@ -3251,15 +3293,17 @@ export class HostController {
       }) => session),
     });
     const mode = this.settings.conversationSpaces.snapshot().activeMode;
+    if (generation !== this.navigationGeneration) throw new Error('restored session is no longer active');
     const first = catalog.sessions.find((session) => {
       const owner = this.settings.conversationSpaces.findBySessionId(session.uuid);
       return session.mode === mode && owner?.mode === mode && owner.projectId === project;
     });
     const ref = first
       ? { projectPath: project, sessionId: first.uuid }
-      : await this.bridge.newSession(project, undefined, { mode, projectId: project });
+      : await this.bridge.newSession(project, undefined, { mode, projectId: project,
+        activate: () => generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === mode });
     if (first) {
-      await this.openSessionAndActivateInternal(ref, { scope: 'current', transcriptPath: first.path });
+      await this.openSessionAndActivateInternal(ref, { scope: 'current', transcriptPath: first.path }, generation, mode);
       const active = this.settings.getPublic().activeSession;
       if (!active || active.sessionId !== ref.sessionId) throw new Error('restored session is no longer active');
       this.terminals?.migrateScope({ projectPath: project, sessionId: TERMINAL_DRAFT_SESSION }, active);
@@ -3267,6 +3311,7 @@ export class HostController {
     }
     const owned: OwnedConversation = { ...ref, mode, projectId: project };
     await this.settings.conversationSpaces.register(owned);
+    if (generation !== this.navigationGeneration) throw new Error('restored session is no longer active');
     this.draftSelections.set(mode, owned);
     this.settings.activateProject(project);
     this.settings.setActiveSessionDraft(owned);
@@ -3353,11 +3398,17 @@ export class HostController {
   }
 
   flushConversationSpaces(): Promise<void> {
-    return this.navigationQueue.then(() => this.settings.conversationSpaces.flush());
+    return Promise.allSettled([this.navigationQueue, ...this.sessionOpenings.values()])
+      .then(() => this.settings.conversationSpaces.flush());
   }
 
-  dispose(): void {
-    this.sessionCatalog.dispose?.();
+  dispose(providerAccountsStopped?: Promise<void>): void {
+    ++this.navigationGeneration;
+    // Credential publication uses this catalog's metadata helper. Retire it
+    // only after already admitted account operations have committed.
+    const disposeCatalog = () => this.sessionCatalog.dispose?.();
+    if (providerAccountsStopped) void providerAccountsStopped.then(disposeCatalog, disposeCatalog);
+    else disposeCatalog();
     this.metadataLifecycleEpoch++;
     for (const token of this.metadataSources.keys()) this.releaseMetadataSource(token);
     this.realtimeAudioStartToken = undefined;
@@ -3395,7 +3446,7 @@ export class HostController {
       CH_DECISION, CH_APPLICATION_ICON, CH_IMAGE_SAVE,
       CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_FOLDER_PICK, CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE,
-      CH_PROJECT_REMOVE, CH_SESSION_PIN_SET, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL,
+      CH_PROJECT_REMOVE, CH_SESSION_PIN_SET, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, CH_SESSION_HISTORY,
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_SESSION_METADATA_CAPTURE, CH_SESSION_METADATA_RELEASE, CH_SESSION_TOUCH, CH_SESSION_RENAME,
       CH_SESSION_WORKSPACE, CH_NATIVE_AUDIO_FLOW_LEASE,

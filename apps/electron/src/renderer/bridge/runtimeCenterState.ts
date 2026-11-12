@@ -452,7 +452,7 @@ export function resourcesFromRestoredMessages(
   messages.forEach((message, messageIndex) => {
     (message.images ?? []).forEach((image, imageIndex) => {
       resources.push(imageResource(
-        `image:${sessionId}:restored:${messageIndex}:${imageIndex}`,
+        `image:${sessionId}:restored:${message.transcript_uuid ?? messageIndex}:${imageIndex}`,
         `Attached image ${imageIndex + 1}`,
         image.media_type,
         image.url,

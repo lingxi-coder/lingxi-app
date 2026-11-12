@@ -1,5 +1,9 @@
 /** Desktop-only copy. Shared strings remain in resources/translations. */
 export const desktopCatalog: Record<string, Record<string, string>> = {
+  desktop_history_loading: { 'zh-Hans': '正在加载更早的消息…', 'zh-Hant': '正在載入更早的訊息…', en: 'Loading earlier messages…', ja: '過去のメッセージを読み込み中…', ko: '이전 메시지를 불러오는 중…' },
+  desktop_history_load_more: { 'zh-Hans': '加载更早的消息', 'zh-Hant': '載入更早的訊息', en: 'Load earlier messages', ja: '過去のメッセージを読み込む', ko: '이전 메시지 불러오기' },
+  desktop_history_retry: { 'zh-Hans': '重试加载', 'zh-Hant': '重試載入', en: 'Retry loading', ja: '再試行', ko: '다시 시도' },
+  desktop_history_failed: { 'zh-Hans': '历史消息加载失败', 'zh-Hant': '歷史訊息載入失敗', en: 'Could not load earlier messages', ja: '過去のメッセージを読み込めませんでした', ko: '이전 메시지를 불러오지 못했습니다' },
   "desktop_project_trust_title": {
     "zh-Hans": "信任此文件夹？",
     "zh-Hant": "信任此資料夾？",

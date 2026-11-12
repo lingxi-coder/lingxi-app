@@ -25,6 +25,7 @@ struct Request {
     session_id: Option<String>,
     scope: Option<String>,
     transcript_path: Option<PathBuf>,
+    history_before: Option<super::history_page::Cursor>,
 }
 
 #[derive(Serialize)]
@@ -204,6 +205,27 @@ impl CatalogWorker {
         } else {
             cwd.join(&self.home)
         };
+        if let Some(cursor) = request.history_before.clone() {
+            let source = request
+                .transcript_path
+                .clone()
+                .ok_or("History requires an exact source")?;
+            let session_id = request
+                .session_id
+                .as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                .ok_or("Invalid history session")?;
+            let page = tokio::task::spawn_blocking(move || {
+                super::history_page::read(&source, session_id, cursor)
+            })
+            .await
+            .map_err(|error| error.to_string())??;
+            let output = serde_json::to_string(&page).map_err(|error| error.to_string())?;
+            if output.len() > MAX_OUTPUT_BYTES {
+                return Err("History page exceeds the output limit".into());
+            }
+            return Ok(output);
+        }
         let scope = request
             .scope
             .as_deref()

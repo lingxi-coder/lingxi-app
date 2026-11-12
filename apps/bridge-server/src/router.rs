@@ -1072,7 +1072,7 @@ impl EngineCommandRouter {
             // streamed results with a pre-activation transcript snapshot.
             workspace.merge_live_resume_display(&mut replayed).await?;
         }
-        let messages = client::adapter::lowering::lower_replayed_transcript(&replayed);
+        let messages = crate::workspace_commands::lower_initial_transcript(&replayed);
 
         // The device-level reasoning default is the counterpart to
         // Electron's persisted model/permission preferences. Apply it

@@ -5,6 +5,8 @@ import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, isAbsolute } from 'node:path';
 import type { SessionRowDto } from '@lingxi/bridge-client';
+import { validateClientEvent } from '@lingxi/bridge-client';
+import { historyCursor, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
 
 import { buildBridgeArguments, buildBridgeEnvironment } from './host-utils.js';
 import { resolveServerBin } from './bridgeDiscovery.js';
@@ -194,6 +196,7 @@ interface CatalogWorkerQuery {
   sessionId?: string;
   scope?: SessionCatalogScope;
   transcriptPath?: string;
+  historyBefore?: TranscriptHistoryCursor;
 }
 
 /** One request at a time bounds worker IO; catalog callers retain their own deduplication. */
@@ -577,6 +580,17 @@ export class ProjectSessionCatalog {
     return row ? { ...row } : undefined;
   }
 
+  async readHistory(projectPath: string, sessionId: string, transcriptPath: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage> {
+    const output = await this.runWorker({ cwd: realpathSync.native(projectPath), sessionId, transcriptPath, historyBefore: historyCursor(before) });
+    const page = JSON.parse(boundedOutput(output)) as TranscriptHistoryPage;
+    const event = validateClientEvent({ type: 'session_resumed', mode: 'code', session_id: sessionId, messages: page.messages });
+    if (event.type !== 'session_resumed') throw new Error('Invalid history page');
+    const next = page.before == null ? null : historyCursor(page.before);
+    if (next && (next.uuid === before.uuid || next.offset == null
+      || (before.offset != null && next.offset >= before.offset))) throw new Error('History cursor did not advance');
+    return { messages: event.messages, before: next };
+  }
+
   /** Invalidate after a durable transcript/metadata mutation. */
   invalidate(projectPath?: string): void {
     this.generation++;
@@ -634,22 +648,8 @@ export class ProjectSessionCatalog {
   private run(canonical: string, sessionId?: string, scope?: SessionCatalogScope, transcriptPath?: string): Promise<ProjectSessionCatalogResult> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
     if (this.options.catalogWorker !== false) {
-      if (this.catalogQueued >= MAX_QUEUED_CATALOG_OPERATIONS) return Promise.reject(new Error('session catalog is busy; try again shortly'));
-      this.catalogQueued++;
-      const operation = this.catalogTail.then(async () => {
-        if (this.disposed) throw new Error('session catalog is disposed');
-        const worker = await this.getWorker(canonical);
-        try {
-          return parseCatalog(await worker.request({ cwd: canonical, ...(sessionId ? { sessionId } : {}),
-            ...(scope ? { scope } : {}), ...(transcriptPath ? { transcriptPath } : {}) }));
-        } catch (error) {
-          worker.retire();
-          if (this.worker === worker) this.worker = undefined;
-          throw error;
-        }
-      });
-      this.catalogTail = operation.then(() => undefined, () => undefined);
-      return operation.finally(() => { this.catalogQueued--; });
+      return this.runWorker({ cwd: canonical, ...(sessionId ? { sessionId } : {}),
+        ...(scope ? { scope } : {}), ...(transcriptPath ? { transcriptPath } : {}) }).then(parseCatalog);
     }
     const args = buildBridgeArguments({
       workspace: canonical,
@@ -661,6 +661,25 @@ export class ProjectSessionCatalog {
       trusted: false,
     });
     return this.runOutput(canonical, args).then((output) => parseCatalog(output));
+  }
+
+  private runWorker(query: CatalogWorkerQuery): Promise<string> {
+    if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
+    if (this.catalogQueued >= MAX_QUEUED_CATALOG_OPERATIONS) return Promise.reject(new Error('session catalog is busy; try again shortly'));
+    this.catalogQueued++;
+    const operation = this.catalogTail.then(async () => {
+      if (this.disposed) throw new Error('session catalog is disposed');
+      const worker = await this.getWorker(query.cwd);
+      try {
+        return await worker.request(query);
+      } catch (error) {
+        worker.retire();
+        if (this.worker === worker) this.worker = undefined;
+        throw error;
+      }
+    });
+    this.catalogTail = operation.then(() => undefined, () => undefined);
+    return operation.finally(() => { this.catalogQueued--; });
   }
 
   private getWorker(canonical: string): Promise<CatalogWorker> {

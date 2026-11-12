@@ -101,6 +101,7 @@ const SEMANTIC_TOOL_ICONS = {
 
 /** Existing icon vocabulary mapped onto the engine's open-ended tool verbs. */
 export function toolIconName(verb: string, tool?: string, icon?: ToolIconDto): string {
+  if ((tool ?? verb).toLowerCase() === 'computer') return 'computer';
   if (tool === 'LocalApp' || verb === 'LocalApp') return 'local-app';
   if ((tool ?? verb).toLowerCase() === 'browser') return 'globe';
   if (isTaskProgressTool(tool ?? verb)) return 'tasks';

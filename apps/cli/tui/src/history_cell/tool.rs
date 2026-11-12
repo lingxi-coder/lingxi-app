@@ -61,7 +61,11 @@ pub(crate) fn tool_use_lines(
     let header = StyledLine {
         spans: vec![
             StyledSpan::styled(
-                TOOL_MARKER.to_string(),
+                if tool.eq_ignore_ascii_case("computer") {
+                    "▣ ".to_string()
+                } else {
+                    TOOL_MARKER.to_string()
+                },
                 SpanStyle {
                     fg: theme.success,
                     ..SpanStyle::default()

@@ -359,6 +359,7 @@ enum ToolDisplayText {
     /// Maps the engine's stable tool verb to a compact action glyph. An orphan
     /// or synthetic row without a start header uses the raw tool name.
     static func icon(header: ConversationToolHeader?, tool: String) -> LXIconName {
+        if tool.lowercased() == "computer" { return .computer }
         if tool == "LocalApp" { return .localApp }
         if ConversationToolTrace.isTaskProgressTool(tool) { return .listChecks }
         if ["sendmessage", "send_message"].contains(tool.lowercased()) || tool.lowercased().hasSuffix("__send_message") { return .send }

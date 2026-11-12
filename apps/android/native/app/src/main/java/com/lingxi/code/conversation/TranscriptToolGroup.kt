@@ -111,6 +111,7 @@ internal fun transcriptBlocks(blocks: List<MessageContent>): List<TranscriptBloc
 }
 
 internal fun toolIconName(verb: ToolVerbUi?, tool: String = "") = when {
+    tool.equals("computer", ignoreCase = true) -> LXIconName.Computer
     tool == "LocalApp" -> LXIconName.Apps
     tool.equals("browser", ignoreCase = true) -> LXIconName.Globe
     isTaskProgressTool(tool) -> LXIconName.ListChecks

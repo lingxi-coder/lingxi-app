@@ -60,6 +60,11 @@ main-frame ownership check, caps each window at 1,200 samples per minute, and is
 removed when its manager is disposed. Diagnostic observer failures cannot stop
 replay delivery.
 
+Recovery samples use one-way IPC, with no reply handler to await. Late samples
+after manager disposal are ignored, and frame-close errors are contained in the
+preload. Package smoke also rejects a shutdown log containing a missing recovery
+handler, so adding diagnostics cannot create its own shutdown request errors.
+
 ## Reproduction and package acceptance
 
 From `apps/electron`, run the repository's TypeScript/CSS test loader for

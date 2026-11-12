@@ -404,7 +404,10 @@ const recoveryDocumentId = `${Date.now().toString(36)}-${Math.random().toString(
 let recoverySubscriptionId = 0;
 function reportSessionRecovery(sample: SessionRecoveryDiagnostic): void {
   const fields = Object.fromEntries(Object.entries(sample).filter(([, value]) => value !== undefined));
-  void ipcRenderer.invoke(CH_SESSION_RECOVERY, { ...fields, documentId: recoveryDocumentId }).catch(() => undefined);
+  // No reply is needed, and late shutdown samples must not invoke an IPC
+  // handler that the main process has already removed.
+  try { ipcRenderer.send(CH_SESSION_RECOVERY, { ...fields, documentId: recoveryDocumentId }); }
+  catch { /* The renderer frame may already be closing. */ }
 }
 
 function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelope<ClientEvent>) => void): Unsubscribe {

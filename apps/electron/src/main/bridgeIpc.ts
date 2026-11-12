@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { EventEmitter } from 'node:events';
 
 export const CH_SEND_PROMPT = 'lingxi:sendPrompt';
 
@@ -42,7 +43,7 @@ export const require = createRequire(import.meta.url);
 
 const electronModule = require('electron');
 
-export const ipcMain = (typeof electronModule === 'string' ? undefined : electronModule.ipcMain) ?? {
+export const ipcMain = (typeof electronModule === 'string' ? undefined : electronModule.ipcMain) ?? Object.assign(new EventEmitter(), {
   handle: () => { throw new Error('ipcMain is unavailable outside Electron'); },
   removeHandler: () => undefined,
-};
+});

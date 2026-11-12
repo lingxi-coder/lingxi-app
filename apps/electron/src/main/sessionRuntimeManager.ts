@@ -1,6 +1,6 @@
 import { assertSessionRef, isSessionId } from './sessionIdentity.js';
 import type { ClientEvent, PermissionModeId } from '@lingxi/bridge-client';
-import type { IpcMainInvokeEvent, WebContents } from 'electron';
+import type { IpcMainEvent, IpcMainInvokeEvent, WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { SessionRuntime } from './bridge.js';
@@ -141,6 +141,7 @@ export class SessionRuntimeManager {
   private accessSequence = 0;
   private cacheTrimScheduled = false;
   private registered = false;
+  private removeRecoveryListener: (() => void) | undefined;
 
   /** Routes visualization documents and state writes to the session that issued the mount. */
   readonly visualizations = new VisualizationRouter({
@@ -881,8 +882,10 @@ export class SessionRuntimeManager {
     if (this.registered) return;
     this.registered = true;
     const recoveryBudgets = new WeakMap<WebContents, { started: number; count: number }>();
-    ipcMain.handle(CH_SESSION_RECOVERY, (event: IpcMainInvokeEvent, input: unknown) => {
-      this.assertSender(event);
+    const recoveryListener = (event: IpcMainEvent, input: unknown): boolean => {
+      // Diagnostics have no response lane. Ignore late/disallowed senders
+      // without turning a best-effort sample into an uncaught IPC error.
+      try { this.assertSender(event); } catch { return false; }
       const sample = parseSessionRecoveryDiagnostic(input);
       if (!sample) return false;
       const now = Date.now();
@@ -896,7 +899,9 @@ export class SessionRuntimeManager {
         ...sample, windowId: event.sender.id,
       }));
       return true;
-    });
+    };
+    ipcMain.on(CH_SESSION_RECOVERY, recoveryListener);
+    this.removeRecoveryListener = () => { ipcMain.removeListener(CH_SESSION_RECOVERY, recoveryListener); };
     ipcMain.handle(CH_EVENT_REPLAY, (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       const replay = this.replaySnapshots;
@@ -1154,7 +1159,7 @@ export class SessionRuntimeManager {
     for (const runtime of this.runtimes.values()) runtime.unregisterWindow(webContents);
   }
 
-  private assertSender(event: IpcMainInvokeEvent): void {
+  private assertSender(event: Pick<IpcMainInvokeEvent, 'sender' | 'senderFrame'>): void {
     const rendererUrls = this.targets.get(event.sender);
     const senderFrame = event.senderFrame;
     if (!rendererUrls || !senderFrame || senderFrame !== event.sender.mainFrame) throw new Error('unauthorized IPC sender');
@@ -1166,9 +1171,10 @@ export class SessionRuntimeManager {
 
   private unregisterIpc(): void {
     if (!this.registered) return;
+    this.removeRecoveryListener?.();
+    this.removeRecoveryListener = undefined;
     for (const channel of [
       CH_EVENT_REPLAY,
-      CH_SESSION_RECOVERY,
       CH_SEND_PROMPT, CH_APPROVE, CH_DENY, CH_APPROVE_COMPUTER_ACCESS, CH_DENY_COMPUTER_ACCESS,
       CH_ANSWER_ASK_USER_QUESTION, CH_CANCEL_ASK_USER_QUESTION, CH_CANCEL, CH_COMMAND, CH_CONNECTION_STATE,
       CH_MOD_UI_CONTROL, CH_MOD_UI_OPERATION,

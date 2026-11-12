@@ -2044,6 +2044,8 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     if (survivors.length > 0) {
       throw new Error(`tracked packaged processes survived cleanup: ${survivors.join(' | ')}`);
     }
+    assert.doesNotMatch(output.stderr, /No handler registered for ['"]lingxi:sessionRecovery['"]/,
+      'late recovery diagnostics must be harmless after IPC teardown');
   }
 }
 

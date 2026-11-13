@@ -2947,4 +2947,9 @@
     <string name="extension_directory_remove_source">移除来源</string>
     <string name="extension_directory_remove_mcp_note">是否从该作用域移除此 MCP 连接配置？</string>
     <string name="extension_directory_category">分类</string>
+    <string name="tool_denied">操作已被拒绝</string>
+    <string name="tool_denied_auto_review">自动审核拒绝了此操作</string>
+    <string name="tool_denied_reason">拒绝原因</string>
+    <string name="tool_denied_no_output">无输出</string>
+    <string name="tool_denied_exit_unknown">退出码未知</string>
 </resources>

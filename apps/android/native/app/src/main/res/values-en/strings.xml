@@ -2947,4 +2947,9 @@
     <string name="extension_directory_remove_source">Remove source</string>
     <string name="extension_directory_remove_mcp_note">Remove this MCP connection from its configured scope?</string>
     <string name="extension_directory_category">Category</string>
+    <string name="tool_denied">Command declined</string>
+    <string name="tool_denied_auto_review">Command declined by auto-review</string>
+    <string name="tool_denied_reason">Why it was denied</string>
+    <string name="tool_denied_no_output">No output</string>
+    <string name="tool_denied_exit_unknown">Exit code unknown</string>
 </resources>

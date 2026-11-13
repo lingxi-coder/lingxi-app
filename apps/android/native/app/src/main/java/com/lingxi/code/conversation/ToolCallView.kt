@@ -3,6 +3,8 @@ package com.lingxi.code.conversation
 import androidx.annotation.StringRes
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -91,7 +93,8 @@ internal fun ToolCallView(
     }
     val t = LingXiTheme.palette
     val display = call.display
-    val title = toolCallTitle(call)
+    val denial = toolDenialPresentation(call.status == AgentToolStatus.Failed, display?.headline, display?.body)
+    val title = if (denial != null) stringResource(if (denial.autoReview) R.string.tool_denied_auto_review else R.string.tool_denied) else toolCallTitle(call)
     val isSkill = call.header?.verb == ToolVerbUi.Skill || call.tool.equals("Skill", ignoreCase = true)
     val requiresCode = display != null && isLocalAppCodeRequired(call.tool, call.status, display.headline, display.body)
     val headline = if (requiresCode) stringResource(R.string.local_app_development_requires_code)
@@ -103,13 +106,11 @@ internal fun ToolCallView(
     val hovered by interaction.collectIsHoveredAsState()
     // Desktop parity: every result starts collapsed; the engine still owns
     // body/diff truncation and the client owns disclosure presentation.
-    val collapsible = display != null && display.hasExpandableContent
+    val collapsible = denial != null || (display != null && display.hasExpandableContent)
     val headlineInTitle = call.tool == "LocalApp" && call.status != AgentToolStatus.Failed &&
         (call.header?.primary == null || call.header.primary == headline)
-    val rowTitle = if (!collapsible && !requiresCode && headline != null && !headlineInTitle) "$title · $headline" else title
-    val showsContent = display != null &&
-        display.hasExpandableContent &&
-        expanded
+    val rowTitle = if (denial == null && !collapsible && !requiresCode && headline != null && !headlineInTitle) "$title · $headline" else title
+    val showsContent = collapsible && expanded
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -136,8 +137,8 @@ internal fun ToolCallView(
                     modifier = Modifier.size(18.dp), color = t.text3, strokeWidth = 1.5.dp,
                 )
             } else {
-                com.lingxi.code.components.LXIcon(toolIconName(call.header?.verb, call.tool),
-                    size = 18.dp, color = if (call.status == AgentToolStatus.Failed) t.danger else t.text3)
+                com.lingxi.code.components.LXIcon(if (denial != null) com.lingxi.code.components.LXIconName.ShieldTerminal else toolIconName(call.header?.verb, call.tool),
+                    size = 18.dp, color = if (denial != null) (if (t.isDark) Color(0xFFE9A56B) else Color(0xFFA64212)) else if (call.status == AgentToolStatus.Failed) t.danger else t.text3)
             }
             Spacer(Modifier.width(9.dp))
             Column(modifier = Modifier.weight(1f, fill = false)) {
@@ -154,7 +155,7 @@ internal fun ToolCallView(
                         fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            if (call.status == AgentToolStatus.Failed || call.status == AgentToolStatus.Cancelled) {
+            if (denial == null && (call.status == AgentToolStatus.Failed || call.status == AgentToolStatus.Cancelled)) {
                 Spacer(Modifier.width(9.dp))
                 Text(statusLabel, color = toolCallStatusColor(call.status), fontSize = 12.sp, maxLines = 1)
             }
@@ -384,46 +385,74 @@ internal fun toolCallStatusColor(status: AgentToolStatus): Color {
 internal fun ToolResultContent(call: ToolCallUi) {
     val display = call.display ?: return
     val t = LingXiTheme.palette
+    val denial = toolDenialPresentation(call.status == AgentToolStatus.Failed, display.headline, display.body)
     val requiresCode = isLocalAppCodeRequired(call.tool, call.status, display.headline, display.body)
     val localizedRefusal = if (requiresCode) stringResource(R.string.local_app_development_requires_code) else null
     val isSkill = call.header?.verb == ToolVerbUi.Skill || call.tool.equals("Skill", ignoreCase = true)
+    val clipboard = LocalClipboardManager.current
     val shell = call.header?.verb == ToolVerbUi.Shell || call.tool.equals("Shell", ignoreCase = true)
     ToolDetailPanel(
         label = if (shell) "Shell" else if (isSkill) stringResource(R.string.chat_tool_verb_skill) else call.header?.label ?: call.tool,
         modifier = Modifier.testTag("conversation.tool-detail.${call.id}"),
         footer = {
-            com.lingxi.code.components.LXIcon(
-                when (call.status) {
-                    AgentToolStatus.Unknown -> com.lingxi.code.components.LXIconName.Clock
-                    AgentToolStatus.Completed -> com.lingxi.code.components.LXIconName.Check
-                    AgentToolStatus.Failed, AgentToolStatus.Cancelled -> com.lingxi.code.components.LXIconName.X
-                    AgentToolStatus.Running -> com.lingxi.code.components.LXIconName.Clock
-                }, size = 13.dp, color = t.text3)
-            Text(toolCallStatusLabel(call.status), color = t.text3, fontSize = 12.sp)
+            if (denial != null) {
+                if (shell) Text(stringResource(R.string.tool_denied_exit_unknown), color = t.text3, fontSize = 12.sp)
+            } else {
+                com.lingxi.code.components.LXIcon(
+                    when (call.status) {
+                        AgentToolStatus.Unknown -> com.lingxi.code.components.LXIconName.Clock
+                        AgentToolStatus.Completed -> com.lingxi.code.components.LXIconName.Check
+                        AgentToolStatus.Failed, AgentToolStatus.Cancelled -> com.lingxi.code.components.LXIconName.X
+                        AgentToolStatus.Running -> com.lingxi.code.components.LXIconName.Clock
+                    }, size = 13.dp, color = t.text3)
+                Text(toolCallStatusLabel(call.status), color = t.text3, fontSize = 12.sp)
+            }
         },
     ) {
         if (shell) {
             val command = call.header?.subLine?.let { "${it.prefix} ${it.text}" } ?: call.syntheticShellCommand
-            command?.let { Text(it, color = t.text2, fontSize = 13.sp, lineHeight = 21.sp, fontFamily = FontFamily.Monospace) }
+            command?.let {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                    Text(it, Modifier.weight(1f), color = t.text2, fontSize = 13.sp, lineHeight = 21.sp, fontFamily = FontFamily.Monospace)
+                    if (denial != null) androidx.compose.material3.IconButton(onClick = {
+                        clipboard.setText(AnnotatedString(call.header?.subLine?.text ?: call.syntheticShellCommand.orEmpty()))
+                    }, modifier = Modifier.size(40.dp)) {
+                        com.lingxi.code.components.LXIcon(com.lingxi.code.components.LXIconName.Copy,
+                            size = 14.dp, color = t.text3, contentDescription = stringResource(R.string.chat_copy_code))
+                    }
+                }
+            }
         }
-        display.diff?.takeIf { it.rows.isNotEmpty() }?.let { DiffView(diff = it) }
-        display.body?.takeIf { it.isNotEmpty() }?.let { body ->
-            if (isSkill && localizedRefusal == null) AIText(markdown = body, compact = true)
-            else SelectionContainer { Text(
-                text = localizedRefusal ?: body,
-                color = t.text2,
-                fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
-                lineHeight = 21.sp,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier.fillMaxWidth(),
-            ) }
+        if (denial != null) {
+            if (!shell) call.header?.primary?.let { Text(it, color = t.text2, fontSize = 13.sp, fontFamily = FontFamily.Monospace) }
+            Text(stringResource(R.string.tool_denied_no_output), color = t.text2, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+        } else {
+            display.diff?.takeIf { it.rows.isNotEmpty() }?.let { DiffView(diff = it) }
+            display.body?.takeIf { it.isNotEmpty() }?.let { body ->
+                if (isSkill && localizedRefusal == null) AIText(markdown = body, compact = true)
+                else SelectionContainer { Text(
+                    text = localizedRefusal ?: body,
+                    color = t.text2,
+                    fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
+                    lineHeight = 21.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.fillMaxWidth(),
+                ) }
+            }
         }
-        if (display.bodyTruncated) {
+        if (denial == null && display.bodyTruncated) {
             Text(
                 text = stringResource(R.string.chat_tool_body_truncated),
                 color = t.text4,
                 fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
             )
+        }
+    }
+    if (denial != null) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(stringResource(R.string.tool_denied_reason), color = t.text2, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            SelectionContainer { Text(denial.reason, color = t.text3, fontSize = 13.sp, lineHeight = 21.sp) }
+            if (display.bodyTruncated) Text(stringResource(R.string.chat_tool_body_truncated), color = t.text4, fontSize = 12.sp)
         }
     }
 }

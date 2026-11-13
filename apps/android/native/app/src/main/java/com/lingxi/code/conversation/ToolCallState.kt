@@ -466,3 +466,14 @@ internal fun spawnResultAgentId(tool: String, json: String): String? {
         listOf("agentId", "agent_id").firstNotNullOfOrNull { key -> (value.opt(key) as? String)?.takeIf(String::isNotBlank) }
     }.getOrNull()
 }
+
+/** Compatibility presentation for persisted gate refusals; shell EACCES remains a command failure. */
+internal data class ToolDenialPresentation(val reason: String, val autoReview: Boolean)
+internal fun toolDenialPresentation(failed: Boolean, headline: String?, body: String?): ToolDenialPresentation? {
+    if (!failed) return null
+    val reason = body?.trim()?.takeIf { it.isNotEmpty() } ?: headline?.trim().orEmpty()
+    val text = reason.lowercase(java.util.Locale.ROOT)
+    val prefixes = listOf("permission to use ", "permission denied:", "permission denied by ", "tool use denied", "user denied ", "automatic approval review failed", "command declined by auto-review")
+    if (text != "permission denied" && prefixes.none { text.startsWith(it) }) return null
+    return ToolDenialPresentation(reason, text.contains("auto-review") || text.contains("auto review") || text.contains("automatic approval review"))
+}

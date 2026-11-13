@@ -218,3 +218,17 @@ final class ConversationRenderLayoutTests: XCTestCase {
         )
     }
 }
+
+final class ToolDenialPresentationTests: XCTestCase {
+    func testGateRefusalRetainsFullReasonAndSource() {
+        let reason = "Automatic approval review failed: Bad Request"
+        XCTAssertEqual(ToolDenialPresentation(failed: true, headline: "Failed", body: reason)?.reason, reason)
+        XCTAssertEqual(ToolDenialPresentation(failed: true, headline: "Failed", body: reason)?.autoReview, true)
+        XCTAssertEqual(ToolDenialPresentation(failed: true, headline: "Permission to use Bash has been denied.", body: nil)?.autoReview, false)
+    }
+    func testCommandFailuresAndSuccessfulQuotesStayOrdinaryResults() {
+        XCTAssertNil(ToolDenialPresentation(failed: false, headline: "Permission denied", body: nil))
+        XCTAssertNil(ToolDenialPresentation(failed: true, headline: "Failed", body: "bash: ./private: Permission denied"))
+        XCTAssertNil(ToolDenialPresentation(failed: true, headline: "Process exited with code 1", body: nil))
+    }
+}

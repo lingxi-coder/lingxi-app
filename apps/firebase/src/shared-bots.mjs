@@ -4,6 +4,7 @@ import { admissionId, sharedBotPermits } from './team-execution-contract.mjs';
 import { sharedBotCommand } from './shared-bot-commands.mjs';
 import { messagePreview } from './team-message-preview.mjs';
 import { prepareSharedConversation } from './team-conversations.mjs';
+import { attachable, cancelUpload, createUpload, finalizeUpload, putUploadPart, readAttachmentPart, revokeAttachment } from './team-attachments.mjs';
 
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
@@ -12,7 +13,7 @@ const same = (left, right) => hash(left) === hash(right);
 const randomId = () => randomBytes(24).toString('base64url');
 const nowDay = now => new Date(now).toISOString().slice(0, 10);
 const memberIdentity = (uid, member) => ({ uid, generation: member.generation });
-const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations', 'readTaskList', 'readList', 'getTransfer', 'readTransferPart']);
+const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations', 'readTaskList', 'readList', 'getTransfer', 'readTransferPart', 'readAttachmentPart']);
 /** An offer to hand a Bot over is open for seven days. */
 const transferMs = 7 * 24 * 60 * 60 * 1000, openTransfer = state => state === 'offered' || state === 'accepted';
 const revisionLimit = 200;
@@ -140,6 +141,12 @@ export class SharedBotsStore {
       else if (action === 'listArtifactRevisions') response = await this.artifactRevisions(context);
       else if (action === 'reviseArtifact') response = await this.reviseArtifact(context);
       else if (action === 'setConversationPolicy') response = await this.conversationPolicy(context);
+      else if (action === 'createUpload') response = await createUpload(this, context);
+      else if (action === 'putUploadPart') response = await putUploadPart(this, context);
+      else if (action === 'finalizeUpload') response = await finalizeUpload(this, context);
+      else if (action === 'cancelUpload') response = await cancelUpload(this, context);
+      else if (action === 'readAttachmentPart') response = await readAttachmentPart(this, context);
+      else if (action === 'revokeAttachment') response = await revokeAttachment(this, context);
       else deny(400, 'INVALID_INPUT');
       if (!readActions.has(action)) {
         const saved = { schemaVersion: 1, requestDigest,
@@ -417,9 +424,11 @@ export class SharedBotsStore {
       return change.data().submissionReceipt;
     }
     if (p.replyTo && !(await tx.get(ref.collection('messages').doc(p.replyTo))).exists) deny(400, 'REPLY_REQUIRED');
-    const bots = await tx.getAll(...p.targets.map(id => team.collection('sharedBots').doc(id)));
-    const owners = await tx.getAll(...bots.map(doc => team.collection('members').doc(doc.data()?.identity.maintainer.uid ?? '_missing')));
-    const deployments = await tx.getAll(...bots.map(doc => team.collection('deployments').doc(doc.data()?.identity.activeDeploymentId ?? '_missing')));
+    const files = await attachable(tx, team, identity, p.conversationId, p.attachments, now);
+    const all = refs => refs.length ? tx.getAll(...refs) : [];
+    const bots = await all(p.targets.map(id => team.collection('sharedBots').doc(id)));
+    const owners = await all(bots.map(doc => team.collection('members').doc(doc.data()?.identity.maintainer.uid ?? '_missing')));
+    const deployments = await all(bots.map(doc => team.collection('deployments').doc(doc.data()?.identity.activeDeploymentId ?? '_missing')));
     for (const [index, snapshot] of bots.entries()) {
       const bot = snapshot.data(), d = deployments[index].data();
       if (!identityPermitted(bot, identity) || owners[index].data()?.generation !== bot.identity.maintainer.generation) deny(403, 'BOT_USE_REQUIRED');
@@ -430,15 +439,16 @@ export class SharedBotsStore {
       if (!d?.enabled || !d.ready || d.onlineUntil <= now) deny(409, 'HOST_UNAVAILABLE');
       if (bot.grants.some(grant => !this.grantPermits(grant, identity))) deny(403, 'INPUT_GRANT_REQUIRED');
     }
-    const day = nowDay(now), quotaKeys = [hash([day, 'team']), hash([day, 'member', identity.uid, identity.generation]),
-      ...p.targets.map(id => hash([day, 'bot', id]))];
+    // A message that asks no Bot uses no request quota.
+    const day = nowDay(now), quotaKeys = p.targets.length ? [hash([day, 'team']), hash([day, 'member', identity.uid, identity.generation]),
+      ...p.targets.map(id => hash([day, 'bot', id]))] : [];
     const quotaRefs = quotaKeys.map(id => team.collection('requestQuotas').doc(id));
-    const quotas = await tx.getAll(...quotaRefs);
+    const quotas = await all(quotaRefs);
     const limits = [Math.min(...bots.map(doc => doc.data().quotas.team)), Math.min(...bots.map(doc => doc.data().quotas.member)),
       ...bots.map(doc => doc.data().quotas.bot)];
     const increments = [p.targets.length, p.targets.length, ...p.targets.map(() => 1)];
     // A request queued behind a live lock (running or waiting) must outlive it.
-    const locks = await tx.getAll(...p.targets.map(id => team.collection('chatExecutionLocks').doc(hash([id, p.conversationId]))));
+    const locks = await all(p.targets.map(id => team.collection('chatExecutionLocks').doc(hash([id, p.conversationId]))));
     for (const [i, snapshot] of quotas.entries()) if ((snapshot.data()?.used ?? 0) + increments[i] > limits[i]) deny(429, 'REQUEST_QUOTA_EXCEEDED');
     const seq = c.lastSeq + 1, changeSeq = c.lastChangeSeq + 1;
     if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) deny(409, 'CURSOR_LIMIT');
@@ -446,12 +456,15 @@ export class SharedBotsStore {
     const response = { messageId: p.messageId, changeId: p.changeId, changeSeq, tasks };
     const author = { kind: 'user', uid: identity.uid, displayName: self.displayName || 'Member' }, at = new Date(now);
     tx.create(ref.collection('messages').doc(p.messageId), { seq, changeSeq, changeId: p.changeId, text: p.text, kind: 'text', author,
-      createdAt: at, taskIds: tasks.map(task => task.taskId), mentions: p.targets.map(id => `shared_bot:${id}`), ...(p.replyTo ? { replyTo: p.replyTo } : {}) });
+      createdAt: at, ...(tasks.length ? { taskIds: tasks.map(task => task.taskId), mentions: p.targets.map(id => `shared_bot:${id}`) } : {}),
+      ...(p.replyTo ? { replyTo: p.replyTo } : {}), ...(files.attachments.length ? { attachments: files.attachments } : {}) });
+    files.attach(p.messageId);
     tx.create(ref.collection('changes').doc(p.changeId), { seq: changeSeq, messageId: p.messageId, operation: 'create',
       actorUid: identity.uid, generation: identity.generation, textDigest: createHash('sha256').update(p.text).digest('hex'), at,
       submissionDigest: digest, submissionReceipt: response });
     tx.update(ref, { lastSeq: seq, lastChangeSeq: changeSeq, lastChange: { id: p.changeId, seq: changeSeq },
-      lastMessage: { id: p.messageId, seq, at, author, preview: messagePreview(p.text) } });
+      // A message of files alone is listed by their names.
+      lastMessage: { id: p.messageId, seq, at, author, preview: messagePreview(p.text || files.attachments.map(file => file.name).join(', ')) } });
     for (const [i, target] of tasks.entries()) {
       const b = bots[i].data();
       tx.create(team.collection('tasks').doc(target.taskId), { schemaVersion: 1, executionVersion: 2, ...target,

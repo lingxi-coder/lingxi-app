@@ -15,6 +15,7 @@ import { CatalogStore } from './store.mjs';
 import { createPushHandler, PushStore } from './push.mjs';
 import { PAIR_CONVERSATION_ID, createTeamsHandler, TeamsStore } from './teams.mjs';
 import { FriendsStore, friendNotifier } from './friends.mjs';
+import { sweepUploads } from './team-attachments.mjs';
 import { OAuth2Client } from 'google-auth-library';
 import { createTeamMarketEligibilityHandler, TeamMarketEligibilityStore } from './team-market-eligibility.mjs';
 
@@ -61,7 +62,7 @@ const friendsStore = new FriendsStore(teamsDb, Date.now, { auth: getAuth(app),
 
 export const prunePushRegistrations = onSchedule({ schedule: 'every 24 hours', timeZone: 'Etc/UTC',
   region: 'us-central1', memory: '256MiB', timeoutSeconds: 540, maxInstances: 1,
-  serviceAccount: pushServiceAccount }, async () => { await pushStore.prune(); await friendsStore.prune(); });
+  serviceAccount: pushServiceAccount }, async () => { await pushStore.prune(); await friendsStore.prune(); await sweepUploads(teamsDb); });
 
 const teamsHandler = createTeamsHandler({ store: new TeamsStore(teamsDb), friends: friendsStore,
   verifyToken: token => getAuth(app).verifyIdToken(token, true),

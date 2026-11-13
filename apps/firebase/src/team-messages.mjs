@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { createTeamConversation } from './team-conversations.mjs';
 import { SharedBotsStore } from './shared-bots.mjs';
 import { messagePreview } from './team-message-preview.mjs';
+import { recallAttachments } from './team-attachments.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
@@ -106,6 +107,7 @@ export class TeamMessagesStore {
       if (input.operation !== 'create' && (!m || m.author.kind !== 'user' || m.author.uid !== user.uid)) fail(403, 'MESSAGE_AUTHOR_REQUIRED');
       if (m?.recalled) fail(409, 'MESSAGE_RECALLED');
       if (input.replyTo && !(await tx.get(ref.collection('messages').doc(input.replyTo))).exists) fail(400, 'REPLY_REQUIRED');
+      const releaseFiles = input.operation === 'recall' ? await recallAttachments(tx, teamRef, m, this.clock()) : () => {};
       const changeSeq = c.lastChangeSeq + 1, seq = input.operation === 'create' ? c.lastSeq + 1 : m.seq;
       if (!Number.isSafeInteger(changeSeq) || !Number.isSafeInteger(seq)) fail(409, 'CURSOR_LIMIT');
       const now = new Date(this.clock());
@@ -127,7 +129,7 @@ export class TeamMessagesStore {
             ...(input.operation === 'recall' ? { recalled: true } : {}) };
         }
       }
-      tx.update(ref, update); tx.create(changeRef, change);
+      tx.update(ref, update); tx.create(changeRef, change); releaseFiles();
       return { messageId: input.messageId, changeId: input.changeId, changeSeq };
     });
   }

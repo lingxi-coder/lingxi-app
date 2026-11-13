@@ -125,6 +125,30 @@
           "queryScope": "COLLECTION_GROUP"
         }
       ]
+    },
+    {
+      "collectionGroup": "transferParts",
+      "fieldPath": "data",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "parts",
+      "fieldPath": "data",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "uploads",
+      "fieldPath": "expiresAt",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
     }
   ]
 }

@@ -1,11 +1,17 @@
 import { z } from 'zod';
 import { deploymentRecord, memberRef, usePolicy } from './team-execution-contract.mjs';
+import { attachmentLimits, attachmentTypes } from './team-attachments.mjs';
 
 export const executionId = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const cursor = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 const text = z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 8192);
+/** One part of a file or of a handover package: at most 700 KiB of bytes, which with its record stays under Firestore's 1 MiB per document. */
+const base64Part = z.string().min(4).max(4 * Math.ceil(attachmentLimits.partBytes / 3)).regex(/^[A-Za-z0-9+/]+={0,2}$/u);
+const partIndex = z.number().int().min(0).max(Math.ceil(attachmentLimits.fileBytes / attachmentLimits.partBytes) - 1);
+/** A file's own name, never a path. */
+const fileName = z.string().min(1).max(120).refine(value => value === value.trim() && !/[/\\\u0000-\u001f\u007f]/u.test(value) && value !== '.' && value !== '..');
 const thread = { conversationId: executionId };
 const task = { taskId: executionId };
 const host = { deploymentId: executionId, hostId: executionId, accountEpoch: positive };
@@ -63,7 +69,7 @@ const payloads = {
   }).strict().refine(value => value.inputs.filter(input => input.kind === 'persona').length === 1, 'Exactly one published persona required'),
   // Handover of a Bot to another member (detailed design 18). The package is the published role and files, in parts of at most 700 KiB.
   putTransferPart: z.object({ transferId: executionId, sharedBotId: executionId, index: z.number().int().min(0).max(7),
-    data: z.string().min(4).max(933336).regex(/^[A-Za-z0-9+/]+={0,2}$/u) }).strict(),
+    data: base64Part }).strict(),
   offerTransfer: z.object({ transferId: executionId, sharedBotId: executionId, expectedRevision: positive, to: memberRef,
     parts: z.number().int().min(1).max(8), packageDigest: digest }).strict(),
   acceptTransfer: z.object({ transferId: executionId }).strict(),
@@ -81,8 +87,19 @@ const payloads = {
   activateDeployment: z.object({ deploymentId: executionId, hostId: executionId,
     expectedAccountEpoch: positive, newAccountEpoch: positive }).strict()
     .refine(value => value.newAccountEpoch > value.expectedAccountEpoch, 'Account epoch must advance'),
-  submit: z.object({ ...thread, messageId: executionId, changeId: executionId, text,
-    targets: z.array(executionId).min(1).max(8).refine(unique), replyTo: executionId.optional() }).strict(),
+  // A message that asks Bots, carries files, or both. A message with neither is an ordinary message and is not sent here.
+  submit: z.object({ ...thread, messageId: executionId, changeId: executionId, text: z.string().refine(value => Buffer.byteLength(value, 'utf8') <= 8192),
+    targets: z.array(executionId).max(8).refine(unique), replyTo: executionId.optional(),
+    attachments: z.array(executionId).min(1).max(attachmentLimits.messageFiles).refine(unique).optional() }).strict()
+    .refine(value => value.targets.length > 0 || value.attachments !== undefined).refine(value => value.text.length > 0 || value.attachments !== undefined),
+  // Files in a message (detailed design 19): uploaded for one Chat in parts of at most 700 KiB, checked as a whole, then carried by a message.
+  createUpload: z.object({ ...thread, uploadId: executionId, name: fileName, mime: z.enum(attachmentTypes),
+    byteLength: z.number().int().min(1).max(attachmentLimits.fileBytes), sha256: digest }).strict(),
+  putUploadPart: z.object({ uploadId: executionId, index: partIndex, data: base64Part }).strict(),
+  finalizeUpload: z.object({ uploadId: executionId }).strict(),
+  cancelUpload: z.object({ uploadId: executionId }).strict(),
+  readAttachmentPart: z.object({ attachmentId: executionId, index: partIndex }).strict(),
+  revokeAttachment: z.object({ attachmentId: executionId, changeId: executionId }).strict(),
   listHostTasks: z.object({ ...host, after: executionId.optional() }).strict(),
   startTask: z.object({ ...host, ...task, expectedLastChangeSeq: cursor }).strict(),
   prepareTask: z.object({ ...host, ...task }).strict(),

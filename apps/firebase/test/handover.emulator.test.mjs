@@ -148,6 +148,11 @@ test('handover: the Bot keeps its entry, its audience and its shared results; au
 });
 
 test('handover: every step has one answer that can be asked for again (E3)', options, async () => {
+  // A part as large as the Desktop cuts them (700 KiB) is taken and given back whole.
+  const full = Buffer.alloc(700 * 1024, 7).toString('base64');
+  await execute('putTransferPart', { transferId: 'transfer_full', sharedBotId: botId, index: 0, data: full });
+  assert.equal((await db.collection(`teams/${teamId}/sharedBots/${botId}/transferParts`).get()).docs[0].data().data, full);
+  await db.recursiveDelete(db.collection(`teams/${teamId}/sharedBots/${botId}/transferParts`));
   // Who may do what.
   await assert.rejects(offer('transfer_self1', owner), { code: 'CURRENT_RECIPIENT_REQUIRED' });
   await assert.rejects(offer('transfer_gone1', { uid: 'stranger' }), { code: 'CURRENT_RECIPIENT_REQUIRED' });

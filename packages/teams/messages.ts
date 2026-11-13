@@ -4,6 +4,8 @@ export type MessageAuthor = { kind: 'user'; uid: string; displayName?: string } 
 export const authorIdentity = (a: MessageAuthor) => a.kind === 'user' ? `user:${a.uid}` : `shared_bot:${a.sharedBotId}`;
 export interface TeamConversation {
   id: string; kind: 'dm' | 'group' | 'channel' | 'bot_dm'; title: string; participants: string[];
+  /** Who can read it, as written when it was made: its people and the maintainers its Bots had then. Absent when the source does not say. */
+  readers?: string[];
   lastSeq: number; lastChangeSeq: number; lastReadSeq: number;
   /** Newest message for conversation lists. Absent until the conversation has a message; then always the full pointer. */
   lastMessage?: { id: string; seq: number; at: string | null; author: MessageAuthor; preview: string; recalled?: true };
@@ -81,7 +83,8 @@ export function mergeConversation(old: TeamConversation | undefined, value: Team
   if (old && old.kind === merged.kind && old.title === merged.title
     && old.lastSeq === merged.lastSeq && old.lastChangeSeq === merged.lastChangeSeq && old.lastReadSeq === merged.lastReadSeq
     && sameLastMessage(old.lastMessage, merged.lastMessage)
-    && old.participants.length === merged.participants.length && old.participants.every((value, index) => value === merged.participants[index])) return old;
+    && old.participants.length === merged.participants.length && old.participants.every((value, index) => value === merged.participants[index])
+    && (old.readers ?? []).join('\n') === (merged.readers ?? []).join('\n')) return old;
   return merged;
 }
 export function mergeDirectory(state: MessageProjection, incoming: TeamConversation[], replace: boolean): MessageProjection {

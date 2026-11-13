@@ -949,3 +949,84 @@ test('the host status names what stands between a published Bot and an answer (M
  f.mock.service.hostMessages=answer;assert.deepEqual(await state(),['ready',undefined]);
  f.store.trash(f.bot.bot_id);assert.deepEqual(await state(),['not_ready','bot']);assert.equal(beats(f).at(-1),false);
 });
+/** What the service keeps of a handover, between the computer that offers a Bot (`from`, signed in as `owner`) and the one that takes it over (`to`, as `other`). */
+function handoverService(from:ReturnType<typeof fixture>,to:ReturnType<typeof fixture>,card:Record<string,unknown>={}){
+ const parts=new Map<number,string>(),receipts=new Map<string,any>();let transfer:any;
+ const published=()=>from.mock.commands.filter(c=>c.action==='publishSharedBot').at(-1).payload;
+ const listed=()=>({sharedBotId,state:'published',...(transfer?.state==='completed'?{revision:transfer.botRevision+1,maintainer:{uid:'other',generation:1}}:{revision:published().expectedRevision+1,maintainer:{uid:'owner',generation:1}}),...card});
+ for(const [f,uid] of [[from,'owner'],[to,'other']] as const){const original=f.mock.service.hostMessages.bind(f.mock.service);
+  f.mock.service.hostMessages=(async(c:any,command:any)=>{const p=command.payload,action=command.action as string;
+   if(!['listSharedBots','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer'].includes(action)&&!(action==='activateDeployment'&&uid==='other'))return original(c,command);
+   f.mock.service.assertHostContext(c);f.mock.commands.push(command);
+   if(action==='listSharedBots')return {bots:[listed()]};
+   if(action==='putTransferPart'){if(transfer?.transferId===p.transferId)throw new TeamsApiError('TRANSFER_SEALED',409);parts.set(p.index,p.data);return {};}
+   if(action==='offerTransfer'){transfer??={transferId:p.transferId,sharedBotId:p.sharedBotId,from:{uid,generation:1},to:p.to,state:'offered',botRevision:p.expectedRevision,parts:p.parts,packageDigest:p.packageDigest,
+    manifest:published().inputs.map((v:any)=>({resourceId:v.resourceId,revision:v.revision,digest:v.digest,kind:v.kind}))};return {...transfer};}
+   if(action==='acceptTransfer'){assert.equal(uid,'other');if(transfer.state==='offered')transfer.state='accepted';return {...transfer};}
+   if(action==='readTransferPart'){assert.equal(transfer.state,'accepted');return {data:parts.get(p.index)};}
+   if(action==='completeTransfer'){if(!receipts.has(command.commandId)){const revision=transfer.botRevision+1;transfer.state='completed';
+    receipts.set(command.commandId,{sharedBotId,revision,grantIds:p.inputs.map((v:any)=>digest(JSON.stringify([sharedBotId,revision,v.resourceId])))});}return receipts.get(command.commandId);}
+   return {};
+  }) as typeof original;}
+ return {parts,card,transfer:()=>transfer};
+}
+const offered={teamId,generation:1,transferId:'transfer00001',sharedBotId,expectedRevision:1,to:{uid:'other',generation:1}};
+const loseOnce=(f:ReturnType<typeof fixture>,action:string)=>{const answer=f.mock.service.hostMessages;let lost=false;
+ f.mock.service.hostMessages=(async(c:any,command:any)=>{const result=await answer(c,command);if(command.action===action&&!lost){lost=true;throw Error('SERVICE_UNAVAILABLE');}return result;}) as typeof answer;};
+test('a Bot is handed over with its published role and files and nothing else, and the new maintainer answers with their own Bot and model (M3-3)',async t=>{
+ const f=fixture(t),g=fixture(t,undefined,{modelRoute:async()=>({route:{...route(),model_id:'their-model'},profiles:[route().model_profile],assertCurrent:async()=>{}})});g.mock.switch('other',0);
+ const path=join(f.root,'prices.md');writeFileSync(path,'Shared prices 价格');f.select([path]);const [file]=await f.connector.selectSharedFiles('owner',f.bot.bot_id);
+ await f.connector.publishLocalBot('owner',{...f.input,fileTokens:[file!.token]});const h=handoverService(f,g);
+ await assert.rejects(f.connector.offerSharedBot('owner',{...offered,to:{uid:'owner',generation:1}}),/INVALID_INPUT/);
+ await assert.rejects(f.connector.offerSharedBot('owner',{...offered,expectedRevision:2}),/BOT_REVISION_CONFLICT/);
+ await assert.rejects(g.connector.offerSharedBot('other',offered),/INVALID_INPUT|BOT_REVISION_CONFLICT/,'only the computer that publishes the Bot holds what goes with it');
+ await f.connector.offerSharedBot('owner',offered);
+ // What left the computer: the documents of the publication, and no word of the local Bot, its model or its account.
+ const sent=JSON.parse(Buffer.concat([...h.parts.entries()].sort(([a],[b])=>a-b).map(([,data])=>Buffer.from(data,'base64'))).toString());
+ const published=await f.privateStore.snapshot('owner',(await f.privateStore.bindings('owner'))[0]!.snapshot);
+ assert.deepEqual(sent,{schemaVersion:1,documents:published.documents});assert.equal(published.documents.length,2);
+ assert.doesNotMatch(JSON.stringify(f.mock.commands.filter(c=>['putTransferPart','offerTransfer'].includes(c.action)).map(c=>({...c,payload:{...c.payload,data:undefined}})))+JSON.stringify(sent),/PRIVATE_ROLE_NOT_SHARED|synthetic|credential|anthropic/);
+ const taken=await g.connector.acceptSharedBot('other',{teamId,generation:1,transferId:'transfer00001',instanceId:g.bot.bot_id});assert.deepEqual(taken,{sharedBotId,revision:2});
+ const binding=(await g.privateStore.bindings('other'))[0]!,theirs=await g.privateStore.snapshot('other',binding.snapshot);
+ assert.deepEqual([binding.ownerUid,binding.revision,binding.instanceId,binding.publicationId],['other',2,g.bot.bot_id,'transfer00001']);
+ assert.deepEqual(theirs.documents,published.documents);assert.equal(theirs.instructions,published.instructions);assert.equal(theirs.model_id,'their-model','their own model answers');
+ const complete=g.mock.commands.find(c=>c.action==='completeTransfer'),deployment=complete.payload.deployment;
+ assert.deepEqual([complete.commandId,deployment.owner,deployment.hostId,deployment.instanceId,deployment.definitionDigest,deployment.revision],['transfer00001',{uid:'other',generation:1},g.privateStore.hostId,g.bot.bot_id,binding.snapshot,2]);
+ assert.notEqual(g.privateStore.hostId,f.privateStore.hostId);assert.notEqual(deployment.deploymentId,(await f.privateStore.bindings('owner'))[0]!.deploymentId);
+ assert.deepEqual(complete.payload.inputs,published.documents.map(d=>({resourceId:d.resourceId,revision:d.revision,digest:d.digest,kind:d.kind})));
+ // From now on the new computer serves the Bot and the earlier one says nothing more for it.
+ g.mock.wake();await settle(()=>beats(g).at(-1)===true);assert.deepEqual((await g.connector.status('other')).bots.map(b=>b.state),['ready']);
+ f.mock.wake();await f.connector.idle();assert.deepEqual((await f.connector.status('owner')).bots.map(b=>b.state),['stopped']);
+ const said=beats(f).length;f.mock.wake();await f.connector.idle();assert.equal(beats(f).length,said);
+});
+test('a lost answer to the offer or to the switch is asked for again with the same command, without a second model check (M3-3)',async t=>{
+ let probes=0;const f=fixture(t),g=fixture(t,undefined,{validateModel:async()=>{probes++;}});g.mock.switch('other',0);const second=g.store.create({name:'Second',persona:'Another',model:'anthropic/synthetic'});
+ await f.connector.publishLocalBot('owner',f.input);handoverService(f,g);
+ loseOnce(f,'offerTransfer');await assert.rejects(f.connector.offerSharedBot('owner',offered),/SERVICE_UNAVAILABLE/);await f.connector.offerSharedBot('owner',offered);
+ const offers=f.mock.commands.filter(c=>c.action==='offerTransfer');assert.equal(offers.length,2);assert.deepEqual(offers[0],offers[1]);
+ const accept={teamId,generation:1,transferId:'transfer00001',instanceId:g.bot.bot_id};
+ loseOnce(g,'completeTransfer');await assert.rejects(g.connector.acceptSharedBot('other',accept),/SERVICE_UNAVAILABLE/);
+ // The switch happened: the next pass of this computer, or asking again, finds that out with the command it saved before sending.
+ await assert.rejects(g.connector.acceptSharedBot('other',{...accept,instanceId:second.bot_id}),/COMMAND_ID_CONFLICT/,'the Bot that hosts it was chosen');
+ assert.deepEqual(await g.connector.acceptSharedBot('other',accept),{sharedBotId,revision:2});
+ g.mock.wake();await settle(()=>beats(g).at(-1)===true);
+ const completes=g.mock.commands.filter(c=>c.action==='completeTransfer');assert.ok(completes.length>=2);for(const again of completes)assert.deepEqual(again,completes[0]);
+ assert.equal(probes,1);assert.equal(g.mock.commands.filter(c=>c.action==='readTransferPart').length,1);
+ const [binding]=await g.privateStore.bindings('other');assert.deepEqual([binding!.revision,binding!.instanceId],[2,g.bot.bot_id]);
+});
+test('a package that is not what was offered, a list the model cannot keep, or a model that does not answer leaves the Bot where it is (M3-3)',async t=>{
+ let model=true;const f=fixture(t),g=fixture(t,undefined,{validateModel:async()=>{if(!model)throw Error('TEAM_MODEL_UNAVAILABLE');}});g.mock.switch('other',0);
+ await f.connector.publishLocalBot('owner',f.input);const h=handoverService(f,g,{sharedList:{title:'Packing'}});await f.connector.offerSharedBot('owner',offered);
+ const accept={teamId,generation:1,transferId:'transfer00001',instanceId:g.bot.bot_id},real=h.parts.get(0)!,realDigest=h.transfer().packageDigest;
+ const forged=JSON.parse(Buffer.from(real,'base64').toString());forged.documents[0].text='A role nobody published';const text=JSON.stringify(forged);
+ h.parts.set(0,Buffer.from(text).toString('base64'));await assert.rejects(g.connector.acceptSharedBot('other',accept),/TRANSFER_PACKAGE_MISMATCH/,'not the bytes that were offered');
+ h.transfer().packageDigest=digest(text);await assert.rejects(g.connector.acceptSharedBot('other',accept),/TRANSFER_PACKAGE_MISMATCH/,'not the role the service published');
+ forged.documents[0].digest=digest(forged.documents[0].text);h.parts.set(0,Buffer.from(JSON.stringify(forged)).toString('base64'));h.transfer().packageDigest=digest(JSON.stringify(forged));
+ await assert.rejects(g.connector.acceptSharedBot('other',accept),/TRANSFER_PACKAGE_MISMATCH/);
+ h.parts.set(0,real);h.transfer().packageDigest=realDigest;
+ await assert.rejects(g.connector.acceptSharedBot('other',accept),/SHARED_LIST_UNSUPPORTED/);delete h.card.sharedList;
+ model=false;await assert.rejects(g.connector.acceptSharedBot('other',accept),/TEAM_MODEL_UNAVAILABLE/);
+ assert.equal(g.mock.commands.some(c=>c.action==='completeTransfer'),false);assert.deepEqual(await g.privateStore.bindings('other'),[]);assert.deepEqual(await g.privateStore.publications('other'),[]);
+ f.mock.wake();await settle(()=>beats(f).at(-1)===true);assert.deepEqual((await f.connector.status('owner')).bots.map(b=>b.state),['ready']);
+ model=true;assert.deepEqual(await g.connector.acceptSharedBot('other',accept),{sharedBotId,revision:2});
+});

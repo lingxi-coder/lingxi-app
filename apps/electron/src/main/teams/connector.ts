@@ -1,9 +1,9 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, lstat } from 'node:fs/promises';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { providerAccountEnvelope, type ProviderAccountLaunch } from '../provider-accounts.js';
-import type { LocalPublishableBot, PublishLocalBotInput, PublishedKnowledge, SelectedSharedFile, SharedBotCard, SharedHostBot, SharedHostStatus, SharedListItem, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
+import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedKnowledge, SelectedSharedFile, SharedBotCard, SharedHostBot, SharedHostStatus, SharedListItem, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
 import { isSharedListWrite } from '../../../../../packages/teams/execution-validation.js';
 import { TeamsApiError, type TeamSummary } from '../../../../../packages/teams/index.js';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source.js';
@@ -88,6 +88,27 @@ export const DELIVERY_SKEW_MS = 2 * 60 * 1000;
 const noCursor = { scope: null, sessionRevision: 0, lastMessageSeq: 0, lastChangeSeq: 0, bootstrapFromSeq: 0 };
 /** Model routes on which the runtime can continue a task in a new worker. Only a Bot on such a route publishes durable waits and may ask its requester. */
 const CONTINUABLE_PROTOCOLS = ['open_ai_chat'];
+/** A handover package travels in parts of this many bytes, each one command. */
+const TRANSFER_PART_BYTES = 700 * 1024, TRANSFER_PARTS = 8;
+interface TransferManifestEntry { resourceId: string; revision: number; digest: string; kind: PublishedDocument['kind'] }
+interface TransferView { transferId: string; sharedBotId: string; to: { uid: string; generation: number }; state: string; botRevision: number; parts: number; packageDigest: string; manifest: TransferManifestEntry[] }
+const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+/** The documents of a handover package, only when they are exactly what the service says was offered: the same resources, at the same revisions, with the same text. */
+function transferDocuments(bytes: Buffer, manifest: TransferManifestEntry[]): PublishedDocument[] {
+  const refuse = (): never => { throw new Error('TRANSFER_PACKAGE_MISMATCH'); };
+  let value: { schemaVersion?: unknown; documents?: unknown };
+  try { value = JSON.parse(bytes.toString('utf8')) as typeof value; } catch { return refuse(); }
+  const sent = value?.documents;
+  if (value?.schemaVersion !== 1 || !Array.isArray(sent) || !Array.isArray(manifest) || !manifest.length || manifest.length > 50 || sent.length !== manifest.length
+    || new Set(manifest.map(entry => entry.resourceId)).size !== manifest.length || manifest.filter(entry => entry.kind === 'persona').length !== 1) return refuse();
+  return manifest.map(entry => {
+    const d = (sent as Array<Partial<PublishedDocument> | null>).find(item => item?.resourceId === entry.resourceId);
+    if (!d || Object.keys(d).sort().join(',') !== 'digest,kind,name,resourceId,revision,text' || !/^[A-Za-z0-9_-]{8,64}$/u.test(entry.resourceId) || d.revision !== entry.revision
+      || d.kind !== entry.kind || !['persona', 'file', 'skill'].includes(entry.kind) || typeof d.text !== 'string' || d.text.includes('\0')
+      || typeof d.name !== 'string' || !d.name.trim() || d.name.length > 400 || d.name.includes('\0') || d.digest !== entry.digest || digest(d.text) !== entry.digest) return refuse();
+    return { resourceId: entry.resourceId, revision: entry.revision, kind: entry.kind, name: d.name, text: d.text, digest: entry.digest };
+  });
+}
 /** A question waits for its answer at most this long; an answered task is picked up within the server's queue limit. */
 const WAIT_MS = 24 * 60 * 60 * 1000, QUEUE_MS = 5 * 60 * 1000;
 /** Model requests of one task over all its attempts, and how often an interrupted attempt is continued before the task ends. */
@@ -227,6 +248,7 @@ export class TeamConnector implements LocalTeamHost {
       const pending = await this.options.privateStore.publication(uid,input.publicationId); this.assert(context);
       if (pending) {
         if (pending.requestDigest !== requestDigest) throw new Error('COMMAND_ID_CONFLICT');
+        if (pending.action) throw new Error('COMMAND_ID_CONFLICT');
         const result = await this.command<{sharedBotId:string;revision:number;grantIds:string[]}>(context,pending.binding,'publishSharedBot',pending.payload,input.publicationId); this.assert(context);
         if (result.sharedBotId !== pending.binding.sharedBotId || result.revision !== pending.binding.revision || JSON.stringify(result.grantIds)!==JSON.stringify(pending.binding.grantIds)) throw new Error('INVALID_PUBLICATION');
         await this.adoptPublication(context,pending.binding); this.wake(); return {sharedBotId:result.sharedBotId,revision:result.revision};
@@ -289,6 +311,94 @@ export class TeamConnector implements LocalTeamHost {
       this.assert(context); if (result.sharedBotId !== binding.sharedBotId || result.revision !== binding.revision || JSON.stringify(result.grantIds) !== JSON.stringify(binding.grantIds)) throw new Error('INVALID_PUBLICATION');
       if (await this.adoptPublication(context,binding)) this.activated.set(scopeKey(binding),activation(binding,context)); for (const token of [...input.fileTokens, ...Object.values(replaced)]) this.selections.delete(token); this.wake(); return { sharedBotId: result.sharedBotId, revision: result.revision };
     } finally { this.publishing.delete(key); this.wake(); }
+  }
+  /**
+   * Offers a Bot this computer publishes to another member of its team. What goes with it is the role and the files of the current publication.
+   * The local Bot, its model and account, its sessions and everything else on this computer stay here.
+   */
+  async offerSharedBot(uid: string, input: OfferSharedBotInput): Promise<void> {
+    this.available(); const context = this.context(uid);
+    if (!input || Object.keys(input).sort().join(',') !== 'expectedRevision,generation,sharedBotId,teamId,to,transferId' || ![input.teamId, input.sharedBotId, input.transferId].every(id)
+      || !input.to || typeof input.to !== 'object' || Object.keys(input.to).sort().join(',') !== 'generation,uid' || typeof input.to.uid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(input.to.uid)
+      || input.to.uid === uid || [input.generation, input.expectedRevision, input.to.generation].some(n => !Number.isSafeInteger(n) || n < 1)) throw new Error('INVALID_INPUT');
+    const binding = (await this.options.privateStore.bindings(uid)).find(b => b.teamId === input.teamId && b.sharedBotId === input.sharedBotId); this.assert(context);
+    // The role and files are on the computer that published them, and only there.
+    if (!binding) throw new Error('SHARED_BOT_REQUIRED'); if (binding.revision !== input.expectedRevision) throw new Error('BOT_REVISION_CONFLICT');
+    const { documents } = await this.options.privateStore.snapshot(uid, binding.snapshot); this.assert(context);
+    const bytes = Buffer.from(JSON.stringify({ schemaVersion: 1, documents: documents.map(d => ({ resourceId: d.resourceId, revision: d.revision, kind: d.kind, name: d.name, text: d.text, digest: d.digest })) }));
+    const parts: string[] = []; for (let at = 0; at < bytes.length; at += TRANSFER_PART_BYTES) parts.push(bytes.subarray(at, at + TRANSFER_PART_BYTES).toString('base64'));
+    if (parts.length > TRANSFER_PARTS) throw new Error('SHARED_FILE_LIMIT');
+    const scope = { teamId: input.teamId, generation: input.generation };
+    try {
+      for (const [index, data] of parts.entries()) {
+        await this.command(context, scope, 'putTransferPart', { transferId: input.transferId, sharedBotId: input.sharedBotId, index, data }, digest(JSON.stringify([input.transferId, 'part', index]))); this.assert(context);
+      }
+    } catch (error) { if (errorCode(error) !== 'TRANSFER_SEALED') throw error; /* The offer was made and its answer was lost: asking again below returns it. */ }
+    await this.command(context, scope, 'offerTransfer', { transferId: input.transferId, sharedBotId: input.sharedBotId, expectedRevision: input.expectedRevision, to: input.to,
+      parts: parts.length, packageDigest: sha256(bytes) }, input.transferId); this.assert(context);
+  }
+  /**
+   * Takes over a Bot offered to this person. It receives the published role and files, checks them against what the service says was offered,
+   * makes this computer able to answer with the chosen local Bot's model, and only then asks the service to switch. Until that answer the earlier maintainer serves the Bot.
+   */
+  async acceptSharedBot(uid: string, input: AcceptSharedBotInput): Promise<{ sharedBotId: string; revision: number }> {
+    this.available(); const context = this.context(uid);
+    if (!input || Object.keys(input).sort().join(',') !== 'generation,instanceId,teamId,transferId' || ![input.teamId, input.transferId, input.instanceId].every(id)
+      || !Number.isSafeInteger(input.generation) || input.generation < 1) throw new Error('INVALID_INPUT');
+    const keys = [JSON.stringify([uid, input.teamId, input.transferId])];
+    if (this.publishing.has(keys[0]!)) throw new Error('BOT_REVISION_CONFLICT'); this.publishing.add(keys[0]!);
+    try {
+      const scope = { teamId: input.teamId, generation: input.generation }, requestDigest = digest(JSON.stringify(input));
+      const pending = await this.options.privateStore.publication(uid, input.transferId); this.assert(context);
+      if (pending) { if (pending.requestDigest !== requestDigest || pending.action !== 'completeTransfer') throw new Error('COMMAND_ID_CONFLICT'); return await this.takeOver(context, pending.binding, pending.payload); }
+      const view = await this.command<TransferView>(context, scope, 'acceptTransfer', { transferId: input.transferId }); this.assert(context);
+      if (view.state !== 'accepted' || view.to?.uid !== uid || !id(view.sharedBotId) || view.sharedBotId === input.instanceId || !Number.isSafeInteger(view.botRevision) || view.botRevision < 1
+        || !Number.isSafeInteger(view.parts) || view.parts < 1 || view.parts > TRANSFER_PARTS) throw new Error('TRANSFER_ENDED');
+      const botKey = JSON.stringify([uid, input.teamId, view.sharedBotId]); if (this.publishing.has(botKey)) throw new Error('BOT_REVISION_CONFLICT'); this.publishing.add(botKey); keys.push(botKey);
+      const received: Buffer[] = [];
+      for (let index = 0; index < view.parts; index += 1) {
+        const part = await this.command<{ data: string }>(context, scope, 'readTransferPart', { transferId: input.transferId, index }); this.assert(context);
+        if (typeof part.data !== 'string') throw new Error('TRANSFER_PACKAGE_MISMATCH'); received.push(Buffer.from(part.data, 'base64'));
+      }
+      const bytes = Buffer.concat(received); if (sha256(bytes) !== view.packageDigest) throw new Error('TRANSFER_PACKAGE_MISMATCH');
+      const documents = transferDocuments(bytes, view.manifest);
+      if (documents.reduce((total, d) => total + Buffer.byteLength(d.text), 0) > 2 * 1024 * 1024 + 64 * 1024) throw new Error('SHARED_FILE_LIMIT');
+      this.options.binaries(); const bot = this.options.store.get(input.instanceId), selected = bot.model ?? this.options.defaultModel(); if (!selected) throw new Error('TEAM_MODEL_UNAVAILABLE');
+      const route = await this.options.modelRoute(selected); this.assert(context); validateTeamModelRoute(route.route);
+      const continues = CONTINUABLE_PROTOCOLS.includes(route.route.model_protocol);
+      const card = (await this.command<{ bots: SharedBotCard[] }>(context, scope, 'listSharedBots', {})).bots.find(c => c.sharedBotId === view.sharedBotId); this.assert(context);
+      if (!card || card.revision !== view.botRevision) throw new Error('TRANSFER_ENDED');
+      // The Bot's list is written by its runs: as at publication, only a model route that continues can host it.
+      if (card.sharedList && !continues) throw new Error('SHARED_LIST_UNSUPPORTED');
+      const accounts = await this.options.modelAccounts(route.route.credential_id, route.route.model_provider, route.profiles); this.assert(context); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
+      const instructions = [documents.find(d => d.kind === 'persona')!.text, ...documents.filter(d => d.kind === 'skill').map(d => `\n\n# Published Skill: ${d.name}\n${d.text}`)].join('');
+      const snapshot: TeamPersonaSnapshot = { ...route.route, instructions, provider_account_profiles: route.profiles, documents };
+      const snapshotId = await this.options.privateStore.saveSnapshot(uid, snapshot); this.assert(context);
+      if (this.active.size + this.probes >= Math.min(4, this.options.maxConcurrent ?? 4)) throw new Error('TEAM_HOST_BUSY');
+      this.probes++;
+      try { if (this.options.validateModel) await this.options.validateModel(context, snapshot, route); else await this.validateModel(context, snapshot, route); }
+      finally { this.probes--; }
+      this.assert(context); await route.assertCurrent(); this.assert(context); if (this.options.store.get(input.instanceId).revision !== bot.revision) throw new Error('BOT_REVISION_CONFLICT');
+      const existing = (await this.options.privateStore.bindings(uid)).find(b => b.teamId === input.teamId && b.sharedBotId === view.sharedBotId); this.assert(context);
+      const revision = view.botRevision + 1;
+      const binding: SharedBotBinding = { schemaVersion: 1, ownerUid: uid, teamId: input.teamId, generation: input.generation, sharedBotId: view.sharedBotId, instanceId: input.instanceId,
+        deploymentId: digest(JSON.stringify([input.transferId, 'deployment'])), revision, snapshot: snapshotId, accountEpoch: Math.max(1, (existing?.accountEpoch ?? 0) + 1), publicationId: input.transferId,
+        grantIds: documents.map(d => digest(JSON.stringify([view.sharedBotId, revision, d.resourceId]))), sessionEpoch: (existing?.sessionEpoch ?? 0) + 1 };
+      const payload = { transferId: input.transferId,
+        deployment: { deploymentId: binding.deploymentId, sharedBotId: binding.sharedBotId, revision, hostId: this.options.privateStore.hostId, owner: { uid, generation: input.generation },
+          instanceId: input.instanceId, definitionDigest: snapshotId, capabilitySnapshotDigest: digest(JSON.stringify({ executionVersion: 2, documents: documents.map(d => d.digest) })), executionVersion: 2,
+          capabilities: { durableWait: continues, writeOperations: continues, delegation: false }, accountEpoch: binding.accountEpoch, enabled: true },
+        inputs: documents.map(d => ({ resourceId: d.resourceId, revision: d.revision, digest: d.digest, kind: d.kind })) };
+      await this.options.privateStore.savePublication(uid, { schemaVersion: 1, requestDigest, binding, payload, action: 'completeTransfer' }); this.assert(context);
+      return await this.takeOver(context, binding, payload);
+    } finally { for (const key of keys) this.publishing.delete(key); this.wake(); }
+  }
+  /** The switch itself. Its answer is the service's own for this handover, so asking again after a lost answer changes nothing. */
+  private async takeOver(c: TeamAccountContext, binding: SharedBotBinding, payload: Record<string, unknown>): Promise<{ sharedBotId: string; revision: number }> {
+    const result = await this.command<{ sharedBotId: string; revision: number; grantIds: string[] }>(c, binding, 'completeTransfer', payload, binding.publicationId); this.assert(c);
+    if (result.sharedBotId !== binding.sharedBotId || result.revision !== binding.revision || JSON.stringify(result.grantIds) !== JSON.stringify(binding.grantIds)) throw new Error('INVALID_PUBLICATION');
+    if (await this.adoptPublication(c, binding)) this.activated.set(scopeKey(binding), activation(binding, c));
+    return { sharedBotId: result.sharedBotId, revision: result.revision };
   }
   private async adoptPublication(c: TeamAccountContext, candidate: SharedBotBinding): Promise<boolean> {
     const directory=await this.command<{bots:SharedBotCard[]}>(c,candidate,'listSharedBots',{}); this.assert(c);
@@ -375,7 +485,7 @@ export class TeamConnector implements LocalTeamHost {
       try {
         const directory=await this.command<{bots:SharedBotCard[]}>(c,candidate,'listSharedBots',{}); assert();
         if (!directory.bots.some(card=>card.sharedBotId===candidate.sharedBotId&&card.revision===candidate.revision&&card.maintainer.uid===c.uid)) continue;
-        const receipt=await this.command<{sharedBotId:string;revision:number;grantIds:string[]}>(c,candidate,'publishSharedBot',publication.payload,candidate.publicationId); assert();
+        const receipt=await this.command<{sharedBotId:string;revision:number;grantIds:string[]}>(c,candidate,publication.action ?? 'publishSharedBot',publication.payload,candidate.publicationId); assert();
         if(receipt.sharedBotId!==candidate.sharedBotId||receipt.revision!==candidate.revision||JSON.stringify(receipt.grantIds)!==JSON.stringify(candidate.grantIds))throw new Error('INVALID_PUBLICATION');
         await this.adoptPublication(c,candidate); assert();
         bindings=await this.options.privateStore.bindings(c.uid); assert();

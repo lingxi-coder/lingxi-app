@@ -156,7 +156,8 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
           const value = snapshot.data(), lastMessage = firestoreLastMessage(value.lastMessage);
           if (!Array.isArray(value.participants) || !value.participants.every((principal: unknown) => typeof principal === 'string' && /^(user:[A-Za-z0-9_-]{1,128}|shared_bot:[A-Za-z0-9_-]{8,64})$/u.test(principal))) throw invalidData();
           if (value.kind === 'bot_dm' && value.participants.filter((principal: string) => principal.startsWith('shared_bot:')).length !== 1) throw invalidData();
-          return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants, lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(snapshot.id) ?? 0, ...(lastMessage ? { lastMessage } : {}) };
+          const readers = Array.isArray(value.memberUids) && value.memberUids.every((reader: unknown) => typeof reader === 'string') ? { readers: value.memberUids as string[] } : {};
+          return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants, ...readers, lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(snapshot.id) ?? 0, ...(lastMessage ? { lastMessage } : {}) };
         });
       } catch {
         // A conversation that breaks the stored contract is not shown half-parsed; the team's listeners stop with the error.

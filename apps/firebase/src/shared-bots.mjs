@@ -12,7 +12,9 @@ const same = (left, right) => hash(left) === hash(right);
 const randomId = () => randomBytes(24).toString('base64url');
 const nowDay = now => new Date(now).toISOString().slice(0, 10);
 const memberIdentity = (uid, member) => ({ uid, generation: member.generation });
-const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations', 'readTaskList', 'readList']);
+const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations', 'readTaskList', 'readList', 'getTransfer', 'readTransferPart']);
+/** An offer to hand a Bot over is open for seven days. */
+const transferMs = 7 * 24 * 60 * 60 * 1000, openTransfer = state => state === 'offered' || state === 'accepted';
 const revisionLimit = 200;
 const byUid = members => [...members].sort((a, b) => a.uid.localeCompare(b.uid));
 /** An interrupted operation of these categories may be sent again: the receiver returns the same receipt. */
@@ -107,6 +109,13 @@ export class SharedBotsStore {
       else if (action === 'publishSharedBot') response = await this.publish(context);
       else if (action === 'listSharedBots') response = await this.directory(context);
       else if (action === 'pauseSharedBot') response = await this.pause(context);
+      else if (action === 'putTransferPart') response = await this.putTransferPart(context);
+      else if (action === 'offerTransfer') response = await this.offerTransfer(context);
+      else if (action === 'acceptTransfer') response = await this.acceptTransfer(context);
+      else if (action === 'readTransferPart') response = await this.readTransferPart(context);
+      else if (action === 'completeTransfer') response = await this.completeTransfer(context);
+      else if (action === 'endTransfer') response = await this.endTransfer(context);
+      else if (action === 'getTransfer') response = await this.getTransfer(context);
       else if (action === 'heartbeatDeployment') response = await this.heartbeat(context);
       else if (action === 'activateDeployment') response = await this.activate(context);
       else if (action === 'submit') response = await this.submit(context);
@@ -162,6 +171,8 @@ export class SharedBotsStore {
     if (previousDeployment && (!same(previousDeployment.owner, identity) || previousDeployment.sharedBotId !== p.sharedBotId
       || d.revision <= previousDeployment.revision)) deny(409, 'DEPLOYMENT_REVISION_CONFLICT');
     const members = (await tx.get(team.collection('members'))).docs.map(doc => memberIdentity(doc.id, doc.data()));
+    // An offer was made for the revision it names: a new publication ends it.
+    const handover = await this.handover(tx, team, ref, existing);
     if (p.usePolicy.mode === 'listed' && p.usePolicy.members.some(value => !members.some(member => same(value, member)))) deny(403, 'CURRENT_RECIPIENT_REQUIRED');
     const audience = p.usePolicy.mode === 'all' ? members : p.usePolicy.members;
     // Persona is newly authored for this publication. Named files/Skills retain
@@ -181,6 +192,7 @@ export class SharedBotsStore {
     tx.set(ref, { identity: identityRecord, name: p.name, description: p.description, grants, quotas: p.quotas,
       sharedList: p.sharedList ?? null, publishedAt: now });
     if (newList) tx.create(listRef, { schemaVersion: 1, listId: p.sharedBotId, dataRevision: 0, items: [], nextItem: 1, updatedAt: now });
+    handover.end('cancelled', now, 'republished');
     tx.set(deploymentRef, { ...d, ready: false, onlineUntil: 0 });
     tx.set(team.collection('signals').doc(p.sharedBotId), { updatedAt: new Date(now) });
     return { sharedBotId: p.sharedBotId, revision: identityRecord.revision, grantIds: grants.map(g => g.grantId) };
@@ -189,6 +201,11 @@ export class SharedBotsStore {
     const bots = await tx.get(team.collection('sharedBots').orderBy('__name__').limit(200));
     const deployments = bots.empty ? [] : await tx.getAll(...bots.docs.map(doc => team.collection('deployments').doc(doc.data().identity.activeDeploymentId)));
     const maintainers = bots.empty ? [] : await tx.getAll(...bots.docs.map(doc => team.collection('members').doc(doc.data().identity.maintainer.uid)));
+    // An open handover is shown to its two parties only, and only while the member it was offered to is still that member.
+    const offered = bots.docs.filter(doc => { const t = doc.data().transfer; return t && t.expiresAt > now && (ownerOf(doc.data(), identity) || same(t.to, identity)); });
+    const recipients = offered.length ? await tx.getAll(...offered.map(doc => team.collection('members').doc(doc.data().transfer.to.uid))) : [];
+    const handovers = new Map(offered.flatMap((doc, index) => { const t = doc.data().transfer;
+      return recipients[index].data()?.generation === t.to.generation ? [[doc.id, { transferId: t.transferId, from: doc.data().identity.maintainer, to: t.to, state: t.state, expiresAt: t.expiresAt }]] : []; }));
     return { bots: bots.docs.flatMap((doc, index) => {
       const b = doc.data(), d = deployments[index].data();
       if (!identityPermitted(b, identity) && !ownerOf(b, identity)) return [];
@@ -197,6 +214,7 @@ export class SharedBotsStore {
         permitted: activeOwner && identityPermitted(b, identity), ready: activeOwner && b.identity.state === 'published' && !!d?.ready && d.enabled && d.onlineUntil > now,
         maintainer: b.identity.maintainer, usePolicy: b.identity.usePolicy, state: b.identity.state,
         onlineUntil: d?.onlineUntil ?? 0, quotas: b.quotas, ...(b.sharedList ? { sharedList: { title: b.sharedList.title, ...(b.sharedList.approval === 'requester' ? { approval: 'requester' } : {}) } } : {}),
+        ...(activeOwner && handovers.has(doc.id) ? { transfer: handovers.get(doc.id) } : {}),
         ...(ownerOf(b, identity) && d ? { instanceId: d.instanceId } : {}) }];
     }) };
   }
@@ -204,10 +222,161 @@ export class SharedBotsStore {
     const ref = team.collection('sharedBots').doc(p.sharedBotId), bot = (await tx.get(ref)).data();
     if (!ownerOf(bot, identity)) deny(403, 'MAINTAINER_REQUIRED');
     if (bot.identity.revision !== p.expectedRevision) deny(409, 'BOT_REVISION_CONFLICT');
-    const revision = p.expectedRevision + 1;
-    tx.update(ref, { 'identity.state': 'paused', 'identity.revision': revision });
+    const revision = p.expectedRevision + 1, handover = await this.handover(tx, team, ref, bot);
+    tx.update(ref, { 'identity.state': 'paused', 'identity.revision': revision, transfer: FieldValue.delete(), sourceRevision: FieldValue.delete() });
+    handover.end('cancelled', now, 'paused');
     tx.set(team.collection('signals').doc(p.sharedBotId), { updatedAt: new Date(now) });
     return { sharedBotId: p.sharedBotId, revision };
+  }
+  /** The open handover of a Bot, read before any write: its record and the parts of its package. `end` only writes. */
+  async handover(tx, team, botRef, bot) {
+    const parts = await tx.get(botRef.collection('transferParts'));
+    const ref = bot?.transfer ? team.collection('transfers').doc(bot.transfer.transferId) : undefined, record = ref ? (await tx.get(ref)).data() : undefined;
+    return { ref, record, parts: parts.docs,
+      /** The handover is over in `state` and nothing of its package is kept. The caller clears `transfer` on the Bot. */
+      end(state, now, reason) {
+        if (record && openTransfer(record.state)) tx.update(ref, { state, endedAt: now, ...(reason ? { reason } : {}) });
+        for (const part of parts.docs) tx.delete(part.ref);
+      } };
+  }
+  /** What a handover has come to. An open one stands only while the Bot is still the one offered, by and to the same two memberships, and the offer has not run out. */
+  async transferState(tx, team, t, bot, now) {
+    if (!openTransfer(t.state)) return t.state;
+    if (t.expiresAt <= now) return 'expired';
+    const [from, to] = await tx.getAll(team.collection('members').doc(t.from.uid), team.collection('members').doc(t.to.uid));
+    return bot?.transfer?.transferId === t.transferId && bot.identity.revision === t.botRevision && ownerOf(bot, t.from)
+      && from.data()?.generation === t.from.generation && to.data()?.generation === t.to.generation ? t.state : 'void';
+  }
+  transferView(t, state, bot) {
+    return { transferId: t.transferId, sharedBotId: t.sharedBotId, from: t.from, to: t.to, state, botRevision: t.botRevision,
+      offeredAt: t.offeredAt, expiresAt: t.expiresAt, parts: t.parts, packageDigest: t.packageDigest, manifest: t.manifest,
+      ...(bot ? { name: bot.name, description: bot.description } : {}), ...(t.reason ? { reason: t.reason } : {}),
+      ...(t.newRevision ? { newRevision: t.newRevision } : {}) };
+  }
+  /** One part of the package the maintainer is about to offer. Parts of an offer that was never made are dropped by the next one. */
+  async putTransferPart({ tx, team, identity, command: { payload: p }, now }) {
+    const botRef = team.collection('sharedBots').doc(p.sharedBotId);
+    const [bot, sealed] = await tx.getAll(botRef, team.collection('transfers').doc(p.transferId));
+    if (!ownerOf(bot.data(), identity)) deny(403, 'MAINTAINER_REQUIRED');
+    if (sealed.exists) deny(409, 'TRANSFER_SEALED');
+    tx.set(botRef.collection('transferParts').doc(hash([p.transferId, p.index])), { transferId: p.transferId, index: p.index, data: p.data, from: identity.uid, at: now });
+    return { index: p.index };
+  }
+  /**
+   * The maintainer offers the Bot to another member. Nothing changes for the people who use it: the Bot stays with its
+   * maintainer until the other member has accepted and published it from their own computer. The new maintainer receives
+   * every published input, so they must already be in each one's audience; a handover never widens it.
+   */
+  async offerTransfer({ tx, team, identity, command: { payload: p }, now }) {
+    const botRef = team.collection('sharedBots').doc(p.sharedBotId), ref = team.collection('transfers').doc(p.transferId);
+    const [botDoc, toDoc, existing] = await tx.getAll(botRef, team.collection('members').doc(p.to.uid), ref), bot = botDoc.data();
+    if (!ownerOf(bot, identity)) deny(403, 'MAINTAINER_REQUIRED');
+    if (bot.identity.revision !== p.expectedRevision) deny(409, 'BOT_REVISION_CONFLICT');
+    if (bot.identity.state !== 'published') deny(409, 'BOT_PAUSED');
+    if (p.to.uid === identity.uid || toDoc.data()?.generation !== p.to.generation) deny(403, 'CURRENT_RECIPIENT_REQUIRED');
+    if (!identityPermitted(bot, p.to) || bot.grants.some(grant => !this.grantPermits(grant, p.to))) deny(403, 'INPUT_GRANT_REQUIRED');
+    const previous = await this.handover(tx, team, botRef, bot);
+    if (existing.exists) {
+      // The same offer again (its answer was lost) changes nothing; the id cannot be used for another one.
+      const t = existing.data();
+      if (!same([t.from, t.to, t.botRevision, t.packageDigest], [identity, p.to, p.expectedRevision, p.packageDigest])) deny(409, 'TRANSFER_ID_CONFLICT');
+      return this.transferView(t, await this.transferState(tx, team, t, bot, now), bot);
+    }
+    // One offer at a time; an earlier one that ran out or lost a party no longer stands.
+    if (previous.record && openTransfer(await this.transferState(tx, team, previous.record, bot, now))) deny(409, 'TRANSFER_PENDING');
+    const mine = previous.parts.filter(doc => doc.data().transferId === p.transferId).sort((a, b) => a.data().index - b.data().index);
+    if (mine.length !== p.parts || mine.some((doc, index) => doc.data().index !== index)) deny(409, 'TRANSFER_PACKAGE_REQUIRED');
+    const digest = createHash('sha256'); for (const doc of mine) digest.update(Buffer.from(doc.data().data, 'base64'));
+    if (digest.digest('hex') !== p.packageDigest) deny(409, 'TRANSFER_PACKAGE_MISMATCH');
+    const t = { schemaVersion: 1, transferId: p.transferId, sharedBotId: p.sharedBotId, from: identity, to: p.to, botRevision: bot.identity.revision,
+      state: 'offered', offeredAt: now, expiresAt: now + transferMs, parts: p.parts, packageDigest: p.packageDigest,
+      manifest: bot.grants.map(({ resourceId, revision, digest: contentDigest, kind }) => ({ resourceId, revision, digest: contentDigest, kind })) };
+    // An earlier offer that came to nothing ends here, and only this offer's parts are kept.
+    if (previous.record && openTransfer(previous.record.state)) tx.update(previous.ref, { state: 'cancelled', endedAt: now, reason: 'replaced' });
+    for (const doc of previous.parts) if (doc.data().transferId !== p.transferId) tx.delete(doc.ref);
+    tx.create(ref, t);
+    tx.update(botRef, { transfer: { transferId: t.transferId, to: t.to, state: 'offered', expiresAt: t.expiresAt } });
+    tx.set(team.collection('signals').doc(p.sharedBotId), { updatedAt: new Date(now) });
+    return this.transferView(t, 'offered', bot);
+  }
+  /** A handover with its Bot, for one of its two parties. */
+  async transfer(tx, team, identity, transferId) {
+    const ref = team.collection('transfers').doc(transferId), t = (await tx.get(ref)).data();
+    if (!t) deny(404, 'TRANSFER_REQUIRED');
+    if (!same(t.from, identity) && !same(t.to, identity)) deny(403, 'TRANSFER_PARTY_REQUIRED');
+    const botRef = team.collection('sharedBots').doc(t.sharedBotId), bot = (await tx.get(botRef)).data();
+    return { ref, t, botRef, bot };
+  }
+  async getTransfer({ tx, team, identity, command: { payload: p }, now }) {
+    const { t, bot } = await this.transfer(tx, team, identity, p.transferId);
+    return this.transferView(t, await this.transferState(tx, team, t, bot, now), bot);
+  }
+  /** The member the Bot was offered to takes it on. The Bot is theirs only once they have published it (`completeTransfer`). */
+  async acceptTransfer({ tx, team, identity, command: { payload: p }, now }) {
+    const { ref, t, botRef, bot } = await this.transfer(tx, team, identity, p.transferId);
+    if (!same(t.to, identity)) deny(403, 'TRANSFER_RECIPIENT_REQUIRED');
+    const state = await this.transferState(tx, team, t, bot, now);
+    if (!openTransfer(state)) deny(409, 'TRANSFER_ENDED');
+    if (state === 'offered') {
+      tx.update(ref, { state: 'accepted', acceptedAt: now });
+      tx.update(botRef, { 'transfer.state': 'accepted' });
+      tx.set(team.collection('signals').doc(t.sharedBotId), { updatedAt: new Date(now) });
+    }
+    return this.transferView(t, 'accepted', bot);
+  }
+  /** The package is read by the member who accepted it, and by nobody else. */
+  async readTransferPart({ tx, team, identity, command: { payload: p }, now }) {
+    const { t, botRef, bot } = await this.transfer(tx, team, identity, p.transferId);
+    if (!same(t.to, identity)) deny(403, 'TRANSFER_RECIPIENT_REQUIRED');
+    if (await this.transferState(tx, team, t, bot, now) !== 'accepted') deny(409, 'TRANSFER_ENDED');
+    const part = (await tx.get(botRef.collection('transferParts').doc(hash([p.transferId, p.index])))).data();
+    if (!part) deny(404, 'TRANSFER_PACKAGE_REQUIRED');
+    return { index: p.index, data: part.data };
+  }
+  /**
+   * The switch, in one transaction: the Bot keeps its id, its audience, its quotas and its list, and gets a new maintainer, the
+   * next revision and the new maintainer's deployment. The earlier deployment takes nothing new, and tasks of the earlier revision
+   * are not carried over. Conversations keep the readers they were created with.
+   */
+  async completeTransfer({ tx, team, identity, command: { payload: p }, now }) {
+    const { ref, t, botRef, bot } = await this.transfer(tx, team, identity, p.transferId);
+    if (!same(t.to, identity)) deny(403, 'TRANSFER_RECIPIENT_REQUIRED');
+    const d = p.deployment;
+    // The same completion again, after a lost answer.
+    if (t.state === 'completed') { if (t.deploymentId !== d.deploymentId) deny(409, 'TRANSFER_ENDED'); return { sharedBotId: t.sharedBotId, revision: t.newRevision, grantIds: t.grantIds }; }
+    if (await this.transferState(tx, team, t, bot, now) !== 'accepted') deny(409, 'TRANSFER_ENDED');
+    if (d.sharedBotId !== t.sharedBotId || !same(d.owner, identity) || !d.enabled) deny(400, 'INVALID_DEPLOYMENT');
+    const deploymentRef = team.collection('deployments').doc(d.deploymentId);
+    if ((await tx.get(deploymentRef)).exists) deny(409, 'DEPLOYMENT_REVISION_CONFLICT');
+    const key = value => hash([value.resourceId, value.revision, value.digest, value.kind]);
+    if (!same(p.inputs.map(key).sort(), t.manifest.map(key).sort())) deny(409, 'TRANSFER_PACKAGE_MISMATCH');
+    if (!identityPermitted(bot, identity) || bot.grants.some(grant => !this.grantPermits(grant, identity))) deny(403, 'INPUT_GRANT_REQUIRED');
+    const handover = await this.handover(tx, team, botRef, bot), revision = bot.identity.revision + 1;
+    const grants = bot.grants.map(grant => ({ ...grant, grantId: hash([t.sharedBotId, revision, grant.resourceId]), publisher: identity }));
+    const { transfer: ended, ...kept } = bot, grantIds = grants.map(grant => grant.grantId);
+    // The inputs are the ones published at `sourceRevision`: documents made from them since then stay readable.
+    tx.set(botRef, { ...kept, identity: { ...bot.identity, maintainer: identity, revision, activeDeploymentId: d.deploymentId }, grants,
+      sourceRevision: bot.sourceRevision ?? bot.identity.revision, publishedAt: now });
+    tx.update(team.collection('deployments').doc(bot.identity.activeDeploymentId), { enabled: false, ready: false, onlineUntil: 0 });
+    tx.set(deploymentRef, { ...d, ready: false, onlineUntil: 0 });
+    tx.update(ref, { state: 'completed', completedAt: now, newRevision: revision, deploymentId: d.deploymentId, grantIds });
+    for (const part of handover.parts) tx.delete(part.ref);
+    tx.set(team.collection('signals').doc(t.sharedBotId), { updatedAt: new Date(now) });
+    return { sharedBotId: t.sharedBotId, revision, grantIds };
+  }
+  /** The maintainer takes the offer back, or the member it was made to declines. Asked again, the answer is the same. */
+  async endTransfer({ tx, team, identity, command: { payload: p }, now }) {
+    const { ref, t, botRef, bot } = await this.transfer(tx, team, identity, p.transferId);
+    if (t.state === 'completed') deny(409, 'TRANSFER_COMPLETED');
+    if (!openTransfer(t.state)) return this.transferView(t, t.state, bot);
+    const handover = await this.handover(tx, team, botRef, bot), state = same(t.from, identity) ? 'cancelled' : 'declined';
+    tx.update(ref, { state, endedAt: now });
+    if (bot?.transfer?.transferId === t.transferId) {
+      for (const part of handover.parts) tx.delete(part.ref);
+      tx.update(botRef, { transfer: FieldValue.delete() });
+      tx.set(team.collection('signals').doc(t.sharedBotId), { updatedAt: new Date(now) });
+    }
+    return this.transferView({ ...t, state }, state, bot);
   }
   async checkHost(tx, team, identity, p) {
     const ref = team.collection('deployments').doc(p.deploymentId), doc = await tx.get(ref), deployment = doc.data();
@@ -254,6 +423,10 @@ export class SharedBotsStore {
     for (const [index, snapshot] of bots.entries()) {
       const bot = snapshot.data(), d = deployments[index].data();
       if (!identityPermitted(bot, identity) || owners[index].data()?.generation !== bot.identity.maintainer.generation) deny(403, 'BOT_USE_REQUIRED');
+      // Readers are written when a Chat is created and a handover never adds one: the Bot answers only where its maintainer
+      // already reads. A Bot DM was created for one member and one maintainer, so after a handover a new one is opened.
+      const maintainer = bot.identity.maintainer.uid;
+      if (!c.memberUids.includes(maintainer) || (c.kind === 'bot_dm' && c.memberUids.some(uid => uid !== maintainer && uid !== identity.uid))) deny(409, 'BOT_MAINTAINER_CHANGED');
       if (!d?.enabled || !d.ready || d.onlineUntil <= now) deny(409, 'HOST_UNAVAILABLE');
       if (bot.grants.some(grant => !this.grantPermits(grant, identity))) deny(403, 'INPUT_GRANT_REQUIRED');
     }
@@ -283,7 +456,7 @@ export class SharedBotsStore {
       const b = bots[i].data();
       tx.create(team.collection('tasks').doc(target.taskId), { schemaVersion: 1, executionVersion: 2, ...target,
         conversationId: p.conversationId, messageId: p.messageId, changeId: p.changeId, messageSeq: seq,
-        requester: identity, botRevision: b.identity.revision, deploymentId: b.identity.activeDeploymentId,
+        requester: identity, botRevision: b.identity.revision, deploymentId: b.identity.activeDeploymentId, maintainer: b.identity.maintainer,
         state: 'queued', createdAt: now, deadline: Math.max(now, locks[i].data()?.until ?? 0) + queueMs, inputGrantIds: b.grants.map(g => g.grantId),
         epoch: 0, attemptStartedAt: 0, activeBudgetMs: 300000, activeSpentMs: 0, physicalDispatchesSpent: 0,
         rootTaskId: target.taskId, operationCount: 0, unverifiedOperations: 0 });
@@ -720,8 +893,8 @@ export class SharedBotsStore {
     const ref = team.collection('tasks').doc(p.taskId), operationRef = team.collection('operations').doc(p.operationId);
     const [snapshot, operationSnapshot] = await tx.getAll(ref, operationRef), task = snapshot.data(), operation = operationSnapshot.data();
     if (!task) deny(404, 'TASK_REQUIRED');
-    const bot = (await tx.get(team.collection('sharedBots').doc(task.sharedBotId))).data();
-    if (!ownerOf(bot, identity)) deny(403, 'MAINTAINER_REQUIRED');
+    // What a task did outside the Chat happened on its maintainer's computer: a later maintainer cannot say what happened there.
+    if (!same(task.maintainer, identity)) deny(403, 'MAINTAINER_REQUIRED');
     if (!operation || operation.taskId !== task.taskId) deny(404, 'OPERATION_REQUIRED');
     const view = state => ({ taskId: task.taskId, state, operationId: p.operationId, operationState: p.resolution });
     if (operation.state === p.resolution && operation.resolvedBy) return view(taskView(task, now).state);
@@ -737,8 +910,7 @@ export class SharedBotsStore {
     const task = (await tx.get(team.collection('tasks').doc(p.taskId))).data();
     if (!task) deny(404, 'TASK_REQUIRED');
     await this.conversation(tx, team, task.conversationId, identity);
-    const bot = (await tx.get(team.collection('sharedBots').doc(task.sharedBotId))).data();
-    if (!same(task.requester, identity) && !ownerOf(bot, identity)) deny(403, 'OPERATION_READ_FORBIDDEN');
+    if (!same(task.requester, identity) && !same(task.maintainer, identity)) deny(403, 'OPERATION_READ_FORBIDDEN');
     const rows = (await tx.get(team.collection('operations').where('taskId', '==', task.taskId))).docs.map(doc => doc.data());
     return { taskId: task.taskId, operations: rows.sort((a, b) => a.dispatchedAt - b.dispatchedAt || a.operationId.localeCompare(b.operationId))
       .map(o => ({ operationId: o.operationId, logicalStepId: o.logicalStepId, category: o.category, tool: o.tool, state: o.state,
@@ -840,7 +1012,8 @@ export class SharedBotsStore {
     if (!artifact || !artifact.readers.some(member => same(member, identity))) deny(403, 'ARTIFACT_READ_REQUIRED');
     await this.conversation(tx, team, artifact.conversationId, identity, mustParticipate);
     const bot = (await tx.get(team.collection('sharedBots').doc(artifact.sharedBotId))).data();
-    if ((!identityPermitted(bot, identity) && !ownerOf(bot, identity)) || artifact.botRevision !== bot.identity.revision
+    // A document stands while the inputs it was made from are in force: a new publication or a pause ends that, a handover does not.
+    if ((!identityPermitted(bot, identity) && !ownerOf(bot, identity)) || artifact.botRevision < (bot.sourceRevision ?? bot.identity.revision)
       || bot.grants.some(grant => !this.grantPermits(grant, identity))) deny(403, 'ARTIFACT_READ_REQUIRED');
     return { ref, artifact };
   }

@@ -10,7 +10,11 @@ export interface SharedBotCard {
   quotas: RequestQuotas; instanceId?: string;
   /** The Bot keeps a list its members and its runs change together. With `approval`, a run only proposes a change and the member who asked decides. */
   sharedList?: { title: string; approval?: 'requester' };
+  /** The maintainer offered the Bot to another member and it is not settled yet. Only those two are told. */
+  transfer?: BotTransfer;
 }
+/** A Bot being handed to another member: `offered` until that member accepts, `accepted` while their computer takes it over. It ends by itself at `expiresAt`. */
+export interface BotTransfer { transferId: string; from: MemberRef; to: MemberRef; state: 'offered' | 'accepted'; expiresAt: number }
 export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'expired' | 'interrupted' | 'authorization_required' | 'revoked' | 'cancelled' | 'needs_reconciliation';
 export type TaskUsage = { status: 'missing' } | { status: 'partial' | 'complete'; inputTokens: number; outputTokens: number; costMicros?: number; currency?: string };
 /** What a waiting task is blocked on: a question to `recipient`, or (`tool_approval`) a list change only they can approve. Present only while `state` is `waiting`. */
@@ -67,6 +71,8 @@ export interface MemberExecutionPayloads {
   readList: { sharedBotId: string };
   writeList: SharedListWrite & { sharedBotId: string; operationId: string };
   setConversationPolicy: { conversationId: string; expectedRevision: number; targets: string[] };
+  /** The maintainer takes an offered Bot back, or the member it was offered to declines it. */
+  endTransfer: { transferId: string };
 }
 export type MemberExecutionAction = keyof MemberExecutionPayloads;
 export type MemberExecutionCommand = { [A in MemberExecutionAction]: ExecutionScope & {
@@ -92,6 +98,10 @@ export interface SharedHostStatus { bots: SharedHostBot[]; openAtLogin: { availa
 export interface PublishedKnowledgeDocument { resourceId: string; revision: number; kind: 'file' | 'skill'; name: string; sha256: string; bytes: number }
 /** What a Bot is published with, as its maintainer's Desktop holds it: the role and the shared files of publication `revision`. */
 export interface PublishedKnowledge { sharedBotId: string; revision: number; role: string; documents: PublishedKnowledgeDocument[] }
+/** Offer a Bot this Desktop publishes to another member of its team. The published role and files go with it; the local Bot, its model and its sessions do not. */
+export interface OfferSharedBotInput extends ExecutionScope { transferId: string; sharedBotId: string; expectedRevision: number; to: MemberRef }
+/** Take over an offered Bot on this Desktop: `instanceId` is the local Bot, with its own model, that answers for it from now on. */
+export interface AcceptSharedBotInput extends ExecutionScope { transferId: string; instanceId: string }
 export interface PublishLocalBotInput extends ExecutionScope {
   publicationId: string; sharedBotId: string; instanceId: string; expectedRevision: number;
   role: string; usePolicy: UsePolicy; fileTokens: string[]; resourceBindings?: Record<string, string>; quotas: RequestQuotas;

@@ -3,7 +3,7 @@ import type { FirebaseOptions } from 'firebase/app';
 import type { Firestore } from 'firebase/firestore';
 import { TeamsApiError, teamsTransport, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../../packages/teams';
 import type { MessageSignal, MessageSnapshot, MessageCommand } from '../../../../../packages/teams/messages';
-import type { LocalPublishableBot, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, SelectedSharedFile } from '../../../../../packages/teams/execution';
+import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, SelectedSharedFile } from '../../../../../packages/teams/execution';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source';
 import type { TeamsFirestoreSession, TeamsFirestoreOptions } from './firestore.js';
 
@@ -19,6 +19,8 @@ export interface LocalTeamHost {
   selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]>;
   publishedKnowledge(uid: string, teamId: string, sharedBotId: string): Promise<PublishedKnowledge>;
   publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }>;
+  offerSharedBot(uid: string, input: OfferSharedBotInput): Promise<void>;
+  acceptSharedBot(uid: string, input: AcceptSharedBotInput): Promise<{ sharedBotId: string; revision: number }>;
   status(uid: string): Promise<SharedHostStatus>;
   revoke(): void;
   stopBinding(teamId: string, sharedBotId: string): void;
@@ -195,12 +197,12 @@ export class TeamsService {
     if (this.account.snapshot().user?.uid !== expectedUid) throw new Error('INVALID_SESSION');
     if (!command || !/^[A-Za-z0-9_-]{8,64}$/u.test(command.teamId) || !Number.isSafeInteger(command.generation) || command.generation < 1) throw new Error('INVALID_INPUT');
     if ('schemaVersion' in command) {
-      if (command.schemaVersion !== 1 || !['listSharedBots', 'createConversation', 'submit', 'pauseSharedBot', 'answerWait', 'cancelTask', 'getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'reviseArtifact', 'listOperations', 'resolveOperation', 'readList', 'writeList', 'decideWait', 'setConversationPolicy'].includes(command.action)) throw new Error('INVALID_INPUT');
+      if (command.schemaVersion !== 1 || !['listSharedBots', 'createConversation', 'submit', 'pauseSharedBot', 'answerWait', 'cancelTask', 'getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'reviseArtifact', 'listOperations', 'resolveOperation', 'readList', 'writeList', 'decideWait', 'setConversationPolicy', 'endTransfer'].includes(command.action)) throw new Error('INVALID_INPUT');
       if (command.action === 'pauseSharedBot') this.host?.stopBinding(command.teamId, command.payload.sharedBotId);
     } else if (!['create', 'read', 'mutate'].includes(command.action)) throw new Error('INVALID_INPUT');
     await this.connect(expectedUid);
     const result = await this.checked<T>(expectedUid, '/messages', command);
-    if (['create','mutate','createConversation','submit','pauseSharedBot','answerWait','cancelTask','setConversationPolicy'].includes(command.action)) this.events.emit('messages');
+    if (['create','mutate','createConversation','submit','pauseSharedBot','answerWait','cancelTask','setConversationPolicy','endTransfer'].includes(command.action)) this.events.emit('messages');
     return result;
   }
   async watchMessages(leaseId: string, uid: string, scope: { teamId: string; generation: number }, conversationId: string): Promise<void> {
@@ -240,6 +242,15 @@ export class TeamsService {
   publishedKnowledge(uid: string, teamId: string, sharedBotId: string): Promise<PublishedKnowledge> { this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.publishedKnowledge(uid, teamId, sharedBotId); }
   publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }> {
     this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.publishLocalBot(uid, input);
+  }
+  /** A handover changes what every Bot list shows, so the pages are told as after any other change. */
+  async offerSharedBot(uid: string, input: OfferSharedBotInput): Promise<void> {
+    this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE');
+    try { await this.host.offerSharedBot(uid, input); } finally { this.events.emit('messages'); }
+  }
+  async acceptSharedBot(uid: string, input: AcceptSharedBotInput): Promise<{ sharedBotId: string; revision: number }> {
+    this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE');
+    try { return await this.host.acceptSharedBot(uid, input); } finally { this.events.emit('messages'); }
   }
   /** Main-only capabilities; no IPC branch exposes these methods or commands. */
   hostContext(): TeamAccountContext | undefined { this.syncAccount(); return this.uid && this.account.snapshot().user?.uid === this.uid ? { uid: this.uid, epoch: this.epoch } : undefined; }

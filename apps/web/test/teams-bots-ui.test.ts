@@ -608,3 +608,88 @@ scenario('Publication offers a shared list, names it in the review, and carries 
   assert.equal(askBox().props.checked, true); await page.type(page.find(n => n.type === 'textarea')[0], 'Keep the shopping list.'); await confirm();
   assert.deepEqual(published[4].sharedList, { title: 'Groceries', description: 'What the household needs.', approval: 'requester' });
 });
+// ── Handing an assistant to another maintainer (M3-3) ──
+const offer = (more: Record<string, unknown> = {}) => ({ transferId: 'transfer-test', from: { uid: 'bob', generation: 1 }, to: { uid: 'alice', generation: 1 }, state: 'offered' as const, expiresAt: Date.UTC(2026, 10, 20), ...more });
+scenario('A maintainer offers their assistant to a member who can use it, is told what goes and what stays, and can take the offer back (M3-3)', async context => {
+  const offers: import('../../../packages/teams/execution').OfferSharedBotInput[] = []; let fail = true;
+  const { fake, workspace } = await open(context, { offerSharedBot: async input => {
+    offers.push(structuredClone(input)); if (fail) { fail = false; throw new Error('SERVICE_UNAVAILABLE'); }
+    fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, transfer: offer({ transferId: input.transferId, from: { uid: 'alice', generation: 1 }, to: input.to }) })];
+  } });
+  const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
+  const buttons = (text: string) => page.find(n => n.type === 'button' && textOf(n) === text), options = () => page.find(n => n.type === 'option').map(textOf);
+  const box = (label: RegExp) => page.find(n => n.type === 'input' && n.props.type === 'checkbox' && label.test(textOf(n.parent)))[0];
+  assert.equal(page.byLabel('Handover').length, 0); await page.click(page.button('Hand over…'));
+  assert.match(page.text(), /They receive the published role and the files it is shared with\./); assert.match(page.text(), /Your local Bot, your model account and everything else on this Mac stay with you\./);
+  assert.match(page.text(), /Conversations people already had with it stay with them and with you\. The new maintainer cannot read them\./);
+  assert.match(page.text(), /Once they take it over, their Mac answers and they pay for the model\. You can no longer pause or publish it, and people start a new chat with it\./);
+  assert.deepEqual(options(), ['Choose a member', 'Bob', 'Owner'], 'not oneself'); assert.equal(page.button('Offer').props.disabled, true);
+  await page.type(page.find(n => n.type === 'select')[0], 'bob'); assert.equal(page.button('Offer').props.disabled, true, 'the right to pass it on is confirmed first');
+  await page.check(box(/I may pass this role and these files on/)); await page.click(page.button('Offer')); await until(() => offers.length === 1, 'the first try');
+  // Its answer was lost: the same offer is made again, not a second one.
+  await until(() => buttons('Offer').length === 1 && !page.button('Offer').props.disabled, 'the dialog stays'); await page.click(page.button('Offer'));
+  await until(() => offers.length === 2 && page.byLabel('Handover').length === 1, 'the offer');
+  assert.deepEqual(offers[0], offers[1]); assert.match(offers[0]!.transferId, /^[A-Za-z0-9_-]{8,64}$/u);
+  assert.deepEqual({ ...offers[0], transferId: '' }, { teamId: 'team-test', generation: 1, transferId: '', sharedBotId: 'assistant-fixture', expectedRevision: 1, to: { uid: 'bob', generation: 1 } });
+  assert.match(textOf(page.oneByLabel('Handover')), /Offered to Bob\. You maintain it until they take it over\. The offer ends on /); assert.equal(buttons('Hand over…').length, 0); assert.equal(buttons('Pause').length, 1, 'still the maintainer');
+  await page.click(page.button('Take back')); const end = fake.commands.find(c => c.action === 'endTransfer');
+  assert.deepEqual(end && 'payload' in end ? end.payload : undefined, { transferId: offers[0]!.transferId });
+  // While their Mac takes it over the card says so.
+  fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, transfer: offer({ from: { uid: 'alice', generation: 1 }, to: { uid: 'bob', generation: 1 }, state: 'accepted' }) })]; await workspace.refreshBots();
+  await until(() => /Bob is taking this assistant over\. You maintain it until their Mac answers for it\./.test(page.text()), 'accepted');
+  // A handover never widens who sees the files: only members who may use the assistant can be chosen.
+  fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, usePolicy: { mode: 'listed', members: [{ uid: 'bob', generation: 1 }] } })]; await workspace.refreshBots();
+  await until(() => buttons('Hand over…').length === 1, 'no offer'); await page.click(page.button('Hand over…')); assert.deepEqual(options(), ['Choose a member', 'Bob']);
+});
+scenario('The member an assistant is offered to takes it over on their Desktop with one of their Bots and is told what that means (M3-3)', async context => {
+  const accepted: unknown[] = [];
+  const { fake, workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-mine', name: 'Mine', description: '', model: 'my-model' }],
+    acceptSharedBot: async input => { accepted.push(structuredClone(input)); fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, revision: 2 })]; return { sharedBotId: 'assistant-fixture', revision: 2 }; } });
+  fake.bots = [botCard({ maintainer: { uid: 'bob', generation: 1 }, transfer: offer() }), botCard({ sharedBotId: 'assistant-other', name: 'Other', maintainer: { uid: 'bob', generation: 1 } })];
+  await workspace.refreshBots(); await until(() => workspace.getSnapshot().bots.length === 2, 'two Bots');
+  const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
+  const box = (label: RegExp) => page.find(n => n.type === 'input' && n.props.type === 'checkbox' && label.test(textOf(n.parent)))[0];
+  assert.equal(page.byLabel('Handover').length, 1, 'only on the offered assistant');
+  assert.match(textOf(page.oneByLabel('Handover')), /Bob wants to hand this assistant over to you\. It stays with Bob until you take it over\. The offer ends on /); assert.doesNotMatch(page.text(), /open LingXi Desktop on the Mac/);
+  await page.click(page.button('Take over…')); await until(() => /You receive the role and the files Fixture Bot is published with\. Nothing else of Bob’s comes with it\./.test(page.text()), 'the dialog');
+  assert.match(page.text(), /This Mac answers for the assistant from now on, with your model account and at your cost\./);
+  assert.match(page.text(), /You can read every new conversation with it\. Earlier conversations stay with the people who had them, and you cannot read them\./);
+  assert.match(page.text(), /Who may use it, its daily limits and its shared list stay as they are\./); assert.match(page.text(), /Mine · my-model/);
+  assert.equal(page.button('Take over').props.disabled, true); await page.type(page.find(n => n.type === 'select')[0], 'local-mine');
+  assert.equal(page.button('Take over').props.disabled, true); await page.check(box(/I take over maintaining this assistant and its model costs/));
+  await page.click(page.button('Take over')); await until(() => accepted.length === 1 && page.byLabel('Handover').length === 0, 'taken over');
+  assert.deepEqual(accepted, [{ teamId: 'team-test', generation: 1, transferId: 'transfer-test', instanceId: 'local-mine' }]); assert.match(page.text(), /Maintainer: Alice/);
+});
+scenario('Off Desktop an offered assistant can be declined but not taken over or offered, and nobody but the two is shown the offer (M3-3)', async context => {
+  const { fake, workspace } = await open(context);
+  fake.bots = [botCard({ maintainer: { uid: 'bob', generation: 1 }, transfer: offer() }), botCard({ sharedBotId: 'assistant-mine', name: 'Mine', maintainer: { uid: 'alice', generation: 1 } }), botCard({ sharedBotId: 'assistant-other', name: 'Other', maintainer: { uid: 'bob', generation: 1 } })];
+  await workspace.refreshBots(); await until(() => workspace.getSnapshot().bots.length === 3, 'three Bots');
+  const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
+  const buttons = (text: string) => page.find(n => n.type === 'button' && textOf(n) === text);
+  assert.equal(page.byLabel('Handover').length, 1); assert.match(textOf(page.oneByLabel('Handover')), /To take it over, open LingXi Desktop on the Mac that will answer for it\./);
+  assert.deepEqual([buttons('Take over…').length, buttons('Hand over…').length, buttons('Decline').length], [0, 0, 1], 'the role and files are only on the Desktop that published them');
+  await page.click(page.button('Decline')); const end = fake.commands.find(c => c.action === 'endTransfer'); assert.deepEqual(end && 'payload' in end ? end.payload : undefined, { transferId: 'transfer-test' });
+});
+scenario('A chat with an assistant from before it changed maintainer stays readable, takes no new request and leads to a new chat (M3-3)', async context => {
+  withDom(context); const { findBotDm } = await import('../../../packages/teams/workspace');
+  const dm = (id: string, readers?: string[]) => conversation(id, { kind: 'bot_dm', participants: ['user:alice', 'shared_bot:assistant-fixture'], lastSeq: 2, ...(readers ? { readers } : {}) });
+  const cards = [botCard({ maintainer: { uid: 'owner', generation: 1 } })];
+  assert.equal(findBotDm([dm('before', ['alice', 'bob']), dm('after', ['alice', 'owner'])], 'alice', 'assistant-fixture', cards)?.id, 'after');
+  assert.equal(findBotDm([dm('before', ['alice', 'bob'])], 'alice', 'assistant-fixture', cards), undefined);
+  assert.equal(findBotDm([dm('unknown')], 'alice', 'assistant-fixture', cards)?.id, 'unknown', 'a source that does not name the readers says nothing');
+  assert.equal(findBotDm([dm('own', ['owner'])], 'alice', 'assistant-fixture', [botCard({ maintainer: { uid: 'alice', generation: 1 } })]), undefined, 'the earlier maintainer’s own chat is not the new maintainer’s');
+  // The member's chat was made while Bob maintained the assistant. The owner maintains it now.
+  const { fake, workspace, page, sent, buttons, box } = await openChat(context, () => [], () => ({}), 'owner');
+  assert.ok(box(), 'readers unknown: the chat is used as before');
+  fake.conversations.set('team-test', [dm('test-chat', ['alice', 'bob'])]); for (const watch of fake.open('team-test')) fake.deliver(watch);
+  await until(() => /This assistant has a new maintainer and no longer answers in this chat\. What was said here stays as it is\./.test(page.text()), 'the notice');
+  assert.equal(box(), undefined); assert.match(page.text(), /Plan my trip/, 'what was said stays');
+  // A chat whose readers include the current maintainer is the current one.
+  fake.conversations.set('team-test', [dm('test-chat', ['alice', 'owner'])]); for (const watch of fake.open('team-test')) fake.deliver(watch);
+  await until(() => !!box(), 'the composer');
+  fake.conversations.set('team-test', [dm('test-chat', ['alice', 'bob'])]); for (const watch of fake.open('team-test')) fake.deliver(watch);
+  await until(() => buttons('Start a new chat').length === 1, 'the way to a new chat');
+  await page.click(buttons('Start a new chat')[0]); await until(() => sent.some(c => c.action === 'createConversation'), 'a new chat');
+  const created = sent.find(c => c.action === 'createConversation');
+  assert.ok(created && 'payload' in created && created.action === 'createConversation' && created.payload.conversationId !== 'test-chat' && created.payload.kind === 'bot_dm');
+});

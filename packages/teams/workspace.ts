@@ -1,4 +1,5 @@
 import { executionCommand, sharedBotUsable, type SharedBotCard } from './execution.js';
+import { botDmHandedOver } from './compose.js';
 import { indexedDbCommandStorage } from './command-storage.js';
 import { inviteLink, type TeamCommand, type TeamDetail, type TeamMember, type TeamSummary, type TeamsApi } from './index.js';
 import { TeamMessaging, pendingPayload, type CommandStorage, type MessageScope, type PendingCommands, type TeamConversation, type TeamMessage } from './messages.js';
@@ -95,9 +96,10 @@ export function conversationParticipants(conversation: TeamConversation, members
   return [...people.filter(person => !person.self), ...robots, ...people.filter(person => person.self)];
 }
 
-/** The viewer's own Bot DM with a Bot, if there is one. (A Bot's owner also sees other people's.) */
-export function findBotDm(conversations: readonly TeamConversation[], uid: string, sharedBotId: string): TeamConversation | undefined {
-  return conversations.find(conversation => conversation.kind === 'bot_dm' && conversation.participants.includes(`shared_bot:${sharedBotId}`) && conversation.participants.includes(`user:${uid}`));
+/** The viewer's own Bot DM with a Bot, if there is one. (A Bot's owner also sees other people's.) With `bots`, a DM from before the Bot changed maintainer does not count: the Bot answers in a new one. */
+export function findBotDm(conversations: readonly TeamConversation[], uid: string, sharedBotId: string, bots: readonly SharedBotCard[] = []): TeamConversation | undefined {
+  return conversations.find(conversation => conversation.kind === 'bot_dm' && conversation.participants.includes(`shared_bot:${sharedBotId}`) && conversation.participants.includes(`user:${uid}`)
+    && !botDmHandedOver(conversation, bots));
 }
 
 /** The viewer's existing two-person DM with someone. */
@@ -483,7 +485,7 @@ export class TeamsWorkspace {
     const model = this.messaging;
     if (!model) return;
     if (!sharedBotUsable(bot)) throw new Error('BOT_USE_REQUIRED');
-    const existing = fresh ? undefined : findBotDm(model.state.conversations, this.uid, bot.sharedBotId);
+    const existing = fresh ? undefined : findBotDm(model.state.conversations, this.uid, bot.sharedBotId, this.bots);
     if (existing) model.select(existing.id);
     else await model.create('bot_dm', bot.name, [this.uid], [bot.sharedBotId]);
   };

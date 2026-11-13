@@ -4,6 +4,7 @@ import type { TeamDetail, TeamsApi, TeamSummary } from './index.js';
 import { Dialog } from './ui';
 import { SharedListDialog } from './SharedListDialog';
 import { SharedHostPanel } from './SharedHostPanel';
+import { BotHandover } from './BotHandover';
 
 /**
  * Shared member directory and native publication wizard. Files are picked by the trusted host. With `friend` (the friend's name) it is
@@ -54,7 +55,7 @@ export function BotDirectory({ api, uid, team, members, bots, zh, busy, status, 
     {status ? <p role="status">{status}</p> : null}
     <ul className="team-bot-grid">{bots.map(bot => <li key={bot.sharedBotId} className="teams-card"><header><b>{bot.name}</b><span className="team-bot-presence" data-online={bot.ready}>{bot.state !== 'published' ? t('Paused', '已暂停') : bot.ready ? t('Ready', '已就绪') : t('Host unavailable', '宿主不可用')}</span></header><p>{bot.description}</p><small>{t('Maintainer', '维护者')}: {owner(bot.maintainer.uid)}</small>
       {friend ? null : <><p className="teams-hint">{bot.usePolicy.mode === 'all' ? t('All current and future members', '所有当前和未来成员') : t('Maintainer and selected memberships', '维护者与指定成员身份')}</p><p className="teams-hint">{t('Daily requests: team / member / assistant', '每日请求：团队 / 成员 / 助手')} {bot.quotas.team} / {bot.quotas.member} / {bot.quotas.bot}</p></>}
-      <div className="teams-row-actions"><button disabled={busy || !sharedBotUsable(bot)} onClick={() => void attempt(() => onOpen(bot))}>{bot.permitted ? t('Message assistant', '与助手对话') : t('Not permitted', '无使用权限')}</button>{bot.sharedList && (bot.permitted || bot.maintainer.uid === uid) ? <button disabled={busy} onClick={() => setListOf(bot)}>{t('List', '清单')}: {bot.sharedList.title}</button> : null}{bot.maintainer.uid === uid && bot.state === 'published' ? <button disabled={busy} onClick={() => setPausing(bot)}>{friend ? t('Stop sharing', '停止共享') : t('Pause', '暂停')}</button> : null}</div></li>)}</ul>
+      <div className="teams-row-actions"><button disabled={busy || !sharedBotUsable(bot)} onClick={() => void attempt(() => onOpen(bot))}>{bot.permitted ? t('Message assistant', '与助手对话') : t('Not permitted', '无使用权限')}</button>{bot.sharedList && (bot.permitted || bot.maintainer.uid === uid) ? <button disabled={busy} onClick={() => setListOf(bot)}>{t('List', '清单')}: {bot.sharedList.title}</button> : null}{bot.maintainer.uid === uid && bot.state === 'published' ? <button disabled={busy} onClick={() => setPausing(bot)}>{friend ? t('Stop sharing', '停止共享') : t('Pause', '暂停')}</button> : null}</div>{friend ? null : <BotHandover api={api} uid={uid} team={team} members={members} bot={bot} zh={zh} busy={busy} attempt={attempt} onChanged={onChanged} />}</li>)}</ul>
     {!bots.length && !status ? <p>{friend ? t('No Bots are shared in this chat yet.', '此聊天中尚未共享 Bot。') : t('No assistants are published yet.', '尚未发布助手。')}</p> : null}
     {friend ? <p className="teams-hint">{note}</p> : null}
     {api.openBotMarket && !friend ? <button type="button" disabled={busy} onClick={() => void attempt(() => api.openBotMarket!())}>{t('Find Bots in the market', '在市场发现 Bot')}</button> : null}

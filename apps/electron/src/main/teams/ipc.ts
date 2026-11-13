@@ -44,6 +44,14 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
           if (typeof command.instanceId !== 'string') throw new Error('INVALID_INPUT');
           value = await service.selectSharedFiles(command.uid, command.instanceId);
           break;
+        case 'offerSharedBot':
+          if (!command.input || typeof command.input !== 'object') throw new Error('INVALID_INPUT');
+          value = await service.offerSharedBot(command.uid, command.input as Parameters<TeamsService['offerSharedBot']>[1]);
+          break;
+        case 'acceptSharedBot':
+          if (!command.input || typeof command.input !== 'object') throw new Error('INVALID_INPUT');
+          value = await service.acceptSharedBot(command.uid, command.input as Parameters<TeamsService['acceptSharedBot']>[1]);
+          break;
         case 'hostStatus':
           value = await service.hostStatus(command.uid);
           break;

@@ -23,6 +23,8 @@ export function desktopTeamsApi(desktop: DesktopTeamsApi, uid: string, backgroun
     selectSharedFiles: instanceId => desktop.selectSharedFiles(uid, instanceId),
     publishedKnowledge: (teamId, sharedBotId) => desktop.publishedKnowledge(uid, teamId, sharedBotId),
     publishLocalBot: input => desktop.publishLocalBot(uid, input),
+    offerSharedBot: input => desktop.offerSharedBot(uid, input),
+    acceptSharedBot: input => desktop.acceptSharedBot(uid, input),
     openBotMarket: () => desktop.openBotMarket(uid),
     list: () => desktop.list(uid), detail: teamId => desktop.detail(uid, teamId), execute: command => desktop.execute(uid, command),
     watchMessages: (scope, conversationId, next) => desktop.watchMessages(uid, scope, conversationId, next),

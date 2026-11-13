@@ -1,5 +1,5 @@
 import type { MessageApi, MessageCommand } from './messages';
-import type { LocalPublishableBot, SelectedSharedFile, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus } from './execution';
+import type { LocalPublishableBot, SelectedSharedFile, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, OfferSharedBotInput, AcceptSharedBotInput } from './execution';
 export * from './execution';
 export type TeamRole = 'owner' | 'admin' | 'member';
 export interface TeamSummary { id: string; name: string; memberCount: number; role: TeamRole; generation: number }
@@ -23,6 +23,10 @@ export interface TeamsApi extends MessageApi {
   /** The role and files of a Bot this Desktop publishes; absent off Desktop. */
   publishedKnowledge?(teamId: string, sharedBotId: string): Promise<PublishedKnowledge>;
   publishLocalBot?(input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }>;
+  /** Offer a Bot this Desktop publishes to another member; absent off Desktop, where its role and files are not held. */
+  offerSharedBot?(input: OfferSharedBotInput): Promise<void>;
+  /** Take over a Bot offered to this person, hosted by one of this Desktop's Bots; absent off Desktop. */
+  acceptSharedBot?(input: AcceptSharedBotInput): Promise<{ sharedBotId: string; revision: number }>;
   /** How this Desktop serves the Bots it publishes; absent off Desktop. */
   hostStatus?(): Promise<SharedHostStatus>;
   /** Change what keeps this Desktop serving while its owner is away. The system may still ask the owner to allow opening at login. */
@@ -42,6 +46,8 @@ export interface DesktopTeamsApi {
   publishedKnowledge(uid: string, teamId: string, sharedBotId: string): Promise<PublishedKnowledge>;
   publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }>;
   hostStatus(uid: string): Promise<SharedHostStatus>;
+  offerSharedBot(uid: string, input: OfferSharedBotInput): Promise<void>;
+  acceptSharedBot(uid: string, input: AcceptSharedBotInput): Promise<{ sharedBotId: string; revision: number }>;
   list(uid: string): Promise<{ teams: TeamSummary[] }>;
   detail(uid: string, teamId: string): Promise<TeamDetail>;
   execute(uid: string, command: TeamCommand): Promise<TeamResult>;

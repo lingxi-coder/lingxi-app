@@ -61,6 +61,20 @@ const payloads = {
     // The Bot keeps one list for the Team. Publishing again keeps its items; leaving this out stops sharing it.
     sharedList: sharedList.optional(),
   }).strict().refine(value => value.inputs.filter(input => input.kind === 'persona').length === 1, 'Exactly one published persona required'),
+  // Handover of a Bot to another member (detailed design 18). The package is the published role and files, in parts of at most 700 KiB.
+  putTransferPart: z.object({ transferId: executionId, sharedBotId: executionId, index: z.number().int().min(0).max(7),
+    data: z.string().min(4).max(933336).regex(/^[A-Za-z0-9+/]+={0,2}$/u) }).strict(),
+  offerTransfer: z.object({ transferId: executionId, sharedBotId: executionId, expectedRevision: positive, to: memberRef,
+    parts: z.number().int().min(1).max(8), packageDigest: digest }).strict(),
+  acceptTransfer: z.object({ transferId: executionId }).strict(),
+  readTransferPart: z.object({ transferId: executionId, index: z.number().int().min(0).max(7) }).strict(),
+  // The new maintainer publishes exactly what was handed over, from their own deployment.
+  completeTransfer: z.object({ transferId: executionId, deployment: deploymentRecord,
+    inputs: z.array(z.object({ resourceId: executionId, revision: positive, digest, kind: z.enum(['persona', 'file', 'skill']) }).strict())
+      .min(1).max(50).refine(values => unique(values.map(value => value.resourceId))) }).strict(),
+  // The maintainer takes the offer back, or the member it was made to declines it.
+  endTransfer: z.object({ transferId: executionId }).strict(),
+  getTransfer: z.object({ transferId: executionId }).strict(),
   listSharedBots: z.object({}).strict(),
   pauseSharedBot: z.object({ sharedBotId: executionId, expectedRevision: positive }).strict(),
   heartbeatDeployment: z.object({ ...host, ready: z.boolean() }).strict(),

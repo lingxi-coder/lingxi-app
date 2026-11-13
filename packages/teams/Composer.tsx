@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactElement } from 'react';
 import { sharedBotUsable, type SharedBotCard } from './execution.js';
-import { byteLength, canSendText, mentionAt, mentionCandidates, MESSAGE_BYTES, sendsOnEnter, snippet, withoutMention } from './compose.js';
+import { botDmHandedOver, byteLength, canSendText, mentionAt, mentionCandidates, MESSAGE_BYTES, sendsOnEnter, snippet, withoutMention } from './compose.js';
 import { ANSWER_REFUSED, type TeamConversation, type TeamMessage } from './messages.js';
 import { Avatar, Icon, useIsoLayoutEffect, type RenderAvatar } from './ui';
 import type { TeamsSnapshot, TeamsWorkspace } from './workspace.js';
@@ -13,11 +13,14 @@ export const MAX_TARGETS = 8;
  * who is not a participant only observes. A Bot dm needs its Bot to be usable: until the Bot list
  * is known (or when it could not be fetched) sending waits rather than guessing.
  */
-export function composerLock(input: { uid: string; conversation: Pick<TeamConversation, 'kind' | 'participants'>; bots: readonly SharedBotCard[]; botsLoaded: boolean; botsUnverified: boolean }, zh: boolean): string {
+export function composerLock(input: { uid: string; conversation: Pick<TeamConversation, 'kind' | 'participants' | 'readers'>; bots: readonly SharedBotCard[]; botsLoaded: boolean; botsUnverified: boolean }, zh: boolean): string {
   const t = (en: string, cn: string) => zh ? cn : en;
   const { conversation } = input;
   if (conversation.participants.length && !conversation.participants.includes(`user:${input.uid}`)) {
     return t('You can read this conversation because you own its Bot, but only participants can send messages.', '你因拥有其中的 Bot 而可阅读此会话，但只有参与者可以发送消息。');
+  }
+  if (botDmHandedOver(conversation, input.bots)) {
+    return t('This assistant has a new maintainer and no longer answers in this chat. What was said here stays as it is.', '此助手已更换维护者，不再在此对话中作答。这里的内容保持不变。');
   }
   if (conversation.kind === 'bot_dm' && !input.bots.some(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`))) {
     if (input.botsUnverified) return t('Bot availability could not be verified. Reconnect to check.', '未能确认 Bot 可用状态，请联网后重试。');
@@ -161,7 +164,10 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
     if (event.key === 'ArrowUp' && !text && !editing && !composing) { event.preventDefault(); onEditLast(); }
   };
 
-  if (lock) return <div className="tw-composer tw-composer-locked"><p className="tw-readonly" role="status">{lock}</p></div>;
+  // After a handover the Bot answers in a new chat, which its new maintainer can read: one step from here.
+  const moved = botDmHandedOver(conversation, snapshot.bots) ? snapshot.bots.find(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`)) : undefined;
+  if (lock) return <div className="tw-composer tw-composer-locked"><p className="tw-readonly" role="status">{lock}</p>
+    {moved ? <button type="button" disabled={snapshot.messageBusy} onClick={() => void workspace.openBotDm(moved)}>{t('Start a new chat', '开始新的对话')}</button> : null}</div>;
   return <form className="tw-composer" onSubmit={event => { event.preventDefault(); void send(); }}>
     {editing ? <div className="tw-context"><Icon name="edit" /><span>{t('Editing message', '正在编辑消息')}</span><button type="button" className="tw-link" onClick={onClearEditing}>{t('Cancel', '取消')}</button></div> : null}
     {reply ? <div className="tw-context"><Icon name="reply" /><span className="tw-context-text">{t('Replying to', '回复')} <b>{reply.author}</b>: {snippet(reply.message.recalled ? t('Recalled message', '已撤回消息') : reply.message.text)}</span>

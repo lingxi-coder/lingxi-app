@@ -87,7 +87,7 @@ export function NewBotDmDialog({ workspace, snapshot, zh, renderAvatar, onClose 
       {snapshot.botsUnverified ? <p role="status" className="tw-hint">{t('Bot availability could not be verified.', '未能确认 Bot 可用状态。')}</p> : null}
       <ul className="tw-picker" aria-label={t('Bots you can message', '可对话的 Bot')}>
         {usable.map(bot => {
-          const existing = findBotDm(snapshot.conversations, snapshot.uid, bot.sharedBotId);
+          const existing = findBotDm(snapshot.conversations, snapshot.uid, bot.sharedBotId, snapshot.bots);
           return <li key={bot.sharedBotId}>
             <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={28} render={renderAvatar} />
             <div className="tw-picker-text">

@@ -100,6 +100,28 @@ export function messageErrorText(code: string, zh: boolean): string {
       return t('The Bot task lost its authorization, so it cannot continue.', '此 Bot 任务的授权已失效，无法继续。');
     case 'TASK_CANCEL_FORBIDDEN':
       return t('Only the person who asked, or the Bot’s maintainer, can cancel this task.', '只有发起请求的人或 Bot 维护者可以取消此任务。');
+    case 'BOT_MAINTAINER_CHANGED':
+      return t('This assistant has a new maintainer. Start a new chat with it from the team’s assistants.', '此助手已更换维护者。请从团队助手中与它开始新的对话。');
+    case 'TRANSFER_PENDING':
+      return t('This assistant is already offered to someone. Take that offer back first.', '此助手已邀请他人接手，请先收回该邀请。');
+    case 'TRANSFER_ENDED':
+    case 'TRANSFER_REQUIRED':
+    case 'TRANSFER_COMPLETED':
+    case 'TRANSFER_PARTY_REQUIRED':
+    case 'TRANSFER_RECIPIENT_REQUIRED':
+      return t('This handover is no longer open. Refresh to see who maintains the assistant.', '此次移交已结束。请刷新以查看助手当前的维护者。');
+    case 'CURRENT_RECIPIENT_REQUIRED':
+      return t('That person is no longer a member of this team. Choose someone else.', '对方已不是此团队的成员，请另选他人。');
+    case 'TRANSFER_PACKAGE_MISMATCH':
+      return t('The assistant’s role and files did not arrive as they were offered, so nothing was taken over. Ask its maintainer to offer it again.', '收到的角色和资料与邀请时不一致，因此未接手。请让维护者重新发出邀请。');
+    case 'TRANSFER_PACKAGE_REQUIRED':
+    case 'TRANSFER_SEALED':
+    case 'TRANSFER_ID_CONFLICT':
+      return t('The offer could not be made. Close this and try again.', '未能发出邀请。请关闭后重试。');
+    case 'SHARED_BOT_REQUIRED':
+      return t('This assistant is published from another computer. Hand it over from there.', '此助手由另一台电脑发布，请在那台电脑上移交。');
+    case 'BOT_PAUSED':
+      return t('This assistant is paused. Publish it again before handing it over.', '此助手已暂停。请重新发布后再移交。');
     case 'BOT_REVISION_CONFLICT':
       return t('Bot settings changed. Refresh before saving again.', 'Bot 设置已变化，请刷新后重试。');
     case 'MESSAGE_RECALLED':

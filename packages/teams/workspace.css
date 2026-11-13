@@ -308,6 +308,8 @@
 .tw-embed .team-bot-presence { font-size: 12px; color: var(--tw-muted); }
 .tw-embed .team-bot-presence[data-online='true'] { color: var(--tw-online); }
 .tw-embed .team-bot-host { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; padding: 12px 14px; border: 1px solid var(--tw-line); border-radius: 14px; background: var(--tw-surface); font-size: 12px; line-height: 1.5; }
+.tw-embed .team-bot-handover { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--tw-line); font-size: 12px; line-height: 1.5; }
+.tw-embed .team-bot-handover p { margin: 0; }
 .tw-embed .team-bot-host h4 { margin: 0; font-size: 13px; }
 .tw-embed .team-bot-host ul { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
 .tw-embed .team-bot-host li[data-state='ready'] b { color: var(--tw-online); }

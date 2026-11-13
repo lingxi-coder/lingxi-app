@@ -1,6 +1,15 @@
 import { sharedBotUsable, type SharedBotCard } from './execution.js';
 import type { TeamConversation } from './messages.js';
 
+/**
+ * A Bot DM made before its Bot was handed to another maintainer. It stays as it was for the people who could read it, and the Bot takes
+ * no new request in it: the new maintainer was never one of its readers. Unknown readers say nothing.
+ */
+export function botDmHandedOver(conversation: Pick<TeamConversation, 'kind' | 'participants' | 'readers'>, bots: readonly SharedBotCard[]): boolean {
+  if (conversation.kind !== 'bot_dm' || !conversation.readers) return false;
+  const maintainer = bots.find(bot => conversation.participants.includes(`shared_bot:${bot.sharedBotId}`))?.maintainer.uid;
+  return !!maintainer && (!conversation.readers.includes(maintainer) || conversation.readers.some(uid => uid !== maintainer && !conversation.participants.includes(`user:${uid}`)));
+}
 /** The server's limit for one message body, in UTF-8 bytes. */
 export const MESSAGE_BYTES = 8192;
 export const byteLength = (text: string): number => new TextEncoder().encode(text).length;

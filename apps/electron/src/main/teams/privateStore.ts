@@ -13,7 +13,8 @@ export interface PublishedDocument { resourceId: string; revision: number; kind:
 export interface TeamPersonaSnapshot extends TeamModelRoute { instructions: string; provider_account_profiles: Record<string, unknown>[]; documents: PublishedDocument[] }
 export interface SharedBotBinding { schemaVersion: 1; ownerUid: string; teamId: string; generation: number; sharedBotId: string; deploymentId: string; instanceId: string; revision: number; snapshot: string; accountEpoch: number; publicationId: string; grantIds: string[]; sessionEpoch: number }
 export interface TeamDataRef { path: string; sha256: string; bytes: number }
-export interface SavedPublication { schemaVersion: 1; requestDigest: string; binding: SharedBotBinding; payload: Record<string, unknown> }
+/** A publication, or (`action`) the take-over of an offered Bot, saved before it is sent so that a lost answer is asked for again with the same command. */
+export interface SavedPublication { schemaVersion: 1; requestDigest: string; binding: SharedBotBinding; payload: Record<string, unknown>; action?: 'completeTransfer' }
 /** One task this host holds or held a model permit for. It lives until the task's result is delivered or the task can no longer continue.
  * Replaced in place as the task moves on: a new attempt, a question, an answer. */
 export interface SavedExecution { schemaVersion: 2; scope: BotChatScope; teamId: string; generation: number; taskId: string;
@@ -160,7 +161,7 @@ export class TeamPrivateStore {
   private async readPublication(uid: string, root: string, publicationId: string): Promise<SavedPublication | undefined> {
     if (!/^[A-Za-z0-9_-]{8,64}$/u.test(publicationId)) throw new Error('INVALID_INPUT');
     try { const value = JSON.parse(await read(join(root,publicationId),128*1024)) as SavedPublication;
-      if (value.schemaVersion !== 1 || !/^[a-f0-9]{64}$/u.test(value.requestDigest) || value.binding.publicationId !== publicationId) throw new Error('UNSAFE_TEAM_STORAGE'); bindingText(value.binding,uid); return value;
+      if (value.schemaVersion !== 1 || !/^[a-f0-9]{64}$/u.test(value.requestDigest) || value.binding.publicationId !== publicationId || (value.action !== undefined && value.action !== 'completeTransfer')) throw new Error('UNSAFE_TEAM_STORAGE'); bindingText(value.binding,uid); return value;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
   }
   async publications(uid: string): Promise<SavedPublication[]> {

@@ -44,6 +44,7 @@ const payloads: Record<string, Check> = {
   writeList: shape({ sharedBotId: id, operationId: id, ...listWrite }),
   resolveOperation: shape({ taskId: id, operationId: v => typeof v === 'string' && /^[a-f0-9]{64}$/u.test(v), resolution: oneOf('succeeded', 'failed') }),
   setConversationPolicy: shape({ conversationId: id, expectedRevision: integer, targets: list(id, 0, 8) }),
+  endTransfer: shape({ transferId: id }),
 };
 /** Only the current member execution envelope. Unknown fields and retired commands fail closed. */
 export function isMemberExecutionCommand(value: unknown): value is MemberExecutionCommand {

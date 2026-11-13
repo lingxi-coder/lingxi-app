@@ -80,9 +80,17 @@ export function executionCommand<A extends MemberExecutionAction>(scope: Executi
 }
 export interface LocalPublishableBot { instanceId: string; name: string; description: string; model?: string; requiredResources?: string[] }
 export interface SelectedSharedFile { token: string; kind: 'file' | 'skill'; name: string; sha256: string; bytes: number; mediaType: string }
+/** One read-only file or Skill a Bot is published with. Its text stays on the maintainer's Desktop. */
+export interface PublishedKnowledgeDocument { resourceId: string; revision: number; kind: 'file' | 'skill'; name: string; sha256: string; bytes: number }
+/** What a Bot is published with, as its maintainer's Desktop holds it: the role and the shared files of publication `revision`. */
+export interface PublishedKnowledge { sharedBotId: string; revision: number; role: string; documents: PublishedKnowledgeDocument[] }
 export interface PublishLocalBotInput extends ExecutionScope {
   publicationId: string; sharedBotId: string; instanceId: string; expectedRevision: number;
   role: string; usePolicy: UsePolicy; fileTokens: string[]; resourceBindings?: Record<string, string>; quotas: RequestQuotas;
+  /** Files of the Bot's current publication that stay shared unchanged, by resource id. A current file that is neither kept nor replaced stops being shared. */
+  keptResources?: string[];
+  /** Files of the current publication whose text is replaced: resource id to the token of the newly selected file. The resource keeps its id and gets its next revision. */
+  replacedResources?: Record<string, string>;
   /** Give the Bot a shared list: its title, and what the Bot is told the list is for. With `approval: 'requester'` the Bot asks the member it works for before each change. */
   sharedList?: { title: string; description: string; approval?: 'none' | 'requester' };
 }

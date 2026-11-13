@@ -44,6 +44,10 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
           if (typeof command.instanceId !== 'string') throw new Error('INVALID_INPUT');
           value = await service.selectSharedFiles(command.uid, command.instanceId);
           break;
+        case 'publishedKnowledge':
+          if (typeof command.teamId !== 'string' || typeof command.sharedBotId !== 'string') throw new Error('INVALID_INPUT');
+          value = await service.publishedKnowledge(command.uid, command.teamId, command.sharedBotId);
+          break;
         case 'detail':
           if (typeof command.teamId !== 'string') throw new Error('INVALID_INPUT');
           value = await service.detail(command.teamId, command.uid);

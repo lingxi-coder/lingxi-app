@@ -1095,3 +1095,46 @@ test('approval: a declined, expired, cancelled or revoked request saves nothing'
   assert.deepEqual((await readList(other)).items, []);
   assert.equal(revoked.taskId.length > 0, true);
 });
+
+// ---- Shared knowledge: keep, revise, revoke (M3-1) ----
+const knowledge = (inputs, expectedRevision, override = {}) => {
+  const base = publish();
+  return execute('publishSharedBot', { ...base, expectedRevision, inputs, deployment: { ...base.deployment, revision: expectedRevision + 1, ...override } });
+};
+const grantsOf = async () => Object.fromEntries((await db.doc(`teams/${teamId}/sharedBots/sharedbot_01`).get()).data().grants.map(grant => [grant.resourceId, grant.revision]));
+test('knowledge: a published resource keeps its identity; the same revision is the same bytes and changed bytes are the next revision', options, async () => {
+  const persona = input('persona', 'persona_01'), file = input('file', 'travel_file'), notes = input('file', 'notes_file'), changed = 'b'.repeat(64);
+  const refused = { code: 'INPUT_REVISION_CONFLICT' };
+  await assert.rejects(knowledge([persona, { ...file, digest: changed }], 1), refused);
+  await assert.rejects(knowledge([persona, { ...file, digest: changed, revision: 3 }], 1), refused);
+  await assert.rejects(knowledge([persona, { ...file, revision: 2 }], 1), refused);
+  await assert.rejects(knowledge([persona, { ...file, kind: 'skill' }], 1), refused);
+  await assert.rejects(knowledge([persona, file, { ...notes, revision: 2 }], 1), refused);
+  assert.deepEqual(await grantsOf(), { persona_01: 1, travel_file: 1 });
+  // One file is revised, one is added, the role is unchanged.
+  const second = await knowledge([persona, { ...file, digest: changed, revision: 2 }, notes], 1);
+  assert.equal(second.revision, 2); assert.equal(second.grantIds.length, 3);
+  assert.deepEqual(await grantsOf(), { persona_01: 1, travel_file: 2, notes_file: 1 });
+  // Leaving a resource out revokes it: the next publication has no grant for it.
+  assert.equal((await knowledge([persona, notes], 2)).revision, 3);
+  assert.deepEqual(await grantsOf(), { persona_01: 1, notes_file: 1 });
+  // Shared again, it is a new resource: it does not continue the revisions of the revoked one.
+  await assert.rejects(knowledge([persona, notes, { ...file, digest: changed, revision: 2 }], 3), refused);
+  assert.equal((await knowledge([persona, notes, file], 3)).revision, 4);
+});
+test('knowledge: a task that began with a revoked source cannot go on or publish its result, and a new task is not given the source', options, async () => {
+  const started = await start(), taskId = started.task.taskId;
+  assert.deepEqual(started.inputs.map(grant => grant.resourceId).sort(), ['persona_01', 'travel_file']);
+  await knowledge([input('persona', 'persona_01')], 1);
+  await heartbeat();
+  const current = (await chatRef().get()).data().lastChangeSeq;
+  await assert.rejects(execute('validateTask', { ...host, taskId, permitId: started.permitId, expectedLastChangeSeq: current }), { code: 'TASK_REVOKED' });
+  await assert.rejects(recover(taskId), { code: 'TASK_REVOKED' });
+  // What the run already drew from the source does not reach the Chat.
+  const ended = await execute('completeTask', result(started, { text: 'FROM-THE-REVOKED-FILE', document: { title: 'Notes', body: 'FROM-THE-REVOKED-FILE' } }));
+  assert.equal(ended.state, 'authorization_required'); assert.equal(ended.artifactId, null);
+  assert.ok(!JSON.stringify((await chatRef().collection('messages').get()).docs.map(doc => doc.data())).includes('FROM-THE-REVOKED-FILE'));
+  const next = await start();
+  assert.deepEqual(next.inputs.map(grant => grant.resourceId), ['persona_01']);
+  assert.equal((await execute('completeTask', result(next))).state, 'completed');
+});

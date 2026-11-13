@@ -252,6 +252,31 @@ is tested in `apps/electron/test/teams-host.test.ts` and the SDK's `team_continu
 for the other side. A run with a signed Desktop package, real process kills and real devices has not been done: it needs the
 SDK branch pushed and pinned, and nothing here is deployed.
 
+## M3-1 — keeping, replacing and no longer sharing a Bot's files
+
+A published Bot's files used to be all-or-nothing: publishing again meant picking every file again, and each pick became a new resource. A maintainer can now publish again and decide file by file.
+
+**The rule (service).** `publish` compares the `inputs` it is given with the grants of the current publication:
+
+| Input | Accepted when |
+|---|---|
+| a resource of the current publication, same digest | same `kind`, same `revision` |
+| a resource of the current publication, different digest | same `kind`, `revision` + 1 |
+| a resource the current publication does not have | `revision` 1 |
+| a current resource that is left out | always: it is no longer shared |
+
+Anything else is `INPUT_REVISION_CONFLICT` (409). A resource therefore keeps its identity for as long as it is published, its revision counts its contents, and a revision cannot be reused for other contents or skipped.
+
+**Stopping (E1/E4).** Leaving a file out is a new Bot revision like any other publication. Tasks admitted under the earlier revision are refused at their next step (`TASK_REVOKED`), their result is not delivered (`authorization_required`), and a new task is prepared from the new revision's grants only, so the file is not among its sources. Nothing is indexed apart from the grants, so there is no second path to the file. Answers people already received stay in their chats.
+
+**Desktop host.** `publishedKnowledge(teamId, sharedBotId)` returns what this Desktop published the Bot with: the role and, per file, `resourceId`, `revision`, `kind`, `name`, `sha256`, `bytes`. Texts stay in the private snapshot and are not returned. `publishLocalBot` takes `keptResources` (ids carried unchanged) and `replacedResources` (id → newly picked file). With either, the binding must be the Bot's current revision on this Desktop (`BOT_REVISION_CONFLICT`), each id must be in the current snapshot (`SHARED_RESOURCE_REQUIRED`), and a replacement must be of the same kind (`SHARED_RESOURCE_KIND`). A replacement with identical contents keeps its revision; otherwise it is the same resource at the next revision, and it keeps the package binding of the file it replaces. Carried and new texts together are limited as before (`SHARED_FILE_LIMIT`).
+
+**Publish dialog (Web and Desktop share it; only Desktop can publish).** Choosing a Bot that is already published fills in its role and lists "Shared now" with Replace…, Undo replace, Stop sharing and Keep sharing per file. The review names each file as unchanged, replaced (with its next revision and digest) or no longer shared. A publication this Desktop does not hold at the Bot's current revision carries nothing, and the role and files are entered again.
+
+**Tests.** Emulator `shared-bots.emulator.test.mjs`: two `knowledge:` tests (identity and revision rule; a task that began with a stopped source cannot continue or deliver, and a new task is not given the source). Electron `teams-host.test.ts`: keep, replace and stop sharing one by one. Web `teams-bots-ui.test.ts`: the dialog flow, the kind check, undoing a choice, and the unknown-revision case.
+
+**Not done.** No signed Desktop package or device run. iOS and Android cannot publish, so they have no change. A file is replaced by picking a new one; editing a published file in place and a per-file history view are not offered.
+
 ## Current integration status, 2026-11-05
 
 The sections below record earlier increments and their failures; this table supersedes their pending source-work statements. M0/M1 release acceptance remains open.

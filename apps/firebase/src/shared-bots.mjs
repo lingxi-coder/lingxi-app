@@ -147,6 +147,14 @@ export class SharedBotsStore {
     const ref = team.collection('sharedBots').doc(p.sharedBotId), existing = (await tx.get(ref)).data();
     if (existing && !ownerOf(existing, identity)) deny(403, 'MAINTAINER_REQUIRED');
     if ((existing?.identity.revision ?? 0) !== p.expectedRevision) deny(409, 'BOT_REVISION_CONFLICT');
+    // A resource keeps its identity while it stays published: the same revision is the same bytes, changed bytes are the
+    // next revision, and a resource that was not in the previous publication starts at 1. Leaving one out revokes it.
+    const published = new Map((existing?.grants ?? []).map(grant => [grant.resourceId, grant]));
+    for (const input of p.inputs) {
+      const before = published.get(input.resourceId);
+      if (before ? before.kind !== input.kind || input.revision !== before.revision + (input.digest === before.digest ? 0 : 1)
+        : input.revision !== 1) deny(409, 'INPUT_REVISION_CONFLICT');
+    }
     const d = p.deployment;
     if (d.sharedBotId !== p.sharedBotId || !same(d.owner, identity) || !d.enabled) deny(400, 'INVALID_DEPLOYMENT');
     const deploymentRef = team.collection('deployments').doc(d.deploymentId);

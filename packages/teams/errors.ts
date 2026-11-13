@@ -77,6 +77,13 @@ export function messageErrorText(code: string, zh: boolean): string {
       return t('Review and confirm the publication before continuing.', '请检查并确认发布内容后继续。');
     case 'PUBLISHED_INPUT_REQUIRED':
     case 'INPUT_GRANT_REQUIRED':
+    case 'INPUT_REVISION_CONFLICT':
+    case 'SHARED_RESOURCE_REQUIRED':
+      return t('The shared files changed in the meantime. Choose the Bot again and review what it shares.', '共享的资料在此期间已更改。请重新选择 Bot 并检查共享内容。');
+    case 'SHARED_RESOURCE_KIND':
+      return t('A Skill can only be replaced by a SKILL.md file, and a file by another file.', 'Skill 只能用 SKILL.md 替换，文件只能用其他文件替换。');
+    case 'SHARED_FILE_LIMIT':
+      return t('Too much is shared at once. Stop sharing some files or choose smaller ones.', '共享的资料过多。请停止共享部分文件，或选择更小的文件。');
     case 'INPUT_AUDIENCE_NARROWER':
       return t('The selected resources cannot be shared with this audience. Choose authorized resources or a narrower audience.', '选定资料无法向此受众共享，请选择有权共享的资料或缩小受众。');
     case 'WAIT_KIND_MISMATCH':

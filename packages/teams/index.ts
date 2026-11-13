@@ -1,5 +1,5 @@
 import type { MessageApi, MessageCommand } from './messages';
-import type { LocalPublishableBot, SelectedSharedFile, PublishLocalBotInput } from './execution';
+import type { LocalPublishableBot, SelectedSharedFile, PublishLocalBotInput, PublishedKnowledge } from './execution';
 export * from './execution';
 export type TeamRole = 'owner' | 'admin' | 'member';
 export interface TeamSummary { id: string; name: string; memberCount: number; role: TeamRole; generation: number }
@@ -20,6 +20,8 @@ export interface TeamsApi extends MessageApi {
   openBotMarket?(): Promise<void>;
   localBots?(): Promise<LocalPublishableBot[]>;
   selectSharedFiles?(instanceId: string): Promise<SelectedSharedFile[]>;
+  /** The role and files of a Bot this Desktop publishes; absent off Desktop. */
+  publishedKnowledge?(teamId: string, sharedBotId: string): Promise<PublishedKnowledge>;
   publishLocalBot?(input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }>;
   list(): Promise<{ teams: TeamSummary[] }>;
   detail(teamId: string): Promise<TeamDetail>;
@@ -31,6 +33,7 @@ export interface DesktopTeamsApi {
   openBotMarket(uid: string): Promise<void>;
   localBots(uid: string): Promise<LocalPublishableBot[]>;
   selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]>;
+  publishedKnowledge(uid: string, teamId: string, sharedBotId: string): Promise<PublishedKnowledge>;
   publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }>;
   list(uid: string): Promise<{ teams: TeamSummary[] }>;
   detail(uid: string, teamId: string): Promise<TeamDetail>;

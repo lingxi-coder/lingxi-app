@@ -529,6 +529,7 @@ const api: LingxiApi = {
     localBots: uid => teamsRequest({ type: 'localBots', uid }),
     publishLocalBot: (uid, input) => teamsRequest({ type: 'publishLocalBot', uid, input }),
     selectSharedFiles: (uid, instanceId) => teamsRequest({ type: 'selectSharedFiles', uid, instanceId }),
+    publishedKnowledge: (uid, teamId, sharedBotId) => teamsRequest({ type: 'publishedKnowledge', uid, teamId, sharedBotId }),
     list: uid => teamsRequest({ type: 'list', uid }),
     detail: (uid, teamId) => teamsRequest({ type: 'detail', uid, teamId }),
     messages: (uid, command) => teamsRequest({ type: 'messages', uid, command }),

@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { open, lstat } from 'node:fs/promises';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { providerAccountEnvelope, type ProviderAccountLaunch } from '../provider-accounts.js';
-import type { LocalPublishableBot, PublishLocalBotInput, SelectedSharedFile, SharedBotCard, SharedListItem, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
+import type { LocalPublishableBot, PublishLocalBotInput, PublishedKnowledge, SelectedSharedFile, SharedBotCard, SharedListItem, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
 import { isSharedListWrite } from '../../../../../packages/teams/execution-validation.js';
 import { TeamsApiError, type TeamSummary } from '../../../../../packages/teams/index.js';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source.js';
@@ -181,14 +181,27 @@ export class TeamConnector implements LocalTeamHost {
     }
     return result;
   }
+  /** The role and read-only files of a Bot this Desktop publishes, for its maintainer to keep, replace or stop sharing. The texts stay here. */
+  async publishedKnowledge(uid: string, teamId: string, sharedBotId: string): Promise<PublishedKnowledge> {
+    this.available(); const context = this.context(uid); if (![teamId, sharedBotId].every(id)) throw new Error('INVALID_INPUT');
+    const binding = (await this.options.privateStore.bindings(uid)).find(b => b.teamId === teamId && b.sharedBotId === sharedBotId); this.assert(context);
+    if (!binding) throw new Error('SHARED_BOT_REQUIRED');
+    const { documents } = await this.options.privateStore.snapshot(uid, binding.snapshot); this.assert(context);
+    return { sharedBotId, revision: binding.revision, role: documents.find(d => d.kind === 'persona')?.text ?? '',
+      documents: documents.flatMap(d => d.kind === 'persona' ? [] : [{ resourceId: d.resourceId, revision: d.revision, kind: d.kind, name: d.name, sha256: d.digest, bytes: Buffer.byteLength(d.text) }]) };
+  }
   async publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }> {
     this.available(); const context = this.context(uid), key = JSON.stringify([uid, input?.teamId, input?.sharedBotId]);
     if (this.publishing.has(key)) throw new Error('BOT_REVISION_CONFLICT'); this.publishing.add(key);
     try {
-      if (!input || Object.keys(input).some(k => !['teamId','generation','publicationId','sharedBotId','instanceId','expectedRevision','usePolicy','fileTokens','quotas','role','resourceBindings','sharedList'].includes(k))
+      if (!input || Object.keys(input).some(k => !['teamId','generation','publicationId','sharedBotId','instanceId','expectedRevision','usePolicy','fileTokens','quotas','role','resourceBindings','sharedList','keptResources','replacedResources'].includes(k))
         || ![input.teamId,input.publicationId,input.sharedBotId,input.instanceId].every(id) || !Number.isSafeInteger(input.generation) || input.generation < 1
         || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0 || typeof input.role !== 'string' || !input.role.trim() || input.role.includes('\0') || Buffer.byteLength(input.role) > 64 * 1024
         || !Array.isArray(input.fileTokens) || input.fileTokens.length > 49 || new Set(input.fileTokens).size !== input.fileTokens.length) throw new Error('INVALID_INPUT');
+      const kept = input.keptResources ?? [], replaced = input.replacedResources ?? {};
+      if (!Array.isArray(kept) || !kept.every(id) || new Set(kept).size !== kept.length || !replaced || typeof replaced !== 'object' || Array.isArray(replaced)
+        || !Object.keys(replaced).every(id) || Object.keys(replaced).some(key => kept.includes(key)) || Object.values(replaced).some(token => typeof token !== 'string' || input.fileTokens.includes(token))
+        || new Set(Object.values(replaced)).size !== Object.keys(replaced).length || kept.length + Object.keys(replaced).length + input.fileTokens.length > 49) throw new Error('INVALID_INPUT');
       const policy = input.usePolicy;
       const member = (value: unknown): boolean => !!value && typeof value === 'object' && !Array.isArray(value)
         && Object.keys(value).sort().join(',') === 'generation,uid' && typeof (value as {uid?:unknown}).uid === 'string'
@@ -216,12 +229,30 @@ export class TeamConnector implements LocalTeamHost {
       const continues = CONTINUABLE_PROTOCOLS.includes(route.route.model_protocol); if (list && !continues) throw new Error('SHARED_LIST_UNSUPPORTED');
       const accounts = await this.options.modelAccounts(route.route.credential_id, route.route.model_provider, route.profiles); this.assert(context); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
       const documents: PublishedDocument[] = [{ resourceId: digest(JSON.stringify([input.publicationId, 'persona'])), revision: 1, kind: 'persona', name: 'Role', text: input.role, digest: digest(input.role) }];
-      for (const token of input.fileTokens) { const selection = this.selections.get(token);
-        if (!selection || selection.context.uid !== uid || selection.context.epoch !== context.epoch || selection.instanceId !== input.instanceId || selection.expires <= this.now()) throw new Error('INVALID_SHARED_FILE_TOKEN'); documents.push({...selection.document}); }
+      const chosen = (token: string): PublishedDocument => { const selection = this.selections.get(token);
+        if (!selection || selection.context.uid !== uid || selection.context.epoch !== context.epoch || selection.instanceId !== input.instanceId || selection.expires <= this.now()) throw new Error('INVALID_SHARED_FILE_TOKEN'); return {...selection.document}; };
       const required = await this.requiredResources(input.instanceId); this.assert(context);
+      // Files of the current publication stay or are replaced under their own resource id; the ones not named here stop being shared.
+      if (kept.length || Object.keys(replaced).length) {
+        const current = (await this.options.privateStore.bindings(uid)).find(b => b.teamId === input.teamId && b.sharedBotId === input.sharedBotId); this.assert(context);
+        if (!current || current.revision !== input.expectedRevision || current.instanceId !== input.instanceId) throw new Error('BOT_REVISION_CONFLICT');
+        const previous = (await this.options.privateStore.snapshot(uid, current.snapshot)).documents.filter(d => d.kind !== 'persona'); this.assert(context);
+        if ([...kept, ...Object.keys(replaced)].some(resourceId => !previous.some(d => d.resourceId === resourceId))) throw new Error('SHARED_RESOURCE_REQUIRED');
+        for (const before of previous) {
+          if (kept.includes(before.resourceId)) { documents.push({...before}); continue; }
+          const token = replaced[before.resourceId]; if (token === undefined) continue;
+          const next = chosen(token); if (next.kind !== before.kind) throw new Error('SHARED_RESOURCE_KIND');
+          // A package resource stays bound to the file that replaces it. The same text is the same revision.
+          const bound = required.find(key => before.name.startsWith(`${key}: `));
+          documents.push(next.digest === before.digest ? {...before} : { ...next, resourceId: before.resourceId, revision: before.revision + 1, name: bound ? `${bound}: ${next.name}` : next.name });
+        }
+      }
+      const carried = (key: string) => documents.some(d => d.kind !== 'persona' && d.name.startsWith(`${key}: `));
+      for (const token of input.fileTokens) documents.push(chosen(token));
+      if (documents.reduce((total, d) => total + Buffer.byteLength(d.text), 0) > 2 * 1024 * 1024 + 64 * 1024) throw new Error('SHARED_FILE_LIMIT');
       const bindings = input.resourceBindings ?? {};
       if (!bindings || typeof bindings !== 'object' || Array.isArray(bindings) || Object.keys(bindings).some(key => !required.includes(key))
-        || required.some(key => typeof bindings[key] !== 'string' || !input.fileTokens.includes(bindings[key]!))) throw new Error('RESOURCE_BINDING_REQUIRED');
+        || required.some(key => bindings[key] === undefined ? !carried(key) : typeof bindings[key] !== 'string' || !input.fileTokens.includes(bindings[key]!))) throw new Error('RESOURCE_BINDING_REQUIRED');
       for (const [resource, token] of Object.entries(bindings)) { const selected = this.selections.get(token); const document = documents.find(d => d.resourceId === selected?.document.resourceId); if (document) document.name = `${resource}: ${document.name}`; }
       await route.assertCurrent(); this.assert(context); if (this.options.store.get(input.instanceId).revision !== bot.revision) throw new Error('BOT_REVISION_CONFLICT');
       const instructions = [input.role,...documents.filter(d => d.kind === 'skill').map(d => `\n\n# Published Skill: ${d.name}\n${d.text}`)].join('');
@@ -248,7 +279,7 @@ export class TeamConnector implements LocalTeamHost {
       await this.options.privateStore.savePublication(uid,{schemaVersion:1,requestDigest,binding,payload}); this.assert(context);
       const result = await this.command<{sharedBotId:string;revision:number;grantIds:string[]}>(context,binding,'publishSharedBot',payload,input.publicationId);
       this.assert(context); if (result.sharedBotId !== binding.sharedBotId || result.revision !== binding.revision || JSON.stringify(result.grantIds) !== JSON.stringify(binding.grantIds)) throw new Error('INVALID_PUBLICATION');
-      if (await this.adoptPublication(context,binding)) this.activated.set(scopeKey(binding),activation(binding,context)); for (const token of input.fileTokens) this.selections.delete(token); this.wake(); return { sharedBotId: result.sharedBotId, revision: result.revision };
+      if (await this.adoptPublication(context,binding)) this.activated.set(scopeKey(binding),activation(binding,context)); for (const token of [...input.fileTokens, ...Object.values(replaced)]) this.selections.delete(token); this.wake(); return { sharedBotId: result.sharedBotId, revision: result.revision };
     } finally { this.publishing.delete(key); this.wake(); }
   }
   private async adoptPublication(c: TeamAccountContext, candidate: SharedBotBinding): Promise<boolean> {

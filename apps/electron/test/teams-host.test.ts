@@ -868,3 +868,42 @@ test('the private process passes an approval only on a list that asks for one, a
  for(const wait of [{...long,kind:'human_input'},{...proposed,kind:'approval'},(({kind:_kind,...rest})=>rest)(proposed),{...proposed,question:'x'.repeat(65*1024)}])
   await assert.rejects(runTeamHost({...base,bootstrap:boot() as any,spawnProcess:frames([waiting(wait)])}),/TEAM_HOST_PROTOCOL/);
 });
+test('a published Bot keeps, replaces and stops sharing its files one by one, and a replaced file is the next revision of the same resource',async t=>{
+ const f=fixture(t),write=(name:string,text:string)=>{const path=join(f.root,name);writeFileSync(path,text);return path;};
+ const pick=async(...paths:string[])=>{f.select(paths);return f.connector.selectSharedFiles('owner',f.bot.bot_id);};
+ await assert.rejects(f.connector.publishedKnowledge('owner',teamId,sharedBotId),/SHARED_BOT_REQUIRED/);
+ const first=await pick(write('prices.md','Prices of 2025'),write('rules.txt','House rules'),write('SKILL.md','Skill text'));
+ await f.connector.publishLocalBot('owner',{...f.input,fileTokens:first.map(file=>file.token)});
+ const shared=await f.connector.publishedKnowledge('owner',teamId,sharedBotId);
+ assert.equal(shared.revision,1);assert.equal(shared.role,'Explicit published role');
+ assert.deepEqual(shared.documents.map(d=>[d.name,d.kind,d.revision,d.bytes]),[['prices.md','file',1,14],['rules.txt','file',1,11],['SKILL.md','skill',1,10]]);
+ assert.equal((shared.documents[0] as any).text,undefined,'the list names the files; it does not carry their text');
+ const [prices,rules,skill]=shared.documents.map(d=>d.resourceId) as [string,string,string];
+ const again=(n:number,extra:Partial<PublishLocalBotInput>)=>({...f.input,publicationId:`publication00${n}`,expectedRevision:n-1,...extra});
+ // Nothing is carried over by default, a resource of another publication cannot be named, and a file cannot replace a Skill.
+ const [other]=await pick(write('other.md','Other'));
+ await assert.rejects(f.connector.publishLocalBot('owner',again(2,{keptResources:['resource_unknown']})),/SHARED_RESOURCE_REQUIRED/);
+ await assert.rejects(f.connector.publishLocalBot('owner',again(2,{keptResources:[prices],replacedResources:{[prices]:other!.token}})),/INVALID_INPUT/);
+ await assert.rejects(f.connector.publishLocalBot('owner',again(2,{replacedResources:{[skill]:other!.token}})),/SHARED_RESOURCE_KIND/);
+ await assert.rejects(f.connector.publishLocalBot('owner',{...again(2,{keptResources:[prices]}),expectedRevision:0}),/BOT_REVISION_CONFLICT/);
+ // Prices are replaced, the Skill stays, the rules stop being shared, one file is added.
+ const [newPrices,added]=await pick(write('prices-2026.md','Prices of 2026'),write('faq.md','Questions'));
+ await f.connector.publishLocalBot('owner',again(2,{role:'Role two',keptResources:[skill],replacedResources:{[prices]:newPrices!.token},fileTokens:[added!.token]}));
+ const second=await f.connector.publishedKnowledge('owner',teamId,sharedBotId);
+ assert.equal(second.revision,2);assert.equal(second.role,'Role two');
+ assert.deepEqual(second.documents.map(d=>[d.name,d.revision,d.resourceId===prices,d.resourceId===skill]),[['prices-2026.md',2,true,false],['SKILL.md',1,false,true],['faq.md',1,false,false]]);
+ assert.ok(!second.documents.some(d=>d.resourceId===rules));
+ const sent=f.mock.commands.filter(c=>c.action==='publishSharedBot').at(-1)!.payload as any;
+ assert.deepEqual(sent.inputs.filter((v:any)=>v.kind!=='persona').map((v:any)=>[v.resourceId===prices?'prices':v.resourceId===skill?'skill':'new',v.revision]),[['prices',2],['skill',1],['new',1]]);
+ // The worker of the new publication is given the new text and nothing of the file that is no longer shared.
+ const binding=(await f.privateStore.bindings('owner')).find(b=>b.sharedBotId===sharedBotId)!,stored=await f.privateStore.snapshot('owner',binding.snapshot);
+ const texts=JSON.stringify(stored);assert.ok(texts.includes('Prices of 2026'));assert.ok(!texts.includes('Prices of 2025'));assert.ok(!texts.includes('House rules'));assert.ok(stored.instructions.includes('Skill text'));
+ // The same text again is the same revision; a token is used once.
+ const [same]=await pick(write('prices-copy.md','Prices of 2026'));
+ await f.connector.publishLocalBot('owner',again(3,{role:'Role two',keptResources:[skill],replacedResources:{[prices]:same!.token}}));
+ const third=await f.connector.publishedKnowledge('owner',teamId,sharedBotId);
+ assert.deepEqual(third.documents.map(d=>[d.name,d.revision]),[['prices-2026.md',2],['SKILL.md',1]]);
+ await assert.rejects(f.connector.publishLocalBot('owner',again(4,{replacedResources:{[prices]:same!.token}})),/INVALID_SHARED_FILE_TOKEN/);
+ // Another account on this Desktop sees none of it.
+ f.mock.switch();await assert.rejects(f.connector.publishedKnowledge('owner',teamId,sharedBotId));
+});

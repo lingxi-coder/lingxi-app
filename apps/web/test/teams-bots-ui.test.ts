@@ -41,6 +41,42 @@ scenario('Publication refresh preserves role and native file drafts', async cont
   const { fake, workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-new', name: 'Travel', description: '' }], selectSharedFiles: async () => [{ token: 'native-token', kind: 'file', name: 'notes.txt', bytes: 4, sha256: 'a'.repeat(64), mediaType: 'text/plain' }], publishLocalBot: async () => ({ sharedBotId: 'shared-new', revision: 1 }) });
   const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount()); await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'local-new'); await page.type(page.find(n => n.type === 'textarea')[0], 'Draft role'); await page.click(page.button('Select read-only files / SKILL.md')); await page.during(() => { fake.signal({ bots: true }); }); assert.equal(page.find(n => n.type === 'textarea')[0].props.value, 'Draft role'); assert.match(page.text(), /notes.txt/);
 });
+scenario('Publishing a Bot again shows what it is shared with now: each file is kept, replaced as its next revision or no longer shared, and the review says which (M3-1)', async context => {
+  const published: Record<string, unknown>[] = [], sha = (c: string) => c.repeat(64), picks = [{ token: 'token-handbook-2', kind: 'file' as const, name: 'handbook-2026.md', sha256: sha('d'), bytes: 20, mediaType: 'text/markdown' }, { token: 'token-skill', kind: 'skill' as const, name: 'SKILL.md', sha256: sha('e'), bytes: 9, mediaType: 'text/markdown' }];
+  const documents = [{ resourceId: 'res-handbook', revision: 2, kind: 'file' as const, name: 'handbook.md', sha256: sha('a'), bytes: 10 }, { resourceId: 'res-prices', revision: 1, kind: 'file' as const, name: 'prices.md', sha256: sha('b'), bytes: 11 }, { resourceId: 'res-notes', revision: 1, kind: 'file' as const, name: 'notes.md', sha256: sha('c'), bytes: 12 }];
+  let revision = 2;
+  const { fake, workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-fixture', name: 'Travel', description: '', model: 'Configured model' }], selectSharedFiles: async () => picks.splice(0, 1),
+    publishedKnowledge: async (_team, sharedBotId) => ({ sharedBotId, revision, role: 'Help with trips.', documents }), publishLocalBot: async input => { published.push(input as unknown as Record<string, unknown>); return { sharedBotId: input.sharedBotId, revision: input.expectedRevision + 1 }; } });
+  fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, revision: 2 })]; await workspace.refreshBots(); await until(() => workspace.getSnapshot().bots[0]?.revision === 2, 'the published Bot');
+  const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
+  await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'local-fixture');
+  await until(() => /Shared now/.test(page.text()), 'the files the Bot is shared with');
+  assert.equal(page.find(n => n.type === 'textarea')[0].props.value, 'Help with trips.', 'the published role is carried into the form');
+  assert.match(page.text(), /handbook\.md · file · revision 2/); assert.match(page.text(), /prices\.md · file · revision 1/); assert.match(page.text(), /requests that started with it are stopped/);
+  assert.doesNotMatch(page.text(), new RegExp(sha('a')), 'no digest noise before the review');
+  // Replace one, stop sharing another, leave the third alone.
+  await page.click(page.oneByLabel('Replace handbook.md')); assert.match(page.text(), /will be replaced by handbook-2026\.md/);
+  await page.click(page.oneByLabel('Stop sharing prices.md')); assert.match(page.text(), /prices\.md · file · revision 1 · will stop being shared/);
+  assert.equal(page.byLabel('Replace prices.md').length, 0, 'a file that will stop being shared cannot also be replaced'); assert.equal(page.byLabel('Keep sharing prices.md').length, 1);
+  // A replacement of another kind is refused and changes nothing.
+  await page.click(page.oneByLabel('Replace notes.md')); assert.doesNotMatch(page.text(), /will be replaced by SKILL\.md/);
+  await page.submit();
+  assert.match(page.text(), /handbook\.md → handbook-2026\.md · file · revision 3 · d{64}/); assert.match(page.text(), /prices\.md · will stop being shared/); assert.match(page.text(), /notes\.md · file · unchanged/);
+  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
+  assert.equal(published.length, 1); const first = published[0];
+  assert.deepEqual([first.sharedBotId, first.expectedRevision, first.role, first.fileTokens], ['assistant-fixture', 2, 'Help with trips.', []]);
+  assert.deepEqual(first.keptResources, ['res-notes']); assert.deepEqual(first.replacedResources, { 'res-handbook': 'token-handbook-2' });
+  // Changing one's mind before publishing: both choices are undone and everything stays as it is.
+  revision = 3; fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, revision: 3 })]; await workspace.refreshBots(); await until(() => workspace.getSnapshot().bots[0]?.revision === 3, 'the next revision');
+  await page.type(page.find(n => n.type === 'select')[0], 'local-fixture'); await until(() => /Shared now/.test(page.text()), 'the files again');
+  await page.click(page.oneByLabel('Stop sharing notes.md')); await page.click(page.oneByLabel('Keep sharing notes.md')); assert.doesNotMatch(page.text(), /will stop being shared/);
+  await page.submit(); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
+  assert.deepEqual(published[1].keptResources, ['res-handbook', 'res-prices', 'res-notes']); assert.deepEqual(published[1].replacedResources, {});
+  // A publication this Desktop does not hold at the Bot's revision is entered again: nothing is carried.
+  revision = 9; fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, revision: 4 })]; await workspace.refreshBots(); await until(() => workspace.getSnapshot().bots[0]?.revision === 4, 'a revision this Desktop does not hold');
+  await page.type(page.find(n => n.type === 'select')[0], 'local-fixture'); await page.during(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+  assert.doesNotMatch(page.text(), /Shared now/); assert.equal(page.find(n => n.type === 'textarea')[0].props.value, '');
+});
 scenario('A friendship\'s Bots are shared with the friend alone: no audience choice, the review names the friend, and a stopped Bot is published again as its next revision (D23)', async context => {
   const published: unknown[] = [];
   const { fake, workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-fixture', name: 'Travel', description: '', model: 'Configured model' }], selectSharedFiles: async () => [], publishLocalBot: async input => { published.push(input); return { sharedBotId: input.sharedBotId, revision: input.expectedRevision + 1 }; } });

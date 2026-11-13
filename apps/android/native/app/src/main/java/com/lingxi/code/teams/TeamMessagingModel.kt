@@ -316,6 +316,15 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     suspend fun reviseArtifact(artifactId: String, expectedRevision: Long, operationId: String, draft: TeamDocumentDraft) {
         onModel { execute("reviseArtifact", JSONObject().put("artifactId", artifactId).put("expectedRevision", expectedRevision).put("operationId", operationId).put("document", draft.json()), lifecycle) }
     }
+    /** What a task did outside the Chat. Only its requester and the Bot's maintainer may ask. */
+    suspend fun listOperations(taskId: String): List<TeamTaskOperation> = onModel { TeamTaskOperation.list(execute("listOperations", JSONObject().put("taskId", taskId), lifecycle)) }
+    /** The maintainer states what happened to an action nobody could verify. The task is read again either way: a refusal often means it has moved. */
+    suspend fun resolveOperation(taskId: String, operationId: String, happened: Boolean) {
+        onModel {
+            try { execute("resolveOperation", JSONObject().put("taskId", taskId).put("operationId", operationId).put("resolution", if (happened) "succeeded" else "failed"), lifecycle) }
+            finally { refreshTask(taskId) }
+        }
+    }
     /** A Bot's shared list as it is now. It is read on demand: the list is not part of the message stream. */
     suspend fun readList(sharedBotId: String): TeamSharedList = onModel { TeamSharedList.parse(execute("readList", JSONObject().put("sharedBotId", sharedBotId), lifecycle)) }
     /** Saves [changes] on top of [expectedDataRevision], or saves nothing. The same [operationId] sent again repeats the same request, so a save whose answer was lost is not applied twice. */

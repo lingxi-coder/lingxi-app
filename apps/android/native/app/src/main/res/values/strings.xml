@@ -2966,7 +2966,7 @@
     <string name="settings_browser_saved">已保存，等待下次启动控制会话</string>
     <string name="settings_browser_manage_session">管理控制会话</string>
     <string name="teams_task_needs_checking">需要核实</string>
-    <string name="teams_task_needs_checking_hint">会话之外的某个操作可能已执行，也可能没有。需要 Bot 维护者在 Desktop 或网页端确认。</string>
+    <string name="teams_task_needs_checking_hint">会话之外的某个操作可能已执行，也可能没有，需要 Bot 维护者确认。</string>
     <string name="teams_list_open">共享清单</string>
     <string name="teams_list_hint_fmt">所有可以使用 %1$s 的人都能查看并修改此清单，%1$s 也可以读取和修改它。</string>
     <string name="teams_list_moved">清单在此期间已被修改，你的更改未保存。请查看最新清单，如仍有需要再重试。</string>
@@ -3008,4 +3008,25 @@
     <string name="teams_error_doc_unchanged">没有需要保存的修改。</string>
     <string name="teams_error_doc_limit">此文档已达到 200 个版本的上限，无法继续编辑。</string>
     <string name="teams_error_doc_revision">该版本不可用。</string>
+    <string name="teams_task_needs_checking_maintainer">会话之外的某个操作可能已执行，也可能没有。请核实并确认结果。</string>
+    <string name="teams_ops_review">核实操作</string>
+    <string name="teams_ops_view">查看操作</string>
+    <string name="teams_ops_title">会话之外的操作</string>
+    <string name="teams_ops_intro_maintainer">请到操作实际发生的地方逐项核实，然后说明它是否已执行。全部确认后任务才会结束。</string>
+    <string name="teams_ops_intro_requester">需要 Bot 维护者确认这些操作后，任务才能结束。</string>
+    <string name="teams_ops_empty">此任务没有记录会话之外的操作。</string>
+    <string name="teams_ops_state_unknown">结果未知</string>
+    <string name="teams_ops_state_unreported">未报告结果</string>
+    <string name="teams_ops_state_happened">已执行</string>
+    <string name="teams_ops_state_not_happened">未执行</string>
+    <string name="teams_ops_state_repeatable">可安全重试</string>
+    <string name="teams_ops_happened">已执行</string>
+    <string name="teams_ops_not_happened">未执行</string>
+    <string name="teams_error_ops_conflict">此项已有不同的处理结果，请重新加载查看当前状态。</string>
+    <string name="teams_error_ops_unavailable">你无法查看这些操作。</string>
+    <string name="teams_error_ops_maintainer">只有 Bot 维护者可以确认实际结果。</string>
+    <string name="teams_error_ops_running">任务仍在运行，可能会自行报告结果。请在任务停止后重试。</string>
+    <string name="teams_ops_confirmed_by_fmt">确认人 %1$s</string>
+    <string name="teams_ops_happened_label_fmt">%1$s：已执行</string>
+    <string name="teams_ops_not_happened_label_fmt">%1$s：未执行</string>
 </resources>

@@ -117,6 +117,31 @@ final class TeamBotTests: XCTestCase {
         XCTAssertEqual(TeamsErrors.key("ARTIFACT_REVISION_LIMIT"), "teams_error_doc_limit")
         XCTAssertEqual(TeamsErrors.key("ARTIFACT_UNCHANGED"), "teams_error_doc_unchanged")
     }
+    func testOnlyAnActionNobodyCouldVerifyAsksForADecision() throws {
+        let listed = try JSONDecoder().decode(TeamTaskOperations.self, from: Data(#"{"taskId":"task_0001","operations":[{"operationId":"a","logicalStepId":"s1","category":"queryable","tool":{"name":"send_mail","version":"1"},"state":"dispatched","epoch":1,"dispatchedAt":1000},{"operationId":"b","logicalStepId":"s2","category":"unqueryable","tool":{"name":"post","version":"1"},"state":"unknown","epoch":1,"dispatchedAt":1000},{"operationId":"c","logicalStepId":"s3","category":"unqueryable","tool":{"name":"post","version":"1"},"state":"succeeded","epoch":1,"dispatchedAt":1000,"settledAt":2000,"resolvedBy":{"uid":"owner","generation":1},"resolvedAt":2000},{"operationId":"d","logicalStepId":"s4","category":"queryable","tool":{"name":"post","version":"1"},"state":"failed","epoch":1,"dispatchedAt":1000},{"operationId":"e","logicalStepId":"s5","category":"store_idempotent","tool":{"name":"read","version":"1"},"state":"dispatched","epoch":1,"dispatchedAt":1000}]}"#.utf8)).operations
+        XCTAssertEqual(listed.map(\.unverified), [true, true, false, false, false])
+        XCTAssertEqual(listed.map(TeamOperationRules.stateKey), ["teams_ops_state_unreported", "teams_ops_state_unknown", "teams_ops_state_happened", "teams_ops_state_not_happened", "teams_ops_state_repeatable"])
+        XCTAssertEqual(listed[2].resolvedBy, TeamMemberRef(uid: "owner", generation: 1))
+    }
+    func testTheRequesterSeesTheActionsAndOnlyTheMaintainerConfirmsThem() throws {
+        func task(_ state: String) throws -> TeamTask {
+            try JSONDecoder().decode(TeamTask.self, from: Data(#"{"taskId":"task_0001","conversationId":"chat_0001","sharedBotId":"sharedbot_01","requester":{"uid":"member","generation":3},"state":"\#(state)","createdAt":1,"deadline":2,"replyId":null,"artifactId":null}"#.utf8))
+        }
+        let requester = TeamMemberRef(uid: "member", generation: 3), maintainer = TeamMemberRef(uid: "owner", generation: 1), other = TeamMemberRef(uid: "other", generation: 1)
+        let unchecked = try task("needs_reconciliation")
+        XCTAssertTrue(TeamOperationRules.canReview(unchecked, viewer: requester, maintainer: maintainer))
+        XCTAssertTrue(TeamOperationRules.canReview(unchecked, viewer: maintainer, maintainer: maintainer))
+        XCTAssertFalse(TeamOperationRules.canReview(unchecked, viewer: other, maintainer: maintainer))
+        XCTAssertFalse(TeamOperationRules.canReview(unchecked, viewer: TeamMemberRef(uid: "member", generation: 4), maintainer: maintainer), "A member who rejoined is another member")
+        XCTAssertFalse(TeamOperationRules.canReview(try task("failed"), viewer: maintainer, maintainer: maintainer))
+        XCTAssertTrue(TeamOperationRules.canResolve(viewer: maintainer, maintainer: maintainer))
+        XCTAssertFalse(TeamOperationRules.canResolve(viewer: requester, maintainer: maintainer))
+        XCTAssertFalse(TeamOperationRules.canResolve(viewer: requester, maintainer: nil))
+        XCTAssertEqual(TeamOperationRules.errorKey("MAINTAINER_REQUIRED"), "teams_error_ops_maintainer")
+        XCTAssertEqual(TeamOperationRules.errorKey("TASK_RUNNING"), "teams_error_ops_running")
+        XCTAssertEqual(TeamOperationRules.errorKey("OPERATION_CONFLICT"), "teams_error_ops_conflict")
+        XCTAssertEqual(TeamOperationRules.errorKey("MEMBERSHIP_REQUIRED"), TeamsErrors.key("MEMBERSHIP_REQUIRED"))
+    }
     func testRetiredBotAuthorCannotDecode() throws {
         let base = #"{"id":"message_0001","seq":1,"author":{"kind":"bot","uid":"owner","botKey":"bot:o:h:x"},"kind":"text","text":"old","changeSeq":1,"changeId":"change_0001"}"#
         XCTAssertThrowsError(try JSONDecoder().decode(TeamMessage.self, from: Data(base.utf8)))

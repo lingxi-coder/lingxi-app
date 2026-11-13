@@ -2966,7 +2966,7 @@
     <string name="settings_browser_saved">Saved for the next control session</string>
     <string name="settings_browser_manage_session">Manage control session</string>
     <string name="teams_task_needs_checking">Needs checking</string>
-    <string name="teams_task_needs_checking_hint">An action outside the chat may or may not have gone through. The Bot’s maintainer confirms it on Desktop or the web.</string>
+    <string name="teams_task_needs_checking_hint">An action outside the chat may or may not have gone through. The Bot’s maintainer needs to confirm it.</string>
     <string name="teams_list_open">Shared list</string>
     <string name="teams_list_hint_fmt">Everyone who can use %1$s sees this list and can change it. %1$s can read and change it too.</string>
     <string name="teams_list_moved">The list was changed in the meantime, so your change was not saved. Check the list, then try again if it is still needed.</string>
@@ -3008,4 +3008,25 @@
     <string name="teams_error_doc_unchanged">There are no changes to save.</string>
     <string name="teams_error_doc_limit">This document has reached its limit of 200 revisions and can no longer be edited.</string>
     <string name="teams_error_doc_revision">That revision is not available.</string>
+    <string name="teams_task_needs_checking_maintainer">An action outside the chat may or may not have gone through. Check it and confirm the result.</string>
+    <string name="teams_ops_review">Review actions</string>
+    <string name="teams_ops_view">View actions</string>
+    <string name="teams_ops_title">Actions outside the chat</string>
+    <string name="teams_ops_intro_maintainer">Check each action where it took place, then say whether it happened. The task ends when all of them are confirmed.</string>
+    <string name="teams_ops_intro_requester">The Bot’s maintainer needs to confirm these actions before the task can end.</string>
+    <string name="teams_ops_empty">This task recorded no outside actions.</string>
+    <string name="teams_ops_state_unknown">Result unknown</string>
+    <string name="teams_ops_state_unreported">No result reported</string>
+    <string name="teams_ops_state_happened">Happened</string>
+    <string name="teams_ops_state_not_happened">Did not happen</string>
+    <string name="teams_ops_state_repeatable">Safe to repeat</string>
+    <string name="teams_ops_happened">It happened</string>
+    <string name="teams_ops_not_happened">It did not happen</string>
+    <string name="teams_error_ops_conflict">This was already decided differently. Reload to see the current state.</string>
+    <string name="teams_error_ops_unavailable">These actions are not available to you.</string>
+    <string name="teams_error_ops_maintainer">Only the Bot’s maintainer can confirm what happened.</string>
+    <string name="teams_error_ops_running">The task is still running and may report the result itself. Try again after it stops.</string>
+    <string name="teams_ops_confirmed_by_fmt">confirmed by %1$s</string>
+    <string name="teams_ops_happened_label_fmt">%1$s: it happened</string>
+    <string name="teams_ops_not_happened_label_fmt">%1$s: it did not happen</string>
 </resources>

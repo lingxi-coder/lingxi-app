@@ -2966,7 +2966,7 @@
     <string name="settings_browser_saved">已儲存，等待下次啟動控制對話</string>
     <string name="settings_browser_manage_session">管理控制對話</string>
     <string name="teams_task_needs_checking">需要核實</string>
-    <string name="teams_task_needs_checking_hint">會話之外的某個操作可能已執行，也可能沒有。需要 Bot 維護者在 Desktop 或網頁端確認。</string>
+    <string name="teams_task_needs_checking_hint">會話之外的某個操作可能已執行，也可能沒有，需要 Bot 維護者確認。</string>
     <string name="teams_list_open">共享清單</string>
     <string name="teams_list_hint_fmt">所有可以使用 %1$s 的人都能查看並修改此清單，%1$s 也可以讀取和修改它。</string>
     <string name="teams_list_moved">清單在此期間已被修改，你的變更未儲存。請查看最新清單，如仍有需要再重試。</string>
@@ -3008,4 +3008,25 @@
     <string name="teams_error_doc_unchanged">沒有需要儲存的修改。</string>
     <string name="teams_error_doc_limit">此文件已達到 200 個版本的上限，無法繼續編輯。</string>
     <string name="teams_error_doc_revision">該版本無法使用。</string>
+    <string name="teams_task_needs_checking_maintainer">會話之外的某個操作可能已執行，也可能沒有。請核實並確認結果。</string>
+    <string name="teams_ops_review">核實操作</string>
+    <string name="teams_ops_view">查看操作</string>
+    <string name="teams_ops_title">會話之外的操作</string>
+    <string name="teams_ops_intro_maintainer">請到操作實際發生的地方逐項核實，然後說明它是否已執行。全部確認後任務才會結束。</string>
+    <string name="teams_ops_intro_requester">需要 Bot 維護者確認這些操作後，任務才能結束。</string>
+    <string name="teams_ops_empty">此任務沒有記錄會話之外的操作。</string>
+    <string name="teams_ops_state_unknown">結果未知</string>
+    <string name="teams_ops_state_unreported">未回報結果</string>
+    <string name="teams_ops_state_happened">已執行</string>
+    <string name="teams_ops_state_not_happened">未執行</string>
+    <string name="teams_ops_state_repeatable">可安全重試</string>
+    <string name="teams_ops_happened">已執行</string>
+    <string name="teams_ops_not_happened">未執行</string>
+    <string name="teams_error_ops_conflict">此項已有不同的處理結果，請重新載入查看目前狀態。</string>
+    <string name="teams_error_ops_unavailable">你無法查看這些操作。</string>
+    <string name="teams_error_ops_maintainer">只有 Bot 維護者可以確認實際結果。</string>
+    <string name="teams_error_ops_running">任務仍在執行，可能會自行回報結果。請在任務停止後重試。</string>
+    <string name="teams_ops_confirmed_by_fmt">確認人 %1$s</string>
+    <string name="teams_ops_happened_label_fmt">%1$s：已執行</string>
+    <string name="teams_ops_not_happened_label_fmt">%1$s：未執行</string>
 </resources>

@@ -69,8 +69,10 @@ struct TeamTaskCard: View {
     /// Starts the answer to the Bot's question. Set only on the question itself, while it can still be answered by the viewer.
     var onReply: (() -> Void)? = nil
     @State private var cancelling = false
+    @State private var reviewing = false
 
     private var canCancel: Bool { TeamTaskActions.canCancel(task, viewer: viewer, maintainer: maintainer) }
+    private var canResolve: Bool { TeamOperationRules.canResolve(viewer: viewer, maintainer: maintainer) }
     private var waitLine: String? {
         guard task.state == "waiting", let wait = task.wait else { return nil }
         let expires = TeamsBotText.expiryText(at: wait.expiresAt, now: Date().timeIntervalSince1970 * 1000)
@@ -92,8 +94,13 @@ struct TeamTaskCard: View {
             }
             // An outside action of unknown outcome: the maintainer confirms it where the review screen is.
             if task.state == "needs_reconciliation" {
-                Text("teams_task_needs_checking_hint").font(.caption).foregroundStyle(.secondary)
+                Text(canResolve ? "teams_task_needs_checking_maintainer" : "teams_task_needs_checking_hint").font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("teams.task.checking.\(task.taskId)")
+                if TeamOperationRules.canReview(task, viewer: viewer, maintainer: maintainer) {
+                    Button(canResolve ? "teams_ops_review" : "teams_ops_view", systemImage: "checklist") { reviewing = true }
+                        .buttonStyle(.bordered).controlSize(.small)
+                        .accessibilityIdentifier("teams.task.review.\(task.taskId)")
+                }
             }
             // A task cancelled before any model call has nothing to report.
             if !(task.state == "cancelled" && task.usage == nil) {
@@ -130,6 +137,9 @@ struct TeamTaskCard: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.task.\(task.taskId)")
+        .sheet(isPresented: $reviewing) {
+            TeamOperationsSheet(taskId: task.taskId, model: workspace.messaging, canResolve: canResolve, members: workspace.directory) { reviewing = false }
+        }
     }
 }
 /// A Bot's request to change its list, under the message that carries it: each change in words, and Approve and Decline for the member the

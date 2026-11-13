@@ -299,6 +299,10 @@ private fun ConversationBody(
     fun authorOf(message: TeamMessage): String = if (message.authorKind == "shared_bot") message.authorDisplayName ?: bots.firstOrNull { it.sharedBotId == message.sharedBotId }?.name ?: strings.bot else personName(message.authorUid)
     val copyText = rememberCopyToClipboard("LingXi team message")
     val viewer = TeamMemberRef(uid, team.generation)
+    var reviewing by remember(conversation.id) { mutableStateOf<String?>(null) }
+    reviewing?.let { taskId ->
+        TeamOperationsDialog(taskId, workspace.messagingModel, TeamOperationRules.maintains(taskId, messaging.tasks, bots, viewer), members) { reviewing = null }
+    }
     val pendingWaits = remember(outbox) { TeamTaskActions.pendingWaitIds(outbox) }
 
     Column(modifier) {
@@ -316,7 +320,7 @@ private fun ConversationBody(
                             item, uid, viewer, pendingWaits, ::personName, conversation, bots, members, strings, messaging, tick, byId, ::authorOf,
                             onReply = { setDraft(draft.copy(replyToId = it.id)); editingId = null },
                             onEdit = { editingId = it.id; setDraft(draft.copy(replyToId = null)) },
-                            onRecall = onRecall, onCopy = { copyText(it.text) }, onArtifact = { workspace.messagingModel.openArtifact(it) }, onRefreshTask = { workspace.messagingModel.refreshTask(it) }, onCancelTask = { workspace.messagingModel.cancelTask(it) },
+                            onRecall = onRecall, onCopy = { copyText(it.text) }, onArtifact = { workspace.messagingModel.openArtifact(it) }, onRefreshTask = { workspace.messagingModel.refreshTask(it) }, onCancelTask = { workspace.messagingModel.cancelTask(it) }, onReviewTask = { reviewing = it },
                             onDecideWait = { waitId, taskId, approve, ids -> workspace.messagingModel.decideWait(waitId, taskId, approve, ids) },
                         )
                         is StreamItem.Local -> LocalCommandRow(item, tick, onDiscard = {
@@ -381,7 +385,7 @@ private fun MessageCell(
     item: StreamItem.Msg, uid: String, viewer: TeamMemberRef, pendingWaits: Set<String>, personName: (String) -> String, conversation: TeamMessageConversation, bots: List<TeamBotCard>, members: List<TeamMember>, strings: TeamsListStrings,
     messaging: TeamMessagingState, tick: androidx.compose.runtime.State<Long>, byId: Map<String, TeamMessage>, authorOf: (TeamMessage) -> String,
     onReply: (TeamMessage) -> Unit, onEdit: (TeamMessage) -> Unit, onRecall: (TeamMessage) -> Unit, onCopy: (TeamMessage) -> Unit,
-    onArtifact: (String) -> Unit, onRefreshTask: (String) -> Unit, onCancelTask: (String) -> Unit,
+    onArtifact: (String) -> Unit, onRefreshTask: (String) -> Unit, onCancelTask: (String) -> Unit, onReviewTask: (String) -> Unit,
     onDecideWait: (waitId: String, taskId: String, approve: Boolean, ids: TeamDecisionIds) -> Unit,
 ) {
     val message = item.message
@@ -452,7 +456,7 @@ private fun MessageCell(
                         val answerable = TeamTaskActions.answerableWait(message, messaging.tasks, viewer, pendingWaits) != null
                         TeamTaskCard(
                             task, bot?.name ?: strings.bot, onArtifact, onRefreshTask, viewer = viewer, maintainer = bot?.maintainer,
-                            recipientName = task.wait?.let { personName(it.recipient.uid) }.orEmpty(), onCancel = onCancelTask, onReply = if (answerable) ({ onReply(message) }) else null,
+                            recipientName = task.wait?.let { personName(it.recipient.uid) }.orEmpty(), onCancel = onCancelTask, onReply = if (answerable) ({ onReply(message) }) else null, onReview = onReviewTask,
                         )
                     }
                     else TextButton(onClick = { onRefreshTask(taskId) }) { Text(stringResource(R.string.teams_task_view)) }

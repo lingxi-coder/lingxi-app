@@ -133,6 +133,34 @@ class TeamBotsTest {
         assertEquals(strings.member, TeamDocumentRules.authorName(history.revisions[0].author, emptyList(), emptyList(), strings))
         assertEquals(strings.bot, TeamDocumentRules.authorName(history.revisions[1].author, emptyList(), emptyList(), strings))
     }
+    @Test fun onlyAnActionNobodyCouldVerifyAsksForADecision() {
+        val listed = TeamTaskOperation.list(JSONObject("""{"taskId":"task_0001","operations":[{"operationId":"a","logicalStepId":"s1","category":"queryable","tool":{"name":"send_mail","version":"1"},"state":"dispatched","epoch":1,"dispatchedAt":1000},{"operationId":"b","logicalStepId":"s2","category":"unqueryable","tool":{"name":"post","version":"1"},"state":"unknown","epoch":1,"dispatchedAt":1000},{"operationId":"c","logicalStepId":"s3","category":"unqueryable","tool":{"name":"post","version":"1"},"state":"succeeded","epoch":1,"dispatchedAt":1000,"settledAt":2000,"resolvedBy":{"uid":"owner","generation":1},"resolvedAt":2000},{"operationId":"d","logicalStepId":"s4","category":"queryable","tool":{"name":"post","version":"1"},"state":"failed","epoch":1,"dispatchedAt":1000},{"operationId":"e","logicalStepId":"s5","category":"store_idempotent","tool":{"name":"read","version":"1"},"state":"dispatched","epoch":1,"dispatchedAt":1000}]}"""))
+        assertEquals(listOf(true, true, false, false, false), listed.map { it.unverified })
+        assertEquals(listOf(com.lingxi.code.R.string.teams_ops_state_unreported, com.lingxi.code.R.string.teams_ops_state_unknown, com.lingxi.code.R.string.teams_ops_state_happened,
+            com.lingxi.code.R.string.teams_ops_state_not_happened, com.lingxi.code.R.string.teams_ops_state_repeatable), listed.map(TeamOperationRules::stateRes))
+        assertEquals(TeamMemberRef("owner", 1), listed[2].resolvedBy)
+        assertEquals("send_mail", listed[0].toolName); assertNull(listed[0].settledAt)
+    }
+    @Test fun theRequesterSeesTheActionsAndOnlyTheMaintainerConfirmsThem() {
+        fun task(state: String) = TeamTask.parse(JSONObject("""{"taskId":"task_0001","conversationId":"chat_0001","sharedBotId":"sharedbot_01","requester":{"uid":"member","generation":3},"state":"$state","createdAt":1,"deadline":2,"replyId":null,"artifactId":null}"""))
+        val requester = TeamMemberRef("member", 3); val maintainer = TeamMemberRef("owner", 3); val other = TeamMemberRef("other", 1)
+        val unchecked = task("needs_reconciliation")
+        assertTrue(TeamOperationRules.canReview(unchecked, requester, maintainer))
+        assertTrue(TeamOperationRules.canReview(unchecked, maintainer, maintainer))
+        assertFalse(TeamOperationRules.canReview(unchecked, other, maintainer))
+        assertFalse("A member who rejoined is another member", TeamOperationRules.canReview(unchecked, TeamMemberRef("member", 4), maintainer))
+        assertFalse(TeamOperationRules.canReview(unchecked, null, maintainer))
+        assertFalse(TeamOperationRules.canReview(task("failed"), maintainer, maintainer))
+        assertTrue(TeamOperationRules.canResolve(maintainer, maintainer))
+        assertFalse(TeamOperationRules.canResolve(requester, maintainer))
+        assertFalse(TeamOperationRules.canResolve(null, null))
+        assertTrue(TeamOperationRules.maintains("task_0001", listOf(unchecked), listOf(card()), maintainer))
+        assertFalse(TeamOperationRules.maintains("task_0001", listOf(unchecked), listOf(card()), requester))
+        assertFalse("An unknown task or Bot gives nobody the choice", TeamOperationRules.maintains("task_0002", listOf(unchecked), listOf(card()), maintainer))
+        assertEquals(com.lingxi.code.R.string.teams_error_ops_maintainer, TeamOperationRules.errorRes("MAINTAINER_REQUIRED"))
+        assertEquals(com.lingxi.code.R.string.teams_error_ops_running, TeamOperationRules.errorRes("TASK_RUNNING"))
+        assertEquals(teamsErrorRes("MEMBERSHIP_REQUIRED"), TeamOperationRules.errorRes("MEMBERSHIP_REQUIRED"))
+    }
     @Test fun offlineBotQueuesWithoutAnyMemberModelConfiguration() {
         val card = TeamBotCard.parse(JSONObject("""{"sharedBotId":"sharedbot_01","name":"Helper","description":"","maintainer":{"uid":"owner","generation":1},"revision":1,"state":"published","permitted":true,"ready":false,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":100,"member":10,"bot":50}}"""))
         assertTrue(card.selectable)

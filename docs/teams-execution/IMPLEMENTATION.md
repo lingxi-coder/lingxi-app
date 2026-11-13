@@ -43,7 +43,7 @@ Implemented in `apps/firebase/src/shared-bots.mjs` and `shared-bot-commands.mjs`
   - `completeTask` over an unverified operation publishes the reply but stores `needs_reconciliation` (the earned state is kept and applied when the last operation is verified). A cancelled task stays `cancelled` and keeps showing `unverifiedOperations`. A running task past its deadline reads `needs_reconciliation` instead of `interrupted`/`cancelled` while one exists.
 - `resolveOperation {taskId, operationId, resolution: succeeded|failed}` (member command, Bot maintainer only: `MAINTAINER_REQUIRED`) states what happened to an unverified operation. Refused while the run could still report (`TASK_RUNNING`) and for an operation that is not unverified (`OPERATION_CONFLICT`). Response `{taskId, state, operationId, operationState}`.
 - `listOperations {taskId}` (requester and maintainer, both must still read the Chat): `{taskId, operations: [{operationId, logicalStepId, category, tool, state, epoch, dispatchedAt, settledAt?, resolvedBy?, resolvedAt?}]}`. Parameters, digests and results are not returned.
-- New task state `needs_reconciliation`. Web, Desktop, iOS and Android do not label it yet (they show the unknown-state text); that is part of Q08.
+- New task state `needs_reconciliation`. All four clients label it and offer the review (see "M2 / Q07–Q08 clients").
 
 ## M2 / Q07 — shared documents: revisions, conflicts and history (Firebase backend)
 
@@ -207,8 +207,11 @@ iOS and Android:
   The edit identity and validity rules are `TeamDocumentOperation` / `TeamDocumentDraft` in `TeamDocuments.swift` and
   `TeamDocuments.kt`. Checked by compile and unit tests only, not on a device.
 - A friend chat does not host the document screen on iOS or Android (it did not before either): "Open document" there shows nothing.
-- A task in `needs_reconciliation` is labelled and explains that the maintainer confirms it on Desktop or the web. iOS and
-  Android do not list or resolve operations yet.
+- A task in `needs_reconciliation` is labelled "Needs checking". Its requester and the Bot's maintainer get "View actions" /
+  "Review actions" on the task card, which opens the list of outside actions (`TeamOperationsView.swift`,
+  `TeamOperationsScreen.kt`); only the maintainer gets "It happened" / "It did not happen". After a decision, accepted or
+  refused, the list and the task are read again. Who may look and who may decide is `TeamOperationRules` in
+  `TeamOperations.swift` / `TeamOperations.kt`. Checked by compile and unit tests only, not on a device.
 
 `resources/translations/*.json` now contains the 22 `settings_browser_*` keys that had been added to the generated iOS and
 Android files only, so `generate.py` is lossless again.

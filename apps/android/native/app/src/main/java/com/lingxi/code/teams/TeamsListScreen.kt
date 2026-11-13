@@ -87,6 +87,7 @@ internal fun TeamsListScreen(
     onArtifact: (String) -> Unit = {},
     onRefreshTask: (String) -> Unit = {},
     onCancelTask: (String) -> Unit = {},
+    onReviewTask: (String) -> Unit = {},
     onDiscardCommand: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -173,7 +174,7 @@ internal fun TeamsListScreen(
                             val bot = bots.firstOrNull { it.sharedBotId == task.sharedBotId }
                             TeamTaskCard(
                                 task, bot?.name ?: strings.bot, onArtifact, onRefreshTask, viewer = messaging.cache?.let { TeamMemberRef(uid, it.generation) }, maintainer = bot?.maintainer,
-                                recipientName = task.wait?.let { wait -> members.firstOrNull { it.uid == wait.recipient.uid }?.displayName?.takeIf { it.isNotEmpty() } } ?: strings.member, onCancel = onCancelTask,
+                                recipientName = task.wait?.let { wait -> members.firstOrNull { it.uid == wait.recipient.uid }?.displayName?.takeIf { it.isNotEmpty() } } ?: strings.member, onCancel = onCancelTask, onReview = onReviewTask,
                             )
                         }
                     }

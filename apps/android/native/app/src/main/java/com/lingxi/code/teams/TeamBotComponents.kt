@@ -86,7 +86,7 @@ internal fun teamWaitExpiryText(expiresAt: Long): String {
 @Composable
 internal fun TeamTaskCard(
     task: TeamTask, botName: String, onArtifact: (String) -> Unit, onRefresh: (String) -> Unit, viewer: TeamMemberRef?, maintainer: TeamMemberRef?,
-    recipientName: String, onCancel: (String) -> Unit, onReply: (() -> Unit)? = null,
+    recipientName: String, onCancel: (String) -> Unit, onReply: (() -> Unit)? = null, onReview: ((String) -> Unit)? = null,
 ) {
     var cancelAsked by remember(task.taskId, task.state, task.cancelRequestedAt) { mutableStateOf(false) }
     val canCancel = TeamTaskActions.canCancel(task, viewer, maintainer)
@@ -101,7 +101,13 @@ internal fun TeamTaskCard(
             )
         }
         // An outside action of unknown outcome: the maintainer confirms it where the review screen is.
-        if (task.state == "needs_reconciliation") Text(stringResource(R.string.teams_task_needs_checking_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.task.checking.${task.taskId}"))
+        if (task.state == "needs_reconciliation") {
+            val resolves = TeamOperationRules.canResolve(viewer, maintainer)
+            Text(stringResource(if (resolves) R.string.teams_task_needs_checking_maintainer else R.string.teams_task_needs_checking_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.task.checking.${task.taskId}"))
+            if (onReview != null && TeamOperationRules.canReview(task, viewer, maintainer)) OutlinedButton(onClick = { onReview(task.taskId) }, modifier = Modifier.testTag("teams.task.review.${task.taskId}")) {
+                Text(stringResource(if (resolves) R.string.teams_ops_review else R.string.teams_ops_view))
+            }
+        }
         // A task cancelled before any model call has nothing to report.
         if (!(task.state == "cancelled" && task.usage == null)) Text(TeamsBotText.usageLine(task.usage, rememberTeamUsageStrings()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.task.usage.${task.taskId}"))
         if (onReply != null || canCancel) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

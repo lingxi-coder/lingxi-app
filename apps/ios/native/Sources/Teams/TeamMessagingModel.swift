@@ -389,6 +389,17 @@ final class TeamMessagingModel {
                                                                                  "decision": approve ? "approve" : "deny"], commandId: ids.commandId, life: lifecycle)
         try await refreshTask(taskId)
     }
+    /// What a task did outside the Chat. Only its requester and the Bot's maintainer may ask.
+    func listOperations(_ taskId: String) async throws -> [TeamTaskOperation] {
+        let result: TeamTaskOperations = try await execute("listOperations", payload: ["taskId": taskId], life: lifecycle)
+        return result.operations
+    }
+    /// The maintainer states what happened to an action nobody could verify. The task is read again either way: a refusal often means it has moved.
+    func resolveOperation(_ taskId: String, operationId: String, happened: Bool) async throws {
+        do { let _: TeamOperationResolved = try await execute("resolveOperation", payload: ["taskId": taskId, "operationId": operationId, "resolution": happened ? "succeeded" : "failed"], life: lifecycle) }
+        catch { try? await refreshTask(taskId); throw error }
+        try await refreshTask(taskId)
+    }
     func openArtifact(_ artifactId: String) async throws {
         let selection = selected
         let result: TeamArtifact = try await execute("readArtifact", payload: ["artifactId": artifactId], life: lifecycle)

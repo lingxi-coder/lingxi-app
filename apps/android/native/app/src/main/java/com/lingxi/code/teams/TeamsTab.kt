@@ -71,6 +71,12 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     val teams by workspace.teams.collectAsStateWithLifecycle()
     val messaging by workspace.messaging.collectAsStateWithLifecycle()
     messaging.artifact?.let { artifact -> TeamArtifactViewer(artifact, workspace.messagingModel, teams.detail?.members.orEmpty(), messaging.bots, workspace.messagingModel::closeArtifact) }
+    // The review of a task from the list of recent tasks; a task inside a conversation is reviewed from its own screen.
+    var reviewing by remember { mutableStateOf<String?>(null) }
+    reviewing?.let { taskId ->
+        val viewer = teams.uid?.let { uid -> messaging.cache?.let { TeamMemberRef(uid, it.generation) } }
+        TeamOperationsDialog(taskId, workspace.messagingModel, TeamOperationRules.maintains(taskId, messaging.tasks, messaging.bots, viewer), teams.detail?.members.orEmpty()) { reviewing = null }
+    }
     val collapsed by workspace.collapsed.collectAsStateWithLifecycle()
     val unreadByTeam by workspace.unreadByTeam.collectAsStateWithLifecycle()
     val host = LocalTabHost.current
@@ -145,6 +151,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                         onArtifact = { workspace.messagingModel.openArtifact(it) },
                         onRefreshTask = { workspace.messagingModel.refreshTask(it) },
                         onCancelTask = { workspace.messagingModel.cancelTask(it) },
+                        onReviewTask = { reviewing = it },
                         onDiscardCommand = { workspace.messagingModel.discardCommand(it) },
                         onReconnect = workspace::reconnect, onDiscardCreation = { workspace.messagingModel.discardCreation() }, modifier = m,
                     )

@@ -44,8 +44,8 @@ test('history pagination and delayed message growth keep every painted reading p
       assert.ok(sample.wheelEvents >= 3, 'trusted wheel input reaches the real transcript');
       assert.equal(sample.historyRequests, 1, 'the gesture joins one in-flight page');
       assert.equal(sample.uniqueMessages, sample.messageCount, 'prepend retains unique message identity');
-      assert.equal(sample.tail.reserved, 0, 'an explicit jump releases short-history tail space');
-      assert.ok(sample.tail.gap <= 1, 'an explicit jump still follows the true bottom');
+      assert.equal(sample.tail.reserved, 0, 'scrolling down at the end or an explicit jump releases short-history tail space');
+      assert.ok(sample.tail.gap <= 1, 'returning to the end still follows the true bottom');
       for (const phase of sample.phases) {
         if (phase.phase === 'late-child-resize') assert.equal(phase.mutationResult, true, 'the preceding row receives a real delayed child resize');
         assert.ok(phase.frames.length >= 4, 'measure successive frames, not only the final location');

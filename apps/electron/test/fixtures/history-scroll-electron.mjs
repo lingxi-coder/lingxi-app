@@ -19,13 +19,13 @@ async function main() {
     await run(`document.querySelector('.desktop-stage').addEventListener('wheel', event => {
       if (event.isTrusted) window.historyWheelEvents++;
     }, { passive: true })`);
-    const wheel = async () => {
+    const wheel = async (deltaY = -6) => {
       const point = await run(`(() => { const r = document.querySelector('.desktop-stage').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + 200 }; })()`);
-      await win.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseWheel', ...point, deltaX: 0, deltaY: -6 });
+      await win.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseWheel', ...point, deltaX: 0, deltaY });
       await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     };
     const results = [];
-    for (const count of [1, 40, 140, 180]) {
+    for (const count of [1, 2, 40, 140, 180]) {
       await run(`window.stageScrollFixture.historySetup(${count})`);
       await delay(120);
       await run(`(() => {
@@ -37,7 +37,7 @@ async function main() {
       await wheel();
       await waitForFixture(win.webContents, 'window.stageScrollFixture.historyRequests() === 1');
       await delay(100);
-      if (count > 1) {
+      if (count > 2) {
         await run(`(() => { const stage = document.querySelector('.desktop-stage'); stage.scrollTop = 500; stage.dispatchEvent(new Event('scroll')); })()`);
         await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
         assert.ok(await run(`document.querySelector('[data-message-uuid="history-current-0"]').getBoundingClientRect().bottom <= document.querySelector('.desktop-stage').getBoundingClientRect().top`), 'the growing message is above the reading position');
@@ -72,7 +72,7 @@ async function main() {
         const frames = await collect();
         return { phase: name, before, mutationResult, frames, maxDrift: drift(before, frames) };
       };
-      const phases = count > 1 ? [await phase('markdown-growth', `window.stageScrollFixture.growHistory('history-current-0')`)] : [];
+      const phases = count > 2 ? [await phase('markdown-growth', `window.stageScrollFixture.growHistory('history-current-0')`)] : [];
       phases.push(await phase('prepend', 'window.stageScrollFixture.completeHistory()'));
       phases.push(await phase('late-child-resize', `(() => {
         const stage = document.querySelector('.desktop-stage');
@@ -94,7 +94,14 @@ async function main() {
         return { wheelEvents: window.historyWheelEvents, historyRequests: window.stageScrollFixture.historyRequests(),
           messageCount: ids.length, uniqueMessages: new Set(ids).size };
       })()`);
-      await run(`document.querySelector('.desktop-stage-jump')?.click()`);
+      if (count === 1) {
+        await wheel(6);
+        await delay(220);
+      } else if (count === 2) {
+        await run(`document.querySelector('.desktop-stage').focus({ preventScroll: true })`);
+        win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'End' });
+        win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'End' });
+      } else await run(`document.querySelector('.desktop-stage-jump')?.click()`);
       await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
       const tail = await run(`(() => { const stage = document.querySelector('.desktop-stage'); return {
         reserved: document.querySelector('.transcript-history-tail-space').offsetHeight,

@@ -775,8 +775,17 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
 
   return (
     <TranscriptLeafWindowScope.Provider value={leafScope}>
-    <div ref={stageRef} className={activityView ? "desktop-stage activity-view" : "desktop-stage"} tabIndex={windowing.enabled ? 0 : -1} onPointerDown={() => { pointerHeld.current = true; }} onWheel={(event) => {
+    <div ref={stageRef} className={activityView ? "desktop-stage activity-view" : "desktop-stage"} tabIndex={windowing.enabled ? 0 : -1} onPointerDown={() => { pointerHeld.current = true; }} onKeyDown={(event) => {
+      if (event.target === event.currentTarget && historyTailSpace.current?.offsetHeight
+        && (event.key === 'End' || event.key === 'ArrowDown' && (event.metaKey || event.ctrlKey))) {
+        event.preventDefault();
+        armTail();
+      }
+    }} onWheel={(event) => {
       followMutedUntil.current = performance.now() + 150;
+      const node = stageRef.current;
+      if (event.deltaY > 0 && historyTailSpace.current?.offsetHeight && node
+        && node.scrollHeight - node.scrollTop - node.clientHeight <= BOTTOM_SLACK) armTail();
       if (event.deltaY < 0 && followTail.current) {
         setFollow(false);
         captureAnchor();

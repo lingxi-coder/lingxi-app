@@ -52,8 +52,8 @@ function Fixture() {
     await new Promise<void>(resolve => { historyResolve.current = resolve; });
     flushSync(() => {
       setItems(previous => [...Array.from({ length: 60 }, (_, index): RunItem => index === 59 && historyToolHead.current
-        ? { type: 'tool', id: 'older-tool', tool: 'Read', status: 'done', view: { verb: 'read', label: 'Read', title: 'Read older.ts', primary: 'older.ts' } }
-        : { type: 'narration', id: `older-${index}`, role: historyUser.current && index === 0 ? 'user' : 'assistant', text: `Older saved message ${index}` }), ...previous]);
+        ? { type: 'tool', id: 'older-tool', transcriptUuid: 'older-tool', tool: 'Read', status: 'done', view: { verb: 'read', label: 'Read', title: 'Read older.ts', primary: 'older.ts' } }
+        : { type: 'narration', id: `older-${index}`, transcriptUuid: `older-${index}`, role: historyUser.current && index === 0 ? 'user' : 'assistant', text: `Older saved message ${index}` }), ...previous]);
       setHistory({ before: null, loading: false });
     });
   };
@@ -85,6 +85,11 @@ function Fixture() {
     },
     historyRequests: () => historyRequests.current,
     completeHistory: () => historyResolve.current?.(),
+    growHistory(id: string) {
+      flushSync(() => setItems(previous => previous.map(item => item.id === id && item.type === 'narration'
+        ? { ...item, text: `${item.text}\n\n${'A delayed Markdown paragraph changes the measured message height. '.repeat(12)}` }
+        : item)));
+    },
     thinking(visible: boolean) { flushSync(() => setThinkingVisible(visible)); },
     activity(phase: 'running' | 'empty-result' | 'result' | 'reasoning' | 'next-tool' | 'group-result' | 'long-reasoning') {
       const read: ToolRunItem = { type: 'tool', id: 'activity-read', tool: 'Read', status: phase === 'running' ? 'running' : 'done',

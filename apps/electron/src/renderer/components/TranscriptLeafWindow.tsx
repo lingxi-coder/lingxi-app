@@ -55,8 +55,8 @@ export function TranscriptLeafWindow<T extends Leaf>({ items, renderItem, gap = 
   const enabled = Boolean(scope) && items.length > TRANSCRIPT_LEAF_WINDOW_THRESHOLD;
   const root = useRef<HTMLDivElement>(null);
   const sessionKey = scope?.sessionKey ?? '';
-  const cache = useRef({ sessionKey, width: 0, heights: new Map<string, number>() });
-  if (cache.current.sessionKey !== sessionKey) cache.current = { sessionKey, width: 0, heights: new Map() };
+  const cache = useRef({ sessionKey, revision: 0, width: 0, heights: new Map<string, number>() });
+  if (cache.current.sessionKey !== sessionKey) cache.current = { sessionKey, revision: 0, width: 0, heights: new Map() };
   const [revision, setRevision] = useState(0);
   const [selection, setSelection] = useState<{ sessionKey: string; first?: string; last?: string }>({ sessionKey });
   const layout = useMemo(() => {
@@ -65,7 +65,7 @@ export function TranscriptLeafWindow<T extends Leaf>({ items, renderItem, gap = 
       indices.set(item.id, index);
       offsets.push(offsets[index]! + (cache.current.heights.get(item.id) ?? (item.type === 'tool' ? 36 : 120)) + (index < items.length - 1 ? gap : 0));
     });
-    return { offsets, indices };
+    return { offsets, indices, revision: cache.current.revision };
   }, [items, sessionKey, revision, gap]);
 
   let range: Range = { start: 0, end: items.length };
@@ -90,6 +90,7 @@ export function TranscriptLeafWindow<T extends Leaf>({ items, renderItem, gap = 
     const state = current.current;
     const viewport = state.scope?.viewport.current;
     if (!state.enabled || !state.scope || !viewport || !root.current || state.scope.following.current || state.scope.targetPending()) return;
+    if (state.layout.revision !== cache.current.revision) return;
     const bounds = root.current.getBoundingClientRect();
     const top = viewport.getBoundingClientRect().top - bounds.top;
     const next = transcriptLeafRange(state.layout.offsets, top, viewport.clientHeight);
@@ -120,7 +121,10 @@ export function TranscriptLeafWindow<T extends Leaf>({ items, renderItem, gap = 
         changed = true;
       }
     }
-    if (changed) setRevision(value => value + 1);
+    if (changed) {
+      cache.current.revision++;
+      setRevision(value => value + 1);
+    }
   }, []);
 
   useLayoutEffect(() => {
@@ -139,15 +143,15 @@ export function TranscriptLeafWindow<T extends Leaf>({ items, renderItem, gap = 
     if (!enabled || !viewport || !root.current) return;
     const onScroll = () => refresh();
     viewport.addEventListener('scroll', onScroll, { passive: true });
-    let frame = 0;
     const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => { measure(); current.current.scope?.onLayout(); refresh(); });
+      measure();
+      current.current.scope?.onLayout();
+      refresh();
     });
     observer.observe(viewport);
     observer.observe(root.current);
     for (const node of root.current.querySelectorAll(':scope > [data-transcript-leaf-id]')) observer.observe(node);
-    return () => { viewport.removeEventListener('scroll', onScroll); observer.disconnect(); cancelAnimationFrame(frame); };
+    return () => { viewport.removeEventListener('scroll', onScroll); observer.disconnect(); };
   }, [enabled, sessionKey, range.start, range.end, scope?.viewport, measure, refresh]);
 
   return <div ref={root} className="transcript-leaf-window" data-leaf-windowed={enabled || undefined}

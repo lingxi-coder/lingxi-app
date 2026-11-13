@@ -1,10 +1,12 @@
-/* Windowed rows need real heights even inside the overscan region. Offscreen
-   history is represented by spacers, so content-visibility would double-estimate. */
-.desktop-stage-feed[data-windowed='true'] .transcript-run-item {
+/* Stage bounds mounted rows and leaves with its measured windows. All mounted
+   messages need real geometry, including the short list before windowing starts;
+   intrinsic placeholders would add a second size correction during backscroll. */
+.desktop-stage-feed .transcript-run-item {
   content-visibility: visible;
   contain-intrinsic-size: none;
 }
-.transcript-window-spacer {
+.transcript-window-spacer,
+.transcript-history-tail-space {
   flex: none;
   pointer-events: none;
 }

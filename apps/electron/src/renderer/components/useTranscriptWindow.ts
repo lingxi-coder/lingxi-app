@@ -50,17 +50,18 @@ export function transcriptWindowRange(offsets: readonly number[], offset: number
  * cache owns heights, not messages or native UI revisions; unmounting a row uses
  * its existing native-surface cleanup, and remounting obtains a fresh revision.
  */
-export function useTranscriptWindow<T extends WindowRow>({ rows, sessionKey, viewport, feed, following }: {
+export function useTranscriptWindow<T extends WindowRow>({ rows, sessionKey, viewport, feed, following, onLayout }: {
   rows: readonly T[];
   sessionKey: string;
   viewport: RefObject<HTMLDivElement>;
   feed: RefObject<HTMLDivElement>;
   following: MutableRefObject<boolean>;
+  onLayout(): void;
 }) {
   const enabled = rows.length > TRANSCRIPT_WINDOW_THRESHOLD;
   const beforeRef = useRef<HTMLDivElement>(null);
-  const cache = useRef({ sessionKey, width: 0, viewportHeight: 0, rem: 16, heights: new Map<string, number>() });
-  if (cache.current.sessionKey !== sessionKey) cache.current = { sessionKey, width: 0, viewportHeight: 0, rem: 16, heights: new Map() };
+  const cache = useRef({ sessionKey, revision: 0, width: 0, viewportHeight: 0, rem: 16, heights: new Map<string, number>() });
+  if (cache.current.sessionKey !== sessionKey) cache.current = { sessionKey, revision: 0, width: 0, viewportHeight: 0, rem: 16, heights: new Map() };
   const [revision, setRevision] = useState(0);
   const [window, setWindow] = useState<WindowState>({ sessionKey, start: 0, end: 0 });
   const detachedPosition = useRef<{ sessionKey: string; id: string } | null>(null);
@@ -73,7 +74,7 @@ export function useTranscriptWindow<T extends WindowRow>({ rows, sessionKey, vie
       const height = cache.current.heights.get(row.id) ?? (row.type === 'tool-group' ? 40 : ESTIMATED_HEIGHT);
       offsets.push(offsets[index]! + height + transcriptRowGap(rows[index - 1], row) * cache.current.rem);
     }
-    return { offsets, indices };
+    return { offsets, indices, revision: cache.current.revision };
   }, [rows, sessionKey, revision]);
 
   let range: Range = { start: 0, end: rows.length };
@@ -121,6 +122,9 @@ export function useTranscriptWindow<T extends WindowRow>({ rows, sessionKey, vie
     const node = viewport.current;
     const before = beforeRef.current;
     if (!node || following.current) return;
+    // A measurement queued a new layout. Its previous estimates cannot choose
+    // the next visible range or evict the current reading anchor.
+    if (state.layout.revision !== cache.current.revision) return;
     if (!state.enabled) {
       const top = node.getBoundingClientRect().top;
       const mounted = feed.current?.querySelectorAll<HTMLElement>(':scope > .transcript-row:not([data-thinking-slot])');
@@ -167,22 +171,24 @@ export function useTranscriptWindow<T extends WindowRow>({ rows, sessionKey, vie
         changed = true;
       }
     }
-    if (changed) setRevision(value => value + 1);
+    if (changed) {
+      cache.current.revision++;
+      setRevision(value => value + 1);
+    }
   }, [feed, viewport]);
 
   // Measure before Stage restores its text anchor or synchronizes the tail.
   useLayoutEffect(measure);
   useLayoutEffect(() => {
     if (!enabled || !feed.current || !viewport.current) return;
-    let frame = 0;
     const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(measure);
+      measure();
+      onLayout();
     });
     observer.observe(viewport.current);
     for (const node of feed.current.querySelectorAll(':scope > [data-transcript-id]')) observer.observe(node);
-    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
-  }, [enabled, sessionKey, range.start, range.end, measure, feed, viewport]);
+    return () => observer.disconnect();
+  }, [enabled, sessionKey, range.start, range.end, measure, feed, viewport, onLayout]);
 
   return {
     enabled, start: range.start, end: range.end, beforeRef, refresh, reveal,

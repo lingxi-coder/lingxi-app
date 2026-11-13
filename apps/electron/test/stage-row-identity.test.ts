@@ -12,7 +12,10 @@ function render(props: React.ComponentProps<typeof Stage>): string {
   return renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, React.createElement(Stage, { sessionKey: 'session', ...props })));
 }
 function anchorTag(html: string, uuid: string): string {
-  const tags = html.match(new RegExp(`<[^>]+data-message-uuid="${uuid}"[^>]*>`, 'g')) ?? [];
+  // Expanded activities also expose their durable aliases on reading leaves.
+  // This contract checks the direct feed wrapper that owns sibling spacing.
+  const tags = (html.match(new RegExp(`<[^>]+data-message-uuid="${uuid}"[^>]*>`, 'g')) ?? [])
+    .filter(tag => /class="transcript-row"/.test(tag));
   assert.equal(tags.length, 1, `expected one DOM anchor for ${uuid}`);
   return tags[0]!;
 }
@@ -79,7 +82,8 @@ test('retry and agent components participate in the shared feed spacing contract
   const retryHtml = render({ liveItems: [{ type: 'thinking', id: 'thinking', text: 'Working', done: false, streamed: true, transcriptUuid: 'retry-message' }, tool], running: true, apiRetry: { message: 'Backoff', attempt: 1, max_retries: 3, delay_ms: 2000 } });
   assert.match(anchorTag(retryHtml, 'retry-message'), /class="transcript-row" data-row-type="tool-group"/);
   assert.match(anchorContents(retryHtml, 'retry-message'), /^<div class="transcript-run-item" data-run-type="activity"/);
-  assert.match(retryHtml, /Retrying… attempt 1\/3 · Backoff/);
+  assert.match(retryHtml, /role="status">Reconnecting 1\/3<\/span>/);
+  assert.match(retryHtml, /class="transcript-api-retry-message">Backoff<\/p>/);
   const agentsHtml = render({ agents: [{ agent_id: 'worker', name: 'Worker', status: 'running', agent_type: 'explorer' }] });
   assert.match(agentsHtml, /class="desktop-stage-feed"[^>]*><div class="transcript-row" data-row-type="agents"><div class="transcript-agents"/);
 });

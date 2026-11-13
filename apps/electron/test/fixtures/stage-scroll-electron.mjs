@@ -359,7 +359,7 @@ async function main() {
       assert.equal(await run('window.stageScrollFixture.historyRequests()'), 1, 'duplicate scroll events join the pending page');
       await run('window.stageScrollFixture.completeHistory()'); await settle();
       const afterOffset = await run(`(() => { const stage = document.querySelector('.desktop-stage');
-        const row = [...document.querySelectorAll('[data-message-uuid]')].find(row => row.dataset.messageUuid === ${JSON.stringify(held.id)});
+        const row = [...document.querySelectorAll('[data-message-uuids]')].find(row => row.dataset.messageUuids.split(' ').includes(${JSON.stringify(held.id)}));
         return row?.getBoundingClientRect().top - stage.getBoundingClientRect().top; })()`);
       assert.ok(Number.isFinite(afterOffset) && Math.abs(afterOffset - held.offset) <= 2, `prepend keeps the same reading row for ${count} rows: ${held.offset} -> ${afterOffset}`);
       assert.equal(await run('Boolean(document.querySelector(".transcript-history-loader"))'), false, 'exhausted history has no further loader');

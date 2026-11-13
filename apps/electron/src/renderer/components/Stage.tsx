@@ -373,6 +373,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
   useEffect(() => setLocalPlan(null), [sessionKey]);
   const stageRef = useRef<HTMLDivElement>(null);
   const feedRef = useRef<HTMLDivElement>(null);
+  const historyTailSpace = useRef<HTMLDivElement>(null);
   /**
    * Whether the reader is parked at the tail. Kept in a ref because the scroll
    * path must read and write it without a re-render; `atTail` mirrors it purely
@@ -385,11 +386,11 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
   /** A pointer is down inside the transcript, so layout drift must not move it. */
   const pointerHeld = useRef(false);
   /**
-   * Deadline (`performance.now()`) before which a layout change may not snap the
-   * viewport. A wheel event reaches us before the scroll it causes, so this is
-   * the only way to avoid fighting the gesture for its first frame.
+   * Suspend automatic tail-follow while the reader is scrolling. Geometry
+   * compensation remains active: it must remove layout drift without undoing
+   * the scroll that the browser has already applied.
    */
-  const snapMutedUntil = useRef(0);
+  const followMutedUntil = useRef(0);
   /** Re-decides the follow once a wheel gesture has settled; see `onWheel`. */
   const settleTimer = useRef<number | undefined>(undefined);
   /**
@@ -398,7 +399,9 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
    * Element identity survives reflow, and `isConnected` retires an anchor whose
    * row was unmounted — an index would quietly point at a different message.
    */
-  const anchor = useRef<{ node: Element; text?: Range; offset: number; rowOffset: number; uuid?: string } | null>(null);
+  const anchor = useRef<{ node: Element; text?: Range; offset: number; rowOffset: number; scrollTop: number; uuid?: string } | null>(null);
+  const layoutChanged = useRef<() => void>();
+  const reportLayout = useCallback(() => layoutChanged.current?.(), []);
   const compensatedScroll = useRef<number | null>(null);
   const scrollSession = useRef(sessionKey);
   /** The newest prompt seen, so a freshly sent one can re-arm the tail. */
@@ -482,8 +485,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
     ?? collapseOpen(visible, sessionKey, groupChoices.aliases.get(id) ?? id) ?? false, [visible, sessionKey, groupChoices]);
 
   const presentationRows = rows;
-  const windowing = useTranscriptWindow({ rows: presentationRows, sessionKey, viewport: stageRef, feed: feedRef, following: followTail });
-  const historyLayout = useRef<{ sessionKey: string; firstId?: string }>({ sessionKey });
+  const windowing = useTranscriptWindow({ rows: presentationRows, sessionKey, viewport: stageRef, feed: feedRef, following: followTail, onLayout: reportLayout });
   useEffect(() => {
     window.lingxi?.reportSessionRecovery?.({ phase: 'stage_commit', sessionKey,
       itemCount: liveItems.length, rowCount: presentationRows.length,
@@ -517,7 +519,16 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
    */
   const measureFollow = useCallback(() => {
     const node = stageRef.current;
-    if (!node) return;
+    if (!node || performance.now() < followMutedUntil.current) return;
+    const space = historyTailSpace.current;
+    const reserved = space?.offsetHeight ?? 0;
+    if (reserved) {
+      // Paging a short transcript preserves the blank area that was already
+      // below it. Removing it while parked there would clamp scrollTop and
+      // move the message. Release it once it is safely below the viewport.
+      if (node.scrollTop > Math.max(0, node.scrollHeight - reserved - node.clientHeight) + 0.5) return;
+      space!.style.height = '0px';
+    }
     setFollow(node.scrollHeight - node.scrollTop - node.clientHeight <= BOTTOM_SLACK);
   }, [setFollow]);
 
@@ -526,7 +537,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
   const syncTail = useCallback(() => {
     const node = stageRef.current;
     if (!node || !followTail.current || pointerHeld.current) return;
-    if (performance.now() < snapMutedUntil.current) return;
+    if (performance.now() < followMutedUntil.current) return;
     const bottom = Math.max(0, node.scrollHeight - node.clientHeight);
     if (Math.abs(node.scrollTop - bottom) > 0.5) node.scrollTop = bottom;
     anchor.current = null;
@@ -565,6 +576,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
     const text = readingTextAnchor(element, containerTop);
     anchor.current = { node: element, text, offset: (text ?? element).getBoundingClientRect().top - containerTop,
       rowOffset: element.getBoundingClientRect().top - containerTop,
+      scrollTop: node.scrollTop,
       uuid: element.getAttribute('data-message-uuid') ?? undefined };
   }, []);
 
@@ -580,10 +592,6 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
     const node = stageRef.current;
     const held = anchor.current;
     if (!node || !held) return;
-    // The reader is driving. Compensating mid-gesture would re-apply their own
-    // wheel delta: the anchor was captured before the scroll event for that
-    // movement arrived, so the offset it recorded already includes it.
-    if (performance.now() < snapMutedUntil.current) return;
     if (!held.node.isConnected) {
       const leafId = (held.node as HTMLElement).dataset?.transcriptLeafId;
       const leaf = leafId && Array.from(feedRef.current?.querySelectorAll<HTMLElement>('[data-transcript-leaf-id]') ?? [])
@@ -599,13 +607,18 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
     if (held.text && !held.node.contains(held.text.startContainer)) { held.text = undefined; held.offset = held.rowOffset; }
     const target = held.text ?? held.node;
     const offset = target.getBoundingClientRect().top - node.getBoundingClientRect().top;
-    const delta = offset - held.offset;
+    // Compare content coordinates. A native wheel can move scrollTop before its
+    // scroll event is delivered; adding that movement back isolates the layout
+    // delta instead of restoring the reader to their previous scroll position.
+    const userScroll = performance.now() < followMutedUntil.current ? node.scrollTop - held.scrollTop : 0;
+    const delta = offset - held.offset + userScroll;
     if (Math.abs(delta) > 0.5) {
       node.scrollTop += delta;
       compensatedScroll.current = node.scrollTop;
     }
     held.offset = target.getBoundingClientRect().top - node.getBoundingClientRect().top;
     held.rowOffset = held.node.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    held.scrollTop = node.scrollTop;
   }, []);
 
   const historyRequest = useRef<{ sessionKey: string; promise: Promise<void> } | null>(null);
@@ -614,6 +627,11 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
     followTail.current = false;
     setAtTail(false);
     captureAnchor();
+    const node = stageRef.current, feed = feedRef.current, space = historyTailSpace.current;
+    if (node && feed && space) {
+      const slack = node.clientHeight - feed.getBoundingClientRect().height;
+      if (slack > 0) space.style.height = `${space.offsetHeight + slack}px`;
+    }
     const promise = Promise.resolve().then(onLoadMoreHistory).catch(() => undefined).finally(() => {
       if (historyRequest.current?.promise === promise) historyRequest.current = null;
     });
@@ -621,10 +639,11 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
   }, [history.before, history.loading, onLoadMoreHistory, captureAnchor, sessionKey]);
 
   const armTail = useCallback(() => {
+    if (historyTailSpace.current) historyTailSpace.current.style.height = '0px';
     followTail.current = true;
     setAtTail(true);
     anchor.current = null;
-    snapMutedUntil.current = 0;
+    followMutedUntil.current = 0;
     // An explicit action must not be blocked by a lingering gesture flag.
     const node = stageRef.current;
     if (node) node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
@@ -636,6 +655,9 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
   useLayoutEffect(() => {
     if (scrollSession.current === sessionKey) return;
     scrollSession.current = sessionKey;
+    if (historyTailSpace.current) historyTailSpace.current.style.height = '0px';
+    window.clearTimeout(settleTimer.current);
+    followMutedUntil.current = 0;
     compensatedScroll.current = null;
     followTail.current = true;
     setAtTail(true);
@@ -693,17 +715,6 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
   }, [messageTarget, sessionKey, rows, items, liveItems, foldedItemIds, visible, setOpen, groupIsOpen, onMessageLocated, presentationRows, windowing.reveal, windowing.start, windowing.end, history, onLoadMoreHistory, requestOlder]);
 
   useLayoutEffect(() => {
-    const previous = historyLayout.current;
-    const firstId = presentationRows[0]?.id;
-    const prepended = previous.sessionKey === sessionKey && previous.firstId !== firstId
-      && presentationRows.some((row, index) => index > 0 && row.id === previous.firstId);
-    historyLayout.current = { sessionKey, firstId };
-    if (prepended && !followTail.current) {
-      const mutedUntil = snapMutedUntil.current;
-      snapMutedUntil.current = 0;
-      restoreAnchor();
-      snapMutedUntil.current = mutedUntil;
-    }
     // A requested window is not mounted until the next commit. Refreshing from
     // the old scroll offset here would overwrite that window with the old tail.
     if (revealInFlight.current) return;
@@ -724,11 +735,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
     const feed = feedRef.current;
     if (!node || !feed) return;
     // Also covers child-only updates, images, disclosures and viewport resizing.
-    const observer = new ResizeObserver(() => {
-      if (pointerHeld.current) return;
-      if (followTail.current) syncTail();
-      else restoreAnchor();
-    });
+    const observer = new ResizeObserver(reportLayout);
     observer.observe(node);
     observer.observe(feed);
     const release = () => {
@@ -747,7 +754,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
       window.removeEventListener('pointercancel', release);
       window.removeEventListener('blur', release);
     };
-  }, [captureAnchor, measureFollow, restoreAnchor, syncTail]);
+  }, [captureAnchor, measureFollow, reportLayout]);
 
   const settleLeafLayout = useCallback(() => {
     if (revealInFlight.current) return;
@@ -758,21 +765,23 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
     if (!anchor.current || !anchor.current.node.hasAttribute('data-transcript-leaf-id')
       && anchor.current.node.querySelector('[data-leaf-windowed]')) captureAnchor();
   }, [restoreAnchor, syncTail, captureAnchor]);
+  layoutChanged.current = settleLeafLayout;
   const readingLeafId = useCallback(() => (anchor.current?.node as HTMLElement | undefined)?.dataset?.transcriptLeafId, []);
   const targetLeafId = messageTarget && locatedMessage.current !== `${sessionKey}:${messageTarget}`
     ? liveItems.find(item => transcriptRowUuids(item).includes(messageTarget))?.id : undefined;
   const leafTargetPending = useCallback(() => Boolean(messageTarget) && locatedMessage.current !== `${sessionKey}:${messageTarget}`, [messageTarget, sessionKey]);
   const leafScope = useMemo(() => ({ sessionKey, viewport: stageRef, following: followTail,
-    targetId: targetLeafId, targetPending: leafTargetPending, readingId: readingLeafId, onLayout: settleLeafLayout }), [sessionKey, targetLeafId, leafTargetPending, readingLeafId, settleLeafLayout]);
+    targetId: targetLeafId, targetPending: leafTargetPending, readingId: readingLeafId, onLayout: reportLayout }), [sessionKey, targetLeafId, leafTargetPending, readingLeafId, reportLayout]);
 
   return (
     <TranscriptLeafWindowScope.Provider value={leafScope}>
     <div ref={stageRef} className={activityView ? "desktop-stage activity-view" : "desktop-stage"} tabIndex={windowing.enabled ? 0 : -1} onPointerDown={() => { pointerHeld.current = true; }} onWheel={(event) => {
+      followMutedUntil.current = performance.now() + 150;
+      if (event.deltaY < 0 && followTail.current) {
+        setFollow(false);
+        captureAnchor();
+      }
       if (event.deltaY < 0 && (stageRef.current?.scrollTop ?? Infinity) <= 160 && !history.error) requestOlder();
-      // Arrives before the scroll it causes, and in either direction: the
-      // reader is driving, so no layout change may move the viewport under them
-      // until the gesture has settled.
-      snapMutedUntil.current = performance.now() + 150;
       // The gate has to lift by itself — nothing else runs once the gesture
       // stops, and a silently expired deadline would leave the viewport parked
       // while `atTail` still claimed the reader was at the tail.
@@ -790,6 +799,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
       // anchor across successive resize frames instead of choosing another line.
       if (stageRef.current?.scrollTop === compensatedScroll.current) return;
       compensatedScroll.current = null;
+      if (!followTail.current && !pointerHeld.current && performance.now() < followMutedUntil.current) restoreAnchor();
       measureFollow();
       windowing.refresh();
       captureAnchor();
@@ -1019,6 +1029,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
               ...(uuid && uuid === messageTarget ? { outline: `2px solid ${t.text3}`, outlineOffset: 4, borderRadius: 8 } : {}) }}>{content}</div>;
         })}
         {windowing.enabled && <div className="transcript-window-spacer" aria-hidden="true" style={{ height: windowing.after }} />}
+        <div ref={historyTailSpace} className="transcript-history-tail-space" aria-hidden="true" />
 
         {localPlan && <div role="dialog" aria-label={tr('desktop_stage_plan')} style={{position:'fixed',inset:'10%',zIndex:100,background:t.surface,overflow:'auto',borderRadius:16}}><button onClick={()=>setLocalPlan(null)}>{tr('desktop_stage_close_plan')}</button><PlanDocument content={localPlan.content}/></div>}
 

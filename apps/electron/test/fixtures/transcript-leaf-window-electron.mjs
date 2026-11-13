@@ -16,7 +16,7 @@ async function main() {
     while (!await run(code)) { if (Date.now() > deadline) throw new Error(message); await delay(30); }
     await settle();
   };
-  const visibleLeaf = `(() => { const stage = document.querySelector('.desktop-stage').getBoundingClientRect(); const leaf = [...document.querySelectorAll('[data-transcript-leaf-id]')].find(leaf => { const r = leaf.getBoundingClientRect(); return r.bottom > stage.top && r.top < stage.bottom; }); return leaf ? { id: leaf.dataset.transcriptLeafId, offset: leaf.getBoundingClientRect().top - stage.top } : null; })()`;
+  const visibleLeaf = `(() => { const stage = document.querySelector('.desktop-stage').getBoundingClientRect(); const leaf = [...document.querySelectorAll('[data-transcript-leaf-id]')].find(leaf => { const r = leaf.getBoundingClientRect(); return r.bottom > stage.top + 1 && r.top < stage.bottom; }); return leaf ? { id: leaf.dataset.transcriptLeafId, offset: leaf.getBoundingClientRect().top - stage.top } : null; })()`;
   const reveal = async id => {
     await run(`window.leafFixture.reveal('uuid-${id}')`);
     await wait('window.leafFixture.located() === true', `UUID ${id} did not settle`);
@@ -49,10 +49,30 @@ async function main() {
     const afterPrepend = await run(visibleLeaf);
     assert.equal(afterPrepend?.id, beforePrepend?.id, 'prepend/merged activity keeps the individual reading leaf');
     assert.ok(Math.abs(afterPrepend.offset - beforePrepend.offset) <= 2, `prepend anchor drift: ${JSON.stringify({ beforePrepend, afterPrepend })}`);
+    // The native scroll and ResizeObserver queues must cooperate while paging
+    // changes the aggregate ID and replaces its independently measured window.
+    const point = await run(`(() => { const r = document.querySelector('.desktop-stage').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + 180 }; })()`);
+    await win.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type: 'mouseWheel', ...point, deltaX: 0, deltaY: -6 });
+    await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    const wheelHeld = await run(visibleLeaf);
+    await run('window.leafFixture.prepend()');
+    const wheelFrames = await run(`new Promise(resolve => {
+      const frames = [];
+      const sample = () => requestAnimationFrame(() => setTimeout(() => {
+        const leaf = document.querySelector('[data-transcript-leaf-id="${wheelHeld.id}"]');
+        frames.push(leaf ? leaf.getBoundingClientRect().top - document.querySelector('.desktop-stage').getBoundingClientRect().top : null);
+        if (frames.length < 4) sample(); else resolve(frames);
+      }, 0));
+      sample();
+    })`);
+    const wheelPrependDrift = Math.max(...wheelFrames.map(offset => offset === null ? Infinity : Math.abs(offset - wheelHeld.offset)));
+    assert.ok(wheelPrependDrift <= 1, `wheel paging preserves the merged leaf in every painted frame: ${JSON.stringify({ wheelHeld, wheelFrames })}`);
+    await settle();
+    const afterWheelPrepend = await run(visibleLeaf);
     await run('window.leafFixture.stream()'); await settle();
     const afterStream = await run(visibleLeaf);
-    assert.equal(afterStream?.id, afterPrepend?.id, 'detached streaming keeps the reading leaf');
-    assert.ok(Math.abs(afterStream.offset - afterPrepend.offset) <= 2, 'detached stream keeps its reading offset');
+    assert.equal(afterStream?.id, afterWheelPrepend?.id, 'detached streaming keeps the reading leaf');
+    assert.ok(Math.abs(afterStream.offset - afterWheelPrepend.offset) <= 2, 'detached stream keeps its reading offset');
     await bounded();
     // Recycling never discards disclosure choices or the logical history.
     for (const fraction of [0, 0.2, 0.5, 0.8, 1]) {
@@ -115,7 +135,7 @@ async function main() {
       assert.ok(await run(visibleLeaf), 'standalone ToolGroup scroll reveals actual leaves');
     }
     assert.equal(await run('document.querySelectorAll(".desktop-stage").length'), 1, 'there is one transcript scrollport');
-    process.stdout.write(`${JSON.stringify({ maxMounted, maxSites, tailGap, reasoningPrependDrift, resizeDrift, prependDrift: Math.abs(afterPrepend.offset - beforePrepend.offset) })}\n`);
+    process.stdout.write(`${JSON.stringify({ maxMounted, maxSites, tailGap, reasoningPrependDrift, resizeDrift, wheelPrependDrift, prependDrift: Math.abs(afterPrepend.offset - beforePrepend.offset) })}\n`);
   } finally { win.destroy(); app.quit(); }
 }
 main().catch(error => { process.stderr.write(`${error.stack ?? error}\n`); app.exit(1); });

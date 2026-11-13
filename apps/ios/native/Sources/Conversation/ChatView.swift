@@ -1029,6 +1029,8 @@ struct ChatView: View {
         switch runtimeFooterState {
         case .hidden:
             EmptyView()
+        case let .reconnecting(retry, runID):
+            ConversationReconnectNotice(retry: retry).id(runID)
         case let .compaction(status):
             CompactionRuntimeFooter(status: status)
         case let .error(message):
@@ -1050,6 +1052,9 @@ struct ChatView: View {
         }
         if let error = convo.error {
             return .error(error.message)
+        }
+        if let run = ConversationRenderLayout.pinnedRun(convo.items), let retry = run.retry, run.status == .running {
+            return .reconnecting(retry, run.id)
         }
         return .hidden
     }
@@ -1267,6 +1272,7 @@ struct ChatView: View {
 
 private enum RuntimeFooterState: Equatable {
     case hidden
+    case reconnecting(ConversationRetrySnapshot, String)
     case compaction(ConversationCompactionStatus)
     case error(String)
 }

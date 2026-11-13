@@ -721,6 +721,21 @@ import SwiftUI
             XCTAssertEqual(source.model.sessionRefreshRevision, 0)
         }
 
+        func testReconnectClearsWhenOutputResumesOrTurnEnds() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 3, sessionId: "session-a")
+            source.applyForTesting(.turnStarted(turnId: 3))
+            source.applyForTesting(.apiRetry(message: "offline", attempt: 1, maxRetries: 5, delayMs: 1000))
+            XCTAssertEqual(ConversationRenderLayout.pinnedRun(source.model.items)?.retry?.attempt, 1)
+            source.applyForTesting(.textDelta(text: "recovered".clientTextDto))
+            XCTAssertNil(ConversationRenderLayout.pinnedRun(source.model.items)?.retry)
+            source.applyForTesting(.apiRetry(message: "offline", attempt: 2, maxRetries: 5, delayMs: 1000))
+            source.applyForTesting(.turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
+            for item in source.model.items {
+                if case let .run(run) = item { XCTAssertNil(run.retry) }
+            }
+        }
+
         func testTelemetryAndCoordinatorEventsAccumulateOnActiveRun() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 3, sessionId: "session-a")

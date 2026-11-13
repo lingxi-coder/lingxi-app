@@ -215,7 +215,7 @@
     <string name="chat_result_removed_label">%1$d줄 삭제</string>
     <string name="chat_resume_session_failed">세션 복원 실패</string>
     <string name="chat_retry_connection">연결 다시 시도</string>
-    <string name="chat_retry_status">요청 재시도 %1$d/%2$d(%3$s)</string>
+    <string name="chat_retry_status">다시 연결 중 %1$d/%2$d</string>
     <string name="chat_run_accessibility_label">에이전트 실행 과정, %1$s</string>
     <string name="chat_run_active_collaborators">협업자 %1$d명</string>
     <string name="chat_run_analyzing_request">요청을 분석하는 중…</string>

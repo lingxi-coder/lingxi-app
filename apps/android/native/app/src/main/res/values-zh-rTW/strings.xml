@@ -215,7 +215,7 @@
     <string name="chat_result_removed_label">刪除 %1$d 行</string>
     <string name="chat_resume_session_failed">恢復會話失敗</string>
     <string name="chat_retry_connection">重試連線</string>
-    <string name="chat_retry_status">請求重試 %1$d/%2$d（%3$s）</string>
+    <string name="chat_retry_status">正在重新連線 %1$d/%2$d</string>
     <string name="chat_run_accessibility_label">Agent 執行過程，%1$s</string>
     <string name="chat_run_active_collaborators">%1$d 個協作者</string>
     <string name="chat_run_analyzing_request">正在分析請求…</string>

@@ -65,15 +65,6 @@ struct ConversationExecutionRunCard: View {
                             }
                         }
 
-                        if let retry = run.retry {
-                            HStack(spacing: 8) {
-                                LXIcon(name: .clock, size: 12, color: t.text3, stroke: 1.6)
-                                Text(String(localized: "chat_retry_attempt \(retry.message) \(retry.attempt) \(retry.maxRetries) \(retry.delayMs)"))
-                                    .font(.system(size: 12.5))
-                                    .foregroundColor(t.text2)
-                            }
-                        }
-
                         if !run.tools.isEmpty {
                             // One renderer for every tool row, live or restored: it consumes
                             // the current engine-derived header and result display.
@@ -317,5 +308,37 @@ private struct UsageChip: View {
             .padding(.vertical, 5)
             .background(t.windowBg.opacity(0.55))
             .clipShape(Capsule())
+    }
+}
+
+struct ConversationReconnectNotice: View {
+    @Environment(\.theme) private var theme
+    @State private var expanded = true
+    let retry: ConversationRetrySnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button { expanded.toggle() } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "wifi")
+                    Text(String(localized: "chat_retrying \(retry.attempt) \(retry.maxRetries)"))
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                }
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(expanded ? String(localized: "chat_run_collapse") : String(localized: "chat_run_expand"))
+            if expanded {
+                Text(retry.message).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .font(.subheadline)
+        .foregroundStyle(theme.text3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .accessibilityIdentifier("conversation.reconnect")
     }
 }

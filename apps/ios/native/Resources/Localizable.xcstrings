@@ -13245,31 +13245,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "重试中（%u/%u）…"
+            "value": "正在重新连接 %u/%u"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "重試中（%u/%u）…"
+            "value": "正在重新連線 %u/%u"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Retrying (%u/%u)…"
+            "value": "Reconnecting %u/%u"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "再試行中（%u/%u）…"
+            "value": "再接続中 %u/%u"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "다시 시도 중 (%u/%u)…"
+            "value": "다시 연결 중 %u/%u"
           }
         }
       }

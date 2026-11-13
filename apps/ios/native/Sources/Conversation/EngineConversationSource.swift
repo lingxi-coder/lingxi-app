@@ -3894,6 +3894,15 @@ final class EngineConversationSource: ConversationSource {
         }
         externalEventHandler?(event)
         switch event {
+        case .textDelta, .thinkingDelta, .toolUseStarted, .turnEnded, .error:
+            if acceptTurnEvent(event), let index = activeRunItemIndex,
+               model.items.indices.contains(index), case let .run(run) = model.items[index], run.retry != nil {
+                updateActiveRun { $0.retry = nil }
+                model.statusLine = nil
+            }
+        default: break
+        }
+        switch event {
         case .turnStarted:
             guard acceptTurnEvent(event) else { return }
             model.promptSuggestion = nil

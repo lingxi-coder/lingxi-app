@@ -3442,6 +3442,13 @@ class ChatViewModel(
             assistantRowsByIdentity.clear()
             assistantReasoningByIdentity.clear()
         }
+        if (event is ReplyEvent.Thinking || event is ReplyEvent.ReasoningDelta || event is ReplyEvent.Delta ||
+            event is ReplyEvent.ToolActivity || event is ReplyEvent.Error || event is ReplyEvent.Completed || event is ReplyEvent.End) {
+            _state.update { state ->
+                if (state.agentRun?.retry == null) state
+                else state.copy(agentRun = state.agentRun.copy(retry = null), statusLine = null)
+            }
+        }
         when (event) {
             is ReplyEvent.Thinking -> _state.update {
                 it.copy(
@@ -3611,23 +3618,12 @@ class ChatViewModel(
             }
 
             is ReplyEvent.Retry -> _state.update {
-                val delaySeconds = event.delayMs / 1_000.0
-                val label = strings.resolve(
-                    R.string.chat_retry_status,
-                    "请求重试 %1\$d/%2\$d（%3\$s）",
-                    event.attempt,
-                    event.maxRetries,
-                    "${delaySeconds}s",
-                )
                 it.copy(
-                    statusLine = label,
-                    agentRun = (it.agentRun ?: AgentRunState(turnId = token))
-                        .addNotice(
-                            AgentRunNotice(
-                                "$label：${event.message}",
-                                AgentRunNoticeKind.Warning,
-                            ),
-                        ),
+                    statusLine = strings.resolve(R.string.chat_retry_status, "正在重新连接 %1\$d/%2\$d",
+                        event.attempt, event.maxRetries),
+                    agentRun = (it.agentRun ?: AgentRunState(turnId = token)).copy(
+                        retry = AgentRetryState(event.message, event.attempt, event.maxRetries),
+                    ),
                 )
             }
 

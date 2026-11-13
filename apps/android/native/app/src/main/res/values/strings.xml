@@ -215,7 +215,7 @@
     <string name="chat_result_removed_label">删除 %1$d 行</string>
     <string name="chat_resume_session_failed">恢复会话失败</string>
     <string name="chat_retry_connection">重试连接</string>
-    <string name="chat_retry_status">请求重试 %1$d/%2$d（%3$s）</string>
+    <string name="chat_retry_status">正在重新连接 %1$d/%2$d</string>
     <string name="chat_run_accessibility_label">Agent 运行过程，%1$s</string>
     <string name="chat_run_active_collaborators">%1$d 个协作者</string>
     <string name="chat_run_analyzing_request">正在分析请求…</string>

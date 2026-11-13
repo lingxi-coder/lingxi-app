@@ -215,7 +215,7 @@
     <string name="chat_result_removed_label">%1$d 行を削除</string>
     <string name="chat_resume_session_failed">会話の再開に失敗しました</string>
     <string name="chat_retry_connection">接続を再試行</string>
-    <string name="chat_retry_status">リクエスト再試行 %1$d/%2$d（%3$s）</string>
+    <string name="chat_retry_status">再接続中 %1$d/%2$d</string>
     <string name="chat_run_accessibility_label">Agent の実行状況、%1$s</string>
     <string name="chat_run_active_collaborators">%1$d 人の協力者</string>
     <string name="chat_run_analyzing_request">リクエストを分析中…</string>

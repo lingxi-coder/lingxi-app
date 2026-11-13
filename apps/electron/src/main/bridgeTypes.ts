@@ -72,6 +72,7 @@ export interface BridgeLaunchConfig {
   globalConfigPath?: string;
   providerAccounts?: ProviderAccountSnapshot;
   providerAccountHome?: string;
+  providerAccountBackend?: 'desktop-broker:development' | 'desktop-broker:production';
   providerAccountCredentials?: Record<string, RuntimeProviderAccountCredential>;
   /** Broker-owned sensitive plugin options, passed only over child stdin. */
   pluginSecrets?: Record<string, Record<string, string>>;

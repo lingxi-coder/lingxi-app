@@ -246,12 +246,14 @@ async fn async_main() -> anyhow::Result<()> {
     let mut cfg = boot::resolve_desktop_config(&args).map_err(|error| anyhow::anyhow!(error))?;
     let mut provider_accounts = None;
     let mut provider_account_home = None;
+    let mut provider_account_backend = None;
     let mut provider_account_credentials = BTreeMap::new();
     if args.credential_stdin {
         let envelope = boot::read_credential_envelope(&mut std::io::stdin().lock())
             .map_err(|e| anyhow::anyhow!(e))?;
         provider_accounts = envelope.provider_accounts;
         provider_account_home = envelope.provider_account_home;
+        provider_account_backend = envelope.provider_account_backend;
         provider_account_credentials = envelope.provider_account_credentials;
         cfg.injected_plugin_secrets = envelope.plugin_secrets;
     }
@@ -267,6 +269,7 @@ async fn async_main() -> anyhow::Result<()> {
         provider_accounts,
         provider_account_credentials,
         provider_account_home,
+        provider_account_backend,
     )
     .await
     .map_err(|e| anyhow::anyhow!("failed to assemble bridge runtime: {e}"))?;

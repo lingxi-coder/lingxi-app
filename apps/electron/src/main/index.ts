@@ -736,6 +736,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         ...(botWorkspace ? { permissionTimeoutSecs: BOT_PERMISSION_TIMEOUT_SECS } : {}),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         providerAccountHome: productPaths.brandHome,
+        providerAccountBackend: `desktop-broker:${credentialBroker?.credentialChannel ?? 'development'}`,
         pluginSecrets,
         model,
         apiBaseUrl: configured.apiBaseUrl,

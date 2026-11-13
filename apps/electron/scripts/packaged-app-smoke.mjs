@@ -1069,6 +1069,10 @@ async function assertDesktopGit(page, workspace, tempRoot) {
 }
 
 async function assertBottomTerminal(page) {
+  // The sidecar fixture was created through Host IPC, outside the renderer's
+  // navigation transaction. Observe its committed owner before testing scope.
+  await page.send('Page.reload', { ignoreCache: true });
+  await assertRendererContract(page, []);
   const scope = await evaluate(page, `(async () => {
     const state = await window.lingxi.bootstrap();
     return state.activeSession ?? { projectPath: state.workspace.path, sessionId: '__draft__' };

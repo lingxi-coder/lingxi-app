@@ -558,6 +558,9 @@ pub struct CredentialEnvelope {
     /// Canonical Host account root, independent of the session settings root.
     #[serde(default)]
     pub provider_account_home: Option<PathBuf>,
+    /// Host credential domain, available before the deferred account projection.
+    #[serde(default)]
+    pub provider_account_backend: Option<String>,
     /// Private access-only account material. Never forwarded to clients.
     #[serde(default)]
     pub provider_account_credentials: BTreeMap<String, secret::AccountCredential>,
@@ -2102,8 +2105,27 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
         None,
         BTreeMap::new(),
         None,
+        None,
     ))
     .await
+}
+
+fn resolve_provider_account_scope(
+    home: &std::path::Path,
+    snapshot_scope: Option<&str>,
+    host_backend: Option<&str>,
+    fallback_backend: &str,
+) -> Result<String, String> {
+    let backend = match host_backend {
+        Some(backend @ ("desktop-broker:development" | "desktop-broker:production")) => backend,
+        Some(_) => return Err("invalid Host account backend".into()),
+        None => fallback_backend,
+    };
+    let expected = harness_runtime::provider_accounts::account_store_scope(home, backend);
+    if host_backend.is_some() && snapshot_scope.is_some_and(|scope| scope != expected) {
+        return Err("account store scope mismatch".into());
+    }
+    Ok(snapshot_scope.unwrap_or(&expected).to_owned())
 }
 
 /// Assemble all account routes with private, process-local Host credentials.
@@ -2112,6 +2134,7 @@ pub async fn assemble_with_account_credentials(
     provider_accounts: Option<lingxi_core::host::provider_accounts::AccountSnapshot>,
     mut provider_account_credentials: BTreeMap<String, secret::AccountCredential>,
     provider_account_home: Option<PathBuf>,
+    provider_account_backend: Option<String>,
 ) -> Result<BoundServer, String> {
     if cfg.team_invocation.is_none() {
         crate::provider_settings::apply_managed(&mut cfg).await?;
@@ -2397,16 +2420,15 @@ pub async fn assemble_with_account_credentials(
         shared.provider_accounts = Some(snapshot);
     }
     shared.provider_account_home = Some(account_home.clone());
-    let account_scope = shared
-        .provider_accounts
-        .as_ref()
-        .map(|s| s.store_scope.clone())
-        .unwrap_or_else(|| {
-            harness_runtime::provider_accounts::account_store_scope(
-                &account_home,
-                &format!("{:?}", shared.credentials.account_storage_backend()),
-            )
-        });
+    let account_scope = resolve_provider_account_scope(
+        &account_home,
+        shared
+            .provider_accounts
+            .as_ref()
+            .map(|s| s.store_scope.as_str()),
+        provider_account_backend.as_deref(),
+        &format!("{:?}", shared.credentials.account_storage_backend()),
+    )?;
     let account_catalog_source = cfg.startup_catalog.clone();
     let account_catalog_inputs = provider_config::AssembleInputs {
         official_catalog: None,
@@ -4778,6 +4800,68 @@ mod tests {
         );
         let error = read_credential_envelope(&mut input).expect_err("protocol mismatch must fail");
         assert_eq!(error, "invalid credential envelope");
+    }
+
+    #[test]
+    fn deferred_account_envelope_retains_host_domain_without_credentials() {
+        let mut input = std::io::Cursor::new(
+            br#"{"provider_account_home":"/host/accounts","provider_account_backend":"desktop-broker:development","plugin_secrets":{}}"#.to_vec(),
+        );
+        let envelope = read_credential_envelope(&mut input).unwrap();
+        assert_eq!(
+            envelope.provider_account_home,
+            Some(PathBuf::from("/host/accounts"))
+        );
+        assert_eq!(
+            envelope.provider_account_backend.as_deref(),
+            Some("desktop-broker:development")
+        );
+        assert!(envelope.provider_accounts.is_none());
+        assert!(envelope.provider_account_credentials.is_empty());
+    }
+
+    #[test]
+    fn deferred_account_scope_matches_later_broker_projection_in_both_channels() {
+        let root = tempfile::tempdir().unwrap();
+        let mut scopes = Vec::new();
+        for backend in ["desktop-broker:development", "desktop-broker:production"] {
+            let projected =
+                harness_runtime::provider_accounts::account_store_scope(root.path(), backend);
+            let initial =
+                resolve_provider_account_scope(root.path(), None, Some(backend), "Memory").unwrap();
+            assert_eq!(initial, projected);
+            assert_eq!(
+                resolve_provider_account_scope(
+                    root.path(),
+                    Some(&projected),
+                    Some(backend),
+                    "Native"
+                )
+                .unwrap(),
+                initial
+            );
+            assert!(resolve_provider_account_scope(
+                root.path(),
+                Some("another-domain"),
+                Some(backend),
+                "Memory"
+            )
+            .is_err());
+            scopes.push(initial);
+        }
+        assert_ne!(scopes[0], scopes[1]);
+        assert!(resolve_provider_account_scope(
+            root.path(),
+            None,
+            Some("desktop-broker:other"),
+            "Memory"
+        )
+        .is_err());
+        assert_eq!(
+            resolve_provider_account_scope(root.path(), Some("legacy-domain"), None, "Native")
+                .unwrap(),
+            "legacy-domain"
+        );
     }
 
     #[test]

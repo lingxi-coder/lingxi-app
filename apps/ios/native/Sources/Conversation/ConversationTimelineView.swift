@@ -287,8 +287,8 @@ struct ConversationTimelineView: View {
             case .reasoning:
                 continue
             case let .message(id, message):
-                if let tool = previousTool, ConversationSkillInstructions.matches(message, tool: tool) {
-                    result[index] = .skillInstructions(id: id, message: message, name: tool.header?.primary ?? tool.tool)
+                if let name = ConversationSkillInstructions.name(message, previousTool: previousTool) {
+                    result[index] = .skillInstructions(id: id, message: message, name: name)
                 }
                 previousTool = nil
             default:

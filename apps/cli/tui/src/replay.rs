@@ -64,12 +64,17 @@ pub fn rebuild_messages(history: &[ConversationMessage]) -> Vec<RenderedMessage>
                 content,
                 is_compact_summary,
                 is_visible_in_transcript_only,
+                origin,
                 ..
             } => {
                 if *is_compact_summary {
                     acc.attach_compact_summary(content);
                 } else if !*is_visible_in_transcript_only {
-                    acc.push_user_blocks(content);
+                    acc.push_user_message(
+                        content,
+                        origin.as_ref(),
+                        &msg.id().as_uuid().to_string(),
+                    );
                 }
             }
             ConversationMessage::Assistant { content, .. } => acc.push_assistant_blocks(content),
@@ -145,7 +150,7 @@ fn rebuild_from_jsonl_impl(
                 if compact_summary {
                     acc.attach_compact_summary(&blocks);
                 } else if !transcript_only {
-                    acc.push_user_blocks(&blocks);
+                    acc.push_user_message(&blocks, m.origin_projection.as_ref(), &m.uuid);
                 }
             }
             "assistant" => acc.push_assistant_blocks(&blocks),
@@ -268,9 +273,34 @@ impl ReplayAcc {
         accumulated.push_str(&summary);
     }
 
-    fn push_user_blocks(&mut self, content: &[ContentBlock]) {
-        for block in content {
-            push_user_block(block, &self.tool_inputs, &self.tool_names, &mut self.out);
+    /// Host identity, rather than document wording or adjacent tool output,
+    /// keeps dynamic Skill companions in the existing expandable tool panel.
+    fn push_user_message(
+        &mut self,
+        content: &[ContentBlock],
+        origin: Option<&Utf16JsonProjection>,
+        row_id: &str,
+    ) {
+        let name = origin
+            .filter(|value| value.string_at("/type") == Some("skill_activation"))
+            .and_then(|value| value.string_at("/skill_name"))
+            .filter(|name| !name.trim().is_empty());
+        for (index, block) in content.iter().enumerate() {
+            match (name, block) {
+                (
+                    Some(name),
+                    ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. },
+                ) => {
+                    self.out.push(RenderedMessage::UserToolResult {
+                        id: format!("skill-instructions:{row_id}:{index}").into(),
+                        tool: "Skill".into(),
+                        result: serde_json::json!({"success": true, "commandName": name, "body": text}),
+                        input: Some(serde_json::json!({"skill": name})),
+                        old_string: None, new_string: None, file_path: None,
+                    });
+                }
+                _ => push_user_block(block, &self.tool_inputs, &self.tool_names, &mut self.out),
+            }
         }
     }
 
@@ -417,6 +447,55 @@ fn push_assistant_block(
 mod tests {
     use super::*;
     use lingxi_core::types::{ImageSource, MessageId};
+
+    #[test]
+    fn skill_origin_renders_revised_instructions_as_a_panel_without_an_adjacent_call() {
+        let text = "# Renamed guide\n\nEntirely revised instructions.";
+        let mut message = user_text(text);
+        if let ConversationMessage::User { origin, .. } = &mut message {
+            *origin = Some(
+                Utf16JsonProjection::parse(
+                    r#"{"type":"skill_activation","skill_name":"lingxi-api"}"#,
+                )
+                .unwrap(),
+            );
+        }
+        let rows = rebuild_messages(&[message]);
+        assert!(
+            matches!(&rows[0], RenderedMessage::UserToolResult { tool, result, .. }
+            if tool == "Skill" && result["body"] == text)
+        );
+        let theme = tui_core::theme::Theme::dark();
+        let plain = |verbose| {
+            crate::message::render_message(&rows[0], 80, &theme, verbose)
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.text.as_str())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(!plain(false).contains("Revised instructions"));
+        assert!(plain(true).contains("Entirely revised instructions"));
+        let mut raw = jsonl("user", &serde_json::json!(text));
+        raw.origin_projection = Some(
+            Utf16JsonProjection::parse(r#"{"type":"skill_activation","skill_name":"lingxi-api"}"#)
+                .unwrap(),
+        );
+        let uuid = raw.uuid.clone();
+        let restored = rebuild_from_jsonl_with_request_ids(&[raw]);
+        assert!(
+            matches!(&restored[0], RenderedMessage::IdentifiedTranscriptRow { message, request_id }
+            if request_id == &uuid && matches!(message.as_ref(), RenderedMessage::UserToolResult { .. }))
+        );
+        assert!(matches!(
+            &rebuild_messages(&[user_text(text)])[0],
+            RenderedMessage::UserText { .. }
+        ));
+    }
 
     fn user_text(text: &str) -> ConversationMessage {
         ConversationMessage::User {

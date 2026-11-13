@@ -55,6 +55,14 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         XCTAssertEqual(ids.filter { $0.hasPrefix("agents:") }, ["agents:after:spawn-a"])
     }
 
+    func testHostSkillIdentitySurvivesRevisedTextAndMissingAdjacentCall() {
+        var message = Message(role: .user, text: "# Renamed guide\n\nRevised instructions.")
+        message.skillName = "lingxi-api"
+        XCTAssertEqual(ConversationSkillInstructions.name(message, previousTool: nil), "lingxi-api")
+        message.skillName = nil
+        XCTAssertNil(ConversationSkillInstructions.name(message, previousTool: nil))
+    }
+
     func testCurrentLocalAppTitleMatchesWithoutToolBody() {
         var trace = ConversationToolTrace(id: "skill", tool: "Skill", status: .completed)
         trace.header = ConversationToolHeader(verb: .skill, label: "Skill", primary: "local-app", qualifier: nil, count: nil, subLine: nil, title: "Skill(local-app)")

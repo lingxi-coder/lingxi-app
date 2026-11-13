@@ -1226,6 +1226,28 @@ impl ToolResultCell {
 
 impl StyledCell for ToolResultCell {
     fn styled_lines(&self, width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine> {
+        // Restored Skill companions have host identity but may have no
+        // adjacent invocation. Keep their document in the same disclosure panel.
+        if self.tool.eq_ignore_ascii_case("Skill")
+            && self
+                .result
+                .get("body")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        {
+            return single_tool_lines(
+                &ActivityEntry {
+                    id: String::new(),
+                    tool: self.tool.clone(),
+                    input: self.input.clone().unwrap_or(serde_json::Value::Null),
+                    result: Some(self.result.clone()),
+                },
+                width,
+                theme,
+                verbose,
+                true,
+            );
+        }
         let refusal_body = tool_display::result_body(&self.tool, &self.result);
         if tool_denial_reason(
             tool_display::result_is_error(&self.result),

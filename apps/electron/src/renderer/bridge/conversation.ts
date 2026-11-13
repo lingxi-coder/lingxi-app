@@ -1375,6 +1375,7 @@ export function conversationFromMessages(
               type: 'narration',
               id: itemId(nextId++),
               text: block.text,
+              skillName: message.role === 'user' ? message.skill_name ?? undefined : undefined,
               strong: message.role === 'user',
               role: message.role === 'user' ? 'user' : 'assistant',
               sentAt,

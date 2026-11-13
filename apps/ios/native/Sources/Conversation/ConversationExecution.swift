@@ -964,6 +964,13 @@ enum ConversationSkillInstructions {
         return body
     }
 
+    static func name(_ message: Message, previousTool: ConversationToolTrace?) -> String? {
+        guard message.role == .user, message.images.isEmpty else { return nil }
+        if let name = message.skillName, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return name }
+        guard let tool = previousTool, matches(message, tool: tool) else { return nil }
+        return tool.header?.primary ?? tool.tool
+    }
+
     static func matches(_ message: Message, tool: ConversationToolTrace) -> Bool {
         guard message.role == .user, message.images.isEmpty, tool.status == .completed,
               tool.tool.caseInsensitiveCompare("Skill") == .orderedSame else { return false }

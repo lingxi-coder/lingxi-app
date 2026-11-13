@@ -66,6 +66,8 @@ export function toolDisplayHeader(item: ToolRunItem): ToolHeaderDto {
 
 /** A prose line — the user's prompt, the assistant's answer, or a notice. */
 export interface NarrationRunItem {
+  /** Host-authored Skill identity preserved across history restoration. */
+  readonly skillName?: string;
   readonly type: 'narration';
   readonly id: string;
   readonly text: string;

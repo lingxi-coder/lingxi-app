@@ -5753,6 +5753,7 @@ final class EngineConversationSource: ConversationSource {
                 images: attachedImages ? [] : uiMessageImages(from: dto.images)
             )
             message.sentAtMs = dto.sentAtMs
+            message.skillName = role == .user ? dto.skillName : nil
             message.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
             if role == .user, !attachedImages { message.visualizationContext = visualizationChip(from: dto) }
             segments.append(RenderedMessage(message: message, detail: detail))
@@ -6180,6 +6181,7 @@ final class EngineConversationSource: ConversationSource {
                 return false
             }
             let startsNewUserTurn = dto.role == "user"
+                && dto.skillName == nil
                 && !containsToolResult
                 && dto.blocks.contains { messageBlock(from: $0) != nil }
             if startsNewUserTurn {
@@ -6204,6 +6206,7 @@ final class EngineConversationSource: ConversationSource {
                     images: attachedImages ? [] : dtoImages
                 )
                 message.sentAtMs = dto.sentAtMs
+                message.skillName = role == .user ? dto.skillName : nil
                 message.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
                 if role == .user, !attachedImages { message.visualizationContext = visualizationChip(from: dto) }
                 attachedImages = true

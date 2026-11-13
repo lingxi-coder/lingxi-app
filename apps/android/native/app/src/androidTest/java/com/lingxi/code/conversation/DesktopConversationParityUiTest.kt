@@ -100,11 +100,9 @@ class DesktopConversationParityUiTest {
         rule.onNodeWithText("ReadFile(README.md)").assertExists()
         rule.onAllNodesWithText("WriteFile(result.kt)").onLast().performClick()
         rule.onNodeWithText("Verified tool output").assertIsDisplayed()
-        val wide = rule.activity.resources.configuration.screenWidthDp >= 840
-        rule.onAllNodes(isDialog()).assertCountEquals(if (wide) 0 else 1)
-        capture("android-conversation-${if (wide) "tablet" else "phone"}-tool-detail", dialog = !wide)
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        rule.onNodeWithContentDescription(context.getString(R.string.chat_run_collapse)).performClick()
+        rule.onAllNodes(isDialog()).assertCountEquals(0)
+        capture("android-conversation-inline-tool-detail")
+        rule.onAllNodesWithText("WriteFile(result.kt)").onLast().performClick()
         rule.onNode(hasScrollToIndexAction()).performScrollToNode(hasTestTag("conversation.tool.group"))
         rule.onNodeWithTag("conversation.tool.group").performClick()
         rule.onNodeWithText("ReadFile(README.md)").assertDoesNotExist()

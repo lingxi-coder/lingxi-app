@@ -79,6 +79,10 @@ class ChatChromeUiTest {
         rule.onNodeWithText("Skill guide").assertIsDisplayed()
         rule.onNodeWithText("Supporting instructions.").assertIsDisplayed()
         rule.onNodeWithText("Base directory", substring = true).assertDoesNotExist()
+        val header = rule.onNodeWithTag("conversation.skill-instructions.toggle").fetchSemanticsNode().boundsInRoot
+        val panel = rule.onNodeWithTag("conversation.skill-instructions.body").fetchSemanticsNode().boundsInRoot
+        assertEquals(header.left, panel.left, 1f)
+        assertEquals(header.right, panel.right, 1f)
         snapshot("skill-instructions-expanded")
         rule.onNodeWithTag("conversation.skill-instructions.toggle").performClick()
         rule.onNodeWithTag("conversation.skill-instructions.body").assertDoesNotExist()

@@ -164,9 +164,9 @@ final class LingxiCodeUITests: XCTestCase {
         app.buttons["conversation.summary-menu"].tap()
         app.buttons["conversation.summary.category.tools"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["conversation.summary-sheet.tools"].firstMatch.waitForExistence(timeout: 5))
-        let shellGroup = app.buttons["conversation.timeline.tool-batch.timeline-tools:ui-shell"]
-        // Different tool kinds remain individual disclosures in the summary.
-        XCTAssertFalse(shellGroup.exists)
+        let toolBatch = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "conversation.timeline.tool-batch.")).firstMatch
+        XCTAssertTrue(toolBatch.waitForExistence(timeout: 5), app.debugDescription)
+        toolBatch.tap()
         let tool = app.descendants(matching: .any)["conversation.tool-call.ui-shell"]
         XCTAssertTrue(tool.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-shell.icon.terminal"].exists)
@@ -180,6 +180,12 @@ final class LingxiCodeUITests: XCTestCase {
         readDisclosure.tap()
         XCTAssertTrue(app.staticTexts["Read fixture body"].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.staticTexts["Read completed"].exists, app.debugDescription)
+        let resultPanel = app.descendants(matching: .any)["conversation.tool-detail.ui-read"]
+        XCTAssertEqual(readDisclosure.frame.minX, resultPanel.frame.minX, accuracy: 1)
+        let expandedResult = XCTAttachment(screenshot: app.screenshot())
+        expandedResult.name = "tool-result-expanded"
+        expandedResult.lifetime = .keepAlways
+        add(expandedResult)
         readDisclosure.tap()
         XCTAssertFalse(app.staticTexts["Read fixture body"].exists)
 

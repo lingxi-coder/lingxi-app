@@ -219,6 +219,99 @@ fn fit_tool_text(text: &str, budget: usize) -> String {
     out
 }
 
+/// Wrap styled output inside a terminal panel without losing ANSI/diff colors.
+fn tool_detail_panel(
+    label: &str,
+    details: Vec<StyledLine>,
+    status: &str,
+    width: usize,
+    theme: &Theme,
+) -> Vec<StyledLine> {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    // Extremely narrow terminals retain the content and let Paragraph wrap it.
+    if width < 6 {
+        return details;
+    }
+    let inner = width - 4;
+    let background = match theme.text {
+        StyleColor::Rgb(0, 0, 0) => StyleColor::Rgb(242, 242, 244),
+        StyleColor::Rgb(..) => StyleColor::Rgb(40, 40, 42),
+        // ANSI themes honor the terminal's background and color capability.
+        _ => StyleColor::Default,
+    };
+    let border = SpanStyle {
+        fg: theme.dim,
+        bg: background,
+        ..SpanStyle::default()
+    };
+    let mut out = vec![StyledLine {
+        spans: vec![StyledSpan::styled(
+            format!("╭{}╮", "─".repeat(width - 2)),
+            border,
+        )],
+    }];
+    let mut framed = |spans: Vec<StyledSpan>, used: usize| {
+        let mut row = vec![StyledSpan::styled("│ ", border)];
+        row.extend(spans);
+        row.push(StyledSpan::styled(
+            format!("{} │", " ".repeat(inner - used)),
+            border,
+        ));
+        out.push(StyledLine { spans: row });
+    };
+    for line in std::iter::once(StyledLine {
+        spans: vec![dim_span(label.into(), theme)],
+    })
+    .chain(std::iter::once(StyledLine::empty()))
+    .chain(details)
+    .chain(std::iter::once(StyledLine::empty()))
+    .chain(std::iter::once(StyledLine {
+        spans: vec![dim_span(
+            format!(
+                "{}{status}",
+                " ".repeat(inner.saturating_sub(status.width()))
+            ),
+            theme,
+        )],
+    })) {
+        let mut row = Vec::new();
+        let mut used = 0;
+        for span in line.spans {
+            let mut style = span.style;
+            if style.bg == StyleColor::Default {
+                style.bg = background;
+            }
+            if style.fg == StyleColor::Default {
+                style.fg = theme.text;
+            }
+            let mut chunk = String::new();
+            for c in span.text.replace('\t', "    ").chars() {
+                let columns = c.width().unwrap_or(0);
+                if used + columns > inner {
+                    row.push(StyledSpan::styled(std::mem::take(&mut chunk), style));
+                    framed(std::mem::take(&mut row), used);
+                    used = 0;
+                }
+                chunk.push(c);
+                used += columns;
+            }
+            if !chunk.is_empty() {
+                row.push(StyledSpan::styled(chunk, style));
+            }
+        }
+        framed(row, used);
+    }
+    out.push(StyledLine {
+        spans: vec![StyledSpan::styled(
+            format!("╰{}╯", "─".repeat(width - 2)),
+            border,
+        )],
+    });
+    // Keep every border inside the viewport even for wide Unicode output.
+    debug_assert!(out.iter().all(|line| line.plain_text().width() <= width));
+    out
+}
+
 fn single_tool_lines(
     entry: &ActivityEntry,
     width: usize,
@@ -251,7 +344,20 @@ fn single_tool_lines(
     let body = entry
         .result
         .as_ref()
-        .and_then(|result| tool_display::result_body(&entry.tool, result))
+        .and_then(|result| {
+            tool_display::result_body(&entry.tool, result).or_else(|| {
+                entry
+                    .tool
+                    .eq_ignore_ascii_case("Skill")
+                    .then(|| {
+                        result
+                            .get("body")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .flatten()
+            })
+        })
         .map(|body| tool_display::result::clamp_body(&body));
     let (old, new, path) = tool_display::diff_inputs_for(&entry.tool, &entry.input);
     let has_details = old.is_some()
@@ -303,30 +409,56 @@ fn single_tool_lines(
         )],
     }];
     if verbose && has_details {
-        lines.extend(
-            tool_use_lines(&entry.tool, &entry.input, theme, true)
-                .into_iter()
-                .skip(1),
-        );
+        let mut details = Vec::new();
+        if let Some(sub) = &header.sub_line {
+            details.extend(parse_ansi(&format!("{} {}", sub.prefix, sub.text)));
+        } else {
+            details.extend(
+                tool_use_lines(&entry.tool, &entry.input, theme, true)
+                    .into_iter()
+                    .skip(1)
+                    .map(|mut line| {
+                        if let Some(span) = line.spans.first_mut() {
+                            if let Some(text) = span.text.strip_prefix("  ") {
+                                span.text = text.into();
+                            }
+                        }
+                        line
+                    }),
+            );
+        }
         if old.is_some() || new.is_some() {
-            lines.extend(edit_write_diff_lines(
+            details.extend(edit_write_diff_lines(
                 old.as_deref(),
                 new.as_deref(),
                 path.as_deref(),
-                width,
+                width.saturating_sub(4).max(1),
                 theme,
             ));
         }
         if let Some(body) = body {
-            lines.extend(body.text.lines().map(|line| StyledLine {
-                spans: vec![dim_span(format!("  {line}"), theme)],
-            }));
+            details.extend(parse_ansi(&body.text));
             if body.truncated {
-                lines.push(StyledLine {
-                    spans: vec![dim_span("  … output truncated".into(), theme)],
+                details.push(StyledLine {
+                    spans: vec![dim_span("… output truncated".into(), theme)],
                 });
             }
         }
+        let status = if failed {
+            "× Unsuccessful"
+        } else if entry.result.is_some() {
+            "✓ Success"
+        } else if sealed {
+            "No result"
+        } else {
+            "◷ Running"
+        };
+        let label = if header.sub_line.is_some() {
+            "Shell"
+        } else {
+            &header.label
+        };
+        lines.extend(tool_detail_panel(label, details, status, width, theme));
     }
     lines
 }
@@ -541,6 +673,10 @@ impl StyledCell for ActivityFoldCell {
                 );
             }
             for entry in &self.entries {
+                if self.key != "agents" {
+                    lines.extend(single_tool_lines(entry, width, theme, true, self.sealed));
+                    continue;
+                }
                 lines.extend(tool_use_lines(&entry.tool, &entry.input, theme, true));
                 if let Some(result) = &entry.result {
                     lines.extend(tool_result_lines(
@@ -1263,6 +1399,116 @@ mod tests {
                 .iter()
                 .flat_map(|line| &line.spans)
                 .any(|span| span.text.contains(expected)));
+        }
+    }
+
+    #[test]
+    fn expanded_panels_preserve_wide_text_colors_and_unindented_child_headers() {
+        use super::{ActivityEntry, ActivityFoldCell};
+        use unicode_width::UnicodeWidthStr;
+        let cell = ActivityFoldCell {
+            key: "activity",
+            reasoning: String::new(),
+            thinking: false,
+            sealed: true,
+            entries: vec![
+                ActivityEntry {
+                    id: "shell".into(),
+                    tool: "Bash".into(),
+                    input: serde_json::json!({"command":"printf 中文输出"}),
+                    result: Some(
+                        serde_json::json!({"stdout":"中文输出\\n\u{1b}[31mred\u{1b}[0m\nlast","stderr":""}),
+                    ),
+                },
+                ActivityEntry {
+                    id: "skill".into(),
+                    tool: "Skill".into(),
+                    input: serde_json::json!({"skill":"apple-design"}),
+                    result: Some(
+                        serde_json::json!({"body":"# Design\n\nKeep every detail readable."}),
+                    ),
+                },
+            ],
+        };
+        for theme in [
+            Theme::dark(),
+            Theme::light(),
+            Theme::dark_ansi(),
+            Theme::light_ansi(),
+        ] {
+            for width in [6, 12, 24, 80] {
+                let lines = cell.styled_lines(width, &theme, true);
+                assert!(
+                    lines.iter().all(|line| line.plain_text().width() <= width),
+                    "width={width}: {:?}",
+                    lines.iter().map(StyledLine::plain_text).collect::<Vec<_>>()
+                );
+                let headers: Vec<_> = lines
+                    .iter()
+                    .filter(|line| line.plain_text().starts_with(TOOL_MARKER))
+                    .collect();
+                assert_eq!(
+                    headers.len(),
+                    2,
+                    "child headers share the group's leading edge"
+                );
+                assert!(lines.iter().any(|line| line.plain_text().starts_with('╭')));
+                assert_eq!(
+                    lines
+                        .iter()
+                        .flat_map(|line| &line.spans)
+                        .filter(|span| span.style.fg
+                            == tui_core::render::StyleColor::Named(
+                                tui_core::render::NamedColor::Red
+                            ))
+                        .map(|span| span.text.as_str())
+                        .collect::<String>(),
+                    "red"
+                );
+                if width == 80 {
+                    let output = lines
+                        .iter()
+                        .map(|line| line.plain_text())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(
+                        output.contains("中文输出")
+                            && output.contains("Keep every detail readable.")
+                    );
+                    assert!(output.contains("✓ Success"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn panel_footer_distinguishes_failures_and_missing_results() {
+        for (result, expected) in [
+            (
+                Some(serde_json::json!({"error":"first\nsecond"})),
+                "Unsuccessful",
+            ),
+            (None, "No result"),
+        ] {
+            let lines = super::single_tool_lines(
+                &super::ActivityEntry {
+                    id: "write".into(),
+                    tool: "Write".into(),
+                    input: serde_json::json!({"file_path":"out.txt","content":"file body"}),
+                    result,
+                },
+                80,
+                &Theme::dark(),
+                true,
+                true,
+            );
+            let output = lines
+                .iter()
+                .map(|line| line.plain_text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(output.contains(expected), "{output}");
+            assert!(!output.contains("✓ Success"), "{output}");
         }
     }
     #[test]

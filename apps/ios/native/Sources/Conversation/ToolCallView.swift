@@ -5,12 +5,8 @@
 // `result_json` to rebuild a header — four clients each re-deriving the same
 // presentation is the drift this whole change exists to delete.
 //
-// Layout mirrors the terminal:
-//
-//     ● Update(src/host.rs) (3 edits)        1.2s
-//       $ cargo test --all
-//       ⎿ Added 18 lines, removed 4 lines
-//         <diff or body, collapsible>
+// Headers share the transcript's leading edge. Expanded command, result and
+// status content lives in a separate rounded detail surface beneath the header.
 //
 // COLLAPSE STATE IS NOT HELD HERE. Every list this view lands in recycles its
 // rows, so row-local `@State` is lost on scroll and reappears on the wrong row.
@@ -26,17 +22,13 @@ struct ToolCallView: View {
     @State private var isHovering = false
     let trace: ConversationToolTrace
     var isExpanded: Bool = false
-    /// Timeline mode uses Codex's borderless, dense row treatment. The legacy
-    /// execution card can keep the original surface by leaving this false.
+    /// Execution rows also retain their elapsed-time metadata.
     var compact: Bool = false
     var onToggle: () -> Void = {}
 
     private var isSkill: Bool {
         trace.header?.verb == .skill || trace.tool.caseInsensitiveCompare("Skill") == .orderedSame
     }
-
-    /// Skill instructions are supporting detail, including in the execution card.
-    private var compactPresentation: Bool { compact || isSkill }
 
     var body: some View {
         if let rows = trace.questionAnswers, trace.status == .completed {
@@ -53,42 +45,21 @@ struct ToolCallView: View {
 
     private var toolContent: some View {
         VStack(alignment: .leading, spacing: 5) {
-            if compactPresentation {
-                if isCollapsible {
-                    Button(action: onToggle) { compactHeader }
-                        .buttonStyle(.plain)
-                        .focused($isFocused)
-                        .onHover { isHovering = $0 }
-                        .accessibilityLabel(compactSummary)
-                        .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
-                        .accessibilityIdentifier("conversation.tool-call.\(trace.id).toggle")
-                } else {
-                    compactHeader
-                }
+            if isCollapsible {
+                Button(action: onToggle) { compactHeader }
+                    .buttonStyle(.plain)
+                    .focused($isFocused)
+                    .onHover { isHovering = $0 }
+                    .accessibilityLabel(compactSummary)
+                    .accessibilityValue(isExpanded ? String(localized: "chat_agent_details_collapse") : String(localized: "chat_agent_details_expand"))
+                    .accessibilityIdentifier("conversation.tool-call.\(trace.id).toggle")
             } else {
-                headerRow
+                compactHeader
             }
-            if !compactPresentation, let sub = trace.header?.subLine, !sub.text.isEmpty {
-                subLineRow(sub)
-            }
-            if !compactPresentation || (isExpanded && isCollapsible) {
-                resultBlock
-                syntheticShellDetails
-            }
+            if showsDetail { resultBlock }
         }
-        // Desktop tool rows are borderless and use a 40pt disclosure target;
-        // keep the compact transcript on that rhythm while the legacy card
-        // retains its padded surface treatment.
-        .padding(.horizontal, compactPresentation ? 0 : 10)
-        .padding(.vertical, compactPresentation ? 2 : 8)
+        .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(compactPresentation ? Color.clear : t.surface)
-        .clipShape(RoundedRectangle(cornerRadius: compactPresentation ? 0 : 10))
-        .overlay {
-            if !compactPresentation {
-                RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5)
-            }
-        }
         .accessibilityElement(children: .contain)
         .accessibilityValue(trace.status.label)
         .accessibilityIdentifier("conversation.tool-call.\(trace.id)")
@@ -97,11 +68,11 @@ struct ToolCallView: View {
     private var compactHeader: some View {
         HStack(spacing: 8) {
             LXIcon(name: ToolDisplayText.icon(header: trace.header, tool: trace.tool), size: 20,
-                   color: trace.status == .failed ? t.danger : t.text3, stroke: 1.8)
+                   color: trace.status == .failed ? t.danger : isExpanded ? t.text : t.text3, stroke: 1.8)
                 .accessibilityIdentifier("conversation.tool-call.\(trace.id).icon.\(ToolDisplayText.icon(header: trace.header, tool: trace.tool).rawValue)")
             Text(compactSummary)
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(t.text3)
+                .font(.footnote)
+                .foregroundStyle(isExpanded || isFocused || isHovering ? t.text : t.text3)
                 .lineLimit(showsRequiresCodeMessage ? nil : 1)
                 .truncationMode(.tail)
                 .fixedSize(horizontal: false, vertical: showsRequiresCodeMessage)
@@ -109,6 +80,9 @@ struct ToolCallView: View {
                 .runtimeTextSweep(isActive: trace.status == .running, highlightColor: t.text)
             if trace.status == .failed {
                 Text(trace.status.label).font(.caption).foregroundStyle(t.danger).lineLimit(1).layoutPriority(1)
+            }
+            if !compact, let elapsed = ConversationExecutionParsing.formatDuration(trace.elapsedMs) {
+                Text(elapsed).font(.caption).foregroundStyle(t.text4)
             }
             if isCollapsible {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
@@ -122,13 +96,6 @@ struct ToolCallView: View {
             }
         }
         .frame(minHeight: 44)
-        .padding(.horizontal, 6)
-        .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(isSkill
-                    ? t.surface.opacity(isFocused || isExpanded ? 1 : 0)
-                    : t.accent.opacity(isFocused || isExpanded ? 0.10 : 0))
-        }
         .contentShape(.rect)
     }
 
@@ -149,152 +116,51 @@ struct ToolCallView: View {
                                                              headline: display.headline, body: display.body)
     }
 
-    // MARK: header
-
-    private var headerRow: some View {
-        HStack(alignment: .center, spacing: 7) {
-            LXIcon(
-                name: ToolDisplayText.icon(header: trace.header, tool: trace.tool),
-                size: 18,
-                color: trace.status == .failed ? t.danger : t.text3,
-                stroke: 1.65
-            )
-            .accessibilityIdentifier(
-                "conversation.tool-call.\(trace.id).icon.\(ToolDisplayText.icon(header: trace.header, tool: trace.tool).rawValue)"
-            )
-            titleText
-                .runtimeTextSweep(isActive: trace.status == .running, highlightColor: t.text)
-            Spacer(minLength: 4)
-            if !compact || trace.status == .failed || trace.status == .cancelled {
-                Text(trace.status.label)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(statusColor)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(statusColor.opacity(0.12))
-                    .clipShape(Capsule())
-                    .accessibilityIdentifier("conversation.tool-call.\(trace.id).status")
-            }
-            if let elapsed = ConversationExecutionParsing.formatDuration(trace.elapsedMs) {
-                Text(elapsed)
-                    .font(.caption)
-                    .foregroundColor(t.text4)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var titleText: some View {
-        if let header = trace.header {
-            HStack(spacing: 0) {
-                Text(ToolDisplayText.verbLabel(header))
-                    .font(.footnote.weight(.semibold))
-                    .foregroundColor(t.text)
-                    .layoutPriority(2)
-                if let primary = header.primary, !primary.isEmpty {
-                    Text("(")
-                        .font(.footnote)
-                        .foregroundColor(t.text4)
-                        .layoutPriority(2)
-                    Text(primary)
-                        .font(.footnote)
-                        .foregroundColor(t.text2)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .layoutPriority(0)
-                    Text(")")
-                        .font(.footnote)
-                        .foregroundColor(t.text4)
-                        .layoutPriority(2)
-                }
-                if let qualifier = header.qualifier, !qualifier.isEmpty {
-                    // The engine's qualifier carries its own leading space.
-                    Text(qualifier)
-                        .font(.caption)
-                        .foregroundColor(t.text3)
-                        .lineLimit(1)
-                        .layoutPriority(1)
-                }
-            }
-        } else {
-            // Orphan or synthetic trace with no observed tool-start header.
-            Text(trace.tool)
-                .font(.footnote.weight(.semibold))
-                .foregroundColor(t.text)
-        }
-    }
-
-    private func subLineRow(_ sub: ConversationToolSubLine) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Text(sub.prefix)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(t.text4)
-            Text(sub.text)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(t.text2)
-                .lineLimit(2)
-                .textSelection(.enabled)
-            Spacer(minLength: 0)
-        }
-        .padding(.leading, 13)
-    }
-
-    // MARK: result
-
     @ViewBuilder
     private var resultBlock: some View {
-        if let display = trace.display {
-            HStack(alignment: .top, spacing: 6) {
-                Text("⎿")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundColor(t.text4)
-                VStack(alignment: .leading, spacing: 5) {
-                    if let headline = ToolDisplayText.headline(display, trace: trace) {
-                        Text(headline)
-                            .font(.caption)
-                            .foregroundColor(trace.status == .failed ? t.danger : t.text3)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if showsDetail {
-                        if let diff = display.diff {
-                            DiffView(diff: diff)
-                        }
-                        if let body = ToolDisplayText.body(display, trace: trace), !body.isEmpty {
-                            Text(body)
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundColor(t.text2)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
-                        }
-                        if display.bodyTruncated {
-                            Text("chat_tool_body_truncated")
-                                .font(.caption)
-                                .foregroundColor(t.text4)
-                        }
-                    }
-                    if isCollapsible && !compactPresentation { disclosure(display) }
-                }
-                Spacer(minLength: 0)
+        ToolDetailPanel(title: detailTitle, status: trace.status) {
+            if let sub = trace.header?.subLine, !sub.text.isEmpty {
+                Text("\(sub.prefix) \(sub.text)")
+                    .font(.system(.footnote, design: .monospaced))
+                    .foregroundStyle(t.text2)
+                    .textSelection(.enabled)
+            } else if trace.header == nil, let input = trace.inputSummary, !input.isEmpty {
+                Text(input)
+                    .font(.system(.footnote, design: .monospaced))
+                    .foregroundStyle(t.text2)
+                    .textSelection(.enabled)
             }
-            .padding(.leading, 13)
+            if let display = trace.display {
+                if let headline = ToolDisplayText.headline(display, trace: trace) {
+                    Text(headline)
+                        .font(.footnote)
+                        .foregroundStyle(trace.status == .failed ? t.danger : t.text3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let diff = display.diff { DiffView(diff: diff) }
+                if let body = ToolDisplayText.body(display, trace: trace), !body.isEmpty {
+                    if isSkill {
+                        AIText(markdown: body, compact: true)
+                    } else {
+                        Text(body)
+                            .font(.system(.footnote, design: .monospaced))
+                            .foregroundStyle(t.text2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                }
+                if display.bodyTruncated {
+                    Text("chat_tool_body_truncated").font(.caption).foregroundStyle(t.text4)
+                }
+            }
         }
+        .accessibilityIdentifier("conversation.tool-detail.\(trace.id)")
     }
 
-    private func disclosure(_ display: ConversationToolResultDisplay) -> some View {
-        Button(action: onToggle) {
-            HStack(spacing: 4) {
-                LXIcon(name: .chevron, size: 11, color: t.accent, stroke: 2)
-                    .rotationEffect(.degrees(isExpanded ? 180 : 0))
-                Text(isExpanded
-                    ? String(localized: "chat_tool_show_less")
-                    : String(localized: "chat_tool_show_more \(Int(display.bodyLines))"))
-                    .font(.caption.weight(.medium))
-                    .foregroundColor(t.accent)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("conversation.tool-call.\(trace.id).toggle")
+    private var detailTitle: String {
+        if trace.header?.verb == .shell || trace.tool.caseInsensitiveCompare("Shell") == .orderedSame { return "Shell" }
+        if isSkill { return String(localized: "chat_tool_verb_skill") }
+        return trace.header?.label ?? trace.tool
     }
 
     /// Tool details stay out of the transcript until the user asks for them.
@@ -307,30 +173,49 @@ struct ToolCallView: View {
 
     private var showsDetail: Bool { isExpanded && isCollapsible }
 
-    private var statusColor: Color {
-        switch trace.status {
-        case .running: return t.text3
-        case .completed: return t.ok
-        case .failed: return t.danger
-        case .cancelled, .unknown: return t.text3
+}
+
+/// A leading-aligned surface shared by tool results and Skill instructions.
+struct ToolDetailPanel<Content: View>: View {
+    @Environment(\.theme) private var t
+    @ScaledMetric(relativeTo: .footnote) private var detailHeight: CGFloat = 384
+    let title: String
+    var status: ConversationToolStatus? = nil
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(title).font(.footnote).foregroundStyle(t.text2)
+                .padding(.horizontal, 14).padding(.top, 10)
+            ViewThatFits(in: .vertical) {
+                detailContent.fixedSize(horizontal: false, vertical: true)
+                ScrollView { detailContent }
+                    .scrollBounceBehavior(.basedOnSize)
+            }
+            .frame(maxHeight: detailHeight, alignment: .topLeading)
+            if let status {
+                HStack(spacing: 6) {
+                    Spacer(minLength: 0)
+                    Image(systemName: status == .completed ? "checkmark" : status == .failed || status == .cancelled ? "xmark" : "clock")
+                        .accessibilityHidden(true)
+                    Text(status.label)
+                }
+                .font(.caption).foregroundStyle(t.text3)
+                .padding(.horizontal, 14).padding(.bottom, 10)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(t.surfaceHover, in: .rect(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).stroke(t.border, lineWidth: 0.5) }
+        .padding(.top, 6).padding(.bottom, 8)
+        .accessibilityElement(children: .contain)
     }
 
-    // MARK: locally-known shell command for synthetic rows
-
-    @ViewBuilder
-    private var syntheticShellDetails: some View {
-        if trace.tool.caseInsensitiveCompare("Shell") == .orderedSame,
-           trace.header == nil,
-           let input = trace.inputSummary,
-           !input.isEmpty {
-            Text(input)
-                .font(.footnote)
-                .foregroundColor(t.text2)
-                .lineLimit(3)
-        }
+    private var detailContent: some View {
+        VStack(alignment: .leading, spacing: 12) { content }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14).padding(.vertical, 12)
     }
-
 }
 
 // MARK: - Localized presentation of the engine's derivation

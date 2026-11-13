@@ -1,12 +1,9 @@
 package com.lingxi.code.conversation
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -57,13 +54,13 @@ internal fun SkillInstructionsView(name: String, text: String, expanded: Boolean
             verticalAlignment = Alignment.CenterVertically) {
             LXIcon(LXIconName.Skill, size = 16.dp, color = t.text3)
             Spacer(Modifier.width(8.dp))
-            Text(name, modifier = Modifier.weight(1f, fill = false), color = t.text2,
+            Text(name, modifier = Modifier.weight(1f, fill = false), color = if (expanded) t.text else t.text2,
                 fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.width(8.dp))
             LXIcon(if (expanded) LXIconName.Chevron else LXIconName.ChevronR, size = 12.dp, color = t.text3)
         }
-        if (expanded) AIText(markdown = skillInstructionText(text), compact = true,
-            modifier = Modifier.padding(start = 24.dp, bottom = 8.dp).heightIn(max = 320.dp)
-                .verticalScroll(rememberScrollState()).testTag("conversation.skill-instructions.body"), onOpenLink = onOpenLink)
+        if (expanded) ToolDetailPanel(label = name, modifier = Modifier.testTag("conversation.skill-instructions.body")) {
+            AIText(markdown = skillInstructionText(text), compact = true, onOpenLink = onOpenLink)
+        }
     }
 }

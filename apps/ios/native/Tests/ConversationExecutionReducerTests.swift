@@ -23,17 +23,19 @@ import SwiftUI
 
         private func makeSource(
             permissionModeRepository: PermissionModeConfigurationRepository? = nil,
-            appSandboxRoot: String? = nil
+            appSandboxRoot: String? = nil,
+            initialSessionID: String? = nil
         ) -> EngineConversationSource {
             let sandbox = appSandboxRoot ?? FileManager.default.temporaryDirectory.appendingPathComponent("lingxi-reducer-\(UUID().uuidString)").path
             if appSandboxRoot == nil { addTeardownBlock { try? FileManager.default.removeItem(atPath: sandbox) } }
-            let config = EngineConfig(
+            var config = EngineConfig(
                 apiBase: "https://api.anthropic.com",
                 model: "",
                 appSandboxRoot: sandbox,
                 projectCwd: nil,
                 sessionMode: .code,
                 visionDelegationEnabled: true)
+            config.initialSessionId = initialSessionID
             return EngineConversationSource(
                 config: config,
                 permissionModeRepository: permissionModeRepository
@@ -1207,7 +1209,7 @@ import SwiftUI
             try await source.beginDurableTurnForTesting(turnId: 701, sessionId: "session-a")
             source.recordDurableSequenceForTesting(turnId: 701, sequence: 11)
 
-            let resumedSource = makeSource(appSandboxRoot: sandboxRoot)
+            let resumedSource = makeSource(appSandboxRoot: sandboxRoot, initialSessionID: "session-a")
             let cursor = try await resumedSource.durableAttachCursorForTesting()
             XCTAssertEqual(
                 cursor,
@@ -1292,12 +1294,12 @@ import SwiftUI
                             tool: "Read",
                             resultJson: #"{"result":"ok"}"#,
                             isError: false,
-                            display: currentToolDisplay()
+                            display: currentToolDisplay(headline: "Snapshot display", body: "snapshot body")
                         ),
                     ]),
                 ]
             ))
-            await flushTasks(12)
+            await source.waitForDurableRecoveryForTesting()
 
             XCTAssertEqual(submitted.compactMap { command -> String? in
                 switch command {
@@ -1326,13 +1328,10 @@ import SwiftUI
                 "retained events without current header/display carriers are ignored"
             )
             XCTAssertEqual(restoredRun.tools.first?.header?.title, "Read")
-            XCTAssertEqual(restoredRun.tools.first?.display?.headline, "Retained display")
-            XCTAssertEqual(restoredRun.tools.first?.display?.body, "retained body")
-            XCTAssertEqual(
-                restoredRun.tools.first?.display?.diff?.rows.first?.segments.first?.text,
-                "🚀 source",
-                "the durable event's complete current display must survive replay"
-            )
+            XCTAssertEqual(restoredRun.tools.first?.display?.headline, "Snapshot display")
+            XCTAssertEqual(restoredRun.tools.first?.display?.body, "snapshot body")
+            XCTAssertNil(restoredRun.tools.first?.display?.diff,
+                "terminal replay must not overwrite the authoritative snapshot display")
         }
 
         func testEmptyUnconfirmedActiveSessionStillRequestsProcessRestoreReplay() async {
@@ -1774,7 +1773,7 @@ import SwiftUI
                 XCTFail("the old turn must be cancelled first")
             }
             if case let .newSession(cwd, model, _) = submittedCommands[1] {
-                XCTAssertNil(cwd)
+                XCTAssertEqual(cwd, LXISHGuestPaths.conversationWorkspace(for: .code))
                 XCTAssertNil(model)
             } else {
                 XCTFail("newSession must follow the awaited cancel")

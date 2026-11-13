@@ -4,4 +4,5 @@
         <item quantity="one">%1$d 件の質問</item>
         <item quantity="other">%1$d 件の質問</item>
     </plurals>
+    <string name="chat_question_skip">スキップ</string>
 </resources>

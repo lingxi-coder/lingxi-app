@@ -12,6 +12,8 @@ enum TeamsErrors {
             "teams_stale_error"
         case "BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "BOT_SELECTION_STALE", "CONVERSATION_POLICY_REQUIRED", "ARTIFACT_READ_REQUIRED", "GRANT_READ_REQUIRED", "INPUT_GRANT_REQUIRED":
             "teams_error_bot_access_changed"
+        case "BOT_MAINTAINER_CHANGED":
+            "teams_composer_lock_bot_handed_over"
         case "REQUEST_QUOTA_EXCEEDED":
             "teams_error_request_quota"
         case "MESSAGE_LISTENER_FAILED":

@@ -81,6 +81,29 @@ test('T1: role hierarchy prevents escalation and protects the owner', options, a
   await assert.rejects(store.execute(owner, { action: 'leave', teamId, generation: 1 }), { code: 'OWNER_CANNOT_LEAVE' });
   await assert.rejects(store.execute(alice, { action: 'delete', teamId }), { code: 'OWNER_REQUIRED' });
 });
+test('M3-3: the owner hands the team to a current member and stays as an admin; only an owner can, and asking again changes nothing', options, async () => {
+  const bob = { uid: 'bob', name: 'Bob' }, roles = async () => Object.fromEntries((await store.detail(owner.uid, teamId)).members.map(member => [member.uid, member.role]));
+  await create(); const { code } = await invite(); await join(code); await join(code, bob);
+  await assert.rejects(store.execute(alice, { action: 'handOver', teamId, uid: bob.uid, generation: 1 }), { code: 'OWNER_REQUIRED' });
+  await assert.rejects(store.execute(owner, { action: 'handOver', teamId, uid: owner.uid, generation: 1 }), { code: 'ROLE_REQUIRED' });
+  await assert.rejects(store.execute(owner, { action: 'handOver', teamId, uid: alice.uid, generation: 2 }), { code: 'STALE_MEMBERSHIP' });
+  await assert.rejects(store.execute(owner, { action: 'handOver', teamId, uid: 'stranger', generation: 1 }), { code: 'STALE_MEMBERSHIP' });
+  assert.deepEqual(await roles(), { owner: 'owner', alice: 'member', bob: 'member' });
+  assert.deepEqual(await store.execute(owner, { action: 'handOver', teamId, uid: alice.uid, generation: 1 }), { ok: true });
+  assert.deepEqual(await roles(), { owner: 'admin', alice: 'owner', bob: 'member' });
+  assert.deepEqual([(await store.list(alice.uid)).teams[0].role, (await store.list(owner.uid)).teams[0].role], ['owner', 'admin'], 'each person’s own list agrees');
+  // Its answer was lost: the earlier owner asks again and nothing moves; nobody takes the team back that way.
+  assert.deepEqual(await store.execute(owner, { action: 'handOver', teamId, uid: alice.uid, generation: 1 }), { ok: true });
+  await assert.rejects(store.execute(owner, { action: 'handOver', teamId, uid: bob.uid, generation: 1 }), { code: 'OWNER_REQUIRED' });
+  assert.deepEqual(await roles(), { owner: 'admin', alice: 'owner', bob: 'member' });
+  // The new owner has the owner's rights and duties, and the earlier one an admin's.
+  await assert.rejects(store.execute(owner, { action: 'delete', teamId }), { code: 'OWNER_REQUIRED' });
+  await assert.rejects(store.execute(alice, { action: 'leave', teamId, generation: 1 }), { code: 'OWNER_CANNOT_LEAVE' });
+  await store.execute(alice, { action: 'role', teamId, uid: bob.uid, generation: 1, role: 'admin' });
+  await store.execute(owner, { action: 'leave', teamId, generation: 1 });
+  assert.deepEqual(await store.execute(alice, { action: 'handOver', teamId, uid: bob.uid, generation: 1 }), { ok: true });
+  assert.deepEqual(Object.fromEntries((await store.detail(bob.uid, teamId)).members.map(member => [member.uid, member.role])), { alice: 'admin', bob: 'owner' });
+});
 test('T1: leave preserves the epoch, and stale leave cannot remove a rejoin', options, async () => {
   await create(); const { code } = await invite(); await join(code);
   await store.execute(alice, { action: 'leave', teamId, generation: 1 });

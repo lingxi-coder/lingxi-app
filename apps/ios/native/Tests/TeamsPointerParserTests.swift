@@ -102,6 +102,12 @@ final class TeamsPointerParserTests: XCTestCase {
         return base
     }
 
+    /// M3-3: the readers written when the conversation was made tell a Bot DM from before a handover apart.
+    func testTheReadersOfAConversationAreKeptWhenTheDocumentNamesThem() throws {
+        XCTAssertNil(try TeamsPointerParser.parseConversation(id: "c1", data: document(), lastReadSeq: 0, millis: millis).readers)
+        XCTAssertEqual(try TeamsPointerParser.parseConversation(id: "c1", data: document(["memberUids": ["u1", "owner"]]), lastReadSeq: 0, millis: millis).readers, ["u1", "owner"])
+    }
+
     func testAWholeDocumentBecomesTheAppConversation() throws {
         let value = try TeamsPointerParser.parseConversation(id: "c1", data: document(), lastReadSeq: 2, millis: millis)
         XCTAssertEqual(value, TeamMessageConversation(

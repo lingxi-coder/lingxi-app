@@ -538,7 +538,7 @@ final class TeamsWorkspace {
         let done = await run {
             guard let model = self.messaging, let uid = self.uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
             guard bot.selectable else { throw TeamMessageFailure(code: "BOT_USE_REQUIRED") }
-            if !fresh, let existing = TeamsListLogic.findBotDm(model.cache?.conversations ?? [], uid: uid, sharedBotId: bot.sharedBotId) {
+            if !fresh, let existing = TeamsListLogic.findBotDm(model.cache?.conversations ?? [], uid: uid, sharedBotId: bot.sharedBotId, bots: model.bots) {
                 opened = existing.id
                 return
             }

@@ -2528,6 +2528,7 @@
     <string name="teams_member">Member</string>
     <string name="teams_promote">Make admin</string>
     <string name="teams_demote">Make member</string>
+    <string name="teams_make_owner">設為擁有者</string>
     <string name="teams_remove">Remove member</string>
     <string name="teams_leave">Leave team</string>
     <string name="teams_delete">Delete team</string>
@@ -2542,6 +2543,7 @@
     <string name="teams_join_disclosure">Join only teams you trust. Your name will be visible to their members.</string>
     <string name="teams_empty">Create a team or join with an invite.</string>
     <string name="teams_confirm_change">Confirm this membership change?</string>
+    <string name="teams_confirm_make_owner">將此成員設為團隊擁有者？你將以管理員身分留在團隊中，只有新的擁有者才能再把你設為擁有者。每個 Bot 仍由其維護者維護，每個對話仍只屬於其中的成員。</string>
     <string name="teams_confirm_delete">Delete this team? All members will lose access.</string>
     <string name="teams_confirm_leave">Leave this team?</string>
     <string name="teams_conversations">會話</string>
@@ -2721,6 +2723,7 @@
     <string name="teams_composer_lock_bot_unverified">未能確認 Bot 可用狀態，請連線後重試。</string>
     <string name="teams_composer_lock_bot_checking">正在確認此 Bot 是否可用…</string>
     <string name="teams_composer_lock_bot_unavailable">此 Bot 目前對你不可用。</string>
+    <string name="teams_composer_lock_bot_handed_over">此 Bot 已更換維護者，不再在此對話中作答。請從團隊的 Bot 清單與它開始新的對話。</string>
     <string name="teams_composer_too_long">訊息過長，請縮短後再傳送。</string>
     <string name="teams_run_preparing">準備中</string>
     <string name="teams_run_processing">處理中</string>

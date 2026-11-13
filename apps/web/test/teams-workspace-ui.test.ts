@@ -554,7 +554,7 @@ test('drawer: leave or delete first, then tabs by role, with a resizable separat
   assert.doesNotMatch(markup, /Leave team/); assert.match(markup, /<h2 tabindex="-1">Acme<\/h2>/); assert.match(markup, /aria-label="Close details"/);
   assert.equal(count(markup, /role="tab"/g), 3); assert.match(markup, /role="tab"[^>]*aria-selected="true"[^>]*tabindex="0"[^>]*>Members</); assert.equal(count(markup, /tabindex="-1" class="tw-tab">(Invites|Bots)</g), 2);
   assert.match(markup, /role="tabpanel"[^>]*aria-labelledby="[^"]*-tab-members"/);
-  assert.equal(count(markup, />Remove</g), 2, 'the owner can remove the other two'); assert.match(markup, />Make member</); assert.match(markup, />Make admin</);
+  assert.equal(count(markup, />Remove</g), 2, 'the owner can remove the other two'); assert.match(markup, />Make member</); assert.match(markup, />Make admin</); assert.equal(count(markup, />Make owner</g), 2, 'and can give the team to either of them');
   assert.match(markup, /Alice<\/b><small>You · Owner/); assert.match(markup, /readable by the platform/);
   const invites = html(drawer(workspace, snapshot(), { tab: 'invites' }));
   assert.match(invites, /Create invite link/); assert.match(invites, /<option value="admin">Admin<\/option>/, 'an owner can invite admins');

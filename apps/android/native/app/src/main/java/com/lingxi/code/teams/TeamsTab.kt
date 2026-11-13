@@ -239,7 +239,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
 
 /** Opens the viewer's Bot DM with the Bot or creates it; the same rule as the Bots list on the Desktop. A friend's chat starts one the same way (D22). */
 internal fun messageBot(workspace: TeamsWorkspace, messaging: TeamMessagingState, uid: String, sharedBotId: String, open: (String) -> Unit) {
-    val existing = TeamsListLogic.findBotDm(messaging.cache?.conversations.orEmpty(), uid, sharedBotId)
+    val existing = TeamsListLogic.findBotDm(messaging.cache?.conversations.orEmpty(), uid, sharedBotId, messaging.bots)
     if (existing != null) { open(existing.id); return }
     val bot = messaging.bots.firstOrNull { it.sharedBotId == sharedBotId } ?: return
     val id = UUID.randomUUID().toString()

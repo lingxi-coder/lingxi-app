@@ -2528,6 +2528,7 @@
     <string name="teams_member">Member</string>
     <string name="teams_promote">Make admin</string>
     <string name="teams_demote">Make member</string>
+    <string name="teams_make_owner">소유자로 지정</string>
     <string name="teams_remove">Remove member</string>
     <string name="teams_leave">Leave team</string>
     <string name="teams_delete">Delete team</string>
@@ -2542,6 +2543,7 @@
     <string name="teams_join_disclosure">Join only teams you trust. Your name will be visible to their members.</string>
     <string name="teams_empty">Create a team or join with an invite.</string>
     <string name="teams_confirm_change">Confirm this membership change?</string>
+    <string name="teams_confirm_make_owner">이 멤버를 팀 소유자로 지정할까요? 회원님은 관리자로 팀에 남으며, 새 소유자만 회원님을 다시 소유자로 지정할 수 있습니다. 각 Bot은 관리하던 멤버에게 그대로 남고, 각 채팅은 참여자에게만 그대로 남습니다.</string>
     <string name="teams_confirm_delete">Delete this team? All members will lose access.</string>
     <string name="teams_confirm_leave">Leave this team?</string>
     <string name="teams_conversations">대화</string>
@@ -2721,6 +2723,7 @@
     <string name="teams_composer_lock_bot_unverified">Bot 사용 가능 여부를 확인하지 못했습니다. 다시 연결해 확인하세요.</string>
     <string name="teams_composer_lock_bot_checking">이 Bot을 사용할 수 있는지 확인하는 중…</string>
     <string name="teams_composer_lock_bot_unavailable">이 Bot은 지금 사용할 수 없습니다.</string>
+    <string name="teams_composer_lock_bot_handed_over">이 Bot은 관리자가 바뀌어 이 채팅에서는 더 이상 답하지 않습니다. 팀의 Bot 목록에서 새 채팅을 시작하세요.</string>
     <string name="teams_composer_too_long">메시지가 너무 깁니다. 줄인 후 보내세요.</string>
     <string name="teams_run_preparing">준비 중</string>
     <string name="teams_run_processing">처리 중</string>

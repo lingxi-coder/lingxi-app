@@ -14,7 +14,9 @@ import java.security.MessageDigest
  */
 internal data class TeamLastMessage(val id: String, val seq: Long, val atMs: Long?, val authorKind: String, val authorUid: String, val authorSharedBotId: String?, val preview: String, val recalled: Boolean = false)
 
-internal data class TeamMessageConversation(val id: String, val kind: String, val title: String, val participants: List<String>, val lastSeq: Long, val lastChangeSeq: Long, val lastReadSeq: Long, val sharedBotIds: List<String> = emptyList(), val lastMessage: TeamLastMessage? = null) {
+internal data class TeamMessageConversation(val id: String, val kind: String, val title: String, val participants: List<String>, val lastSeq: Long, val lastChangeSeq: Long, val lastReadSeq: Long, val sharedBotIds: List<String> = emptyList(), val lastMessage: TeamLastMessage? = null,
+    /** Who can read it, as written when it was made: its people and the maintainers its Bots had then. Null when the source does not say. */
+    val readers: List<String>? = null) {
     fun merging(old: TeamMessageConversation?) = copy(lastSeq = maxOf(old?.lastSeq ?: 0, lastSeq), lastChangeSeq = maxOf(old?.lastChangeSeq ?: 0, lastChangeSeq), lastReadSeq = maxOf(old?.lastReadSeq ?: 0, lastReadSeq))
     val unread get() = (lastSeq - lastReadSeq).coerceAtLeast(0)
     /** The raw SharedBot ID carried by the Chat's explicit `shared_bot:` participant. */
@@ -29,7 +31,8 @@ internal data class TeamMessageConversation(val id: String, val kind: String, va
             val participants = (data["participants"] as? List<*>)?.map { it as? String ?: throw TeamMessageFailure("INVALID_DATA") } ?: throw TeamMessageFailure("INVALID_DATA")
             fun long(key: String) = (data[key] as? Number)?.toLong() ?: throw TeamMessageFailure("INVALID_DATA")
             return TeamMessageConversation(id, data["kind"] as? String ?: throw TeamMessageFailure("INVALID_DATA"), data["title"] as? String ?: throw TeamMessageFailure("INVALID_DATA"), participants,
-                long("lastSeq"), long("lastChangeSeq"), lastReadSeq, participants.filter { it.startsWith("shared_bot:") }.map { it.removePrefix("shared_bot:") }, TeamsPointerParser.parseLastMessage(data.containsKey("lastMessage"), data["lastMessage"], millis))
+                long("lastSeq"), long("lastChangeSeq"), lastReadSeq, participants.filter { it.startsWith("shared_bot:") }.map { it.removePrefix("shared_bot:") }, TeamsPointerParser.parseLastMessage(data.containsKey("lastMessage"), data["lastMessage"], millis),
+                (data["memberUids"] as? List<*>)?.takeIf { uids -> uids.all { it is String } }?.map { it as String })
         }
     }
 }

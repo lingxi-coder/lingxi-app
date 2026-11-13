@@ -14,7 +14,9 @@ export type TeamCommand =
   | { action: 'join'; code: string; requestId: string }
   | { action: 'leave'; teamId: string; generation: number }
   | { action: 'remove'; teamId: string; uid: string; generation: number }
-  | { action: 'role'; teamId: string; uid: string; generation: number; role: 'admin' | 'member' };
+  | { action: 'role'; teamId: string; uid: string; generation: number; role: 'admin' | 'member' }
+  /** The owner gives the team to a current member and stays as an admin. Bots, Chats and model accounts stay where they are. */
+  | { action: 'handOver'; teamId: string; uid: string; generation: number };
 export interface TeamResult { teamId?: string; code?: string; generation?: number; alreadyMember?: boolean; ok?: boolean }
 export interface TeamsApi extends MessageApi {
   openBotMarket?(): Promise<void>;

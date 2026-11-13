@@ -304,6 +304,44 @@ No new daemon. The host of published Bots already lives in the Desktop main proc
 
 **Not done — needs a signed package and a real Mac.** F1 on a signed app after login with no window; the sleep, quit, sign-out and offline rows observed on a device; F2, the twenty-four hour run with a fixture request every ten minutes; F3 after a real restart; F5. A Mac that is asleep, shut down or has LingXi quit still answers nobody, and the lid still wins over keep-awake.
 
+## M3-3 — handing a Bot to another member, and handing over the team
+
+Two separate things, each moved by its own command. Maintaining a Bot, owning the team, paying for the model and the audience of the data never move together (E5).
+
+**What a Bot handover moves.** The maintainer, and with it the deployment that answers and the model account that pays. The published role and the files of the current publication go to the new maintainer as a package. The Bot keeps its `sharedBotId`, its name, who may use it, its daily limits and its shared list; its revision goes up by one.
+
+**What it does not move.** The earlier maintainer's local Bot, model account and anything else on their Mac. Conversations: each keeps the readers it was created with, so the new maintainer reads none of the earlier ones and the earlier maintainer reads none of the new ones. Results and documents already delivered stay readable to the people who could read them. What a task did outside the Chat stays with the maintainer it ran under (`task.maintainer`): only they see and resolve its operations.
+
+**Steps and states.** `offered → accepted → completed`, or one of `cancelled` (taken back), `declined`, `expired` (seven days), `void` (a new publication, a pause, or either party leaving the team). Until `completed` nothing changes for the people who use the Bot. Every step has one answer that can be asked for again.
+
+| Step | Who | Command | Notes |
+|---|---|---|---|
+| Upload the package | maintainer's Desktop | `putTransferPart` | JSON `{schemaVersion, documents}` in base64 parts of 700 KiB, at most 8; sealed by the offer |
+| Offer | maintainer | `offerTransfer` (`commandId` = `transferId`) | only to a member who may use the Bot (`INPUT_GRANT_REQUIRED` otherwise); one open offer per Bot (`TRANSFER_PENDING`) |
+| Accept | recipient's Desktop | `acceptTransfer`, then `readTransferPart` | parts are readable by the accepted recipient only |
+| Complete | recipient's Desktop | `completeTransfer` | new deployment, old one disabled, parts deleted |
+| End | either party | `endTransfer` | taken back by the maintainer, declined by the recipient |
+
+**After it.** The earlier deployment gets `DEPLOYMENT_REQUIRED` for everything, and a run it had in progress is not carried over. A request in a Chat from before the handover is refused with `BOT_MAINTAINER_CHANGED`: the Chat's readers were fixed when it was made, and the new maintainer is not one of them. People start a new chat with the Bot.
+
+**Desktop (recipient).** Accept → read the parts → check the package against the manifest (same documents, same digests, exactly one role; `TRANSFER_PACKAGE_MISMATCH` otherwise) → take the model route and accounts of the local Bot the recipient chose → check that the model answers → save a pending publication → `completeTransfer` → adopt it. The chosen Bot's model answers and the published role is used in place of its own. A lost answer at any step is repeated with the same command, by the same call or at the next start. A tampered package, a list the chosen model route cannot continue (`SHARED_LIST_UNSUPPORTED`) or a model that does not answer leave the Bot where it is.
+
+**Clients.**
+
+| | Maintainer | Recipient | Everyone else |
+|---|---|---|---|
+| Desktop | "Hand over…" on the Bot's card: who, what goes, what stays, a confirmation; then "Offered to … / Take back" | the offer with "Take over…" (choose a local Bot, costs, confirmation) and "Decline" | nothing |
+| Web | "Offered to … / Take back" (the offer itself needs the Desktop that publishes the Bot) | the offer, "Decline", and where to take it over | nothing |
+| iOS, Android | nothing | nothing | nothing |
+
+On all four, a Bot chat from before the handover shows why it no longer answers, and the Bot list opens a new chat instead of that one. Web and Desktop add a "Start a new chat" button there. The rule is the server's: the Chat is a Bot DM whose readers do not include the current maintainer, or include someone who is neither the maintainer nor the person in it. Handover is not offered in a friendship.
+
+**Handing over the team.** `handOver {teamId, uid, generation}` on the team service: the owner gives the team to a current member and stays as an admin. It takes effect at once, has no offer step, and changes two roles and nothing else — no Bot, deployment, Chat reader, grant or quota. Only the owner can (`OWNER_REQUIRED`); not to oneself (`ROLE_REQUIRED`); a member whose membership changed is refused (`STALE_MEMBERSHIP`); asked again after a lost answer it changes nothing. Friendships refuse it like every member command (`PAIR_TEAM`). "Make owner" is on each member for the owner, with what does and does not change in the confirmation: Web and Desktop in the details drawer, iOS in the member's menu, Android in a new per-member menu that also holds the role change and removal.
+
+**Tests.** Emulator `handover.emulator.test.mjs` (7: E2 and RV-06, E3 repeats, each way an offer ends, a party leaving, E5 including the team's owner changing, operations, documents) and `teams.members.emulator.test.mjs` (the owner's handover); rules deny clients `transfers` and `transferParts`. Electron `teams-host.test.ts` (three `M3-3` tests). Web `teams-bots-ui.test.ts` (four `M3-3` scenarios) and `teams-workspace-interaction.test.ts` (the owner's confirmation). iOS `TeamsListLogicTests`, `TeamsPointerParserTests`; Android `TeamsListLogicTest`.
+
+**Not done.** Nothing here has run on a device or against the deployed project, and nothing is deployed. Native clients show no offer: the maintainer and the recipient use Desktop or Web. The owner control on iOS and Android is compiled and type-checked but has no UI test. A handover does not move the task history of the earlier deployment, by design.
+
 ## Current integration status, 2026-11-05
 
 The sections below record earlier increments and their failures; this table supersedes their pending source-work statements. M0/M1 release acceptance remains open.

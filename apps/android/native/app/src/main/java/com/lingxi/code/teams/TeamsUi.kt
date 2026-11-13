@@ -77,6 +77,7 @@ internal object TeamsTags {
     fun message(id: String) = "teams.message.$id"
     fun runCard(trigger: String) = "teams.run.$trigger"
     fun addFriend(uid: String) = "teams.addFriend.$uid"
+    fun memberActions(uid: String) = "teams.member.actions.$uid"
 }
 
 /** The words of the conversation list, from resources for the UI language (the two separators are code constants). */
@@ -100,6 +101,7 @@ internal fun teamsErrorRes(code: String): Int = when {
     code in setOf("MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED") -> R.string.teams_stale_error
     code.contains("STORAGE") -> R.string.teams_messages_storage_error
     code in setOf("BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "BOT_SELECTION_STALE", "CONVERSATION_POLICY_REQUIRED", "ARTIFACT_READ_REQUIRED", "GRANT_READ_REQUIRED", "INPUT_GRANT_REQUIRED") -> R.string.teams_error_bot_access_changed
+    code == "BOT_MAINTAINER_CHANGED" -> R.string.teams_composer_lock_bot_handed_over
     code == "REQUEST_QUOTA_EXCEEDED" -> R.string.teams_error_request_quota
     code == "MESSAGE_LISTENER_FAILED" -> R.string.teams_error_sync_failed
     code in setOf("MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT",

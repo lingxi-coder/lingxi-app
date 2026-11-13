@@ -294,6 +294,22 @@ scenario('drawer: tabs follow the arrow keys, Escape closes, the handle resizes,
   assert.deepEqual(fake.teamCommands[0], { action: 'delete', teamId: 'team-aaaa' }); assert.deepEqual(events, ['close'], 'the drawer was about the team that is gone');
 });
 
+scenario('drawer: the owner gives the team to a member after reading what does and does not change (M3-3)', async context => {
+  const { fake, workspace, snapshot } = await open(context);
+  await until(() => !!snapshot().detail, 'detail');
+  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer, { workspace, snapshot, zh: false, onClose() {} } as never)); context.after(() => page.unmount());
+  const offers = page.find(node => node.type === 'button' && textOf(node) === 'Make owner');
+  assert.equal(offers.length, snapshot().detail!.members.length - 1, 'every other member can be given the team, and the owner cannot give it to themselves');
+  await page.click(offers[0]);
+  const dialog = page.find(node => node.type === 'dialog')[0]; assert.equal(dialog.props.role, 'alertdialog');
+  assert.match(textOf(dialog), /Make (Bob|Owner) the owner of Acme\?/); assert.match(textOf(dialog), /You stay in the team as an admin/); assert.match(textOf(dialog), /Each Bot stays with the member who maintains it/);
+  assert.equal(fake.teamCommands.length, 0, 'nothing happens until it is confirmed');
+  await page.click(dialog.findAll((node: any) => node.type === 'button' && textOf(node) === 'Make owner')[0]);
+  await until(() => fake.teamCommands.length === 1, 'the handover');
+  const target = snapshot().detail!.members.find(member => member.uid === (fake.teamCommands[0] as { uid: string }).uid)!;
+  assert.deepEqual(fake.teamCommands[0], { action: 'handOver', teamId: 'team-aaaa', uid: target.uid, generation: target.generation });
+});
+
 scenario('drawer: members can be promoted and removed after a confirmation, and invitations are created and revoked', async context => {
   const { fake, workspace, snapshot } = await open(context);
   await until(() => !!snapshot().detail, 'detail');

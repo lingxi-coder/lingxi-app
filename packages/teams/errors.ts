@@ -7,6 +7,7 @@ const membership: Record<string, [string, string]> = {
   MEMBERSHIP_REQUIRED: ['Your membership has ended. Refresh or join with a new invite.', '你已不在此团队，请刷新或通过新邀请加入。'],
   STALE_MEMBERSHIP: ['Membership changed. Refresh before trying again.', '成员身份已变化，请刷新后重试。'],
   ROLE_REQUIRED: ['Your role cannot perform this action.', '当前角色无权执行此操作。'],
+  OWNER_REQUIRED: ['Only the owner of the team can do this.', '只有团队所有者可以执行此操作。'],
   TEAM_LIMIT: ['You can join up to 20 teams.', '最多可加入 20 个团队。'],
   MEMBER_LIMIT: ['This team has reached 200 members.', '团队已达到 200 人上限。'],
 };

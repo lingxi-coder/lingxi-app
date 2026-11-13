@@ -2528,6 +2528,7 @@
     <string name="teams_member">Member</string>
     <string name="teams_promote">Make admin</string>
     <string name="teams_demote">Make member</string>
+    <string name="teams_make_owner">Make owner</string>
     <string name="teams_remove">Remove member</string>
     <string name="teams_leave">Leave team</string>
     <string name="teams_delete">Delete team</string>
@@ -2542,6 +2543,7 @@
     <string name="teams_join_disclosure">Join only teams you trust. Your name will be visible to their members.</string>
     <string name="teams_empty">Create a team or join with an invite.</string>
     <string name="teams_confirm_change">Confirm this membership change?</string>
+    <string name="teams_confirm_make_owner">Make this member the owner of the team? You stay as an admin, and only the new owner can make you the owner again. Every Bot stays with the member who maintains it, and every chat with the people in it.</string>
     <string name="teams_confirm_delete">Delete this team? All members will lose access.</string>
     <string name="teams_confirm_leave">Leave this team?</string>
     <string name="teams_conversations">Conversations</string>
@@ -2721,6 +2723,7 @@
     <string name="teams_composer_lock_bot_unverified">Bot availability could not be verified. Reconnect to check.</string>
     <string name="teams_composer_lock_bot_checking">Checking whether this Bot is available…</string>
     <string name="teams_composer_lock_bot_unavailable">This Bot is not available to you right now.</string>
+    <string name="teams_composer_lock_bot_handed_over">This Bot has a new maintainer and no longer answers in this chat. Start a new chat with it from the team’s Bots.</string>
     <string name="teams_composer_too_long">This message is too long. Shorten it to send.</string>
     <string name="teams_run_preparing">Preparing</string>
     <string name="teams_run_processing">Processing</string>

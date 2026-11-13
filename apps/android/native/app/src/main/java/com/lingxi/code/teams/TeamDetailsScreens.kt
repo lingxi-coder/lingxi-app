@@ -2,6 +2,7 @@ package com.lingxi.code.teams
 
 import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -23,6 +25,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -149,10 +153,19 @@ private fun androidx.compose.foundation.lazy.LazyListScope.membersSection(
                 }
             }
             if (member.uid != uid && member.role != "owner" && (team.role == "owner" || (team.role == "admin" && member.role == "member"))) {
-                if (team.role == "owner") TextButton(enabled = !busy, onClick = { confirm(R.string.teams_confirm_change to mapOf("action" to "role", "teamId" to team.id, "uid" to member.uid, "generation" to member.generation, "role" to if (member.role == "admin") "member" else "admin")) }) {
-                    Text(stringResource(if (member.role == "admin") R.string.teams_demote else R.string.teams_promote))
-                }
-                TextButton(enabled = !busy, onClick = { confirm(R.string.teams_confirm_change to mapOf("action" to "remove", "teamId" to team.id, "uid" to member.uid, "generation" to member.generation)) }) {
+                val target: Map<String, Any> = mapOf("teamId" to team.id, "uid" to member.uid, "generation" to member.generation)
+                // The owner has three things to decide about a member; they are behind one button so the name keeps its room.
+                if (team.role == "owner") Box {
+                    var menu by remember(member.uid) { mutableStateOf(false) }
+                    IconButton(enabled = !busy, onClick = { menu = true }, modifier = Modifier.testTag(TeamsTags.memberActions(member.uid))) { Icon(Icons.Outlined.MoreVert, member.displayName) }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text(stringResource(if (member.role == "admin") R.string.teams_demote else R.string.teams_promote)) },
+                            onClick = { menu = false; confirm(R.string.teams_confirm_change to target + mapOf("action" to "role", "role" to if (member.role == "admin") "member" else "admin")) })
+                        // Owning the team is given on its own: Bots stay with their maintainers and chats with their readers.
+                        DropdownMenuItem(text = { Text(stringResource(R.string.teams_make_owner)) }, onClick = { menu = false; confirm(R.string.teams_confirm_make_owner to target + mapOf("action" to "handOver")) })
+                        DropdownMenuItem(text = { Text(stringResource(R.string.teams_remove), color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; confirm(R.string.teams_confirm_change to target + mapOf("action" to "remove")) })
+                    }
+                } else TextButton(enabled = !busy, onClick = { confirm(R.string.teams_confirm_change to target + mapOf("action" to "remove")) }) {
                     Text(stringResource(R.string.teams_remove), color = MaterialTheme.colorScheme.error)
                 }
             }

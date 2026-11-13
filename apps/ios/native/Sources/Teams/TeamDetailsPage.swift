@@ -28,7 +28,7 @@ struct TeamDetailsPage: View {
     }
 
     private struct Confirmation: Identifiable {
-        enum Kind { case role, remove, leave, delete }
+        enum Kind { case role, owner, remove, leave, delete }
         let id = UUID()
         let kind: Kind
         /// Who or what it is about, shown under the question.
@@ -231,6 +231,12 @@ struct TeamDetailsPage: View {
                                         "role": member.role == "admin" ? "member" : "admin",
                                     ])
                                 }
+                                // Owning the team is given on its own: Bots stay with their maintainers and chats with their readers.
+                                Button("teams_make_owner") {
+                                    confirmation = Confirmation(kind: .owner, subject: member.displayName, input: [
+                                        "action": "handOver", "teamId": team.id, "uid": member.uid, "generation": member.generation,
+                                    ])
+                                }
                             }
                             Button("teams_remove", role: .destructive) {
                                 confirmation = Confirmation(kind: .remove, subject: member.displayName, input: [
@@ -370,7 +376,7 @@ struct TeamDetailsPage: View {
         }
         Section {
             ForEach(bots) { bot in
-                let existing = workspace.uid.flatMap { TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: $0, sharedBotId: bot.sharedBotId) }
+                let existing = workspace.uid.flatMap { TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: $0, sharedBotId: bot.sharedBotId, bots: bots) }
                 TeamBotCardView(
                     bot: bot, ownerName: userName(bot.maintainer.uid), isOwner: bot.maintainer == TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation),
                     busy: workspace.messageBusy || (offline && existing == nil),
@@ -426,6 +432,7 @@ struct TeamDetailsPage: View {
     private func question(_ pending: Confirmation) -> Text {
         switch pending.kind {
         case .role, .remove: Text("teams_confirm_change")
+        case .owner: Text("teams_confirm_make_owner")
         case .leave: Text("teams_confirm_leave")
         case .delete: Text("teams_confirm_delete")
         }
@@ -434,6 +441,7 @@ struct TeamDetailsPage: View {
     private func confirmKey(_ pending: Confirmation) -> LocalizedStringKey {
         switch pending.kind {
         case .role: LocalizedStringKey(pending.input["role"] as? String == "admin" ? "teams_promote" : "teams_demote")
+        case .owner: "teams_make_owner"
         case .remove: "teams_remove"
         case .leave: "teams_leave"
         case .delete: "teams_delete"

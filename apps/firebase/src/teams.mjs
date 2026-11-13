@@ -20,6 +20,7 @@ const command = z.discriminatedUnion('action', [
   z.object({ action: z.literal('leave'), ...teamId, generation }).strict(),
   z.object({ action: z.literal('remove'), ...teamId, uid, generation }).strict(),
   z.object({ action: z.literal('role'), ...teamId, uid, generation, role: z.enum(['admin', 'member']) }).strict(),
+  z.object({ action: z.literal('handOver'), ...teamId, uid, generation }).strict(),
 
 ]);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -209,6 +210,20 @@ export class TeamsStore {
       }
       const targetUid = input.action === 'leave' ? user.uid : input.uid;
       const targetRef = ref.collection('members').doc(targetUid), target = targetUid === user.uid ? self : await tx.get(targetRef);
+      if (input.action === 'handOver') {
+        // The owner gives the team to a current member and stays as an admin. Owning the team is a role of its own: every Bot stays
+        // with its maintainer, every Chat with its readers, and nobody's model account or shared files change hands.
+        if (targetUid === user.uid) fail(403, 'ROLE_REQUIRED');
+        if (!target.exists || target.data().generation !== input.generation) fail(409, 'STALE_MEMBERSHIP');
+        // Asked again after a lost answer: that member already owns the team.
+        if (target.data().role === 'owner' && manager(self.data())) return { ok: true };
+        if (role !== 'owner') fail(403, 'OWNER_REQUIRED');
+        tx.update(targetRef, { role: 'owner' }); tx.update(this.index(targetUid, ref.id), { role: 'owner' });
+        tx.update(selfRef, { role: 'admin' }); tx.update(this.index(user.uid, ref.id), { role: 'admin' });
+        tx.update(ref, { updatedAt: now });
+        tx.set(ref.collection('signals').doc('membership'), { updatedAt: FieldValue.serverTimestamp() });
+        return { ok: true };
+      }
       if (input.action !== 'leave' && (!manager(self.data()) || targetUid === user.uid
         || (role !== 'owner' && target.data()?.role !== 'member'))) fail(403, 'ROLE_REQUIRED');
       if (!target.exists) fail(409, 'STALE_MEMBERSHIP');

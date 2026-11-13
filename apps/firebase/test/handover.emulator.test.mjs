@@ -265,7 +265,19 @@ test('handover: maintaining a Bot, owning the team, paying for the model and the
   const asked = await execute('submit', submit('chat_owner_001'), owner), task = await taskData(asked.tasks[0].taskId);
   assert.deepEqual([task.deploymentId, task.maintainer.uid], [newHost.deploymentId, 'other']);
   await assert.rejects(execute('startTask', { ...oldHost, taskId: asked.tasks[0].taskId }), { code: 'DEPLOYMENT_REQUIRED' });
-  assert.equal((await execute('startTask', { ...newHost, taskId: asked.tasks[0].taskId }, other)).execute, true);
+  const started = await execute('startTask', { ...newHost, taskId: asked.tasks[0].taskId }, other); assert.equal(started.execute, true);
+  // Owning the team moves by itself too: the member who gets the team gets no Bot with it, reads no Chat they could not read, and hosts nothing.
+  const chats = async () => Object.fromEntries((await db.collection(`teams/${teamId}/conversations`).get()).docs.map(doc => [doc.id, doc.data().memberUids]));
+  const botBefore = await botData(), chatsBefore = await chats();
+  await teams.execute(owner, { action: 'handOver', teamId, uid: member.uid, generation: 1 });
+  assert.deepEqual(await roles(), { owner: 'admin', member: 'owner', other: 'member' });
+  assert.deepEqual([await botData(), await chats()], [botBefore, chatsBefore]);
+  for (const actor of [member, owner]) await assert.rejects(execute('pauseSharedBot', { sharedBotId: botId, expectedRevision: 3 }, actor), { code: 'MAINTAINER_REQUIRED' });
+  assert.equal(await card(member), undefined, 'the new owner of the team still cannot use the Bot');
+  await assert.rejects(execute('listTasks', { conversationId: 'chat_owner_001' }, member), { code: 'CONVERSATION_REQUIRED' });
+  await assert.rejects(execute('listHostTasks', newHost, member), { code: 'DEPLOYMENT_REQUIRED' });
+  // The earlier owner's request and the Bot's maintainer are untouched by it.
+  assert.equal((await execute('completeTask', result(newHost, started), other)).state, 'completed');
   // The new maintainer decides about the Bot as any maintainer does.
   assert.equal((await execute('pauseSharedBot', { sharedBotId: botId, expectedRevision: 3 }, other)).revision, 4);
 });

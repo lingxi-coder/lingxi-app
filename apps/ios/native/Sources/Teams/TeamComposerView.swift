@@ -25,7 +25,7 @@ struct TeamComposerView: View {
     private var conversation: TeamMessageConversation { context.conversation }
     private var lock: ComposerLock {
         TeamsComposeLogic.composerLock(
-            uid: context.uid, kind: conversation.kind, participants: conversation.participants,
+            uid: context.uid, kind: conversation.kind, participants: conversation.participants, readers: conversation.readers,
             bots: context.bots, botsLoaded: model.botsLoaded, botsUnverified: model.botsUnverified)
     }
     private var asks: Bool { editing == nil && (conversation.kind == "group" || conversation.kind == "channel") }
@@ -74,6 +74,7 @@ struct TeamComposerView: View {
         switch lock {
         case .none: ""
         case .ownerReading: "teams_composer_lock_owner_reading"
+        case .botHandedOver: "teams_composer_lock_bot_handed_over"
         case .botUnverified: "teams_composer_lock_bot_unverified"
         case .botChecking: "teams_composer_lock_bot_checking"
         case .botUnavailable: "teams_composer_lock_bot_unavailable"

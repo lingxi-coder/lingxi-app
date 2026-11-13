@@ -169,6 +169,9 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
               {team.role === 'owner' ? <button type="button" disabled={snapshot.busy}
                 onClick={() => ask({ action: 'role', teamId: team.id, uid: member.uid, generation: member.generation, role: member.role === 'admin' ? 'member' : 'admin' }, t(`Change ${member.displayName}’s role?`, `更改 ${member.displayName} 的角色？`), t('Change role', '更改角色'))}>
                 {member.role === 'admin' ? t('Make member', '设为成员') : t('Make admin', '设为管理员')}</button> : null}
+              {team.role === 'owner' ? <button type="button" disabled={snapshot.busy}
+                onClick={() => ask({ action: 'handOver', teamId: team.id, uid: member.uid, generation: member.generation }, t(`Make ${member.displayName} the owner of ${team.name}?`, `将「${team.name}」的所有者变更为 ${member.displayName}？`), t('Make owner', '设为所有者'))}>
+                {t('Make owner', '设为所有者')}</button> : null}
               <button type="button" className="tw-danger-btn" disabled={snapshot.busy}
                 onClick={() => ask({ action: 'remove', teamId: team.id, uid: member.uid, generation: member.generation }, t(`Remove ${member.displayName}?`, `移除 ${member.displayName}？`), t('Remove', '移除'))}>{t('Remove', '移除')}</button>
             </> : null}
@@ -234,6 +237,7 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
     {confirmation ? <Dialog role="alertdialog" title={confirmation.title} onClose={() => setConfirmation(undefined)}>
       <div className="tw-form">
         {confirmation.command.action === 'delete' ? <p className="tw-hint">{t('This cannot be undone.', '此操作无法撤销。')}</p> : null}
+        {confirmation.command.action === 'handOver' ? <p className="tw-hint">{t('You stay in the team as an admin, and only the new owner can make you the owner again. Each Bot stays with the member who maintains it, and every chat stays with the people in it.', '你将以管理员身份留在团队中，只有新的所有者才能再把你设为所有者。每个 Bot 仍由其维护者维护，每个对话仍只属于其中的成员。')}</p> : null}
         <div className="tw-dialog-actions">
           <button type="button" data-autofocus disabled={snapshot.busy} onClick={() => setConfirmation(undefined)}>{t('Cancel', '取消')}</button>
           <button type="button" className="tw-danger-btn" disabled={snapshot.busy} onClick={() => void confirmNow()}>{confirmation.confirm}</button>

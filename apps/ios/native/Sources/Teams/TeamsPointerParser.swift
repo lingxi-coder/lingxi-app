@@ -84,7 +84,7 @@ enum TeamsPointerParser {
         }
         let last = try parseLastMessage(present: data.keys.contains("lastMessage"), value: data["lastMessage"], millis: millis)
         return TeamMessageConversation(id: id, kind: kind, title: title, participants: participants, lastSeq: lastSeq, lastChangeSeq: lastChangeSeq,
-                                       lastReadSeq: lastReadSeq, sharedBotId: sharedBotId, lastMessage: last)
+                                       lastReadSeq: lastReadSeq, sharedBotId: sharedBotId, lastMessage: last, readers: data["memberUids"] as? [String])
     }
 
     /// An integer in the JavaScript safe range. A Firestore double with an integral value is accepted; a

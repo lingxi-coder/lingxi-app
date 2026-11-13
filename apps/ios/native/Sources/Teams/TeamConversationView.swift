@@ -221,7 +221,7 @@ struct TeamConversationView: View {
         let newest = messages.last?.seq ?? 0
         let unseen = messages.filter { $0.seq > seenSeq && !context.isMine($0) }.count
         let locked = TeamsComposeLogic.composerLock(
-            uid: context.uid, kind: conversation.kind, participants: conversation.participants,
+            uid: context.uid, kind: conversation.kind, participants: conversation.participants, readers: conversation.readers,
             bots: context.bots, botsLoaded: context.model.botsLoaded, botsUnverified: context.model.botsUnverified) != .none
         let outbox = (context.model.cache?.outbox ?? []).filter { $0.conversationId == conversation.id }
         return ScrollView {

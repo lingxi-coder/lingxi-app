@@ -30,6 +30,8 @@ struct TeamMessageConversation: Equatable, Identifiable, Sendable {
     var sharedBotId: String? = nil
     /// The pointer to the newest message; `nil` = no message yet. Parsed strictly (`TeamsPointerParser`).
     var lastMessage: TeamLastMessage? = nil
+    /// Who can read it, as written when it was made: its people and the maintainers its Bots had then. `nil` when the source does not say.
+    var readers: [String]? = nil
     func merging(_ old: TeamMessageConversation?) -> TeamMessageConversation {
         var value = self; value.lastReadSeq = max(old?.lastReadSeq ?? 0, lastReadSeq); value.lastSeq = max(old?.lastSeq ?? 0, lastSeq); value.lastChangeSeq = max(old?.lastChangeSeq ?? 0, lastChangeSeq); return value
     }

@@ -1,7 +1,7 @@
 package com.lingxi.code.teams
 
 /** Why the composer cannot be used (SPEC-mobile-team-bot-ui section 8.3; mirrors `Composer.tsx`). */
-internal enum class ComposerLock { None, OwnerReading, BotUnverified, BotChecking, BotUnavailable }
+internal enum class ComposerLock { None, OwnerReading, BotHandedOver, BotUnverified, BotChecking, BotUnavailable }
 
 /** The `@query` being typed right before the caret; [start] is the UTF-16 index of the `@`. */
 internal data class MentionAt(val start: Int, val query: String)
@@ -49,8 +49,10 @@ internal object TeamsComposeLogic {
         return flat.substring(0, flat.offsetByCodePoints(0, length)) + "…"
     }
 
-    fun composerLock(uid: String, kind: String, participants: List<String>, bots: List<TeamBotCard>, botsLoaded: Boolean, botsUnverified: Boolean): ComposerLock {
+    /** A Bot DM from before its Bot changed maintainer ([readers]) is a record: the Bot answers in a new one. */
+    fun composerLock(uid: String, kind: String, participants: List<String>, bots: List<TeamBotCard>, botsLoaded: Boolean, botsUnverified: Boolean, readers: List<String>? = null): ComposerLock {
         if (participants.isNotEmpty() && "user:$uid" !in participants) return ComposerLock.OwnerReading
+        if (TeamsListLogic.botDmHandedOver(kind, participants, readers, bots)) return ComposerLock.BotHandedOver
         if (kind == "bot_dm" && participants.none { key -> key.startsWith("shared_bot:") && bots.any { it.sharedBotId == key.removePrefix("shared_bot:") && it.selectable } }) {
             return when {
                 botsUnverified -> ComposerLock.BotUnverified

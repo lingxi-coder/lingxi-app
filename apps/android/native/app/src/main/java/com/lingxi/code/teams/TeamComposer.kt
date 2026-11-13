@@ -53,12 +53,13 @@ internal fun TeamComposer(
     onSend: (text: String, targets: List<String>, done: () -> Unit) -> Unit, modifier: Modifier = Modifier,
 ) {
     val bots = messaging.bots
-    val lock = TeamsComposeLogic.composerLock(uid, conversation.kind, conversation.participants, bots, messaging.botsLoaded, messaging.botsFailed)
+    val lock = TeamsComposeLogic.composerLock(uid, conversation.kind, conversation.participants, bots, messaging.botsLoaded, messaging.botsFailed, conversation.readers)
     if (lock != ComposerLock.None) {
         Surface(modifier.fillMaxWidth().testTag(TeamsTags.COMPOSER_LOCK), color = MaterialTheme.colorScheme.surfaceVariant) {
             Text(
                 stringResource(when (lock) {
                     ComposerLock.OwnerReading -> R.string.teams_composer_lock_owner_reading
+                    ComposerLock.BotHandedOver -> R.string.teams_composer_lock_bot_handed_over
                     ComposerLock.BotUnverified -> R.string.teams_composer_lock_bot_unverified
                     ComposerLock.BotChecking -> R.string.teams_composer_lock_bot_checking
                     else -> R.string.teams_composer_lock_bot_unavailable

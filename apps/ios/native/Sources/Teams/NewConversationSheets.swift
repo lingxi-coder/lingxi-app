@@ -351,7 +351,7 @@ struct NewConversationSheet: View {
     }
 
     private func botRow(_ bot: TeamBotCard) -> some View {
-        let existing = TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: uid, sharedBotId: bot.sharedBotId)
+        let existing = TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: uid, sharedBotId: bot.sharedBotId, bots: model?.bots ?? [])
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
                 AgentAvatar(agentID: bot.avatarId, size: 32)

@@ -679,7 +679,7 @@ scenario('A chat with an assistant from before it changed maintainer stays reada
   assert.equal(findBotDm([dm('unknown')], 'alice', 'assistant-fixture', cards)?.id, 'unknown', 'a source that does not name the readers says nothing');
   assert.equal(findBotDm([dm('own', ['owner'])], 'alice', 'assistant-fixture', [botCard({ maintainer: { uid: 'alice', generation: 1 } })]), undefined, 'the earlier maintainer’s own chat is not the new maintainer’s');
   // The member's chat was made while Bob maintained the assistant. The owner maintains it now.
-  const { fake, workspace, page, sent, buttons, box } = await openChat(context, () => [], () => ({}), 'owner');
+  const { fake, page, sent, buttons, box } = await openChat(context, () => [], () => ({}), 'owner');
   assert.ok(box(), 'readers unknown: the chat is used as before');
   fake.conversations.set('team-test', [dm('test-chat', ['alice', 'bob'])]); for (const watch of fake.open('team-test')) fake.deliver(watch);
   await until(() => /This assistant has a new maintainer and no longer answers in this chat\. What was said here stays as it is\./.test(page.text()), 'the notice');

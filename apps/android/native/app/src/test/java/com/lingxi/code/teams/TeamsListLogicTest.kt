@@ -88,6 +88,27 @@ class TeamsListLogicTest {
         assertTrue(finds.isNull("dmMissing"))
     }
 
+    /** M3-3: a Bot DM keeps the readers it was made with, so one from before a handover is a record and the Bot answers in a new one. */
+    @Test fun aBotDmFromBeforeItsBotChangedMaintainerIsNotTheCurrentOne() {
+        val maintainer = bots.first { it.sharedBotId == "sharedbot_helper" }.maintainer.uid
+        fun dm(id: String, readers: List<String>?) = TeamMessageConversation(id, "bot_dm", "", listOf("user:$uid", "shared_bot:sharedbot_helper"), 0, 0, 0, listOf("sharedbot_helper"), readers = readers)
+        val before = dm("before", listOf(uid, "earlier_maintainer")); val after = dm("after", listOf(uid, maintainer)); val unknown = dm("unknown", null)
+        assertEquals("after", TeamsListLogic.findBotDm(listOf(before, after), uid, "sharedbot_helper", bots)?.id)
+        assertNull(TeamsListLogic.findBotDm(listOf(before), uid, "sharedbot_helper", bots))
+        assertEquals("before", TeamsListLogic.findBotDm(listOf(before), uid, "sharedbot_helper")?.id)
+        assertEquals("unknown", TeamsListLogic.findBotDm(listOf(unknown), uid, "sharedbot_helper", bots)?.id)
+        fun lock(c: TeamMessageConversation) = TeamsComposeLogic.composerLock(uid, c.kind, c.participants, bots, botsLoaded = true, botsUnverified = false, readers = c.readers)
+        assertEquals(ComposerLock.BotHandedOver, lock(before))
+        assertFalse(lock(after) == ComposerLock.BotHandedOver); assertFalse(lock(unknown) == ComposerLock.BotHandedOver)
+        // The new maintainer's own earlier chat had the earlier maintainer as a reader: it is not the current one either.
+        assertTrue(TeamsListLogic.botDmHandedOver("bot_dm", listOf("user:$maintainer", "shared_bot:sharedbot_helper"), listOf(maintainer, "earlier_maintainer"), bots))
+        assertFalse(TeamsListLogic.botDmHandedOver("group", before.participants, before.readers, bots))
+        // The stored readers are read from the conversation document.
+        val parsed = TeamMessageConversation.fromDocument("c1", mapOf("kind" to "bot_dm", "title" to "", "participants" to listOf("user:$uid", "shared_bot:sharedbot_helper"),
+            "memberUids" to listOf(uid, "earlier_maintainer"), "lastSeq" to 0L, "lastChangeSeq" to 0L, "lastMessage" to null), 0) { null }
+        assertEquals(listOf(uid, "earlier_maintainer"), parsed.readers)
+    }
+
     @Test fun conversationPreviewCoversNoneOwnRecalledNonTextAndAuthorPrefix() {
         val section = root.getJSONObject("previews")
         val names = section.getJSONObject("authorNames")

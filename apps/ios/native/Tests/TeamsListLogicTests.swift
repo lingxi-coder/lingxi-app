@@ -209,6 +209,28 @@ final class TeamsListLogicTests: XCTestCase {
         XCTAssertEqual(result.botDirect.map(\.id), ["unlisted", "mine", "other"])
     }
 
+    /// M3-3: a Bot DM keeps the readers it was made with, so one from before a handover is a record and the Bot answers in a new one.
+    func testABotDmFromBeforeItsBotChangedMaintainerIsNotTheCurrentOne() throws {
+        let cards = try bots(), helper = try XCTUnwrap(cards.first { $0.sharedBotId == "sharedbot_helper" }), maintainer = helper.maintainer.uid
+        func dm(_ id: String, _ readers: [String]?) -> TeamMessageConversation {
+            TeamMessageConversation(id: id, kind: "bot_dm", title: "", participants: ["user:\(uid)", "shared_bot:sharedbot_helper"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0, readers: readers)
+        }
+        let before = dm("before", [uid, "earlier_maintainer"]), after = dm("after", [uid, maintainer]), unknown = dm("unknown", nil)
+        XCTAssertEqual(TeamsListLogic.findBotDm([before, after], uid: uid, sharedBotId: "sharedbot_helper", bots: cards)?.id, "after")
+        XCTAssertNil(TeamsListLogic.findBotDm([before], uid: uid, sharedBotId: "sharedbot_helper", bots: cards))
+        XCTAssertEqual(TeamsListLogic.findBotDm([before], uid: uid, sharedBotId: "sharedbot_helper")?.id, "before", "without the cards nothing is known")
+        XCTAssertEqual(TeamsListLogic.findBotDm([unknown], uid: uid, sharedBotId: "sharedbot_helper", bots: cards)?.id, "unknown", "a source that does not name the readers says nothing")
+        func lock(_ conversation: TeamMessageConversation) -> ComposerLock {
+            TeamsComposeLogic.composerLock(uid: uid, kind: conversation.kind, participants: conversation.participants, readers: conversation.readers, bots: cards, botsLoaded: true, botsUnverified: false)
+        }
+        XCTAssertEqual(lock(before), .botHandedOver)
+        XCTAssertNotEqual(lock(after), .botHandedOver)
+        XCTAssertNotEqual(lock(unknown), .botHandedOver)
+        // The new maintainer's own earlier chat had the earlier maintainer as a reader: it is not the current one either.
+        XCTAssertTrue(TeamsListLogic.botDmHandedOver(kind: "bot_dm", participants: ["user:\(maintainer)", "shared_bot:sharedbot_helper"], readers: [maintainer, "earlier_maintainer"], bots: cards))
+        XCTAssertFalse(TeamsListLogic.botDmHandedOver(kind: "group", participants: before.participants, readers: before.readers, bots: cards), "only a Bot DM is bound to one maintainer")
+    }
+
     func testBotLabelsFallBackAndTheEffectiveBotKeyIsTheFirstBotParticipant() throws {
         let bots = try bots(), members = try members()
         // No sharedBotId field: the first "bot:" participant is the Bot (Desktop `sharedBotIdOf`).

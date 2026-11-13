@@ -92948,6 +92948,40 @@
         }
       }
     },
+    "teams_composer_lock_bot_handed_over": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此 Bot 已更换维护者，不再在此对话中作答。请从团队的 Bot 列表与它开始新的对话。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此 Bot 已更換維護者，不再在此對話中作答。請從團隊的 Bot 清單與它開始新的對話。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This Bot has a new maintainer and no longer answers in this chat. Start a new chat with it from the team’s Bots."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この Bot は管理者が変わったため、このチャットでは応答しません。チームの Bot 一覧から新しいチャットを始めてください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 Bot은 관리자가 바뀌어 이 채팅에서는 더 이상 답하지 않습니다. 팀의 Bot 목록에서 새 채팅을 시작하세요."
+          }
+        }
+      }
+    },
     "teams_composer_lock_bot_unavailable": {
       "localizations": {
         "zh-Hans": {
@@ -93386,6 +93420,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "Leave this team?"
+          }
+        }
+      }
+    },
+    "teams_confirm_make_owner": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将此成员设为团队所有者？你将以管理员身份留在团队中，只有新的所有者才能再把你设为所有者。每个 Bot 仍由其维护者维护，每个对话仍只属于其中的成员。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "將此成員設為團隊擁有者？你將以管理員身分留在團隊中，只有新的擁有者才能再把你設為擁有者。每個 Bot 仍由其維護者維護，每個對話仍只屬於其中的成員。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make this member the owner of the team? You stay as an admin, and only the new owner can make you the owner again. Every Bot stays with the member who maintains it, and every chat with the people in it."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このメンバーをチームのオーナーにしますか？あなたは管理者としてチームに残り、再びオーナーになるには新しいオーナーの操作が必要です。各 Bot はそれを管理しているメンバーのもとに残り、各チャットは参加者だけのものであり続けます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 멤버를 팀 소유자로 지정할까요? 회원님은 관리자로 팀에 남으며, 새 소유자만 회원님을 다시 소유자로 지정할 수 있습니다. 각 Bot은 관리하던 멤버에게 그대로 남고, 각 채팅은 참여자에게만 그대로 남습니다."
           }
         }
       }
@@ -96650,6 +96718,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "메시지를 불러오는 중…"
+          }
+        }
+      }
+    },
+    "teams_make_owner": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设为所有者"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "設為擁有者"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make owner"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "オーナーにする"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "소유자로 지정"
           }
         }
       }

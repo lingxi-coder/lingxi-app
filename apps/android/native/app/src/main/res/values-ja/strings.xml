@@ -2528,6 +2528,7 @@
     <string name="teams_member">Member</string>
     <string name="teams_promote">Make admin</string>
     <string name="teams_demote">Make member</string>
+    <string name="teams_make_owner">オーナーにする</string>
     <string name="teams_remove">Remove member</string>
     <string name="teams_leave">Leave team</string>
     <string name="teams_delete">Delete team</string>
@@ -2542,6 +2543,7 @@
     <string name="teams_join_disclosure">Join only teams you trust. Your name will be visible to their members.</string>
     <string name="teams_empty">Create a team or join with an invite.</string>
     <string name="teams_confirm_change">Confirm this membership change?</string>
+    <string name="teams_confirm_make_owner">このメンバーをチームのオーナーにしますか？あなたは管理者としてチームに残り、再びオーナーになるには新しいオーナーの操作が必要です。各 Bot はそれを管理しているメンバーのもとに残り、各チャットは参加者だけのものであり続けます。</string>
     <string name="teams_confirm_delete">Delete this team? All members will lose access.</string>
     <string name="teams_confirm_leave">Leave this team?</string>
     <string name="teams_conversations">会話</string>
@@ -2721,6 +2723,7 @@
     <string name="teams_composer_lock_bot_unverified">Bot の利用可否を確認できませんでした。再接続して確認してください。</string>
     <string name="teams_composer_lock_bot_checking">この Bot が利用できるか確認しています…</string>
     <string name="teams_composer_lock_bot_unavailable">この Bot は現在利用できません。</string>
+    <string name="teams_composer_lock_bot_handed_over">この Bot は管理者が変わったため、このチャットでは応答しません。チームの Bot 一覧から新しいチャットを始めてください。</string>
     <string name="teams_composer_too_long">メッセージが長すぎます。短くしてから送信してください。</string>
     <string name="teams_run_preparing">準備中</string>
     <string name="teams_run_processing">処理中</string>

@@ -238,7 +238,7 @@ private fun NewBotList(
     }
     Text(stringResource(R.string.teams_new_bots_pickable), style = MaterialTheme.typography.labelLarge)
     bots.forEach { bot ->
-        val existing = TeamsListLogic.findBotDm(conversations, uid, bot.sharedBotId)
+        val existing = TeamsListLogic.findBotDm(conversations, uid, bot.sharedBotId, bots)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             BotAvatar(bot.avatarId, 40.dp)
             Column(Modifier.weight(1f)) {

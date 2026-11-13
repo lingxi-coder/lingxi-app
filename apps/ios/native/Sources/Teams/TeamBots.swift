@@ -214,10 +214,30 @@ enum TeamExecutionContract {
             try shape(["conversationId", "expectedRevision", "targets"]); try id("conversationId"); try ids("targets", minimum: 0)
             guard integer(payload["expectedRevision"], minimum: 0) != nil else { try fail() }
         case "submit":
-            try shape(["conversationId", "messageId", "changeId", "text", "targets"], ["replyTo"])
-            for key in ["conversationId", "messageId", "changeId"] { try id(key) }; try ids("targets")
+            // A message that asks Bots, carries files, or both.
+            try shape(["conversationId", "messageId", "changeId", "text", "targets"], ["replyTo", "attachments"])
+            for key in ["conversationId", "messageId", "changeId"] { try id(key) }
+            let files = payload["attachments"] != nil
+            try ids("targets", minimum: files ? 0 : 1)
+            if files { try ids("attachments", maximum: TeamAttachments.messageFiles) }
             if payload["replyTo"] != nil { try id("replyTo") }
-            guard let text = payload["text"] as? String, !text.isEmpty, text.utf8.count <= 8192 else { try fail() }
+            guard let text = payload["text"] as? String, files || !text.isEmpty, text.utf8.count <= 8192 else { try fail() }
+        case "createUpload":
+            try shape(["conversationId", "uploadId", "name", "mime", "byteLength", "sha256"]); try id("conversationId"); try id("uploadId")
+            guard let name = payload["name"] as? String, name == TeamAttachments.name(name),
+                  let mime = payload["mime"] as? String, TeamAttachments.types.contains(mime),
+                  let length = integer(payload["byteLength"], minimum: 1), length <= Double(TeamAttachments.fileBytes),
+                  let digest = payload["sha256"] as? String, digest.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else { try fail() }
+        case "putUploadPart":
+            try shape(["uploadId", "index", "data"]); try id("uploadId")
+            guard let index = integer(payload["index"], minimum: 0), index <= Double((TeamAttachments.fileBytes - 1) / TeamAttachments.partBytes),
+                  let data = payload["data"] as? String, data.utf8.count >= 4, data.utf8.count <= 4 * ((TeamAttachments.partBytes + 2) / 3),
+                  data.range(of: "^[A-Za-z0-9+/]+={0,2}$", options: .regularExpression) != nil else { try fail() }
+        case "finalizeUpload", "cancelUpload": try shape(["uploadId"]); try id("uploadId")
+        case "readAttachmentPart":
+            try shape(["attachmentId", "index"]); try id("attachmentId")
+            guard let index = integer(payload["index"], minimum: 0), index <= Double((TeamAttachments.fileBytes - 1) / TeamAttachments.partBytes) else { try fail() }
+        case "revokeAttachment": try shape(["attachmentId", "changeId"]); try id("attachmentId"); try id("changeId")
         case "createConversation":
             try shape(["conversationId", "kind", "title", "participantUids", "sharedBotIds"]); try id("conversationId"); try ids("sharedBotIds")
             guard let kind = payload["kind"] as? String, ["bot_dm", "group", "channel"].contains(kind),

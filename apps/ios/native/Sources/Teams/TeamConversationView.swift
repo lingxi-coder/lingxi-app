@@ -104,11 +104,15 @@ struct TeamConversationView: View {
         let unread = model.unread(of: conversation)
         let messages = model.cache?.threads[conversation.id]?.messages ?? []
         let participants = TeamsListLogic.conversationParticipants(conversation, members: context.members, bots: context.bots, uid: context.uid, strings: context.strings)
+        let carrying = carriesFiles(context)
         return VStack(spacing: 0) {
             banners(context)
             stream(context, messages: messages)
             TeamComposerView(
                 context: context, draft: $draft, editing: editing, replying: replying(context, messages: messages), busy: workspace.messageBusy,
+                files: carrying ? workspace.files(for: conversationID) : [], refusals: carrying ? workspace.refusals(for: conversationID) : [],
+                onChooseFiles: carrying ? { workspace.addFiles($0, to: conversationID) } : nil,
+                onRemoveFile: { workspace.removeFile($0, from: conversationID) }, onDismissRefusals: { workspace.dismissRefusals(for: conversationID) },
                 focus: $composerFocused, onSend: { Task { await send(context) } },
                 onCancelEdit: endEdit, onCancelReply: { draft.replyToID = nil })
         }
@@ -359,15 +363,30 @@ struct TeamConversationView: View {
         guard let target = byID[replyID] else { return TeamMessageQuote(author: "", text: String(localized: "teams_message_reply")) }
         return TeamMessageQuote(
             author: context.identity(of: target).name,
-            text: target.recalled == true ? String(localized: "teams_message_recalled") : TeamsComposeLogic.snippet(target.text))
+            text: target.recalled == true ? String(localized: "teams_message_recalled") : said(target))
     }
 
     // MARK: Composer actions
 
     private func replying(_ context: TeamConversationContext, messages: [TeamMessage]) -> (author: String, text: String)? {
         guard let id = draft.replyToID, let target = messages.first(where: { $0.id == id }) else { return nil }
-        return (context.identity(of: target).name, target.recalled == true ? String(localized: "teams_message_recalled") : TeamsComposeLogic.snippet(target.text))
+        return (context.identity(of: target).name, target.recalled == true ? String(localized: "teams_message_recalled") : said(target))
     }
+
+    /// A one-line snippet of a message; one of files alone is said by their names.
+    private func said(_ message: TeamMessage) -> String {
+        TeamsComposeLogic.snippet(TeamAttachments.said(text: message.text, names: message.files.map(\.name)))
+    }
+
+    /// The wait the message being written would answer: it replies to a Bot's question that still waits for the viewer.
+    private func answering(_ context: TeamConversationContext) -> String? {
+        guard editing == nil, let id = draft.replyToID,
+              let question = context.model.cache?.threads[context.conversation.id]?.messages.first(where: { $0.id == id }) else { return nil }
+        return context.answerableWait(of: question)
+    }
+
+    /// Whether the message being written carries the draft's files: a new message does, an edit and an answer to a Bot's question do not.
+    private func carriesFiles(_ context: TeamConversationContext) -> Bool { editing == nil && answering(context) == nil }
 
     private func startReply(_ message: TeamMessage) {
         if editing != nil { endEdit() }
@@ -393,10 +412,11 @@ struct TeamConversationView: View {
 
     private func send(_ context: TeamConversationContext) async {
         let body = draft.text, reply = draft.replyToID, targets = draft.targets, changing = editing
-        guard TeamsComposeLogic.canSendText(body) else { return }
         // A reply to a Bot's question that still waits for the viewer is its answer: it continues that task and asks no Bot.
-        let question = changing == nil ? reply.flatMap { id in context.model.cache?.threads[context.conversation.id]?.messages.first { $0.id == id } } : nil
-        let waitId = question.flatMap { context.answerableWait(of: $0) }
+        let waitId = answering(context)
+        // The files are this conversation's draft's, read at the moment of sending: no other conversation's are ever sent here.
+        let files = changing == nil && waitId == nil ? workspace.files(for: conversationID) : []
+        guard TeamAttachments.canSend(text: body, files: files) else { return }
         let sent = await workspace.run {
             let model = context.model
             if let waitId { try await model.queue(operation: "create", text: body, replyTo: reply, waitId: waitId); return }
@@ -404,9 +424,11 @@ struct TeamConversationView: View {
             if changing == nil, targets.contains(where: { key in !model.bots.contains { $0.sharedBotId == key && $0.selectable } }) {
                 throw TeamMessageFailure(code: "BOT_USE_REQUIRED")
             }
-            try await model.queue(operation: changing == nil ? "create" : "edit", text: body, messageId: changing?.id, replyTo: reply, targets: changing == nil ? targets : [])
+            guard model.selected == conversationID else { throw TeamMessageFailure(code: "INVALID_INPUT") }
+            try await model.queue(operation: changing == nil ? "create" : "edit", text: body, messageId: changing?.id, replyTo: reply, targets: changing == nil ? targets : [], files: files)
         }
         guard sent else { return }
+        workspace.filesSent(files.map(\.uploadId), in: conversationID)
         if changing != nil {
             // The set-aside draft comes back (Desktop: `onClearEditing` restores the text kept while editing).
             endEdit()

@@ -12,6 +12,14 @@ struct TeamComposerView: View {
     /// The message being answered and who wrote it.
     let replying: (author: String, text: String)?
     let busy: Bool
+    /// The files of the unsent message and the chosen ones that were not taken. Empty while a message is edited or a
+    /// Bot's question is answered: neither carries files, and the files wait in the draft.
+    var files: [TeamDraftFile] = []
+    var refusals: [TeamFileRefusal] = []
+    /// `nil` where files cannot be added now.
+    var onChooseFiles: (([TeamChosenFile]) -> Void)?
+    var onRemoveFile: (String) -> Void = { _ in }
+    var onDismissRefusals: () -> Void = {}
     var focus: FocusState<Bool>.Binding
     let onSend: () -> Void
     let onCancelEdit: () -> Void
@@ -59,6 +67,7 @@ struct TeamComposerView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     contextBars
                     chips
+                    TeamDraftFilesView(files: files, refusals: refusals, onRemove: onRemoveFile, onDismissRefusals: onDismissRefusals)
                     picker
                     field
                     footer
@@ -203,6 +212,9 @@ struct TeamComposerView: View {
 
     private var field: some View {
         HStack(alignment: .bottom, spacing: 8) {
+            if let onChooseFiles {
+                TeamAttachButton(disabled: files.count >= TeamAttachments.messageFiles, onChosen: onChooseFiles)
+            }
             if asks {
                 Button(action: insertAt) {
                     Image(systemName: "at").font(.system(size: 18, weight: .medium)).frame(width: 32, height: 32)
@@ -221,7 +233,7 @@ struct TeamComposerView: View {
             Button(action: onSend) {
                 Image(systemName: editing != nil ? "checkmark.circle.fill" : "arrow.up.circle.fill").font(.system(size: 30))
             }
-            .disabled(busy || !TeamsComposeLogic.canSendText(draft.text))
+            .disabled(busy || !TeamAttachments.canSend(text: draft.text, files: files))
             .accessibilityLabel(Text(LocalizedStringKey(editing != nil ? "teams_message_save" : "teams_message_send")))
             .accessibilityIdentifier("teams.composer.send")
         }
@@ -233,6 +245,11 @@ struct TeamComposerView: View {
             Text("teams_composer_too_long").font(.caption).foregroundStyle(.red)
         } else if bytes > Int(Double(TeamsComposeLogic.messageBytes) * 0.9) {
             Text(verbatim: "\(bytes) / \(TeamsComposeLogic.messageBytes)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
+        }
+        if files.contains(where: { $0.state == .failed }) {
+            Text("teams_file_note_failed").font(.caption2).foregroundStyle(.secondary)
+        } else if files.contains(where: { $0.state == .uploading }) {
+            Text("teams_file_note_uploading").font(.caption2).foregroundStyle(.secondary)
         }
         if conversation.kind == "bot_dm" {
             Text("teams_composer_note_bot_dm").font(.caption2).foregroundStyle(.secondary)

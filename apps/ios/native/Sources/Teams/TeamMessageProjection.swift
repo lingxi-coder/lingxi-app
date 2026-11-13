@@ -110,6 +110,12 @@ struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     var approval: TeamListApproval? = nil
     /// On the requester's reply to such a request.
     var decision: TeamWaitDecision? = nil
+    /// Files the message carries, in the order they were added.
+    var attachments: [TeamMessageAttachment]? = nil
+    /// On a Bot's reply: the files of this conversation its model was given.
+    var readFiles: [TeamReadFile]? = nil
+    /// The files to show: none on a recalled message.
+    var files: [TeamMessageAttachment] { recalled == true ? [] : attachments ?? [] }
     /// The request to show under this message, if it is one a Bot made and it can be read.
     var approvalRequest: TeamListApproval? {
         guard author.kind != "user", recalled != true, waitId != nil, let approval, approval.readable else { return nil }
@@ -131,20 +137,25 @@ struct TeamMessageIntent: Codable, Equatable, Identifiable, Sendable {
     /// Set when the message answers a Bot's question: it is sent as `answerWait` and continues that task instead of starting one.
     /// `replyTo` then names the question only for the pending bubble; the server links the answer itself.
     var waitId: String? = nil
+    /// Checked uploads of this sender for this conversation that the new message carries. It may then have no text and ask no Bot.
+    var attachments: [String]? = nil
+    /// Their names, for the pending bubble only.
+    var attachmentNames: [String]? = nil
     var error: String?
     var leaseUntil: Double?
     var attempted: Bool?
     var id: String { changeId }
     var body: [String: Any] {
-        let targets = targets ?? []
+        let targets = targets ?? [], attachments = attachments ?? []
         var payload: [String: Any] = ["conversationId": conversationId, "messageId": messageId, "changeId": changeId, "text": text]
         if let waitId {
             payload["waitId"] = waitId
             return ["schemaVersion": 1, "commandId": changeId, "teamId": teamId, "generation": generation, "action": "answerWait", "payload": payload]
         }
         if let replyTo { payload["replyTo"] = replyTo }
-        if operation == "create", !targets.isEmpty {
+        if operation == "create", !targets.isEmpty || !attachments.isEmpty {
             payload["targets"] = targets
+            if !attachments.isEmpty { payload["attachments"] = attachments }
             return ["schemaVersion": 1, "commandId": changeId, "teamId": teamId, "generation": generation, "action": "submit", "payload": payload]
         }
         payload["action"] = "mutate"; payload["operation"] = operation

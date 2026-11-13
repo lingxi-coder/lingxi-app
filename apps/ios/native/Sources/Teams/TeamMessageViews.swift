@@ -187,6 +187,9 @@ struct TeamMessageCell: View {
                 if let quote { quoteLine(quote) }
                 if recalled {
                     Text("teams_message_recalled").italic().foregroundStyle(.secondary)
+                } else if message.text.isEmpty && !message.files.isEmpty {
+                    // A message of files alone has no text line.
+                    EmptyView()
                 } else if TeamsBotText.rendersMarkdown(authorKind: message.author.kind, recalled: recalled) {
                     // A shared Bot writes Markdown: the chat's renderer, web links only. Images stay inert.
                     AIText(markdown: context.text(of: message))
@@ -194,6 +197,13 @@ struct TeamMessageCell: View {
                         .accessibilityIdentifier("teams.message.body.\(message.id)")
                 } else {
                     Text(context.text(of: message))
+                }
+                if !message.files.isEmpty { TeamMessageFilesView(message: message, context: context).padding(.top, 2) }
+                if !recalled, let read = message.readFiles, !read.isEmpty {
+                    // What the Bot's model was given, as the service checked it.
+                    Label { Text("teams_files_read \(read.map(\.name).joined(separator: ", "))") } icon: { Image(systemName: "paperclip") }
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("teams.message.read.\(message.id)")
                 }
                 if message.editedAt != nil && !recalled {
                     Text("teams_message_edited").font(.caption2).foregroundStyle(.secondary)
@@ -210,7 +220,7 @@ struct TeamMessageCell: View {
             if !recalled {
                 if let onReply { Button("teams_message_reply", systemImage: "arrowshape.turn.up.left") { onReply(message) } }
                 if let onEdit { Button("teams_message_edit", systemImage: "pencil") { onEdit(message) } }
-                Button("chat_message_copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.text }
+                if !message.text.isEmpty { Button("chat_message_copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.text } }
                 if let onRecall { Button("teams_message_recall", systemImage: "trash", role: .destructive) { onRecall(message) } }
             }
         }
@@ -318,7 +328,11 @@ struct TeamOutboxCell: View {
                 switch intent.operation {
                 case "recall": Text("teams_message_recall").foregroundStyle(.secondary)
                 case "edit": Text(String(localized: "teams_message_edit") + ": " + intent.text).foregroundStyle(.secondary)
-                default: Text(intent.text).foregroundStyle(.secondary)
+                default:
+                    if !intent.text.isEmpty { Text(intent.text).foregroundStyle(.secondary) }
+                    if let names = intent.attachmentNames, !names.isEmpty {
+                        Label(names.joined(separator: ", "), systemImage: "paperclip").font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
                 Button("teams_message_discard", role: .destructive, action: onDiscard)
                     .font(.caption)

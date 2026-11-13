@@ -103,6 +103,12 @@ final class TeamsWorkspace {
     @ObservationIgnored private var watchers: [String: TeamsUnreadWatcher] = [:]
     @ObservationIgnored private var conversationByTeam: [String: String] = [:]
     @ObservationIgnored private var drafts: [String: TeamComposerDraft] = [:]
+    /// The files of unsent messages and what was last refused when files were chosen, by the same key as `drafts`. Observed:
+    /// an upload moves on while its conversation is closed, and the composer shows where it stands when it is opened again.
+    private var draftFiles: [String: [TeamDraftFile]] = [:]
+    private var fileRefusals: [String: [TeamFileRefusal]] = [:]
+    /// The uploads in progress, by upload id.
+    @ObservationIgnored private var uploads: [String: Task<Void, Never>] = [:]
     /// The team to open first when it is in the list (the persisted selection).
     @ObservationIgnored private var initialTeamID = ""
 
@@ -181,6 +187,8 @@ final class TeamsWorkspace {
         closeMessaging()
         for watcher in watchers.values { watcher.stop() }
         watchers = [:]; unreadOthers = [:]; directories = [:]; conversationByTeam = [:]; drafts = [:]
+        draftFiles = [:]; fileRefusals = [:]
+        TeamFileStore.purge()
         teams = []; selectedTeamID = ""; detail = nil; listed = false; invitationLink = ""
         busy = false; messageBusy = false; error = ""; loadError = ""; actionError = ""; collapsed = []
         initialTeamID = ""
@@ -400,6 +408,10 @@ final class TeamsWorkspace {
     }
 
     private func closeMessaging() {
+        // An upload belongs to the team it was started in: closing the team ends it, and the file leaves its draft. Checked files stay.
+        for task in uploads.values { task.cancel() }
+        uploads = [:]
+        draftFiles = draftFiles.compactMapValues { files in let kept = files.filter { $0.state == .ready }; return kept.isEmpty ? nil : kept }
         if let model = messaging, let team = messagingTeam {
             if model.readsReady { unreadOthers[team.id] = model.unreadTotal }
             if !model.selected.isEmpty { conversationByTeam[team.id] = model.selected }
@@ -486,6 +498,64 @@ final class TeamsWorkspace {
     }
 
     private func draftKey(_ conversationID: String) -> String { "\(uid ?? ""):\(selectedTeamID):\(team?.generation ?? 0):\(conversationID)" }
+
+    // MARK: Files of an unsent message
+
+    func files(for conversationID: String) -> [TeamDraftFile] { draftFiles[draftKey(conversationID)] ?? [] }
+    func refusals(for conversationID: String) -> [TeamFileRefusal] { fileRefusals[draftKey(conversationID)] ?? [] }
+    func dismissRefusals(for conversationID: String) { fileRefusals.removeValue(forKey: draftKey(conversationID)) }
+
+    /// Adds chosen files to a conversation's unsent message and starts uploading the ones it takes; the others are kept as
+    /// refusals with the reason for each. An upload reports to the draft it was started for and to no other: one of another
+    /// conversation, team or account never sees it.
+    func addFiles(_ chosen: [TeamChosenFile], to conversationID: String) {
+        guard started, let model = messaging, !conversationID.isEmpty else { return }
+        let key = draftKey(conversationID)
+        let readable = chosen.filter { $0.error == nil }
+        let admission = TeamAttachments.admit(draft: (draftFiles[key] ?? []).map(\.byteLength), files: readable.map { .init(name: $0.name, type: $0.type, size: $0.data.count) })
+        let refused = chosen.compactMap { file in file.error.map { TeamFileRefusal(name: TeamAttachments.name(file.name), code: $0) } }
+            + admission.refused.map { TeamFileRefusal(name: $0.name, code: $0.code) }
+        if refused.isEmpty { fileRefusals.removeValue(forKey: key) } else { fileRefusals[key] = refused }
+        for accepted in admission.accepted {
+            let data = readable[accepted.index].data
+            let file = TeamDraftFile(uploadId: UUID().uuidString, name: accepted.name, mime: accepted.mime, byteLength: data.count)
+            draftFiles[key, default: []].append(file)
+            uploads[file.uploadId] = Task { [weak self] in
+                do {
+                    try await model.upload(conversationId: conversationID, uploadId: file.uploadId, name: file.name, mime: file.mime, data: data) { sent in
+                        self?.updateFile(file.uploadId, in: key) { $0.sent = sent }
+                    }
+                    self?.updateFile(file.uploadId, in: key) { $0.state = .ready; $0.sent = $0.byteLength }
+                } catch {
+                    self?.updateFile(file.uploadId, in: key) { $0.state = .failed; $0.error = Self.code(error, fallback: "UPLOAD_FAILED") }
+                }
+                self?.uploads[file.uploadId] = nil
+            }
+        }
+    }
+
+    private func updateFile(_ uploadId: String, in key: String, _ change: (inout TeamDraftFile) -> Void) {
+        guard let index = draftFiles[key]?.firstIndex(where: { $0.uploadId == uploadId }) else { return }
+        change(&draftFiles[key]![index])
+    }
+
+    /// Takes a file out of an unsent message and gives its upload up.
+    func removeFile(_ uploadId: String, from conversationID: String) {
+        let key = draftKey(conversationID)
+        guard let index = draftFiles[key]?.firstIndex(where: { $0.uploadId == uploadId }) else { return }
+        draftFiles[key]?.remove(at: index)
+        if draftFiles[key]?.isEmpty == true { draftFiles.removeValue(forKey: key) }
+        let running = uploads.removeValue(forKey: uploadId)
+        running?.cancel()
+        if let model = messaging { Task { _ = await running?.value; await model.cancelUpload(uploadId) } }
+    }
+
+    /// The files a message was sent with leave the draft; they are the message's now.
+    func filesSent(_ uploadIds: [String], in conversationID: String) {
+        let key = draftKey(conversationID)
+        draftFiles[key]?.removeAll { uploadIds.contains($0.uploadId) }
+        if draftFiles[key]?.isEmpty == true { draftFiles.removeValue(forKey: key) }
+    }
 
     // MARK: Messaging actions
 

@@ -1,3 +1,4 @@
+import CoreGraphics
 import FirebaseAuth
 import FirebaseFirestore
 import Foundation
@@ -67,6 +68,8 @@ final class TeamMessagingModel {
     private let db: Firestore
     private let apiRoot: URL
     private let session = URLSession(configuration: .ephemeral, delegate: TeamMessageRedirectPolicy(), delegateQueue: nil)
+    /// Small copies of the pictures shown in the stream, by attachment id. In memory only, emptied when the team is closed or lost.
+    @ObservationIgnored let pictures: NSCache<NSString, CGImage> = { let cache = NSCache<NSString, CGImage>(); cache.countLimit = 40; return cache }()
 
     init(apiRoot: URL = URL(string: "https://lingxios.net/v1/teams/messages")!, auth: Auth = Auth.auth(), db: Firestore = Firestore.firestore()) {
         self.apiRoot = apiRoot; self.auth = auth; self.db = db
@@ -214,6 +217,7 @@ final class TeamMessagingModel {
     }
     func stop() {
         active = false; lifecycle += 1; task?.cancel(); retry?.cancel(); deadline?.cancel(); deadline = nil; task = nil; retry = nil
+        pictures.removeAllObjects()
         removeListeners()
         if let authListener { auth.removeStateDidChangeListener(authListener) }; authListener = nil
         running = false; again = false; bots = []; tasks = []; artifact = nil
@@ -221,6 +225,7 @@ final class TeamMessagingModel {
     private func invalidate() {
         guard !revoked else { return }
         revoked = true; selected = ""; error = "MEMBERSHIP_REQUIRED"
+        pictures.removeAllObjects()
         cache = nil
         let owner = uid, team = teamId, epoch = generation
         stop()
@@ -312,7 +317,7 @@ final class TeamMessagingModel {
                         try await commit { $0.outbox.removeAll { $0.id == intent.id } }
                     } catch {
                         let code = (error as? TeamMessageFailure)?.code ?? "SERVICE_UNAVAILABLE"
-                        let permanent = ["MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "BOT_PARTICIPANT_REQUIRED", "INVALID_BOT_TARGET", "INVALID_INPUT", "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED"].contains(code)
+                        let permanent = ["MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "BOT_PARTICIPANT_REQUIRED", "INVALID_BOT_TARGET", "INVALID_INPUT", "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED", "ATTACHMENT_REQUIRED", "ATTACHMENT_LIMIT", "UPLOAD_EXPIRED"].contains(code)
                         try await commit { value in if let index = value.outbox.firstIndex(where: { $0.id == intent.id }) { value.outbox[index].leaseUntil = nil; if permanent { value.outbox[index].error = code } } }
                         if !permanent { throw error }
                     }
@@ -438,8 +443,11 @@ final class TeamMessagingModel {
         select(id)
     }
     /// `waitId` makes a new message the answer to a Bot's question: it asks no Bot and starts no task.
-    func queue(operation: String, text: String, messageId: String? = nil, replyTo: String? = nil, targets: [String] = [], waitId: String? = nil) async throws {
-        guard active, !revoked, !selected.isEmpty, operation == "recall" || (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && text.utf8.count <= 8192) else { throw TeamMessageFailure(code: "INVALID_INPUT") }
+    /// `files`: checked uploads of this conversation that a new message carries; it may then have no text.
+    func queue(operation: String, text: String, messageId: String? = nil, replyTo: String? = nil, targets: [String] = [], waitId: String? = nil, files: [TeamDraftFile] = []) async throws {
+        let carries = operation == "create" && waitId == nil && !files.isEmpty
+        guard active, !revoked, !selected.isEmpty, files.isEmpty || carries, files.count <= TeamAttachments.messageFiles, files.allSatisfy({ $0.state == .ready }),
+              operation == "recall" || ((carries || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && text.utf8.count <= 8192) else { throw TeamMessageFailure(code: "INVALID_INPUT") }
         if let waitId {
             guard operation == "create" else { throw TeamMessageFailure(code: "INVALID_INPUT") }
             let intent = TeamMessageIntent(teamId: teamId, generation: generation, conversationId: selected, messageId: messageId ?? UUID().uuidString, changeId: UUID().uuidString, operation: operation, text: text, replyTo: replyTo, waitId: waitId)
@@ -450,7 +458,8 @@ final class TeamMessagingModel {
         }
         let conversation = cache?.conversations.first { $0.id == selected }
         let resolvedTargets = operation == "create" ? conversation.map { Array(TeamBotSelection.targets(in: $0, selected: Set(targets))).sorted() } : nil
-        let intent = TeamMessageIntent(teamId: teamId, generation: generation, conversationId: selected, messageId: messageId ?? UUID().uuidString, changeId: UUID().uuidString, operation: operation, text: text, replyTo: replyTo, targets: resolvedTargets ?? nil)
+        let intent = TeamMessageIntent(teamId: teamId, generation: generation, conversationId: selected, messageId: messageId ?? UUID().uuidString, changeId: UUID().uuidString, operation: operation, text: carries && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : text, replyTo: replyTo, targets: resolvedTargets ?? nil,
+                                       attachments: carries ? files.map(\.uploadId) : nil, attachmentNames: carries ? files.map(\.name) : nil)
         try await commit { $0.outbox.append(intent) }; refresh()
     }
     func pause(_ bot: TeamBotCard) async throws {
@@ -467,10 +476,79 @@ final class TeamMessagingModel {
         }
         refresh()
     }
-    func discard(_ id: String) async throws { try await commit { value in
-        if value.outbox.contains(where: { $0.id == id && (($0.attempted == true && $0.error == nil) || ($0.leaseUntil ?? 0) > Date().timeIntervalSince1970 * 1000) }) { throw TeamMessageFailure(code: "MESSAGE_IN_FLIGHT") }
-        value.outbox.removeAll { $0.id == id }
-    } }
+    func discard(_ id: String) async throws {
+        // The files of a message that was refused are no message's: they are given up, so they stop counting against the sender.
+        let files = cache?.outbox.first { $0.id == id && $0.error != nil }?.attachments ?? []
+        try await commit { value in
+            if value.outbox.contains(where: { $0.id == id && (($0.attempted == true && $0.error == nil) || ($0.leaseUntil ?? 0) > Date().timeIntervalSince1970 * 1000) }) { throw TeamMessageFailure(code: "MESSAGE_IN_FLIGHT") }
+            value.outbox.removeAll { $0.id == id }
+        }
+        for uploadId in files { await cancelUpload(uploadId) }
+    }
+
+    // MARK: Files
+
+    /// Uploads one file for one conversation and has it checked (Desktop `uploadAttachment`). Each step has its own stable command
+    /// id, so a step repeated after a lost answer is the same step. Throws the service's code when the file is refused
+    /// (`UPLOAD_TYPE_MISMATCH`, `UPLOAD_DIGEST_MISMATCH`, `UPLOAD_QUOTA_EXCEEDED`, …) and `INVALID_SESSION` when this team was
+    /// closed or the account changed meanwhile: nothing more is sent then.
+    func upload(conversationId: String, uploadId: String, name: String, mime: String, data: Data, progress: @MainActor (Int) -> Void) async throws {
+        let life = lifecycle
+        let digest = await Task.detached { TeamAttachments.sha256Hex(data) }.value
+        let created: TeamUploadView = try await insist { try await self.execute("createUpload", payload: [
+            "conversationId": conversationId, "uploadId": uploadId, "name": name, "mime": mime, "byteLength": data.count, "sha256": digest,
+        ], commandId: "\(uploadId)_c", life: life) }
+        if created.state == "verified" { progress(data.count); return }
+        guard created.state == "uploading", created.partBytes > 0 else { throw TeamMessageFailure(code: created.code ?? "UPLOAD_FAILED") }
+        for index in 0..<created.parts {
+            let from = index * created.partBytes
+            guard from < data.count else { throw TeamMessageFailure(code: "UPLOAD_FAILED") }
+            let part = data.subdata(in: from..<min(data.count, from + created.partBytes)).base64EncodedString()
+            let _: TeamBotAck = try await insist { try await self.execute("putUploadPart", payload: ["uploadId": uploadId, "index": index, "data": part],
+                                                                          commandId: "\(uploadId)_p\(index)", life: life, timeout: 90) }
+            progress(min(data.count, from + created.partBytes))
+        }
+        let checked: TeamUploadView = try await insist { try await self.execute("finalizeUpload", payload: ["uploadId": uploadId], commandId: "\(uploadId)_f", life: life, timeout: 60) }
+        guard checked.state == "verified" else { throw TeamMessageFailure(code: checked.code ?? "UPLOAD_FAILED") }
+    }
+
+    /// Gives up a file that no message carries. Best effort: one that is not given up here ends by itself after a day.
+    func cancelUpload(_ uploadId: String) async {
+        let _: TeamBotAck? = try? await execute("cancelUpload", payload: ["uploadId": uploadId], life: lifecycle)
+    }
+
+    /// A file of a message, whole and checked against what the message says it is. Asked of the service every time and kept nowhere:
+    /// only someone who reads that conversation now is answered.
+    func download(_ file: TeamMessageAttachment) async throws -> Data {
+        let life = lifecycle
+        func read(_ index: Int) async throws -> TeamAttachmentPart {
+            try Task.checkCancellation()
+            return try await execute("readAttachmentPart", payload: ["attachmentId": file.attachmentId, "index": index], life: life, timeout: 90)
+        }
+        let first = try await read(0)
+        var parts = [first.data]
+        if first.parts > 1 { for index in 1..<first.parts { parts.append(try await read(index).data) } }
+        return try await Task.detached { try TeamAttachments.assemble(parts, file: file) }.value
+    }
+
+    /// The sender takes a file of their message back: its bytes are deleted and the message says so.
+    func revokeAttachment(_ attachmentId: String) async throws {
+        let _: TeamBotAck = try await execute("revokeAttachment", payload: ["attachmentId": attachmentId, "changeId": UUID().uuidString], life: lifecycle)
+    }
+
+    /// A step of an upload: tried again, a little later each time, unless the answer will not change by asking again.
+    private func insist<T>(_ step: () async throws -> T) async throws -> T {
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            do { return try await step() } catch {
+                let code = (error as? TeamMessageFailure)?.code ?? ""
+                if attempt >= 3 || TeamAttachments.isFinal(code) || error is CancellationError || (error as? URLError)?.code == .cancelled { throw error }
+                try await Task.sleep(for: .milliseconds(500 << attempt))
+                attempt += 1
+            }
+        }
+    }
     func discardCreation() async throws { try await commit { value in
         if (value.creation?.attempted == true && value.creation?.error == nil) || (value.creation?.leaseUntil ?? 0) > Date().timeIntervalSince1970 * 1000 { throw TeamMessageFailure(code: "MESSAGE_IN_FLIGHT") }; value.creation = nil
     } }
@@ -519,17 +597,17 @@ final class TeamMessagingModel {
         retryDelay = min(30, retryDelay * 2)
         retry = Task { [weak self] in do { try await Task.sleep(for: .seconds(delay)); self?.refresh() } catch {} }
     }
-    private func execute<T: Decodable>(_ action: String, payload: [String: Any], commandId: String = UUID().uuidString, life: Int) async throws -> T {
-        try await call(["schemaVersion": 1, "commandId": commandId, "action": action, "payload": payload], life: life)
+    private func execute<T: Decodable>(_ action: String, payload: [String: Any], commandId: String = UUID().uuidString, life: Int, timeout: TimeInterval = 20) async throws -> T {
+        try await call(["schemaVersion": 1, "commandId": commandId, "action": action, "payload": payload], life: life, timeout: timeout)
     }
-    private func call<T: Decodable>(_ body: [String: Any], life: Int) async throws -> T {
+    private func call<T: Decodable>(_ body: [String: Any], life: Int, timeout: TimeInterval = 20) async throws -> T {
         guard active, life == lifecycle, let user = auth.currentUser, user.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
         let token = try await user.getIDToken()
         guard active, life == lifecycle, auth.currentUser?.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
         var body = body; body["teamId"] = teamId; body["generation"] = generation
         if body["schemaVersion"] != nil { try TeamExecutionContract.validate(body) }
         var request = URLRequest(url: apiRoot)
-        request.httpMethod = "POST"; request.timeoutInterval = 20; request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpMethod = "POST"; request.timeoutInterval = timeout; request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await session.data(for: request)

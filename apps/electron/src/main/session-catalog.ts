@@ -635,8 +635,10 @@ export class ProjectSessionCatalog {
     const event = validateClientEvent({ type: 'session_resumed', mode: 'code', session_id: sessionId, messages: page.messages });
     if (event.type !== 'session_resumed') throw new Error('Invalid history page');
     const next = page.before == null ? null : historyCursor(page.before);
-    if (next && (next.uuid === before.uuid || next.offset == null
-      || (before.offset != null && next.offset >= before.offset))) throw new Error('History cursor did not advance');
+    // Compaction can persist the same UUID at multiple physical positions.
+    // A bound cursor advances by byte offset in the same file, not by UUID.
+    if (next && (next.offset == null || (before.offset != null
+      && (next.offset >= before.offset || next.identity !== before.identity)))) throw new Error('History cursor did not advance');
     return { messages: event.messages, before: next };
   }
 

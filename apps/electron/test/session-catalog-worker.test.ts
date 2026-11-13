@@ -85,6 +85,24 @@ test('history pages reuse their worker and validate that cursors advance', async
   await assert.rejects(invalid, /cursor did not advance/);
 });
 
+test('history advances across repeated compact UUIDs only within the same file and decreasing byte offsets', async t => {
+  const cwd = project(t), process = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess });
+  t.after(() => catalog.dispose());
+  const path = `/source/${uuid}.jsonl`, before = { uuid, offset: 200, identity: '1:2' };
+  const page = catalog.readHistory(cwd, uuid, path, before);
+  await nextTurn();
+  const worker = process.calls[0], next = { ...before, offset: 100 };
+  worker.reply(JSON.stringify({ messages: [], before: next }));
+  assert.deepEqual((await page).before, next, 'a repeated durable UUID may represent an earlier persisted copy');
+  for (const invalid of [{ ...next, offset: 200 }, { ...next, identity: '1:3' }, { uuid }]) {
+    const request = catalog.readHistory(cwd, uuid, path, next);
+    await nextTurn();
+    worker.reply(JSON.stringify({ messages: [], before: invalid }));
+    await assert.rejects(request, /cursor did not advance/);
+  }
+});
+
 test('held history for A cannot block exact selection for B across projects, and equal requests coalesce', async t => {
   const cwd = project(t), otherCwd = project(t), process = processes();
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess });

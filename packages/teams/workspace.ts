@@ -27,8 +27,8 @@ export function compareConversations(a: TeamConversation, b: TeamConversation): 
 
 export interface ConversationGroups { channels: TeamConversation[]; direct: TeamConversation[]; botDirect: TeamConversation[] }
 /**
- * Sidebar sections: channels, people (dm and group), and Bot DMs. A Bot's owner can read other
- * members' DMs with that Bot; those follow the viewer's own Bot DMs.
+ * Sidebar sections: channels, people (dm and group), and Bot chats. A Bot's maintainer can read other
+ * members' chats with that Bot; those follow the viewer's own Bot chats.
  */
 export function groupConversations(conversations: readonly TeamConversation[], uid: string): ConversationGroups {
   const channels: TeamConversation[] = [], direct: TeamConversation[] = [], botDirect: TeamConversation[] = [];

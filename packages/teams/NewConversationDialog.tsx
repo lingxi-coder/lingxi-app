@@ -47,7 +47,7 @@ export function NewConversationDialog({ workspace, snapshot, zh, mode, renderAva
         <legend>{kind === 'dm' ? t('Message', '发给') : t('People', '成员')}</legend>
         {people.map(member => <label key={member.uid} className="tw-check">
           <input type={kind === 'dm' ? 'radio' : 'checkbox'} name="tw-people" checked={parties.includes(member.uid)} onChange={event => choose(member.uid, event.target.checked)} />
-          <Avatar identity={{ kind: 'user', id: member.uid, name: member.displayName }} size={20} render={renderAvatar} />
+          <Avatar identity={{ kind: 'user', id: member.uid, name: member.displayName }} size={24} render={renderAvatar} />
           {member.displayName}
         </label>)}
         {!people.length ? <p className="tw-hint">{t('No other members yet. Invite people from Team settings.', '暂无其他成员，请在团队设置中邀请成员。')}</p> : null}
@@ -57,7 +57,7 @@ export function NewConversationDialog({ workspace, snapshot, zh, mode, renderAva
         {bots.map(bot => <label key={bot.sharedBotId} className="tw-check">
           <input type="checkbox" checked={botParties.includes(bot.sharedBotId)} disabled={!botParties.includes(bot.sharedBotId) && botParties.length >= MAX_BOTS}
             onChange={event => setBotParties(event.target.checked ? [...botParties, bot.sharedBotId] : botParties.filter(key => key !== bot.sharedBotId))} />
-          <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={20} render={renderAvatar} />
+          <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={24} render={renderAvatar} />
           {bot.name} · {owner(bot.maintainer.uid)}
         </label>)}
       </fieldset> : null}
@@ -89,7 +89,7 @@ export function NewBotDmDialog({ workspace, snapshot, zh, renderAvatar, onClose 
         {usable.map(bot => {
           const existing = findBotDm(snapshot.conversations, snapshot.uid, bot.sharedBotId);
           return <li key={bot.sharedBotId}>
-            <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={28} render={renderAvatar} />
+            <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={24} render={renderAvatar} />
             <div className="tw-picker-text">
               <b>{bot.name}</b>
               <small>{bot.ready ? t('Online', '在线') : t('Host unavailable', '宿主不可用')} · {t('Owner', '所有者')}: {owner(bot.maintainer.uid)}</small>

@@ -5,7 +5,7 @@ import { parseDeepLink } from '../deep-links/index';
 import { friendsErrorText, offerErrorText } from './errors';
 import {
   badgeCount, badgeText, BADGE_CAP, canInviteFriends, chatEnded, classifyQuery, compareCards, compareFriends, compareOffers, compareRequests, confirmBody, definitive, FRIEND_CHAT,
-  friendCodeOf, friendCollator, friendLink, friendsErrorKey, handleValid, invitePicker, lookupBody, matchesFilter, NAME_MAX, nameValid, newRequestId, nextOfferExpiry, NOTE_MAX,
+  DEFAULT_MEMBER_NAME, friendCodeOf, friendCollator, friendLink, friendsErrorKey, handleValid, invitePicker, lookupBody, matchesFilter, NAME_MAX, nameValid, newRequestId, nextOfferExpiry, NOTE_MAX,
   noteValid, offerErrorKey, offerExpiry, offerLive, relationAction, SECTION_ROWS, sectionCards, unreadOf,
   type FriendCard, type OfferAction, type Proof, type TeamOffer,
 } from './friends';
@@ -219,4 +219,12 @@ test('offers.errors: the action\'s key, else the common one, else generic; the E
   assert.equal(friendsErrorKey('MEMBERSHIP_REQUIRED'), 'friends_chat_unavailable');
   assert.notEqual(offerErrorKey('offerTeam', 'MEMBERSHIP_REQUIRED'), 'friends_chat_unavailable');
   assert.notEqual(offerErrorKey('acceptOffer', 'STALE_MEMBERSHIP'), 'friends_chat_unavailable');
+});
+
+test('the name that means "no name yet" is the one the service gives a new account, and the views never compare it as text', () => {
+  const service = readFileSync(new URL('../../apps/firebase/src/teams.mjs', import.meta.url), 'utf8');
+  assert.match(service, new RegExp(`\\.slice\\(0, 80\\) : '${DEFAULT_MEMBER_NAME}';`), 'the client\'s constant follows the service\'s default');
+  for (const file of ['FriendsSidebar.tsx', 'FriendChatView.tsx', 'FriendsMain.tsx', 'AddFriendView.tsx', 'FriendProfileSettings.tsx']) {
+    assert.doesNotMatch(readFileSync(new URL(`./${file}`, import.meta.url), 'utf8'), /['"]Member['"]/, `${file} reads FriendsSnapshot.profileNameUnset, not an English word`);
+  }
 });

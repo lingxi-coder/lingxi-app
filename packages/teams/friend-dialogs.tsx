@@ -79,6 +79,61 @@ export function MemberFriendDialog({ workspace, zh, teamId, member, renderAvatar
 }
 
 /**
+ * D10: a friend's profile, from the chat's menu or from the friend's row: the picture, the username and since when the two are friends.
+ * The friend's profile is read again while it is open, so a name or username that changed shows up in this session.
+ */
+export function FriendProfileDialog({ workspace, zh, uid, name, handle, since, locale, renderAvatar, onClose }: {
+  workspace: FriendsWorkspace; zh: boolean; uid: string; name: string; handle?: string; since?: number; locale?: string; renderAvatar?: RenderAvatar; onClose(): void;
+}): ReactElement {
+  const t = (en: string, cn: string) => zh ? cn : en;
+  useEffect(() => { void workspace.refreshFriend(uid); }, [workspace, uid]);
+  const date = since ? new Intl.DateTimeFormat(locale ?? (zh ? 'zh-CN' : 'en-US'), { dateStyle: 'medium' }).format(since) : '';
+  return <Dialog title={name} onClose={onClose}>
+    <div className="tw-form">
+      <div className="tw-profile">
+        <Avatar identity={{ kind: 'user', id: uid, name }} size={56} render={renderAvatar} />
+        <div className="tw-person-text">
+          {handle ? <p>@{handle}</p> : null}
+          {date ? <p className="tw-hint">{t(`Friends since ${date}`, `${date} 起成为好友`)}</p> : null}
+        </div>
+      </div>
+      <div className="tw-dialog-actions"><button type="button" data-autofocus onClick={onClose}>{t('Close', '关闭')}</button></div>
+    </div>
+  </Dialog>;
+}
+
+/**
+ * D10: Remove friend and Block ask once. The title names the person, the body says what follows, Cancel is always there and the
+ * confirming button is the danger one. A failure is shown under the body and the dialog stays; success closes it.
+ */
+export function FriendLeaveDialog({ workspace, zh, uid, name, action, onClose }: {
+  workspace: FriendsWorkspace; zh: boolean; uid: string; name: string; action: 'remove' | 'block'; onClose(): void;
+}): ReactElement {
+  const t = (en: string, cn: string) => zh ? cn : en;
+  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const leave = async () => {
+    setBusy(true); setError('');
+    const code = await workspace.leave(uid, action);
+    setBusy(false); setError(code);
+    if (!code) onClose();
+  };
+  const remove = action === 'remove';
+  return <Dialog role="alertdialog" title={remove ? t(`Remove “${name}”?`, `删除好友“${name}”？`) : t(`Block “${name}”?`, `屏蔽“${name}”？`)}
+    description={remove
+      ? t('You will no longer be friends, and the chat is deleted for both of you. You can add each other again later.', '你们将不再是好友，聊天记录会对双方删除。之后可以重新添加。')
+      : t("They are also removed from your friends and the chat is deleted for both of you. Until you unblock them, they can't find you or send you requests.", '同时会将对方从好友中移除，并对双方删除聊天记录。在你解除屏蔽之前，对方无法找到你或向你发送请求。')}
+    onClose={onClose}>
+    <div className="tw-form">
+      {error ? <p role="alert" className="tw-error">{friendsErrorText(error, zh)}</p> : null}
+      <div className="tw-dialog-actions">
+        <button type="button" data-autofocus onClick={onClose}>{t('Cancel', '取消')}</button>
+        <button type="button" className="tw-danger-btn" disabled={busy} onClick={() => void leave()}>{remove ? t('Remove friend', '删除好友') : t('Block', '屏蔽')}</button>
+      </div>
+    </div>
+  </Dialog>;
+}
+
+/**
  * D26: invite friends to a team. The list is the friends who are not in the team, in the Friends order, narrowed by the filter; Invite
  * sends an offer for that row and the row then says `Invited` until the dialog closes. Closing reports the names invited, for the
  * one-shot {@link InviteNotice}: nothing is stored, because the sender cannot read offers.
@@ -125,7 +180,7 @@ export function InviteFriendsDialog({ workspace, zh, team, members, locale, rend
           {list.map(card => {
             const done = sent.some(value => value.uid === card.uid), running = busy.includes(card.uid);
             return <li key={card.uid} aria-busy={running}>
-              <Avatar identity={{ kind: 'user', id: card.uid, name: card.displayName }} size={32} render={renderAvatar} />
+              <Avatar identity={{ kind: 'user', id: card.uid, name: card.displayName }} size={40} render={renderAvatar} />
               <div className="tw-person-text">
                 <b>{card.displayName}</b>
                 {card.handle ? <small>@{card.handle}</small> : null}
@@ -144,7 +199,10 @@ export function InviteFriendsDialog({ workspace, zh, team, members, locale, rend
   </Dialog>;
 }
 
-/** D26: what the person invited, once, after the picker closed. It goes away by itself, like the other notices of the Friends views. */
+/**
+ * D26: what the person invited, once, after the picker closed. It goes away by itself, like the other notices of the Friends views.
+ * The host mounts it outside any workspace view, so it is a scope of its own (the banner reads the scope's colors).
+ */
 export function InviteNotice({ names, zh, onDone }: { names: string[]; zh: boolean; onDone(): void }): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
   const done = useRef(onDone);
@@ -154,5 +212,5 @@ export function InviteNotice({ names, zh, onDone }: { names: string[]; zh: boole
     return () => clearTimeout(timer);
   }, [names]);
   const who = names.join(zh ? '、' : ', ');
-  return <p className="tw-banner" role="status">{t(`Invitation sent to ${who}`, `已向 ${who} 发送邀请`)}</p>;
+  return <p className="tw-scope tw-banner" role="status">{t(`Invitation sent to ${who}`, `已向 ${who} 发送邀请`)}</p>;
 }

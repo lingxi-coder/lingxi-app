@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { messageErrorText, teamsErrorText } from './errors.js';
 import { pendingPayload, type TeamConversation } from './messages.js';
 import { snippet } from './compose.js';
 import { NewBotDmDialog, NewConversationDialog } from './NewConversationDialog';
 import { formatListTime } from './stream.js';
 import { CreateTeamDialog, JoinTeamDialog } from './team-dialogs';
-import { ConversationLead, Icon, platformNotice, PopupMenu, rovingIndex, TeamMark, UnreadBadge, type DrawerTab, type MenuItem, type RenderAvatar } from './ui';
+import { ConversationLead, Icon, platformNotice, PopupMenu, rovingKeys, TeamMark, UnreadBadge, type DrawerTab, type MenuItem, type RenderAvatar } from './ui';
 import { conversationLabel, conversationPreview, groupConversations, unreadCount, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
 
 /** Rows shown per section before "Show more". The open conversation is always shown. */
@@ -70,7 +70,7 @@ type DialogState = { kind: 'createTeam' } | { kind: 'joinTeam'; code: string } |
 
 /**
  * The left column of the Teams workspace: team switcher, connection line, and the open team's
- * Channels, Direct messages and Bot DMs. It owns only transient UI state (menus, dialogs, the
+ * Channels, Direct messages and Bot chats. It owns only transient UI state (menus, dialogs, the
  * focused row); everything else comes from the workspace.
  */
 export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSettings, onConversationSelected, onOpenDetails, initialInvite, onInviteHandled, onInviteResolved, locale, now, query }: TeamSidebarProps): ReactElement {
@@ -104,7 +104,7 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
   const sections = [
     { id: 'channels' as const, title: t('Channels', '频道'), add: t('New channel', '新建频道'), empty: t('No channels yet. Create one with +.', '还没有频道，点击 + 新建。'), rows: narrowed(groups.channels), dialog: { kind: 'channel' } as const },
     { id: 'direct' as const, title: t('Direct messages', '私信'), add: t('New message', '新建私信'), empty: t('No messages yet. Start one with +.', '还没有私信，点击 + 开始。'), rows: narrowed(groups.direct), dialog: { kind: 'direct' } as const },
-    { id: 'botDirect' as const, title: t('Bot DMs', 'Bot 对话'), add: t('Message a Bot', '与 Bot 对话'), empty: t('No Bot chats yet. Start one with +.', '还没有 Bot 对话，点击 + 开始。'), rows: narrowed(groups.botDirect), dialog: { kind: 'botDm' } as const },
+    { id: 'botDirect' as const, title: t('Bot chats', 'Bot 对话'), add: t('Message a Bot', '与 Bot 对话'), empty: t('No Bot chats yet. Start one with +.', '还没有 Bot 对话，点击 + 开始。'), rows: narrowed(groups.botDirect), dialog: { kind: 'botDm' } as const },
   ];
   const shown = sections.map(section => {
     const index = section.rows.findIndex(row => row.id === selectedId);
@@ -115,15 +115,6 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
   const tabStop = flat.some(row => row.id === focusId) ? focusId : flat.some(row => row.id === selectedId) ? selectedId : flat[0]?.id ?? '';
 
   const select = (id: string) => { workspace.selectConversation(id); onConversationSelected?.(id); };
-  const move = (event: KeyboardEvent<HTMLElement>) => {
-    const target = event.target as HTMLElement;
-    if (!target.matches?.('[data-row]')) return;
-    const rows = [...event.currentTarget.querySelectorAll<HTMLElement>('[data-row]')];
-    const to = rovingIndex(rows.length, rows.indexOf(target), event.key);
-    if (to === undefined) return;
-    event.preventDefault();
-    rows[to]?.focus();
-  };
 
   const otherUnread = Object.entries(snapshot.unreadByTeam).reduce((sum, [id, count]) => id === snapshot.selectedTeamId ? sum : sum + count, 0);
   const team = snapshot.team;
@@ -172,7 +163,7 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
         <p className="tw-hint">{platformNotice(zh)}</p>
       </div>
       : !team ? <p className="tw-empty-line" role="status">{t('Opening team…', '正在打开团队…')}</p>
-      : <div className="tw-sections" onKeyDown={move}>
+      : <div className="tw-sections" onKeyDown={rovingKeys}>
         {loadingRows ? <p className="tw-empty-line" role="status">{t('Loading conversations…', '正在加载会话…')}</p> : null}
         {searching && !loadingRows && !flat.length ? <p className="tw-empty-line" role="status">{t('No matching conversations.', '没有匹配的会话。')}</p> : null}
         {shown.map(section => {

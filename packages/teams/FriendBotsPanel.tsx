@@ -9,8 +9,9 @@ import type { TeamsSnapshot, TeamsWorkspace } from './workspace.js';
  * The Bots of a friendship (D21), a panel over the friend chat: the Bot cards the chat's pair workspace fetched, Message to open a Bot DM
  * (D22) and, on Desktop, sharing and Stop sharing (D23). All of it is the Teams Bot directory in its `friend` mode.
  */
-export function FriendBotsPanel({ pair, view, chat, zh, onClose }: {
-  pair: TeamsWorkspace; view: TeamsSnapshot; chat: FriendChat; zh: boolean; onClose(): void;
+export function FriendBotsPanel({ id, pair, view, chat, zh, onClose }: {
+  /** The id the header's Shared Bots button names in `aria-controls`. */
+  id: string; pair: TeamsWorkspace; view: TeamsSnapshot; chat: FriendChat; zh: boolean; onClose(): void;
 }): ReactElement | null {
   const t = (en: string, cn: string) => zh ? cn : en;
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -21,7 +22,7 @@ export function FriendBotsPanel({ pair, view, chat, zh, onClose }: {
   const escape = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key === 'Escape' && !event.defaultPrevented && !(event.target as HTMLElement).closest('dialog')) { event.stopPropagation(); onClose(); }
   };
-  return <section className="tw-scope tw-friends-bots" aria-label={t('Shared Bots', '共享的 Bot')} onKeyDown={escape}>
+  return <section id={id} className="tw-scope tw-friends-bots" aria-label={t('Shared Bots', '共享的 Bot')} onKeyDown={escape}>
     <header className="tw-conv-head">
       <div className="tw-conv-title"><h2>{t('Shared Bots', '共享的 Bot')}</h2></div>
       <button ref={closeRef} type="button" className="tw-icon-btn" aria-label={t('Close', '关闭')} title={t('Close', '关闭')} onClick={onClose}><Icon name="x" /></button>

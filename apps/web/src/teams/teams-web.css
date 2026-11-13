@@ -78,11 +78,10 @@
 .teams-web-nav .teams-web-badge { margin-left: 8px; padding: 1px 7px; border-radius: 999px; background: var(--teams-badge-bg); color: var(--teams-badge-fg); font-size: 11px; font-weight: 700; vertical-align: middle; }
 
 /*
- * A Bot's picture is the Desktop's avatar art (teamAvatar.tsx) in the workspace's avatar box, rounded to 24% of its side,
- * which is 0.24 × the size at whatever size it is drawn (the workspace's own rule is a fixed 8px); people stay circles.
+ * A Bot's picture is the Desktop's avatar art (teamAvatar.tsx) in the workspace's avatar box, which rounds it to 24% of its side
+ * (workspace.css, the same for a Bot, a channel and a team mark); people stay circles.
  * Both variants of the art are in the page and the site's theme shows one, as the Remote chat's agent avatars do (remote.css).
  */
-.teams-web .tw-avatar[data-kind='bot'] { border-radius: 24%; }
 .tw-bot-art { display: block; width: 100%; height: 100%; }
 .tw-bot-art[data-art='dark'] { display: none; }
 :root[data-theme='dark'] .tw-bot-art[data-art='dark'] { display: block; }

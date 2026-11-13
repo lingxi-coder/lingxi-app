@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { TeamsWorkspace } from '../../../packages/teams/workspace';
 import type { TeamsApi } from '../../../packages/teams';
 import type { MessageCommand } from '../../../packages/teams/messages';
@@ -8,18 +9,18 @@ import { loadTeamsModule } from './support/loadTeamsModule';
 import { mount, scenario, textOf, withDom } from './support/workspacePage';
 const { BotDirectory } = loadTeamsModule<typeof import('../../../packages/teams/BotDirectory')>('BotDirectory');
 const { TeamConversationView } = loadTeamsModule<typeof import('../../../packages/teams/TeamConversationView')>('TeamConversationView');
-const { usageText } = loadTeamsModule<typeof import('../../../packages/teams/BotRunCards')>('BotRunCards');
+const { BotRun, usageText, tokenSplit, runLook, RUN_STATES } = loadTeamsModule<typeof import('../../../packages/teams/BotRunCards')>('BotRunCards');
 async function open(context: Parameters<Parameters<typeof scenario>[1]>[0], overrides: Partial<TeamsApi> = {}) {
   withDom(context); const fake = new FakeTeams('alice'); fake.teams = [team('team-test', { role: 'owner' })]; fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 } })]; Object.assign(fake.api, overrides);
   const workspace = new TeamsWorkspace(fake.api, 'alice', { storage: memoryStorage, environment: new EventTarget() }); context.after(() => workspace.close()); await until(() => workspace.getSnapshot().botsLoaded && !!workspace.getSnapshot().detail); return { fake, workspace };
 }
 const directory = (workspace: TeamsWorkspace) => (s: ReturnType<TeamsWorkspace['getSnapshot']>) => createElement(BotDirectory, { api: workspace.api, uid: s.uid, team: s.team!, members: s.directory, bots: s.bots, zh: false, busy: s.messageBusy, status: '', attempt: workspace.attempt, onOpen: bot => workspace.startBotDm(bot), onChanged: workspace.refreshBots });
 const friendDirectory = (workspace: TeamsWorkspace) => (s: ReturnType<TeamsWorkspace['getSnapshot']>) => createElement(BotDirectory, { api: workspace.api, uid: s.uid, team: s.team!, members: s.directory, bots: s.bots, zh: false, busy: s.messageBusy, status: '', attempt: workspace.attempt, onOpen: bot => workspace.startBotDm(bot), onChanged: workspace.refreshBots, friend: 'Bob' });
-scenario('Member home requires no model setup and reopens document with Missing usage', async context => {
+scenario('Member home requires no model setup and opens the document; a finished task without usage says so', async context => {
   const { fake, workspace } = await open(context); const calls: MessageCommand[] = []; fake.conversations.set('team-test', [conversation('test-chat')]);
   fake.messages = async <T>(command: MessageCommand) => { calls.push(command); if (command.action === 'listTasks') return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state: 'completed', createdAt: 1, deadline: 2, artifactId: 'artifact-test' }] } as T; if (command.action === 'readArtifact') return { artifactId: 'artifact-test', revision: 1, digest: 'a'.repeat(64), document: { title: 'Trip preparation', body: 'Pack passports' } } as T; return { bots: fake.bots } as T; };
-  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount()); assert.match(page.text(), /No model or API key setup/); assert.match(page.text(), /Missing usage · cost unknown/);
-  await page.click(page.button('Reopen document')); assert.match(page.text(), /Trip preparation/); assert.match(page.text(), /Pack passports/); await page.click(page.button('Close')); await page.click(page.button('Reopen document')); assert.equal(calls.filter(c => c.action === 'readArtifact').length, 2);
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount()); assert.match(page.text(), /No model or API key setup/); assert.match(page.text(), /Usage unavailable/); assert.doesNotMatch(page.text(), /Missing usage|Reopen document/);
+  await page.click(page.button('Open document')); assert.match(page.text(), /Trip preparation/); assert.match(page.text(), /Pack passports/); await page.click(page.button('Close')); await page.click(page.button('Open document')); assert.equal(calls.filter(c => c.action === 'readArtifact').length, 2);
 });
 scenario('The Bot document dialog renders its body through the host Markdown renderer, else as plain text', async context => {
   const { fake, workspace } = await open(context); fake.conversations.set('team-test', [conversation('test-chat')]);
@@ -27,8 +28,8 @@ scenario('The Bot document dialog renders its body through the host Markdown ren
   const rendered: string[] = [];
   const renderMarkdown = (text: string) => { rendered.push(text); return createElement('div', { className: 'host-md' }, 'rendered:' + text); };
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false, renderMarkdown })); context.after(() => page.unmount());
-  await until(() => /Reopen document/.test(page.text()), 'the task');
-  await page.click(page.button('Reopen document'));
+  await until(() => /Open document/.test(page.text()), 'the task');
+  await page.click(page.button('Open document'));
   assert.ok(rendered.length > 0 && rendered.every(text => text === '# Pack\n- passports')); assert.match(page.text(), /rendered:# Pack/);
 });
 scenario('Publication confirms explicit role, native files, membership audience, costs and quotas', async context => {
@@ -46,24 +47,90 @@ scenario('A friendship\'s Bots are shared with the friend alone: no audience cho
   const { fake, workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-fixture', name: 'Travel', description: '', model: 'Configured model' }], selectSharedFiles: async () => [], publishLocalBot: async input => { published.push(input); return { sharedBotId: input.sharedBotId, revision: input.expectedRevision + 1 }; } });
   fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, state: 'paused', revision: 2 })]; await workspace.refreshBots(); await until(() => workspace.getSnapshot().bots[0]?.state === 'paused', 'the stopped Bot');
   const page = await mount(workspace, friendDirectory(workspace)); context.after(() => page.unmount());
-  assert.match(page.text(), /Share a Bot with Bob/); assert.match(page.text(), /A Bot runs on its owner’s Desktop\. The owner can read every conversation with it\./); assert.match(page.text(), /Paused/);
+  assert.match(page.text(), /Share a Bot with Bob/); assert.match(page.text(), /A Bot runs on its maintainer’s Desktop\. The maintainer can read every conversation with it\./); assert.match(page.text(), /Sharing stopped/); assert.doesNotMatch(page.text(), /Paused/);
   assert.doesNotMatch(page.text(), /Daily requests|All current and future members|Find Bots|Team assistants|Pause\b/);
   await page.click(page.button('Load local Bots'));
   assert.equal(page.find(n => n.type === 'select').length, 1, 'only the choice of the local Bot: the audience is the friend');
   await page.type(page.find(n => n.type === 'select')[0], 'local-fixture'); await page.type(page.find(n => n.type === 'textarea')[0], 'Help with trips.');
   assert.equal(page.find(n => n.type === 'input' && n.props.type === 'checkbox').length, 0, 'no member checkboxes');
   await page.submit();
-  assert.match(page.text(), /Audience: Bob\./); assert.match(page.text(), /The owner can read every conversation with it\./); assert.doesNotMatch(page.text(), /every current and future team member/);
+  assert.match(page.text(), /Audience: Bob\./); assert.match(page.text(), /The maintainer can read every conversation with it\./); assert.doesNotMatch(page.text(), /every current and future team member/);
   await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
   assert.equal(published.length, 1); const value = published[0] as Record<string, unknown>;
   assert.deepEqual(value.usePolicy, { mode: 'all' }); assert.deepEqual(value.quotas, { team: 100, member: 20, bot: 100 });
   assert.equal(value.sharedBotId, 'assistant-fixture', 'the same shared Bot'); assert.equal(value.expectedRevision, 2, 'as its next revision');
   assert.deepEqual([value.teamId, value.generation], ['team-test', 1]);
 });
-scenario('Pause uses shared identity and revision with no legacy recovery controls', async context => {
-  const { fake, workspace } = await open(context); const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount()); await page.click(page.button('Pause')); await page.click(page.button('Pause assistant')); const command = fake.commands.find(c => c.action === 'pauseSharedBot'); assert.equal(command?.action, 'pauseSharedBot'); if (command?.action === 'pauseSharedBot') assert.deepEqual(command.payload, { sharedBotId: 'assistant-fixture', expectedRevision: 1 }); assert.doesNotMatch(page.text(), /Settle request|Send answer/);
+scenario('Stop sharing asks first, names the Bot and can be cancelled; confirming uses shared identity and revision with no legacy recovery controls', async context => {
+  const { fake, workspace } = await open(context); const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
+  const dialogs = () => page.find(n => n.type === 'dialog'), pauses = () => fake.commands.filter(c => c.action === 'pauseSharedBot');
+  const inDialog = (name: string) => dialogs()[0].findAll((n: any) => n.type === 'button' && textOf(n) === name)[0];
+  assert.equal(page.find(n => n.type === 'button' && textOf(n) === 'Pause').length, 0, 'the word is Stop sharing everywhere');
+  await page.click(page.button('Stop sharing'));
+  assert.equal(dialogs().length, 1); assert.equal(dialogs()[0].props.role, 'alertdialog');
+  assert.match(textOf(dialogs()[0]), /Stop sharing “Fixture Bot”\?/); assert.match(textOf(dialogs()[0]), /New requests to this Bot stop\. Existing conversations stay\. You can share it again from LingXi Desktop\./);
+  assert.ok(dialogs()[0].props['aria-describedby'], 'the consequence is the dialog\'s description'); assert.equal(inDialog('Cancel').props['data-autofocus'], true, 'the safe choice has the focus');
+  assert.equal(pauses().length, 0, 'asking is not doing');
+  await page.click(inDialog('Cancel')); assert.equal(dialogs().length, 0); assert.equal(pauses().length, 0);
+  await page.click(page.button('Stop sharing')); await page.click(inDialog('Stop sharing'));
+  const command = pauses()[0]; assert.equal(command?.action, 'pauseSharedBot'); if (command?.action === 'pauseSharedBot') assert.deepEqual(command.payload, { sharedBotId: 'assistant-fixture', expectedRevision: 1 }); assert.doesNotMatch(page.text(), /Settle request|Send answer/);
 });
-scenario('Missing and Partial usage never invent zero cost', async () => { assert.equal(usageText(undefined, false), 'Missing usage · cost unknown'); assert.match(usageText({ status: 'partial', inputTokens: 3, outputTokens: 4 }, false), /Partial usage.*cost unknown/); assert.match(usageText({ status: 'complete', inputTokens: 3, outputTokens: 4, costMicros: 0, currency: 'USD' }, false), /0.000000 USD/); });
+scenario('Usage reads like the phones say it: the total of the tokens in the compact number of the language, then the cost, and nothing is invented', async () => {
+  const done = (usage: Record<string, unknown>) => ({ status: 'complete', inputTokens: 1, outputTokens: 1, ...usage }) as never;
+  const english = (usage: unknown) => usageText(usage as never, false), chinese = (usage: unknown) => usageText(usage as never, true);
+  // The vectors of TeamTaskUsageTests on iOS.
+  assert.equal(english(undefined), 'Usage unavailable'); assert.equal(english({ status: 'missing' }), 'Usage unavailable'); assert.equal(english({ status: 'missing', inputTokens: 5, outputTokens: 6, costMicros: 7, currency: 'USD' }), 'Usage unavailable');
+  assert.equal(chinese(undefined), '用量不可用');
+  assert.equal(english({ status: 'partial', inputTokens: 3, outputTokens: 4 }), 'Partial usage · 7 tokens · cost unknown'); assert.equal(chinese({ status: 'partial', inputTokens: 3, outputTokens: 4 }), '用量不完整 · 7 tokens · 费用未知');
+  assert.equal(english(done({ inputTokens: 123, outputTokens: 456, costMicros: 1322, currency: 'USD' })), '579 tokens · $0.0013');
+  assert.equal(english(done({ inputTokens: 3, outputTokens: 4, costMicros: 0, currency: 'USD' })), '7 tokens · $0.00');
+  assert.equal(english({ status: 'complete', outputTokens: 4, costMicros: 2000000, currency: 'USD' }), '4 tokens · $2.00', 'a missing count is zero');
+  assert.equal(english(done({ inputTokens: 1000, outputTokens: 234, costMicros: 1200, currency: 'USD' })), '1.2K tokens · $0.0012');
+  assert.equal(english(done({ inputTokens: 2000000, outputTokens: 0, costMicros: 0, currency: 'USD' })), '2M tokens · $0.00');
+  assert.equal(chinese(done({ inputTokens: 12345, outputTokens: 0, costMicros: 0, currency: 'CNY' })), '1.2万 tokens · ¥0.00');
+  assert.equal(english(done({ costMicros: 120000, currency: 'USD' })), '2 tokens · $0.12'); assert.equal(english(done({ costMicros: 123456, currency: 'usd' })), '2 tokens · $0.1235', 'the code is not case sensitive');
+  assert.ok(english(done({ costMicros: 2500000, currency: 'EUR' })).endsWith('€2.50'));
+  assert.equal(english(done({ costMicros: 50, currency: 'USD' })), '2 tokens · <$0.0001'); assert.equal(english(done({ costMicros: 100, currency: 'USD' })), '2 tokens · $0.0001');
+  assert.equal(english({ status: 'complete', inputTokens: 1, outputTokens: 2, costMicros: 2500000 }), '3 tokens · 2.50 currency unknown'); assert.equal(english({ status: 'complete', inputTokens: 1, outputTokens: 2, costMicros: 2500000, currency: '' }), '3 tokens · 2.50 currency unknown');
+  assert.equal(english({ status: 'complete', inputTokens: 1, outputTokens: 2 }), '3 tokens · cost unknown');
+  // The split stays available, as the tooltip of the line.
+  assert.equal(tokenSplit({ status: 'complete', inputTokens: 123, outputTokens: 456 }), '123 / 456 tokens'); assert.equal(tokenSplit({ status: 'partial', outputTokens: 4 } as never), '0 / 4 tokens');
+  assert.equal(tokenSplit({ status: 'missing' }), ''); assert.equal(tokenSplit(undefined), '');
+});
+
+scenario('A Bot task\'s card: the glyph beside the state in words, one line under it and at most one action; only Completed is green and only Failed red; a state it does not know is Unknown', async () => {
+  const scope = { teamId: 'team-test', generation: 1 };
+  const draw = (task: Record<string, unknown>, zh = false) => renderToStaticMarkup(createElement(BotRun, { task: { taskId: 't', conversationId: 'c', sharedBotId: 's', requester: { uid: 'alice', generation: 1 }, createdAt: 1, deadline: 2, state: 'queued', ...task } as never, api: new FakeTeams().api, scope, zh }));
+  const states: [string, string, string, string][] = [
+    ['queued', 'Queued', 'muted', 'Waiting for the Bot’s Desktop to pick this up.'], ['running', 'Processing', 'muted', 'The Bot is working on it.'],
+    ['failed', 'Failed', 'danger', 'The Bot couldn’t finish this request. Send it again.'], ['expired', 'Expired', 'muted', 'The Bot’s Desktop didn’t pick this up in time. Send it again.'],
+    ['interrupted', 'Interrupted', 'muted', 'The Bot’s Desktop stopped before finishing. Send a new request.'],
+    ['authorization_required', 'Authorization required', 'muted', 'This result can’t be shown yet. Ask the Bot’s maintainer to authorize it.'], ['revoked', 'Access revoked', 'muted', 'You no longer have access to this Bot.'],
+  ];
+  for (const [state, label, tone, detail] of states) {
+    const markup = draw({ state });
+    assert.match(markup, new RegExp(`<section class="team-bot-run" data-state="${state}" data-tone="${tone}" aria-label="Task status">`), state);
+    assert.ok(markup.includes(`<span>${label}</span>`), `${state}: the state is words`); assert.ok(markup.includes(`<p class="tw-run-detail">${detail}</p>`), `${state}: one line of what is going on or what to do`);
+    assert.match(markup, /<span class="tw-run-glyph"><svg[^>]*aria-hidden="true"/, `${state}: the glyph is decoration, the state is never colour alone`); assert.match(markup, /<p class="tw-run-state" role="status">/);
+    assert.doesNotMatch(markup, /<button/, `${state}: nothing to press without a document`);
+  }
+  // Completed: green, no sentence, the usage as its line, and the split of the tokens for whoever hovers it.
+  const done = draw({ state: 'completed', usage: { status: 'complete', inputTokens: 1000, outputTokens: 234, costMicros: 1200, currency: 'USD' } });
+  assert.match(done, /data-state="completed" data-tone="ok"/); assert.ok(done.includes('<span>Completed</span>')); assert.ok(done.includes('<p class="tw-run-detail" title="1000 / 234 tokens">1.2K tokens · $0.0012</p>'));
+  assert.ok(draw({ state: 'completed' }).includes('<p class="tw-run-detail">Usage unavailable</p>'), 'a usage that is not there is not made up');
+  assert.ok(draw({ state: 'completed' }, true).includes('<span>已完成</span>') && draw({ state: 'completed' }, true).includes('用量不可用') && draw({ state: 'queued' }, true).includes('等待 Bot 所在的 Desktop 接收此请求。'));
+  // A running task turns, and has the still glyph for reduced motion beside it.
+  const running = draw({ state: 'running' }); assert.match(running, /class="tw-icon tw-run-spin"/); assert.match(running, /class="tw-icon tw-run-still"/); assert.doesNotMatch(draw({ state: 'queued' }), /tw-run-spin|tw-run-still/);
+  // The one action is the document; a failed task does not offer a document it has no reason to have.
+  const withDocument = draw({ state: 'completed', artifactId: 'artifact-1' }); assert.equal((withDocument.match(/<button/g) ?? []).length, 1); assert.match(withDocument, /<button type="button">Open document<\/button>/);
+  assert.match(draw({ state: 'completed', artifactId: 'artifact-1' }, true), />打开文档</);
+  // Only Completed is ok and only Failed is danger; a state the service adds later is one more row of the table, and until then it reads Unknown.
+  assert.deepEqual(Object.entries(RUN_STATES).filter(([, look]) => look.tone === 'ok').map(([state]) => state), ['completed']); assert.deepEqual(Object.entries(RUN_STATES).filter(([, look]) => look.tone === 'danger').map(([state]) => state), ['failed']);
+  assert.deepEqual(Object.keys(RUN_STATES).sort(), ['authorization_required', 'completed', 'expired', 'failed', 'interrupted', 'queued', 'revoked', 'running']);
+  assert.ok(Object.values(RUN_STATES).every(look => look.label[0] && look.label[1] && look.icon && (look.detail ? look.detail[0] && look.detail[1] : true)), 'every row has its words in both languages and a glyph');
+  const unknown = draw({ state: 'waiting' }); assert.match(unknown, /data-state="waiting" data-tone="muted"/); assert.ok(unknown.includes('<span>Unknown</span>')); assert.doesNotMatch(unknown, /tw-run-detail/);
+  assert.equal(runLook('constructor').label[0], 'Unknown', 'a state is looked up by what the table holds, not by what an object inherits'); assert.equal(runLook('__proto__').label[0], 'Unknown'); assert.equal(runLook('toString').tone, 'muted');
+});
 
 scenario('Changed member generation invalidates a confirmed publication review', async context => {
   let sends = 0;

@@ -61,7 +61,7 @@ export function messageErrorText(code: string, zh: boolean): string {
     case 'PARTICIPANT_REQUIRED':
     case 'CONVERSATION_REJECTED':
     case 'INVALID_INPUT':
-      return t('This pending change was rejected. Discard it and try again.', '此待发操作未被接受，请丢弃后重试。');
+      return t('This couldn’t be sent. Discard it and try again.', '未能发送。请丢弃后重试。');
     default:
       return t('Could not sync messages. Check your connection and try again.', '消息同步未完成，请检查网络后重试。');
   }

@@ -160,7 +160,7 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
       {open ? <ul id={listId} role="listbox" className="tw-mentions" aria-label={t('Bots you can ask', '可请求的 Bot')}>
         {candidates.map((bot, index) => <li key={bot.sharedBotId} id={`${listId}-${index}`} role="option" aria-selected={index === choice} className="tw-mention"
           onMouseDown={event => { event.preventDefault(); pick(bot); }}>
-          <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={20} render={renderAvatar} />
+          <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={24} render={renderAvatar} />
           <b>{bot.name}</b><small>{bot.ready ? t('Online', '在线') : t('Host unavailable', '宿主不可用')}</small>
         </li>)}
       </ul> : null}

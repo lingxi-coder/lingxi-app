@@ -3,7 +3,7 @@ import { messageErrorText, teamsErrorText } from './errors.js';
 import type { TeamCommand, TeamMember, TeamRole } from './index.js';
 import { BotDirectory } from './BotDirectory';
 import { canInviteFriends } from './friends.js';
-import { Avatar, Dialog, Icon, platformNotice, rovingIndex, type DrawerTab, type RenderAvatar } from './ui';
+import { Avatar, Dialog, Icon, platformNotice, rovingIndex, TeamMark, type DrawerTab, type RenderAvatar } from './ui';
 import type { TeamsSnapshot, TeamsWorkspace } from './workspace.js';
 
 export const DRAWER_MIN = 280;
@@ -51,7 +51,8 @@ export interface TeamDetailsDrawerProps {
   onInviteFriends?(): void;
 }
 
-interface Confirmation { command: TeamCommand; title: string; confirm: string }
+/** What is asked once before a consequential command (U8): the title names the thing, the body says what follows, the button is the verb. */
+interface Confirmation { command: TeamCommand; title: string; body: string; confirm: string; /** A destructive act gets the danger button; a change of role the primary one. */ danger: boolean }
 
 /**
  * The right column: the open team's members, invitations and Bots. Leaving or deleting the team is
@@ -98,7 +99,7 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
   const role = (value: TeamRole) => ({ owner: t('Owner', '所有者'), admin: t('Admin', '管理员'), member: t('Member', '成员') })[value];
   const tabLabel = (value: DrawerTab) => ({ members: t('Members', '成员'), invites: t('Invites', '邀请'), bots: 'Bots' })[value];
 
-  const ask = (command: TeamCommand, title: string, confirm: string) => setConfirmation({ command, title, confirm });
+  const ask = (command: TeamCommand, title: string, body: string, confirm: string, danger = true) => setConfirmation({ command, title, body, confirm, danger });
   const confirmNow = async () => {
     const pending = confirmation;
     if (!pending) return;
@@ -108,8 +109,10 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
     if (ok && (pending.command.action === 'leave' || pending.command.action === 'delete')) onClose();
   };
   const leaveOrDelete = team.role === 'owner'
-    ? () => ask({ action: 'delete', teamId: team.id }, t(`Delete ${team.name} for everyone?`, `删除团队「${team.name}」？所有成员将失去访问权限。`), t('Delete team', '删除团队'))
-    : () => ask({ action: 'leave', teamId: team.id, generation: team.generation }, t(`Leave ${team.name}?`, `退出团队「${team.name}」？`), t('Leave team', '退出团队'));
+    ? () => ask({ action: 'delete', teamId: team.id }, t(`Delete “${team.name}”?`, `删除“${team.name}”？`),
+      t('Everyone loses access to its conversations and shared Bots. This can’t be undone.', '所有成员都将无法再访问该团队的会话和共享的 Bot。此操作无法撤销。'), t('Delete', '删除'))
+    : () => ask({ action: 'leave', teamId: team.id, generation: team.generation }, t(`Leave “${team.name}”?`, `退出“${team.name}”？`),
+      t('You will lose access to its conversations and shared Bots. To come back, you need a new invite.', '你将无法再访问该团队的会话和共享的 Bot。如需回来，需要新的邀请。'), t('Leave', '退出'));
 
   const resizeDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     drag.current = { x: event.clientX, width };
@@ -161,16 +164,20 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
     if (current === 'members') {
       return <ul className="tw-people" aria-label={t('Members', '成员')}>
         {members.map(member => <li key={member.uid}>
-          <Avatar identity={{ kind: 'user', id: member.uid, name: member.displayName }} size={32} render={renderAvatar} />
+          <Avatar identity={{ kind: 'user', id: member.uid, name: member.displayName }} size={40} render={renderAvatar} />
           <div className="tw-person-text"><b>{member.displayName}</b><small>{member.uid === uid ? `${t('You', '你')} · ` : ''}{role(member.role)}</small></div>
           {onAddFriend && member.uid !== uid || canManageMember(team.role, uid, member) ? <div className="tw-person-actions">
             {onAddFriend && member.uid !== uid ? <button type="button" onClick={() => onAddFriend(member)}>{t('Add friend', '添加好友')}</button> : null}
             {canManageMember(team.role, uid, member) ? <>
               {team.role === 'owner' ? <button type="button" disabled={snapshot.busy}
-                onClick={() => ask({ action: 'role', teamId: team.id, uid: member.uid, generation: member.generation, role: member.role === 'admin' ? 'member' : 'admin' }, t(`Change ${member.displayName}’s role?`, `更改 ${member.displayName} 的角色？`), t('Change role', '更改角色'))}>
+                onClick={() => ask({ action: 'role', teamId: team.id, uid: member.uid, generation: member.generation, role: member.role === 'admin' ? 'member' : 'admin' },
+                  member.role === 'admin' ? t(`Make ${member.displayName} a member?`, `将 ${member.displayName} 设为成员？`) : t(`Make ${member.displayName} an admin?`, `将 ${member.displayName} 设为管理员？`),
+                  member.role === 'admin' ? t('They will no longer be able to invite people or remove members.', '对方将无法再邀请他人或移除成员。') : t('Admins can invite people and remove members.', '管理员可以邀请他人并移除成员。'),
+                  member.role === 'admin' ? t('Make member', '设为成员') : t('Make admin', '设为管理员'), false)}>
                 {member.role === 'admin' ? t('Make member', '设为成员') : t('Make admin', '设为管理员')}</button> : null}
               <button type="button" className="tw-danger-btn" disabled={snapshot.busy}
-                onClick={() => ask({ action: 'remove', teamId: team.id, uid: member.uid, generation: member.generation }, t(`Remove ${member.displayName}?`, `移除 ${member.displayName}？`), t('Remove', '移除'))}>{t('Remove', '移除')}</button>
+                onClick={() => ask({ action: 'remove', teamId: team.id, uid: member.uid, generation: member.generation }, t(`Remove ${member.displayName} from the team?`, `将 ${member.displayName} 移出团队？`),
+                  t('They lose access to its conversations and shared Bots. They can rejoin with a new invite.', '对方将无法再访问该团队的会话和共享的 Bot，之后可通过新的邀请重新加入。'), t('Remove', '移除'))}>{t('Remove', '移除')}</button>
             </> : null}
           </div> : null}
         </li>)}
@@ -203,7 +210,9 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
         {invites.map(invite => <li key={invite.id}>
           <span>{invite.role === 'admin' ? t('Admin', '管理员') : t('Member', '成员')} · {invite.uses}/{invite.maxUses} · {new Date(invite.expiresAt).toLocaleString(tag)}</span>
           {invite.revoked ? <small>{t('Revoked', '已撤销')}</small>
-            : <button type="button" disabled={snapshot.busy || (team.role !== 'owner' && invite.role === 'admin')} onClick={() => void workspace.execute({ action: 'revokeInvite', teamId: team.id, inviteId: invite.id })}>{t('Revoke', '撤销')}</button>}
+            : <button type="button" disabled={snapshot.busy || (team.role !== 'owner' && invite.role === 'admin')}
+              onClick={() => ask({ action: 'revokeInvite', teamId: team.id, inviteId: invite.id }, t('Revoke this invite?', '撤销此邀请？'),
+                t('The link stops working right away. People who already joined stay in the team.', '链接会立即失效。已经加入的人会留在团队中。'), t('Revoke', '撤销'))}>{t('Revoke', '撤销')}</button>}
         </li>)}
         {!invites.length ? <li className="tw-empty-line">{t('No invitations yet.', '还没有邀请。')}</li> : null}
       </ul>
@@ -215,6 +224,7 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
       aria-valuemin={DRAWER_MIN} aria-valuemax={DRAWER_MAX} aria-valuenow={width} tabIndex={0}
       onPointerDown={resizeDown} onPointerMove={resizeMove} onPointerUp={resizeUp} onPointerCancel={resizeUp} onKeyDown={resizeKey} />
     <header className="tw-drawer-head">
+      <TeamMark id={team.id} name={team.name} size={56} />
       <div className="tw-drawer-title">
         <h2 ref={heading} tabIndex={-1}>{team.name}</h2>
         <p>{role(team.role)} · {team.memberCount} {t('members', '位成员')} · {t('Platform readable', '平台可读')}</p>
@@ -231,12 +241,11 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
         className="tw-tab" onClick={() => choose(value)}>{tabLabel(value)}</button>)}
     </div>
     <div className="tw-drawer-body" role="tabpanel" id={`${id}-panel`} aria-labelledby={`${id}-tab-${current}`} tabIndex={0}>{body()}</div>
-    {confirmation ? <Dialog role="alertdialog" title={confirmation.title} onClose={() => setConfirmation(undefined)}>
+    {confirmation ? <Dialog role="alertdialog" title={confirmation.title} description={confirmation.body} onClose={() => setConfirmation(undefined)}>
       <div className="tw-form">
-        {confirmation.command.action === 'delete' ? <p className="tw-hint">{t('This cannot be undone.', '此操作无法撤销。')}</p> : null}
         <div className="tw-dialog-actions">
-          <button type="button" data-autofocus disabled={snapshot.busy} onClick={() => setConfirmation(undefined)}>{t('Cancel', '取消')}</button>
-          <button type="button" className="tw-danger-btn" disabled={snapshot.busy} onClick={() => void confirmNow()}>{confirmation.confirm}</button>
+          <button type="button" data-autofocus onClick={() => setConfirmation(undefined)}>{t('Cancel', '取消')}</button>
+          <button type="button" className={confirmation.danger ? 'tw-danger-btn' : 'tw-primary'} disabled={snapshot.busy} onClick={() => void confirmNow()}>{confirmation.confirm}</button>
         </div>
       </div>
     </Dialog> : null}

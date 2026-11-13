@@ -129,6 +129,24 @@ test('under the Desktop palettes text on every Teams surface reads at 4.5:1 and 
   }
 });
 
+// U3: the signed-in person's own rows are tinted with the accent at 6% over the stream (`--tw-own`), and the tint is all that marks them.
+// What is written on it, and on it under the pointer (the hover colour at 55% over it), must still read.
+test('under the Desktop palettes the tint of the own rows keeps text at 4.5:1, with and without the pointer, in the light and the dark one', () => {
+  assert.match(workspaceCss, /--tw-own:\s*color-mix\(in srgb, var\(--tw-accent\) 6%, transparent\)/, 'the tint is the accent at 6%');
+  for (const dark of [false, true]) {
+    const variables = teamsThemeVariables(tokens(dark));
+    const color = (name: string) => variables[`--teams-${name}`]!;
+    const own = mixColors(color('accent'), color('bg'), 0.06), hovered = mixColors(color('hover'), own, 0.55);
+    assert.notEqual(own, color('bg'), `${dark ? 'dark' : 'light'}: the tint can be told from the stream`);
+    for (const [where, surface] of [['own', own], ['own under the pointer', hovered]] as const) {
+      for (const text of ['fg', 'muted', 'accent-text', 'danger']) {
+        const ratio = contrast(color(text), surface);
+        assert.ok(ratio >= 4.5, `${dark ? 'dark' : 'light'}: ${text} on ${where} (${surface}) is ${ratio.toFixed(2)}:1`);
+      }
+    }
+  }
+});
+
 test('the sidebar of the Teams sits on the Desktop\'s sidebar panel, and its page on the Desktop\'s stage', () => {
   for (const dark of [false, true]) {
     const palette = tokens(dark);

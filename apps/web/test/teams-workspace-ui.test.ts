@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -18,7 +18,8 @@ const { composerLock } = loadTeamsModule<typeof import('../../../packages/teams/
 const { TeamConversationView, conversationSubtitle } = loadTeamsModule<typeof import('../../../packages/teams/TeamConversationView')>('TeamConversationView');
 const { DRAWER_DEFAULT, DRAWER_MAX, DRAWER_MIN, TeamDetailsDrawer, canManageMember, clampDrawerWidth, drawerTabs, drawerWidthForDrag, drawerWidthForKey } = loadTeamsModule<typeof import('../../../packages/teams/TeamDetailsDrawer')>('TeamDetailsDrawer');
 const { TeamSidebar, connectionStatus } = loadTeamsModule<typeof import('../../../packages/teams/TeamSidebar')>('TeamSidebar');
-const { AVATAR_COLORS, Avatar, PopupMenu, avatarColor, initials, nextEnabled, rovingIndex } = loadTeamsModule<typeof import('../../../packages/teams/ui')>('ui');
+const { AVATAR_COLORS, AVATAR_SIZES, Avatar, PopupMenu, avatarColor, initials, nextEnabled, rovingIndex, stackedSize } = loadTeamsModule<typeof import('../../../packages/teams/ui')>('ui');
+const roving = loadTeamsModule<typeof import('../../../packages/teams/roving')>('roving');
 
 // ── Pure helpers ──
 
@@ -62,6 +63,26 @@ test('menu and roving-focus helpers skip disabled items and wrap or stop as aske
   assert.equal(rovingIndex(3, 0, 'ArrowLeft', { prev: 'ArrowLeft', next: 'ArrowRight', wrap: true }), 2);
   assert.equal(rovingIndex(3, 0, 'ArrowDown', { prev: 'ArrowLeft', next: 'ArrowRight', wrap: true }), undefined, 'other keys do not move');
   assert.equal(rovingIndex(0, 0, 'ArrowDown'), undefined); assert.equal(rovingIndex(5, 2, 'a'), undefined);
+});
+
+test('the roving rule is one function for the Teams sidebars, the Desktop\'s Bots sidebar and the tab strips', () => {
+  assert.equal(rovingIndex, roving.rovingIndex, 'ui re-exports the rule of roving.ts, which imports no React');
+  assert.doesNotMatch(readFileSync(new URL('../../../packages/teams/roving.ts', import.meta.url), 'utf8'), /^import /m, 'so that a test runner without React can load it');
+  assert.match(readFileSync(new URL('../../electron/src/renderer/components/rovingIndex.ts', import.meta.url), 'utf8'), /export \{ rovingIndex \} from '[./]+\/packages\/teams\/roving'/, 'the Desktop re-exports it');
+  assert.equal(roving.rovingIndex(3, 0, 'ArrowRight', { next: 'ArrowRight', prev: 'ArrowLeft', wrap: true }), 1); assert.equal(roving.rovingIndex(3, 2, 'ArrowRight', { next: 'ArrowRight', prev: 'ArrowLeft', wrap: true }), 0, 'a tab strip wraps');
+  assert.equal(roving.rovingIndex(0, -1, 'ArrowDown'), undefined, 'nothing to move between');
+});
+
+test('avatars: five sizes, and a stack of them takes the largest size that is at most 70% of its lead; every size the views ask for is on the scale', () => {
+  assert.deepEqual([...AVATAR_SIZES], [20, 24, 32, 40, 56]);
+  assert.deepEqual([56, 40, 32, 24].map(stackedSize), [32, 24, 20, 20]);
+  const folder = new URL('../../../packages/teams/', import.meta.url);
+  const asked: { file: string; size: number }[] = [];
+  for (const file of readdirSync(folder).filter(name => name.endsWith('.tsx'))) {
+    for (const line of readFileSync(new URL(file, folder), 'utf8').split('\n')) for (const match of line.matchAll(/<(?:Avatar|TeamMark|AvatarStack|ConversationLead)\b[^\n]*?\bsize=\{(\d+)\}/g)) asked.push({ file, size: Number(match[1]) });
+  }
+  assert.ok(asked.length >= 10, `the views draw avatars (${asked.length} found)`);
+  assert.deepEqual(asked.filter(({ size }) => !(AVATAR_SIZES as readonly number[]).includes(size)), [], 'no avatar off the scale');
 });
 
 test('PopupMenu is a menu: radio items say which is checked, disabled items are disabled, separators separate', () => {
@@ -188,7 +209,9 @@ test('the default palette meets contrast in light and dark, and the stylesheet k
   const css = readFileSync(new URL('../../../packages/teams/workspace.css', import.meta.url), 'utf8');
   const palette = (block: string): Record<string, string> => Object.fromEntries([...block.matchAll(/--tw-([a-z-]+):\s*var\(--teams-[a-z-]+,\s*(#[0-9a-fA-F]{6})\)/g)].map(match => [match[1]!, match[2]!]));
   const dark = css.indexOf('@media (prefers-color-scheme: dark)');
-  const schemes = { light: palette(css.slice(css.indexOf('.tw-scope {'), dark)), dark: palette(css.slice(dark, css.indexOf('.tw-scope, .tw-scope *'))) };
+  const declared = css.indexOf('.tw-scope, .tw-dialog {');
+  assert.ok(declared >= 0 && declared < dark, 'the tokens are declared on the scope and on dialogs');
+  const schemes = { light: palette(css.slice(declared, dark)), dark: palette(css.slice(dark, css.indexOf('.tw-scope, .tw-scope *'))) };
   const text: [string, string][] = [
     ['fg', 'bg'], ['fg', 'sidebar-bg'], ['fg', 'surface'], ['fg', 'hover'], ['fg', 'selected'],
     ['muted', 'bg'], ['muted', 'sidebar-bg'], ['muted', 'surface'], ['muted', 'hover'], ['muted', 'selected'],
@@ -202,6 +225,17 @@ test('the default palette meets contrast in light and dark, and the stylesheet k
     for (const [foreground, background] of parts) assert.ok(contrast(colors[foreground]!, colors[background]!) >= 3, `${name}: ${foreground} against ${background} is ${contrast(colors[foreground]!, colors[background]!).toFixed(2)}`);
   }
   assert.deepEqual(Object.keys(schemes.light).sort(), Object.keys(schemes.dark).sort(), 'both schemes define the same tokens');
+  // U3: the signed-in person's own rows are tinted with the accent at 6% over the stream (`--tw-own`); what is written on the tint, and on the
+  // tint under the pointer (the hover colour at 55% over it), stays readable.
+  const mix = (top: string, bottom: string, share: number) => `#${[1, 3, 5].map(i => Math.round(parseInt(top.slice(i, i + 2), 16) * share + parseInt(bottom.slice(i, i + 2), 16) * (1 - share)).toString(16).padStart(2, '0')).join('')}`;
+  assert.match(css, /--tw-own:\s*color-mix\(in srgb, var\(--tw-accent\) 6%, transparent\)/, 'the tint is the accent at 6%');
+  for (const [name, colors] of Object.entries(schemes)) {
+    const own = mix(colors.accent!, colors.bg!, 0.06), hovered = mix(colors.hover!, own, 0.55);
+    for (const [surface, background] of [['own', own], ['own under the pointer', hovered]] as const) {
+      for (const foreground of ['fg', 'muted', 'accent-text', 'danger'] as const) assert.ok(contrast(colors[foreground]!, background) >= 4.5, `${name}: ${foreground} on ${surface} is ${contrast(colors[foreground]!, background).toFixed(2)}`);
+    }
+    assert.notEqual(own, colors.bg, `${name}: the tint can be told from the stream`);
+  }
   const sizes = [...css.matchAll(/font-size:\s*(\d+(?:\.\d+)?)px/g)].map(match => Number(match[1]));
   assert.ok(sizes.length > 10 && Math.min(...sizes) >= 11, `no text below 11px (smallest ${Math.min(...sizes)})`);
   assert.match(css, /\.tw-scope\s*\{[^}]*font:\s*13px\//, 'body text is 13px');
@@ -215,6 +249,25 @@ test('the default palette meets contrast in light and dark, and the stylesheet k
     assert.match(css, new RegExp(`:focus-within [^{]*${hidden.replace('.', '\\.')}|\\.tw-row:focus-within ${hidden.replace('.', '\\.')}`), `${hidden} also shows on focus-within`);
   }
   assert.doesNotMatch(css, /display:\s*none/, 'nothing is removed from the accessibility tree by CSS');
+});
+
+test('the stylesheet: tokens reach dialogs, an outline is one token that clears 3:1, native menus follow the scheme and touch targets are 44px', () => {
+  const css = readFileSync(new URL('../../../packages/teams/workspace.css', import.meta.url), 'utf8');
+  assert.equal((css.match(/^\s*\.tw-scope, \.tw-dialog \{$/gm) ?? []).length, 2, 'light and dark both declare the tokens for the scope and for dialogs, which hosts may mount outside any scope');
+  assert.doesNotMatch(css, /#626873/, 'the old outline colour is gone');
+  assert.equal((css.match(/var\(--teams-border/g) ?? []).length, 2, 'only the token itself falls back to a colour: once in light, once in dark');
+  assert.ok((css.match(/var\(--tw-border\)/g) ?? []).length >= 7, 'every outline reads the token (the divider of the Member home is a hairline, so it reads --tw-line)');
+  assert.match(css, /\.tw-scope select option, \.tw-dialog select option\s*\{[^}]*color:\s*var\(--tw-fg\)[^}]*background:\s*var\(--tw-surface\)/, 'the options of a native menu take the scheme');
+  const touch = /@media \(hover: none\) and \(pointer: coarse\)\s*\{([\s\S]*?)\n\}/.exec(css)?.[1] ?? '';
+  assert.match(touch, /\.tw-scope button, \.tw-dialog button[^{]*\{[^}]*min-height:\s*44px/, 'controls are 44px tall for a finger');
+  assert.match(touch, /\.tw-icon-btn[^{]*\{[^}]*min-width:\s*44px/, 'and icon buttons 44px wide');
+  assert.match(touch, /\.tw-row-more[^{]*\{[^}]*min-width:\s*44px/, 'and so is the more button of a row');
+  assert.match(touch, /select[^{]*\{[^}]*min-height:\s*44px/, 'and so are the fields');
+  assert.match(css, /\.tw-row-lead\s*\{[^}]*(width|height):\s*40px/, 'a conversation leads with the avatar at the 40 step of the scale');
+  // What was said twice is said once: the look of a card, of the friends cards and of a bar.
+  assert.equal([...css.matchAll(/^[^\n{}]*\.teams-card[^\n{}]*\{[^}\n]*border-radius:\s*14px/gm)].length, 1, 'the look of a Bot card is one rule for the cards of the team and of the Member home');
+  assert.equal([...css.matchAll(/^\.tw-friends-card, \.tw-lookup \{[^}\n]*border-radius:\s*10px/gm)].length, 1, 'and the friends cards and the lookup share theirs');
+  assert.equal([...css.matchAll(/^\.tw-conn, \.tw-banner \{[^}\n]*border-radius:\s*8px/gm)].length, 1, 'and so do the bars of the sidebar and of the conversation');
 });
 
 // ── Rendering ──
@@ -270,7 +323,7 @@ test('sidebar: team switcher, three sections with their add buttons, rows with p
   assert.match(markup, /<nav class="tw-scope tw-sidebar" aria-label="Teams">/);
   assert.match(markup, /class="tw-switcher" aria-haspopup="menu" aria-expanded="false"/); assert.match(markup, /Acme/);
   assert.match(markup, /class="tw-switcher"[^]*?aria-label="3 unread"[^]*?<\/button>/, 'Beta has 3 unread messages, which the switcher points out');
-  for (const heading of ['Channels', 'Direct messages', 'Bot DMs']) assert.match(markup, new RegExp(`<h3 id="tw-section-[a-zA-Z]+">${heading}</h3>`));
+  for (const heading of ['Channels', 'Direct messages', 'Bot chats']) assert.match(markup, new RegExp(`<h3 id="tw-section-[a-zA-Z]+">${heading}</h3>`));
   for (const add of ['New channel', 'New message', 'Message a Bot']) assert.match(markup, new RegExp(`aria-label="${add}"`));
   assert.match(markup, /class="tw-row-title">general</); assert.match(markup, /class="tw-row-title">Bob</, 'a dm is named after the other person, not its stored title');
   assert.match(markup, /class="tw-row-title">Fixture Bot</); assert.match(markup, /class="tw-row-title">Bob, Owner</, 'a group without a chosen name lists the others');
@@ -404,7 +457,10 @@ test('conversation view: header, stream with day and unread dividers, grouped ru
   assert.equal(count(markup, /data-grouped="true"/g), 2, 'messages 2 and 3 continue message 1');
   assert.equal(count(markup, /class="tw-msg"/g), 7);
   assert.match(markup, /data-message-id="message-1" data-message-seq="1"/);
-  assert.match(markup, /<b class="tw-msg-author">Bob<\/b>/); assert.match(markup, /<b class="tw-msg-author">Alice<\/b>/);
+  assert.match(markup, /<b class="tw-msg-author">Bob<\/b>/); assert.match(markup, /<b class="tw-msg-author">You<\/b>/, 'the signed-in person reads "You" on their own row');
+  assert.doesNotMatch(markup, /<b class="tw-msg-author">Alice<\/b>/, 'and not their own name');
+  assert.equal(count(markup, /data-mine="true"/g), 1, 'one own row'); assert.match(markup, /data-mine="true" data-kind="user"[^>]*data-message-id="message-4"/, 'message 4 is the signed-in person\'s: the tint is the only cue, there is no bubble');
+  assert.equal(count(markup, /data-mine="false"/g), 6, 'every other row is not');
   assert.match(markup, /<blockquote class="tw-quote"><b>Alice<\/b> Thanks &lt;script&gt;alert\(1\)&lt;\/script&gt;<\/blockquote>/, 'the quote names the author and is escaped');
   assert.doesNotMatch(markup, /<script>alert/, 'message text is never markup'); assert.match(markup, /Thanks &lt;script&gt;/);
   assert.match(markup, /<em>Message recalled<\/em>/); assert.match(markup, /\(edited\)/);
@@ -465,6 +521,18 @@ test('conversation view: someone else\'s Bot dm is read-only; a Bot dm needs its
   assert.match(dm, /<h2>Bob<\/h2>/); assert.match(dm, /placeholder="Message Bob"/); assert.doesNotMatch(dm, /Ask a Bot/); assert.match(dm, /Enter to send, Shift\+Enter for a new line/); assert.match(dm, /No messages yet|Loading messages/);
 });
 
+test('conversation view: a conversation with no messages says so and invites a first one; one whose messages are on their way only says it is loading', async context => {
+  const { workspace, snapshot } = await open(fake => { fake.conversations.get('team-aaaa')!.push(conversation('quiet', { title: 'quiet', lastSeq: 0, lastReadSeq: 0 })); });
+  context.after(() => workspace.close());
+  workspace.selectConversation('quiet'); await until(() => snapshot().selectedConversationId === 'quiet', 'the quiet conversation');
+  const empty = html(view(workspace, snapshot()));
+  assert.match(empty, /<div class="tw-empty" role="status"><h3>No messages yet<\/h3><p>Say hello to start the conversation\.<\/p><\/div>/, 'a heading and a hint, not one line of grey text');
+  assert.match(html(view(workspace, snapshot(), { zh: true })), /<h3>暂无消息<\/h3><p>打个招呼，开始对话吧。<\/p>/);
+  workspace.selectConversation('dm-bob'); await until(() => snapshot().selectedConversationId === 'dm-bob', 'the conversation with a message to come');
+  const loading = html(view(workspace, snapshot()));
+  assert.match(loading, /<p class="tw-empty-line" role="status">Loading messages…<\/p>/); assert.doesNotMatch(loading, /No messages yet/, 'a conversation that has messages is not empty while they load');
+});
+
 test('conversation view: pending messages show their state and can be discarded; offline and errors explain themselves', async context => {
   const { fake, workspace, snapshot } = await open(); context.after(() => workspace.close());
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 7, 'the thread');
@@ -473,7 +541,9 @@ test('conversation view: pending messages show their state and can be discarded;
   await snapshot().messaging!.queue('create', 'Queued while offline'); await until(() => snapshot().pending.length === 1, 'the pending message');
   const markup = html(view(workspace, snapshot()));
   assert.match(markup, /class="tw-msg tw-pending"/); assert.match(markup, /Queued while offline/); assert.match(markup, />Discard</);
-  assert.match(markup, /Pending · sends when connected|Waiting for server confirmation/);
+  assert.match(markup, /Pending · sends when connected|Waiting for confirmation\. Retrying won’t send it twice\./);
+  assert.doesNotMatch(markup, /Retries keep the same message identity|server confirmation\. /, 'no engineering words in the status of a message');
+  assert.match(markup, /class="tw-msg tw-pending" data-mine="true"/, 'a message waiting to be sent is the signed-in person\'s: it takes the tint'); assert.match(markup, /<b class="tw-msg-author">You<\/b>/);
   fake.messages = originalMessages;
   await until(() => snapshot().pending.length === 0, 'the retry to land');
   const [watch] = fake.open('team-aaaa', 'chan-general'); assert.ok(watch);
@@ -526,7 +596,8 @@ test('conversation subtitle names who is in a conversation or whether its Bot is
   const botDm = conversation('b', { kind: 'bot_dm', participants: ['user:alice', 'shared_bot:a'] });
   assert.equal(conversationSubtitle(botDm, snap([bot]), false), 'Online · Owner: Bob');
   assert.equal(conversationSubtitle(botDm, snap([{ ...bot, ready: false }]), false), 'Host unavailable · Owner: Bob');
-  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, state: 'paused' }]), true), '已停用 · 所有者: Bob');
+  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, state: 'paused' }]), true), '已停止共享 · 所有者: Bob');
+  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, state: 'paused' }]), false), 'Sharing stopped · Owner: Bob');
   assert.equal(conversationSubtitle(botDm, snap([]), false), '', 'nothing to say about a Bot that is not listed');
   assert.equal(conversationSubtitle(conversation('d', { kind: 'dm' }), snap([]), false), 'Direct message');
   assert.equal(conversationSubtitle(conversation('g', { kind: 'group', participants: ['user:alice', 'user:bob', 'user:owner'] }), snap([]), true), '3 位成员');

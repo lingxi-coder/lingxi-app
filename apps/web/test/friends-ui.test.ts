@@ -128,7 +128,7 @@ scenario('the header: Add friend, a menu with exactly Profile settings and Block
   context.after(() => workspace.close());
   await ready(snapshot);
   const page = await mount(workspace, view(workspace, FriendsSidebar)); context.after(() => page.unmount());
-  assert.ok(page.text().includes('Set your name so friends recognize you.'));
+  assert.ok(page.text().includes('Set your name so friends recognize you.')); assert.equal(snapshot().profileNameUnset, true, 'the workspace says it, the view does not compare text');
   await page.click(page.button('Set name')); assert.equal(snapshot().page, 'profile');
   await page.click(page.button('Add friend')); assert.equal(snapshot().page, 'add');
   await page.click(page.oneByLabel('More'));
@@ -137,7 +137,117 @@ scenario('the header: Add friend, a menu with exactly Profile settings and Block
   await page.click(items[1]!); assert.equal(snapshot().page, 'blocked');
   fake.profile = profile({ displayName: 'Alice' });
   await workspace.refreshProfile(); await page.during(() => undefined);
-  assert.ok(!page.text().includes('Set your name so friends recognize you.'));
+  assert.ok(!page.text().includes('Set your name so friends recognize you.')); assert.equal(snapshot().profileNameUnset, false);
+});
+
+// ── The friend rows: one tab stop, the arrow keys and a menu of their own (U6, U9) ──
+
+/** The rows of the list as the browser has them: `matches` says an element is a row, `focus` says where the focus went. */
+const rowList = (ids: string[]) => {
+  const focused: string[] = [];
+  const rows = ids.map(id => ({ id, matches: () => true, focus: () => { focused.push(id); } }));
+  return { rows, focused, list: { querySelectorAll: () => rows } };
+};
+const sideAndMain = (workspace: FriendsWorkspace) => (snapshot: FriendsSnapshot) => createElement('div', null, view(workspace, FriendsSidebar)(snapshot), view(workspace, FriendsMain)(snapshot));
+
+scenario('the friends are one tab stop: the arrow keys, Home and End move between the rows, and the stop follows the focus or the open chat', async context => {
+  const { workspace, snapshot } = friendsFixture(f => {
+    f.cards = [card('bob', { lastSeq: 1, lastReadSeq: 1, lastMessage: pointer(1, { at: at(2) }) }), card('carol', { lastSeq: 1, lastReadSeq: 1, lastMessage: pointer(1, { at: at(3) }) }), card('dave')];
+  });
+  context.after(() => workspace.close());
+  await ready(snapshot);
+  const page = await mount(workspace, view(workspace, FriendsSidebar)); context.after(() => page.unmount());
+  const mains = () => page.byClass('tw-row-main'), mores = () => page.byClass('tw-row-more');
+  assert.deepEqual(mains().map(node => node.props['data-row']), ['carol', 'bob', 'dave'], 'the roving items are the rows, in the order of the list');
+  assert.deepEqual(mains().map(node => node.props.tabIndex), [0, -1, -1], 'one tab stop: the first friend'); assert.deepEqual(mores().map(node => node.props.tabIndex), [0, -1, -1], 'and the row\'s own button goes with it');
+  const sections = page.byClass('tw-sections')[0]!, { rows, focused, list } = rowList(['carol', 'bob', 'dave']);
+  const press = (key: string, from: number) => page.key(sections, key, { target: rows[from], currentTarget: list });
+  assert.equal(await press('ArrowDown', 0), true, 'the key is the list\'s: the page does not scroll'); await press('ArrowDown', 1); await press('ArrowDown', 2); await press('ArrowUp', 2); await press('Home', 2); await press('End', 0);
+  assert.deepEqual(focused, ['bob', 'dave', 'dave', 'bob', 'carol', 'dave'], 'the list stops at its ends');
+  assert.equal(await press('a', 0), false, 'a key that is not for the list is left alone'); assert.equal(focused.length, 6);
+  assert.equal(await page.key(sections, 'ArrowDown', { target: { matches: () => false }, currentTarget: list }), false, 'and so is a key typed in the filter or on a request');
+  workspace.openChat('dave'); await page.during(() => undefined);
+  assert.deepEqual(mains().map(node => node.props.tabIndex), [-1, -1, 0], 'with nothing focused the open chat is the stop');
+  await page.during(() => mains()[1]!.props.onFocus());
+  assert.deepEqual(mains().map(node => node.props.tabIndex), [-1, 0, -1], 'and the row that had the focus is the stop after it');
+  await page.type(page.oneByLabel('Search friends'), 'zz'); assert.equal(mains().length, 0);
+  await page.type(page.oneByLabel('Search friends'), ''); assert.equal(mains().filter(node => node.props.tabIndex === 0).length, 1, 'there is always exactly one stop');
+});
+
+scenario('a friend\'s menu opens from its more button, a right click, the Menu key or Shift+F10; Shared Bots opens the chat with its Bots', async context => {
+  const { fake, workspace, snapshot } = friendsFixture((f, teams) => {
+    chatSetup(f, teams); confirmBotDms(teams); f.names.set('bob', { displayName: 'Robert', handle: 'rob' });
+    teams.bots = [botCard({ name: 'Bob Helper', maintainer: { uid: 'bob', generation: 1 } })];
+  });
+  context.after(() => workspace.close());
+  await ready(snapshot);
+  const page = await mount(workspace, sideAndMain(workspace)); context.after(() => page.unmount());
+  const main = () => page.byClass('tw-row-main')[0]!, more = () => page.byClass('tw-row-more')[0]!;
+  const menus = () => page.find(node => node.props.role === 'menu'), items = () => page.find(node => node.props.role === 'menuitem');
+  assert.equal(more().props['aria-label'], 'More: Bob', 'the button says whose menu it is'); assert.equal(more().props['aria-haspopup'], 'menu'); assert.equal(menus().length, 0);
+  // The browser raises `contextmenu` for a right click, the Menu key and Shift+F10 alike: the row opens its own menu and the browser's stays shut.
+  let prevented = 0;
+  await page.during(() => main().props.onContextMenu({ preventDefault() { prevented++; } }));
+  assert.equal(prevented, 1); assert.equal(menus().length, 1); assert.equal(more().props['aria-expanded'], true);
+  assert.deepEqual(items().map(textOf), ['View profile', 'Shared Bots', 'Remove friend']); assert.equal(menus()[0]!.props['aria-label'], 'Bob');
+  await page.click(more()); assert.equal(menus().length, 0, 'the more button closes it again');
+  await page.click(more()); assert.equal(menus().length, 1, 'and opens it');
+  // View profile: the friend's own dialog, with the fresh name and the date they became friends.
+  await page.click(items().find(node => textOf(node) === 'View profile')!);
+  await until(() => fake.readProfiles.includes('bob'), 'the friend\'s profile'); await page.during(() => undefined);
+  assert.equal(menus().length, 0); assert.ok(textOf(dialogs(page)[0]).includes('@rob') && textOf(dialogs(page)[0]).includes('Friends since'));
+  await page.click(dialogs(page)[0].findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === 'Close')); assert.equal(dialogs(page).length, 0);
+  // Shared Bots: the chat opens with the panel, and asking again opens it again after it was closed.
+  await page.during(() => main().props.onContextMenu({ preventDefault() {} }));
+  await page.click(items().find(node => textOf(node) === 'Shared Bots')!);
+  assert.equal(snapshot().page, 'chat'); assert.equal(snapshot().chat?.uid, 'bob'); assert.equal(snapshot().chat?.botsRequest, 1);
+  await until(() => !!snapshot().chat?.workspace?.getSnapshot().conversation, 'the chat'); await page.during(() => undefined);
+  const opener = () => page.byLabel('Shared Bots').find(node => node.type === 'button')!;
+  assert.equal(opener().props['aria-expanded'], true); assert.equal(page.byClass('tw-friends-bots').length, 1, 'the panel is open with the chat');
+  assert.equal(page.byClass('tw-friends-bots')[0]!.props.id, opener().props['aria-controls'], 'the toggle controls the panel');
+  await page.click(page.byLabel('Close').find(node => node.type === 'button')!); assert.equal(page.byClass('tw-friends-bots').length, 0);
+  await page.during(() => main().props.onContextMenu({ preventDefault() {} }));
+  await page.click(items().find(node => textOf(node) === 'Shared Bots')!);
+  assert.equal(snapshot().chat?.botsRequest, 2); assert.equal(page.byClass('tw-friends-bots').length, 1, 'the open chat shows the panel again');
+  // Remove friend: the same confirmation as in the chat, and Cancel is the way out.
+  await page.during(() => main().props.onContextMenu({ preventDefault() {} }));
+  await page.click(items().find(node => textOf(node) === 'Remove friend')!);
+  const dialog = () => dialogs(page)[0], inDialog = (name: string) => dialog().findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === name);
+  assert.equal(dialog().props.role, 'alertdialog'); assert.ok(textOf(dialog()).includes('Remove “Robert”?') && textOf(dialog()).includes('the chat is deleted for both of you'), 'the title names the friend as the list has them now');
+  assert.equal(inDialog('Cancel').props['data-autofocus'], true, 'the safe choice has the focus'); assert.equal(fake.executed('remove').length, 0, 'asking is not doing');
+  await page.click(inDialog('Cancel')); assert.equal(dialogs(page).length, 0); assert.equal(fake.executed('remove').length, 0);
+  await page.during(() => main().props.onContextMenu({ preventDefault() {} }));
+  await page.click(items().find(node => textOf(node) === 'Remove friend')!); await page.click(inDialog('Remove friend'));
+  assert.equal(fake.executed('remove').length, 1); assert.equal(dialogs(page).length, 0); assert.equal(snapshot().page, 'home', 'the friend\'s chat ends with the friendship');
+});
+
+scenario('a confirmation about a friend can be cancelled while its change is in flight; only the confirming button waits', async context => {
+  const { fake, workspace, snapshot } = friendsFixture((f, teams) => chatSetup(f, teams));
+  context.after(() => workspace.close());
+  await ready(snapshot);
+  const page = await mount(workspace, view(workspace, FriendsSidebar)); context.after(() => page.unmount());
+  await page.during(() => page.byClass('tw-row-main')[0]!.props.onContextMenu({ preventDefault() {} }));
+  await page.click(page.find(node => node.props.role === 'menuitem' && textOf(node) === 'Remove friend')[0]);
+  const inDialog = (name: string) => dialogs(page)[0].findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === name);
+  let release = () => {}; fake.replies.set('remove', () => new Promise(resolve => { release = () => resolve({ ok: true }); }));
+  await page.click(inDialog('Remove friend'));
+  assert.equal(inDialog('Remove friend').props.disabled, true, 'it is not sent twice'); assert.notEqual(inDialog('Cancel').props.disabled, true, 'but the person is not held in the dialog');
+  await page.click(inDialog('Cancel')); assert.equal(dialogs(page).length, 0);
+  await page.during(() => { release(); });
+});
+
+scenario('the main area with nothing open says what Friends is and offers the one thing to do: Add friend', async context => {
+  const none = friendsFixture(); context.after(() => none.workspace.close()); await ready(none.snapshot);
+  const empty = await mount(none.workspace, view(none.workspace, FriendsMain)); context.after(() => empty.unmount());
+  assert.equal(textOf(empty.find(node => node.type === 'h2')[0]), 'No friends yet'); assert.ok(empty.text().includes('Add someone by @username, email or friend link to chat one-to-one.'));
+  await empty.click(empty.button('Add friend')); assert.equal(none.snapshot().page, 'add', 'the way to add one is in the area itself, not only in the header');
+  const some = friendsFixture(f => { f.cards = [card('bob')]; }); context.after(() => some.workspace.close()); await ready(some.snapshot);
+  const filled = await mount(some.workspace, view(some.workspace, FriendsMain)); context.after(() => filled.unmount());
+  assert.equal(textOf(filled.find(node => node.type === 'h2')[0]), 'Friends', 'with friends it is not "No friends yet"');
+  await filled.click(filled.button('Add friend')); assert.equal(some.snapshot().page, 'add');
+  some.workspace.show('home');
+  const zh = await mount(some.workspace, view(some.workspace, FriendsMain, { zh: true, locale: 'zh-CN' })); context.after(() => zh.unmount());
+  assert.equal(textOf(zh.find(node => node.type === 'h2')[0]), '好友'); assert.ok(zh.text().includes('添加好友'));
 });
 
 // ── Add friend (D6, D7) ──
@@ -310,7 +420,8 @@ scenario('blocked people: newest first with Unblock, the list follows the listen
   await page.click(unblock());
   assert.deepEqual(fake.executed('unblock').map(command => (command as { otherUid: string }).otherUid), ['new', 'new']);
   fake.emitBlocks([]); await page.during(() => undefined);
-  assert.ok(page.text().includes("You haven't blocked anyone."));
+  assert.ok(page.text().includes('No blocked people'), 'an empty list says so with a heading');
+  assert.ok(page.text().includes('People you block can’t find you or send you requests. They will appear here.'));
 });
 
 // ── The main area and its chat (D9, D10) ──
@@ -604,7 +715,7 @@ scenario('the Bots action opens the friendship\'s Bots over the chat: Teams card
   assert.equal(opener().props['aria-expanded'], true);
   const text = textOf(panel());
   for (const expected of ['Shared Bots', 'Bob Helper', 'Answers about trips', 'Maintainer: Bob', 'Ready', 'Message assistant',
-    'A Bot runs on its owner’s Desktop. The owner can read every conversation with it.', 'To share one of your Bots with this friend, open LingXi Desktop.']) assert.ok(text.includes(expected), expected);
+    'A Bot runs on its maintainer’s Desktop. The maintainer can read every conversation with it.', 'To share one of your Bots with this friend, open LingXi Desktop.']) assert.ok(text.includes(expected), expected);
   for (const absent of ['Daily requests', 'All current and future members', 'Find Bots in the market', 'Team assistants', 'Publish a Desktop assistant', 'Stop sharing', 'Pause']) assert.ok(!text.includes(absent), absent);
   assert.equal(teams.commands.filter(command => command.action === 'listSharedBots').length, 1, 'the cards came from the chat\'s own workspace');
   await page.click(page.byLabel('Close').find(node => node.type === 'button')!);
@@ -615,7 +726,7 @@ scenario('with no Bots the panel says so, and a Bot list that could not be read 
   const { page, pair, teams } = await botsChat(context);
   await until(() => pair().getSnapshot().botsLoaded, 'the Bot cards');
   await page.click(page.oneByLabel('Shared Bots'));
-  assert.ok(page.text().includes('No Bots are shared in this chat yet.')); assert.ok(page.text().includes('A Bot runs on its owner’s Desktop.'), 'the note is always there');
+  assert.ok(page.text().includes('No Bots are shared in this chat yet.')); assert.ok(page.text().includes('A Bot runs on its maintainer’s Desktop.'), 'the note is always there');
   await page.click(page.byLabel('Close').find(node => node.type === 'button')!);
   teams.messages = async () => { throw new Error('SERVICE_UNAVAILABLE'); };
   await page.during(() => pair().refreshBots());
@@ -690,7 +801,10 @@ scenario('Stop sharing: your own published Bot, behind a confirmation, as pauseS
   assert.equal(page.find(node => node.type === 'button' && textOf(node) === 'Stop sharing').length, 1, 'only on the viewer\'s own Bot');
   await page.click(page.button('Stop sharing'));
   const dialog = () => dialogs(page)[0]!;
-  assert.ok(textOf(dialog()).includes('New Bot requests will stop. Existing conversation history remains.'));
+  assert.ok(textOf(dialog()).includes('Stop sharing “My Helper”?'), 'the title names the Bot');
+  assert.ok(textOf(dialog()).includes('New requests to this Bot stop. Existing conversations stay. You can share it again from LingXi Desktop.'));
+  assert.equal(dialog().props.role, 'alertdialog');
+  assert.equal(buttonOf(dialog(), 'Cancel').props['data-autofocus'], true, 'the safe choice has the focus');
   assert.equal(teams.commands.some(command => command.action === 'pauseSharedBot'), false, 'asking is not doing');
   await page.click(buttonOf(dialog(), 'Cancel'));
   assert.equal(dialogs(page).length, 0); assert.equal(teams.commands.some(command => command.action === 'pauseSharedBot'), false);
@@ -701,7 +815,7 @@ scenario('Stop sharing: your own published Bot, behind a confirmation, as pauseS
   assert.ok(pause.action === 'pauseSharedBot' && pause.teamId === pairTeamId('bob') && pause.generation === 1 && pause.payload.sharedBotId === 'my-helper-bot' && pause.payload.expectedRevision === 3);
   assert.equal(dialogs(page).length, 0);
   await until(() => pair().getSnapshot().bots.some(bot => bot.state === 'paused'), 'the Bot cards after stopping'); await page.during(() => undefined);
-  assert.ok(textOf(panel()).includes('Paused'), 'the row shows the Teams paused state'); assert.equal(page.find(node => node.type === 'button' && textOf(node) === 'Stop sharing').length, 0);
+  assert.ok(textOf(panel()).includes('Sharing stopped'), 'the row shows that sharing has stopped'); assert.equal(page.find(node => node.type === 'button' && textOf(node) === 'Stop sharing').length, 0);
 
   teams.bots = [{ ...mine, state: 'published' }];
   await page.during(() => pair().refreshBots());

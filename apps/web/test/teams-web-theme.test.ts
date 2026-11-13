@@ -77,3 +77,19 @@ for (const [name, scope] of Object.entries(palettes)) test(`${name} palette: tex
   // Rows can be told apart: hover and selection are visible against the sidebar, and from each other.
   assert.ok(ratio('--teams-hover', '--teams-sidebar-bg') > 1.05 && ratio('--teams-selected', '--teams-sidebar-bg') > 1.05 && ratio('--teams-selected', '--teams-hover') > 1.02);
 });
+
+// U3: the signed-in person's own rows are the accent at 6% over the stream (`--tw-own`, workspace.css) and nothing else marks them; what is
+// written on the tint, and on it under the pointer (the hover colour at 55% over it), must still read in both palettes.
+for (const [name, scope] of Object.entries(palettes)) test(`${name} palette: the tint of the own rows keeps text at 4.5:1, also under the pointer`, () => {
+  assert.match(workspaceCss, /--tw-own:\s*color-mix\(in srgb, var\(--tw-accent\) 6%, transparent\)/u, 'the tint is the accent at 6%');
+  const tinted = new Map(scope).set('--own', 'color-mix(in srgb, var(--teams-accent) 6%, var(--teams-bg))').set('--own-hover', 'color-mix(in srgb, var(--teams-hover) 55%, var(--own))');
+  const color = (variable: string) => resolve(`var(${variable})`, tinted);
+  assert.notDeepEqual(color('--own'), color('--teams-bg'), 'the tint can be told from the stream');
+  // Danger is promised on the plain surfaces only (above), so under the pointer the three the palette promises on hover are held; the one danger text on a
+  // tint, the failure of a message waiting to be sent, keeps the plain tint under the pointer (workspace.css).
+  assert.match(workspaceCss, /\.tw-pending\[data-mine='true'\]:hover\s*\{[^}]*background:\s*var\(--tw-own\)/u, 'a pending message keeps its tint under the pointer');
+  for (const [background, foregrounds] of [['--own', ['--teams-fg', '--teams-muted', '--teams-accent-text', '--teams-danger']], ['--own-hover', ['--teams-fg', '--teams-muted', '--teams-accent-text']]] as const) for (const foreground of foregrounds) {
+    const ratio = contrast(color(foreground), color(background));
+    assert.ok(ratio >= 4.5, `${foreground} on ${background} is ${ratio.toFixed(2)}, below 4.5`);
+  }
+});

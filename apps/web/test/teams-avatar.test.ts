@@ -79,14 +79,13 @@ const declaration = (css: string, selector: string, property: string): string | 
   const rule = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(match => match[1]!.split(',').map(part => part.trim()).includes(selector));
   return rule && new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`).exec(rule[2]!)?.[1]?.trim();
 };
-/** The weight of a selector made of classes, attributes and pseudo-classes: how many of each. */
-const specificity = (selector: string): number => (selector.match(/\.[\w-]+|\[[^\]]+\]|:(?!:)[\w-]+/g)?.length ?? 0);
 
-test('a Bot\'s box is rounded to 24% of its side and people keep the circle; the dark and the light art take turns with the theme', () => {
-  assert.equal(declaration(webCss, ".teams-web .tw-avatar[data-kind='bot']", 'border-radius'), '24%');
-  assert.equal(declaration(workspaceCss, ".tw-avatar[data-kind='bot']", 'border-radius'), '8px', 'the workspace\'s own rule is a fixed size');
-  assert.ok(specificity(".teams-web .tw-avatar[data-kind='bot']") > specificity(".tw-avatar[data-kind='bot']"), 'and the Web\'s is the one that applies');
+test('a Bot\'s box is rounded to 24% of its side by the workspace alone, as are the channel and team tiles, and people keep the circle; the dark and the light art take turns with the theme', () => {
+  assert.equal(declaration(workspaceCss, ".tw-avatar[data-kind='bot']", 'border-radius'), '24%', 'a proportion, so every size of the scale is the same shape');
+  assert.equal(declaration(workspaceCss, '.tw-chan', 'border-radius'), '24%', 'the # tile of a channel');
+  assert.equal(declaration(workspaceCss, '.tw-team-mark', 'border-radius'), '24%', 'the tile of a team');
   assert.equal(declaration(workspaceCss, ".tw-avatar[data-kind='user']", 'border-radius'), '50%');
+  assert.equal(declaration(webCss, ".teams-web .tw-avatar[data-kind='bot']", 'border-radius'), undefined, 'the Web has no rule of its own for it');
   assert.equal(declaration(webCss, ".teams-web .tw-avatar[data-kind='user']", 'border-radius'), undefined, 'people are left to it');
   // Light art by default, dark art under the site\'s dark theme, never both.
   assert.equal(declaration(webCss, ".tw-bot-art[data-art='dark']", 'display'), 'none');

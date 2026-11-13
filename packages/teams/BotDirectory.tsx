@@ -5,15 +5,15 @@ import { Dialog } from './ui';
 
 /**
  * Shared member directory and native publication wizard. Files are picked by the trusted host. With `friend` (the friend's name) it is
- * the Bots of a friendship instead (D21, D23): no audience or quota lines on the cards, an audience that is fixed to the friend in the
- * wizard (the quotas stay editable) and Stop sharing in place of Pause.
+ * the Bots of a friendship instead (D21, D23): no audience or quota lines on the cards and an audience that is fixed to the friend in the
+ * wizard (the quotas stay editable). Ending a Bot's availability is Stop sharing (U1, U8) in both, with the same dialog.
  */
 export function BotDirectory({ api, uid, team, members, bots, zh, busy, status, attempt, onOpen, onChanged, friend }: {
   api: TeamsApi; uid: string; team: TeamSummary; members: TeamDetail['members']; bots: SharedBotCard[]; zh: boolean; busy: boolean; status: string;
   attempt(action: () => Promise<unknown>): Promise<void>; onOpen(bot: SharedBotCard): Promise<void>; onChanged(): Promise<void>; friend?: string;
 }) {
   const t = (en: string, cn: string) => zh ? cn : en;
-  const note = t('A Bot runs on its owner’s Desktop. The owner can read every conversation with it.', 'Bot 在其所有者的 Desktop 上运行。所有者可阅读与它的所有对话。');
+  const note = t('A Bot runs on its maintainer’s Desktop. The maintainer can read every conversation with it.', 'Bot 在其维护者的 Desktop 上运行。维护者可阅读与它的所有对话。');
   const [local, setLocal] = useState<LocalPublishableBot[]>(), [instanceId, setInstanceId] = useState('');
   const [role, setRole] = useState(''), [files, setFiles] = useState<SelectedSharedFile[]>([]);
   const [resourceBindings, setResourceBindings] = useState<Record<string, string>>({});
@@ -40,9 +40,9 @@ export function BotDirectory({ api, uid, team, members, bots, zh, busy, status, 
     {friend ? null : <><h3>{t('Team assistants', '团队助手')}</h3>
     <p className="teams-hint">{t('Members use the published role and selected read-only resources. The maintainer can read conversations containing their assistant.', '成员使用已发布的角色和选定的只读资料。维护者可阅读包含其助手的会话。')}</p></>}
     {status ? <p role="status">{status}</p> : null}
-    <ul className="team-bot-grid">{bots.map(bot => <li key={bot.sharedBotId} className="teams-card"><header><b>{bot.name}</b><span className="team-bot-presence" data-online={bot.ready}>{bot.state !== 'published' ? t('Paused', '已暂停') : bot.ready ? t('Ready', '已就绪') : t('Host unavailable', '宿主不可用')}</span></header><p>{bot.description}</p><small>{t('Maintainer', '维护者')}: {owner(bot.maintainer.uid)}</small>
+    <ul className="team-bot-grid">{bots.map(bot => <li key={bot.sharedBotId} className="teams-card"><header><b>{bot.name}</b><span className="team-bot-presence" data-online={bot.ready}>{bot.state !== 'published' ? t('Sharing stopped', '已停止共享') : bot.ready ? t('Ready', '已就绪') : t('Host unavailable', '宿主不可用')}</span></header><p>{bot.description}</p><small>{t('Maintainer', '维护者')}: {owner(bot.maintainer.uid)}</small>
       {friend ? null : <><p className="teams-hint">{bot.usePolicy.mode === 'all' ? t('All current and future members', '所有当前和未来成员') : t('Maintainer and selected memberships', '维护者与指定成员身份')}</p><p className="teams-hint">{t('Daily requests: team / member / assistant', '每日请求：团队 / 成员 / 助手')} {bot.quotas.team} / {bot.quotas.member} / {bot.quotas.bot}</p></>}
-      <div className="teams-row-actions"><button disabled={busy || !sharedBotUsable(bot)} onClick={() => void attempt(() => onOpen(bot))}>{bot.permitted ? t('Message assistant', '与助手对话') : t('Not permitted', '无使用权限')}</button>{bot.maintainer.uid === uid && bot.state === 'published' ? <button disabled={busy} onClick={() => setPausing(bot)}>{friend ? t('Stop sharing', '停止共享') : t('Pause', '暂停')}</button> : null}</div></li>)}</ul>
+      <div className="teams-row-actions"><button disabled={busy || !sharedBotUsable(bot)} onClick={() => void attempt(() => onOpen(bot))}>{bot.permitted ? t('Message assistant', '与助手对话') : t('Not permitted', '无使用权限')}</button>{bot.maintainer.uid === uid && bot.state === 'published' ? <button disabled={busy} onClick={() => setPausing(bot)}>{t('Stop sharing', '停止共享')}</button> : null}</div></li>)}</ul>
     {!bots.length && !status ? <p>{friend ? t('No Bots are shared in this chat yet.', '此聊天中尚未共享 Bot。') : t('No assistants are published yet.', '尚未发布助手。')}</p> : null}
     {friend ? <p className="teams-hint">{note}</p> : null}
     {api.openBotMarket && !friend ? <button type="button" disabled={busy} onClick={() => void attempt(() => api.openBotMarket!())}>{t('Find Bots in the market', '在市场发现 Bot')}</button> : null}
@@ -57,9 +57,9 @@ export function BotDirectory({ api, uid, team, members, bots, zh, busy, status, 
       {changed ? <p role="alert">{t('Publication changed elsewhere. Choose the Bot again before publishing.', '发布已在其他位置更改，请重新选择 Bot。')}</p> : null}<button disabled={busy || !instanceId || !role.trim() || !!changed || missingBindings}>{t('Review publication', '检查发布内容')}</button>
     </form> : null}</details> : <p className="teams-hint">{friend ? t('To share one of your Bots with this friend, open LingXi Desktop.', '要与这位好友共享你的 Bot，请打开灵犀 Desktop。') : t('Open LingXi Desktop to publish a local assistant.', '在灵犀 Desktop 发布本机助手。')}</p>}
     {review && selected ? <Dialog title={t('Confirm publication', '确认发布')} onClose={() => setReview(undefined)}><div className="tw-form"><h3>{selected.name}</h3><p>{t('Host: this Desktop', '宿主：此 Desktop')} · {selected.model ?? t('Configured model', '已配置模型')}</p><blockquote>{review.role}</blockquote><ul>{files.map(file => <li key={file.token}>{file.name} · {file.kind} · {file.sha256}</li>)}</ul><p>{friend ? t(`Audience: ${friend}.`, `受众：${friend}。`) : mode === 'all' ? t('Audience: every current and future team member.', '受众：团队所有当前和未来成员。') : `${t('Audience', '受众')}: ${[owner(uid), ...uids.map(owner)].join(', ')}`}</p>{friend ? <p>{note}</p> : null}{requiredResources.length ? <ul>{requiredResources.map(id => <li key={id}>{id}: {files.find(file => file.token === resourceBindings[id])?.name}</li>)}</ul> : null}<p>{t('Daily quotas (team / member / assistant)', '每日额度（团队 / 成员 / 助手）')}: {quotas.team} / {quotas.member} / {quotas.bot}</p><label className="team-party"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />{t('I have permission to share the role, selected resources and their derived results with this audience, and confirm model costs and quotas.', '我有权向以上受众共享角色、选定资料及其派生结果，并确认模型费用和额度。')}</label>{!reviewCurrent ? <p role="alert">{t('Publication inputs or memberships changed. Review again before publishing.', '发布输入或成员身份已变化，请重新检查后发布。')}</p> : null}<button disabled={busy || !confirmed || !!changed || !reviewCurrent || missingBindings} onClick={() => void attempt(publish)}>{t('Publish assistant', '发布助手')}</button></div></Dialog> : null}
-    {pausing ? <Dialog title={friend ? t('Stop sharing', '停止共享') : t(`Pause ${pausing.name}?`, `暂停 ${pausing.name}？`)} role="alertdialog" onClose={() => setPausing(undefined)}>
-      <p>{friend ? t('New Bot requests will stop. Existing conversation history remains.', '将停止新的 Bot 请求，现有会话历史保留。') : t('New requests stop. Conversation history remains available.', '停止新请求，保留会话历史。')}</p>
-      <div className="tw-dialog-actions">{friend ? <button type="button" data-autofocus onClick={() => setPausing(undefined)}>{t('Cancel', '取消')}</button> : null}
-        <button disabled={busy} className={friend ? 'tw-danger-btn' : undefined} onClick={() => void attempt(async () => { await api.messages(executionCommand({ teamId: team.id, generation: team.generation }, 'pauseSharedBot', { sharedBotId: pausing.sharedBotId, expectedRevision: pausing.revision })); setPausing(undefined); await onChanged(); })}>{friend ? t('Stop sharing', '停止共享') : t('Pause assistant', '暂停助手')}</button></div></Dialog> : null}
+    {pausing ? <Dialog title={t(`Stop sharing “${pausing.name}”?`, `停止共享“${pausing.name}”？`)} role="alertdialog"
+      description={t('New requests to this Bot stop. Existing conversations stay. You can share it again from LingXi Desktop.', '将停止向此 Bot 发送新请求，现有会话会保留。你可以在灵犀 Desktop 重新共享。')} onClose={() => setPausing(undefined)}>
+      <div className="tw-dialog-actions"><button type="button" data-autofocus onClick={() => setPausing(undefined)}>{t('Cancel', '取消')}</button>
+        <button disabled={busy} className="tw-danger-btn" onClick={() => void attempt(async () => { await api.messages(executionCommand({ teamId: team.id, generation: team.generation }, 'pauseSharedBot', { sharedBotId: pausing.sharedBotId, expectedRevision: pausing.revision })); setPausing(undefined); await onChanged(); })}>{t('Stop sharing', '停止共享')}</button></div></Dialog> : null}
   </section>;
 }

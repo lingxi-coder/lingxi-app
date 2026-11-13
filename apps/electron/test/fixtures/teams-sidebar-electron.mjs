@@ -84,7 +84,7 @@ try {
   await wait(`document.querySelector('.teams-page .tw-member-home')`);
   assert.deepEqual(await marked(), ['Teams']);
   assert.equal(await run(`document.querySelector('${sidebar} .tw-switcher-name').textContent`), 'Acme');
-  assert.deepEqual(await run(`Array.from(document.querySelectorAll('${sidebar} h3')).map(heading => heading.textContent)`), ['Channels', 'Direct messages', 'Bot DMs']);
+  assert.deepEqual(await run(`Array.from(document.querySelectorAll('${sidebar} h3')).map(heading => heading.textContent)`), ['Channels', 'Direct messages', 'Bot chats']);
   assert.deepEqual(await rows(), ['chan-general', 'chan-design', 'dm-bob', 'bot-chat']);
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('${sidebar} .tw-row-preview')).map(preview => preview.textContent)`),
     ['Bob: Ship it', 'Bob: Mockups are in the folder', 'You: Lunch?', 'Done: the summary is ready']);

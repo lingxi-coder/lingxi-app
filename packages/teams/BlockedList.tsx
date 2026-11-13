@@ -21,12 +21,15 @@ export function BlockedList({ workspace, snapshot, zh, renderAvatar }: FriendsVi
         <p role="alert" className="tw-error">{t("Couldn't load your friends. Check your connection and try again.", '无法加载好友，请检查网络后重试。')}</p>
         <button type="button" onClick={workspace.retry}>{t('Retry', '重试')}</button>
       </div>
-      : !snapshot.blocks.length ? <p className="tw-hint">{t("You haven't blocked anyone.", '你还没有屏蔽任何人。')}</p>
+      : !snapshot.blocks.length ? <div className="tw-empty">
+        <h3>{t('No blocked people', '没有已屏蔽的人')}</h3>
+        <p>{t('People you block can’t find you or send you requests. They will appear here.', '被你屏蔽的人无法找到你，也无法向你发送请求。他们会显示在这里。')}</p>
+      </div>
       : <ul className="tw-people" aria-label={t('Blocked people', '已屏蔽的人')}>
         {snapshot.blocks.map(block => {
           const name = block.displayName || t('Member', '成员');
           return <li key={block.uid}>
-            <Avatar identity={{ kind: 'user', id: block.uid, name }} size={32} render={renderAvatar} />
+            <Avatar identity={{ kind: 'user', id: block.uid, name }} size={40} render={renderAvatar} />
             <div className="tw-person-text">
               <b>{name}</b>
               {block.handle ? <small>@{block.handle}</small> : null}

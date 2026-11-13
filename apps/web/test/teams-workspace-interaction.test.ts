@@ -15,7 +15,7 @@ const { TeamSidebar } = loadTeamsModule<typeof import('../../../packages/teams/T
 // ── Fixture ──
 
 const at = (minute: number) => new Date(2026, 10, 2, 11, minute).toISOString();
-async function open(context: TestContext) {
+async function open(context: TestContext, setup: (fake: FakeTeams) => void = () => {}) {
   withDom(context);
   const fake = new FakeTeams();
   const bot = botCard();
@@ -31,6 +31,7 @@ async function open(context: TestContext) {
     message(2, { text: 'Mine', author: { kind: 'user', uid: 'alice' }, createdAt: at(2) }),
     message(3, { text: 'Three', createdAt: at(3) }),
   ]);
+  setup(fake);
   const workspace = new TeamsWorkspace(fake.api, uid, { storage: memoryStorage, environment: new EventTarget(), refreshDelay: 5 });
   context.after(() => workspace.close());
   const snapshot = (): TeamsSnapshot => workspace.getSnapshot();
@@ -284,12 +285,13 @@ scenario('drawer: tabs follow the arrow keys, Escape closes, the handle resizes,
   await page.key(aside(), 'Escape'); assert.deepEqual(events.slice(-1), ['close']);
   events.length = 0;
   await page.click(page.button('Delete team'));
-  const dialog = page.find(node => node.type === 'dialog')[0]; assert.equal(dialog.props.role, 'alertdialog'); assert.match(textOf(dialog), /Delete Acme for everyone\?/);
+  const dialog = page.find(node => node.type === 'dialog')[0]; assert.equal(dialog.props.role, 'alertdialog'); assert.match(textOf(dialog), /Delete “Acme”\?/); assert.match(textOf(dialog), /Everyone loses access to its conversations and shared Bots\. This can’t be undone\./);
+  assert.ok(dialog.props['aria-describedby'], 'the consequence is what the dialog is described by');
   await page.key(aside(), 'Escape'); assert.deepEqual(events, [], 'Escape belongs to the confirmation');
   assert.equal(fake.teamCommands.length, 0, 'nothing happens until it is confirmed');
   await page.click(page.button('Cancel')); assert.equal(page.find(node => node.type === 'dialog').length, 0);
   await page.click(page.button('Delete team'));
-  await page.click(page.find(node => node.type === 'dialog')[0].findAll((node: any) => node.type === 'button' && textOf(node) === 'Delete team')[0]);
+  await page.click(page.find(node => node.type === 'dialog')[0].findAll((node: any) => node.type === 'button' && textOf(node) === 'Delete')[0]);
   await until(() => fake.teamCommands.length === 1, 'the delete');
   assert.deepEqual(fake.teamCommands[0], { action: 'delete', teamId: 'team-aaaa' }); assert.deepEqual(events, ['close'], 'the drawer was about the team that is gone');
 });
@@ -299,13 +301,16 @@ scenario('drawer: members can be promoted and removed after a confirmation, and 
   await until(() => !!snapshot().detail, 'detail');
   const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer, { workspace, snapshot, zh: false, onClose() {} } as never)); context.after(() => page.unmount());
   await page.click(page.find(node => node.type === 'button' && textOf(node) === 'Make admin')[0]);
-  assert.match(textOf(page.find(node => node.type === 'dialog')[0]), /Change Bob’s role\?|Change Owner’s role\?/);
-  await page.click(page.button('Change role'));
+  const inDialog = (name: string) => page.find(node => node.type === 'dialog')[0].findAll((node: any) => node.type === 'button' && textOf(node) === name)[0];
+  assert.match(textOf(page.find(node => node.type === 'dialog')[0]), /Make (Bob|Owner) an admin\?/); assert.match(textOf(page.find(node => node.type === 'dialog')[0]), /Admins can invite people and remove members\./);
+  assert.match(inDialog('Make admin').props.className, /tw-primary/, 'a change of role is not drawn as destruction');
+  await page.click(inDialog('Make admin'));
   await until(() => fake.teamCommands.length === 1, 'the role command');
   assert.equal(fake.teamCommands[0]!.action, 'role'); assert.equal((fake.teamCommands[0] as { role: string }).role, 'admin');
   await page.click(page.find(node => node.type === 'button' && textOf(node) === 'Remove' && classes(node).includes('tw-danger-btn'))[0]);
-  assert.match(textOf(page.find(node => node.type === 'dialog')[0]), /Remove (Bob|Owner)\?/);
-  await page.click(page.find(node => node.type === 'dialog')[0].findAll((node: any) => node.type === 'button' && textOf(node) === 'Remove')[0]);
+  assert.match(textOf(page.find(node => node.type === 'dialog')[0]), /Remove (Bob|Owner) from the team\?/); assert.match(textOf(page.find(node => node.type === 'dialog')[0]), /They lose access to its conversations and shared Bots\. They can rejoin with a new invite\./);
+  assert.match(inDialog('Remove').props.className, /tw-danger-btn/, 'removing is destructive');
+  await page.click(inDialog('Remove'));
   await until(() => fake.teamCommands.length === 2, 'the remove command'); assert.equal(fake.teamCommands[1]!.action, 'remove');
   fake.execute = async command => { fake.teamCommands.push(command); return command.action === 'invite' ? { code: 'C'.repeat(32) } : {}; };
   await page.click(page.find(node => node.props.role === 'tab' && textOf(node) === 'Invites')[0]);
@@ -317,6 +322,27 @@ scenario('drawer: members can be promoted and removed after a confirmation, and 
   assert.deepEqual([invite.role, invite.maxUses, invite.ttlSeconds], ['member', 5, 86400]);
   await until(() => !!snapshot().inviteLink, 'the link');
   assert.equal(page.find(node => node.type === 'input' && node.props.readOnly === true)[0].props.value, `https://lingxios.net/open/team/join?code=${'C'.repeat(32)}`);
+});
+
+scenario('drawer: revoking an invite asks first, and a confirmation can be cancelled while its change is still in flight', async context => {
+  const invite = { id: 'invite-1', role: 'member' as const, expiresAt: new Date(2026, 11, 2).toISOString(), uses: 0, maxUses: 5, revoked: false };
+  const { fake, workspace, snapshot } = await open(context, setup => { const base = setup.detail; setup.detail = async id => { const value = await base(id); return id === 'team-aaaa' ? { ...value, invites: [invite] } : value; }; });
+  await until(() => snapshot().detail?.invites.length === 1, 'the invite');
+  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer, { workspace, snapshot, zh: false, onClose() {} } as never)); context.after(() => page.unmount());
+  const dialog = () => page.find(node => node.type === 'dialog')[0], inDialog = (name: string) => dialog().findAll((node: any) => node.type === 'button' && textOf(node) === name)[0];
+  await page.click(page.find(node => node.props.role === 'tab' && textOf(node) === 'Invites')[0]);
+  await page.click(page.find(node => node.type === 'button' && textOf(node) === 'Revoke')[0]);
+  assert.equal(dialog().props.role, 'alertdialog'); assert.match(textOf(dialog()), /Revoke this invite\?/); assert.match(textOf(dialog()), /The link stops working right away\. People who already joined stay in the team\./);
+  assert.equal(fake.teamCommands.length, 0, 'asking is not doing');
+  assert.equal(inDialog('Cancel').props['data-autofocus'], true, 'the safe choice has the focus');
+  // The change takes its time: the confirm waits, Cancel does not.
+  const release: (() => void)[] = [];
+  fake.execute = command => new Promise(resolve => { fake.teamCommands.push(command); release.push(() => resolve({})); });
+  await page.click(inDialog('Revoke'));
+  await until(() => fake.teamCommands.length === 1, 'the revoke'); assert.equal(fake.teamCommands[0]!.action, 'revokeInvite');
+  assert.equal(inDialog('Revoke').props.disabled, true, 'it is not sent twice'); assert.notEqual(inDialog('Cancel').props.disabled, true, 'but the person is not held in the dialog');
+  await page.click(inDialog('Cancel')); assert.equal(page.find(node => node.type === 'dialog').length, 0);
+  await page.during(() => { release.forEach(done => done()); });
 });
 
 scenario('the conversation view toggles the details drawer through its header button', async context => {

@@ -91,10 +91,10 @@ function MyLink({ workspace, snapshot, zh }: Pick<FriendsViewProps, 'workspace' 
       </div>}
     {error ? <p role="alert" className="tw-error">{friendsErrorText(error, zh)}</p> : null}
     <p className="tw-hint">{t('Anyone who opens this link and confirms becomes your friend right away, without your approval. You can reset or turn it off at any time.', '任何人打开此链接并确认后，会立即成为你的好友，无需你批准。你可以随时重置或关闭链接。')}</p>
-    {ask ? <Dialog role="alertdialog" title={ask === 'reset' ? t('Reset link', '重置链接') : t('Turn off link', '关闭链接')} onClose={() => setAsk(undefined)}>
+    {ask ? <Dialog role="alertdialog" title={ask === 'reset' ? t('Reset your friend link?', '重置好友链接？') : t('Turn off your friend link?', '关闭好友链接？')}
+      description={ask === 'reset' ? t('The old link stops working immediately.', '旧链接会立即失效。') : t('No one can add you with it until you create a new one.', '在你创建新链接之前，任何人都无法通过它添加你。')}
+      onClose={() => setAsk(undefined)}>
       <div className="tw-form">
-        <p>{ask === 'reset' ? t('Reset your friend link? The old link stops working immediately.', '重置好友链接？旧链接会立即失效。')
-          : t('Turn off your friend link? No one can add you with it until you create a new one.', '关闭好友链接？在你创建新链接之前，任何人都无法通过它添加你。')}</p>
         <div className="tw-dialog-actions">
           <button type="button" data-autofocus onClick={() => setAsk(undefined)}>{t('Cancel', '取消')}</button>
           <button type="button" className="tw-danger-btn" disabled={busy} onClick={() => void run(ask === 'reset' ? workspace.rotateCode : workspace.revokeCode)}>{ask === 'reset' ? t('Reset link', '重置链接') : t('Turn off link', '关闭链接')}</button>

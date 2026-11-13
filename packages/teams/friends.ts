@@ -20,6 +20,12 @@ export interface BlockEntry { uid: string; at: number; displayName: string; hand
 /** `users/{uid}/teamOffers/{teamId}` as plain values: `expiresAt` in epoch milliseconds, `teamId` the document id. The names are snapshots from offer time. */
 export interface TeamOffer { teamId: string; teamName: string; fromUid: string; fromName: string; role: 'member'; expiresAt: number }
 export interface FriendProfile { uid: string; displayName: string; handle?: string; findByHandle: boolean; findByEmail: boolean; friendCode: { code: string; link: string } | null }
+/**
+ * The name the backend gives an account that has none (`displayName()` in apps/firebase/src/teams.mjs), whatever the language. The server has
+ * no "unnamed" flag, so this one value is the whole contract: the workspace turns it into `FriendsSnapshot.profileNameUnset` and the views
+ * read that, never the text.
+ */
+export const DEFAULT_MEMBER_NAME = 'Member';
 export interface LookupResult { uid: string; displayName: string; handle?: string; relation: Relation }
 
 export type FriendsCommand =

@@ -47,7 +47,7 @@ export function conversationSubtitle(conversation: TeamConversation, snapshot: P
     const card = snapshot.bots.find(bot => conversation.participants.includes(`shared_bot:${bot.sharedBotId}`));
     if (!card) return '';
     const owner = snapshot.directory.find(member => member.uid === card.maintainer.uid)?.displayName || (card.maintainer.uid === snapshot.uid ? t('You', '你') : t('Member', '成员'));
-    const presence = card.state !== 'published' ? t('Disabled', '已停用') : card.ready ? t('Online', '在线') : t('Host unavailable', '宿主不可用');
+    const presence = card.state !== 'published' ? t('Sharing stopped', '已停止共享') : card.ready ? t('Online', '在线') : t('Host unavailable', '宿主不可用');
     return `${presence} · ${t('Owner', '所有者')}: ${owner}`;
   }
   if (conversation.kind === 'dm') return t('Direct message', '私信');
@@ -240,7 +240,9 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
     <div className="tw-stream-wrap">
       <div ref={scroller} className="tw-stream" role="log" aria-label={t('Messages', '消息')} tabIndex={0} onScroll={measure}>
         {start > 0 ? <div className="tw-earlier"><button type="button" onClick={showEarlier}>{t('Show earlier messages', '显示更早的消息')} ({start})</button></div> : null}
-        {!messages.length && !snapshot.pending.length && !runs.tasks.length ? <p className="tw-empty-line" role="status">{loadingMessages ? t('Loading messages…', '正在加载消息…') : t('No messages yet. Say hello.', '还没有消息，打个招呼吧。')}</p> : null}
+        {!messages.length && !snapshot.pending.length && !runs.tasks.length ? loadingMessages
+          ? <p className="tw-empty-line" role="status">{t('Loading messages…', '正在加载消息…')}</p>
+          : <div className="tw-empty" role="status"><h3>{t('No messages yet', '暂无消息')}</h3><p>{t('Say hello to start the conversation.', '打个招呼，开始对话吧。')}</p></div> : null}
         <ol ref={content} className="tw-messages">
           {unanswered.head.map(taskRow)}
           {rows.map(row => {
@@ -261,11 +263,11 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
           {snapshot.pending.map(intent => {
             const payload = pendingPayload(intent);
             const operation = 'operation' in payload ? payload.operation : 'create';
-            const status = (intent.error ? messageErrorText(intent.error, zh) : '') || (intent.attempted ? t('Waiting for server confirmation. Retries keep the same message identity.', '等待服务器确认，重试会沿用同一条消息。') : t('Pending · sends when connected', '待发送 · 联网后发送'));
-            return <li key={payload.changeId} className="tw-msg tw-pending" data-error={intent.error ? 'true' : undefined}>
+            const status = (intent.error ? messageErrorText(intent.error, zh) : '') || (intent.attempted ? t('Waiting for confirmation. Retrying won’t send it twice.', '正在等待确认，重试不会重复发送。') : t('Pending · sends when connected', '待发送 · 联网后发送'));
+            return <li key={payload.changeId} className="tw-msg tw-pending" data-mine="true" data-error={intent.error ? 'true' : undefined}>
               <div className="tw-msg-lead"><Avatar identity={{ kind: 'user', id: uid, name: nameOf(uid) }} size={32} render={renderAvatar} /></div>
               <div className="tw-msg-main">
-                <div className="tw-msg-head"><b className="tw-msg-author">{nameOf(uid)}</b><small role="status">{status}</small></div>
+                <div className="tw-msg-head"><b className="tw-msg-author">{t('You', '你')}</b><small role="status">{status}</small></div>
                 <p className="tw-msg-body">{operation === 'recall' ? t('Recall message', '撤回消息') : `${operation === 'edit' ? `${t('Edit', '编辑')}: ` : ''}${payload.text}`}</p>
                 <div className="tw-pending-actions">
                   {intent.error === 'HOST_UNAVAILABLE' ? <button type="button" onClick={() => void workspace.attempt(() => model.retryHostUnavailable(payload.changeId))}>{t('Retry', '重试')}</button> : null}
@@ -285,10 +287,10 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
       editing={editing} reply={reply ? { message: reply, author: authorOf(reply).name } : undefined} focusToken={focusToken}
       onClearEditing={() => setEditing(undefined)} onClearReply={() => setReply(undefined)} onEditLast={() => { if (lastOwn && participant) edit(lastOwn); }} />
 
-    {recall ? <Dialog role="alertdialog" title={t('Recall this message for everyone?', '为所有人撤回此消息？')} onClose={() => setRecall(undefined)}>
+    {recall ? <Dialog role="alertdialog" title={t('Recall this message for everyone?', '为所有人撤回此消息？')} onClose={() => setRecall(undefined)}
+      description={t('Everyone in this conversation will see that it was recalled.', '会话中的所有人都会看到此消息已被撤回。')}>
       <div className="tw-form">
         <blockquote className="tw-quote">{snippet(recall.text, 140)}</blockquote>
-        <p className="tw-hint">{t('Everyone in this conversation will see that it was recalled.', '会话中的所有人都会看到此消息已被撤回。')}</p>
         <div className="tw-dialog-actions">
           <button type="button" data-autofocus onClick={() => setRecall(undefined)}>{t('Cancel', '取消')}</button>
           <button type="button" className="tw-danger-btn" disabled={snapshot.messageBusy} onClick={() => void confirmRecall()}>{t('Recall', '撤回')}</button>
@@ -324,7 +326,7 @@ function MessageItem({ message, grouped, author, mine, owner, quote, locale, zh,
     <div className="tw-msg-lead">{grouped ? time : <Avatar identity={author} size={32} render={renderAvatar} />}</div>
     <div className="tw-msg-main">
       {!grouped ? <div className="tw-msg-head">
-        <b className="tw-msg-author">{author.name}</b>
+        <b className="tw-msg-author">{mine ? t('You', '你') : author.name}</b>
         {author.kind === 'bot' ? <span className="tw-tag">Bot</span> : null}
         {owner ? <small>{t('Owner', '所有者')}: {owner}</small> : null}
         {time}

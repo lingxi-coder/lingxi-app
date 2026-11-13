@@ -317,6 +317,7 @@ private fun ConversationBody(
                             onReply = { setDraft(draft.copy(replyToId = it.id)); editingId = null },
                             onEdit = { editingId = it.id; setDraft(draft.copy(replyToId = null)) },
                             onRecall = onRecall, onCopy = { copyText(it.text) }, onArtifact = { workspace.messagingModel.openArtifact(it) }, onRefreshTask = { workspace.messagingModel.refreshTask(it) }, onCancelTask = { workspace.messagingModel.cancelTask(it) },
+                            onDecideWait = { waitId, taskId, approve, ids -> workspace.messagingModel.decideWait(waitId, taskId, approve, ids) },
                         )
                         is StreamItem.Local -> LocalCommandRow(item, tick, onDiscard = {
                             workspace.messagingModel.discard((item.intent.optJSONObject("payload") ?: item.intent).getString("changeId"))
@@ -381,6 +382,7 @@ private fun MessageCell(
     messaging: TeamMessagingState, tick: androidx.compose.runtime.State<Long>, byId: Map<String, TeamMessage>, authorOf: (TeamMessage) -> String,
     onReply: (TeamMessage) -> Unit, onEdit: (TeamMessage) -> Unit, onRecall: (TeamMessage) -> Unit, onCopy: (TeamMessage) -> Unit,
     onArtifact: (String) -> Unit, onRefreshTask: (String) -> Unit, onCancelTask: (String) -> Unit,
+    onDecideWait: (waitId: String, taskId: String, approve: Boolean, ids: TeamDecisionIds) -> Unit,
 ) {
     val message = item.message
     var menu by remember { mutableStateOf(false) }
@@ -390,7 +392,15 @@ private fun MessageCell(
     val edit = stringResource(R.string.teams_message_edit)
     val recall = stringResource(R.string.teams_message_recall)
     val copy = stringResource(R.string.chat_message_copy)
-    val editable = canAct && own && message.kind == "text"
+    // A decision on a Bot's request is not text to rewrite or take back.
+    val editable = canAct && own && message.kind == "text" && message.decision == null
+    val request = message.approvalRequest
+    // The service writes an approval request and the reply to it in English; they are shown in the viewer's language.
+    val body = when {
+        request != null -> stringResource(R.string.teams_approval_request_fmt, request.title)
+        message.authorKind == "user" && message.waitId != null && message.decision != null -> stringResource(if (message.decision) R.string.teams_approval_reply_approved else R.string.teams_approval_reply_declined)
+        else -> message.text
+    }
     val card = bots.firstOrNull { it.sharedBotId == message.sharedBotId }
     Box {
         Row(
@@ -425,9 +435,15 @@ private fun MessageCell(
                     }
                 }
                 if (message.recalled) Text(stringResource(R.string.teams_message_recalled), style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                else if (TeamsBotText.rendersMarkdown(message.authorKind, message.recalled)) AIText(markdown = message.text, modifier = Modifier.fillMaxWidth().testTag("teams.message.body.${message.id}"), onOpenLink = rememberTeamBotLinkOpener())
-                else Text(message.text, style = MaterialTheme.typography.bodyLarge)
+                else if (TeamsBotText.rendersMarkdown(message.authorKind, message.recalled)) AIText(markdown = body, modifier = Modifier.fillMaxWidth().testTag("teams.message.body.${message.id}"), onOpenLink = rememberTeamBotLinkOpener())
+                else Text(body, style = MaterialTheme.typography.bodyLarge)
                 if (message.editedAt != null && !message.recalled) Text(stringResource(R.string.teams_message_edited), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val requestTask = message.taskId
+                if (request != null && message.waitId != null && requestTask != null) {
+                    val state = TeamTaskActions.approvalState(message.waitId, messaging.tasks.firstOrNull { it.taskId == requestTask }, viewer, messaging.cache?.threads?.get(conversation.id)?.messages ?: emptyList())
+                    val decider = when (state) { is TeamApprovalState.Waiting -> personName(state.uid); is TeamApprovalState.Approved -> personName(state.uid); is TeamApprovalState.Declined -> personName(state.uid); else -> "" }
+                    TeamApprovalCard(request, message.waitId, state, decider) { approve, ids -> onDecideWait(message.waitId, requestTask, approve, ids) }
+                }
                 val taskIds = message.taskId?.let { listOf(it) } ?: message.taskIds
                 taskIds.forEach { taskId ->
                     val task = messaging.tasks.firstOrNull { it.taskId == taskId }

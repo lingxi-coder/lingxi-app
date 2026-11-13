@@ -76,7 +76,7 @@ struct TeamTaskCard: View {
             Button {
                 Task { await workspace.run { try await workspace.messaging?.refreshTask(task.taskId) } }
             } label: {
-                Label(LocalizedStringKey(task.cancelling ? "teams_task_cancelling" : TeamsBotText.stateKey(task.state)), systemImage: "arrow.clockwise")
+                Label(LocalizedStringKey(task.cancelling ? "teams_task_cancelling" : task.state == "waiting" && task.wait?.kind == "tool_approval" ? "teams_task_waiting_approval" : TeamsBotText.stateKey(task.state)), systemImage: "arrow.clockwise")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
@@ -124,6 +124,79 @@ struct TeamTaskCard: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.task.\(task.taskId)")
+    }
+}
+/// A Bot's request to change its list, under the message that carries it: each change in words, and Approve and Decline for the member the
+/// Bot works for while the task waits. Afterwards it says how the request ended. Nothing is saved to the list before an approval.
+struct TeamApprovalCard: View {
+    @Environment(TeamsWorkspace.self) private var workspace
+    let approval: TeamListApproval
+    let waitId: String
+    let taskId: String
+    let state: TeamApprovalState
+    /// The name of the member who decides or decided (not used when that is the viewer deciding now).
+    let deciderName: String
+    @State private var sending = false
+    /// One identity per decision, kept across retries so a lost answer cannot post the reply twice.
+    @State private var ids: [Bool: TeamDecisionIds] = [:]
+
+    private func line(_ change: TeamListApproval.Change) -> String {
+        let item = change.item.map { "“\($0)”" } ?? String(localized: "teams_approval_missing_item")
+        let text = "“\(change.text ?? "")”"
+        switch (change.op, change.text != nil, change.done) {
+        case ("add", _, _): return String(localized: "teams_approval_add \(text)")
+        case ("remove", _, _): return String(localized: "teams_approval_remove \(item)")
+        case (_, true, .some(true)): return String(localized: "teams_approval_change_done \(item) \(text)")
+        case (_, true, .some(false)): return String(localized: "teams_approval_change_undone \(item) \(text)")
+        case (_, true, nil): return String(localized: "teams_approval_change \(item) \(text)")
+        case (_, false, .some(false)): return String(localized: "teams_approval_undone \(item)")
+        default: return String(localized: "teams_approval_done \(item)")
+        }
+    }
+    private var status: String? {
+        switch state {
+        case .decide: nil
+        case .waiting: String(localized: "teams_approval_waiting_member \(deciderName)")
+        case .approved: String(localized: "teams_approval_approved_by \(deciderName)")
+        case .declined: String(localized: "teams_approval_declined_by \(deciderName)")
+        case .closed: String(localized: "teams_approval_closed")
+        }
+    }
+    private func decide(_ approve: Bool) {
+        guard !sending else { return }
+        sending = true
+        let identity = ids[approve] ?? TeamDecisionIds(); ids[approve] = identity
+        Task { await workspace.run { try await workspace.messaging?.decideWait(waitId, taskId: taskId, approve: approve, ids: identity) }; sending = false }
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("teams_approval_title \(approval.title)").font(.subheadline.weight(.semibold))
+            ForEach(Array(approval.changes.enumerated()), id: \.offset) { _, change in
+                Label(line(change), systemImage: change.op == "add" ? "plus" : change.op == "remove" ? "minus" : "pencil")
+                    .font(.footnote)
+            }
+            if let status {
+                Text(status).font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("teams.approval.status.\(waitId)")
+            } else {
+                Text("teams_approval_hint").font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Button("teams_approval_approve") { decide(true) }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("teams.approval.approve.\(waitId)")
+                    Button("teams_approval_decline", role: .destructive) { decide(false) }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("teams.approval.decline.\(waitId)")
+                }
+                .controlSize(.small)
+                .disabled(sending)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("teams.approval.\(waitId)")
     }
 }
 /// Artifact links come from Bot output, so only web links may leave the app.

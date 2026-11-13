@@ -38,6 +38,20 @@ internal data class TeamTask(val taskId: String, val conversationId: String, val
         TeamMemberRef.parse(v.getJSONObject("requester")), v.getString("state"), v.getLong("createdAt"), v.getLong("deadline"), v.stringOrNull("replyId"), v.stringOrNull("artifactId"), v.optJSONObject("usage")?.let(TeamTaskUsage::parse),
         if (v.has("cancelRequestedAt") && !v.isNull("cancelRequestedAt")) v.getLong("cancelRequestedAt") else null, v.optJSONObject("wait")?.let(TeamTaskWait::parse)) }
 }
+/** The identity of one decision on a request. Made once and sent again unchanged on a retry, so a lost answer cannot post the reply twice. */
+internal data class TeamDecisionIds(val commandId: String = java.util.UUID.randomUUID().toString(), val messageId: String = java.util.UUID.randomUUID().toString(),
+    val changeId: String = java.util.UUID.randomUUID().toString())
+/** Where a Bot's request to change its list stands for the viewer (Desktop `ApprovalCard`). */
+internal sealed interface TeamApprovalState {
+    /** The task waits for the viewer's decision. */
+    object Decide : TeamApprovalState
+    /** The task waits for this member's decision. */
+    data class Waiting(val uid: String) : TeamApprovalState
+    data class Approved(val uid: String) : TeamApprovalState
+    data class Declined(val uid: String) : TeamApprovalState
+    /** It ended without a decision: it expired, or its task was cancelled or lost its authorization. */
+    object Closed : TeamApprovalState
+}
 /** What the viewer may do with a task (Desktop `BotRun`). */
 internal object TeamTaskActions {
     enum class ExpiryUnit { MINUTES, HOURS, DAYS }
@@ -47,7 +61,16 @@ internal object TeamTaskActions {
     /** The wait an answer from the viewer would resolve: the task waits for exactly this viewer and no answer to it is already on its way. */
     fun answerableWait(task: TeamTask?, viewer: TeamMemberRef?, pendingWaitIds: Set<String>): String? {
         val wait = task?.wait ?: return null
-        return if (task.state == "waiting" && viewer != null && wait.recipient == viewer && wait.waitId !in pendingWaitIds) wait.waitId else null
+        // A proposed change is approved or declined on its own card, never answered in words.
+        return if (task.state == "waiting" && wait.kind == "human_input" && viewer != null && wait.recipient == viewer && wait.waitId !in pendingWaitIds) wait.waitId else null
+    }
+    /** Where the request [waitId] stands: open while its task waits on it, then decided by the reply that carries the decision, else closed. */
+    fun approvalState(waitId: String, task: TeamTask?, viewer: TeamMemberRef?, messages: List<TeamMessage>): TeamApprovalState {
+        val wait = task?.wait
+        if (task?.state == "waiting" && wait != null && wait.waitId == waitId && wait.kind == "tool_approval")
+            return if (viewer != null && wait.recipient == viewer) TeamApprovalState.Decide else TeamApprovalState.Waiting(wait.recipient.uid)
+        val reply = messages.firstOrNull { it.waitId == waitId && it.authorKind == "user" && it.decision != null } ?: return TeamApprovalState.Closed
+        return if (reply.decision == true) TeamApprovalState.Approved(reply.authorUid) else TeamApprovalState.Declined(reply.authorUid)
     }
     /** The wait a reply to [message] would answer: [message] is a Bot's question whose task still waits for the viewer. */
     fun answerableWait(message: TeamMessage?, tasks: List<TeamTask>, viewer: TeamMemberRef?, pendingWaitIds: Set<String>): String? {
@@ -141,6 +164,11 @@ internal object TeamExecutionContract {
                 shape(setOf("conversationId", "waitId", "messageId", "changeId", "text"))
                 listOf("conversationId", "waitId", "messageId", "changeId").forEach(::requireId)
                 val text = p.opt("text") as? String ?: fail(); if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 8192) fail()
+            }
+            "decideWait" -> {
+                shape(setOf("conversationId", "waitId", "messageId", "changeId", "decision"))
+                listOf("conversationId", "waitId", "messageId", "changeId").forEach(::requireId)
+                if ((p.opt("decision") as? String) !in setOf("approve", "deny")) fail()
             }
             "listTasks" -> { shape(emptySet(), setOf("conversationId", "after")); p.keysSet().forEach(::requireId) }
             "pauseSharedBot" -> { shape(setOf("sharedBotId", "expectedRevision")); requireId("sharedBotId"); if (!integer(p.opt("expectedRevision"), 1)) fail() }

@@ -106,6 +106,53 @@ class TeamsBotTextTest {
         assertNull(TeamTaskActions.answerableWait(message("shared_bot", "t", "wait_1"), tasks, asker, TeamTaskActions.pendingWaitIds(outbox)))
     }
 
+    // Approving a list change (M2 Q05)
+    private val approvalWait = ""","epoch":2,"wait":{"waitId":"wait_1","kind":"tool_approval","recipient":{"uid":"asker","generation":3},"expiresAt":9000000,"messageId":"request"}"""
+    private fun posted(author: String, extra: String = "") = TeamMessage.parse(JSONObject("""{"id":"m","seq":1,"author":$author,"kind":"text","text":"x","changeSeq":1,"changeId":"change_0001","taskId":"t","waitId":"wait_1"$extra}"""))
+    private val bot = """{"kind":"shared_bot","sharedBotId":"sharedbot_01","displayName":"Helper"}"""
+    private val person = """{"kind":"user","uid":"asker"}"""
+
+    @Test fun aProposedChangeIsDecidedOnItsCardAndNeverAnsweredInWords() {
+        val waiting = task("waiting", approvalWait)
+        assertNull(TeamTaskActions.answerableWait(waiting, asker, emptySet()))
+        assertEquals(TeamApprovalState.Decide, TeamTaskActions.approvalState("wait_1", waiting, asker, emptyList()))
+        assertEquals(TeamApprovalState.Waiting("asker"), TeamTaskActions.approvalState("wait_1", waiting, keeper, emptyList()))
+        assertEquals(TeamApprovalState.Waiting("asker"), TeamTaskActions.approvalState("wait_1", waiting, null, emptyList()))
+        // The same person after rejoining is another member.
+        assertEquals(TeamApprovalState.Waiting("asker"), TeamTaskActions.approvalState("wait_1", waiting, TeamMemberRef("asker", 4), emptyList()))
+        // A question is not an approval, and another wait of the same task is not this request.
+        assertEquals(TeamApprovalState.Closed, TeamTaskActions.approvalState("wait_1", task("waiting", wait), asker, emptyList()))
+        assertEquals(TeamApprovalState.Closed, TeamTaskActions.approvalState("wait_0", waiting, asker, emptyList()))
+    }
+
+    @Test fun aDecidedRequestSaysWhoDecidedAndAnUndecidedOneIsClosed() {
+        val done = task("completed")
+        val approved = posted(person, ""","decision":"approve""""); val declined = posted(person, ""","decision":"deny"""")
+        assertEquals(TeamApprovalState.Approved("asker"), TeamTaskActions.approvalState("wait_1", done, asker, listOf(approved)))
+        assertEquals(TeamApprovalState.Declined("asker"), TeamTaskActions.approvalState("wait_1", null, other, listOf(declined)))
+        assertEquals(TeamApprovalState.Closed, TeamTaskActions.approvalState("wait_1", task("expired"), asker, emptyList()))
+        // Only a member's reply with one of the two decisions counts.
+        for (stray in listOf(posted(person), posted(person, ""","decision":"maybe""""), posted(person, ""","decision":true"""), posted(bot, ""","decision":"approve"""")))
+            assertEquals(TeamApprovalState.Closed, TeamTaskActions.approvalState("wait_1", done, asker, listOf(stray)))
+        assertEquals(TeamApprovalState.Closed, TeamTaskActions.approvalState("wait_2", done, asker, listOf(approved)))
+    }
+
+    @Test fun aRequestIsShownOnlyWhenEveryChangeCanBeSaidInWords() {
+        val changes = """[{"op":"add","text":"Bread"},{"op":"update","itemId":"item_0001","done":true,"item":"Milk"},{"op":"remove","itemId":"item_0002","item":null}]"""
+        val request = posted(bot, ""","approval":{"title":"Groceries","changes":$changes}""").approvalRequest!!
+        assertEquals("Groceries", request.title)
+        assertEquals(listOf(TeamListApprovalChange("add", text = "Bread"), TeamListApprovalChange("update", done = true, item = "Milk"), TeamListApprovalChange("remove")), request.changes)
+        // A request that cannot be read never fails the message it is on; it is just not shown as a request.
+        for (broken in listOf(""""soon"""", """{"title":"Groceries"}""", """{"title":"Groceries","changes":[]}""", """{"title":"Groceries","changes":[{"op":"clear"}]}""", """{"title":"Groceries","changes":[{"op":"add"}]}""",
+            """{"title":"Groceries","changes":[{"op":"update","itemId":"item_0001"}]}""", """{"title":"Groceries","changes":[{"op":"add","text":5}]}""", """{"changes":$changes}""")) {
+            val read = posted(bot, ""","approval":$broken""")
+            assertNull(broken, read.approvalRequest); assertEquals("x", read.text)
+        }
+        // Only a Bot asks, and a recalled request asks nothing.
+        assertNull(posted(person, ""","approval":{"title":"Groceries","changes":$changes}""").approvalRequest)
+        assertNull(posted(bot, ""","recalled":true,"approval":{"title":"Groceries","changes":$changes}""").approvalRequest)
+    }
+
     @Test fun aWaitExpiryIsRoundedUpToMinutesHoursOrDays() {
         fun expiry(ms: Long) = TeamTaskActions.expiry(1_000_000 + ms, 1_000_000).let { "${it.first} ${it.second}" }
         assertEquals("1 MINUTES", expiry(-5))

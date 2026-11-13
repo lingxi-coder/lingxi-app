@@ -15,7 +15,7 @@ final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchec
 @MainActor @Observable
 final class TeamMessagingModel {
     static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "sharedBotId"]
-    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "targets", "taskId", "taskIds", "artifactId", "waitId"]
+    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision"]
     private(set) var cache: TeamMessageProjection?
     private(set) var offline = true
     private(set) var error = ""
@@ -379,6 +379,14 @@ final class TeamMessagingModel {
     func cancelTask(_ taskId: String) async throws {
         do { let _: TeamTaskCancellation = try await execute("cancelTask", payload: ["taskId": taskId], life: lifecycle) }
         catch let failure as TeamMessageFailure where failure.code == "TASK_FINISHED" {}
+        try await refreshTask(taskId)
+    }
+    /// Approves or declines the list change a task waits on. `ids` are made once per decision by the caller: sending them again after a lost
+    /// answer repeats the same command, so the reply is never posted twice.
+    func decideWait(_ waitId: String, taskId: String, approve: Bool, ids: TeamDecisionIds) async throws {
+        guard !selected.isEmpty else { throw TeamMessageFailure(code: "INVALID_INPUT") }
+        let _: TeamBotAck = try await execute("decideWait", payload: ["conversationId": selected, "waitId": waitId, "messageId": ids.messageId, "changeId": ids.changeId,
+                                                                                 "decision": approve ? "approve" : "deny"], commandId: ids.commandId, life: lifecycle)
         try await refreshTask(taskId)
     }
     func openArtifact(_ artifactId: String) async throws {

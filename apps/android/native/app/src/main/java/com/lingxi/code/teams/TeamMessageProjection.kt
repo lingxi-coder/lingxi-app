@@ -33,11 +33,45 @@ internal data class TeamMessageConversation(val id: String, val kind: String, va
         }
     }
 }
+/** One change a Bot asks to make to its list. [item] is the item as it read when the Bot asked: null for an added item, and for one that was already gone. */
+internal data class TeamListApprovalChange(val op: String, val text: String? = null, val done: Boolean? = null, val item: String? = null)
+/** A Bot's request to change its list: the list and exactly the changes the approval is for. */
+internal data class TeamListApproval(val title: String, val changes: List<TeamListApprovalChange>) {
+    companion object {
+        /** Never throws: one unreadable request must not hide the conversation it is in. It is then not shown as a request. */
+        fun parse(value: Any?): TeamListApproval? {
+            val request = value as? JSONObject ?: return null
+            val title = request.opt("title") as? String ?: return null
+            val list = request.optJSONArray("changes")?.takeIf { it.length() > 0 } ?: return null
+            val changes = (0 until list.length()).map { index ->
+                val change = list.optJSONObject(index) ?: return null
+                val op = change.opt("op") as? String
+                val text = change.opt("text").takeIf { change.has("text") && !change.isNull("text") }
+                val done = change.opt("done").takeIf { change.has("done") && !change.isNull("done") }
+                if ((text != null && text !is String) || (done != null && done !is Boolean)) return null
+                when (op) {
+                    "add" -> if (text == null) return null
+                    "update" -> if (text == null && done == null) return null
+                    "remove" -> Unit
+                    else -> return null
+                }
+                TeamListApprovalChange(op!!, text as String?, done as Boolean?, if (op == "add") null else change.opt("item") as? String)
+            }
+            return TeamListApproval(title, changes)
+        }
+    }
+}
 internal data class TeamMessage(val id: String, val seq: Long, val authorUid: String, val authorKind: String, val text: String,
     val changeSeq: Long, val changeId: String, val recalled: Boolean, val replyTo: String?, val editedAt: String?, val kind: String = "text",
     val sharedBotId: String? = null, val taskId: String? = null, val artifactId: String? = null, val targets: List<String> = emptyList(), val createdAt: String? = null, val taskIds: List<String> = emptyList(), val authorDisplayName: String? = null,
     /** On a Bot's question and on the answer to it: the wait they belong to. */
-    val waitId: String? = null) {
+    val waitId: String? = null,
+    /** On a Bot's request to approve a list change. */
+    val approval: TeamListApproval? = null,
+    /** On the requester's reply to such a request: approved or declined. */
+    val decision: Boolean? = null) {
+    /** The request to show under this message, if it is one a Bot made. */
+    val approvalRequest: TeamListApproval? get() = approval.takeIf { authorKind != "user" && !recalled && waitId != null }
     val createdAtMs: Long? get() = createdAt?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrNull() }
     companion object { fun parse(v: JSONObject): TeamMessage {
         val author = v.getJSONObject("author"); val authorKind = author.getString("kind")
@@ -45,7 +79,8 @@ internal data class TeamMessage(val id: String, val seq: Long, val authorUid: St
         return TeamMessage(v.getString("id"), v.getLong("seq"), if (authorKind == "user") author.getString("uid") else "", authorKind,
             v.getString("text"), v.getLong("changeSeq"), v.getString("changeId"), v.optBoolean("recalled"), v.stringOrNull("replyTo"),
             v.stringOrNull("editedAt"), v.getString("kind"), if (authorKind == "shared_bot") author.getString("sharedBotId") else null,
-            v.stringOrNull("taskId"), v.stringOrNull("artifactId"), v.optJSONArray("targets")?.strings() ?: emptyList(), v.stringOrNull("createdAt"), v.optJSONArray("taskIds")?.strings() ?: emptyList(), author.stringOrNull("displayName"), v.stringOrNull("waitId"))
+            v.stringOrNull("taskId"), v.stringOrNull("artifactId"), v.optJSONArray("targets")?.strings() ?: emptyList(), v.stringOrNull("createdAt"), v.optJSONArray("taskIds")?.strings() ?: emptyList(), author.stringOrNull("displayName"), v.stringOrNull("waitId"),
+            TeamListApproval.parse(v.opt("approval")), when (v.opt("decision")) { "approve" -> true; "deny" -> false; else -> null })
     } }
 }
 internal data class TeamMessageThread(val messages: List<TeamMessage> = emptyList())

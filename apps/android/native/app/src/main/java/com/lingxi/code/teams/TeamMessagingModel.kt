@@ -295,6 +295,12 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         catch (error: TeamMessageFailure) { if (error.code != "TASK_FINISHED") throw error }
         refreshTask(taskId)
     }
+    /** Approves or declines the list change a task waits on. [ids] are made once per decision by the caller: sending them again repeats the same command. */
+    fun decideWait(waitId: String, taskId: String, approve: Boolean, ids: TeamDecisionIds) = launchOperation {
+        val payload = JSONObject().put("conversationId", mutable.value.selected).put("waitId", waitId).put("messageId", ids.messageId).put("changeId", ids.changeId).put("decision", if (approve) "approve" else "deny")
+        call(executionCommand("decideWait", payload, ids.commandId), lifecycle)
+        refreshTask(taskId)
+    }
     fun openArtifact(artifactId: String) = launchOperation {
         val selection = mutable.value.selected
         val artifact = TeamArtifact.parse(execute("readArtifact", JSONObject().put("artifactId", artifactId), lifecycle))

@@ -26,6 +26,24 @@ struct TeamConversationContext {
         let pending = Set((model.cache?.outbox ?? []).compactMap(\.waitId))
         return TeamTaskActions.answerableWait(model.tasks.first { $0.taskId == taskId }, viewer: viewer, pendingWaitIds: pending) == waitId ? waitId : nil
     }
+    /// Where the Bot's request under `message` stands for the viewer, and the name of the member who decides or decided it.
+    @MainActor
+    func approval(of message: TeamMessage) -> (state: TeamApprovalState, decider: String) {
+        let state = TeamTaskActions.approvalState(waitId: message.waitId ?? "", task: model.tasks.first { $0.taskId == message.taskId }, viewer: viewer,
+                                                  messages: model.cache?.threads[conversation.id]?.messages ?? [])
+        switch state {
+        case .waiting(let uid), .approved(let uid), .declined(let uid): return (state, userName(uid))
+        case .decide, .closed: return (state, "")
+        }
+    }
+    /// What a message says. The service writes an approval request and the reply to it in English; they are shown in the viewer's language.
+    func text(of message: TeamMessage) -> String {
+        if let request = message.approvalRequest { return String(localized: "teams_approval_request \(request.title)") }
+        if message.author.kind == "user", message.waitId != nil, let approved = message.decision?.approved {
+            return String(localized: approved ? "teams_approval_reply_approved" : "teams_approval_reply_declined")
+        }
+        return message.text
+    }
     /// The viewer may send here (a Bot's owner reading someone else's Bot DM only observes).
     var participant: Bool { conversation.participants.isEmpty || conversation.participants.contains("user:\(uid)") }
 
@@ -171,11 +189,11 @@ struct TeamMessageCell: View {
                     Text("teams_message_recalled").italic().foregroundStyle(.secondary)
                 } else if TeamsBotText.rendersMarkdown(authorKind: message.author.kind, recalled: recalled) {
                     // A shared Bot writes Markdown: the chat's renderer, web links only. Images stay inert.
-                    AIText(markdown: message.text)
+                    AIText(markdown: context.text(of: message))
                         .teamBotLinkPolicy()
                         .accessibilityIdentifier("teams.message.body.\(message.id)")
                 } else {
-                    Text(message.text)
+                    Text(context.text(of: message))
                 }
                 if message.editedAt != nil && !recalled {
                     Text("teams_message_edited").font(.caption2).foregroundStyle(.secondary)
@@ -236,6 +254,11 @@ struct TeamMessageCell: View {
 
     @ViewBuilder
     private var cards: some View {
+        if let request = message.approvalRequest, let waitId = message.waitId, let taskId = message.taskId {
+            let standing = context.approval(of: message)
+            TeamApprovalCard(approval: request, waitId: waitId, taskId: taskId, state: standing.state, deciderName: standing.decider)
+                .padding(.top, 4)
+        }
         let ids = message.taskId.map { [$0] } ?? message.taskIds ?? []
         ForEach(ids, id: \.self) { taskId in
             if let task = context.model.tasks.first(where: { $0.taskId == taskId }) {

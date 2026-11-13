@@ -37,6 +37,39 @@ struct TeamMessageConversation: Equatable, Identifiable, Sendable {
     /// The raw SharedBot ID stored on a DM or carried by its explicit `shared_bot:` participant.
     var effectiveSharedBotId: String? { sharedBotId ?? participants.first { $0.hasPrefix("shared_bot:") }.map { String($0.dropFirst(11)) } }
 }
+/// A Bot's request to change its list: the list and exactly the changes the approval is for.
+struct TeamListApproval: Decodable, Equatable, Sendable {
+    struct Change: Decodable, Equatable, Sendable {
+        let op: String
+        var text: String? = nil
+        var done: Bool? = nil
+        /// The item as it read when the Bot asked: `nil` for an added item, and for one that was already gone.
+        var item: String? = nil
+    }
+    let title: String
+    let changes: [Change]
+    init(title: String, changes: [Change]) { self.title = title; self.changes = changes }
+    private enum CodingKeys: String, CodingKey { case title, changes }
+    /// Never fails: one unreadable request must not hide the conversation it is in. It then has no changes and is not shown as a request.
+    init(from decoder: Decoder) throws {
+        let c = try? decoder.container(keyedBy: CodingKeys.self)
+        title = (try? c?.decode(String.self, forKey: .title)) ?? ""
+        changes = (try? c?.decode([Change].self, forKey: .changes)) ?? []
+    }
+    /// Every change is one the list knows, so each can be said in words.
+    var readable: Bool {
+        !changes.isEmpty && changes.allSatisfy { ["add", "update", "remove"].contains($0.op) && ($0.op != "add" || $0.text != nil) && ($0.op != "update" || $0.text != nil || $0.done != nil) }
+    }
+}
+/// The requester's reply to such a request. Anything but the two decisions reads as no decision.
+struct TeamWaitDecision: Decodable, Equatable, Sendable {
+    let approved: Bool?
+    init(approved: Bool?) { self.approved = approved }
+    init(from decoder: Decoder) throws {
+        let raw = try? decoder.singleValueContainer().decode(String.self)
+        approved = raw == "approve" ? true : raw == "deny" ? false : nil
+    }
+}
 struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     struct Author: Decodable, Equatable, Sendable {
         let kind: String; let uid: String; let sharedBotId: String?; let displayName: String?
@@ -71,6 +104,15 @@ struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     var artifactId: String? = nil
     /// On a Bot's question and on the answer to it: the wait they belong to.
     var waitId: String? = nil
+    /// On a Bot's request to approve a list change.
+    var approval: TeamListApproval? = nil
+    /// On the requester's reply to such a request.
+    var decision: TeamWaitDecision? = nil
+    /// The request to show under this message, if it is one a Bot made and it can be read.
+    var approvalRequest: TeamListApproval? {
+        guard author.kind != "user", recalled != true, waitId != nil, let approval, approval.readable else { return nil }
+        return approval
+    }
 
 }
 struct TeamMessageIntent: Codable, Equatable, Identifiable, Sendable {

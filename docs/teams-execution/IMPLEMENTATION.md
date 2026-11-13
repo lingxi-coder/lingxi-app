@@ -137,6 +137,43 @@ runtime and host only know a "list service" with read and operation-id write; a 
 - Known limit: `dispatchedAt` is the host clock (as `pausedAt` is). A host clock ahead of the service, or behind the start of
   the attempt, makes the record answer `TASK_EXPIRED`, which ends the run.
 
+## M2 / Q05 — approving a list change
+
+Scope: the controlled write is the Bot's own write to its shared list, and the approver is the member whose request the task
+serves (B3, C7). Connection waits (B8) and budget waits are not built: no M2 tool needs a connection or a budget grant.
+
+- Publication: `sharedList.approval` is `none` (default, absent) or `requester`. The card shows it; a list that asks needs a
+  deployment with both `writeOperations` and `durableWait` (the Desktop publishes both exactly on a continuable route).
+- Runtime (`harness-runtime`, `team_process`): a list published with `requester` offers `TeamListProposeChange` instead of
+  `TeamListWrite`; the two names never share a transcript meaning. A well-formed proposal that is on the transcript file is the
+  task's wait: `kind: "tool_approval"`, `waitId` derived from its logical step, `question` the proposed write as JSON, and a
+  request digest under its own domain. The worker ends as `waiting` exactly as for a question and nothing reaches the host.
+  One wait is open at a time, whichever tool opens it.
+- Continuation: a waiting task continues only with the reply to that wait and of that kind (`answer.approved` present exactly
+  for an approval). Approved: the write is sent with `approvalRef` = the wait of its own step; the parent process refuses any
+  write whose `approvalRef` does not match the list's mode. Declined: the call returns `DECLINED` to the model and nothing is
+  sent. An approved write that is interrupted repeats in the next attempt with the same step, operation id and approval.
+- Desktop host: `pauseTask {kind: "tool_approval", approval: {operationId, logicalStepId, expectedDataRevision, changes}}`
+  with the operation id the write will have and no free text. A proposal that is not a valid list change, or one on a list
+  that does not ask, ends the task instead of asking anyone. `resume.decision` becomes `answer.approved`; a reply in words
+  to an approval (or a decision on a question) continues nothing. `recordOperation` carries `approvalRef`;
+  `APPROVAL_REQUIRED` from the ledger is told to the Bot as a refusal and nothing is sent.
+- Service (already in the Q05 backend commit): the request message carries `waitId` and `approval {title, changes}` with each
+  touched item as it read then; `decideWait {decision}` is accepted only from the wait's recipient and only for an approval
+  wait (`answerWait` only for a question: `WAIT_KIND_MISMATCH`); `recordOperation` for a list that asks accepts the write only
+  under an approved wait of the same task, operation id and parameter digest. A change of parameters, a declined, expired,
+  cancelled or revoked wait all leave the list untouched. The list revision is still checked when the write is applied, so an
+  approval of a change to a list that moved on saves nothing and the Bot is told.
+- Clients (Web, Desktop, iOS, Android): `TaskWait.kind` is `human_input | tool_approval`. An approval request is never
+  answered in words: the Reply entry is offered only for a question. Under the Bot's request a card lists each change in
+  words (add, rename, tick, untick, remove; an item that was already gone is said so) with Approve and Decline for the
+  recipient, "waiting for <member>" for everyone else, and afterwards how it ended (approved by, declined by, or ended
+  without a decision). A decision keeps its command, message and change ids across retries. The request text and the reply
+  (`Approved` / `Declined`) are stored in English and shown in the viewer's language; a decision cannot be edited or recalled
+  from the clients. The publish wizard on Desktop has "Ask before the assistant changes the list".
+- Not built: approvers other than the requester (design §10 allows an authorized approver set), approval of anything but the
+  list write, and a member-side view of pending approvals outside the chat. iOS and Android still have no list screen.
+
 ## M2 / Q07–Q08 clients — document editing, history and tasks that need checking
 
 Member commands added to the shared contract (`packages/teams/contracts/execution-vectors.json`, validated identically by the

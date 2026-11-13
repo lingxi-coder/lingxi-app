@@ -91,6 +91,57 @@ final class TeamTaskUsageTests: XCTestCase {
         XCTAssertNil(TeamTaskActions.answerableWait(nil, viewer: asker, pendingWaitIds: []))
     }
 
+    // MARK: Approving a list change (M2 Q05)
+
+    private let approvalWait = #","epoch":2,"wait":{"waitId":"wait_1","kind":"tool_approval","recipient":{"uid":"asker","generation":3},"expiresAt":9000000,"messageId":"request"}"#
+    private func message(_ id: String, _ author: String, _ extra: String = "") throws -> TeamMessage {
+        let json = #"{"id":""# + id + #"","seq":1,"author":"# + author + #","kind":"text","text":"x","changeSeq":1,"changeId":"change_0001","taskId":"t","waitId":"wait_1""# + extra + "}"
+        return try JSONDecoder().decode(TeamMessage.self, from: Data(json.utf8))
+    }
+    private let bot = #"{"kind":"shared_bot","sharedBotId":"sharedbot_01","displayName":"Helper"}"#
+    private let person = #"{"kind":"user","uid":"asker"}"#
+
+    func testAProposedChangeIsDecidedOnItsCardAndNeverAnsweredInWords() throws {
+        let waiting = try task("waiting", approvalWait)
+        XCTAssertNil(TeamTaskActions.answerableWait(waiting, viewer: asker, pendingWaitIds: []))
+        XCTAssertEqual(TeamTaskActions.approvalState(waitId: "wait_1", task: waiting, viewer: asker, messages: []), .decide)
+        XCTAssertEqual(TeamTaskActions.approvalState(waitId: "wait_1", task: waiting, viewer: maintainer, messages: []), .waiting(uid: "asker"))
+        // The same person after rejoining is another member.
+        XCTAssertEqual(TeamTaskActions.approvalState(waitId: "wait_1", task: waiting, viewer: TeamMemberRef(uid: "asker", generation: 4), messages: []), .waiting(uid: "asker"))
+        // A question is not an approval, and another wait of the same task is not this request.
+        XCTAssertEqual(TeamTaskActions.approvalState(waitId: "wait_1", task: try task("waiting", wait), viewer: asker, messages: []), .closed)
+        XCTAssertEqual(TeamTaskActions.approvalState(waitId: "wait_0", task: waiting, viewer: asker, messages: []), .closed)
+    }
+
+    func testADecidedRequestSaysWhoDecidedAndAnUndecidedOneIsClosed() throws {
+        let done = try task("completed")
+        let approved = try message("reply", person, #","decision":"approve""#), declined = try message("reply", person, #","decision":"deny""#)
+        XCTAssertEqual(TeamTaskActions.approvalState(waitId: "wait_1", task: done, viewer: asker, messages: [approved]), .approved(uid: "asker"))
+        XCTAssertEqual(TeamTaskActions.approvalState(waitId: "wait_1", task: nil, viewer: other, messages: [declined]), .declined(uid: "asker"))
+        XCTAssertEqual(TeamTaskActions.approvalState(waitId: "wait_1", task: try task("expired"), viewer: asker, messages: []), .closed)
+        // Only a member's reply with one of the two decisions counts.
+        for stray in [try message("reply", person), try message("reply", person, #","decision":"maybe""#), try message("reply", person, #","decision":true"#), try message("reply", bot, #","decision":"approve""#)] {
+            XCTAssertEqual(TeamTaskActions.approvalState(waitId: "wait_1", task: done, viewer: asker, messages: [stray]), .closed)
+        }
+        XCTAssertEqual(TeamTaskActions.approvalState(waitId: "wait_2", task: done, viewer: asker, messages: [approved]), .closed)
+    }
+
+    func testARequestIsShownOnlyWhenEveryChangeCanBeSaidInWords() throws {
+        let changes = #"[{"op":"add","text":"Bread"},{"op":"update","itemId":"item_0001","done":true,"item":"Milk"},{"op":"remove","itemId":"item_0002","item":null}]"#
+        let request = try XCTUnwrap(try message("request", bot, #","approval":{"title":"Groceries","changes":"# + changes + "}").approvalRequest)
+        XCTAssertEqual(request.title, "Groceries")
+        XCTAssertEqual(request.changes, [.init(op: "add", text: "Bread"), .init(op: "update", done: true, item: "Milk"), .init(op: "remove")])
+        // A request that cannot be read never fails the message it is on; it is just not shown as a request.
+        for broken in [#""soon""#, #"{"title":"Groceries"}"#, #"{"title":"Groceries","changes":[]}"#, #"{"title":"Groceries","changes":[{"op":"clear"}]}"#,
+                       #"{"title":"Groceries","changes":[{"op":"add"}]}"#, #"{"title":"Groceries","changes":[{"op":"update","itemId":"item_0001"}]}"#, #"{"title":"Groceries","changes":[{"op":"add","text":5}]}"#] {
+            let read = try message("request", bot, #","approval":"# + broken)
+            XCTAssertNil(read.approvalRequest, broken); XCTAssertEqual(read.text, "x")
+        }
+        // Only a Bot asks, and a recalled request asks nothing.
+        XCTAssertNil(try message("request", person, #","approval":{"title":"Groceries","changes":"# + changes + "}").approvalRequest)
+        XCTAssertNil(try message("request", bot, #","recalled":true,"approval":{"title":"Groceries","changes":"# + changes + "}").approvalRequest)
+    }
+
     func testAWaitExpiryIsRoundedUpToMinutesHoursOrDays() {
         func expiry(_ ms: Double) -> String { let e = TeamTaskActions.expiry(at: 1_000_000 + ms, now: 1_000_000); return "\(e.value) \(e.unit)" }
         XCTAssertEqual(expiry(-5), "1 minutes")

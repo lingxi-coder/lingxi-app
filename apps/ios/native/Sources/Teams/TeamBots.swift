@@ -58,6 +58,23 @@ struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
     /// Cancellation was asked while the Bot was working; the task ends at the worker's next check.
     var cancelling: Bool { state == "running" && cancelRequestedAt != nil }
 }
+/// The identity of one decision on a request. Made once and sent again unchanged on a retry.
+struct TeamDecisionIds: Equatable, Sendable {
+    var commandId = UUID().uuidString
+    var messageId = UUID().uuidString
+    var changeId = UUID().uuidString
+}
+/// Where a Bot's request to change its list stands for the viewer (Desktop `ApprovalCard`).
+enum TeamApprovalState: Equatable, Sendable {
+    /// The task waits for the viewer's decision.
+    case decide
+    /// The task waits for this member's decision.
+    case waiting(uid: String)
+    case approved(uid: String)
+    case declined(uid: String)
+    /// It ended without a decision: it expired, or its task was cancelled or lost its authorization.
+    case closed
+}
 /// What the viewer may do with a task (Desktop `BotRun`).
 enum TeamTaskActions {
     enum ExpiryUnit: Equatable, Sendable { case minutes, hours, days }
@@ -67,8 +84,17 @@ enum TeamTaskActions {
     }
     /// The wait an answer from the viewer would resolve: the task waits for exactly this viewer and no answer to it is already on its way.
     static func answerableWait(_ task: TeamTask?, viewer: TeamMemberRef, pendingWaitIds: Set<String>) -> String? {
-        guard let task, task.state == "waiting", let wait = task.wait, wait.recipient == viewer, !pendingWaitIds.contains(wait.waitId) else { return nil }
+        // A proposed change is approved or declined on its own card, never answered in words.
+        guard let task, task.state == "waiting", let wait = task.wait, wait.kind == "human_input", wait.recipient == viewer, !pendingWaitIds.contains(wait.waitId) else { return nil }
         return wait.waitId
+    }
+    /// Where the request `waitId` stands: open while its task waits on it, then decided by the reply that carries the decision, else closed.
+    static func approvalState(waitId: String, task: TeamTask?, viewer: TeamMemberRef, messages: [TeamMessage]) -> TeamApprovalState {
+        if let task, task.state == "waiting", let wait = task.wait, wait.waitId == waitId, wait.kind == "tool_approval" {
+            return wait.recipient == viewer ? .decide : .waiting(uid: wait.recipient.uid)
+        }
+        guard let reply = messages.first(where: { $0.waitId == waitId && $0.author.kind == "user" && $0.decision?.approved != nil }) else { return .closed }
+        return reply.decision?.approved == true ? .approved(uid: reply.author.uid) : .declined(uid: reply.author.uid)
     }
     /// How long until `at` (both in milliseconds), rounded up to whole minutes, hours (under 48) or days; never less than one minute.
     static func expiry(at: Double, now: Double) -> (value: Int, unit: ExpiryUnit) {
@@ -169,6 +195,10 @@ enum TeamExecutionContract {
             try shape(["conversationId", "waitId", "messageId", "changeId", "text"])
             for key in ["conversationId", "waitId", "messageId", "changeId"] { try id(key) }
             guard let text = payload["text"] as? String, !text.isEmpty, text.utf8.count <= 8192 else { try fail() }
+        case "decideWait":
+            try shape(["conversationId", "waitId", "messageId", "changeId", "decision"])
+            for key in ["conversationId", "waitId", "messageId", "changeId"] { try id(key) }
+            guard let decision = payload["decision"] as? String, ["approve", "deny"].contains(decision) else { try fail() }
         case "listTasks":
             try shape([], ["conversationId", "after"])
             for key in payload.keys { try id(key) }

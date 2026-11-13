@@ -97,7 +97,7 @@ internal fun TeamTaskCard(
     val canCancel = TeamTaskActions.canCancel(task, viewer, maintainer)
     Column(Modifier.fillMaxWidth().padding(12.dp).testTag("teams.task.${task.taskId}"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(botName, style = MaterialTheme.typography.titleSmall)
-        TextButton(onClick = { onRefresh(task.taskId) }) { Text(stringResource(if (task.cancelling) R.string.teams_task_cancelling else teamTaskStateRes(task.state)), style = MaterialTheme.typography.bodySmall) }
+        TextButton(onClick = { onRefresh(task.taskId) }) { Text(stringResource(if (task.cancelling) R.string.teams_task_cancelling else if (task.state == "waiting" && task.wait?.kind == "tool_approval") R.string.teams_task_waiting_approval else teamTaskStateRes(task.state)), style = MaterialTheme.typography.bodySmall) }
         task.wait?.takeIf { task.state == "waiting" }?.let { wait ->
             val expires = teamWaitExpiryText(wait.expiresAt)
             Text(
@@ -116,6 +116,57 @@ internal fun TeamTaskCard(
             }
         }
         task.artifactId?.let { id -> TextButton(onClick = { onArtifact(id) }) { Text(stringResource(R.string.teams_artifact_open)) } }
+    }
+}
+
+/** One proposed change in words. An item that was gone when the Bot asked has no text to show. */
+@Composable
+internal fun teamApprovalChangeText(change: TeamListApprovalChange): String {
+    val item = change.item?.let { "“$it”" } ?: stringResource(R.string.teams_approval_missing_item)
+    val text = "“${change.text.orEmpty()}”"
+    return when {
+        change.op == "add" -> stringResource(R.string.teams_approval_add_fmt, text)
+        change.op == "remove" -> stringResource(R.string.teams_approval_remove_fmt, item)
+        change.text != null && change.done == true -> stringResource(R.string.teams_approval_change_done_fmt, item, text)
+        change.text != null && change.done == false -> stringResource(R.string.teams_approval_change_undone_fmt, item, text)
+        change.text != null -> stringResource(R.string.teams_approval_change_fmt, item, text)
+        change.done == false -> stringResource(R.string.teams_approval_undone_fmt, item)
+        else -> stringResource(R.string.teams_approval_done_fmt, item)
+    }
+}
+
+/**
+ * A Bot's request to change its list, under the message that carries it: each change in words, and Approve and Decline for the
+ * member the Bot works for while the task waits. Afterwards it says how the request ended. [deciderName] names the member who
+ * decides or decided. Nothing is saved to the list before an approval.
+ */
+@Composable
+internal fun TeamApprovalCard(approval: TeamListApproval, waitId: String, state: TeamApprovalState, deciderName: String, onDecide: (Boolean, TeamDecisionIds) -> Unit) {
+    // One identity per decision, kept across retries so a lost answer cannot post the reply twice.
+    val ids = remember(waitId) { mutableMapOf<Boolean, TeamDecisionIds>() }
+    var asked by remember(waitId, state) { mutableStateOf(false) }
+    // A decision that did not get through can be sent again after a moment.
+    androidx.compose.runtime.LaunchedEffect(asked) { if (asked) { kotlinx.coroutines.delay(8000); asked = false } }
+    Column(Modifier.fillMaxWidth().padding(12.dp).testTag("teams.approval.$waitId"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(stringResource(R.string.teams_approval_title_fmt, approval.title), style = MaterialTheme.typography.titleSmall)
+        approval.changes.forEach { change -> Text("• ${teamApprovalChangeText(change)}", style = MaterialTheme.typography.bodyMedium) }
+        if (state == TeamApprovalState.Decide) {
+            Text(stringResource(R.string.teams_approval_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { asked = true; onDecide(true, ids.getOrPut(true) { TeamDecisionIds() }) }, enabled = !asked, modifier = Modifier.testTag("teams.approval.approve.$waitId")) { Text(stringResource(R.string.teams_approval_approve)) }
+                OutlinedButton(onClick = { asked = true; onDecide(false, ids.getOrPut(false) { TeamDecisionIds() }) }, enabled = !asked, modifier = Modifier.testTag("teams.approval.decline.$waitId")) {
+                    Text(stringResource(R.string.teams_approval_decline), color = MaterialTheme.colorScheme.error)
+                }
+            }
+        } else Text(
+            when (state) {
+                is TeamApprovalState.Waiting -> stringResource(R.string.teams_approval_waiting_member_fmt, deciderName)
+                is TeamApprovalState.Approved -> stringResource(R.string.teams_approval_approved_by_fmt, deciderName)
+                is TeamApprovalState.Declined -> stringResource(R.string.teams_approval_declined_by_fmt, deciderName)
+                else -> stringResource(R.string.teams_approval_closed)
+            },
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.approval.status.$waitId"),
+        )
     }
 }
 

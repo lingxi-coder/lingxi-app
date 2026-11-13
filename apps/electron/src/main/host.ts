@@ -3439,8 +3439,18 @@ export class HostController {
   }
 
   flushConversationSpaces(): Promise<void> {
+    const started = Date.now();
+    this.diagnostics.add('info', 'host', JSON.stringify({
+      event: 'conversation_spaces_drain', phase: 'navigation', status: 'started',
+      sessionOpenings: this.sessionOpenings.size, sessionArchivals: this.sessionArchivals.size,
+    }));
     return Promise.allSettled([this.navigationQueue, ...this.sessionOpenings.values(), ...this.sessionArchivals.values()])
-      .then(() => this.settings.conversationSpaces.flush());
+      .then(() => {
+        this.diagnostics.add('info', 'host', JSON.stringify({
+          event: 'conversation_spaces_drain', phase: 'navigation', status: 'completed', durationMs: Date.now() - started,
+        }));
+        return this.settings.conversationSpaces.flush();
+      });
   }
 
   dispose(providerAccountsStopped?: Promise<void>): void {

@@ -1224,8 +1224,18 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     try { await dispose(); record('completed'); }
     catch (error) { record('failed'); throw error; }
   })).finally(async () => {
-    await flushConversationSpaces?.();
-    try { await shutdownDiagnostics?.flush(); }
-    finally { app.quit(); }
+    const started = Date.now();
+    const record = (status: string): void => shutdownDiagnostics?.add('info', 'host', JSON.stringify({
+      event: 'shutdown_phase', phase: 'conversation_spaces', status, durationMs: Date.now() - started,
+    }));
+    record('started');
+    try { await flushConversationSpaces?.(); record('completed'); }
+    catch (error) {
+      record('failed');
+      shutdownDiagnostics?.add('error', 'host', `Conversation state flush failed: ${sanitizeDiagnostic(error)}`);
+    } finally {
+      try { await shutdownDiagnostics?.flush(); }
+      finally { app.quit(); }
+    }
   });
   });

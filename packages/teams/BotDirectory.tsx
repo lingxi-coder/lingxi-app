@@ -3,6 +3,7 @@ import { executionCommand, sharedBotUsable, type LocalPublishableBot, type Reque
 import type { TeamDetail, TeamsApi, TeamSummary } from './index.js';
 import { Dialog } from './ui';
 import { SharedListDialog } from './SharedListDialog';
+import { SharedHostPanel } from './SharedHostPanel';
 
 /**
  * Shared member directory and native publication wizard. Files are picked by the trusted host. With `friend` (the friend's name) it is
@@ -57,6 +58,7 @@ export function BotDirectory({ api, uid, team, members, bots, zh, busy, status, 
     {!bots.length && !status ? <p>{friend ? t('No Bots are shared in this chat yet.', '此聊天中尚未共享 Bot。') : t('No assistants are published yet.', '尚未发布助手。')}</p> : null}
     {friend ? <p className="teams-hint">{note}</p> : null}
     {api.openBotMarket && !friend ? <button type="button" disabled={busy} onClick={() => void attempt(() => api.openBotMarket!())}>{t('Find Bots in the market', '在市场发现 Bot')}</button> : null}
+    {api.hostStatus ? <SharedHostPanel api={api} teamId={team.id} bots={bots.filter(bot => bot.maintainer.uid === uid && bot.state === 'published')} zh={zh} busy={busy} attempt={attempt} /> : null}
     {native ? <details><summary>{friend ? t(`Share a Bot with ${friend}`, `与 ${friend} 共享 Bot`) : t('Publish a Desktop assistant', '发布 Desktop 助手')}</summary><button disabled={busy} onClick={() => void attempt(async () => setLocal(await api.localBots!()))}>{t('Load local Bots', '加载本机 Bot')}</button>{local ? <form className="tw-form" onSubmit={event => { event.preventDefault(); setConfirmed(false); if (draft) setReview({ teamId: team.id, generation: team.generation, publicationId: crypto.randomUUID(), sharedBotId: draft.sharedBotId, instanceId, expectedRevision: draft.revision, role, fileTokens: files.map(file => file.token), usePolicy: audience, quotas, ...bindingInput, ...listInput, ...knowledgeInput }); }}>
       <label>{t('Local Bot and model', '本机 Bot 与模型')}<select required disabled={busy} value={instanceId} onChange={event => { const id = event.target.value, bot = bots.find(value => value.maintainer.uid === uid && value.instanceId === id); setInstanceId(id); setFiles([]); setResourceBindings({}); setRole(''); setCurrent(undefined); setDropped([]); setSwaps({}); setMode(bot?.usePolicy.mode ?? 'listed'); setUids(bot?.usePolicy.mode === 'listed' ? bot.usePolicy.members.map(member => member.uid) : []); setQuotas(bot?.quotas ?? { team: 100, member: 20, bot: 100 }); setDraft({ sharedBotId: bot?.sharedBotId ?? crypto.randomUUID(), revision: bot?.revision ?? 0 });
         // A list the Bot already has is carried into the new publication unless its maintainer switches it off.

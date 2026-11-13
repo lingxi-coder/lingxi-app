@@ -77,6 +77,36 @@ scenario('Publishing a Bot again shows what it is shared with now: each file is 
   await page.type(page.find(n => n.type === 'select')[0], 'local-fixture'); await page.during(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
   assert.doesNotMatch(page.text(), /Shared now/); assert.equal(page.find(n => n.type === 'textarea')[0].props.value, '');
 });
+scenario('On Desktop a maintainer sees how this Mac serves their Bots, what stops it, and turns on what keeps it serving; nobody else is shown it (M3-2)', async context => {
+  const changes: unknown[] = []; let opened = 0, reads = 0;
+  let host: import('../../../packages/teams/execution').SharedHostStatus = { bots: [{ teamId: 'team-test', sharedBotId: 'assistant-fixture', state: 'ready', running: 1 }], openAtLogin: { available: true, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false };
+  const { fake, workspace } = await open(context, { hostStatus: async () => { reads += 1; return host; }, openLoginItems: async () => { opened += 1; },
+    // The system answers a request to open at login by asking the owner to allow it.
+    setHostBackground: async change => { changes.push(change); host = { ...host, ...(change.openAtLogin ? { openAtLogin: { available: true, enabled: false, needsApproval: true } } : {}), ...(change.keepAwake === undefined ? {} : { keepAwake: change.keepAwake }) }; } });
+  fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 } }), botCard({ sharedBotId: 'assistant-elsewhere', name: 'Elsewhere', maintainer: { uid: 'alice', generation: 1 } }), botCard({ sharedBotId: 'assistant-theirs', name: 'Theirs', maintainer: { uid: 'bob', generation: 1 } })];
+  await workspace.refreshBots(); await until(() => workspace.getSnapshot().bots.length === 3, 'three Bots');
+  const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
+  await until(() => page.byLabel('This Mac').length === 1, 'the host section'); const panel = () => textOf(page.oneByLabel('This Mac'));
+  assert.match(panel(), /Fixture Bot is answering from this Mac · 1 in progress/); assert.match(panel(), /Elsewhere is published from another computer\. This Mac does not answer for it\./); assert.doesNotMatch(panel(), /Theirs/, 'only the Bots the person maintains');
+  assert.match(panel(), /keeps answering after you close the window\. It stops when you quit LingXi or sign out, and while the Mac is asleep or offline\./);
+  assert.match(panel(), /After this Mac restarts, the assistant stays unavailable until you open LingXi\./); assert.match(panel(), /may go to sleep when it is idle/);
+  const box = (label: RegExp) => page.find(n => n.type === 'input' && n.props.type === 'checkbox' && label.test(textOf(n.parent)))[0];
+  assert.deepEqual([box(/Open LingXi in the background/).props.checked, box(/Keep this Mac awake/).props.checked], [false, false]);
+  await page.check(box(/Open LingXi in the background/)); assert.deepEqual(changes, [{ openAtLogin: true }]);
+  await until(() => /Allow LingXi in System Settings → General → Login Items\./.test(panel()), 'the system asks for approval'); await page.click(page.button('Open Login Items')); assert.equal(opened, 1);
+  await page.check(box(/Keep this Mac awake/)); assert.deepEqual(changes.at(-1), { keepAwake: true });
+  await until(() => /While plugged in, this Mac stays awake for as long as an assistant you share is online\./.test(panel()), 'kept awake on mains'); assert.equal(box(/Keep this Mac awake/).props.checked, true);
+  // What stands in the way is named; the state is read again when the cards change.
+  const before = reads; host = { ...host, onBattery: true, bots: [{ teamId: 'team-test', sharedBotId: 'assistant-fixture', state: 'not_ready', reason: 'model', running: 0 }] };
+  fake.bots = fake.bots.map(bot => bot.sharedBotId === 'assistant-fixture' ? { ...bot, ready: false } : bot); await workspace.refreshBots();
+  await until(() => /cannot answer: its model account is not available on this Mac/.test(panel()), 'the reason'); assert.ok(reads > before); assert.match(panel(), /On battery, this Mac stays awake only while a request is being answered\./);
+  // A Bot that only another computer serves offers no switches: they would change nothing for it.
+  host = { ...host, bots: [] }; fake.bots = fake.bots.map(bot => ({ ...bot, revision: bot.revision + 1 })); await workspace.refreshBots();
+  await until(() => /Fixture Bot is published from another computer/.test(panel()), 'served elsewhere'); assert.doesNotMatch(panel(), /Keep this Mac awake|Open LingXi in the background/);
+  // Someone who maintains no Bot here is shown nothing.
+  fake.bots = [botCard({ sharedBotId: 'assistant-theirs', name: 'Theirs', maintainer: { uid: 'bob', generation: 1 } })]; await workspace.refreshBots();
+  await until(() => page.byLabel('This Mac').length === 0, 'no host section');
+});
 scenario('A friendship\'s Bots are shared with the friend alone: no audience choice, the review names the friend, and a stopped Bot is published again as its next revision (D23)', async context => {
   const published: unknown[] = [];
   const { fake, workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-fixture', name: 'Travel', description: '', model: 'Configured model' }], selectSharedFiles: async () => [], publishLocalBot: async input => { published.push(input); return { sharedBotId: input.sharedBotId, revision: input.expectedRevision + 1 }; } });

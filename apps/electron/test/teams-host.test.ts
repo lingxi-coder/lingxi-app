@@ -33,9 +33,9 @@ function fakeService(){
  return {messages:Array.from({length:through-from},(_,i)=>({messageId:`message${String(from+i+1).padStart(6,'0')}`,seq:from+i+1,changeSeq:from+i+1,changeId:`change${String(from+i+1).padStart(6,'0')}`,author:{kind:'user' as const,uid:i%2?'human2':'human1',displayName:'Same name'},createdAt:1700000000000+i,text:`original ${i}`})),lastSeq:1000,lastChangeSeq:1000,hasMore:from>0};},};
  return {service,commands,tasks,reads,wake:()=>events.emit('messages'),flicker:()=>events.emit('change',{invalidated:true}),switch:(uid='other',epoch=1)=>{context={uid,epoch};events.emit('change',{invalidated:true});}};
 }
-function fixture(t:any,run?:TeamHostProcessOptions extends never?never:(o:TeamHostProcessOptions)=>Promise<TeamHostResult>){
+function fixture(t:any,run?:TeamHostProcessOptions extends never?never:(o:TeamHostProcessOptions)=>Promise<TeamHostResult>,more:Partial<ConstructorParameters<typeof TeamConnector>[0]>={}){
  const f=botFixture(t),privateStore=new TeamPrivateStore(f.userData),mock=fakeService(),bot=f.store.create({name:'Personal',persona:'PRIVATE_ROLE_NOT_SHARED',model:'anthropic/synthetic'});let selected:string[]=[];
- const connector=new TeamConnector({service:mock.service,store:f.store,privateStore,binaries:()=>({host:'/mock/host',worker:'/mock/worker'}),defaultModel:()=>undefined,modelRoute:async()=>({route:route(),profiles:[route().model_profile],assertCurrent:async()=>{}}),modelAccounts:async()=>accounts(),chooseFiles:async()=>selected,validateModel:async()=>{},platform:'darwin',retryMs:60000,run:run??(async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:{status:'completed',cursor,text:'Done',finishedAt:Date.now()})});
+ const connector=new TeamConnector({service:mock.service,store:f.store,privateStore,binaries:()=>({host:'/mock/host',worker:'/mock/worker'}),defaultModel:()=>undefined,modelRoute:async()=>({route:route(),profiles:[route().model_profile],assertCurrent:async()=>{}}),modelAccounts:async()=>accounts(),chooseFiles:async()=>selected,validateModel:async()=>{},platform:'darwin',retryMs:60000,run:run??(async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:{status:'completed',cursor,text:'Done',finishedAt:Date.now()}),...more});
  t.after(()=>connector.close());const input:PublishLocalBotInput={teamId,generation:1,publicationId:'publication001',sharedBotId,instanceId:bot.bot_id,expectedRevision:0,usePolicy:{mode:'all'},fileTokens:[],quotas:{team:100,bot:100,member:10},role:'Explicit published role'};
  return {...f,privateStore,mock,bot,connector,input,select:(paths:string[])=>{selected=paths;}};
 }
@@ -906,4 +906,46 @@ test('a published Bot keeps, replaces and stops sharing its files one by one, an
  await assert.rejects(f.connector.publishLocalBot('owner',again(4,{replacedResources:{[prices]:same!.token}})),/INVALID_SHARED_FILE_TOKEN/);
  // Another account on this Desktop sees none of it.
  f.mock.switch();await assert.rejects(f.connector.publishedKnowledge('owner',teamId,sharedBotId));
+});
+/** The owner's keep-awake preference with the number of holds on it, and what the Mac does in the background as the host reads it. */
+function mac(){
+ const state={holds:0,battery:false,keepAwake:true,openAtLogin:{available:true,enabled:true,needsApproval:false}};
+ return {state,options:{keepAwake:{hold:()=>{state.holds++;let done=false;return()=>{if(!done){done=true;state.holds--;}};}},background:()=>({openAtLogin:state.openAtLogin,keepAwake:state.keepAwake,onBattery:state.battery})}};
+}
+const beats=(f:{mock:{commands:any[]}})=>f.mock.commands.filter(c=>c.action==='heartbeatDeployment').map(c=>c.payload.ready as boolean);
+test('the Mac is kept awake while a task runs and, on mains power, for as long as a published Bot is online (M3-2)',async t=>{
+ const m=mac();let finish!:()=>void;const gate=new Promise<void>(done=>{finish=done;});
+ const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};await gate;return {status:'completed',cursor,text:'Done',finishedAt:Date.now()};},m.options);
+ f.mock.wake();await f.connector.idle();assert.equal(m.state.holds,0,'nothing is published: nothing holds');
+ await f.connector.publishLocalBot('owner',f.input);f.mock.wake();await settle(()=>m.state.holds===1);
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>m.state.holds===2);
+ const status=await f.connector.status('owner');assert.deepEqual(status.bots,[{teamId,sharedBotId,state:'ready',running:1}]);assert.deepEqual([status.keepAwake,status.onBattery,status.openAtLogin.enabled],[true,false,true]);
+ m.state.battery=true;f.connector.powerChanged();assert.equal(m.state.holds,1,'on battery only the running task holds');
+ finish();await settle(()=>m.state.holds===0);assert.equal((await f.connector.status('owner')).bots[0]!.running,0);
+ m.state.battery=false;f.connector.powerChanged();assert.equal(m.state.holds,1,'back on mains the online Bot holds again');
+ f.mock.switch();f.connector.revoke();assert.equal(m.state.holds,0,'another account: nothing of the first one holds');
+ await assert.rejects(f.connector.status('owner'),/INVALID_SESSION/);
+});
+test('sleep and quit say at once that the Bots are offline, nothing is served while resting, and waking serves again (M3-2)',async t=>{
+ const m=mac(),f=fixture(t,undefined,m.options);await f.connector.publishLocalBot('owner',f.input);f.mock.wake();await settle(()=>beats(f).at(-1)===true&&m.state.holds===1);
+ await f.connector.rest();assert.equal(beats(f).at(-1),false,'offline is said before the Mac sleeps');assert.equal(m.state.holds,0);assert.equal((await f.connector.status('owner')).bots[0]!.state,'checking');
+ const sent=f.mock.commands.length;f.mock.wake();await f.connector.idle();await new Promise(done=>setTimeout(done,20));assert.equal(f.mock.commands.length,sent,'no pass and no heartbeat while resting');
+ f.connector.awake();await settle(()=>beats(f).at(-1)===true&&m.state.holds===1);assert.equal((await f.connector.status('owner')).bots[0]!.state,'ready');
+ // A service that does not answer cannot hold up the exit.
+ const answer=f.mock.service.hostMessages;f.mock.service.hostMessages=()=>new Promise(()=>{});const started=Date.now();await f.connector.rest(30);assert.ok(Date.now()-started<1000);assert.equal(m.state.holds,0);f.mock.service.hostMessages=answer;
+});
+test('the host status names what stands between a published Bot and an answer (M3-2)',async t=>{
+ let model=true;const f=fixture(t,undefined,{modelAccounts:async()=>model?accounts():undefined});
+ assert.deepEqual((await f.connector.status('owner')).bots,[]);
+ await f.connector.publishLocalBot('owner',f.input);f.mock.wake();await settle(()=>beats(f).at(-1)===true);
+ const state=async()=>{f.mock.wake();await f.connector.idle();const [bot]=(await f.connector.status('owner')).bots;return [bot!.state,bot!.reason];};
+ assert.deepEqual(await state(),['ready',undefined]);
+ assert.deepEqual((await f.connector.status('owner')).openAtLogin,{available:false,enabled:false,needsApproval:false},'a host that is told nothing about the Mac claims nothing');
+ model=false;assert.deepEqual(await state(),['not_ready','model']);assert.equal(beats(f).at(-1),false);
+ model=true;assert.deepEqual(await state(),['ready',undefined]);assert.equal(beats(f).at(-1),true);
+ const answer=f.mock.service.hostMessages;
+ f.mock.service.hostMessages=async()=>{throw new Error('ENOTFOUND');};assert.deepEqual(await state(),['unreachable',undefined]);
+ f.mock.service.hostMessages=(async(c:any,command:any)=>command.action==='listSharedBots'?{bots:[]}:answer(c,command)) as typeof answer;assert.deepEqual(await state(),['stopped',undefined]);
+ f.mock.service.hostMessages=answer;assert.deepEqual(await state(),['ready',undefined]);
+ f.store.trash(f.bot.bot_id);assert.deepEqual(await state(),['not_ready','bot']);assert.equal(beats(f).at(-1),false);
 });

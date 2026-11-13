@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { open, lstat } from 'node:fs/promises';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { providerAccountEnvelope, type ProviderAccountLaunch } from '../provider-accounts.js';
-import type { LocalPublishableBot, PublishLocalBotInput, PublishedKnowledge, SelectedSharedFile, SharedBotCard, SharedListItem, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
+import type { LocalPublishableBot, PublishLocalBotInput, PublishedKnowledge, SelectedSharedFile, SharedBotCard, SharedHostBot, SharedHostStatus, SharedListItem, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
 import { isSharedListWrite } from '../../../../../packages/teams/execution-validation.js';
 import { TeamsApiError, type TeamSummary } from '../../../../../packages/teams/index.js';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source.js';
@@ -36,6 +36,10 @@ export interface TeamConnectorOptions {
   retryMs?: number; now?: () => number; maxConcurrent?: number;
   /** Event name plus ids and codes only; never user text, credentials or model output. */
   diagnostics?: (event: string, details: Record<string, unknown>) => void;
+  /** The owner's keep-awake preference. Held while a task runs and, on mains power, while a published Bot is online. */
+  keepAwake?: { hold(): () => void };
+  /** What this computer does to go on serving while its owner is away: read each time, since the system and the owner change it. */
+  background?: () => Pick<SharedHostStatus, 'openAtLogin' | 'keepAwake' | 'onBattery'>;
 }
 interface Selected { context: TeamAccountContext; instanceId: string; expires: number; document: PublishedDocument }
 /** `resume` marks a waiting task whose requester answered: it is queued again and continues from its checkpoint. */
@@ -118,6 +122,10 @@ export class TeamConnector implements LocalTeamHost {
   private readonly ended = new Set<string>();
   /** taskId → earliest time another missing-result inspect may spawn. */
   private readonly resultProbes = new Map<string, number>();
+  /** What the last pass found for each Bot this computer publishes. Memory only: a new start checks again. */
+  private readonly served = new Map<string, Pick<SharedHostBot, 'state' | 'reason'>>();
+  /** The app is quitting or the computer is going to sleep: no pass runs and no Bot is said to be online. */
+  private resting = false; private releaseServing?: () => void;
   constructor(private readonly options: TeamConnectorOptions) {
     this.stops = [options.service.onChanged(() => this.wake()), options.service.onMessagesChanged(() => this.wake())]; this.wake();
   }
@@ -316,11 +324,44 @@ export class TeamConnector implements LocalTeamHost {
     this.wake();
   }
   /** Account reset or sign-out: every running task loses its authority. A cache or listener flicker never comes here. */
-  revoke() { this.revision++; this.ended.clear(); for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.deferredCodes.clear(); this.activated.clear(); this.heartbeats.clear(); this.resultProbes.clear(); this.wake(); }
+  revoke() { this.revision++; this.ended.clear(); for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.deferredCodes.clear(); this.activated.clear(); this.heartbeats.clear(); this.resultProbes.clear(); this.served.clear(); this.keepServing(); this.wake(); }
   private wake() {
-    if (this.closed || (this.options.platform ?? process.platform) !== 'darwin') return; this.pending = true; if (this.refresh) return;
-    this.refresh = (async () => { while (this.pending && !this.closed) { this.pending = false; try { await this.discover(); } catch { /* Retry discovery; a failed authorization never starts work. */ } } })()
-      .finally(() => { this.refresh = undefined; clearTimeout(this.timer); if (!this.closed) { this.timer = setTimeout(() => this.wake(), this.options.retryMs ?? 5000); this.timer.unref(); } });
+    if (this.closed || this.resting || (this.options.platform ?? process.platform) !== 'darwin') return; this.pending = true; if (this.refresh) return;
+    this.refresh = (async () => { while (this.pending && !this.closed && !this.resting) { this.pending = false; try { await this.discover(); } catch { /* Retry discovery; a failed authorization never starts work. */ } this.keepServing(); } })()
+      .finally(() => { this.refresh = undefined; clearTimeout(this.timer); if (!this.closed && !this.resting) { this.timer = setTimeout(() => this.wake(), this.options.retryMs ?? 5000); this.timer.unref(); } });
+  }
+  /** The computer stays awake for its published Bots exactly while one of them is online and the computer is on mains power; a running task holds by itself. */
+  private keepServing() {
+    const serving = !this.closed && !this.resting && [...this.served.values()].some(bot => bot.state === 'ready') && this.options.background?.().onBattery !== true;
+    if (serving && !this.releaseServing) this.releaseServing = this.options.keepAwake?.hold();
+    else if (!serving && this.releaseServing) { this.releaseServing(); this.releaseServing = undefined; }
+  }
+  /**
+   * The app quits or the computer goes to sleep. The Bots are said to be offline at once, so that nobody's request is accepted and then
+   * left waiting for the heartbeat to run out. Best effort within `limitMs`: an unanswered call changes nothing, since the heartbeat runs
+   * out by itself. Running tasks are left alone; a task that sleep or the exit interrupts is continued from its checkpoint.
+   */
+  async rest(limitMs = 1500): Promise<void> {
+    if (this.closed || this.resting) return; this.resting = true; clearTimeout(this.timer); this.keepServing();
+    const c = this.options.service.hostContext(); if (!c) return;
+    const work = (async () => {
+      await this.refresh; if (!this.resting) return;
+      const online = (await this.options.privateStore.bindings(c.uid)).filter(b => this.served.get(scopeKey(b))?.state === 'ready');
+      await Promise.allSettled(online.map(async b => { await this.command(c,b,'heartbeatDeployment',{...this.hostFields(b),ready:false}); this.heartbeats.delete(scopeKey(b)); this.served.delete(scopeKey(b)); }));
+    })().catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([work, new Promise<void>(done => { timer = setTimeout(done, limitMs); })]); clearTimeout(timer);
+  }
+  /** The computer woke up: check and serve again at once. */
+  awake() { if (this.closed || !this.resting) return; this.resting = false; this.wake(); }
+  /** Mains power came or went: the computer is kept awake for its Bots on mains only. */
+  powerChanged() { this.keepServing(); }
+  /** How this computer serves the Bots it publishes for this account, with what keeps it serving while its owner is away. */
+  async status(uid: string): Promise<SharedHostStatus> {
+    const c = this.context(uid), bindings = await this.options.privateStore.bindings(c.uid); this.assert(c);
+    const running = (b: SharedBotBinding) => [...this.active.keys()].filter(key => { const scope = JSON.parse(key) as string[]; return scope[0] === b.teamId && scope[1] === b.sharedBotId; }).length;
+    return { bots: bindings.map(b => ({ teamId: b.teamId, sharedBotId: b.sharedBotId, state: 'checking' as const, ...this.served.get(scopeKey(b)), running: running(b) })),
+      ...(this.options.background?.() ?? { openAtLogin: { available: false, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false }) };
   }
   async idle() { await this.refresh; }
   private async discover() {
@@ -340,6 +381,7 @@ export class TeamConnector implements LocalTeamHost {
         bindings=await this.options.privateStore.bindings(c.uid); assert();
       } catch { assert(); }
     }
+    for (const key of [...this.served.keys()]) if (!bindings.some(b => scopeKey(b) === key)) this.served.delete(key);
     if (!bindings.length) return;
     const { teams } = await this.options.service.list(c.uid); assert();
     const candidates: Array<{ binding: SharedBotBinding; task: HostTask; snapshot: TeamPersonaSnapshot }> = [];
@@ -348,19 +390,26 @@ export class TeamConnector implements LocalTeamHost {
     for (let index = 0; index < bindings.length; index += 1) {
       let b = bindings[index]!;
       // A friendship's team is never in `list()`: its binding stands on the stored generation (always 1), and the server checks the membership with every command (D24).
-      if (!b.teamId.startsWith(PAIR_PREFIX) && !teams.some(t => t.id === b.teamId && t.generation === b.generation)) continue;
+      if (!b.teamId.startsWith(PAIR_PREFIX) && !teams.some(t => t.id === b.teamId && t.generation === b.generation)) { this.served.set(scopeKey(b),{ state: 'stopped' }); continue; }
       try {
         const { bots } = await this.command<{ bots: SharedBotCard[] }>(c,b,'listSharedBots',{}); assert();
-        const card = bots.find(v => v.sharedBotId === b.sharedBotId); if (!card || card.state !== 'published' || card.revision !== b.revision || card.maintainer.uid !== c.uid) { inactive.add(scopeKey(b)); this.stopBinding(b.teamId,b.sharedBotId); continue; }
+        const card = bots.find(v => v.sharedBotId === b.sharedBotId); if (!card || card.state !== 'published' || card.revision !== b.revision || card.maintainer.uid !== c.uid) { inactive.add(scopeKey(b)); this.served.set(scopeKey(b),{ state: 'stopped' }); this.stopBinding(b.teamId,b.sharedBotId); continue; }
         if (this.activated.get(scopeKey(b)) !== activation(b,c)) {
           const next = b.accountEpoch + 1; await this.command(c,b,'activateDeployment',{ deploymentId:b.deploymentId,hostId:this.options.privateStore.hostId,expectedAccountEpoch:b.accountEpoch,newAccountEpoch:next },digest(JSON.stringify([b.deploymentId,next,'activate']))); assert();
           b = { ...b, accountEpoch: next }; await this.options.privateStore.saveBinding(c.uid,b); assert(); bindings[index] = b; this.activated.set(scopeKey(b),activation(b,c));
         }
-        const snapshot = await this.options.privateStore.snapshot(c.uid,b.snapshot); assert(); let ready = true;
-        try { this.options.store.get(b.instanceId); this.options.binaries(); const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) ready = false; } catch { ready = false; }
+        const snapshot = await this.options.privateStore.snapshot(c.uid,b.snapshot); assert();
+        // What stands between the Bot and an answer, in the order its maintainer can repair it: the local Bot, this app's runtime, the model account.
+        let reason: SharedHostBot['reason'];
+        try { this.options.store.get(b.instanceId); } catch { reason = 'bot'; }
+        if (!reason) try { this.options.binaries(); } catch { reason = 'runtime'; }
+        if (!reason) try { const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) reason = 'model'; } catch { reason = 'model'; }
+        const ready = !reason;
+        if (this.resting) throw new Error('TEAM_HOST_RESTING');
         if ((this.heartbeats.get(scopeKey(b)) ?? 0) + 20000 < this.now() || !ready) {
           await this.command(c,b,'heartbeatDeployment',{...this.hostFields(b),ready}); assert(); this.heartbeats.set(scopeKey(b),this.now());
         }
+        this.served.set(scopeKey(b), reason ? { state: 'not_ready', reason } : { state: 'ready' });
         if (!ready) { this.stopBinding(b.teamId,b.sharedBotId); continue; }
         let after: string | undefined; const pages = new Set<string>();
         do {
@@ -371,7 +420,11 @@ export class TeamConnector implements LocalTeamHost {
           if (!id(response.nextCursor) || pages.has(response.nextCursor)) throw new Error('INVALID_TASK_PAGE');
           pages.add(response.nextCursor); after=response.nextCursor;
         } while (after);
-      } catch (error) { if (definitive(error)) this.stopBinding(b.teamId,b.sharedBotId); }
+      } catch (error) {
+        // A refusal is final for this Bot; anything else is the network or the service, and the next pass asks again.
+        if (!this.resting) this.served.set(scopeKey(b),{ state: definitive(error) ? 'stopped' : 'unreachable' });
+        if (definitive(error)) this.stopBinding(b.teamId,b.sharedBotId);
+      }
     }
     // A live run may save its delivery, or finish and clean up, while recovery works: check each intent afresh.
     const handled = async (intent: SavedExecution) => { assert();
@@ -459,11 +512,11 @@ export class TeamConnector implements LocalTeamHost {
   }
   /** One task at a time per Bot and Chat. A start that throws is tried again after the retry delay. */
   private launch(revision: number, taskId: string, instanceId: string, key: string, start: (signal: AbortSignal) => Promise<void>) {
-    const controller = new AbortController(); this.scheduled.set(key,this.now());
+    const controller = new AbortController(), release = this.options.keepAwake?.hold(); this.scheduled.set(key,this.now());
     const promise = start(controller.signal).catch(error => {
       // A task retried every few seconds for the same reason is logged once per reason, not per try.
       const code = errorCode(error); if (this.deferredCodes.get(taskId) !== code) { this.deferredCodes.set(taskId,code); this.log('team_task_deferred', { taskId, code }); }
-      if (revision === this.revision) this.deferred.set(taskId,this.now()+(this.options.retryMs??5000)); }).finally(() => { this.active.delete(key); this.wake(); });
+      if (revision === this.revision) this.deferred.set(taskId,this.now()+(this.options.retryMs??5000)); }).finally(() => { release?.(); this.active.delete(key); this.wake(); });
     this.active.set(key,{taskId,instanceId,controller,promise});
   }
   private async checkpoint(record: SavedExecution, snapshot: TeamPersonaSnapshot, { paths, bins }: HostEnvironment, assert: () => void): Promise<TeamTaskCheckpoint> {
@@ -714,5 +767,5 @@ export class TeamConnector implements LocalTeamHost {
       ...(synthesized ? { synthesized: true as const } : {}),payload};
     await this.options.privateStore.saveDelivery(c.uid,delivery); return delivery;
   }
-  close() { this.closed=true; clearTimeout(this.timer); for(const stop of this.stops)stop(); for(const a of this.active.values())this.abort(a,'CLOSED'); this.selections.clear(); }
+  close() { this.closed=true; clearTimeout(this.timer); this.keepServing(); for(const stop of this.stops)stop(); for(const a of this.active.values())this.abort(a,'CLOSED'); this.selections.clear(); }
 }

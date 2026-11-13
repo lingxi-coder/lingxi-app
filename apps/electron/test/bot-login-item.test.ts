@@ -330,7 +330,7 @@ test('the page offers to keep the Mac awake, says what that does not do, and sho
   const off = await background(hostSays(status(false)));
   assert.match(off, /Running in the background/);
   assert.match(off, /Keep this Mac awake while Bots are working/);
-  assert.match(off, /Also stays awake for the ten minutes before a Bot&#x27;s routine is due\. Closing the lid still puts the Mac to sleep\./);
+  assert.match(off, /Also stays awake for the ten minutes before a Bot&#x27;s routine is due and, while plugged in, for as long as a Bot you share with a team or a friend is online\. Closing the lid still puts the Mac to sleep\./);
   assert.match(switchOf(off, 'Keep this Mac awake while Bots are working'), /aria-checked="false"/);
   assert.match(switchOf(await background(hostSays(status(false)), { keepAwake: true }), 'Keep this Mac awake while Bots are working'), /aria-checked="true"/);
 });

@@ -257,7 +257,7 @@ export function App() {
   const botSessions = useBotSessions(botsApi);
   // Teams: one workspace for the window, which the sidebar, the page and the rail's unread count all read.
   const zh = locale.startsWith('zh');
-  const teams = useTeams();
+  const teams = useTeams({}, bridge.setBotsKeepAwake);
   const friends = useFriends();
   const teamsDrawer = useTeamsDrawer({
     savedWidth: bridge.bootstrap?.settings.sidebar?.teamsDrawerWidth,

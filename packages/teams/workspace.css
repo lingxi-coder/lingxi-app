@@ -307,6 +307,12 @@
 .tw-embed .teams-card header { display: flex; justify-content: space-between; gap: 8px; }
 .tw-embed .team-bot-presence { font-size: 12px; color: var(--tw-muted); }
 .tw-embed .team-bot-presence[data-online='true'] { color: var(--tw-online); }
+.tw-embed .team-bot-host { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; padding: 12px 14px; border: 1px solid var(--tw-line); border-radius: 14px; background: var(--tw-surface); font-size: 12px; line-height: 1.5; }
+.tw-embed .team-bot-host h4 { margin: 0; font-size: 13px; }
+.tw-embed .team-bot-host ul { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.tw-embed .team-bot-host li[data-state='ready'] b { color: var(--tw-online); }
+.tw-embed .team-bot-host p { margin: 0; }
+.tw-embed .team-bot-host p[role='alert'] { color: var(--tw-danger); }
 .tw-embed .teams-modal { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: rgba(0, 0, 0, 0.45); }
 .tw-embed .teams-modal > section { max-width: 460px; padding: 20px; border-radius: 14px; background: var(--tw-surface); color: var(--tw-fg); box-shadow: var(--tw-shadow); }
 .tw-embed .teams-modal h2 { font-size: 16px; margin: 0 0 12px; }

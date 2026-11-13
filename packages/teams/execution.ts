@@ -80,6 +80,14 @@ export function executionCommand<A extends MemberExecutionAction>(scope: Executi
 }
 export interface LocalPublishableBot { instanceId: string; name: string; description: string; model?: string; requiredResources?: string[] }
 export interface SelectedSharedFile { token: string; kind: 'file' | 'skill'; name: string; sha256: string; bytes: number; mediaType: string }
+/**
+ * How one Bot is served from the computer that publishes it. `checking` until a pass has an answer; `not_ready` names what its maintainer
+ * repairs (`bot`: the local Bot is gone, `runtime`: this app cannot run it, `model`: its model account needs attention); `unreachable`: the
+ * computer cannot reach the service; `stopped`: paused, published again elsewhere, or its team was left.
+ */
+export interface SharedHostBot { teamId: string; sharedBotId: string; state: 'checking' | 'ready' | 'not_ready' | 'unreachable' | 'stopped'; reason?: 'bot' | 'runtime' | 'model'; /** Requests being answered now. */ running: number }
+/** A Desktop as the host of the Bots it publishes, and what keeps it serving while its owner is away. The system owns `openAtLogin`. */
+export interface SharedHostStatus { bots: SharedHostBot[]; openAtLogin: { available: boolean; enabled: boolean; needsApproval: boolean }; keepAwake: boolean; onBattery: boolean }
 /** One read-only file or Skill a Bot is published with. Its text stays on the maintainer's Desktop. */
 export interface PublishedKnowledgeDocument { resourceId: string; revision: number; kind: 'file' | 'skill'; name: string; sha256: string; bytes: number }
 /** What a Bot is published with, as its maintainer's Desktop holds it: the role and the shared files of publication `revision`. */

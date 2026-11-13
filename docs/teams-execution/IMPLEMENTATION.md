@@ -277,6 +277,33 @@ Anything else is `INPUT_REVISION_CONFLICT` (409). A resource therefore keeps its
 
 **Not done.** No signed Desktop package or device run. iOS and Android cannot publish, so they have no change. A file is replaced by picking a new one; editing a published file in place and a per-file history view are not offered.
 
+## M3-2 — the Mac as a resident host (code part)
+
+No new daemon. The host of published Bots already lives in the Desktop main process and checks for work every five seconds whether or not a window is open; the existing login item opens the signed app in the background. What was missing is that the two existing switches (Bots page → "Running in the background") did nothing for published Bots, that sleep and quit were only noticed when the heartbeat ran out, and that the maintainer could not see any of it.
+
+**Keep awake.** `TeamConnector` takes the same `KeepAwake` as local Bots. It holds while a task runs and, on mains power, for as long as one of the Bots it publishes is online. On battery only a running task holds. Nothing holds when the switch is off (that is `KeepAwake`'s rule), after an account change, or once the host rests or closes. Closing the lid still puts the Mac to sleep.
+
+**The five states.**
+
+| What happens | Host | What people see |
+|---|---|---|
+| Last window closed | keeps serving | nothing changes |
+| Quit | `rest()` (at most 1.5 s), then Teams stops; running tasks are interrupted and continued from their checkpoint at the next start | unavailable at once |
+| Sleep (`suspend`) | `rest()`; running tasks are left alone | unavailable at once |
+| Wake (`resume`) | `awake()`: a pass at once, heartbeat first | available again |
+| Sign-out or another account | `revoke()` as before | unavailable when the heartbeat ends |
+| Network lost | passes fail and are repeated; the state is `unreachable` | unavailable when the heartbeat ends (90 s) |
+
+`rest()` sends `heartbeatDeployment {ready: false}` for each online Bot, so a request is refused (`HOST_UNAVAILABLE`) instead of being accepted and left waiting. It is best effort: without an answer the heartbeat ends by itself. No pass runs and no Bot is said to be online while resting.
+
+**Status (`hostStatus`).** Per Bot this Mac publishes: `checking`, `ready`, `not_ready` with what its maintainer repairs (`bot`: the local Bot is gone, `runtime`: this app cannot run it, `model`: its model account), `unreachable`, `stopped` (paused, published again elsewhere, team left), and the number of requests in progress. With it: the login item as the system has it, the keep-awake switch and whether the Mac is on battery. Memory only.
+
+**"This Mac" in the Bot directory (Desktop, team and friendship).** Shown to a person who maintains a published Bot there: one line per Bot, what continues and what stops the service, and the two switches with what is wrong when one is off (not opened after a restart; may sleep when idle; on battery; the system wants the login item allowed, with a button to Login Items). A Bot that another computer publishes is named as such and offers no switches. The switches are the ones of the Bots page; the keep-awake hint there now mentions shared Bots.
+
+**Tests.** Electron `teams-host.test.ts` (three `M3-2` tests: holds for a task and for an online Bot on mains, battery, account change; rest/awake and an unanswering service; every status and reason), `bot-login-item.test.ts` (hint). Web `teams-bots-ui.test.ts` (the section, both switches, approval, a reason, a Bot served elsewhere, a person who maintains nothing).
+
+**Not done — needs a signed package and a real Mac.** F1 on a signed app after login with no window; the sleep, quit, sign-out and offline rows observed on a device; F2, the twenty-four hour run with a fixture request every ten minutes; F3 after a real restart; F5. A Mac that is asleep, shut down or has LingXi quit still answers nobody, and the lid still wins over keep-awake.
+
 ## Current integration status, 2026-11-05
 
 The sections below record earlier increments and their failures; this table supersedes their pending source-work statements. M0/M1 release acceptance remains open.

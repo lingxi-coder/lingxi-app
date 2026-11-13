@@ -1021,6 +1021,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           },
           renewModelAccount: renewProviderAccount,
           diagnostics: (event, details) => diagnostics.add('warn', 'host', diagnosticEvent(event, details)),
+          // The switches of the Bots page serve the published Bots too: the Mac stays awake for them, and the login item opens the app that hosts them.
+          keepAwake,
+          background: () => ({ openAtLogin: loginItem.status(), keepAwake: settings.getPublic().botsKeepAwake === true, onBattery: powerMonitor.isOnBatteryPower() }),
           chooseFiles: async () => {
             const parent = [...mainWindows].find(window => !window.isDestroyed());
             const options = { title: 'Choose files to share with Team members', properties: ['openFile', 'multiSelections'] as Array<'openFile' | 'multiSelections'>,
@@ -1030,6 +1033,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           },
         });
         teamsService.attachHost(teamConnector);
+        // Asleep, the Mac answers nobody: the Bots are said to be offline before it sleeps and checked again when it wakes.
+        powerMonitor.on('suspend', () => { void teamConnector?.rest(); });
+        powerMonitor.on('resume', () => { teamConnector?.awake(); });
+        powerMonitor.on('on-ac', () => { teamConnector?.powerChanged(); });
+        powerMonitor.on('on-battery', () => { teamConnector?.powerChanged(); });
       } catch { diagnostics.add('warn', 'host', 'Team Bot host is unavailable'); }
     }
     localApps = new LocalAppHost({
@@ -1175,7 +1183,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
-  stopTeams?.(); stopTeams = undefined;
+  // Quitting ends the service, unlike closing the window: the published Bots are said to be offline first, then Teams stops.
+  const currentStopTeams = stopTeams, currentTeamConnector = teamConnector;
+  stopTeams = undefined; teamConnector = undefined;
   desktopUpdates?.dispose();
   desktopUpdates = null;
   host?.dispose();
@@ -1211,6 +1221,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   // finish while shutdown is in progress, but cannot acquire a new account lock.
   const providerAccountsStopped = disposeProviderAccounts?.() ?? Promise.resolve();
   const shutdownPhases: Array<[string, () => Promise<void>]> = [
+    ['teams', async () => { try { await currentTeamConnector?.rest(); } finally { currentStopTeams?.(); } }],
     ['provider_accounts', () => providerAccountsStopped],
     ['bot_router', () => currentBotRouter?.dispose() ?? Promise.resolve()],
     ['browser', () => currentBrowser?.close() ?? Promise.resolve()],

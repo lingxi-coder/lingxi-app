@@ -307,6 +307,15 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         mutable.update { if (it.selected == selection) it.copy(artifact = artifact) else it }
     }
     fun closeArtifact() { mutable.update { it.copy(artifact = null) } }
+    /** One revision of a document ([revision] null: the newest). Reading checks the current Team membership every time. */
+    suspend fun readArtifact(artifactId: String, revision: Long? = null): TeamArtifact = onModel {
+        TeamArtifact.parse(execute("readArtifact", JSONObject().put("artifactId", artifactId).apply { if (revision != null) put("revision", revision) }, lifecycle))
+    }
+    suspend fun listArtifactRevisions(artifactId: String): TeamArtifactRevisions = onModel { TeamArtifactRevisions.parse(execute("listArtifactRevisions", JSONObject().put("artifactId", artifactId), lifecycle)) }
+    /** Saves [draft] as the revision after [expectedRevision], or saves nothing. The same [operationId] sent again repeats the same request. */
+    suspend fun reviseArtifact(artifactId: String, expectedRevision: Long, operationId: String, draft: TeamDocumentDraft) {
+        onModel { execute("reviseArtifact", JSONObject().put("artifactId", artifactId).put("expectedRevision", expectedRevision).put("operationId", operationId).put("document", draft.json()), lifecycle) }
+    }
     /** A Bot's shared list as it is now. It is read on demand: the list is not part of the message stream. */
     suspend fun readList(sharedBotId: String): TeamSharedList = onModel { TeamSharedList.parse(execute("readList", JSONObject().put("sharedBotId", sharedBotId), lifecycle)) }
     /** Saves [changes] on top of [expectedDataRevision], or saves nothing. The same [operationId] sent again repeats the same request, so a save whose answer was lost is not applied twice. */

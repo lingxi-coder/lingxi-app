@@ -70,7 +70,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     val workspace = workspaceOverride ?: remember(context) { TeamsWorkspace.get(context.applicationContext) }
     val teams by workspace.teams.collectAsStateWithLifecycle()
     val messaging by workspace.messaging.collectAsStateWithLifecycle()
-    messaging.artifact?.let { artifact -> TeamArtifactViewer(artifact, workspace.messagingModel::closeArtifact) }
+    messaging.artifact?.let { artifact -> TeamArtifactViewer(artifact, workspace.messagingModel, teams.detail?.members.orEmpty(), messaging.bots, workspace.messagingModel::closeArtifact) }
     val collapsed by workspace.collapsed.collectAsStateWithLifecycle()
     val unreadByTeam by workspace.unreadByTeam.collectAsStateWithLifecycle()
     val host = LocalTabHost.current

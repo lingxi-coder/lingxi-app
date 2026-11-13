@@ -112,7 +112,7 @@ struct TeamsListView: View {
             }
         }
         .sheet(item: Binding(get: { workspace.messaging?.artifact }, set: { if $0 == nil { workspace.messaging?.closeArtifact() } })) { artifact in
-            TeamArtifactViewer(artifact: artifact) { workspace.messaging?.closeArtifact() }
+            TeamArtifactViewer(artifact: artifact, model: workspace.messaging, members: workspace.directory) { workspace.messaging?.closeArtifact() }
         }
         .navigationTitle("teams_title")
         .navigationBarTitleDisplayMode(.large)

@@ -71,6 +71,52 @@ final class TeamBotTests: XCTestCase {
         XCTAssertEqual(list.items, [TeamSharedListItem(itemId: "item_0001", text: "Bread", done: true)])
         XCTAssertEqual(list.dataRevision, 2)
     }
+    func testADocumentEditIsValidOnlyAsTheServiceStoresIt() throws {
+        let artifact = try JSONDecoder().decode(TeamArtifact.self, from: Data(#"{"artifactId":"artifact_0001","revision":2,"digest":"d","document":{"title":"Plan","body":"One"},"currentRevision":3}"#.utf8))
+        XCTAssertTrue(artifact.old)
+        var draft = TeamDocumentDraft(artifact.document)
+        XCTAssertFalse(draft.changed(from: artifact.document))
+        // Spaces around the title are not a change; the body is compared exactly.
+        draft.title = " Plan "
+        XCTAssertFalse(draft.changed(from: artifact.document))
+        draft.body = "One\n"
+        XCTAssertTrue(draft.changed(from: artifact.document))
+        XCTAssertTrue(draft.valid)
+        var body = command("reviseArtifact")
+        body["payload"] = ["artifactId": "artifact_0001", "expectedRevision": 3, "operationId": "operation_0001", "document": draft.payload]
+        XCTAssertNoThrow(try TeamExecutionContract.validate(body))
+        XCTAssertEqual(draft.payload["title"] as? String, "Plan")
+        draft.title = String(repeating: "t", count: 121)
+        XCTAssertFalse(draft.valid)
+        draft.title = "Plan"; draft.body = ""
+        XCTAssertFalse(draft.valid)
+        draft.body = String(repeating: "a", count: TeamExecutionContract.documentBytes + 1)
+        XCTAssertTrue(draft.tooLong)
+        XCTAssertFalse(draft.valid)
+    }
+    func testARepeatedDocumentSaveKeepsItsOperationAndAnyOtherEditGetsANewOne() {
+        var made = 0
+        let id = { made += 1; return "operation_000\(made)" }
+        let draft = TeamDocumentDraft(title: "Plan ", body: "Two")
+        let first = TeamDocumentOperation.of(nil, revision: 3, draft: draft, newId: id)
+        XCTAssertEqual(TeamDocumentOperation.of(first, revision: 3, draft: TeamDocumentDraft(title: "Plan", body: "Two"), newId: id), first)
+        XCTAssertEqual(TeamDocumentOperation.of(first, revision: 3, draft: TeamDocumentDraft(title: "Plan", body: "Three"), newId: id).id, "operation_0002")
+        // Saving the same text over a newer revision is another decision.
+        XCTAssertEqual(TeamDocumentOperation.of(first, revision: 4, draft: draft, newId: id).id, "operation_0003")
+    }
+    func testTheHistoryNamesMembersAndBotsAndKeepsAGenericNameForThoseWhoLeft() throws {
+        let history = try JSONDecoder().decode(TeamArtifactRevisions.self, from: Data(#"{"artifactId":"artifact_0001","currentRevision":2,"revisions":[{"revision":2,"parentRevision":1,"digest":"b","title":"Plan","author":{"kind":"user","uid":"member","generation":3},"createdAt":2000},{"revision":1,"parentRevision":null,"digest":"a","title":"Plan","author":{"kind":"shared_bot","sharedBotId":"sharedbot_01"},"createdAt":1000,"sourceTaskId":"task_0001"}]}"#.utf8))
+        let members = [TeamMember(uid: "member", displayName: "Ada", role: "member", generation: 3)]
+        let strings = TeamsListStrings.en
+        XCTAssertEqual(history.revisions.map(\.revision), [2, 1])
+        XCTAssertNil(history.revisions[1].parentRevision)
+        XCTAssertEqual(TeamDocumentRules.authorName(history.revisions[0].author, members: members, bots: [try card()], strings: strings), "Ada")
+        XCTAssertEqual(TeamDocumentRules.authorName(history.revisions[1].author, members: members, bots: [try card()], strings: strings), "Helper")
+        XCTAssertEqual(TeamDocumentRules.authorName(history.revisions[0].author, members: [], bots: [], strings: strings), strings.member)
+        XCTAssertEqual(TeamDocumentRules.authorName(history.revisions[1].author, members: [], bots: [], strings: strings), strings.bot)
+        XCTAssertEqual(TeamsErrors.key("ARTIFACT_REVISION_LIMIT"), "teams_error_doc_limit")
+        XCTAssertEqual(TeamsErrors.key("ARTIFACT_UNCHANGED"), "teams_error_doc_unchanged")
+    }
     func testRetiredBotAuthorCannotDecode() throws {
         let base = #"{"id":"message_0001","seq":1,"author":{"kind":"bot","uid":"owner","botKey":"bot:o:h:x"},"kind":"text","text":"old","changeSeq":1,"changeId":"change_0001"}"#
         XCTAssertThrowsError(try JSONDecoder().decode(TeamMessage.self, from: Data(base.utf8)))

@@ -112,7 +112,10 @@ struct TeamArtifact: Decodable, Equatable, Identifiable, Sendable {
     let revision: Int
     let digest: String
     let document: Document
+    /// The latest revision of this document; `revision` is older when an entry of the history is shown.
+    let currentRevision: Int
     var id: String { artifactId }
+    var old: Bool { revision < currentRevision }
 }
 /// IDs are raw SharedBot IDs in commands and explicit shared_bot principals in Chat participants.
 enum TeamBotSelection {

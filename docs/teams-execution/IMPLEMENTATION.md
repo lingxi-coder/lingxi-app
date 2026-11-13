@@ -198,8 +198,17 @@ Web and Desktop (`packages/teams`):
 - A task in `needs_reconciliation` is labelled "Needs checking". Its requester and the Bot's maintainer can open the list of
   outside actions (`OperationsDialog`); only the maintainer gets "It happened" / "It did not happen" (`resolveOperation`).
 
-iOS and Android label the state and explain that the maintainer confirms it on Desktop or the web. They do not edit documents
-or resolve operations yet.
+iOS and Android:
+
+- The document screen (`TeamArtifactViewer.swift`, `TeamArtifactScreen.kt`) follows the same rules as `DocumentDialog`: read,
+  edit the title and Markdown body, history with the author and date of each revision, any revision opens read-only and only
+  the latest can be edited. A refused save keeps the person's text above the newer revision with "Save over revision N" /
+  "Discard my changes"; leaving with unsaved text asks first (the iOS sheet cannot be swiped away, Android Back asks).
+  The edit identity and validity rules are `TeamDocumentOperation` / `TeamDocumentDraft` in `TeamDocuments.swift` and
+  `TeamDocuments.kt`. Checked by compile and unit tests only, not on a device.
+- A friend chat does not host the document screen on iOS or Android (it did not before either): "Open document" there shows nothing.
+- A task in `needs_reconciliation` is labelled and explains that the maintainer confirms it on Desktop or the web. iOS and
+  Android do not list or resolve operations yet.
 
 `resources/translations/*.json` now contains the 22 `settings_browser_*` keys that had been added to the generated iOS and
 Android files only, so `generate.py` is lossless again.

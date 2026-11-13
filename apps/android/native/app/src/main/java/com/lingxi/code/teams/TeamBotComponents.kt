@@ -2,10 +2,6 @@ package com.lingxi.code.teams
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Surface
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -30,7 +26,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
-import com.lingxi.code.conversation.AIText
 import com.lingxi.code.theme.BotAvatar
 
 internal fun teamTaskStateRes(state: String): Int = when (state) {
@@ -167,20 +162,6 @@ internal fun TeamApprovalCard(approval: TeamListApproval, waitId: String, state:
             },
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.approval.status.$waitId"),
         )
-    }
-}
-
-@Composable
-internal fun TeamArtifactViewer(artifact: TeamArtifact, onClose: () -> Unit) {
-    androidx.compose.ui.window.Dialog(onDismissRequest = onClose, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
-            Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(artifact.title, style = MaterialTheme.typography.headlineSmall)
-                androidx.compose.foundation.text.selection.SelectionContainer(Modifier.weight(1f).verticalScroll(rememberScrollState())) { AIText(markdown = artifact.body, modifier = Modifier.fillMaxWidth().testTag("teams.artifact.body"), onOpenLink = rememberTeamBotLinkOpener()) }
-                Text("v${artifact.revision} · ${artifact.digest}", style = MaterialTheme.typography.labelSmall)
-                TextButton(onClick = onClose) { Text(stringResource(R.string.common_close)) }
-            }
-        }
     }
 }
 

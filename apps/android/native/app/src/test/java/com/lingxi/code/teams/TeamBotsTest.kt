@@ -97,6 +97,42 @@ class TeamBotsTest {
             assertFalse(cleaned.has("answers")); assertFalse(cleaned.has("settlements")); assertEquals("human history is preserved", cleaned.getString("businessSentinel"))
         } finally { directory.deleteRecursively() }
     }
+    @Test fun aDocumentEditIsValidOnlyAsTheServiceStoresIt() {
+        val base = TeamArtifact.parse(JSONObject("""{"artifactId":"artifact_0001","revision":2,"digest":"b","document":{"title":"Plan","body":"One"},"currentRevision":3}"""))
+        assertTrue(base.old)
+        assertFalse(TeamDocumentDraft(base).changed(base))
+        assertFalse("Spaces around the title are not a change", TeamDocumentDraft(" Plan ", "One").changed(base))
+        assertTrue(TeamDocumentDraft("Plan", "Two").changed(base))
+        assertTrue(TeamDocumentDraft("Plan", "Two").valid)
+        assertFalse(TeamDocumentDraft("  ", "Two").valid)
+        assertFalse(TeamDocumentDraft("x".repeat(121), "Two").valid)
+        assertFalse(TeamDocumentDraft("Plan", "").valid)
+        val long = TeamDocumentDraft("Plan", "é".repeat(TeamExecutionContract.DOCUMENT_BYTES / 2 + 1))
+        assertTrue(long.tooLong); assertFalse(long.valid)
+        assertEquals("""{"title":"Plan","body":"Two"}""", TeamDocumentDraft(" Plan ", "Two").json().toString())
+    }
+    @Test fun aRepeatedDocumentSaveKeepsItsOperationAndAnyOtherEditGetsANewOne() {
+        var made = 0
+        val id = { made += 1; "operation_000$made" }
+        val draft = TeamDocumentDraft("Plan ", "Two")
+        val first = TeamDocumentOperation.of(null, 3, draft, id)
+        assertEquals(first, TeamDocumentOperation.of(first, 3, TeamDocumentDraft("Plan", "Two"), id))
+        assertEquals("operation_0002", TeamDocumentOperation.of(first, 3, TeamDocumentDraft("Plan", "Three"), id).id)
+        // Saving the same text over a newer revision is another decision.
+        assertEquals("operation_0003", TeamDocumentOperation.of(first, 4, draft, id).id)
+    }
+    @Test fun theHistoryNamesMembersAndBotsAndKeepsAGenericNameForThoseWhoLeft() {
+        val history = TeamArtifactRevisions.parse(JSONObject("""{"artifactId":"artifact_0001","currentRevision":2,"revisions":[{"revision":2,"parentRevision":1,"digest":"b","title":"Plan","author":{"kind":"user","uid":"member","generation":3},"createdAt":2000},{"revision":1,"parentRevision":null,"digest":"a","title":"Plan","author":{"kind":"shared_bot","sharedBotId":"sharedbot_01"},"createdAt":1000,"sourceTaskId":"task_0001"}]}"""))
+        val members = listOf(TeamMember("member", "Ada", "member", 3))
+        val strings = TeamsListStrings.ENGLISH
+        assertEquals(listOf(2L, 1L), history.revisions.map { it.revision })
+        assertNull(history.revisions[1].parentRevision)
+        assertEquals("task_0001", history.revisions[1].sourceTaskId)
+        assertEquals("Ada", TeamDocumentRules.authorName(history.revisions[0].author, members, listOf(card()), strings))
+        assertEquals("Helper", TeamDocumentRules.authorName(history.revisions[1].author, members, listOf(card()), strings))
+        assertEquals(strings.member, TeamDocumentRules.authorName(history.revisions[0].author, emptyList(), emptyList(), strings))
+        assertEquals(strings.bot, TeamDocumentRules.authorName(history.revisions[1].author, emptyList(), emptyList(), strings))
+    }
     @Test fun offlineBotQueuesWithoutAnyMemberModelConfiguration() {
         val card = TeamBotCard.parse(JSONObject("""{"sharedBotId":"sharedbot_01","name":"Helper","description":"","maintainer":{"uid":"owner","generation":1},"revision":1,"state":"published","permitted":true,"ready":false,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":100,"member":10,"bot":50}}"""))
         assertTrue(card.selectable)

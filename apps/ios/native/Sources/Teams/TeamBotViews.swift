@@ -221,30 +221,3 @@ extension View {
         })
     }
 }
-
-/// Cloud-backed immutable document; reading always checks current Team membership.
-/// The body is Markdown rendered by the same `AIText` as chat messages. Markdown images stay inert
-/// (alt text only, nothing is fetched) and links open only when they are http(s).
-struct TeamArtifactViewer: View {
-    @Environment(\.theme) private var theme
-    let artifact: TeamArtifact
-    let onClose: () -> Void
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(artifact.document.title).font(.title2.weight(.semibold)).foregroundStyle(theme.text)
-                    AIText(markdown: artifact.document.body)
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("teams.artifact.body")
-                    Text("v\(artifact.revision) · \(artifact.digest)").font(.caption.monospaced()).foregroundStyle(.secondary)
-                }.frame(maxWidth: .infinity, alignment: .leading).padding()
-            }
-            .background(theme.windowBg)
-            .teamBotLinkPolicy()
-            .navigationTitle("teams_artifact_title")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("common_close", action: onClose) } }
-        }
-        .accessibilityIdentifier("teams.artifact.\(artifact.artifactId)")
-    }
-}

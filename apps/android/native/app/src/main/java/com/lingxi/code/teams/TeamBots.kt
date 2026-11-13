@@ -90,8 +90,13 @@ internal object TeamTaskActions {
         return if (hours < 48) hours.toInt() to ExpiryUnit.HOURS else ((hours + 23) / 24).toInt() to ExpiryUnit.DAYS
     }
 }
-internal data class TeamArtifact(val artifactId: String, val revision: Long, val digest: String, val title: String, val body: String) {
-    companion object { fun parse(v: JSONObject) = TeamArtifact(v.getString("artifactId"), v.getLong("revision"), v.getString("digest"), v.getJSONObject("document").getString("title"), v.getJSONObject("document").getString("body")) }
+/** One revision of a shared document. [currentRevision] is the document's newest revision; a revision below it is read-only history. */
+internal data class TeamArtifact(val artifactId: String, val revision: Long, val digest: String, val title: String, val body: String, val currentRevision: Long) {
+    val old get() = revision < currentRevision
+    companion object {
+        fun parse(v: JSONObject) = TeamArtifact(v.getString("artifactId"), v.getLong("revision"), v.getString("digest"), v.getJSONObject("document").getString("title"),
+            v.getJSONObject("document").getString("body"), v.getLong("currentRevision"))
+    }
 }
 internal fun staleTeamBotSelections(selected: Collection<String>, bots: List<TeamBotCard>, participants: Collection<String>? = null): Set<String> =
     selected.filterTo(mutableSetOf()) { id -> bots.none { it.sharedBotId == id && it.selectable } || (participants != null && "shared_bot:$id" !in participants) }

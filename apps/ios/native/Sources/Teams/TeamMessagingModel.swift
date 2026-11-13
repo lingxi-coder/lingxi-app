@@ -395,6 +395,20 @@ final class TeamMessagingModel {
         if selected == selection { artifact = result }
     }
     func closeArtifact() { artifact = nil }
+    /// One revision of a shared document: the latest, or the one named.
+    func readArtifact(_ artifactId: String, revision: Int? = nil) async throws -> TeamArtifact {
+        var payload: [String: Any] = ["artifactId": artifactId]
+        if let revision { payload["revision"] = revision }
+        return try await execute("readArtifact", payload: payload, life: lifecycle)
+    }
+    func listArtifactRevisions(_ artifactId: String) async throws -> TeamArtifactRevisions {
+        try await execute("listArtifactRevisions", payload: ["artifactId": artifactId], life: lifecycle)
+    }
+    /// Saves `draft` as the revision after `expectedRevision`, or saves nothing when someone saved first (`ARTIFACT_REVISION_CONFLICT`).
+    func reviseArtifact(_ artifactId: String, expectedRevision: Int, operationId: String, draft: TeamDocumentDraft) async throws {
+        let _: TeamArtifactRevised = try await execute("reviseArtifact", payload: ["artifactId": artifactId, "expectedRevision": expectedRevision,
+                                                                                  "operationId": operationId, "document": draft.payload], life: lifecycle)
+    }
     /// A Bot's shared list as it is now. It is read on demand: the list is not part of the message stream.
     func readList(_ sharedBotId: String) async throws -> TeamSharedList {
         try await execute("readList", payload: ["sharedBotId": sharedBotId], life: lifecycle)

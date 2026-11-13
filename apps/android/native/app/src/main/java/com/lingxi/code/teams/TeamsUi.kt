@@ -107,6 +107,10 @@ internal fun teamsErrorRes(code: String): Int = when {
     code == "LIST_REQUIRED" || code == "SHARED_LIST_UNSUPPORTED" -> R.string.teams_error_list_unavailable
     code == "LIST_LIMIT" -> R.string.teams_error_list_full
     code == "LIST_REVISION_CONFLICT" || code == "LIST_ITEM_REQUIRED" -> R.string.teams_list_moved
+    code == "ARTIFACT_REVISION_CONFLICT" -> R.string.teams_error_doc_conflict
+    code == "ARTIFACT_UNCHANGED" -> R.string.teams_error_doc_unchanged
+    code == "ARTIFACT_REVISION_LIMIT" -> R.string.teams_error_doc_limit
+    code == "ARTIFACT_REVISION_REQUIRED" -> R.string.teams_error_doc_revision
     code == "INVITE_UNAVAILABLE" -> R.string.teams_invite_error
     else -> R.string.teams_error
 }

@@ -216,6 +216,42 @@ iOS and Android:
 `resources/translations/*.json` now contains the 22 `settings_browser_*` keys that had been added to the generated iOS and
 Android files only, so `generate.py` is lossless again.
 
+## M2 / Q09 — fault injection against the service (emulator)
+
+`apps/firebase/test/fault-matrix.emulator.test.mjs`, part of `npm run test:teams` (185 tests with it). A scripted host runs one
+task with one tool step against the real service code and stops at each of the seven boundaries of acceptance C3: creating
+the request, obtaining the permit, saving the checkpoint, dispatching the tool, receiving the tool result, writing the final
+result, and the service's acknowledgement. A restarted host then does what the Desktop host does on start (`continueTask`
+with `reason: 'recovery'`, settling a queryable operation first). Each boundary runs ten rounds over the four write
+categories.
+
+The tool reaches `Outside`, a stand-in system with its own ledger that the service cannot change. After every round the test
+compares that ledger with the service's: a keyed write has exactly one effect however often it was called; a write that
+cannot be repeated is called at most once and never by a recovery; an operation the ledger calls `succeeded` happened and
+one it calls `failed` did not; the task is in the expected final state with no unverified operation, the Bot chat is free,
+the host has nothing left to do, and there is at most one reply.
+
+| Stopped at | What the rounds establish |
+| --- | --- |
+| Request | The same `submit` sent again, also concurrently, is one message, one task and one charge. |
+| Permit | A granted `startTask` whose answer was lost is not granted again; recovery gets a new permit and the lost one is void. |
+| Checkpoint | The replaced attempt's permit can neither record an operation nor deliver a result. |
+| Tool dispatch | Nothing is called before the record is accepted. Recorded but not sent: a keyed write is sent by the next attempt; a queryable one is closed as not done after asking; an unqueryable one sends the task to the maintainer with zero calls. |
+| Tool result | Called but not settled: a keyed write is repeated with one effect; a queryable one is confirmed and not called again; an unqueryable one is never called again and the maintainer closes it. |
+| Final result | The next attempt gets the tool's receipt instead of a licence and delivers the result. |
+| Acknowledgement | A delivered result answers a repeated delivery identically, refuses a different one, and grants no new attempt. |
+
+Three further ten-round tests: two processes of one host racing for the permit, the recovery, the licence and the delivery
+(exactly one of each); authority ending mid-run (the Bot paused, the requester removed, the requester's use withdrawn, the
+host account changed), after which no tool call is admitted, no attempt is granted and the call already sent stays on record
+until the maintainer says what happened (B5, C8); and a result racing a new Chat reader, which is published whole or not at
+all.
+
+What this does not cover: the Desktop host process and the runtime worker are scripted here, not killed. Their own recovery
+is tested in `apps/electron/test/teams-host.test.ts` and the SDK's `team_continuation_process` tests, each against a stand-in
+for the other side. A run with a signed Desktop package, real process kills and real devices has not been done: it needs the
+SDK branch pushed and pinned, and nothing here is deployed.
+
 ## Current integration status, 2026-11-05
 
 The sections below record earlier increments and their failures; this table supersedes their pending source-work statements. M0/M1 release acceptance remains open.

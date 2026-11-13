@@ -252,3 +252,50 @@ test('attachments: a request to a Bot carries its files, and the Bot’s maintai
   await send([(await upload(picture)).uploadId]);
   assert.deepEqual(await used(), [1, 1, 1]);
 });
+
+test('attachments: a finished task records the files its model was given, as far as the service stands behind them, and the reply shows them (L2)', options, async () => {
+  await execute('publishSharedBot', publish(), owner); await execute('heartbeatDeployment', { ...host, ready: true }, owner);
+  await execute('createConversation', { conversationId: botChat, kind: 'bot_dm', title: 'Travel', participantUids: [member.uid], sharedBotIds: [botId] }, member);
+  const picture = png(4096), paper = pdf(2048);
+  const first = await upload(picture, { conversationId: botChat, name: 'ticket.png' }), second = await upload(paper, { conversationId: botChat, name: 'itinerary.pdf', mime: 'application/pdf' });
+  const elsewhere = await upload(picture, { name: 'elsewhere.png' }); await send([elsewhere.uploadId]);
+  const loose = await upload(picture, { conversationId: botChat, name: 'never-sent.png' });
+  const asked = await send([first.uploadId, second.uploadId], { conversationId: botChat, text: 'When do we leave?', targets: [botId] }), taskId = asked.tasks[0].taskId;
+  const lastChangeSeq = async () => (await chatData(botChat)).lastChangeSeq;
+  const started = await execute('startTask', { ...host, taskId, expectedLastChangeSeq: await lastChangeSeq() }, owner);
+  assert.equal(started.execute, true);
+  const result = more => ({ ...host, taskId, permitId: started.permitId, outcome: 'completed', text: 'At 18:30.', finishedAt: now,
+    inputGrantIds: started.inputs.map(grant => grant.grantId), outputAudience: { mode: 'published_inputs' }, usage: { status: 'missing' }, ...more });
+  const claimed = [{ attachmentId: first.uploadId, sha256: sha(picture) }, { attachmentId: second.uploadId, sha256: sha(paper) },
+    { attachmentId: first.uploadId, sha256: sha(picture) },                 // named twice
+    { attachmentId: elsewhere.uploadId, sha256: sha(picture) },             // a file of another conversation
+    { attachmentId: loose.uploadId, sha256: sha(picture) }];                // checked, but no message carries it
+  await assert.rejects(execute('completeTask', result({ readFiles: [...claimed, { attachmentId: 'unknown_file_01', sha256: sha('x') }] }), owner), { name: 'ZodError' }, 'more than five');
+  await assert.rejects(execute('completeTask', result({ readFiles: [] }), owner), { name: 'ZodError' });
+  const done = await execute('completeTask', result({ readFiles: claimed }), owner, 'command_complete_files');
+  assert.equal(done.state, 'completed');
+  const reply = await messageData(done.replyId, botChat), task = (await db.doc(`teams/${teamId}/tasks/${taskId}`).get()).data();
+  assert.deepEqual(reply.readFiles, [{ attachmentId: first.uploadId, name: 'ticket.png' }, { attachmentId: second.uploadId, name: 'itinerary.pdf' }]);
+  assert.deepEqual(task.readFiles, [{ attachmentId: first.uploadId, sha256: sha(picture) }, { attachmentId: second.uploadId, sha256: sha(paper) }]);
+  assert.equal('attachments' in reply, false, 'the reply shows its sources; it carries no file of its own');
+  // The same delivery again is the same result. A file taken back afterwards stays in the record: the Bot did read it.
+  assert.deepEqual(await execute('completeTask', result({ readFiles: claimed }), owner, 'command_complete_files'), done);
+  await execute('revokeAttachment', { attachmentId: second.uploadId, changeId: `change_${++serial}` });
+  assert.equal((await messageData(done.replyId, botChat)).readFiles.length, 2);
+  // A file with another digest is not one the service checked.
+  const next = await send([(await upload(picture, { conversationId: botChat, name: 'again.png' })).uploadId], { conversationId: botChat, text: 'And this?', targets: [botId] });
+  const again = await execute('startTask', { ...host, taskId: next.tasks[0].taskId, expectedLastChangeSeq: await lastChangeSeq() }, owner);
+  const plain = await execute('completeTask', { ...result({ readFiles: [{ attachmentId: first.uploadId, sha256: sha('other bytes') }] }), taskId: next.tasks[0].taskId, permitId: again.permitId }, owner);
+  const second_reply = await messageData(plain.replyId, botChat);
+  assert.equal('readFiles' in second_reply, false);
+  // A failed run claims nothing, whatever the host sends.
+  const third = await send([(await upload(picture, { conversationId: botChat, name: 'third.png' })).uploadId], { conversationId: botChat, text: 'Once more', targets: [botId] });
+  const failing = await execute('startTask', { ...host, taskId: third.tasks[0].taskId, expectedLastChangeSeq: await lastChangeSeq() }, owner);
+  const failed = await execute('completeTask', { ...result({ outcome: 'failed', readFiles: [{ attachmentId: first.uploadId, sha256: sha(picture) }] }), taskId: third.tasks[0].taskId, permitId: failing.permitId }, owner);
+  assert.equal('readFiles' in await messageData(failed.replyId, botChat), false);
+  // A file taken back while the Bot works changes the request under it: that run publishes nothing, as after any change of its request.
+  const changing = await send([(await upload(picture, { conversationId: botChat, name: 'changing.png' })).uploadId], { conversationId: botChat, text: 'And this one?', targets: [botId] });
+  const begun = await execute('startTask', { ...host, taskId: changing.tasks[0].taskId, expectedLastChangeSeq: await lastChangeSeq() }, owner);
+  await execute('revokeAttachment', { attachmentId: (await messageData(changing.messageId, botChat)).attachments[0].attachmentId, changeId: `change_${++serial}` });
+  await assert.rejects(execute('completeTask', { ...result(), taskId: changing.tasks[0].taskId, permitId: begun.permitId }, owner), { code: 'TASK_REVOKED' });
+});

@@ -265,3 +265,19 @@ scenario('Saving a file reads it through the service each time it is needed, and
   await page.click(page.oneByLabel('Save other.pdf')); await until(() => /taken back and can no longer be opened/.test(page.text()), 'the refusal');
   assert.equal(saved.length, 1);
 });
+
+test('a Bot reply names the files it read, and a stored message reads them back', async context => {
+  const reply = message(2, { text: 'You leave at 18:30.', author: { kind: 'shared_bot', sharedBotId: 'sharedbot_01', displayName: 'Travel Bot' }, readFiles: [{ attachmentId: 'attachment_01', name: 'ticket.png' }, { attachmentId: 'attachment_02', name: 'itinerary.pdf' }] });
+  const { page } = await openGroup(context, [
+    message(1, { text: 'When do we leave?', attachments: [attachment('ticket.png', 'image/png', bytesOf(40)), attachment('itinerary.pdf', 'application/pdf', bytesOf(50))] }),
+    reply, message(3, { text: 'Thanks', author: { kind: 'shared_bot', sharedBotId: 'sharedbot_01', displayName: 'Travel Bot' } }),
+  ], async () => ({ parts: 1, data: '' }));
+  const sources = page.find(n => n.type === 'p' && classes(n).includes('tw-msg-sources'));
+  assert.deepEqual(sources.map(n => textOf(n).replace(/\s+/gu, ' ').trim()), ['Read ticket.png, itinerary.pdf']);
+  assert.equal(sources[0]!.props.title, 'ticket.png\nitinerary.pdf');
+  // As the message is stored: entries that do not read as a file are left out, and without any there is no line.
+  const stored = { seq: 2, author: { kind: 'shared_bot', sharedBotId: 'sharedbot_01', displayName: 'Bot' }, kind: 'text', text: 'ok', changeSeq: 2, changeId: 'change_0002', createdAt: { toMillis: () => 1 } };
+  assert.deepEqual(firestoreMessage('message_0002', { ...stored, readFiles: [{ attachmentId: 'attachment_01', name: 'ticket.png' }, { attachmentId: 7, name: 'x' }, { attachmentId: 'attachment_03', name: '' }, null] }).readFiles,
+    [{ attachmentId: 'attachment_01', name: 'ticket.png' }]);
+  assert.equal('readFiles' in firestoreMessage('message_0002', { ...stored, readFiles: 'ticket.png' }), false);
+});

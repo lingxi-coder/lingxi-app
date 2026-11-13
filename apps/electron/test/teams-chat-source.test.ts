@@ -151,3 +151,15 @@ test('shared Chat source: an edit mixed with later appends still invalidates the
   assert.equal(fresh.messages.find(message => message.seq === 210)!.text, 'Corrected while reading');
   f.reader.close();
 });
+
+test('a source message names the files it carries; a recalled one names none, and a file that does not read as one is refused', () => {
+  const value = { seq: 1, changeSeq: 1, changeId: 'change_0001', text: '', author: { kind: 'user', uid: 'human1', displayName: 'Ann' }, createdAt: { toMillis: () => 1000 } };
+  const file = { attachmentId: 'attachment_01', name: 'plan.png', mime: 'image/png', byteLength: 12, sha256: 'a'.repeat(64) };
+  assert.deepEqual(chatSourceMessage('message_0001', { ...value, attachments: [file, { ...file, attachmentId: 'attachment_02', revoked: true }] }).attachments,
+    [file, { ...file, attachmentId: 'attachment_02', revoked: true }]);
+  assert.equal('attachments' in chatSourceMessage('message_0001', value), false);
+  assert.equal('attachments' in chatSourceMessage('message_0001', { ...value, recalled: true, attachments: [file] }), false);
+  for (const wrong of [[], [{ ...file, mime: 'image/gif' }], [{ ...file, byteLength: 0 }], [{ ...file, byteLength: 10 * 1024 * 1024 + 1 }], [{ ...file, sha256: 'A'.repeat(64) }],
+    [{ ...file, name: '' }], [{ ...file, name: 'a\u0000b' }], [{ ...file, attachmentId: 'short' }], [{ ...file, revoked: 'yes' }], Array(6).fill(file), 'plan.png', [null]])
+    assert.throws(() => chatSourceMessage('message_0001', { ...value, attachments: wrong }), /INVALID_DATA/u);
+});

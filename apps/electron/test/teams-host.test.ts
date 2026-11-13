@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { mkdirSync, writeFileSync, readFileSync, symlinkSync, linkSync, chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -1029,4 +1030,67 @@ test('a package that is not what was offered, a list the model cannot keep, or a
  assert.equal(g.mock.commands.some(c=>c.action==='completeTransfer'),false);assert.deepEqual(await g.privateStore.bindings('other'),[]);assert.deepEqual(await g.privateStore.publications('other'),[]);
  f.mock.wake();await settle(()=>beats(f).at(-1)===true);assert.deepEqual((await f.connector.status('owner')).bots.map(b=>b.state),['ready']);
  model=true;assert.deepEqual(await g.connector.acceptSharedBot('other',accept),{sharedBotId,revision:2});
+});
+
+/** A Chat whose messages carry files, and a service that hands their bytes out in two parts each. `refuse`: what the service answers instead, per file. */
+function withFiles(f:ReturnType<typeof fixture>,files:Record<number,{id:string;name:string;mime:string;bytes:Buffer;revoked?:boolean}[]>,more:{replyTo?:Record<number,number>;refuse?:Record<string,()=>Error>}={}){
+ const read=f.mock.service.hostReadChat.bind(f.mock.service),send=f.mock.service.hostMessages.bind(f.mock.service),asked:string[]=[];
+ const stored=new Map(Object.values(files).flat().map(file=>[file.id,file]));
+ f.mock.service.hostReadChat=async(c,q)=>{const result=await read(c,q);return {...result,messages:result.messages.map(message=>({...message,
+  ...(more.replyTo?.[message.seq]?{replyTo:`message${String(more.replyTo[message.seq]).padStart(6,'0')}`}:{}),
+  ...(files[message.seq]?{attachments:files[message.seq]!.map(file=>({attachmentId:file.id,name:file.name,mime:file.mime as 'image/png',byteLength:file.bytes.length,sha256:digestOf(file.bytes),...(file.revoked?{revoked:true}:{})}))}:{})}))};};
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action!=='readAttachmentPart')return send(c,command);
+  const p=command.payload as {attachmentId:string;index:number};asked.push(`${p.attachmentId}:${p.index}`);const refusal=more.refuse?.[p.attachmentId];if(refusal)throw refusal();
+  const file=stored.get(p.attachmentId)!,half=Math.ceil(file.bytes.length/2);return {parts:2,data:file.bytes.subarray(p.index*half,(p.index+1)*half).toString('base64')} as any;};
+ return asked;
+}
+const digestOf=(bytes:Buffer)=>createHash('sha256').update(bytes).digest('hex');
+const fileTask=(seq:number)=>({taskId:'task00001',conversationId,sharedBotId,requester:{uid:'human2',generation:1},state:'queued',messageId:`message${String(seq).padStart(6,'0')}`,messageSeq:seq,createdAt:Date.now(),deadline:Date.now()+300000});
+test('the files of the asking message, of the one it answers and of the newest others reach the worker with their bytes, and a finished task names them',async t=>{
+ let batch:any;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};batch=JSON.parse(readFileSync(o.bootstrap.inputBatchRef!.path,'utf8'));return {status:'completed',cursor,text:'Done',finishedAt:Date.now()};});
+ await f.connector.publishLocalBot('owner',f.input);
+ const file=(id:string,name:string,mime:string,text:string,more={})=>({id,name,mime,bytes:Buffer.from(text),...more});
+ const asked=withFiles(f,{5:[file('attachment_a','ask.png','image/png','PNG of the asking message')],2:[file('attachment_b','answered.pdf','application/pdf','PDF of the answered message')],
+  4:[file('attachment_r','gone.txt','text/plain','taken back',{revoked:true}),file('attachment_c','notes.txt','text/plain','notes of message four')],
+  3:[file('attachment_d','late.png','image/png','taken back after the read')],1:[file('attachment_e','first.txt','text/plain','first message')]},
+  {replyTo:{5:2},refuse:{attachment_d:()=>new TeamsApiError('ATTACHMENT_REVOKED',410)}});
+ f.mock.tasks.push(fileTask(5));f.mock.wake();await settle(()=>f.mock.tasks[0].state==='completed');
+ assert.deepEqual(batch.files.map((v:any)=>[v.attachmentId,v.messageId,v.name,v.mime,Buffer.from(v.data,'base64').toString()]),[
+  ['attachment_a','message000005','ask.png','image/png','PNG of the asking message'],['attachment_b','message000002','answered.pdf','application/pdf','PDF of the answered message'],
+  ['attachment_c','message000004','notes.txt','text/plain','notes of message four'],['attachment_e','message000001','first.txt','text/plain','first message']]);
+ assert.ok(batch.files.every((v:any)=>!('revoked' in v)&&v.sha256===digestOf(Buffer.from(v.data,'base64'))&&v.byteLength===Buffer.from(v.data,'base64').length));
+ // A file its sender took back is never asked for; one that is refused is asked for once and left out.
+ assert.equal(asked.some(v=>v.startsWith('attachment_r')),false);assert.deepEqual(asked.filter(v=>v.startsWith('attachment_d')),['attachment_d:0']);
+ // The messages still say which files they carry, and every read came before the permit was asked for.
+ assert.equal(batch.messages[4].attachments[0].name,'ask.png');assert.equal(batch.messages[3].attachments[0].revoked,true);
+ const order=f.mock.commands.map(c=>c.action);assert.ok(order.indexOf('prepareTask')<order.indexOf('startTask'));
+ const done=f.mock.commands.find(c=>c.action==='completeTask')!.payload;
+ assert.deepEqual(done.readFiles,['a','b','c','e'].map(k=>({attachmentId:`attachment_${k}`,sha256:batch.files.find((v:any)=>v.attachmentId===`attachment_${k}`).sha256})));
+ // The record of the task keeps what a continued attempt would say again, never the bytes.
+ assert.equal(JSON.stringify(await f.privateStore.executions('owner')).includes(batch.files[0].data),false);
+});
+test('a task is handed at most five files and twenty mebibytes; without files the batch and the result say nothing about them',async t=>{
+ let batch:any;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};batch=JSON.parse(readFileSync(o.bootstrap.inputBatchRef!.path,'utf8'));return {status:'completed',cursor,text:'Done',finishedAt:Date.now()};});
+ await f.connector.publishLocalBot('owner',f.input);
+ const big=(id:string,fill:number)=>({id,name:`${id}.pdf`,mime:'application/pdf',bytes:Buffer.alloc(9*1024*1024,fill)}),small=(id:string)=>({id,name:`${id}.txt`,mime:'text/plain',bytes:Buffer.from(id)});
+ const asked=withFiles(f,{3:[big('attachment_1',1),big('attachment_2',2),big('attachment_3',3),small('attachment_4')],2:[small('attachment_5'),small('attachment_6'),small('attachment_7')]});
+ f.mock.tasks.push(fileTask(3));f.mock.wake();await settle(()=>f.mock.tasks[0].state==='completed');
+ // The third nine-mebibyte file does not fit; smaller ones after it do, up to five files.
+ assert.deepEqual(batch.files.map((v:any)=>v.attachmentId),['attachment_1','attachment_2','attachment_4','attachment_5','attachment_6']);
+ assert.equal(asked.some(v=>v.startsWith('attachment_3')||v.startsWith('attachment_7')),false);
+ assert.equal(f.mock.commands.find(c=>c.action==='completeTask')!.payload.readFiles.length,5);
+ const g=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};batch=JSON.parse(readFileSync(o.bootstrap.inputBatchRef!.path,'utf8'));return {status:'completed',cursor,text:'Done',finishedAt:Date.now()};});
+ await g.connector.publishLocalBot('owner',g.input);g.mock.tasks.push(fileTask(3));g.mock.wake();await settle(()=>g.mock.tasks[0].state==='completed');
+ assert.equal('files' in batch,false);assert.equal('readFiles' in g.mock.commands.find(c=>c.action==='completeTask')!.payload,false);
+});
+test('a file that cannot be read for another reason ends the try before a permit is spent; a failed run claims no files',async t=>{
+ let down=true,runs=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};runs+=1;return {status:'failed',cursor,finishedAt:Date.now()};});(f.connector as any).options.retryMs=10;
+ await f.connector.publishLocalBot('owner',f.input);
+ const asked=withFiles(f,{1:[{id:'attachment_a',name:'a.png',mime:'image/png',bytes:Buffer.from('picture')}]},{refuse:{attachment_a:()=>new TeamsApiError('SERVICE_UNAVAILABLE',503)}});
+ const send=f.mock.service.hostMessages.bind(f.mock.service);
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='readAttachmentPart'&&!down){const bytes=Buffer.from('picture');return {parts:1,data:bytes.toString('base64')} as any;}return send(c,command);};
+ f.mock.tasks.push(fileTask(1));f.mock.wake();await settle(()=>asked.length>0);await tick();
+ assert.equal(f.mock.commands.some(c=>c.action==='startTask'),false);assert.equal(runs,0);
+ down=false;f.mock.wake();await settle(()=>f.mock.commands.some(c=>c.action==='completeTask'));
+ const done=f.mock.commands.find(c=>c.action==='completeTask')!.payload;assert.equal(done.outcome,'failed');assert.equal('readFiles' in done,false);
 });

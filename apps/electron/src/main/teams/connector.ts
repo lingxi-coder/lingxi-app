@@ -6,7 +6,8 @@ import { providerAccountEnvelope, type ProviderAccountLaunch } from '../provider
 import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedKnowledge, SelectedSharedFile, SharedBotCard, SharedHostBot, SharedHostStatus, SharedListItem, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
 import { isSharedListWrite } from '../../../../../packages/teams/execution-validation.js';
 import { TeamsApiError, type TeamSummary } from '../../../../../packages/teams/index.js';
-import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source.js';
+import type { ChatReadRequest, ChatReadResult, ChatSourceMessage } from '../../../../../packages/teams/chat-source.js';
+import { ATTACHMENT_MESSAGE_BYTES, ATTACHMENT_MESSAGE_FILES, downloadAttachment, type MessageAttachment } from '../../../../../packages/teams/attachments.js';
 import type { BotStore } from '../bots/store.js';
 import { validateBotManifest } from '../bots/package.js';
 import { TeamPrivateStore, digest, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution, type SavedDelivery, type TeamDataRef } from './privateStore.js';
@@ -113,6 +114,8 @@ function transferDocuments(bytes: Buffer, manifest: TransferManifestEntry[]): Pu
 const WAIT_MS = 24 * 60 * 60 * 1000, QUEUE_MS = 5 * 60 * 1000;
 /** Model requests of one task over all its attempts, and how often an interrupted attempt is continued before the task ends. */
 const DISPATCH_LIMIT = 32, MAX_RECOVERIES = 2;
+/** A file of a Chat message as the worker is handed it: what the message says about it, the message, and its bytes in base64. */
+type InputFile = Omit<MessageAttachment, 'revoked'> & { messageId: string; data: string };
 /** The host process or its worker stopped without a verdict: the attempt can be continued from its checkpoint. */
 const INTERRUPTIONS = ['TEAM_HOST_INTERRUPTED', 'WORKER'];
 /** Server answers after which a question can never be accepted. */
@@ -710,9 +713,10 @@ export class TeamConnector implements LocalTeamHost {
       || changes.messages.some(message => message.changeSeq > source.lastChangeSeq))) throw new Error('CHAT_CHANGED');
     if (prepared.deployment.definitionDigest !== b.snapshot || prepared.deployment.accountEpoch !== b.accountEpoch || prepared.inputs.some(g => !snapshot.documents.some(d => d.resourceId === g.resourceId && d.digest === g.digest))
       || prepared.inputs.length !== snapshot.documents.length) throw new Error('INPUT_GRANT_REQUIRED');
+    const files = await this.inputFiles(c,b,source.messages,prepared.messageId,signal); assert();
     const reference = await this.options.privateStore.dataRef(c.uid,{schemaVersion:1,batchId:task.taskId,...scope,expectedSessionRevision:cursor.sessionRevision,
       fromSeqExclusive:cursor.sessionRevision === 0 ? Math.max(0,prepared.messageSeq-200) : cursor.lastMessageSeq,toSeqInclusive:prepared.messageSeq,lastChangeSeq:source.lastChangeSeq,
-      bootstrap:cursor.sessionRevision === 0,currentMessageId:prepared.messageId,messages:source.messages,changes:changes?.messages ?? []});
+      bootstrap:cursor.sessionRevision === 0,currentMessageId:prepared.messageId,messages:source.messages,changes:changes?.messages ?? [],...(files.length ? { files } : {})});
     // Once the permit is saved the batch belongs to the execution record: a continuing worker is given the same bytes, and the record's end releases them.
     let kept = false;
     try {
@@ -725,6 +729,7 @@ export class TeamConnector implements LocalTeamHost {
       commandId:digest(JSON.stringify([task.taskId,'delivery'])),deadlineAt:started.task.deadline,payload:{...fields,permitId:started.permitId,inputGrantIds:b.grantIds},
       epoch:1,messageSeq:prepared.messageSeq,lastChangeSeq:source.lastChangeSeq,batch:reference,dispatched:0,recoveries:0,
       ask:started.deployment?.capabilities?.durableWait === true && CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol),
+      ...(files.length ? { files: files.map(({ attachmentId, sha256 }) => ({ attachmentId, sha256 })) } : {}),
       ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && listOffer(started.sharedList) ? { list: listOffer(started.sharedList)! } : {}) };
     // The permit is spent: save it before any abort check, so a revoke now ends in a failed result instead of losing the permit.
     // `c` is the account that sent startTask: the execution and its failed delivery stay in that account's private store, never in the current one, and `assert` in the attempt keeps the worker from starting.
@@ -732,6 +737,27 @@ export class TeamConnector implements LocalTeamHost {
     await this.options.privateStore.saveExecution(c.uid,record); kept = true;
     await this.attempt(c,b,snapshot,record,accounts,environment,signal);
     } finally { if (!kept) await this.options.privateStore.releaseDataRef(c.uid,reference); }
+  }
+  /** The files the model is given with a task: those of the message that asked, then of the message it answers, then of the other new
+   * messages from the newest back; together at most what one message may carry. The host reads them through the service as the Bot's
+   * maintainer, who reads the Chat. A file its sender took back, or one that does not arrive whole, is left out; any other failure ends
+   * this try before a permit is spent. */
+  private async inputFiles(c: TeamAccountContext, b: SharedBotBinding, source: readonly ChatSourceMessage[], currentId: string, signal: AbortSignal): Promise<InputFile[]> {
+    if (!source.some(message => message.attachments?.some(file => !file.revoked))) return [];
+    const current = source.find(message => message.messageId === currentId), answered = current?.replyTo && source.find(message => message.messageId === current.replyTo);
+    const api = { messages: <T>(command: object) => { this.assert(c); return this.options.service.hostMessages<T>(c, command as Record<string, unknown>); } };
+    const chosen: InputFile[] = [], seen = new Set<string>(); let total = 0;
+    for (const message of [current, answered || undefined, ...[...source].reverse()]) for (const file of message?.attachments ?? []) {
+      if (file.revoked || seen.has(file.attachmentId)) continue;
+      seen.add(file.attachmentId);
+      if (chosen.length >= ATTACHMENT_MESSAGE_FILES || total + file.byteLength > ATTACHMENT_MESSAGE_BYTES) continue;
+      let bytes: Uint8Array;
+      try { bytes = await downloadAttachment(api, { teamId: b.teamId, generation: b.generation }, file, signal); }
+      catch (error) { if (/^ATTACHMENT_/u.test(errorCode(error))) { this.log('team_task_file_skipped', { code: errorCode(error) }); continue; } throw error; }
+      const { revoked: _revoked, ...facts } = file;
+      chosen.push({ ...facts, messageId: message!.messageId, data: Buffer.from(bytes).toString('base64') }); total += file.byteLength;
+    }
+    return chosen;
   }
   /** One worker attempt under the record's current permit, and what it ends in: a delivered result, a question, or an interruption left for recovery. */
   private async attempt(c: TeamAccountContext, b: SharedBotBinding, snapshot: TeamPersonaSnapshot, record: SavedExecution, accounts: ProviderAccountLaunch, { paths, bins }: HostEnvironment, outer: AbortSignal, continuation?: TeamContinuation) {
@@ -872,7 +898,9 @@ export class TeamConnector implements LocalTeamHost {
   }
   private async saveResult(c: TeamAccountContext, record: SavedExecution, result: TeamRunResult, synthesized = false) {
     const payload = {...record.payload,outcome:result.status==='completed'?'completed':'failed',text:result.text || 'The assistant could not complete this request.',finishedAt:result.finishedAt,
-      outputAudience:{mode:'published_inputs'},usage:totalUsage(record.usage,result.usage,record.recoveries>0),...(result.document ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
+      outputAudience:{mode:'published_inputs'},usage:totalUsage(record.usage,result.usage,record.recoveries>0),
+      // A finished run was given these files as model input: the worker refuses a batch whose files it cannot show the model.
+      ...(result.status==='completed' && record.files?.length ? { readFiles: record.files } : {}),...(result.document ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
     const delivery: SavedDelivery = {schemaVersion:1,teamId:record.teamId,generation:record.generation,taskId:record.taskId,deadlineAt:record.deadlineAt,commandId:record.commandId,
       ...(synthesized ? { synthesized: true as const } : {}),payload};
     await this.options.privateStore.saveDelivery(c.uid,delivery); return delivery;

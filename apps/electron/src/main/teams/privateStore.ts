@@ -24,6 +24,7 @@ export interface SavedExecution { schemaVersion: 2; scope: BotChatScope; teamId:
   /** The request message and the source watermark the task was admitted with. */ messageSeq: number; lastChangeSeq: number;
   /** The admitted input batch. A continuing worker is given the same bytes, so it is kept as long as this record. */ batch: TeamDataRef;
   /** The Bot may ask its requester a question (the deployment publishes durable waits). */ ask: boolean;
+  /** The files of Chat messages in the batch: the model was given them, and a finished task says so. */ files?: { attachmentId: string; sha256: string }[];
   /** The Bot's shared list, offered to the worker of this task. Its writes go through the operation ledger. */ list?: { title: string; description: string; approval?: 'requester' };
   /** Model requests of the attempts so far, as the server counted them. */ dispatched: number;
   /** Attempts continued after an interruption. Bounded, so a task that keeps dying ends. */ recoveries: number;

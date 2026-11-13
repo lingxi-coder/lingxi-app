@@ -108,6 +108,8 @@ const payloads = {
     outcome: z.enum(['completed', 'failed']), text, finishedAt: cursor,
     inputGrantIds: grantIds, outputAudience,
     document: artifactDocument.optional(),
+    // The files of Chat messages the model was given as input. Kept only where each is a checked file of the task's conversation.
+    readFiles: z.array(z.object({ attachmentId: executionId, sha256: digest }).strict()).min(1).max(5).optional(),
     // The document is the next revision of an existing artifact of this Bot in this Chat, not a new artifact.
     revises: z.object({ artifactId: executionId, expectedRevision: positive }).strict().optional(),
     usage: z.discriminatedUnion('status', [

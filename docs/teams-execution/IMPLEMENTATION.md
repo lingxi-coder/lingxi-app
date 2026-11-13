@@ -342,6 +342,65 @@ On all four, a Bot chat from before the handover shows why it no longer answers,
 
 **Not done.** Nothing here has run on a device or against the deployed project, and nothing is deployed. Native clients show no offer: the maintainer and the recipient use Desktop or Web. The owner control on iOS and Android is compiled and type-checked but has no UI test. A handover does not move the task history of the earlier deployment, by design.
 
+## M3-4 — files in a Team message (service, Web, Desktop, the Bot's model)
+
+A member attaches pictures and documents to a Team message. Everyone who reads the conversation can open them, and a Bot that is asked gets them as real model input. Phones and voice are not done yet (see the end).
+
+**Limits.** PNG, JPEG, PDF and plain text. 10 MiB a file, 5 files and 20 MiB a message. What a member has uploaded and not yet sent: at most 10 files and 40 MiB, kept for 24 hours.
+
+**Where the bytes are.** In Firestore, as base64 parts of 700 KiB under `teams/{team}/uploads/{uploadId}/parts/{index}`; the rules deny every client read and write there. The design names a private object store; the app has no Cloud Storage bucket today, so this uses the database that is already there. Only `team-attachments.mjs` puts, reads and deletes parts, so moving them to a bucket later changes that one file. **This is a deviation to confirm.**
+
+**The upload record** `teams/{team}/uploads/{uploadId}`: conversation, uploader, name, type, length, SHA-256, and a state.
+
+| State | Meaning |
+|---|---|
+| `uploading` | parts are arriving |
+| `verified` | the service read every part and the whole matches the declared length, digest and type (by its first bytes); only this state can go into a message |
+| `attached` | a message carries it; the id is now the `attachmentId` |
+| `failed` | it was not what it said; its parts are deleted |
+| `revoked` | its sender took it back, or recalled the message; its parts are deleted |
+
+**Commands** (all through the member command endpoint; each can be asked again and gives the same answer).
+
+| Command | Who | Notes |
+|---|---|---|
+| `createUpload` | a participant of the conversation | `UPLOAD_QUOTA_EXCEEDED`, `UPLOAD_ID_CONFLICT` |
+| `putUploadPart` | the uploader | `UPLOAD_PART_INVALID`, `UPLOAD_SEALED`, `UPLOAD_EXPIRED` |
+| `finalizeUpload` | the uploader | answers `verified`, or `failed` with `UPLOAD_INCOMPLETE`, `UPLOAD_DIGEST_MISMATCH` or `UPLOAD_TYPE_MISMATCH` |
+| `cancelUpload` | the uploader | a file taken out of a draft is gone at once |
+| `submit` with `attachments` | the uploader | 1–5 verified uploads of this sender for this conversation; the text and the Bot targets may be empty (`ATTACHMENT_REQUIRED`, `ATTACHMENT_LIMIT`) |
+| `readAttachmentPart` | whoever reads the conversation now | `ATTACHMENT_REVOKED` after a take-back or a recall; a member who left gets `MEMBERSHIP_REQUIRED` |
+| `revokeAttachment` | the sender | one change to the message: the file stays listed as taken back |
+
+A message stores `attachments: [{attachmentId, name, mime, byteLength, sha256, revoked?}]`. There are no download links: every read goes through the service and is checked against the conversation's readers at that moment (L4). A daily job removes uploads no message took.
+
+**Web and Desktop.** The composer has an attach button and takes dropped and pasted files. Each file shows its progress, can be removed, and a refusal says why in words (type, empty, too large, too many, too much together). Sending waits for every file to be checked. A draft and its uploads belong to one conversation: switching conversations keeps them there and never sends them elsewhere (L3). In a message, pictures show inline, text opens in place, and any file can be saved; the sender can take a file back after a confirmation. Desktop reuses the Web components; its main process allows the six commands.
+
+**The Bot's model (Desktop host and runtime).**
+
+1. When a task starts, the host chooses files: those of the message that asked, then of the message it answers, then of the other messages the Bot has not seen, newest first — together at most 5 files and 20 MiB. Files taken back are not chosen.
+2. The host reads each one through `readAttachmentPart` as the Bot's maintainer (who reads the conversation), and checks length and digest. A file that was taken back in the meantime is left out. Any other failure ends the try before a permit is spent, and the task is tried again.
+3. The batch handed to the worker lists the files with their bytes (`files`, in the private transport file). Each message still names its own files in `attachments`.
+4. The worker checks every file again, takes the bytes out of the batch before anything is journaled, and writes them into the transcript row of the asking message: a PNG or JPEG as an image block, a PDF as a document block, a text file as text (at most 256 KiB of it, with `shownBytes` saying where it was cut). Each file is preceded by a label with its message, name, type, length and digest.
+5. A batch whose files do not match what it says is refused before anything is kept.
+6. A finished run sends `readFiles: [{attachmentId, sha256}]` with `completeTask`. The service keeps the entries that are files of that conversation with that digest, writes them on the task, and puts `readFiles: [{attachmentId, name}]` on the Bot's reply. Web and Desktop show "Read ticket.png, itinerary.pdf" over the reply. A failed run records none.
+
+Things that follow from existing rules:
+
+- Taking a file back, like editing, changes the asking message. A run in progress for that message publishes nothing (`TASK_REVOKED`).
+- After a message changes, the Bot's history is rebuilt from what the messages say now. The rebuilt history names earlier files but no longer contains their bytes.
+- The bytes of files a Bot was given stay in that Bot's transcript on the maintainer's Mac, as recalled text already does.
+- A Team Bot's transcript now accepts rows up to 48 MiB (other transcripts keep 2 MiB).
+
+**Tests.** Emulator `attachments.emulator.test.mjs` (9: upload and read back by each reader, wrong or cut files, limits, repeats, quota and cleanup, take-back, recall and leaving, a Bot request with files, the read-files record) and the rules test. Firebase unit contract test. Web `teams-attachments.test.ts` (11). Electron `teams-host.test.ts` (3 for files: order and evidence, limits, failures) and `teams-chat-source.test.ts` (1). Runtime `team_invocation_process` (3: files in the real model request and across later tasks, a row over 2 MiB, refused batches).
+
+**Not done.**
+
+- iOS and Android: a message's files are not shown, and cannot be attached. Voice in the Team composer (L1, L5) is not started.
+- Nothing ran in a real browser, the Desktop app, on a phone, or against a real model. No real provider has been sent a Team file.
+- Files at the full 20 MiB were not run through the worker. The test uses one 1.6 MiB file, just over the old row limit: the unoptimized worker needs about a minute and a half per run for 3.5 MiB of files, and a 13 MiB run did not finish in five minutes. The time grows with the size of the rows in the transcript and is paid again by every later task of that conversation. It has not been measured in an optimized build.
+- Nothing is deployed. The runtime change is on its own branch and the app does not pin it yet.
+
 ## Current integration status, 2026-11-05
 
 The sections below record earlier increments and their failures; this table supersedes their pending source-work statements. M0/M1 release acceptance remains open.

@@ -166,6 +166,19 @@ export async function revokeAttachment(store, { tx, team, identity, command: { p
   return { attachmentId: p.attachmentId, state: 'revoked' };
 }
 
+/** The files a finished task says its model was given, as far as the service can stand behind them: each a file a message of the
+ * task's own conversation carries or carried, with the digest the service checked. The names are the service's, not the host's. */
+export async function taskFiles(tx, team, task, claimed = []) {
+  const wanted = claimed.filter((file, index) => claimed.findIndex(other => other.attachmentId === file.attachmentId) === index);
+  if (!wanted.length) return [];
+  const uploads = (await tx.getAll(...wanted.map(file => team.collection('uploads').doc(file.attachmentId)))).map(doc => doc.data());
+  return wanted.flatMap((file, index) => {
+    const upload = uploads[index];
+    return upload && upload.conversationId === task.conversationId && upload.sha256 === file.sha256 && ['attached', 'revoked'].includes(upload.state)
+      ? [{ attachmentId: file.attachmentId, name: upload.name, sha256: upload.sha256 }] : [];
+  });
+}
+
 /** A message recalled through the service gives up its files at once. Reads first; the returned function writes. */
 export async function recallAttachments(tx, team, message, now) {
   const live = (message.attachments ?? []).filter(a => !a.revoked);

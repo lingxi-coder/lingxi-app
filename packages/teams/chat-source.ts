@@ -1,4 +1,5 @@
 import type { Firestore, DocumentData, Query, QuerySnapshot } from 'firebase/firestore';
+import { ATTACHMENT_FILE_BYTES, ATTACHMENT_MESSAGE_FILES, ATTACHMENT_TYPES, type MessageAttachment } from './attachments.js';
 
 export type ChatSourceAuthor = { kind: 'user'; uid: string; displayName: string }
   | { kind: 'shared_bot'; sharedBotId: string; displayName: string };
@@ -6,6 +7,8 @@ export interface ChatSourceMessage {
   messageId: string; seq: number; changeSeq: number; changeId: string; author: ChatSourceAuthor;
   createdAt: number; editedAt?: number; text: string; replyTo?: string; recalled?: boolean;
   sourceTaskId?: string; deliveryId?: string; artifactId?: string; waitId?: string;
+  /** The files the message carries, as it names them. Their bytes are read through the service, one file at a time. */
+  attachments?: MessageAttachment[];
 }
 export type ChatReadRequest = { teamId: string; generation: number; conversationId: string } & (
   | { mode: 'recent'; throughSeq: number }
@@ -22,6 +25,17 @@ function millis(value: unknown): number {
   if (!value || typeof value !== 'object' || !('toMillis' in value) || typeof value.toMillis !== 'function') return fail('INVALID_SOURCE_TIME');
   const result: unknown = value.toMillis();
   return counter(result) ? result : fail('INVALID_SOURCE_TIME');
+}
+function attachments(value: unknown): MessageAttachment[] {
+  if (!Array.isArray(value) || !value.length || value.length > ATTACHMENT_MESSAGE_FILES) return fail('INVALID_DATA');
+  return value.map((item: unknown) => {
+    const file = item && typeof item === 'object' ? item as Record<string, unknown> : fail('INVALID_DATA');
+    const { attachmentId, name, mime, byteLength, sha256, revoked } = file;
+    if (!id(attachmentId) || typeof name !== 'string' || !name || name.length > 120 || /[\u0000-\u001f\u007f]/u.test(name)
+      || !ATTACHMENT_TYPES.some(type => type === mime) || !counter(byteLength, 1) || byteLength > ATTACHMENT_FILE_BYTES
+      || typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(sha256) || (revoked !== undefined && typeof revoked !== 'boolean')) return fail('INVALID_DATA');
+    return { attachmentId, name, mime: mime as MessageAttachment['mime'], byteLength, sha256, ...(revoked !== undefined ? { revoked } : {}) };
+  });
 }
 export function chatSourceMessage(messageId: string, data: DocumentData): ChatSourceMessage {
   if (!id(messageId) || !counter(data.seq, 1) || !counter(data.changeSeq, 1) || !id(data.changeId)
@@ -40,6 +54,8 @@ export function chatSourceMessage(messageId: string, data: DocumentData): ChatSo
   return { messageId, seq: data.seq, changeSeq: data.changeSeq, changeId: data.changeId, text: data.text, author,
     createdAt: millis(data.createdAt), ...(data.editedAt !== undefined ? { editedAt: millis(data.editedAt) } : {}),
     ...(data.replyTo !== undefined ? { replyTo: data.replyTo } : {}), ...(data.recalled !== undefined ? { recalled: data.recalled } : {}),
+    // A recalled message gave its files up with its text.
+    ...(data.attachments !== undefined && data.recalled !== true ? { attachments: attachments(data.attachments) } : {}),
     // A Bot's message names its task as `taskId`; the human answer to a Bot's question stores it as `sourceTaskId`.
     ...(data.taskId !== undefined ? { sourceTaskId: id(data.taskId) ? data.taskId : fail('INVALID_DATA') }
       : data.sourceTaskId !== undefined ? { sourceTaskId: id(data.sourceTaskId) ? data.sourceTaskId : fail('INVALID_DATA') } : {}),

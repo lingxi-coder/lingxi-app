@@ -80,7 +80,13 @@ export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
     ...(value.waitId ? { waitId: value.waitId } : {}),
     ...(approvalOf(value.approval) ? { approval: approvalOf(value.approval)! } : {}),
     ...(value.decision === 'approve' || value.decision === 'deny' ? { decision: value.decision } : {}),
-    ...(attachmentsOf(value.attachments).length ? { attachments: attachmentsOf(value.attachments) } : {}) };
+    ...(attachmentsOf(value.attachments).length ? { attachments: attachmentsOf(value.attachments) } : {}),
+    ...(readFilesOf(value.readFiles).length ? { readFiles: readFilesOf(value.readFiles) } : {}) };
+}
+function readFilesOf(value: unknown): { attachmentId: string; name: string }[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(item => item && typeof item === 'object' && typeof item.attachmentId === 'string' && typeof item.name === 'string' && item.name
+    ? [{ attachmentId: item.attachmentId, name: item.name }] : []);
 }
 /** The files of a message. An entry that does not read as a file is left out; the others stand. */
 function attachmentsOf(value: unknown): MessageAttachment[] {

@@ -28,6 +28,8 @@ export interface TeamMessage {
   mentions?: string[];
   /** Files the message carries, in the order they were added. */
   attachments?: MessageAttachment[];
+  /** On a Bot's reply: the files of this conversation its model was given, as the service checked them. */
+  readFiles?: { attachmentId: string; name: string }[];
 }
 export interface MessageScope { teamId: string; generation: number }
 export type MessageMutation = MessageScope & { action: 'mutate'; conversationId: string; messageId: string; changeId: string;

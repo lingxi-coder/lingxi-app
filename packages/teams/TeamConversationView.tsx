@@ -293,6 +293,8 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
             return <Fragment key={row.key}><MessageItem message={localized(message)} grouped={grouped} author={author} mine={mine} owner={message.author.kind === 'shared_bot' ? nameOf(snapshot.bots.find(bot => bot.sharedBotId === (message.author as Extract<TeamMessage['author'], { kind: 'shared_bot' }>).sharedBotId)?.maintainer.uid ?? '') : ''}
               quote={quoteOf(message)} locale={tag} zh={zh} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} question={question && !approval} approval={!!approval}
               onReply={lock ? undefined : answering ? () => startAnswer(answering) : answer} onEdit={mine && participant && !message.decision ? edit : undefined} onRecall={mine && participant && !message.decision ? setRecall : undefined}>
+              {message.readFiles?.length && !message.recalled ? <p className="tw-msg-sources" title={message.readFiles.map(file => file.name).join('\n')}>
+                <Icon name="clip" size={12} /> {t('Read', '已读取')} {message.readFiles.map(file => file.name).join(zh ? '、' : ', ')}</p> : null}
               {message.attachments?.length && !message.recalled ? <MessageFiles api={workspace.api} scope={scope} files={message.attachments} zh={zh} onRevoke={mine && participant ? file => setTakeBack(file) : undefined} /> : null}
               {approval ? <div className="tw-embed"><ApprovalCard api={workspace.api} scope={scope} conversationId={conversation.id} message={message} approval={approval} zh={zh} onChanged={runs.refresh} {...approvalOf(message, waiting)} /></div> : null}
               {answering && !answerPending(message.waitId!)

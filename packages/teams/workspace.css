@@ -261,6 +261,8 @@
 .tw-file-refusals { margin: 0; padding: 6px 10px; list-style: none; border-radius: 8px; background: var(--tw-hover); font-size: 12px; color: var(--tw-danger); }
 .tw-file-refusals b { color: var(--tw-fg); }
 .tw-pending-files { color: var(--tw-muted); font-size: 12px; }
+/* The files a Bot read for its reply: one quiet line over the reply, cut with an ellipsis; the full list is its tooltip. */
+.tw-msg-sources { margin: 0 0 2px; color: var(--tw-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tw-target { display: inline-flex; align-items: center; gap: 2px; padding: 0 2px 0 10px; border-radius: 14px; background: var(--tw-selected); font-size: 12px; font-weight: 600; min-height: 28px; }
 .tw-compose-box { position: relative; display: flex; flex-direction: column; padding: 10px 12px 8px; border: 1px solid var(--teams-border, #626873); border-radius: 16px; background: var(--tw-surface); box-shadow: 0 3px 14px rgb(0 0 0 / 5%); transition: border-color 0.14s ease, box-shadow 0.14s ease; }
 .tw-compose-box:focus-within { border-color: var(--tw-focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--tw-focus) 35%, transparent); }

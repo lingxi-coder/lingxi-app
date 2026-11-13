@@ -4,7 +4,7 @@ import { admissionId, sharedBotPermits } from './team-execution-contract.mjs';
 import { sharedBotCommand } from './shared-bot-commands.mjs';
 import { messagePreview } from './team-message-preview.mjs';
 import { prepareSharedConversation } from './team-conversations.mjs';
-import { attachable, cancelUpload, createUpload, finalizeUpload, putUploadPart, readAttachmentPart, revokeAttachment } from './team-attachments.mjs';
+import { attachable, cancelUpload, createUpload, finalizeUpload, putUploadPart, readAttachmentPart, revokeAttachment, taskFiles } from './team-attachments.mjs';
 
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
@@ -684,10 +684,13 @@ export class SharedBotsStore {
       || base.botRevision !== task.botRevision || !same(byUid(base.readers), byUid(readers)) || base.revision !== p.revises.expectedRevision
       || base.revision >= revisionLimit || base.digest === hash(p.document));
     const allowed = gate.allowed && !stale;
+    // Shown on the reply as its sources, and kept on the task as the record of what the model was given.
+    const read = allowed && p.outcome === 'completed' ? await taskFiles(tx, team, task, p.readFiles) : [];
     const artifactId = !allowed || !p.document ? null : p.revises ? p.revises.artifactId : hash([p.taskId, 'document']);
     this.botMessage(tx, gate, task, bot, identity, now, { messageId: replyId, changeId,
       text: allowed ? p.text : stale ? '文档已被修改或不可用，本次修改未保存。请重新提问。' : gate.refusal,
-      fields: { deliveryId: hash([task.taskId, 'delivery']), ...(artifactId ? { artifactId } : {}) } });
+      fields: { deliveryId: hash([task.taskId, 'delivery']), ...(artifactId ? { artifactId } : {}),
+        ...(read.length ? { readFiles: read.map(({ attachmentId, name }) => ({ attachmentId, name })) } : {}) } });
     if (artifactId) {
       const artifactRef = team.collection('artifacts').doc(artifactId), revision = p.revises ? base.revision + 1 : 1, digest = hash(p.document);
       if (p.revises) tx.update(artifactRef, { revision, digest, document: p.document, updatedAt: now });
@@ -703,6 +706,7 @@ export class SharedBotsStore {
     const state = task.unverifiedOperations > 0 ? 'needs_reconciliation' : settled;
     // No restricted body, document or diagnostic trace is persisted in shared projections/receipts.
     tx.update(ref, { state, resultDigest, replyId, artifactId, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now,
+      ...(read.length ? { readFiles: read.map(({ attachmentId, sha256 }) => ({ attachmentId, sha256 })) } : {}),
       ...(state === settled ? {} : { reconciledState: settled }) });
     if (lock?.taskId === p.taskId) tx.delete(lockRef);
     return { taskId: task.taskId, state, replyId, artifactId };

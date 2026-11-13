@@ -1740,7 +1740,7 @@ export async function runPackagedCredentialStability(appPath) {
   const runtime = runtimePathsForHome(home);
   writePackagedProfile(runtime, createAdversarialWorkspace(tempRoot));
   const env = sanitizePackagedAppEnvironment(process.env, {
-    HOME: home, CFFIXED_USER_HOME: home, TMPDIR: temporary, LINGXI_CONFIG_DIR: join(home, '.lingxi'),
+    HOME: home, CFFIXED_USER_HOME: home, __CFPREFERENCES_AVOID_DAEMON: '1', TMPDIR: temporary, LINGXI_CONFIG_DIR: join(home, '.lingxi'),
   });
   const port = await reserveLoopbackPort();
   const probe = await customProviderProbe();
@@ -1874,6 +1874,9 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   const env = sanitizePackagedAppEnvironment(process.env, {
     HOME: tempHome,
     CFFIXED_USER_HOME: tempHome,
+    // A disposable CFFIXED_USER_HOME must not wait on the real user's
+    // cfprefsd domain. Keep native Firebase preferences in this test home.
+    __CFPREFERENCES_AVOID_DAEMON: '1',
     TMPDIR: tempTmp,
     LINGXI_CONFIG_DIR: join(tempHome, ".lingxi"),
   });

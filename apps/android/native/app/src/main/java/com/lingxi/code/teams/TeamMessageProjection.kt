@@ -72,7 +72,13 @@ internal data class TeamMessage(val id: String, val seq: Long, val authorUid: St
     /** On a Bot's request to approve a list change. */
     val approval: TeamListApproval? = null,
     /** On the requester's reply to such a request: approved or declined. */
-    val decision: Boolean? = null) {
+    val decision: Boolean? = null,
+    /** Files the message carries, in the order they were added. */
+    val attachments: List<TeamMessageAttachment> = emptyList(),
+    /** On a Bot's reply: the files of this conversation its model was given. */
+    val readFiles: List<TeamReadFile> = emptyList()) {
+    /** The files to show: none on a recalled message. */
+    val files: List<TeamMessageAttachment> get() = if (recalled) emptyList() else attachments
     /** The request to show under this message, if it is one a Bot made. */
     val approvalRequest: TeamListApproval? get() = approval.takeIf { authorKind != "user" && !recalled && waitId != null }
     val createdAtMs: Long? get() = createdAt?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrNull() }
@@ -83,7 +89,9 @@ internal data class TeamMessage(val id: String, val seq: Long, val authorUid: St
             v.getString("text"), v.getLong("changeSeq"), v.getString("changeId"), v.optBoolean("recalled"), v.stringOrNull("replyTo"),
             v.stringOrNull("editedAt"), v.getString("kind"), if (authorKind == "shared_bot") author.getString("sharedBotId") else null,
             v.stringOrNull("taskId"), v.stringOrNull("artifactId"), v.optJSONArray("targets")?.strings() ?: emptyList(), v.stringOrNull("createdAt"), v.optJSONArray("taskIds")?.strings() ?: emptyList(), author.stringOrNull("displayName"), v.stringOrNull("waitId"),
-            TeamListApproval.parse(v.opt("approval")), when (v.opt("decision")) { "approve" -> true; "deny" -> false; else -> null })
+            TeamListApproval.parse(v.opt("approval")), when (v.opt("decision")) { "approve" -> true; "deny" -> false; else -> null },
+            if (v.has("attachments") && !v.isNull("attachments")) TeamMessageAttachment.list(v.optJSONArray("attachments") ?: throw TeamMessageFailure("INVALID_DATA")) else emptyList(),
+            TeamReadFile.list(v.optJSONArray("readFiles")))
     } }
 }
 internal data class TeamMessageThread(val messages: List<TeamMessage> = emptyList())

@@ -51,6 +51,10 @@ internal fun TeamComposer(
     replyTo: TeamMessage?, editing: TeamMessage?, replyAuthor: String,
     onDraft: (ComposerDraft) -> Unit, onCancelReply: () -> Unit, onCancelEdit: () -> Unit,
     onSend: (text: String, targets: List<String>, done: () -> Unit) -> Unit, modifier: Modifier = Modifier,
+    /** The files of the unsent message and the chosen ones that were not taken. Empty while a message is edited or a Bot's question is answered: neither carries files, and the files wait in the draft. */
+    files: List<TeamDraftFile> = emptyList(), refusals: List<TeamFileRefusal> = emptyList(),
+    /** Null where files cannot be added now. */
+    onChooseFiles: ((List<TeamChosenFile>) -> Unit)? = null, onRemoveFile: (String) -> Unit = {}, onDismissRefusals: () -> Unit = {},
 ) {
     val bots = messaging.bots
     val lock = TeamsComposeLogic.composerLock(uid, conversation.kind, conversation.participants, bots, messaging.botsLoaded, messaging.botsFailed, conversation.readers)
@@ -79,7 +83,7 @@ internal fun TeamComposer(
     val staleTargets = if (editing == null && askable) composerStaleTargets(draft.targets, bots, conversation) else emptySet()
     val staleBotDm = conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1
     val tooLong = TeamsComposeLogic.byteLength(field.text) > TeamsComposeLogic.MESSAGE_BYTES
-    val canSend = TeamsComposeLogic.canSendText(field.text) && !messaging.submitting && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
+    val canSend = TeamAttachments.canSend(field.text, files) && !messaging.submitting && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
     val hasAskableBots = askable && bots.any { it.selectable && "shared_bot:${it.sharedBotId}" in conversation.participants }
     fun update(value: TextFieldValue, targets: Set<String> = draft.targets) {
         field = value
@@ -138,8 +142,10 @@ internal fun TeamComposer(
                 }
             }
         }
+        TeamDraftFiles(files, refusals, onRemoveFile, onDismissRefusals)
         if (staleTargets.isNotEmpty() || staleBotDm) Text(stringResource(R.string.teams_error_bot_access_changed), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.Bottom) {
+            if (onChooseFiles != null) TeamAttachButton(enabled = files.size < TeamAttachments.MESSAGE_FILES && !messaging.submitting, onChosen = onChooseFiles)
             OutlinedTextField(
                 value = field, onValueChange = { update(it) }, minLines = 1, maxLines = 6, isError = tooLong, enabled = !messaging.submitting,
                 placeholder = {
@@ -171,6 +177,8 @@ internal fun TeamComposer(
             }
         }
         val note = when {
+            files.any { it.state == TeamDraftFile.State.Failed } -> R.string.teams_file_note_failed
+            files.any { it.state == TeamDraftFile.State.Uploading } -> R.string.teams_file_note_uploading
             messaging.offline -> R.string.teams_composer_note_offline
             conversation.kind == "bot_dm" -> R.string.teams_composer_note_bot_dm
             hasAskableBots -> R.string.teams_composer_note_group

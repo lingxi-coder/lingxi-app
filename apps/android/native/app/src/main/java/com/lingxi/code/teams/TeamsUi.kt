@@ -70,6 +70,9 @@ internal object TeamsTags {
     const val UNREAD_DIVIDER = "teams.unreadDivider"
     const val COMPOSER_LOCK = "teams.composerLock"
     const val ASK_BOT = "teams.askBot"
+    const val ATTACH = "teams.attach"
+    const val DRAFT_FILES = "teams.composer.files"
+    const val REFUSED_FILES = "teams.composer.files.refused"
     const val SHEET = "teams.sheet"
     const val INVITE_FRIENDS = "teams.inviteFriends"
     fun section(id: String) = "teams.section.$id"
@@ -97,6 +100,19 @@ internal fun rememberTeamsListStrings(): TeamsListStrings {
 /** Error code (HTTP or local) to text (SPEC-mobile-team-bot-ui section 6.7). */
 @StringRes
 internal fun teamsErrorRes(code: String): Int = when {
+    // Files in a message: why one was not taken, could not be uploaded or cannot be opened.
+    code == "ATTACHMENT_TYPE" || code == "UPLOAD_TYPE_MISMATCH" -> R.string.teams_file_error_type
+    code == "ATTACHMENT_EMPTY" -> R.string.teams_file_error_empty
+    code == "ATTACHMENT_TOO_LARGE" -> R.string.teams_file_error_too_large
+    code == "ATTACHMENT_COUNT" -> R.string.teams_file_error_count
+    code == "ATTACHMENT_TOTAL" || code == "ATTACHMENT_LIMIT" -> R.string.teams_file_error_total
+    code == "UPLOAD_QUOTA_EXCEEDED" -> R.string.teams_file_error_quota
+    code == "UPLOAD_EXPIRED" -> R.string.teams_file_error_expired
+    code in setOf("UPLOAD_DIGEST_MISMATCH", "UPLOAD_INCOMPLETE", "UPLOAD_PART_INVALID", "UPLOAD_FAILED") -> R.string.teams_file_error_incomplete
+    code in setOf("UPLOAD_REQUIRED", "UPLOAD_SEALED", "UPLOAD_ID_CONFLICT", "ATTACHMENT_REQUIRED") -> R.string.teams_file_error_unsendable
+    code == "ATTACHMENT_REVOKED" -> R.string.teams_file_error_revoked
+    code == "ATTACHMENT_DAMAGED" -> R.string.teams_file_error_damaged
+    code == "ATTACHMENT_UNREADABLE" -> R.string.teams_file_error_unreadable
     code == "INVALID_DATA" || code == "INVALID_MESSAGE_SNAPSHOT" -> R.string.teams_error_invalid_data
     code in setOf("MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED") -> R.string.teams_stale_error
     code.contains("STORAGE") -> R.string.teams_messages_storage_error

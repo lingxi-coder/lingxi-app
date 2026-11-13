@@ -177,6 +177,78 @@ class TeamMessagingQueueTest {
         }
     }
 
+    @Test fun aFileIsUploadedInPartsCheckedSentWithItsMessageAndReadBackWhole() = runBlocking {
+        Harness().use { h ->
+            h.start()
+            val bytes = ByteArray(2500) { (it % 251).toByte() }
+            val progress = CopyOnWriteArrayList<Int>()
+            h.model.uploadRetryMs = 5
+            // One part and the check are refused once by a busy service: each is the same step again, with the same command id.
+            h.busy["putUploadPart"] = 1; h.busy["finalizeUpload"] = 1
+            h.model.upload(CHAT, UPLOAD, "notes.txt", "text/plain", bytes) { progress += it }
+            assertEquals(listOf(1000, 2000, 2500), progress.toList())
+            assertEquals(listOf("createUpload", "putUploadPart", "putUploadPart", "putUploadPart", "finalizeUpload"), h.asked.map { it.getString("action") })
+            assertEquals(listOf("${UPLOAD}_c", "${UPLOAD}_p0", "${UPLOAD}_p1", "${UPLOAD}_p2", "${UPLOAD}_f"), h.asked.map { it.getString("commandId") })
+            assertEquals(2, h.refused.size)
+            val created = h.asked.first().getJSONObject("payload")
+            assertEquals(TeamAttachments.sha256Hex(bytes), created.getString("sha256")); assertEquals(2500, created.getInt("byteLength")); assertEquals(CHAT, created.getString("conversationId"))
+
+            // The message: files alone, no Bot asked. It is a submit with no text and no targets, and its file names stay on the device.
+            val file = TeamDraftFile(UPLOAD, "notes.txt", "text/plain", bytes.size, TeamDraftFile.State.Ready, bytes.size)
+            withContext(h.dispatcher) { h.model.queue("create", "   ", files = listOf(file), conversationId = CHAT) }
+            eventually { !h.model.state.value.submitting }
+            h.awaitDelivery()
+            val sent = h.sent.single()
+            TeamExecutionContract.validate(sent)
+            assertEquals("submit", sent.getString("action"))
+            assertFalse(sent.has("attachmentNames"))
+            val payload = sent.getJSONObject("payload")
+            assertEquals("", payload.getString("text")); assertEquals(0, payload.getJSONArray("targets").length()); assertEquals(listOf(UPLOAD), payload.getJSONArray("attachments").strings())
+
+            // Read back: every part is asked of the service, and the whole is checked against what the message says.
+            val carried = TeamMessageAttachment(UPLOAD, "notes.txt", "text/plain", bytes.size, TeamAttachments.sha256Hex(bytes))
+            assertArrayEquals(bytes, h.model.download(carried))
+            assertEquals(3, h.asked.count { it.getString("action") == "readAttachmentPart" })
+            assertEquals("ATTACHMENT_DAMAGED", runCatching { h.model.download(carried.copy(sha256 = "0".repeat(64))) }.exceptionOrNull().let { (it as TeamMessageFailure).code })
+            h.model.revokeAttachment(UPLOAD)
+            assertEquals(UPLOAD, h.asked.last { it.getString("action") == "revokeAttachment" }.getJSONObject("payload").getString("attachmentId"))
+        }
+    }
+
+    @Test fun aRefusedFileStopsAtOnceAndFilesAreNeverQueuedForAnotherConversationOrUnchecked() = runBlocking {
+        Harness().use { h ->
+            h.start()
+            h.model.uploadRetryMs = 5
+            // The service's refusal is final: it is not asked again and nothing more of the file is sent.
+            h.fail["createUpload"] = "UPLOAD_QUOTA_EXCEEDED"
+            assertEquals("UPLOAD_QUOTA_EXCEEDED", (runCatching { h.model.upload(CHAT, UPLOAD, "a.txt", "text/plain", ByteArray(10)) { } }.exceptionOrNull() as TeamMessageFailure).code)
+            assertEquals(1, h.refused.size); assertTrue(h.asked.isEmpty())
+            // A file that arrives changed is refused by the check.
+            h.fail.clear()
+            h.partBytes = 4
+            val upload = (runCatching { h.model.upload(CHAT, UPLOAD, "a.txt", "text/plain", ByteArray(10)) { h.parts["$UPLOAD/0"] = "AAAA" } }.exceptionOrNull() as TeamMessageFailure)
+            assertEquals("UPLOAD_DIGEST_MISMATCH", upload.code)
+
+            val ready = TeamDraftFile(UPLOAD, "a.txt", "text/plain", 10, TeamDraftFile.State.Ready, 10)
+            suspend fun queued(files: List<TeamDraftFile>, conversation: String?, operation: String = "create", waitId: String? = null): Boolean {
+                withContext(h.dispatcher) { h.model.queue(operation, "hello", messageId = if (operation == "edit") "message_0001" else null, waitId = waitId, files = files, conversationId = conversation) }
+                eventually { !h.model.state.value.submitting }
+                delay(50)
+                return h.storage.load(MEMBER, TEAM, GENERATION).outbox.isNotEmpty() || h.sent.isNotEmpty()
+            }
+            assertFalse(queued(listOf(ready), "chat_other1"))
+            assertFalse(queued(listOf(ready), null))
+            assertFalse(queued(listOf(ready.copy(state = TeamDraftFile.State.Uploading)), CHAT))
+            assertFalse(queued(List(6) { ready.copy(uploadId = "upload_000$it") }, CHAT))
+            assertFalse(queued(listOf(ready), CHAT, operation = "edit"))
+            assertFalse(queued(listOf(ready), CHAT, waitId = WAIT))
+            assertTrue(h.sent.isEmpty())
+            // Leaving the team ends an upload: nothing more is sent for it.
+            withContext(h.dispatcher) { h.model.stop() }
+            assertEquals("INVALID_SESSION", (runCatching { h.model.upload(CHAT, UPLOAD, "a.txt", "text/plain", ByteArray(10)) { } }.exceptionOrNull() as TeamMessageFailure).code)
+        }
+    }
+
     private class Harness(private val bot: Boolean = false) : AutoCloseable {
         val directory = Files.createTempDirectory("team-public-queue-").toFile()
         val storage = TeamCommandStorage(directory)
@@ -197,6 +269,12 @@ class TeamMessagingQueueTest {
         val durableBeforeAck = AtomicBoolean(false)
         /** An action the server refuses with HTTP 403 and this error code, set by a test after the model has started. */
         val fail = java.util.concurrent.ConcurrentHashMap<String, String>()
+        /** The upload service in small: what `createUpload` announced, the parts that arrived, and what was checked or given up. */
+        val uploads = java.util.concurrent.ConcurrentHashMap<String, JSONObject>()
+        val parts = java.util.concurrent.ConcurrentHashMap<String, String>()
+        var partBytes = 1000
+        /** How many more requests of an action the server answers with HTTP 503 before it serves them. */
+        val busy = java.util.concurrent.ConcurrentHashMap<String, Int>()
         private val server = ServerSocket(0, 0, InetAddress.getByName("127.0.0.1"))
         private val httpThreads = Executors.newSingleThreadExecutor()
         val model: TeamMessagingModel
@@ -229,7 +307,9 @@ class TeamMessagingQueueTest {
                     if (header.startsWith("Content-Length:", ignoreCase = true)) length = header.substringAfter(':').trim().toInt()
                 }
                 val input = JSONObject(String(stream.readNBytes(length), Charsets.UTF_8))
-                val refusal = fail[input.getString("action")]
+                val waits = busy[input.getString("action")] ?: 0
+                if (waits > 0) busy[input.getString("action")] = waits - 1
+                val refusal = if (waits > 0) "SERVICE_UNAVAILABLE" else fail[input.getString("action")]
                 if (refusal != null) refused += input
                 val result = if (refusal != null) JSONObject().put("error", JSONObject().put("code", refusal)) else when (input.getString("action")) {
                     "listSharedBots" -> JSONObject().put("bots", JSONArray().also { if (bot) it.put(botCard()) })
@@ -245,11 +325,23 @@ class TeamMessagingQueueTest {
                         JSONObject().put("ok", true)
                     }
                     "pauseSharedBot", "createConversation" -> JSONObject().put("ok", true)
+                    "createUpload" -> { asked += input; val p = input.getJSONObject("payload"); uploads[p.getString("uploadId")] = p
+                        JSONObject().put("uploadId", p.getString("uploadId")).put("state", "uploading").put("parts", (p.getInt("byteLength") + partBytes - 1) / partBytes).put("partBytes", partBytes) }
+                    "putUploadPart" -> { asked += input; val p = input.getJSONObject("payload"); parts["${p.getString("uploadId")}/${p.getInt("index")}"] = p.getString("data"); JSONObject().put("index", p.getInt("index")) }
+                    "finalizeUpload" -> { asked += input; val id = input.getJSONObject("payload").getString("uploadId"); val upload = uploads.getValue(id)
+                        val count = (upload.getInt("byteLength") + partBytes - 1) / partBytes
+                        val whole = (0 until count).map { java.util.Base64.getDecoder().decode(parts["$id/$it"] ?: "") }.fold(ByteArray(0)) { all, part -> all + part }
+                        val good = whole.size == upload.getInt("byteLength") && TeamAttachments.sha256Hex(whole) == upload.getString("sha256")
+                        JSONObject().put("uploadId", id).put("state", if (good) "verified" else "failed").put("parts", count).put("partBytes", partBytes).also { if (!good) it.put("code", "UPLOAD_DIGEST_MISMATCH") } }
+                    "readAttachmentPart" -> { asked += input; val p = input.getJSONObject("payload"); val id = p.getString("attachmentId"); val upload = uploads.getValue(id)
+                        JSONObject().put("attachmentId", id).put("index", p.getInt("index")).put("parts", (upload.getInt("byteLength") + partBytes - 1) / partBytes).put("data", parts.getValue("$id/${p.getInt("index")}")) }
+                    "cancelUpload" -> { asked += input; JSONObject().put("uploadId", input.getJSONObject("payload").getString("uploadId")).put("state", "cancelled") }
+                    "revokeAttachment" -> { asked += input; JSONObject().put("attachmentId", input.getJSONObject("payload").getString("attachmentId")).put("state", "revoked") }
                     else -> error("Unexpected public queue request")
                 }
                 val bytes = result.toString().toByteArray()
                 socket.getOutputStream().use { output ->
-                    output.write("HTTP/1.1 ${if (refusal != null) "403 Forbidden" else "200 OK"}\r\nContent-Type: application/json\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())
+                    output.write("HTTP/1.1 ${if (waits > 0) "503 Service Unavailable" else if (refusal != null) "403 Forbidden" else "200 OK"}\r\nContent-Type: application/json\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())
                     output.write(bytes); output.flush()
                 }
             } } catch (error: SocketException) { if (!server.isClosed) throw error } }
@@ -299,6 +391,7 @@ class TeamMessagingQueueTest {
         private const val BOT = "sharedbot_01"
         private const val GENERATION = 7L
         private const val TASK = "task_test01"
+        private const val UPLOAD = "upload_test01"
         private const val WAIT = "wait_0123456789abcdef0123456789abcdef01234567"
         private suspend fun eventually(test: () -> Boolean) = withTimeout(5000) { while (!test()) delay(10) }
         private fun anyMetadata() = eq(MetadataChanges.INCLUDE) ?: MetadataChanges.INCLUDE

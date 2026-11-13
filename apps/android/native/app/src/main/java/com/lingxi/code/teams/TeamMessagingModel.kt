@@ -224,12 +224,12 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                     val id = pending.optJSONObject("payload")?.getString("changeId") ?: pending.getString("changeId"); val lease = System.currentTimeMillis() + 30000
                     commit(life) { it.copy(outbox = it.outbox.map { value -> if ((value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) == id && !value.has("error") && value.optLong("leaseUntil") <= System.currentTimeMillis()) JSONObject(value.toString()).put("leaseUntil", lease).put("attempted", true) else value }) }
                     val intent = mutable.value.cache?.outbox?.find { (it.optJSONObject("payload")?.getString("changeId") ?: it.getString("changeId")) == id && it.optLong("leaseUntil") == lease } ?: continue
-                    val body = JSONObject(intent.toString()).also { it.remove("error"); it.remove("leaseUntil"); it.remove("attempted") }
+                    val body = JSONObject(intent.toString()).also { it.remove("error"); it.remove("leaseUntil"); it.remove("attempted"); it.remove("attachmentNames") }
                     try { call(body, life); commit(life) { it.copy(outbox = it.outbox.filter { pending -> (pending.optJSONObject("payload")?.getString("changeId") ?: pending.getString("changeId")) != id }) } }
                     catch (error: CancellationException) { throw error }
                     catch (error: Exception) {
                         val code = (error as? TeamMessageFailure)?.code ?: "SERVICE_UNAVAILABLE"
-                        val permanent = code in setOf("MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "INVALID_INPUT", "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED")
+                        val permanent = code in setOf("MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "INVALID_INPUT", "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED", "ATTACHMENT_REQUIRED", "ATTACHMENT_LIMIT", "UPLOAD_EXPIRED")
                         commit(life) { it.copy(outbox = it.outbox.map { value -> if ((value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) == id) JSONObject(value.toString()).also { it.remove("leaseUntil"); if (permanent) it.put("error", code) } else value }) }
                         if (!permanent) throw error
                     }
@@ -343,13 +343,20 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         commit(lifecycle) { if (it.creation != null) throw TeamMessageFailure("CREATION_PENDING"); it.copy(creation = intent) }
         select(id); onSuccess()
     }
-    /** [waitId] makes a new message the answer to a Bot's question: it is sent as `answerWait`, asks no Bot and starts no task. */
-    fun queue(operation: String, text: String, messageId: String? = null, replyTo: String? = null, targets: List<String> = emptyList(), waitId: String? = null, onSuccess: () -> Unit = {}) {
+    /**
+     * [waitId] makes a new message the answer to a Bot's question: it is sent as `answerWait`, asks no Bot and starts no task.
+     * [files]: checked uploads of [conversationId] that a new message carries; it may then have no text and ask no Bot. A message with
+     * files is only ever queued for the conversation they were uploaded for.
+     */
+    fun queue(operation: String, text: String, messageId: String? = null, replyTo: String? = null, targets: List<String> = emptyList(), waitId: String? = null,
+              files: List<TeamDraftFile> = emptyList(), conversationId: String? = null, onSuccess: () -> Unit = {}) {
         if (mutable.value.submitting) return
         mutable.update { it.copy(submitting = true) }; val life = lifecycle
         launchOperation {
             try {
-                if (!active || mutable.value.revoked || mutable.value.selected.isEmpty() || (operation != "recall" && (text.isBlank() || text.toByteArray(Charsets.UTF_8).size > 8192))) throw TeamMessageFailure("INVALID_INPUT")
+                val carries = operation == "create" && waitId == null && files.isNotEmpty()
+                if (files.isNotEmpty() && (!carries || files.size > TeamAttachments.MESSAGE_FILES || files.any { it.state != TeamDraftFile.State.Ready } || conversationId != mutable.value.selected)) throw TeamMessageFailure("INVALID_INPUT")
+                if (!active || mutable.value.revoked || mutable.value.selected.isEmpty() || (operation != "recall" && ((text.isBlank() && !carries) || text.toByteArray(Charsets.UTF_8).size > 8192))) throw TeamMessageFailure("INVALID_INPUT")
                 if (waitId != null) {
                     if (operation != "create") throw TeamMessageFailure("INVALID_INPUT")
                     val changeId = UUID.randomUUID().toString()
@@ -364,12 +371,14 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                     requireTeamBotSelections(selected, mutable.value.bots, conversation.participants)
                     selected
                 } else emptyList()
-                val intent = JSONObject().put("action", "mutate").put("teamId", teamId).put("generation", generation).put("conversationId", mutable.value.selected).put("messageId", messageId ?: UUID.randomUUID().toString()).put("changeId", UUID.randomUUID().toString()).put("operation", operation).put("text", text)
+                val said = if (carries && text.isBlank()) "" else text
+                val intent = JSONObject().put("action", "mutate").put("teamId", teamId).put("generation", generation).put("conversationId", mutable.value.selected).put("messageId", messageId ?: UUID.randomUUID().toString()).put("changeId", UUID.randomUUID().toString()).put("operation", operation).put("text", said)
                 replyTo?.let { intent.put("replyTo", it) }
-                val command = if (targetsForSubmit.isNotEmpty()) {
-                    val payload = JSONObject().put("conversationId", intent.getString("conversationId")).put("messageId", intent.getString("messageId")).put("changeId", intent.getString("changeId")).put("text", text).put("targets", JSONArray(targetsForSubmit.distinct().sorted()))
+                val command = if (targetsForSubmit.isNotEmpty() || carries) {
+                    val payload = JSONObject().put("conversationId", intent.getString("conversationId")).put("messageId", intent.getString("messageId")).put("changeId", intent.getString("changeId")).put("text", said).put("targets", JSONArray(targetsForSubmit.distinct().sorted()))
                     replyTo?.let { payload.put("replyTo", it) }
-                    executionCommand("submit", payload, intent.getString("changeId"))
+                    if (carries) payload.put("attachments", JSONArray(files.map { it.uploadId }))
+                    executionCommand("submit", payload, intent.getString("changeId")).also { if (carries) it.put("attachmentNames", JSONArray(files.map { file -> file.name })) }
                 } else intent
                 commit(life) { it.copy(outbox = it.outbox + command) }; onSuccess(); refresh()
             } finally { if (life == lifecycle) mutable.update { it.copy(submitting = false) } }
@@ -385,7 +394,12 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         if (!intent.has("error") || intent.optLong("leaseUntil") > System.currentTimeMillis()) throw TeamMessageFailure("MESSAGE_IN_FLIGHT")
         cache.copy(commands = cache.commands.filter { it.getString("commandId") != commandId })
     }; refresh() }
-    fun discard(id: String) = launchOperation { commit(lifecycle) { if (it.outbox.any { value -> (value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) == id && ((value.optBoolean("attempted") && !value.has("error")) || value.optLong("leaseUntil") > System.currentTimeMillis()) }) throw TeamMessageFailure("MESSAGE_IN_FLIGHT"); it.copy(outbox = it.outbox.filter { value -> (value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) != id }) } }
+    fun discard(id: String) = launchOperation {
+        // The files of a message that was refused are no message's: they are given up, so they stop counting against the sender.
+        val files = mutable.value.cache?.outbox?.firstOrNull { value -> value.has("error") && value.optJSONObject("payload")?.optString("changeId") == id }?.optJSONObject("payload")?.optJSONArray("attachments")?.strings() ?: emptyList()
+        commit(lifecycle) { if (it.outbox.any { value -> (value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) == id && ((value.optBoolean("attempted") && !value.has("error")) || value.optLong("leaseUntil") > System.currentTimeMillis()) }) throw TeamMessageFailure("MESSAGE_IN_FLIGHT"); it.copy(outbox = it.outbox.filter { value -> (value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) != id }) }
+        for (uploadId in files) cancelUpload(uploadId)
+    }
     fun discardCreation() = launchOperation { commit(lifecycle) { if ((it.creation?.optBoolean("attempted") == true && !it.creation.has("error")) || (it.creation?.optLong("leaseUntil") ?: 0) > System.currentTimeMillis()) throw TeamMessageFailure("MESSAGE_IN_FLIGHT"); it.copy(creation = null) } }
     /** HTTP `read`: the list action sends the row's `lastSeq`, automatic mark-read the newest rendered `seq`. */
     fun markRead(conversationId: String, seq: Long) = launchOperation {
@@ -411,8 +425,70 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     }
     private fun executionCommand(action: String, payload: JSONObject, commandId: String = UUID.randomUUID().toString()) =
         JSONObject().put("schemaVersion", 1).put("commandId", commandId).put("teamId", teamId).put("generation", generation).put("action", action).put("payload", payload)
+    // --- files -------------------------------------------------------------------------------------
+
+    /**
+     * Uploads one file for one conversation and has it checked (Desktop `uploadAttachment`). Each step has its own stable command id, so a
+     * step repeated after a lost answer is the same step. Throws the service's code when the file is refused (`UPLOAD_TYPE_MISMATCH`,
+     * `UPLOAD_DIGEST_MISMATCH`, `UPLOAD_QUOTA_EXCEEDED`, …) and `INVALID_SESSION` when this team was closed or the account changed
+     * meanwhile: nothing more is sent then.
+     */
+    suspend fun upload(conversationId: String, uploadId: String, name: String, mime: String, bytes: ByteArray, onProgress: (Int) -> Unit) = onModel {
+        val life = lifecycle
+        val digest = withContext(Dispatchers.Default) { TeamAttachments.sha256Hex(bytes) }
+        val created = insist { call(executionCommand("createUpload", JSONObject().put("conversationId", conversationId).put("uploadId", uploadId).put("name", name).put("mime", mime).put("byteLength", bytes.size).put("sha256", digest), "${uploadId}_c"), life) }
+        if (created.optString("state") == "verified") { onProgress(bytes.size); return@onModel }
+        val parts = created.optInt("parts"); val partBytes = created.optInt("partBytes")
+        if (created.optString("state") != "uploading" || partBytes <= 0 || parts <= 0) throw TeamMessageFailure(created.optString("code").ifEmpty { "UPLOAD_FAILED" })
+        for (index in 0 until parts) {
+            val from = index.toLong() * partBytes
+            if (from >= bytes.size) throw TeamMessageFailure("UPLOAD_FAILED")
+            val until = minOf(bytes.size.toLong(), from + partBytes).toInt()
+            val data = withContext(Dispatchers.Default) { java.util.Base64.getEncoder().encodeToString(bytes.copyOfRange(from.toInt(), until)) }
+            insist { call(executionCommand("putUploadPart", JSONObject().put("uploadId", uploadId).put("index", index).put("data", data), "${uploadId}_p$index"), life, 90) }
+            onProgress(until)
+        }
+        val checked = insist { call(executionCommand("finalizeUpload", JSONObject().put("uploadId", uploadId), "${uploadId}_f"), life, 60) }
+        if (checked.optString("state") != "verified") throw TeamMessageFailure(checked.optString("code").ifEmpty { "UPLOAD_FAILED" })
+    }
+    /** Gives up a file that no message carries. Best effort: one that is not given up here ends by itself after a day. */
+    suspend fun cancelUpload(uploadId: String) {
+        try { onModel { execute("cancelUpload", JSONObject().put("uploadId", uploadId), lifecycle) } }
+        catch (error: CancellationException) { throw error } catch (_: Exception) { }
+    }
+    /**
+     * A file of a message, whole and checked against what the message says it is. Asked of the service every time and kept nowhere:
+     * only someone who reads that conversation now is answered.
+     */
+    suspend fun download(file: TeamMessageAttachment): ByteArray = onModel {
+        val life = lifecycle
+        suspend fun read(index: Int) = call(executionCommand("readAttachmentPart", JSONObject().put("attachmentId", file.attachmentId).put("index", index)), life, 90)
+        val first = read(0)
+        val parts = mutableListOf(first.getString("data"))
+        for (index in 1 until first.getInt("parts")) parts += read(index).getString("data")
+        withContext(Dispatchers.Default) { TeamAttachments.assemble(parts, file) }
+    }
+    /** The sender takes a file of their message back: its bytes are deleted and the message says so. */
+    suspend fun revokeAttachment(attachmentId: String) {
+        onModel { execute("revokeAttachment", JSONObject().put("attachmentId", attachmentId).put("changeId", UUID.randomUUID().toString()), lifecycle) }
+    }
+    /** A step of an upload: tried again, a little later each time, unless the answer will not change by asking again. */
+    private suspend fun insist(step: suspend () -> JSONObject): JSONObject {
+        var attempt = 0
+        while (true) {
+            try { return step() }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (attempt >= 3 || TeamAttachments.isFinal((error as? TeamMessageFailure)?.code.orEmpty())) throw error
+                delay(uploadRetryMs shl attempt); attempt++
+            }
+        }
+    }
+    /** The first pause before a step of an upload is tried again; a test shortens it. */
+    internal var uploadRetryMs = 500L
+
     private suspend fun execute(action: String, payload: JSONObject, life: Long) = call(executionCommand(action, payload), life)
-    private suspend fun call(input: JSONObject, life: Long): JSONObject {
+    private suspend fun call(input: JSONObject, life: Long, seconds: Long = 20): JSONObject {
         val owner = uid
         val user = auth.currentUser
         if (!active || life != lifecycle || user?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
@@ -420,7 +496,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         if (!active || life != lifecycle || auth.currentUser?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
         val body = JSONObject(input.toString()).put("teamId", teamId).put("generation", generation)
         if (body.has("schemaVersion")) TeamExecutionContract.validate(body)
-        val result = TeamHttp.request("$apiRoot/v1/teams/messages", token, body)
+        val result = TeamHttp.request("$apiRoot/v1/teams/messages", token, body, seconds)
         if (!active || life != lifecycle || auth.currentUser?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
         return result
     }

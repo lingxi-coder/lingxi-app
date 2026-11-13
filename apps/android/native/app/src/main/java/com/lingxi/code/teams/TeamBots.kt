@@ -125,10 +125,12 @@ internal object TeamExecutionContract {
         val p = v.optJSONObject("payload") ?: fail()
         fun shape(required: Set<String>, optional: Set<String> = emptySet()) { if (!p.keysSet().containsAll(required) || !((required + optional).containsAll(p.keysSet()))) fail() }
         fun requireId(key: String) { if (!id(p.opt(key))) fail() }
-        fun ids(key: String, minimum: Int = 1) {
+        fun ids(key: String, minimum: Int = 1, maximum: Int = 8) {
             val a = p.optJSONArray(key) ?: fail(); val values = (0 until a.length()).map { a.get(it) }
-            if (values.size !in minimum..8 || values.distinct().size != values.size || values.any { !id(it) }) fail()
+            if (values.size !in minimum..maximum || values.distinct().size != values.size || values.any { !id(it) }) fail()
         }
+        val lastPart = (TeamAttachments.FILE_BYTES - 1) / TeamAttachments.PART_BYTES
+        fun partIndex(value: Any?) = integer(value, 0) && (value as Number).toLong() <= lastPart
         when (v.opt("action")) {
             "listSharedBots" -> shape(emptySet())
             "getTask" -> { shape(setOf("taskId")); requireId("taskId") }
@@ -180,11 +182,29 @@ internal object TeamExecutionContract {
             "pauseSharedBot" -> { shape(setOf("sharedBotId", "expectedRevision")); requireId("sharedBotId"); if (!integer(p.opt("expectedRevision"), 1)) fail() }
             "setConversationPolicy" -> { shape(setOf("conversationId", "expectedRevision", "targets")); requireId("conversationId"); ids("targets", 0); if (!integer(p.opt("expectedRevision"), 0)) fail() }
             "submit" -> {
-                shape(setOf("conversationId", "messageId", "changeId", "text", "targets"), setOf("replyTo"))
-                listOf("conversationId", "messageId", "changeId").forEach(::requireId); ids("targets")
+                // A message that asks Bots, carries files, or both.
+                shape(setOf("conversationId", "messageId", "changeId", "text", "targets"), setOf("replyTo", "attachments"))
+                listOf("conversationId", "messageId", "changeId").forEach(::requireId)
+                val files = p.has("attachments")
+                ids("targets", if (files) 0 else 1)
+                if (files) ids("attachments", maximum = TeamAttachments.MESSAGE_FILES)
                 if (p.has("replyTo")) requireId("replyTo")
-                val text = p.opt("text") as? String ?: fail(); if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 8192) fail()
+                val text = p.opt("text") as? String ?: fail(); if ((text.isEmpty() && !files) || text.toByteArray(Charsets.UTF_8).size > 8192) fail()
             }
+            "createUpload" -> {
+                shape(setOf("conversationId", "uploadId", "name", "mime", "byteLength", "sha256")); requireId("conversationId"); requireId("uploadId")
+                val name = p.opt("name") as? String ?: fail(); val digest = p.opt("sha256") as? String ?: fail()
+                if (name != TeamAttachments.name(name) || p.opt("mime") !in TeamAttachments.TYPES || !integer(p.opt("byteLength"), 1) ||
+                    (p.opt("byteLength") as Number).toLong() > TeamAttachments.FILE_BYTES || !Regex("^[a-f0-9]{64}$").matches(digest)) fail()
+            }
+            "putUploadPart" -> {
+                shape(setOf("uploadId", "index", "data")); requireId("uploadId")
+                val data = p.opt("data") as? String ?: fail()
+                if (!partIndex(p.opt("index")) || data.length !in 4..4 * ((TeamAttachments.PART_BYTES + 2) / 3) || !Regex("^[A-Za-z0-9+/]+={0,2}$").matches(data)) fail()
+            }
+            "finalizeUpload", "cancelUpload" -> { shape(setOf("uploadId")); requireId("uploadId") }
+            "readAttachmentPart" -> { shape(setOf("attachmentId", "index")); requireId("attachmentId"); if (!partIndex(p.opt("index"))) fail() }
+            "revokeAttachment" -> { shape(setOf("attachmentId", "changeId")); requireId("attachmentId"); requireId("changeId") }
             "createConversation" -> {
                 shape(setOf("conversationId", "kind", "title", "participantUids", "sharedBotIds")); requireId("conversationId"); ids("sharedBotIds")
                 if (p.opt("kind") !in setOf("bot_dm", "group", "channel")) fail()

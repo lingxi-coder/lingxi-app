@@ -342,7 +342,7 @@ On all four, a Bot chat from before the handover shows why it no longer answers,
 
 **Not done.** Nothing here has run on a device or against the deployed project, and nothing is deployed. Native clients show no offer: the maintainer and the recipient use Desktop or Web. The owner control on iOS and Android is compiled and type-checked but has no UI test. A handover does not move the task history of the earlier deployment, by design.
 
-## M3-4 — files in a Team message (service, Web, Desktop, the Bot's model)
+## M3-4 — files in a Team message (service, Web, Desktop, iOS, Android, the Bot's model)
 
 A member attaches pictures and documents to a Team message. Everyone who reads the conversation can open them, and a Bot that is asked gets them as real model input. Phones and voice are not done yet (see the end).
 
@@ -394,9 +394,20 @@ Things that follow from existing rules:
 
 **Tests.** Emulator `attachments.emulator.test.mjs` (9: upload and read back by each reader, wrong or cut files, limits, repeats, quota and cleanup, take-back, recall and leaving, a Bot request with files, the read-files record) and the rules test. Firebase unit contract test. Web `teams-attachments.test.ts` (11). Electron `teams-host.test.ts` (3 for files: order and evidence, limits, failures) and `teams-chat-source.test.ts` (1). Runtime `team_invocation_process` (3: files in the real model request and across later tasks, a row over 2 MiB, refused batches).
 
+**iOS and Android.** Both have the same rules as `packages/teams/attachments.ts` (`TeamAttachments.swift`, `TeamAttachments.kt`) and the same command checks.
+
+- Choosing: iOS offers the photo library and Files; Android the system file chooser. A picture that is not PNG or JPEG (HEIC, WebP), or one over 10 MiB, is made into a JPEG of at most 4096 pixels a side before it is sent. Anything else that is not one of the four types is refused with the reason.
+- The workspace owns the uploads. A draft's files are kept by account, team, generation and conversation, next to its text. An upload reports to the draft it was started for only; it ends when its team is closed, and its file then leaves the draft (checked files stay). Everything is dropped on sign-out or an account change.
+- Sending reads the files of the open conversation's draft at that moment. An edit and an answer to a Bot's question carry no files; the files wait in the draft. A message refused for good gives its uploads up when it is discarded.
+- A message's pictures are shown small in the stream; the small copies are held in memory only while the team (iOS) or the conversation (Android) is open. Opening a file asks the service for it each time. iOS shows it in Quick Look and deletes its copy when the preview closes. Android writes it under `cache/team-files` for the app that shows it and deletes it before the next file is opened and on an account change.
+- The sender can take a file back after a confirmation. A Bot's reply names the files its model was given.
+
+Tests: iOS `TeamAttachmentsTests` (12, on macOS) and the whole-app type check; Android `TeamAttachmentsTest` (10) and two model tests in `TeamMessagingQueueTest` (upload in parts with a busy service, send, read back, take back; refusals and files never queued for another conversation, an edit, an answer or unchecked).
+
 **Not done.**
 
-- iOS and Android: a message's files are not shown, and cannot be attached. Voice in the Team composer (L1, L5) is not started.
+- Voice in the Team composer (L1, L5) is not started on either phone.
+- The phone UI has no UI test and has not run on a device or simulator.
 - Nothing ran in a real browser, the Desktop app, on a phone, or against a real model. No real provider has been sent a Team file.
 - Files at the full 20 MiB were not run through the worker. The test uses one 1.6 MiB file, just over the old row limit: the unoptimized worker needs about a minute and a half per run for 3.5 MiB of files, and a 13 MiB run did not finish in five minutes. The time grows with the size of the rows in the transcript and is paid again by every later task of that conversation. It has not been measured in an optimized build.
 - Nothing is deployed. The runtime change is on its own branch and the app does not pin it yet.

@@ -5,6 +5,35 @@ struct DurableConversationTurnRecord: Codable, Equatable, Sendable {
     let sessionID: String
     let turnID: UInt64
     var lastSequence: UInt64
+    let anchorTurnID: UInt64
+    var isActive: Bool
+    var queuedTurnIDs: [UInt64]
+
+    init(scope: String, sessionID: String, turnID: UInt64, lastSequence: UInt64,
+         anchorTurnID: UInt64? = nil, isActive: Bool = true, queuedTurnIDs: [UInt64] = []) {
+        self.scope = scope
+        self.sessionID = sessionID
+        self.turnID = turnID
+        self.lastSequence = lastSequence
+        self.anchorTurnID = anchorTurnID ?? turnID
+        self.isActive = isActive
+        self.queuedTurnIDs = queuedTurnIDs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case scope, sessionID, turnID, lastSequence, anchorTurnID, isActive, queuedTurnIDs
+    }
+
+    init(from decoder: any Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        scope = try fields.decode(String.self, forKey: .scope)
+        sessionID = try fields.decode(String.self, forKey: .sessionID)
+        turnID = try fields.decode(UInt64.self, forKey: .turnID)
+        lastSequence = try fields.decode(UInt64.self, forKey: .lastSequence)
+        anchorTurnID = fields.contains(.anchorTurnID) ? try fields.decode(UInt64.self, forKey: .anchorTurnID) : turnID
+        isActive = fields.contains(.isActive) ? try fields.decode(Bool.self, forKey: .isActive) : true
+        queuedTurnIDs = fields.contains(.queuedTurnIDs) ? try fields.decode([UInt64].self, forKey: .queuedTurnIDs) : []
+    }
 }
 
 private struct DurableConversationTurnWitness: Codable, Equatable {
@@ -46,6 +75,7 @@ actor DurableConversationTurnLedger {
     }
     private struct ClearReceipt {
         let turnID: UInt64
+        let anchorTurnID: UInt64
         let ledger: OwnerCatalogExpectation
         let witness: OwnerCatalogExpectation
     }
@@ -89,7 +119,10 @@ actor DurableConversationTurnLedger {
                 for record in records {
                     let owner = canonicalSessionID(record.sessionID)
                     guard !owner.isEmpty, !record.scope.isEmpty, owners.insert(owner).inserted,
-                          witnessed[owner] == record.turnID else {
+                          witnessed[owner] == record.anchorTurnID,
+                          Set(record.queuedTurnIDs).count == record.queuedTurnIDs.count,
+                          !record.isActive || !record.queuedTurnIDs.contains(record.turnID),
+                          record.isActive || !record.queuedTurnIDs.isEmpty else {
                         throw DurableConversationRecoveryError.invalidStore
                     }
                 }
@@ -113,6 +146,17 @@ actor DurableConversationTurnLedger {
             try replace()
         })
         try synchronizeOwnerCatalog(url, expectedBytes: data)
+    }
+
+    private func writeRecords(_ records: [DurableConversationTurnRecord], to url: URL,
+                              expected: OwnerCatalogExpectation, witness: OwnerCatalogExpectation) throws {
+        let data = try JSONEncoder().encode(records)
+        try durableWrite(data, to: url, expected: expected, witness: (witnessURL(for: url), witness)) { bytes in
+            try UniqueJSONKeyGuard.validate(bytes)
+            guard try JSONDecoder().decode([DurableConversationTurnRecord].self, from: bytes) == records else {
+                throw DurableConversationRecoveryError.invalidStore
+            }
+        }
     }
 
     /// Undo only a begin that failed before its ledger replacement was
@@ -163,6 +207,20 @@ actor DurableConversationTurnLedger {
         try rollbackUnpublished(url: url, key: key)
         guard !(blockedOwners[key]?.contains(owner) ?? false) else { throw DurableConversationRecoveryError.unresolvedOwner }
         let (witnessExpected, expected, witness, records) = try snapshot(url)
+        if let index = records.firstIndex(where: { canonicalSessionID($0.sessionID) == owner }) {
+            let previous = records[index]
+            guard !previous.isActive, previous.queuedTurnIDs.contains(turnID) else {
+                throw DurableConversationRecoveryError.unresolvedOwner
+            }
+            var next = records
+            next[index] = DurableConversationTurnRecord(scope: scope, sessionID: owner, turnID: turnID,
+                lastSequence: 0, anchorTurnID: previous.anchorTurnID,
+                queuedTurnIDs: previous.queuedTurnIDs.filter { $0 != turnID })
+            // The stable anchor leaves the witness untouched while atomically
+            // claiming an already admitted successor in the ledger.
+            try writeRecords(next, to: url, expected: expected, witness: witnessExpected)
+            return
+        }
         guard !records.contains(where: { canonicalSessionID($0.sessionID) == owner }),
               !witness.owners.contains(where: { canonicalSessionID($0.sessionID) == owner }) else {
             throw DurableConversationRecoveryError.unresolvedOwner
@@ -207,27 +265,149 @@ actor DurableConversationTurnLedger {
         }
     }
 
-    func load(url: URL, sessionID: String) throws -> DurableConversationTurnRecord? {
+    func state(url: URL, sessionID: String) throws -> DurableConversationTurnRecord? {
         let owner = canonicalSessionID(sessionID)
         guard !owner.isEmpty else { throw DurableConversationRecoveryError.invalidStore }
         let (_, _, _, records) = try snapshot(url)
         return records.first { canonicalSessionID($0.sessionID) == owner }
     }
 
+    func load(url: URL, sessionID: String) throws -> DurableConversationTurnRecord? {
+        guard let record = try state(url: url, sessionID: sessionID), record.isActive else { return nil }
+        return record
+    }
+
+    func enqueue(url: URL, sessionID: String, ownerTurnID: UInt64, turnID: UInt64) throws {
+        let owner = canonicalSessionID(sessionID)
+        guard !owner.isEmpty else { throw DurableConversationRecoveryError.invalidStore }
+        let (witness, expected, _, records) = try snapshot(url)
+        guard let index = records.firstIndex(where: { canonicalSessionID($0.sessionID) == owner }),
+              records[index].isActive, records[index].turnID == ownerTurnID, turnID != ownerTurnID else {
+            throw DurableConversationRecoveryError.unresolvedOwner
+        }
+        guard !records[index].queuedTurnIDs.contains(turnID) else { return }
+        var next = records
+        next[index].queuedTurnIDs.append(turnID)
+        try writeRecords(next, to: url, expected: expected, witness: witness)
+    }
+
+    /// The native admission query can prove the visible owner is still a
+    /// private queued input while a successor already owns the executor.
+    /// Preserve that input as pending rather than treating it as terminal.
+    func deferActive(url: URL, sessionID: String, turnID: UInt64) throws {
+        let owner = canonicalSessionID(sessionID)
+        guard !owner.isEmpty else { throw DurableConversationRecoveryError.invalidStore }
+        let (witness, expected, _, records) = try snapshot(url)
+        guard let index = records.firstIndex(where: { canonicalSessionID($0.sessionID) == owner }),
+              records[index].turnID == turnID else { throw DurableConversationRecoveryError.unresolvedOwner }
+        if !records[index].isActive {
+            guard records[index].queuedTurnIDs.contains(turnID), let bytes = expected.bytes else {
+                throw DurableConversationRecoveryError.unresolvedOwner
+            }
+            try synchronizeOwnerCatalog(url, expectedBytes: bytes)
+            return
+        }
+        var next = records
+        next[index].isActive = false
+        next[index].queuedTurnIDs.insert(turnID, at: 0)
+        try writeRecords(next, to: url, expected: expected, witness: witness)
+    }
+
+    /// A native member query can name the executor of a coalesced envelope
+    /// after another client member was already retired. Extend only an exact
+    /// persisted pending member; its caller owns the native/session proof.
+    func adoptQueuedOwner(url: URL, sessionID: String, memberTurnID: UInt64, ownerTurnID: UInt64) throws {
+        let owner = canonicalSessionID(sessionID)
+        guard !owner.isEmpty else { throw DurableConversationRecoveryError.invalidStore }
+        let (witness, expected, _, records) = try snapshot(url)
+        guard let index = records.firstIndex(where: { canonicalSessionID($0.sessionID) == owner }),
+              let memberIndex = records[index].queuedTurnIDs.firstIndex(of: memberTurnID),
+              !records[index].isActive || records[index].turnID != ownerTurnID else {
+            throw DurableConversationRecoveryError.unresolvedOwner
+        }
+        if records[index].queuedTurnIDs.contains(ownerTurnID) {
+            guard let bytes = expected.bytes else { throw DurableConversationRecoveryError.invalidStore }
+            try synchronizeOwnerCatalog(url, expectedBytes: bytes)
+            return
+        }
+        var next = records
+        next[index].queuedTurnIDs.insert(ownerTurnID, at: memberIndex)
+        try writeRecords(next, to: url, expected: expected, witness: witness)
+    }
+
+    func removeQueued(url: URL, sessionID: String, turnID: UInt64) throws {
+        let owner = canonicalSessionID(sessionID), key = url.standardizedFileURL.path
+        guard !owner.isEmpty else { throw DurableConversationRecoveryError.invalidStore }
+        // An explicitly proven terminal deletion may need only its witness
+        // publication retried after the queued ID has already disappeared.
+        if let receipt = clearReceipts[key]?[owner] {
+            try clear(url: url, sessionID: owner, turnID: receipt.turnID)
+            return
+        }
+        let (witnessExpected, expected, witness, records) = try snapshot(url)
+        guard let index = records.firstIndex(where: { canonicalSessionID($0.sessionID) == owner }),
+              records[index].queuedTurnIDs.contains(turnID) else { return }
+        let record = records[index]
+        if !record.isActive, record.queuedTurnIDs == [turnID] {
+            try retire(url: url, owner: owner, turnID: record.turnID, anchorTurnID: record.anchorTurnID,
+                       expected: expected, witnessExpected: witnessExpected, witness: witness, records: records)
+            return
+        }
+        var next = records
+        next[index].queuedTurnIDs.removeAll { $0 == turnID }
+        try writeRecords(next, to: url, expected: expected, witness: witnessExpected)
+    }
+
     func clear(url: URL, sessionID: String, turnID: UInt64) throws {
         let owner = canonicalSessionID(sessionID), key = url.standardizedFileURL.path
         guard !owner.isEmpty else { throw DurableConversationRecoveryError.invalidStore }
+        let receipt = clearReceipts[key]?[owner]
+        guard receipt == nil || receipt?.turnID == turnID else { throw DurableConversationRecoveryError.invalidStore }
+        let (witnessExpected, expected, witness, records) = try snapshot(url, allowWitnessOnlyFor: receipt == nil ? nil : owner)
+        let record = records.first { canonicalSessionID($0.sessionID) == owner }
+        // A delayed terminal event for the predecessor cannot mutate or fence
+        // a successor that has already become this owner's active turn.
+        guard record == nil || record?.turnID == turnID else { throw DurableConversationRecoveryError.invalidStore }
+        if let record, !record.queuedTurnIDs.isEmpty {
+            guard receipt == nil else { throw DurableConversationRecoveryError.invalidStore }
+            do {
+                if record.isActive {
+                    var next = records
+                    let index = next.firstIndex { canonicalSessionID($0.sessionID) == owner }!
+                    next[index].isActive = false
+                    try writeRecords(next, to: url, expected: expected, witness: witnessExpected)
+                } else if let bytes = expected.bytes {
+                    // Confirm durability when a previous publication succeeded
+                    // but its caller received an uncertain failure.
+                    try synchronizeOwnerCatalog(url, expectedBytes: bytes)
+                }
+                blockedOwners[key]?.remove(owner)
+            } catch {
+                blockedOwners[key, default: []].insert(owner)
+                throw error
+            }
+            return
+        }
+        guard let anchor = record?.anchorTurnID ?? receipt?.anchorTurnID else {
+            throw DurableConversationRecoveryError.invalidStore
+        }
+        try retire(url: url, owner: owner, turnID: turnID, anchorTurnID: anchor,
+                   expected: expected, witnessExpected: witnessExpected, witness: witness, records: records)
+    }
+
+    private func retire(url: URL, owner: String, turnID: UInt64, anchorTurnID: UInt64,
+                        expected: OwnerCatalogExpectation, witnessExpected: OwnerCatalogExpectation,
+                        witness: DurableConversationTurnWitness, records: [DurableConversationTurnRecord]) throws {
+        let key = url.standardizedFileURL.path
         do {
             let receipt = clearReceipts[key]?[owner]
             guard receipt == nil || receipt?.turnID == turnID else { throw DurableConversationRecoveryError.invalidStore }
-            let retryOwner = receipt == nil ? nil : owner
-            let (witnessExpected, expected, witness, records) = try snapshot(url, allowWitnessOnlyFor: retryOwner)
             if let receipt {
                 guard receipt.ledger == expected, receipt.witness == witnessExpected else {
                     throw DurableConversationRecoveryError.invalidStore
                 }
             }
-            guard witness.owners.contains(where: { canonicalSessionID($0.sessionID) == owner && $0.turnID == turnID }) else {
+            guard witness.owners.contains(where: { canonicalSessionID($0.sessionID) == owner && $0.turnID == anchorTurnID }) else {
                 throw DurableConversationRecoveryError.invalidStore
             }
             var committedLedger = expected
@@ -246,12 +426,12 @@ actor DurableConversationTurnLedger {
                 committedLedger = try ownerCatalogExpectation(url)
                 guard committedLedger.bytes == data else { throw DurableConversationRecoveryError.invalidStore }
                 clearReceipts[key, default: [:]][owner] = ClearReceipt(
-                    turnID: turnID, ledger: committedLedger, witness: witnessExpected)
+                    turnID: turnID, anchorTurnID: anchorTurnID, ledger: committedLedger, witness: witnessExpected)
             } else if receipt == nil {
                 throw DurableConversationRecoveryError.invalidStore
             }
             var nextWitness = witness
-            nextWitness.owners.removeAll { canonicalSessionID($0.sessionID) == owner && $0.turnID == turnID }
+            nextWitness.owners.removeAll { canonicalSessionID($0.sessionID) == owner && $0.turnID == anchorTurnID }
             let marker = try JSONEncoder().encode(nextWitness)
             try durableWrite(marker, to: witnessURL(for: url), expected: witnessExpected,
                              witness: (url, committedLedger)) { bytes in

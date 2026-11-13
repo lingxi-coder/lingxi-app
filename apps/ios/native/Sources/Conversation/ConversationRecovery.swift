@@ -47,12 +47,41 @@ final class DurableConversationTurnClientStore {
     }
 
     func load() async throws -> DurableConversationTurnRecord? {
-        guard let sessionID else { return nil }
-        guard var record = try await ledger.load(url: url, sessionID: sessionID) else { return nil }
-        guard self.sessionID == sessionID else { throw CancellationError() }
-        // Only a warm projection owns its in-memory acknowledgement cursor.
-        record.lastSequence = liveAckSequences[record.turnID] ?? 0
+        guard let record = try await state(), record.isActive else { return nil }
         return record
+    }
+
+    func state(sessionID: String? = nil) async throws -> DurableConversationTurnRecord? {
+        guard let owner = sessionID.map(canonicalSessionID) ?? self.sessionID else { return nil }
+        guard var record = try await ledger.state(url: url, sessionID: owner) else { return nil }
+        if sessionID == nil, self.sessionID != owner { throw CancellationError() }
+        // Only a warm projection owns its in-memory acknowledgement cursor.
+        record.lastSequence = record.isActive && self.sessionID == owner ? liveAckSequences[record.turnID] ?? 0 : 0
+        return record
+    }
+
+    func enqueue(sessionID: String, ownerTurnID: UInt64, turnID: UInt64) async throws {
+        try await ledger.enqueue(url: url, sessionID: canonicalSessionID(sessionID),
+                                 ownerTurnID: ownerTurnID, turnID: turnID)
+    }
+
+    func queuedTurnIDs(sessionID: String? = nil) async throws -> [UInt64] {
+        try await state(sessionID: sessionID)?.queuedTurnIDs ?? []
+    }
+
+    func removeQueued(turnID: UInt64, sessionID: String) async throws {
+        try await ledger.removeQueued(url: url, sessionID: canonicalSessionID(sessionID), turnID: turnID)
+    }
+
+    func deferActive(turnID: UInt64, sessionID: String) async throws {
+        let owner = canonicalSessionID(sessionID)
+        try await ledger.deferActive(url: url, sessionID: owner, turnID: turnID)
+        if self.sessionID == owner { liveAckSequences.removeValue(forKey: turnID) }
+    }
+
+    func adoptQueuedOwner(sessionID: String, memberTurnID: UInt64, ownerTurnID: UInt64) async throws {
+        try await ledger.adoptQueuedOwner(url: url, sessionID: canonicalSessionID(sessionID),
+                                          memberTurnID: memberTurnID, ownerTurnID: ownerTurnID)
     }
 
     func updateSequence(turnID: UInt64, sequence: UInt64) {

@@ -197,6 +197,17 @@ final class EngineListener: IosEventListener {
                     resolvedPermissionIDs.insert(requestId)
                 }
                 source.apply(event)
+                if case .sessionResumed = event {
+                    // Restore persisted queued IDs and query native admission
+                    // before any cold executor output can reach the reducer.
+                    Task { @MainActor [self, source] in
+                        let attempt = await source.waitForQueuedAdmissionRestore()
+                        drain()
+                        await waitUntilIdle()
+                        source.finishQueuedAdmissionRestore(attempt)
+                    }
+                    return
+                }
             case let .permission(request):
                 guard !resolvedPermissionIDs.contains(request.requestId) else { continue }
                 source.enqueuePermission(request)

@@ -312,6 +312,41 @@ fn tool_detail_panel(
     out
 }
 
+/// Match only gate-refusal prefixes, not arbitrary stderr containing "permission denied".
+fn tool_denial_reason(
+    failed: bool,
+    headline: Option<&str>,
+    body: Option<&str>,
+) -> Option<(String, bool)> {
+    if !failed {
+        return None;
+    }
+    let reason = body
+        .map(str::trim)
+        .filter(|body| !body.is_empty())
+        .or(headline.map(str::trim))
+        .unwrap_or("");
+    let text = reason.to_ascii_lowercase();
+    let prefixes = [
+        "permission to use ",
+        "permission denied:",
+        "permission denied by ",
+        "tool use denied",
+        "user denied ",
+        "automatic approval review failed",
+        "command declined by auto-review",
+    ];
+    if text != "permission denied" && !prefixes.iter().any(|prefix| text.starts_with(prefix)) {
+        return None;
+    }
+    Some((
+        reason.into(),
+        text.contains("auto-review")
+            || text.contains("auto review")
+            || text.contains("automatic approval review"),
+    ))
+}
+
 fn single_tool_lines(
     entry: &ActivityEntry,
     width: usize,
@@ -359,6 +394,61 @@ fn single_tool_lines(
             })
         })
         .map(|body| tool_display::result::clamp_body(&body));
+    if let Some((reason, auto_review)) = tool_denial_reason(
+        failed,
+        headline.as_deref(),
+        body.as_ref().map(|body| body.text.as_str()),
+    ) {
+        let title = if auto_review {
+            "Command declined by auto-review"
+        } else {
+            "Command declined"
+        };
+        let mut lines = vec![StyledLine {
+            spans: vec![dim_span(
+                format!("◇ {title} {}", if verbose { "⌄" } else { "›" }),
+                theme,
+            )],
+        }];
+        if verbose {
+            let mut details = Vec::new();
+            if let Some(sub) = &header.sub_line {
+                details.extend(parse_ansi(&format!("{} {}", sub.prefix, sub.text)));
+            } else if let Some(primary) = &header.primary {
+                details.extend(parse_ansi(primary));
+            }
+            details.push(StyledLine {
+                spans: vec![dim_span("No output".into(), theme)],
+            });
+            let shell = matches!(
+                entry.tool.to_ascii_lowercase().as_str(),
+                "shell" | "bash" | "powershell"
+            );
+            lines.extend(tool_detail_panel(
+                if shell { "Shell" } else { &header.label },
+                details,
+                if shell { "Exit code unknown" } else { "" },
+                width,
+                theme,
+            ));
+            lines.push(StyledLine {
+                spans: vec![dim_span("Why it was denied".into(), theme)],
+            });
+            // Render the reason literally: terminal control sequences in a refusal are not instructions.
+            lines.extend(reason.lines().map(|line| StyledLine {
+                spans: vec![dim_span(
+                    line.chars().filter(|c| !c.is_control()).collect(),
+                    theme,
+                )],
+            }));
+            if body.as_ref().is_some_and(|body| body.truncated) {
+                lines.push(StyledLine {
+                    spans: vec![dim_span("… output truncated".into(), theme)],
+                });
+            }
+        }
+        return lines;
+    }
     let (old, new, path) = tool_display::diff_inputs_for(&entry.tool, &entry.input);
     let has_details = old.is_some()
         || new.is_some()
@@ -718,6 +808,27 @@ pub(crate) fn tool_result_lines(
         && !tool_display::result_is_error(result)
     {
         return Vec::new();
+    }
+    let refusal_body = tool_display::result_body(tool, result);
+    if tool_denial_reason(
+        tool_display::result_is_error(result),
+        None,
+        refusal_body.as_deref(),
+    )
+    .is_some()
+    {
+        return single_tool_lines(
+            &ActivityEntry {
+                id: String::new(),
+                tool: tool.into(),
+                input: input.cloned().unwrap_or(serde_json::Value::Null),
+                result: Some(result.clone()),
+            },
+            width,
+            theme,
+            true,
+            true,
+        );
     }
     if old_string.is_some() || new_string.is_some() {
         return edit_write_diff_lines(old_string, new_string, file_path, width, theme);
@@ -1114,7 +1225,28 @@ impl ToolResultCell {
 }
 
 impl StyledCell for ToolResultCell {
-    fn styled_lines(&self, width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
+    fn styled_lines(&self, width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine> {
+        let refusal_body = tool_display::result_body(&self.tool, &self.result);
+        if tool_denial_reason(
+            tool_display::result_is_error(&self.result),
+            None,
+            refusal_body.as_deref(),
+        )
+        .is_some()
+        {
+            return single_tool_lines(
+                &ActivityEntry {
+                    id: String::new(),
+                    tool: self.tool.clone(),
+                    input: self.input.clone().unwrap_or(serde_json::Value::Null),
+                    result: Some(self.result.clone()),
+                },
+                width,
+                theme,
+                verbose,
+                true,
+            );
+        }
         tool_result_lines(
             &self.tool,
             self.input.as_ref(),
@@ -2081,5 +2213,99 @@ mod tests {
             plain(&cell, false),
             vec!["Queried github 2 times, ran 1 bash command, wrote 1 memory".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod denial_presentation_tests {
+    use super::*;
+    #[test]
+    fn refusal_recognition_keeps_command_failures_and_successful_quoted_text() {
+        assert!(tool_denial_reason(false, Some("Permission denied"), None).is_none());
+        assert!(
+            tool_denial_reason(true, None, Some("bash: ./private: Permission denied")).is_none()
+        );
+        assert!(tool_denial_reason(true, None, Some("Process exited with code 1")).is_none());
+        assert_eq!(
+            tool_denial_reason(
+                true,
+                None,
+                Some("Automatic approval review failed: Bad Request")
+            ),
+            Some(("Automatic approval review failed: Bad Request".into(), true))
+        );
+        assert_eq!(
+            tool_denial_reason(true, Some("Permission to use Bash has been denied."), None)
+                .unwrap()
+                .1,
+            false
+        );
+    }
+    #[test]
+    fn denied_command_panel_retains_command_and_reason() {
+        let entry = ActivityEntry {
+            id: "denied".into(),
+            tool: "Bash".into(),
+            input: serde_json::json!({"command":"echo hello"}),
+            result: Some(
+                serde_json::json!({"error":"Automatic approval review failed: Bad Request"}),
+            ),
+        };
+        let collapsed = single_tool_lines(&entry, 80, &Theme::dark(), false, true);
+        let collapsed_text = collapsed
+            .iter()
+            .map(StyledLine::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(collapsed_text.contains("Command declined by auto-review"));
+        assert!(!collapsed_text.contains("Bad Request"));
+        for width in [12, 40, 80] {
+            let expanded = single_tool_lines(&entry, width, &Theme::dark(), true, true);
+            let text = expanded
+                .iter()
+                .map(StyledLine::plain_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("Why it was denied"));
+            assert!(text.contains("Bad Request"));
+            assert!(!text.contains("Unsuccessful"));
+        }
+    }
+    #[test]
+    fn standalone_refusals_use_the_same_disclosure_and_never_render_an_edit_diff() {
+        let result = serde_json::json!({"error": "Permission to use Edit has been denied."});
+        let input = serde_json::json!({"file_path":"/work/example.rs","old_string":"before","new_string":"after"});
+        let cell = ToolResultCell::new(
+            "Edit".into(),
+            result.clone(),
+            Some("before".into()),
+            Some("after".into()),
+            Some("/work/example.rs".into()),
+            Some(input.clone()),
+        );
+        let compact = cell
+            .styled_lines(80, &Theme::dark(), false)
+            .iter()
+            .map(StyledLine::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(compact.contains("Command declined"));
+        assert!(!compact.contains("Why it was denied"));
+        let expanded = tool_result_lines(
+            "Edit",
+            Some(&input),
+            &result,
+            Some("before"),
+            Some("after"),
+            Some("/work/example.rs"),
+            80,
+            &Theme::dark(),
+        )
+        .iter()
+        .map(StyledLine::plain_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert!(expanded.contains("Why it was denied"));
+        assert!(!expanded.contains("Added"));
     }
 }

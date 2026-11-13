@@ -4,6 +4,10 @@
 // the MCP fallback is drawn from the supplied reference.
 function artwork(name: string) {
   switch (name) {
+    case 'shield-terminal': return <g fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 1 14 4v5c0 3-2.5 5-6 7-3.5-2-6-4-6-7V4l6-3Z" />
+      <path d="m5 6 2 2-2 2m4 0h2" />
+    </g>;
     case 'computer': return <g stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round">
       <path d="M7.25 10.75h-4a1.5 1.5 0 0 1-1.5-1.5v-5.5a1.5 1.5 0 0 1 1.5-1.5h9.5a1.5 1.5 0 0 1 1.5 1.5v2.5M6.25 10.75v3M4.25 13.75h4" />
       <path d="m9.25 7.25 5 3.25-2.5.5-1 2.5-1.5-6.25Z" />
@@ -43,5 +47,5 @@ function artwork(name: string) {
 /** Tool-only artwork keeps navigation and other shared icons unchanged. */
 export function ToolActivityIcon({ name }: { name: string }) {
   const drawing = artwork(name) ?? artwork('box');
-  return <svg width={14} height={14} viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false" data-tool-icon={name}>{drawing}</svg>;
+  return <svg width={14} height={14} viewBox={name === "shield-terminal" ? "0 0 16 17" : "0 0 16 16"} fill="none" aria-hidden="true" focusable="false" data-tool-icon={name}>{drawing}</svg>;
 }

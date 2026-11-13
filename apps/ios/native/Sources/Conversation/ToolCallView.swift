@@ -14,6 +14,7 @@
 // keyed by tool-use id, and gets a toggle callback back.
 
 import SwiftUI
+import UIKit
 
 struct ToolCallView: View {
     @Environment(\.theme) private var t
@@ -28,6 +29,10 @@ struct ToolCallView: View {
 
     private var isSkill: Bool {
         trace.header?.verb == .skill || trace.tool.caseInsensitiveCompare("Skill") == .orderedSame
+    }
+
+    private var denial: ToolDenialPresentation? {
+        ToolDenialPresentation(failed: trace.status == .failed, headline: trace.display?.headline, body: trace.display?.body)
     }
 
     var body: some View {
@@ -67,9 +72,9 @@ struct ToolCallView: View {
 
     private var compactHeader: some View {
         HStack(spacing: 8) {
-            LXIcon(name: ToolDisplayText.icon(header: trace.header, tool: trace.tool), size: 20,
-                   color: trace.status == .failed ? t.danger : isExpanded ? t.text : t.text3, stroke: 1.8)
-                .accessibilityIdentifier("conversation.tool-call.\(trace.id).icon.\(ToolDisplayText.icon(header: trace.header, tool: trace.tool).rawValue)")
+            LXIcon(name: denial != nil ? .shieldTerminal : ToolDisplayText.icon(header: trace.header, tool: trace.tool), size: 20,
+                   color: denial != nil ? (t.isDark ? Color(red: 0.91, green: 0.65, blue: 0.42) : Color(red: 0.65, green: 0.26, blue: 0.07)) : trace.status == .failed ? t.danger : isExpanded ? t.text : t.text3, stroke: 1.8)
+                .accessibilityIdentifier("conversation.tool-call.\(trace.id).icon.\((denial != nil ? LXIconName.shieldTerminal : ToolDisplayText.icon(header: trace.header, tool: trace.tool)).rawValue)")
             Text(compactSummary)
                 .font(.footnote)
                 .foregroundStyle(isExpanded || isFocused || isHovering ? t.text : t.text3)
@@ -78,7 +83,7 @@ struct ToolCallView: View {
                 .fixedSize(horizontal: false, vertical: showsRequiresCodeMessage)
                 .layoutPriority(showsRequiresCodeMessage ? 1 : 0)
                 .runtimeTextSweep(isActive: trace.status == .running, highlightColor: t.text)
-            if trace.status == .failed {
+            if trace.status == .failed && denial == nil {
                 Text(trace.status.label).font(.caption).foregroundStyle(t.danger).lineLimit(1).layoutPriority(1)
             }
             if !compact, let elapsed = ConversationExecutionParsing.formatDuration(trace.elapsedMs) {
@@ -100,6 +105,7 @@ struct ToolCallView: View {
     }
 
     private var compactSummary: String {
+        if let denial { return denial.title }
         var summary = ConversationDesktopTimeline.summary([trace])
         if let display = trace.display, let headline = ToolDisplayText.headline(display, trace: trace) {
             let headlineInTitle = trace.status != .failed
@@ -118,43 +124,73 @@ struct ToolCallView: View {
 
     @ViewBuilder
     private var resultBlock: some View {
-        ToolDetailPanel(title: detailTitle, status: trace.status) {
-            if let sub = trace.header?.subLine, !sub.text.isEmpty {
-                Text("\(sub.prefix) \(sub.text)")
-                    .font(.system(.footnote, design: .monospaced))
-                    .foregroundStyle(t.text2)
-                    .textSelection(.enabled)
-            } else if trace.header == nil, let input = trace.inputSummary, !input.isEmpty {
-                Text(input)
-                    .font(.system(.footnote, design: .monospaced))
-                    .foregroundStyle(t.text2)
-                    .textSelection(.enabled)
-            }
-            if let display = trace.display {
-                if let headline = ToolDisplayText.headline(display, trace: trace) {
-                    Text(headline)
-                        .font(.footnote)
-                        .foregroundStyle(trace.status == .failed ? t.danger : t.text3)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let diff = display.diff { DiffView(diff: diff) }
-                if let body = ToolDisplayText.body(display, trace: trace), !body.isEmpty {
-                    if isSkill {
-                        AIText(markdown: body, compact: true)
-                    } else {
-                        Text(body)
+        if let denial {
+            ToolDetailPanel(title: detailTitle, footerText: trace.header?.verb == .shell ? String(localized: "tool_denied_exit_unknown") : nil) {
+                if let sub = trace.header?.subLine {
+                    HStack(alignment: .top, spacing: 8) {
+                        Text("\(sub.prefix) \(sub.text)")
                             .font(.system(.footnote, design: .monospaced))
-                            .foregroundStyle(t.text2)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
+                            .foregroundStyle(t.text2).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button { UIPasteboard.general.string = sub.text } label: {
+                            Image(systemName: "doc.on.doc").font(.caption).foregroundStyle(t.text3)
+                                .frame(minWidth: 44, minHeight: 44)
+                        }.buttonStyle(.plain).accessibilityLabel(String(localized: "chat_copy_code"))
                     }
+                } else if let primary = trace.header?.primary {
+                    Text(primary).font(.system(.footnote, design: .monospaced))
+                        .foregroundStyle(t.text2).textSelection(.enabled)
                 }
-                if display.bodyTruncated {
+                Text("tool_denied_no_output").font(.system(.footnote, design: .monospaced)).foregroundStyle(t.text2)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("tool_denied_reason").font(.footnote.weight(.medium)).foregroundStyle(t.text2)
+                Text(denial.reason).font(.footnote).foregroundStyle(t.text3)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                if trace.display?.bodyTruncated == true {
                     Text("chat_tool_body_truncated").font(.caption).foregroundStyle(t.text4)
                 }
             }
+            .padding(.bottom, 8)
+        } else {
+            ToolDetailPanel(title: detailTitle, status: trace.status) {
+                if let sub = trace.header?.subLine, !sub.text.isEmpty {
+                    Text("\(sub.prefix) \(sub.text)")
+                        .font(.system(.footnote, design: .monospaced))
+                        .foregroundStyle(t.text2)
+                        .textSelection(.enabled)
+                } else if trace.header == nil, let input = trace.inputSummary, !input.isEmpty {
+                    Text(input)
+                        .font(.system(.footnote, design: .monospaced))
+                        .foregroundStyle(t.text2)
+                        .textSelection(.enabled)
+                }
+                if let display = trace.display {
+                    if let headline = ToolDisplayText.headline(display, trace: trace) {
+                        Text(headline)
+                            .font(.footnote)
+                            .foregroundStyle(trace.status == .failed ? t.danger : t.text3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let diff = display.diff { DiffView(diff: diff) }
+                    if let body = ToolDisplayText.body(display, trace: trace), !body.isEmpty {
+                        if isSkill {
+                            AIText(markdown: body, compact: true)
+                        } else {
+                            Text(body)
+                                .font(.system(.footnote, design: .monospaced))
+                                .foregroundStyle(t.text2)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    if display.bodyTruncated {
+                        Text("chat_tool_body_truncated").font(.caption).foregroundStyle(t.text4)
+                    }
+                }
+            }
+            .accessibilityIdentifier("conversation.tool-detail.\(trace.id)")
         }
-        .accessibilityIdentifier("conversation.tool-detail.\(trace.id)")
     }
 
     private var detailTitle: String {
@@ -167,6 +203,7 @@ struct ToolCallView: View {
     /// The engine's `collapsed` hint is still useful metadata, but the client
     /// keeps the interaction consistent for short and long outputs alike.
     private var isCollapsible: Bool {
+        if denial != nil { return true }
         guard let display = trace.display else { return !(trace.inputSummary ?? "").isEmpty }
         return display.hasExpandableContent
     }
@@ -181,6 +218,7 @@ struct ToolDetailPanel<Content: View>: View {
     @ScaledMetric(relativeTo: .footnote) private var detailHeight: CGFloat = 384
     let title: String
     var status: ConversationToolStatus? = nil
+    var footerText: String? = nil
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -193,7 +231,11 @@ struct ToolDetailPanel<Content: View>: View {
                     .scrollBounceBehavior(.basedOnSize)
             }
             .frame(maxHeight: detailHeight, alignment: .topLeading)
-            if let status {
+            if let footerText {
+                Text(footerText).font(.caption).foregroundStyle(t.text3)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.horizontal, 14).padding(.bottom, 10)
+            } else if let status {
                 HStack(spacing: 6) {
                     Spacer(minLength: 0)
                     Image(systemName: status == .completed ? "checkmark" : status == .failed || status == .cancelled ? "xmark" : "clock")
@@ -417,5 +459,25 @@ enum ToolDisplayText {
         case .skill: return "Skill"
         case .generic: return nil
         }
+    }
+}
+
+/// Historical tool results retain only the gate's display text. Restrict matching
+/// to refusal prefixes so failed shell commands containing EACCES stay ordinary failures.
+struct ToolDenialPresentation {
+    let reason: String
+    let autoReview: Bool
+    init?(failed: Bool, headline: String?, body: String?) {
+        guard failed else { return nil }
+        let body = body?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let reason = body.isEmpty ? (headline?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") : body
+        let text = reason.lowercased()
+        let prefixes = ["permission to use ", "permission denied:", "permission denied by ", "tool use denied", "user denied ", "automatic approval review failed", "command declined by auto-review"]
+        guard text == "permission denied" || prefixes.contains(where: { text.hasPrefix($0) }) else { return nil }
+        self.reason = reason
+        autoReview = text.contains("auto-review") || text.contains("auto review") || text.contains("automatic approval review")
+    }
+    var title: String {
+        autoReview ? String(localized: "tool_denied_auto_review") : String(localized: "tool_denied")
     }
 }

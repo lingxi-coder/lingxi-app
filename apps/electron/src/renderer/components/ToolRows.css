@@ -120,3 +120,12 @@
 @media (prefers-contrast: more) {
   .tool-detail-panel { border-color: currentColor; }
 }
+
+.tool-denial-reason { padding: 0 0 .75rem; font: inherit; line-height: 1.5; }
+.tool-denial-reason-label { color: var(--permission-text); font-weight: 500; margin-bottom: .4rem; }
+
+.tool-denial-command { display: flex; align-items: flex-start; gap: .5rem; }
+.tool-denial-command > pre { flex: 1; min-width: 0; }
+.tool-denial-copy { display: inline-flex; align-items: center; justify-content: center; padding: .25rem; border: 0; border-radius: .25rem; background: transparent; color: var(--tool-panel-muted); cursor: pointer; }
+.tool-denial-copy:hover, .tool-denial-copy:focus-visible { color: var(--tool-panel-text); }
+.tool-denial-copy:active { opacity: .65; }

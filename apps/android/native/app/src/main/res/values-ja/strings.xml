@@ -2947,4 +2947,9 @@
     <string name="extension_directory_remove_source">ソースを削除</string>
     <string name="extension_directory_remove_mcp_note">設定されているスコープからこの MCP 接続を削除しますか？</string>
     <string name="extension_directory_category">カテゴリー</string>
+    <string name="tool_denied">操作が拒否されました</string>
+    <string name="tool_denied_auto_review">自動レビューにより操作が拒否されました</string>
+    <string name="tool_denied_reason">拒否された理由</string>
+    <string name="tool_denied_no_output">出力なし</string>
+    <string name="tool_denied_exit_unknown">終了コード不明</string>
 </resources>

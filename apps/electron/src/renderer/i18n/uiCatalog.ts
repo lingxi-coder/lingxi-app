@@ -1,4 +1,10 @@
 const rows: Record<string, readonly [string, string, string, string, string]> = {
+  tool_denied: ["操作已被拒绝", "操作已被拒絕", "Command declined", "操作が拒否されました", "작업이 거부됨"],
+  tool_denied_auto_review: ["自动审核拒绝了此操作", "自動審核拒絕了此操作", "Command declined by auto-review", "自動レビューにより操作が拒否されました", "자동 검토에서 작업을 거부함"],
+  tool_denied_reason: ["拒绝原因", "拒絕原因", "Why it was denied", "拒否された理由", "거부된 이유"],
+  tool_denied_no_output: ["无输出", "無輸出", "No output", "出力なし", "출력 없음"],
+  tool_denied_exit_unknown: ["退出码未知", "結束代碼未知", "Exit code unknown", "終了コード不明", "종료 코드 알 수 없음"],
+
   agent_started_working: ['开始工作', '開始工作', 'started working', '作業を開始', '작업 시작'],
   agent_finished: ['已完成', '已完成', 'finished', '完了', '완료'],
   agent_attention_count: ['%1$d 项需关注', '%1$d 項需注意', 'Needs attention: %1$d', '要確認 %1$d 件', '확인 필요 %1$d개'],

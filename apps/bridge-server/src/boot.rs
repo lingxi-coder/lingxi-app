@@ -2128,6 +2128,28 @@ fn resolve_provider_account_scope(
     Ok(snapshot_scope.unwrap_or(&expected).to_owned())
 }
 
+fn seed_deferred_broker_directory(
+    snapshot: &mut Option<lingxi_core::host::provider_accounts::AccountSnapshot>,
+    scope: &str,
+    broker_owned: bool,
+) {
+    if broker_owned && snapshot.is_none() {
+        // Bind the SDK account pool and its credential consumers before the
+        // Host's asynchronous projection arrives. This process-local empty
+        // directory is never persisted or presented as the Host configuration.
+        *snapshot = Some(lingxi_core::host::provider_accounts::AccountSnapshot {
+            store_scope: scope.to_owned(),
+            config_revision: 0,
+            accounts: Vec::new(),
+            provider_policies: BTreeMap::new(),
+            health: Vec::new(),
+            scoped_health: Vec::new(),
+            model_entitlements: Vec::new(),
+            model_availability: Vec::new(),
+        });
+    }
+}
+
 /// Assemble all account routes with private, process-local Host credentials.
 pub async fn assemble_with_account_credentials(
     mut cfg: DesktopConfig,
@@ -2429,6 +2451,11 @@ pub async fn assemble_with_account_credentials(
         provider_account_backend.as_deref(),
         &format!("{:?}", shared.credentials.account_storage_backend()),
     )?;
+    seed_deferred_broker_directory(
+        &mut shared.provider_accounts,
+        &account_scope,
+        provider_account_backend.is_some(),
+    );
     let account_catalog_source = cfg.startup_catalog.clone();
     let account_catalog_inputs = provider_config::AssembleInputs {
         official_catalog: None,
@@ -4862,6 +4889,36 @@ mod tests {
                 .unwrap(),
             "legacy-domain"
         );
+    }
+
+    #[test]
+    fn deferred_broker_pool_accepts_the_later_host_directory_without_adopting_native_scope() {
+        use llm_runtime::accounts::{AccountPool, MemoryAccountPoolStore};
+        use std::sync::{Arc, RwLock};
+
+        for scope in ["broker-development", "broker-production"] {
+            let mut snapshot = None;
+            seed_deferred_broker_directory(&mut snapshot, scope, true);
+            let seed = snapshot.unwrap();
+            assert!(seed.accounts.is_empty());
+            assert_eq!(seed.config_revision, 0);
+            let pool = AccountPool::from_directory(
+                Arc::new(RwLock::new(seed.clone())),
+                Arc::new(MemoryAccountPoolStore::default()),
+            );
+            let mut published = seed.clone();
+            published.config_revision = 7;
+            pool.refresh(published.clone()).unwrap();
+            let mut existing = Some(published);
+            seed_deferred_broker_directory(&mut existing, scope, true);
+            assert_eq!(existing.unwrap().config_revision, 7);
+            let mut wrong_domain = seed;
+            wrong_domain.store_scope = "native-storage".into();
+            assert!(pool.refresh(wrong_domain).is_err());
+        }
+        let mut native = None;
+        seed_deferred_broker_directory(&mut native, "native-storage", false);
+        assert!(native.is_none());
     }
 
     #[test]

@@ -85,6 +85,7 @@ function Fixture() {
     },
     historyRequests: () => historyRequests.current,
     completeHistory: () => historyResolve.current?.(),
+    repaint: () => flushSync(() => setItems(previous => [...previous])),
     growHistory(id: string) {
       flushSync(() => setItems(previous => previous.map(item => item.id === id && item.type === 'narration'
         ? { ...item, text: `${item.text}\n\n${'A delayed Markdown paragraph changes the measured message height. '.repeat(12)}` }

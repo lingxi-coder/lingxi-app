@@ -13,16 +13,17 @@ async function main() {
     const run = source => window.webContents.executeJavaScript(source);
     await waitForFixture(window.webContents, 'Boolean(window.activityFixture)');
     const sample = `(() => { const stage = document.querySelector('.desktop-stage');
-      const row = document.querySelector('[data-activity-id]');
+      const row = document.querySelector('.transcript-row[data-row-type="tool-group"]');
       const marker = [...document.querySelectorAll('.transcript-row[data-row-type="narration"]')].at(-1);
+      window.activityRowProbe ??= row;
       return { height: stage.scrollHeight, top: stage.scrollTop, marker: marker.getBoundingClientRect().top,
-        row: row?.getBoundingClientRect().height, id: row?.dataset.activityId,
+        row: row?.getBoundingClientRect().height, sameNode: row === window.activityRowProbe,
         slot: Boolean(document.querySelector('[data-thinking-slot]')) }; })()`;
     const toolStart = (id, tool, verb) => ({ type: 'tool_use_started', id, tool, input_json: '{}',
       header: { verb, label: tool, title: `${tool} file`, primary: 'file' } });
     const result = [];
     for (const count of [35, 180]) {
-      await run(`window.activityFixture.reset(${count})`);
+      await run(`window.activityFixture.reset(${count}); window.activityRowProbe = null`);
       await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
       const events = [
         { type: 'thinking_delta', thinking: 'Inspect layout' },
@@ -39,7 +40,10 @@ async function main() {
       for (const event of events) {
         await run(`window.activityFixture.event(${JSON.stringify(event)})`);
         if (event.type === 'api_retry') {
-          assert.ok(await run(`document.querySelector('.transcript-activity-trigger').textContent.includes('Retrying')`), 'a retry must update the existing memoized activity header');
+          assert.equal(await run(`document.querySelector('.transcript-api-retry-trigger').textContent.trim()`), 'Reconnecting 2/5', 'a retry updates the existing activity row with the current recovery header');
+          assert.ok(await run(`document.querySelector('.transcript-api-retry-message').textContent.includes('Rate limited.')`), 'expanded recovery keeps the provider failure inspectable');
+          assert.ok(await run(`document.querySelector('.transcript-api-retry .transcript-activity-details').textContent.includes('Inspect layout')`), 'recovery retains the activity details');
+          await run(`document.querySelector('.transcript-api-retry-trigger').click()`);
         }
         samples.push(await run(sample));
         await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
@@ -47,10 +51,10 @@ async function main() {
       }
       const base = samples[0];
       for (const current of samples) {
-        assert.equal(current.height, base.height, `activity transitions must keep the scroll extent: ${JSON.stringify(samples)}`);
+        assert.ok(Math.abs(current.height - base.height) <= 1, `closed activity transitions preserve the pixel-rounded scroll extent: ${JSON.stringify(samples)}`);
         assert.ok(Math.abs(current.marker - base.marker) <= 1, `reading position moved: ${JSON.stringify({ base, current })}`);
-        assert.equal(current.id, base.id, 'the initial thought and tools must retain row identity');
-        assert.equal(current.row, 28, 'a closed activity has one compact header');
+        assert.equal(current.sameNode, true, 'thinking, retry and tools retain the exact outer row node');
+        assert.ok(Math.abs(current.row - 28) <= 0.5, 'a closed activity has one compact header, including a half-pixel recovery border');
         assert.equal(current.slot, false, 'no independent thinking spacer remains');
       }
       await run(`document.querySelector('.transcript-activity-trigger').click()`);

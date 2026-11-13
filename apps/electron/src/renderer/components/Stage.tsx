@@ -914,7 +914,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
                   flexDirection: user ? 'column' : 'row',
                   alignItems: user ? 'flex-end' : undefined,
                   justifyContent: user ? undefined : 'flex-start',
-                  gap: user ? 4 : 10, width: '100%', animation: 'fade-in 0.3s ease',
+                  gap: user ? 4 : 10, width: '100%', animation: 'transcript-message-appear 0.3s ease',
                 }}
               >
                 {user && (peer || item.origin?.kind === 'device') && <div className="message-origin-caption" style={{ color: t.text3, display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', gap: '0.4em', maxWidth: 'min(700px, 90%)', padding: '0 4px 2px', fontSize: 12, lineHeight: 1.5, textAlign: 'end', overflowWrap: 'anywhere' }}>
@@ -982,7 +982,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
           }
           if (item.type === 'command') {
             return (
-              <div className="transcript-run-item" data-run-type="command" key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+              <div className="transcript-run-item" data-run-type="command" key={item.id} style={{ display: 'flex', gap: 10, animation: 'transcript-message-appear 0.3s ease' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <NativeCommandOutputRow
                     sessionId={modUiSessionId}

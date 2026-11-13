@@ -10,3 +10,13 @@
   flex: none;
   pointer-events: none;
 }
+
+/* Entry opacity must not move a saved character: transformed text can become
+   the reading anchor while its historical row is mounted or recycled. */
+@keyframes transcript-message-appear {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .desktop-stage-feed .transcript-run-item { animation: none !important; }
+}

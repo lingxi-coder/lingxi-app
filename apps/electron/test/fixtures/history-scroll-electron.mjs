@@ -69,11 +69,34 @@ async function main() {
         await wheel();
         const before = await run(read);
         const mutationResult = await run(mutation);
+        const enteringOffset = name === 'prepend' && count === 1 ? await run(`(() => {
+          const row = document.querySelector('[data-message-uuid="older-59"]');
+          const body = row?.querySelector('.transcript-run-item');
+          return body && row ? body.getBoundingClientRect().top - row.getBoundingClientRect().top : null;
+        })()`) : undefined;
         const frames = await collect();
-        return { phase: name, before, mutationResult, frames, maxDrift: drift(before, frames) };
+        return { phase: name, before, mutationResult, enteringOffset, frames, maxDrift: drift(before, frames) };
       };
       const phases = count > 2 ? [await phase('markdown-growth', `window.stageScrollFixture.growHistory('history-current-0')`)] : [];
-      phases.push(await phase('prepend', 'window.stageScrollFixture.completeHistory()'));
+      const prepend = await phase('prepend', 'window.stageScrollFixture.completeHistory()');
+      phases.push(prepend);
+      if (count === 1) {
+        assert.ok(Number.isFinite(prepend.enteringOffset), 'the newly mounted historical message is measured');
+        await delay(350);
+        await run('window.stageScrollFixture.repaint()');
+        const frames = await run(`new Promise(resolve => {
+          const frames = [];
+          const sample = () => requestAnimationFrame(() => {
+            const row = document.querySelector('[data-message-uuid="older-59"]');
+            const body = row?.querySelector('.transcript-run-item');
+            frames.push({ at: performance.now(), offset: body && row ? body.getBoundingClientRect().top - row.getBoundingClientRect().top : null });
+            if (frames.length < 4) sample(); else resolve(frames);
+          });
+          sample();
+        })`);
+        const before = { offset: prepend.enteringOffset };
+        phases.push({ phase: 'historical-text-after-entry-animation', before, frames, maxDrift: drift(before, frames) });
+      }
       phases.push(await phase('late-child-resize', `(() => {
         const stage = document.querySelector('.desktop-stage');
         const top = stage.getBoundingClientRect().top;

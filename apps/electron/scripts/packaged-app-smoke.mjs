@@ -561,7 +561,11 @@ function packagedAppBundleId(appPath) {
 }
 
 export async function waitForPackagedAppExit(child, requestQuit) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  const assertCleanExit = () => {
+    assert.equal(child.signalCode, null, 'packaged app must exit without a termination signal');
+    assert.equal(child.exitCode, 0, 'packaged app must exit successfully');
+  };
+  if (child.exitCode !== null || child.signalCode !== null) { assertCleanExit(); return; }
   let onExit;
   let timer;
   const exited = new Promise((resolvePromise) => {
@@ -572,13 +576,17 @@ export async function waitForPackagedAppExit(child, requestQuit) {
     // Subscribe before requesting quit: CDP may close its socket only after
     // the process has already exited. Listening afterwards loses that event.
     await requestQuit();
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (child.exitCode !== null || child.signalCode !== null) { assertCleanExit(); return; }
     await Promise.race([
       exited,
       new Promise((_, rejectPromise) => {
-        timer = setTimeout(() => rejectPromise(new Error('packaged app did not exit after Browser.close')), 10_000);
+        // macOS Chromium can finish its native profile fsync after `quit` and
+        // all application drains. An observed clean exit took 18.3 seconds;
+        // keep a finite deadline without terminating those durable writes.
+        timer = setTimeout(() => rejectPromise(new Error('packaged app did not exit after Browser.close within 30000ms')), 30_000);
       }),
     ]);
+    assertCleanExit();
   } finally {
     clearTimeout(timer);
     child.removeListener('exit', onExit);

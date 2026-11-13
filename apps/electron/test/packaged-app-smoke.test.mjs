@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,12 +23,52 @@ import {
   runPackagedCredentialStability,
   sanitizePackagedAppEnvironment,
   waitForRendererCommit,
+  waitForPackagedAppExit,
   workspaceTrustFingerprint,
 } from '../scripts/packaged-app-smoke.mjs';
 import { workspaceFingerprint as hostWorkspaceFingerprint } from '../src/main/host-utils.ts';
 import { ConversationSpaceStore } from '../src/main/conversationSpaceStore.ts';
 
 const temporaryDirectories = [];
+
+test('packaged exit observes a clean process exit delivered during the quit request', async () => {
+  const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+  await waitForPackagedAppExit(child, async () => { child.exitCode = 0; child.emit('exit', 0, null); });
+  assert.equal(child.listenerCount('exit'), 0);
+});
+
+test('packaged exit waits for the observed slow native profile flush and still requires a real exit', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+  let settled = false;
+  const waiting = waitForPackagedAppExit(child, async () => {});
+  waiting.then(() => { settled = true; }, () => { settled = true; });
+  await Promise.resolve();
+  t.mock.timers.tick(18_334);
+  await Promise.resolve();
+  assert.equal(settled, false, 'the original 10s budget must not interrupt a native flush');
+  child.exitCode = 0; child.emit('exit', 0, null);
+  await waiting;
+  assert.equal(child.listenerCount('exit'), 0);
+});
+
+test('packaged exit rejects a process that stays alive beyond the bounded deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+  const waiting = waitForPackagedAppExit(child, async () => {});
+  const rejected = assert.rejects(waiting, /did not exit.*30000ms/);
+  await Promise.resolve();
+  t.mock.timers.tick(30_001);
+  await rejected;
+  assert.equal(child.listenerCount('exit'), 0);
+});
+
+test('packaged exit rejects crashes and signal termination instead of accepting process disappearance', async () => {
+  for (const state of [{ exitCode: 1, signalCode: null }, { exitCode: null, signalCode: 'SIGTERM' }]) {
+    const child = Object.assign(new EventEmitter(), state);
+    await assert.rejects(waitForPackagedAppExit(child, async () => {}), /must exit/);
+  }
+});
 
 test('packaged profile maps the fixture workspace into the current Code space', () => {
   const home = temporaryDirectory();

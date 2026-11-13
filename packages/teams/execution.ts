@@ -56,7 +56,16 @@ export interface ExecutionScope { teamId: string; generation: number }
 export interface MemberExecutionPayloads {
   listSharedBots: Record<string, never>;
   createConversation: { conversationId: string; kind: 'bot_dm' | 'group' | 'channel'; title: string; participantUids: string[]; sharedBotIds: string[] };
-  submit: { conversationId: string; messageId: string; changeId: string; text: string; targets: string[]; replyTo?: string };
+  /** A message that asks Bots, carries files (`attachments`: checked uploads of this sender for this conversation), or both. */
+  submit: { conversationId: string; messageId: string; changeId: string; text: string; targets: string[]; replyTo?: string; attachments?: string[] };
+  createUpload: { conversationId: string; uploadId: string; name: string; mime: 'image/png' | 'image/jpeg' | 'application/pdf' | 'text/plain'; byteLength: number; sha256: string };
+  putUploadPart: { uploadId: string; index: number; data: string };
+  finalizeUpload: { uploadId: string };
+  /** Take a file out of an unsent message. */
+  cancelUpload: { uploadId: string };
+  readAttachmentPart: { attachmentId: string; index: number };
+  /** The sender takes a file back out of a sent message. */
+  revokeAttachment: { attachmentId: string; changeId: string };
   pauseSharedBot: { sharedBotId: string; expectedRevision: number };
   answerWait: { conversationId: string; waitId: string; messageId: string; changeId: string; text: string };
   decideWait: { conversationId: string; waitId: string; messageId: string; changeId: string; decision: 'approve' | 'deny' };

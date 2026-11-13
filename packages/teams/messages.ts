@@ -1,5 +1,6 @@
 import { isMemberExecutionCommand } from './execution-validation.js';
 import { executionCommand, type MemberExecutionCommand } from './execution.js';
+import { ATTACHMENT_MESSAGE_FILES, type MessageAttachment } from './attachments.js';
 export type MessageAuthor = { kind: 'user'; uid: string; displayName?: string } | { kind: 'shared_bot'; sharedBotId: string; displayName: string };
 export const authorIdentity = (a: MessageAuthor) => a.kind === 'user' ? `user:${a.uid}` : `shared_bot:${a.sharedBotId}`;
 export interface TeamConversation {
@@ -25,6 +26,8 @@ export interface TeamMessage {
   /** On the requester's reply to such a request. */
   decision?: 'approve' | 'deny';
   mentions?: string[];
+  /** Files the message carries, in the order they were added. */
+  attachments?: MessageAttachment[];
 }
 export interface MessageScope { teamId: string; generation: number }
 export type MessageMutation = MessageScope & { action: 'mutate'; conversationId: string; messageId: string; changeId: string;
@@ -232,16 +235,20 @@ export class TeamMessaging {
     await this.commit(old => { if (old.creation) throw new Error('CREATION_PENDING'); return { ...old, creation: { command } }; });
     this.select(conversationId); await this.refresh();
   }
-  async queue(operation: MessageMutation['operation'], text: string, messageId: string = crypto.randomUUID(), replyTo?: string, targets: string[] = []) {
-    if (this.closed || !this.selected || (operation !== 'recall' && (!text.trim() || new TextEncoder().encode(text).length > 8192))) throw new Error('INVALID_INPUT');
-    if (operation !== 'create' && targets.length) throw new Error('INVALID_BOT_TARGET');
+  /** `attachments`: checked uploads of this sender for the open conversation. A new message may be files alone. */
+  async queue(operation: MessageMutation['operation'], text: string, messageId: string = crypto.randomUUID(), replyTo?: string, targets: string[] = [], attachments: string[] = []) {
+    if (this.closed || !this.selected || (operation !== 'recall' && ((!text.trim() && !attachments.length) || new TextEncoder().encode(text).length > 8192))) throw new Error('INVALID_INPUT');
+    if (operation !== 'create' && (targets.length || attachments.length)) throw new Error('INVALID_BOT_TARGET');
+    if (attachments.length > ATTACHMENT_MESSAGE_FILES || new Set(attachments).size !== attachments.length) throw new Error('ATTACHMENT_LIMIT');
     if (targets.length > 8 || new Set(targets).size !== targets.length) throw new Error('INVALID_BOT_TARGET');
     const conversation = this.state.conversations.find(value => value.id === this.selected);
     const selectedTargets = targets.length ? targets : operation === 'create' && conversation?.kind === 'bot_dm'
       ? conversation.participants.filter(value => value.startsWith('shared_bot:')).map(value => value.slice(11)) : [];
     const changeId = crypto.randomUUID();
-    const command: OutboxCommand = operation === 'create' && selectedTargets.length
-      ? executionCommand(this.scope, 'submit', { conversationId: this.selected, messageId, changeId, text, targets: [...selectedTargets], ...(replyTo ? { replyTo } : {}) })
+    // Files alone carry no text: surrounding spaces are not a message.
+    const command: OutboxCommand = operation === 'create' && (selectedTargets.length || attachments.length)
+      ? executionCommand(this.scope, 'submit', { conversationId: this.selected, messageId, changeId, text: text.trim() ? text : '', targets: [...selectedTargets],
+        ...(replyTo ? { replyTo } : {}), ...(attachments.length ? { attachments: [...attachments] } : {}) })
       : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...(replyTo ? { replyTo } : {}) };
     await this.commit(old => ({ ...old, outbox: [...old.outbox, { command }] }));
     void this.refresh();

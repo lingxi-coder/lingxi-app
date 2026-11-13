@@ -1,4 +1,5 @@
 import type { DocumentData, Firestore, FirestoreError } from 'firebase/firestore';
+import { ATTACHMENT_TYPES, type MessageAttachment } from './attachments.js';
 import type { BlockEntry, FriendCard, TeamOffer } from './friends.js';
 import type { ListApproval, ListApprovalChange, MessageScope, MessageSnapshot, TeamConversation, TeamMessage } from './messages.js';
 
@@ -78,7 +79,15 @@ export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
     ...(value.taskId ? { taskId: value.taskId } : {}), ...(value.taskIds ? { taskIds: value.taskIds } : {}), ...(value.artifactId ? { artifactId: value.artifactId } : {}),
     ...(value.waitId ? { waitId: value.waitId } : {}),
     ...(approvalOf(value.approval) ? { approval: approvalOf(value.approval)! } : {}),
-    ...(value.decision === 'approve' || value.decision === 'deny' ? { decision: value.decision } : {}) };
+    ...(value.decision === 'approve' || value.decision === 'deny' ? { decision: value.decision } : {}),
+    ...(attachmentsOf(value.attachments).length ? { attachments: attachmentsOf(value.attachments) } : {}) };
+}
+/** The files of a message. An entry that does not read as a file is left out; the others stand. */
+function attachmentsOf(value: unknown): MessageAttachment[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(item => item && typeof item === 'object' && typeof item.attachmentId === 'string' && typeof item.name === 'string'
+    && (ATTACHMENT_TYPES as readonly string[]).includes(item.mime) && Number.isSafeInteger(item.byteLength) && item.byteLength > 0 && typeof item.sha256 === 'string'
+    ? [{ attachmentId: item.attachmentId, name: item.name, mime: item.mime, byteLength: item.byteLength, sha256: item.sha256, ...(item.revoked === true ? { revoked: true } : {}) }] : []);
 }
 /** The approval request on a Bot's message. A request that does not read as one is not shown as one. */
 function approvalOf(value: unknown): ListApproval | undefined {

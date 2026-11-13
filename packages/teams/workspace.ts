@@ -3,6 +3,7 @@ import { botDmHandedOver } from './compose.js';
 import { indexedDbCommandStorage } from './command-storage.js';
 import { inviteLink, type TeamCommand, type TeamDetail, type TeamMember, type TeamSummary, type TeamsApi } from './index.js';
 import { TeamMessaging, pendingPayload, type CommandStorage, type MessageScope, type PendingCommands, type TeamConversation, type TeamMessage } from './messages.js';
+import { admitFiles, uploadAttachment, type AttachmentType, type DraftFile, type FileRefusal } from './attachments.js';
 
 // ─── Pure helpers ───────────────────────────────────────────────────────────
 
@@ -222,6 +223,8 @@ export interface TeamsSnapshot {
   readonly messagingConnecting: boolean;
   /** `TeamMessaging.error`: the controller's own failure code. */
   readonly messagingError: string;
+  /** Files of the open conversation's unsent message, in the order they were added. */
+  readonly draftFiles: DraftFile[];
   readonly bots: SharedBotCard[];
   /** The Bot list has been fetched at least once for this team. */
   readonly botsLoaded: boolean;
@@ -253,6 +256,9 @@ export interface TeamsWorkspaceOptions {
 }
 
 const EMPTY_MEMBERS: TeamMember[] = [], EMPTY_BOTS: SharedBotCard[] = [], EMPTY_CONVERSATIONS: TeamConversation[] = [], EMPTY_MESSAGES: TeamMessage[] = [];
+const EMPTY_FILES: DraftFile[] = [];
+/** A chosen file, as the browser's `File` is. */
+export interface PickedFile { name: string; type: string; size: number; arrayBuffer(): Promise<ArrayBuffer> }
 const EMPTY_OUTBOX: PendingCommands['outbox'] = [];
 
 const codeOf = (error: unknown, fallback = 'SERVICE_UNAVAILABLE'): string => error instanceof Error ? error.message : fallback;
@@ -334,6 +340,9 @@ export class TeamsWorkspace {
   private botsError = '';
   private readonly conversationByTeam = new Map<string, string>();
   private readonly drafts = new Map<string, string>();
+  // Files of unsent messages, kept like the text drafts. Each upload is for one conversation of one membership and ends there.
+  private readonly draftFileLists = new Map<string, DraftFile[]>();
+  private readonly uploads = new Map<string, AbortController>();
   // Unread of the other teams: one directory-only listener each (`watchMessages` with no conversation).
   private readonly watchers = new Map<string, { generation: number; stop(): void }>();
   private readonly unread = new Map<string, number>();
@@ -375,6 +384,58 @@ export class TeamsWorkspace {
     if (text) this.drafts.set(key, text); else this.drafts.delete(key);
   };
   private draftKey(conversationId: string): string { return `${this.selection}:${conversationId}`; }
+
+  /**
+   * Add chosen files to a conversation's unsent message and start uploading them. Resolves with the files that were not taken and why.
+   * An upload keeps the conversation it was started for: choosing another conversation while it runs changes nothing about where it goes.
+   */
+  addFiles = (conversationId: string, files: readonly PickedFile[]): { name: string; code: FileRefusal }[] => {
+    const model = this.messaging;
+    if (!model || this.closed || !files.length) return [];
+    const key = this.draftKey(conversationId), scope = model.scope, old = this.draftFileLists.get(key) ?? EMPTY_FILES;
+    const { accepted, refused } = admitFiles(old, files);
+    const started = accepted.map(item => ({ ...item, uploadId: crypto.randomUUID() }));
+    if (started.length) {
+      this.draftFileLists.set(key, [...old, ...started.map(item => ({ uploadId: item.uploadId, name: item.name, mime: item.mime, byteLength: item.file.size, state: 'uploading' as const, sent: 0 }))]);
+      this.publish();
+      for (const item of started) void this.upload(key, scope, conversationId, item);
+    }
+    return refused;
+  };
+  /** Take a file out of an unsent message. An upload in progress stops, and what the service already has of it is given up. */
+  removeFile = (conversationId: string, uploadId: string): void => {
+    const key = this.draftKey(conversationId), old = this.draftFileLists.get(key);
+    if (!old?.some(file => file.uploadId === uploadId)) return;
+    this.setDraftFiles(key, old.filter(file => file.uploadId !== uploadId));
+    this.uploads.get(uploadId)?.abort();
+    const scope = this.messaging?.scope;
+    if (scope) void this.api.messages(executionCommand(scope, 'cancelUpload', { uploadId })).catch(() => {});
+  };
+  /** The files went out with a message: they leave the draft and stay with the service. */
+  sentFiles = (conversationId: string, uploadIds: readonly string[]): void => {
+    const key = this.draftKey(conversationId), old = this.draftFileLists.get(key);
+    if (old && uploadIds.length) this.setDraftFiles(key, old.filter(file => !uploadIds.includes(file.uploadId)));
+  };
+  private setDraftFiles(key: string, files: DraftFile[]): void {
+    if (files.length) this.draftFileLists.set(key, files); else this.draftFileLists.delete(key);
+    this.publish();
+  }
+  private async upload(key: string, scope: MessageScope, conversationId: string, item: { uploadId: string; file: PickedFile; name: string; mime: AttachmentType }): Promise<void> {
+    const controller = new AbortController(), { uploadId } = item;
+    this.uploads.set(uploadId, controller);
+    // The file may have been taken out of the draft meanwhile; then there is nothing to report.
+    const patch = (change: Partial<DraftFile>) => {
+      const old = this.draftFileLists.get(key);
+      if (old?.some(file => file.uploadId === uploadId) && !this.closed) this.setDraftFiles(key, old.map(file => file.uploadId === uploadId ? { ...file, ...change } : file));
+    };
+    try {
+      const bytes = new Uint8Array(await item.file.arrayBuffer());
+      await uploadAttachment(this.api, scope, conversationId, uploadId, { name: item.name, mime: item.mime, bytes }, { signal: controller.signal, onProgress: sent => patch({ sent }) });
+      patch({ state: 'ready', sent: bytes.length });
+    } catch (error) {
+      if (!controller.signal.aborted) patch({ state: 'failed', error: codeOf(error, 'UPLOAD_FAILED') });
+    } finally { this.uploads.delete(uploadId); }
+  }
 
   // ── Team list and selection ──
 
@@ -520,6 +581,8 @@ export class TeamsWorkspace {
     if (this.closed) return;
     this.closed = true; this.epoch++; this.authority++;
     clearTimeout(this.timer);
+    for (const upload of this.uploads.values()) upload.abort();
+    this.uploads.clear(); this.draftFileLists.clear();
     this.closeMessaging();
     for (const watcher of this.watchers.values()) watcher.stop();
     this.watchers.clear(); this.unread.clear();
@@ -658,6 +721,7 @@ export class TeamsWorkspace {
       messages: model?.state.threads[selected]?.messages ?? EMPTY_MESSAGES,
       pending: this.outboxFor.value, creation: model?.state.creation, offline: model?.offline ?? false,
       messagingConnecting: model?.connecting ?? !!this.selection, messagingError: model?.error ?? '',
+      draftFiles: this.draftFileLists.get(this.draftKey(selected)) ?? EMPTY_FILES,
       bots: this.bots, botsLoaded: this.botsLoaded, botsUnverified: this.botsUnverified, botsError: this.botsError,
       unreadByTeam, totalUnread: Object.values(unreadByTeam).reduce((sum, value) => sum + value, 0),
     };

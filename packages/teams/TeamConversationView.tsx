@@ -6,6 +6,9 @@ import { snippet } from './compose.js';
 import { Composer, composerLock } from './Composer';
 import { messageErrorText } from './errors.js';
 import { ApprovalCard } from './ApprovalCard';
+import { MessageFiles } from './MessageFiles';
+import type { MessageAttachment } from './attachments.js';
+import { executionCommand } from './execution.js';
 import { pendingPayload, type TeamConversation, type TeamMessage } from './messages.js';
 import { ArtifactButton, BotRun } from './BotRunCards';
 import { buildStreamRows, formatClock, placeTasks, visibleStart, WINDOW_SIZE } from './stream.js';
@@ -107,6 +110,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
   const minute = Math.floor((now === undefined ? Date.now() : typeof now === 'number' ? now : now.getTime()) / 60_000);
   const [startId, setStartId] = useState<string>();
   const [editing, setEditing] = useState<TeamMessage>(), [reply, setReply] = useState<TeamMessage>(), [recall, setRecall] = useState<TeamMessage>();
+  const [takeBack, setTakeBack] = useState<MessageAttachment>();
   const [answerWait, setAnswerWait] = useState<string>();
   const [focusToken, setFocusToken] = useState(0);
   const [pinned, setPinned] = useState(true);
@@ -134,11 +138,13 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
   };
   const botIdentity = (sharedBotId: string): Identity => ({ kind: 'bot', id: sharedBotId, name: snapshot.bots.find(bot => bot.sharedBotId === sharedBotId)?.name || 'Bot' });
   const isMine = (message: TeamMessage) => message.author.kind === 'user' && message.author.uid === uid;
+  /** What a message says in one line: its text, or the names of its files when it is files alone. */
+  const said = (message: TeamMessage) => message.text || (message.attachments ?? []).map(file => file.name).join(', ');
   const quoteOf = (message: TeamMessage) => {
     if (!message.replyTo) return undefined;
     const target = byId.get(message.replyTo);
     if (!target) return { author: '', text: t('Reply to an earlier message', '回复早前的消息') };
-    return { author: authorOf(target).name, text: target.recalled ? t('Recalled message', '已撤回消息') : snippet(target.text, 140) };
+    return { author: authorOf(target).name, text: target.recalled ? t('Recalled message', '已撤回消息') : snippet(said(target), 140) };
   };
   const scope = { teamId: team.id, generation: team.generation };
   // Answer mode ends by itself once the task is not waiting for this viewer on that question any more.
@@ -232,6 +238,12 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
     if (!target) return;
     if (await workspace.run(() => model.queue('recall', '', target.id))) setRecall(undefined);
   };
+  // Taking a file back is a change to the message, like an edit: one change id, kept for a repeat.
+  const confirmTakeBack = async () => {
+    const target = takeBack;
+    if (!target) return;
+    if (await workspace.run(() => workspace.api.messages(executionCommand(scope, 'revokeAttachment', { attachmentId: target.attachmentId, changeId: crypto.randomUUID() })))) setTakeBack(undefined);
+  };
   const subtitle = conversationSubtitle(conversation, snapshot, zh);
 
   return <section className="tw-scope tw-conv" aria-label={label}>
@@ -281,6 +293,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
             return <Fragment key={row.key}><MessageItem message={localized(message)} grouped={grouped} author={author} mine={mine} owner={message.author.kind === 'shared_bot' ? nameOf(snapshot.bots.find(bot => bot.sharedBotId === (message.author as Extract<TeamMessage['author'], { kind: 'shared_bot' }>).sharedBotId)?.maintainer.uid ?? '') : ''}
               quote={quoteOf(message)} locale={tag} zh={zh} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} question={question && !approval} approval={!!approval}
               onReply={lock ? undefined : answering ? () => startAnswer(answering) : answer} onEdit={mine && participant && !message.decision ? edit : undefined} onRecall={mine && participant && !message.decision ? setRecall : undefined}>
+              {message.attachments?.length && !message.recalled ? <MessageFiles api={workspace.api} scope={scope} files={message.attachments} zh={zh} onRevoke={mine && participant ? file => setTakeBack(file) : undefined} /> : null}
               {approval ? <div className="tw-embed"><ApprovalCard api={workspace.api} scope={scope} conversationId={conversation.id} message={message} approval={approval} zh={zh} onChanged={runs.refresh} {...approvalOf(message, waiting)} /></div> : null}
               {answering && !answerPending(message.waitId!)
                 ? <div className="tw-embed"><div className="teams-row-actions"><button type="button" aria-label={t('Reply to the Bot’s question', '回复 Bot 的问题')} onClick={() => startAnswer(answering)}>{t('Reply', '回复')}</button></div></div> : null}
@@ -298,6 +311,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
               <div className="tw-msg-main">
                 <div className="tw-msg-head"><b className="tw-msg-author">{nameOf(uid)}</b><small role="status">{status}</small></div>
                 <p className="tw-msg-body">{operation === 'recall' ? t('Recall message', '撤回消息') : `${operation === 'edit' ? `${t('Edit', '编辑')}: ` : ''}${payload.text}`}</p>
+                {'attachments' in payload && payload.attachments?.length ? <p className="tw-msg-body tw-pending-files"><Icon name="clip" size={12} /> {t(payload.attachments.length === 1 ? '1 file' : `${payload.attachments.length} files`, `${payload.attachments.length} 个文件`)}</p> : null}
                 <div className="tw-pending-actions">
                   {intent.error === 'HOST_UNAVAILABLE' ? <button type="button" onClick={() => void workspace.attempt(() => model.retryHostUnavailable(payload.changeId))}>{t('Retry', '重试')}</button> : null}
                   <button type="button" disabled={Boolean(intent.attempted && !intent.error) || (intent.leaseUntil ?? 0) > Date.now()} onClick={() => void workspace.attempt(() => model.discard(payload.changeId))}>{t('Discard', '丢弃')}</button>
@@ -318,10 +332,19 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
       onClearAnswering={() => setAnswerWait(undefined)} onAnswered={runs.refresh}
       onClearEditing={() => setEditing(undefined)} onClearReply={() => setReply(undefined)} onEditLast={() => { if (lastOwn && participant) edit(lastOwn); }} />
 
+    {takeBack ? <Dialog role="alertdialog" title={t(`Take back ${takeBack.name}?`, `收回 ${takeBack.name}？`)} onClose={() => setTakeBack(undefined)}>
+      <div className="tw-form">
+        <p className="tw-hint">{t('Nobody will be able to open or save it from this conversation any more, and an assistant will not read it again. Copies people already saved stay with them. This cannot be undone.', '此后任何人都无法再从此会话打开或保存它，助手也不会再读取它。他人已保存的副本仍在其设备上。此操作无法撤销。')}</p>
+        <div className="tw-dialog-actions">
+          <button type="button" data-autofocus onClick={() => setTakeBack(undefined)}>{t('Cancel', '取消')}</button>
+          <button type="button" className="tw-danger-btn" disabled={snapshot.messageBusy} onClick={() => void confirmTakeBack()}>{t('Take back', '收回')}</button>
+        </div>
+      </div>
+    </Dialog> : null}
     {recall ? <Dialog role="alertdialog" title={t('Recall this message for everyone?', '为所有人撤回此消息？')} onClose={() => setRecall(undefined)}>
       <div className="tw-form">
-        <blockquote className="tw-quote">{snippet(recall.text, 140)}</blockquote>
-        <p className="tw-hint">{t('Everyone in this conversation will see that it was recalled.', '会话中的所有人都会看到此消息已被撤回。')}</p>
+        <blockquote className="tw-quote">{snippet(said(recall), 140)}</blockquote>
+        <p className="tw-hint">{t('Everyone in this conversation will see that it was recalled.', '会话中的所有人都会看到此消息已被撤回。')}{recall.attachments?.some(file => !file.revoked) ? ` ${t('Its files can no longer be opened.', '其中的文件将无法再打开。')}` : ''}</p>
         <div className="tw-dialog-actions">
           <button type="button" data-autofocus onClick={() => setRecall(undefined)}>{t('Cancel', '取消')}</button>
           <button type="button" className="tw-danger-btn" disabled={snapshot.messageBusy} onClick={() => void confirmRecall()}>{t('Recall', '撤回')}</button>
@@ -368,7 +391,7 @@ function MessageItem({ message, grouped, author, mine, owner, quote, question, a
       {markdown ? <div className="tw-msg-body tw-md" data-markdown="true">
         {renderMarkdown(message.text)}
         {message.editedAt ? <small className="tw-edited"> ({t('edited', '已编辑')})</small> : null}
-      </div> : <p className="tw-msg-body">
+      </div> : !message.text && !message.recalled && message.attachments?.length ? null : <p className="tw-msg-body">
         {message.recalled ? <em>{t('Message recalled', '消息已撤回')}</em> : message.text}
         {message.editedAt && !message.recalled ? <small className="tw-edited"> ({t('edited', '已编辑')})</small> : null}
       </p>}

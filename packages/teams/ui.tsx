@@ -112,6 +112,10 @@ const paths = {
   panel: 'M4 5h16v14H4zM15 5v14',
   copy: 'M9 9h11v11H9zM5 15V5h10',
   bot: 'M12 8V4H8M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2zM2 14h2M20 14h2M15 13v2M9 13v2',
+  clip: 'M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9',
+  file: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M9 13h6M9 17h6',
+  image: 'M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM9 9.5h.01M20 15l-4.5-4.5L6 20',
+  download: 'M12 4v11M7 11l5 5 5-5M5 20h14',
 } as const;
 export type IconName = keyof typeof paths;
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }): ReactElement {

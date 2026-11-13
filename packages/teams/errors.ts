@@ -46,6 +46,36 @@ export function messageErrorText(code: string, zh: boolean): string {
       return t('Some of this team’s data is in an unsupported format and cannot be shown.', '此团队的部分数据格式不受支持，无法显示。');
     case 'REQUEST_QUOTA_EXCEEDED':
       return t('The daily request quota is exhausted. Ask the maintainer to review quotas or try after the UTC day resets.', '每日请求额度已用尽，请联系维护者检查额度或在 UTC 日期切换后重试。');
+    case 'ATTACHMENT_TYPE':
+    case 'UPLOAD_TYPE_MISMATCH':
+      return t('Only PNG and JPEG pictures, PDF documents and plain text files can be sent, and a file must be what its name says.', '只能发送 PNG、JPEG 图片、PDF 文档和纯文本文件，且文件内容须与其名称相符。');
+    case 'ATTACHMENT_EMPTY':
+      return t('This file is empty.', '此文件为空。');
+    case 'ATTACHMENT_TOO_LARGE':
+      return t('A file can be up to 10 MB.', '单个文件最大 10 MB。');
+    case 'ATTACHMENT_COUNT':
+      return t('A message carries up to five files.', '一条消息最多带五个文件。');
+    case 'ATTACHMENT_TOTAL':
+    case 'ATTACHMENT_LIMIT':
+      return t('The files of one message can be up to 20 MB together.', '一条消息的文件合计最大 20 MB。');
+    case 'UPLOAD_QUOTA_EXCEEDED':
+      return t('You have too many unsent files. Send or remove some first.', '未发送的文件过多，请先发送或移除一些。');
+    case 'UPLOAD_EXPIRED':
+      return t('This file waited too long to be sent. Add it again.', '此文件等待发送的时间过长，请重新添加。');
+    case 'UPLOAD_DIGEST_MISMATCH':
+    case 'UPLOAD_INCOMPLETE':
+    case 'UPLOAD_PART_INVALID':
+    case 'UPLOAD_FAILED':
+      return t('The file did not arrive whole. Add it again.', '文件未完整送达，请重新添加。');
+    case 'UPLOAD_REQUIRED':
+    case 'UPLOAD_SEALED':
+    case 'UPLOAD_ID_CONFLICT':
+    case 'ATTACHMENT_REQUIRED':
+      return t('This file can no longer be sent. Add it again.', '此文件已无法发送，请重新添加。');
+    case 'ATTACHMENT_REVOKED':
+      return t('This file was taken back and can no longer be opened.', '此文件已被收回，无法再打开。');
+    case 'ATTACHMENT_DAMAGED':
+      return t('The file could not be read whole. Try again.', '未能完整读取文件，请重试。');
     case 'ARTIFACT_READ_REQUIRED':
       return t('You no longer have access to this document. Ask the maintainer to review its audience.', '你已无权访问此文档，请联系维护者检查受众。');
     case 'ARTIFACT_REVISION_CONFLICT':

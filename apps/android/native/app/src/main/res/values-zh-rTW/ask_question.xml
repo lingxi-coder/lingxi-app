@@ -4,4 +4,5 @@
         <item quantity="one">已詢問 %1$d 個問題</item>
         <item quantity="other">已詢問 %1$d 個問題</item>
     </plurals>
+    <string name="chat_question_skip">略過</string>
 </resources>

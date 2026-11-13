@@ -2967,4 +2967,21 @@
     <string name="settings_browser_manage_session">操作セッションを管理</string>
     <string name="teams_task_needs_checking">確認が必要</string>
     <string name="teams_task_needs_checking_hint">チャット外の操作が実行されたかどうか確認できていません。Bot の管理者が Desktop または Web で確認します。</string>
+    <string name="teams_list_open">共有リスト</string>
+    <string name="teams_list_hint_fmt">%1$s を使えるメンバー全員がこのリストを表示・変更できます。%1$s も読み取りと変更ができます。</string>
+    <string name="teams_list_moved">その間にリストが変更されたため、変更は保存されませんでした。最新のリストを確認し、必要ならもう一度お試しください。</string>
+    <string name="teams_list_empty">リストにはまだ何もありません。</string>
+    <string name="teams_list_add_placeholder">項目を追加</string>
+    <string name="teams_list_add">追加</string>
+    <string name="teams_list_too_long">項目が長すぎて保存できません。短くしてもう一度お試しください。</string>
+    <string name="teams_list_loading">リストを読み込み中…</string>
+    <string name="teams_list_edit">編集</string>
+    <string name="teams_list_remove">削除</string>
+    <string name="teams_list_edit_title">項目を編集</string>
+    <string name="teams_list_refresh">更新</string>
+    <string name="teams_list_done">完了</string>
+    <string name="teams_list_not_done">未完了</string>
+    <string name="teams_list_item_options_fmt">「%1$s」のオプション</string>
+    <string name="teams_error_list_unavailable">このリストは利用できなくなりました。</string>
+    <string name="teams_error_list_full">リストがいっぱいです。追加する前にいくつか項目を削除してください。</string>
 </resources>

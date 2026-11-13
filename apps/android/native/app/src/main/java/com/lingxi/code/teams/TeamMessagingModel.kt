@@ -307,6 +307,15 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         mutable.update { if (it.selected == selection) it.copy(artifact = artifact) else it }
     }
     fun closeArtifact() { mutable.update { it.copy(artifact = null) } }
+    /** A Bot's shared list as it is now. It is read on demand: the list is not part of the message stream. */
+    suspend fun readList(sharedBotId: String): TeamSharedList = onModel { TeamSharedList.parse(execute("readList", JSONObject().put("sharedBotId", sharedBotId), lifecycle)) }
+    /** Saves [changes] on top of [expectedDataRevision], or saves nothing. The same [operationId] sent again repeats the same request, so a save whose answer was lost is not applied twice. */
+    suspend fun writeList(sharedBotId: String, operationId: String, expectedDataRevision: Long, changes: List<TeamSharedListChange>) {
+        onModel { execute("writeList", JSONObject().put("sharedBotId", sharedBotId).put("operationId", operationId).put("expectedDataRevision", expectedDataRevision).put("changes", changes.json()), lifecycle) }
+    }
+    /** Runs a caller's request where the model's own work runs, so it sees the same account, team and generation checks. */
+    private suspend fun <T> onModel(block: suspend () -> T): T =
+        kotlinx.coroutines.withContext(scope.coroutineContext[kotlin.coroutines.ContinuationInterceptor] ?: kotlin.coroutines.EmptyCoroutineContext) { block() }
     fun create(kind: String, title: String, parties: List<String>, id: String, sharedBotIds: List<String> = emptyList(), onSuccess: () -> Unit) = launchOperation {
         requireTeamBotSelections(sharedBotIds, mutable.value.bots)
         if ((kind == "bot_dm" && sharedBotIds.size != 1) || (kind == "dm" && sharedBotIds.isNotEmpty())) throw TeamMessageFailure("BOT_SELECTION_STALE")

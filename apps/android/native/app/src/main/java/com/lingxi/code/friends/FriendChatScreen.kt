@@ -43,8 +43,10 @@ import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.materialIcon
 import com.lingxi.code.teams.FriendChatHeader
 import com.lingxi.code.teams.PairTeam
+import com.lingxi.code.teams.TeamBotCard
 import com.lingxi.code.teams.TeamConversationScreen
 import com.lingxi.code.teams.TeamDetail
+import com.lingxi.code.teams.TeamSharedListDialog
 import com.lingxi.code.teams.TeamsMessageState
 import com.lingxi.code.teams.TeamsSheet
 import com.lingxi.code.teams.TeamsState
@@ -121,6 +123,9 @@ private fun FriendChat(
     LaunchedEffect(friendUid) { workspace.refreshName(friendUid) }
 
     var dialog by rememberSaveable(friendUid) { mutableStateOf("") }
+    // The shared list of one of the chat's Bots; it closes with the friendship's generation.
+    var listOf by remember(friendUid, pair.generation) { mutableStateOf<TeamBotCard?>(null) }
+    listOf?.let { bot -> TeamSharedListDialog(bot, chat.messagingModel) { listOf = null } }
     LaunchedEffect(dialog) { if (dialog == "profile") workspace.refreshName(friendUid) }
 
     if (messaging.revoked) {
@@ -131,7 +136,7 @@ private fun FriendChat(
         view == "bots" -> FriendBotsScreen(
             messaging = messaging, members = teams.detail?.members.orEmpty(), uid = uid, generation = pair.generation, showBack = showBack, onBack = { view = "" },
             onMessage = { sharedBotId -> messageBot(chat, messaging, uid, sharedBotId) { view = "dm:$it" } },
-            onStop = { bot -> chat.messagingModel.pause(bot) }, onReconnect = chat::reconnect, modifier = modifier,
+            onStop = { bot -> chat.messagingModel.pause(bot) }, onReconnect = chat::reconnect, modifier = modifier, onList = { listOf = it },
         )
         view.startsWith("dm:") -> TeamConversationScreen(
             workspace = chat, uid = uid, team = summary, teams = teams, messaging = messaging,

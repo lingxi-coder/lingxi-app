@@ -7,14 +7,15 @@ internal data class TeamMemberRef(val uid: String, val generation: Long) {
 }
 internal data class TeamBotCard(val sharedBotId: String, val name: String, val description: String, val maintainer: TeamMemberRef,
     val revision: Long, val state: String, val permitted: Boolean, val ready: Boolean, val onlineUntil: Long, val usePolicy: JSONObject,
-    val quotas: JSONObject, val instanceId: String?) {
+    val quotas: JSONObject, val instanceId: String?, val sharedList: TeamBotListInfo? = null) {
     val selectable get() = state == "published" && permitted
     val avatarId get() = sharedBotId
     fun canPause(uid: String, generation: Long) = state == "published" && maintainer == TeamMemberRef(uid, generation)
     companion object {
         fun parse(v: JSONObject) = TeamBotCard(v.getString("sharedBotId"), v.getString("name"), v.getString("description"),
             TeamMemberRef.parse(v.getJSONObject("maintainer")), v.getLong("revision"), v.getString("state"), v.getBoolean("permitted"),
-            v.getBoolean("ready"), v.getLong("onlineUntil"), v.getJSONObject("usePolicy"), v.getJSONObject("quotas"), v.stringOrNull("instanceId"))
+            v.getBoolean("ready"), v.getLong("onlineUntil"), v.getJSONObject("usePolicy"), v.getJSONObject("quotas"), v.stringOrNull("instanceId"),
+            v.optJSONObject("sharedList")?.let(TeamBotListInfo::parse))
     }
 }
 /** What a Bot run cost, as the host reports it: `missing` carries no figures; the cost only when the host could price it (`costMicros` is millionths of `currency`). */

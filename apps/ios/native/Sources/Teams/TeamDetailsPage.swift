@@ -42,6 +42,7 @@ struct TeamDetailsPage: View {
     @State private var inviteRole = "member"
     @State private var confirmation: Confirmation?
     @State private var pausing: TeamBotCard?
+    @State private var listOf: TeamBotCard?
     @State private var copied = false
     /// The member whose "Add friend" sheet is open (docs/FRIENDS-CLIENTS.md D15).
     @State private var befriending: TeamMember?
@@ -66,6 +67,9 @@ struct TeamDetailsPage: View {
                 tabs.select(.friends)
             }
         }
+        .sheet(item: $listOf) { bot in
+            if let model = workspace.messaging { TeamSharedListSheet(bot: bot, model: model) { listOf = nil } }
+        }
         .sheet(isPresented: $inviting) {
             if let team = workspace.team {
                 InviteFriendsSheet(teamID: team.id, teamName: team.name) { invitedNames = $0 }
@@ -84,7 +88,7 @@ struct TeamDetailsPage: View {
         }
         .hidesTabBarWhenPushed(in: .teams)
         // A change of account or membership invalidates what the person was about to confirm.
-        .onChange(of: workspace.authority) { _, _ in confirmation = nil; pausing = nil }
+        .onChange(of: workspace.authority) { _, _ in confirmation = nil; pausing = nil; listOf = nil }
         .onChange(of: workspace.invitationLink) { _, _ in copied = false }
         // Leaving, deleting or losing the team leaves nothing to show.
         .onChange(of: workspace.team == nil) { _, gone in if gone { onClose() } }
@@ -373,7 +377,8 @@ struct TeamDetailsPage: View {
                     onMessage: {
                         Task { if let id = await workspace.openBotDM(bot) { onOpenConversation(id) } }
                     },
-                    onPause: { pausing = bot })
+                    onPause: { pausing = bot },
+                    onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation)) && !offline ? { listOf = bot } : nil)
             }
             if bots.isEmpty && status == nil {
                 Text("teams_bots_none").font(.footnote).foregroundStyle(.secondary)

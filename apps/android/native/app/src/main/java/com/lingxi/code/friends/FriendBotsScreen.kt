@@ -24,6 +24,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
 import com.lingxi.code.teams.TeamBotCard
+import com.lingxi.code.teams.TeamSharedListRules
 import com.lingxi.code.teams.TeamMember
 import com.lingxi.code.teams.TeamMessagingState
 import com.lingxi.code.teams.TeamsErrorBanner
@@ -52,6 +53,7 @@ internal fun FriendBotsScreen(
     onStop: (TeamBotCard) -> Unit,
     onReconnect: () -> Unit,
     modifier: Modifier = Modifier,
+    onList: (TeamBotCard) -> Unit = {},
 ) {
     val online = !messaging.offline
     Column(modifier.fillMaxSize().testTag(FriendsTags.BOTS_SCREEN)) {
@@ -66,7 +68,8 @@ internal fun FriendBotsScreen(
                 )
             }
             items(messaging.bots, key = { "bot-${it.sharedBotId}" }) { bot ->
-                FriendBotRow(bot, ownerName(bot, members, uid), uid, generation, online, onMessage = { onMessage(bot.sharedBotId) }, onStop = { onStop(bot) })
+                FriendBotRow(bot, ownerName(bot, members, uid), uid, generation, online, onMessage = { onMessage(bot.sharedBotId) }, onStop = { onStop(bot) },
+                    onList = if (TeamSharedListRules.canOpen(bot, uid, generation)) ({ onList(bot) }) else null)
             }
             item(key = "note") {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -89,7 +92,7 @@ private fun ownerName(bot: TeamBotCard, members: List<TeamMember>, uid: String):
  * usable Bot and a connection; Stop sharing is the person's own published Bot only, and asks first (D23).
  */
 @Composable
-private fun FriendBotRow(bot: TeamBotCard, owner: String, uid: String, generation: Long, online: Boolean, onMessage: () -> Unit, onStop: () -> Unit) {
+private fun FriendBotRow(bot: TeamBotCard, owner: String, uid: String, generation: Long, online: Boolean, onMessage: () -> Unit, onStop: () -> Unit, onList: (() -> Unit)? = null) {
     var confirm by remember(bot.sharedBotId, bot.revision, bot.state) { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp).testTag(FriendsTags.bot(bot.sharedBotId)), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         BotAvatar(bot.avatarId, 40.dp)
@@ -100,6 +103,7 @@ private fun FriendBotRow(bot: TeamBotCard, owner: String, uid: String, generatio
             if (!bot.permitted) Text(stringResource(R.string.teams_bot_not_permitted), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row {
                 TextButton(enabled = online && bot.selectable, onClick = onMessage, modifier = Modifier.testTag(FriendsTags.botMessage(bot.sharedBotId))) { Text(stringResource(R.string.teams_bot_message)) }
+                if (onList != null) TextButton(enabled = online, onClick = onList, modifier = Modifier.testTag("teams.bot.list.${bot.sharedBotId}")) { Text(stringResource(R.string.teams_list_open)) }
                 if (bot.canPause(uid, generation)) {
                     TextButton(enabled = online, onClick = { confirm = true }, modifier = Modifier.testTag(FriendsTags.botStop(bot.sharedBotId))) { Text(stringResource(R.string.friends_share_bot_stop)) }
                 }

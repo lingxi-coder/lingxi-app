@@ -132,8 +132,14 @@ runtime and host only know a "list service" with read and operation-id write; a 
   Bot; `SharedListDialog` adds, ticks, renames and removes items, one change per save on top of the revision that was read.
   A refused save (`LIST_REVISION_CONFLICT`, `LIST_ITEM_REQUIRED`) reads the list again and keeps what was typed; a repeated
   save reuses its operation id. The publish wizard has the list option, names the list in the review, and carries an existing
-  list into the next publication unless the maintainer switches it off. iOS and Android validate the two commands but have no
-  list screen yet.
+  list into the next publication unless the maintainer switches it off.
+- iOS and Android: the Bot card (Team details, and the Bots of a friend chat) has "Shared list" for whoever may use the Bot
+  and for its maintainer, while the Bot is published and the client is online. The screen (`TeamSharedListView.swift`,
+  `TeamSharedListScreen.kt`) follows `SharedListDialog`: tick, rename, remove and add, one change per save on top of the
+  revision that was read; a refused save reads the list again, says the list changed and keeps what was typed; a repeated
+  save of the same change on the same revision reuses its operation id (`TeamSharedListOperation`); an item over 500 bytes
+  is refused before it is sent. The list is read when the screen opens and on Refresh: it is not live. Tests:
+  `Tests/TeamBotTests.swift`, `TeamBotsTest.kt`. Checked by compilation and unit tests only, not on a device or simulator.
 - Known limit: `dispatchedAt` is the host clock (as `pausedAt` is). A host clock ahead of the service, or behind the start of
   the attempt, makes the record answer `TASK_EXPIRED`, which ends the run.
 
@@ -172,7 +178,7 @@ serves (B3, C7). Connection waits (B8) and budget waits are not built: no M2 too
   (`Approved` / `Declined`) are stored in English and shown in the viewer's language; a decision cannot be edited or recalled
   from the clients. The publish wizard on Desktop has "Ask before the assistant changes the list".
 - Not built: approvers other than the requester (design §10 allows an authorized approver set), approval of anything but the
-  list write, and a member-side view of pending approvals outside the chat. iOS and Android still have no list screen.
+  list write, and a member-side view of pending approvals outside the chat.
 
 ## M2 / Q07–Q08 clients — document editing, history and tasks that need checking
 

@@ -18,6 +18,7 @@ struct FriendBotsView: View {
 
     /// The Bot whose Stop sharing is waiting for its confirmation.
     @State private var stopping: TeamBotCard?
+    @State private var listOf: TeamBotCard?
 
     var body: some View {
         content
@@ -33,7 +34,7 @@ struct FriendBotsView: View {
             }
             .hidesTabBarWhenPushed(in: .friends)
             // An account change, or the end of the friendship, drops what the person was about to confirm.
-            .onChange(of: friends.authority) { _, _ in stopping = nil }
+            .onChange(of: friends.authority) { _, _ in stopping = nil; listOf = nil }
             .accessibilityIdentifier("friends.bots")
     }
 
@@ -73,7 +74,8 @@ struct FriendBotsView: View {
                         busy: workspace.messageBusy || (offline && existing == nil),
                         showsAudience: false, pauseTitle: "friends_share_bot_stop",
                         onMessage: { Task { if let id = await workspace.openBotDM(bot) { onOpenBot(id) } } },
-                        onPause: { stopping = bot })
+                        onPause: { stopping = bot },
+                        onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: chat.generation)) && !offline ? { listOf = bot } : nil)
                 }
                 if bots.isEmpty && status == nil {
                     Text("friends_bots_none").font(.footnote).foregroundStyle(.secondary)
@@ -88,6 +90,9 @@ struct FriendBotsView: View {
         }
         .listStyle(.insetGrouped)
         .safeAreaInset(edge: .top, spacing: 0) { banners(chat) }
+        .sheet(item: $listOf) { bot in
+            if let model = workspace.messaging { TeamSharedListSheet(bot: bot, model: model) { listOf = nil } }
+        }
         .confirmationDialog(
             Text("friends_share_bot_stop"),
             isPresented: Binding(get: { stopping != nil }, set: { if !$0 { stopping = nil } }),

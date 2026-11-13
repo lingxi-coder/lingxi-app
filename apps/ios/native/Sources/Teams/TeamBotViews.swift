@@ -12,6 +12,8 @@ struct TeamBotCardView: View {
     var pauseTitle: LocalizedStringKey = "teams_bot_pause"
     let onMessage: () -> Void
     let onPause: () -> Void
+    /// Opens the list the Bot shares. Set only for a viewer the service lets read it.
+    var onList: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -37,6 +39,10 @@ struct TeamBotCardView: View {
             HStack(spacing: 10) {
                 if bot.selectable {
                     Button("teams_bot_message", action: onMessage).buttonStyle(.borderedProminent)
+                }
+                if let onList {
+                    Button("teams_list_open", systemImage: "checklist", action: onList).buttonStyle(.bordered)
+                        .accessibilityIdentifier("teams.bot.list.\(bot.sharedBotId)")
                 }
                 if isOwner && (bot.state == "published") {
                     Button(pauseTitle, role: .destructive, action: onPause).buttonStyle(.bordered)

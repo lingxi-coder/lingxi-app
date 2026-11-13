@@ -16,6 +16,8 @@ struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
     let usePolicy: TeamUsePolicy
     let quotas: TeamRequestQuotas
     let instanceId: String?
+    /// The list this Bot shares with the people who may use it, when it shares one.
+    var sharedList: TeamBotListInfo? = nil
     var id: String { sharedBotId }
     var selectable: Bool { state == "published" && permitted }
     var avatarId: String { sharedBotId }

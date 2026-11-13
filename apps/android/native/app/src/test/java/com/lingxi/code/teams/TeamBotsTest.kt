@@ -16,6 +16,52 @@ class TeamBotsTest {
             assertEquals(row.getString("name"), row.getBoolean("valid"), result.isSuccess)
         }
     }
+    private fun card(extra: String = "", permitted: Boolean = true, state: String = "published") = TeamBotCard.parse(JSONObject(
+        """{"sharedBotId":"sharedbot_01","name":"Helper","description":"","maintainer":{"uid":"owner","generation":3},"revision":2,"state":"$state","permitted":$permitted,"ready":true,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":1,"member":1,"bot":1}$extra}"""))
+    @Test fun theListIsOfferedOnlyToThoseWhoMayReadIt() {
+        val listed = ""","sharedList":{"title":"Groceries","approval":"requester"}"""
+        assertNull(card().sharedList)
+        assertEquals(TeamBotListInfo("Groceries", "requester"), card(listed).sharedList)
+        assertFalse(TeamSharedListRules.canOpen(card(), "member", 3))
+        assertTrue(TeamSharedListRules.canOpen(card(listed), "member", 3))
+        // Not allowed to use the Bot: only its maintainer still reads the list.
+        assertFalse(TeamSharedListRules.canOpen(card(listed, permitted = false), "member", 3))
+        assertTrue(TeamSharedListRules.canOpen(card(listed, permitted = false), "owner", 3))
+        assertFalse(TeamSharedListRules.canOpen(card(listed, state = "paused"), "owner", 3))
+    }
+    @Test fun aRepeatedListSaveKeepsItsOperationAndAnyOtherChangeGetsANewOne() {
+        var made = 0
+        val id = { made += 1; "operation_000$made" }
+        val bread = listOf<TeamSharedListChange>(TeamSharedListChange.Add("Bread"))
+        val first = TeamSharedListOperation.of(null, 4, bread, id)
+        assertEquals("operation_0001", first.id)
+        // The answer was lost and the person saves again: the same request.
+        assertEquals(first, TeamSharedListOperation.of(first, 4, listOf(TeamSharedListChange.Add("Bread")), id))
+        // Other text, or the same text on a newer list, is another change.
+        assertEquals("operation_0002", TeamSharedListOperation.of(first, 4, listOf(TeamSharedListChange.Add("Milk")), id).id)
+        assertEquals("operation_0003", TeamSharedListOperation.of(first, 5, bread, id).id)
+    }
+    @Test fun everyListChangeIsACommandTheServiceAccepts() {
+        fun write(changes: List<TeamSharedListChange>) = command().put("action", "writeList")
+            .put("payload", JSONObject().put("sharedBotId", "sharedbot_01").put("operationId", "operation_0001").put("expectedDataRevision", 0).put("changes", changes.json()))
+        TeamExecutionContract.validate(write(listOf(TeamSharedListChange.Add("Bread"), TeamSharedListChange.SetText("item_0001", "Rye bread"),
+            TeamSharedListChange.SetDone("item_0001", true), TeamSharedListChange.Remove("item_0002"))))
+        assertTrue(TeamSharedListRules.usable(" Bread "))
+        assertFalse(TeamSharedListRules.usable("  \n"))
+        // 500 bytes fit; one more does not, and multi-byte text is counted in bytes.
+        assertTrue(TeamSharedListRules.usable("a".repeat(500)))
+        assertFalse(TeamSharedListRules.usable("a".repeat(501)))
+        assertFalse(TeamSharedListRules.fits("\u6e05".repeat(167)))
+        assertTrue(runCatching { TeamExecutionContract.validate(write(listOf(TeamSharedListChange.Add("a".repeat(501))))) }.isFailure)
+    }
+    @Test fun aListThatMovedIsReadAgain() {
+        assertTrue(TeamSharedListRules.moved("LIST_REVISION_CONFLICT"))
+        assertTrue(TeamSharedListRules.moved("LIST_ITEM_REQUIRED"))
+        assertFalse(TeamSharedListRules.moved("LIST_LIMIT"))
+        val list = TeamSharedList.parse(JSONObject("""{"sharedBotId":"sharedbot_01","title":"Groceries","description":"","dataRevision":2,"items":[{"itemId":"item_0001","text":"Bread","done":true}],"updatedAt":5}"""))
+        assertEquals(listOf(TeamSharedListItem("item_0001", "Bread", true)), list.items)
+        assertEquals(2L, list.dataRevision)
+    }
     @Test fun durableCommandsSurviveRestartAndStayInTheirAccountTeamGeneration() {
         val directory = Files.createTempDirectory("team-execution-").toFile()
         try {

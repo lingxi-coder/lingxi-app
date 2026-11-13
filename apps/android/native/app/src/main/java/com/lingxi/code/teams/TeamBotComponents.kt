@@ -185,7 +185,7 @@ internal fun TeamArtifactViewer(artifact: TeamArtifact, onClose: () -> Unit) {
 }
 
 @Composable
-internal fun TeamBotCardView(bot: TeamBotCard, ownerName: String, uid: String, generation: Long, enabled: Boolean, onMessage: () -> Unit, onPause: () -> Unit, modifier: Modifier = Modifier) {
+internal fun TeamBotCardView(bot: TeamBotCard, ownerName: String, uid: String, generation: Long, enabled: Boolean, onMessage: () -> Unit, onPause: () -> Unit, modifier: Modifier = Modifier, onList: (() -> Unit)? = null) {
     var confirm by remember(bot.sharedBotId, bot.revision, bot.state) { mutableStateOf(false) }
     Column(modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -197,6 +197,7 @@ internal fun TeamBotCardView(bot: TeamBotCard, ownerName: String, uid: String, g
                 Text(stringResource(if (bot.usePolicy.getString("mode") == "all") R.string.teams_bot_use_all else R.string.teams_bot_use_listed), style = MaterialTheme.typography.bodySmall)
                 Row {
                     TextButton(enabled = enabled && bot.selectable, onClick = onMessage) { Text(stringResource(R.string.teams_bot_message)) }
+                    if (onList != null) TextButton(enabled = enabled, onClick = onList, modifier = Modifier.testTag("teams.bot.list.${bot.sharedBotId}")) { Text(stringResource(R.string.teams_list_open)) }
                     if (bot.canPause(uid, generation)) TextButton(enabled = enabled, onClick = { confirm = true }) { Text(stringResource(R.string.teams_bot_pause)) }
                 }
             }

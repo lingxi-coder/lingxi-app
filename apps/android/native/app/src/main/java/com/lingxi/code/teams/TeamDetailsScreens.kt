@@ -71,6 +71,9 @@ internal fun TeamDetailsScreen(
     val privileged = current.role != "member"
     var segment by rememberSaveable { mutableIntStateOf(0) }
     var confirmation by remember { mutableStateOf<Pair<Int, Map<String, Any>>?>(null) }
+    // The shared list of one Bot of this team; a change of account, team or membership closes it.
+    var listOf by remember(uid, team.id, current.generation) { mutableStateOf<TeamBotCard?>(null) }
+    listOf?.let { bot -> TeamSharedListDialog(bot, workspace.messagingModel) { listOf = null } }
     val model = workspace.teamsModel
     val busy = teams.busy
 
@@ -101,7 +104,7 @@ internal fun TeamDetailsScreen(
             when (segments[selected]) {
                 R.string.teams_members -> membersSection(detail, current, uid, busy, friendUids, onAddFriend) { confirmation = it }
                 R.string.teams_invites -> invitesSection(detail, current, teams, busy, model, onInviteFriends)
-                else -> botsSection(messaging, detail, uid, onMessageBot, workspace)
+                else -> botsSection(messaging, detail, uid, onMessageBot, workspace) { listOf = it }
             }
             item {
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
@@ -227,7 +230,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.invitesSection(
     }
 }
 
-private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(messaging: TeamMessagingState, detail: TeamDetail?, uid: String, onMessageBot: (String) -> Unit, workspace: TeamsWorkspace) {
+private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(messaging: TeamMessagingState, detail: TeamDetail?, uid: String, onMessageBot: (String) -> Unit, workspace: TeamsWorkspace, onOpenList: (TeamBotCard) -> Unit) {
     item {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(stringResource(R.string.teams_bots_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -245,6 +248,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(messaging
             TeamBotCardView(
                 bot, detail?.members?.firstOrNull { it.uid == bot.maintainer.uid }?.displayName ?: bot.maintainer.uid, uid, messaging.cache?.generation ?: 0, !messaging.offline,
                 onMessage = { onMessageBot(bot.sharedBotId) }, onPause = { workspace.messagingModel.pause(bot) },
+                onList = if (TeamSharedListRules.canOpen(bot, uid, messaging.cache?.generation ?: 0)) ({ onOpenList(bot) }) else null,
             )
         }
     }

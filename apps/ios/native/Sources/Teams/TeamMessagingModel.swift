@@ -395,6 +395,16 @@ final class TeamMessagingModel {
         if selected == selection { artifact = result }
     }
     func closeArtifact() { artifact = nil }
+    /// A Bot's shared list as it is now. It is read on demand: the list is not part of the message stream.
+    func readList(_ sharedBotId: String) async throws -> TeamSharedList {
+        try await execute("readList", payload: ["sharedBotId": sharedBotId], life: lifecycle)
+    }
+    /// Saves `changes` on top of `expectedDataRevision`, or saves nothing. Sending the same `operationId` again repeats the same
+    /// request, so a save whose answer was lost is not applied twice.
+    func writeList(_ sharedBotId: String, operationId: String, expectedDataRevision: Int, changes: [TeamSharedListChange]) async throws {
+        let _: TeamSharedListWritten = try await execute("writeList", payload: ["sharedBotId": sharedBotId, "operationId": operationId,
+                                                                             "expectedDataRevision": expectedDataRevision, "changes": changes.map(\.payload)], life: lifecycle)
+    }
     func create(kind: String, title: String, uids: [String], sharedBotIds: [String] = [], id: String) async throws {
         guard active, !revoked else { return }
         guard TeamBotSelection.unavailable(Set(sharedBotIds), cards: bots).isEmpty else { throw TeamMessageFailure(code: "BOT_USE_REQUIRED") }

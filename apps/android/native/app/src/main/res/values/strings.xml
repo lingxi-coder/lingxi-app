@@ -2967,4 +2967,21 @@
     <string name="settings_browser_manage_session">管理控制会话</string>
     <string name="teams_task_needs_checking">需要核实</string>
     <string name="teams_task_needs_checking_hint">会话之外的某个操作可能已执行，也可能没有。需要 Bot 维护者在 Desktop 或网页端确认。</string>
+    <string name="teams_list_open">共享清单</string>
+    <string name="teams_list_hint_fmt">所有可以使用 %1$s 的人都能查看并修改此清单，%1$s 也可以读取和修改它。</string>
+    <string name="teams_list_moved">清单在此期间已被修改，你的更改未保存。请查看最新清单，如仍有需要再重试。</string>
+    <string name="teams_list_empty">清单还是空的。</string>
+    <string name="teams_list_add_placeholder">添加条目</string>
+    <string name="teams_list_add">添加</string>
+    <string name="teams_list_too_long">条目过长，无法保存。请缩短后重试。</string>
+    <string name="teams_list_loading">正在加载清单…</string>
+    <string name="teams_list_edit">编辑</string>
+    <string name="teams_list_remove">移除</string>
+    <string name="teams_list_edit_title">编辑条目</string>
+    <string name="teams_list_refresh">刷新</string>
+    <string name="teams_list_done">已完成</string>
+    <string name="teams_list_not_done">未完成</string>
+    <string name="teams_list_item_options_fmt">“%1$s”的选项</string>
+    <string name="teams_error_list_unavailable">此清单已不可用。</string>
+    <string name="teams_error_list_full">清单已满，请先移除一些条目再添加。</string>
 </resources>

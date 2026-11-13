@@ -20,6 +20,12 @@ enum TeamsErrors {
              "BOT_REVISION_CONFLICT", "MAINTAINER_REQUIRED", "MESSAGE_IN_FLIGHT", "REPLY_REQUIRED",
              "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "WAIT_KIND_MISMATCH", "TASK_REVOKED":
             "teams_message_failed"
+        case "LIST_REQUIRED", "SHARED_LIST_UNSUPPORTED":
+            "teams_error_list_unavailable"
+        case "LIST_LIMIT":
+            "teams_error_list_full"
+        case "LIST_REVISION_CONFLICT", "LIST_ITEM_REQUIRED":
+            "teams_list_moved"
         case "INVITE_UNAVAILABLE":
             "teams_invite_error"
         default:

@@ -104,6 +104,9 @@ internal fun teamsErrorRes(code: String): Int = when {
     code == "MESSAGE_LISTENER_FAILED" -> R.string.teams_error_sync_failed
     code in setOf("MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT",
         "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "WAIT_KIND_MISMATCH", "TASK_REVOKED") -> R.string.teams_message_failed
+    code == "LIST_REQUIRED" || code == "SHARED_LIST_UNSUPPORTED" -> R.string.teams_error_list_unavailable
+    code == "LIST_LIMIT" -> R.string.teams_error_list_full
+    code == "LIST_REVISION_CONFLICT" || code == "LIST_ITEM_REQUIRED" -> R.string.teams_list_moved
     code == "INVITE_UNAVAILABLE" -> R.string.teams_invite_error
     else -> R.string.teams_error
 }

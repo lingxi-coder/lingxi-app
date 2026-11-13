@@ -2967,4 +2967,21 @@
     <string name="settings_browser_manage_session">Manage control session</string>
     <string name="teams_task_needs_checking">Needs checking</string>
     <string name="teams_task_needs_checking_hint">An action outside the chat may or may not have gone through. The Bot’s maintainer confirms it on Desktop or the web.</string>
+    <string name="teams_list_open">Shared list</string>
+    <string name="teams_list_hint_fmt">Everyone who can use %1$s sees this list and can change it. %1$s can read and change it too.</string>
+    <string name="teams_list_moved">The list was changed in the meantime, so your change was not saved. Check the list, then try again if it is still needed.</string>
+    <string name="teams_list_empty">Nothing is on the list yet.</string>
+    <string name="teams_list_add_placeholder">Add an item</string>
+    <string name="teams_list_add">Add</string>
+    <string name="teams_list_too_long">This item is too long to save. Shorten it and try again.</string>
+    <string name="teams_list_loading">Loading the list…</string>
+    <string name="teams_list_edit">Edit</string>
+    <string name="teams_list_remove">Remove</string>
+    <string name="teams_list_edit_title">Edit item</string>
+    <string name="teams_list_refresh">Refresh</string>
+    <string name="teams_list_done">Done</string>
+    <string name="teams_list_not_done">Not done</string>
+    <string name="teams_list_item_options_fmt">Options for %1$s</string>
+    <string name="teams_error_list_unavailable">This list is no longer available.</string>
+    <string name="teams_error_list_full">The list is full. Remove some items before adding more.</string>
 </resources>

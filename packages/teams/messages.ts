@@ -8,6 +8,9 @@ export interface TeamConversation {
   /** Newest message for conversation lists. Absent until the conversation has a message; then always the full pointer. */
   lastMessage?: { id: string; seq: number; at: string | null; author: MessageAuthor; preview: string; recalled?: true };
 }
+/** One change a Bot asks to make to its list. `item` is the text of the item it touches as it read when the Bot asked, `null` if it was gone. */
+export interface ListApprovalChange { op: 'add' | 'update' | 'remove'; text?: string; itemId?: string; done?: boolean; item?: string | null }
+export interface ListApproval { title: string; changes: ListApprovalChange[] }
 export interface TeamMessage {
   id: string; seq: number; author: MessageAuthor;
   kind: string; text: string; replyTo?: string; createdAt: string | null; editedAt?: string | null;
@@ -15,6 +18,10 @@ export interface TeamMessage {
   taskId?: string; taskIds?: string[]; artifactId?: string;
   /** Set on a Bot's question and on the human answer to it. */
   waitId?: string;
+  /** On a Bot's request to approve a list change: the list and exactly the changes the approval is for. */
+  approval?: ListApproval;
+  /** On the requester's reply to such a request. */
+  decision?: 'approve' | 'deny';
   mentions?: string[];
 }
 export interface MessageScope { teamId: string; generation: number }

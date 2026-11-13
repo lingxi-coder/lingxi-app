@@ -535,7 +535,7 @@ test('a worker frame stops waiting to retry as soon as the run is aborted',async
 
 // M2: questions, answers, recovery and cancellation.
 const chatRoute=():TeamModelRoute=>({...route(),model_provider:'deepseek',model_protocol:'open_ai_chat',model_endpoint:'https://api.deepseek.com',credential_id:'deepseek',model_profile:{profile_name:'deepseek'}});
-const checkpointDigest='c'.repeat(64),waitId=`wait_${'a'.repeat(40)}`,theWait={waitId,logicalStepId:'task00001/t0/c0',question:'Which city?',requestDigest:'d'.repeat(64)};
+const checkpointDigest='c'.repeat(64),waitId=`wait_${'a'.repeat(40)}`,theWait={waitId,kind:'human_input' as const,logicalStepId:'task00001/t0/c0',question:'Which city?',requestDigest:'d'.repeat(64)};
 const checkpoint=(fields:Record<string,unknown>={})=>({status:'task_checkpoint' as const,taskId:'task00001',phase:'in_flight' as const,attempts:1,dispatchesObserved:1,continuable:true,checkpointDigest,...fields});
 const interrupted=()=>{throw new Error('TEAM_HOST_INTERRUPTED');};
 type Run=(o:TeamHostProcessOptions)=>Promise<TeamHostResult>;
@@ -693,14 +693,14 @@ const stepId=(logicalStepId=step)=>digest(JSON.stringify(['task00001','task00001
 const milk={itemId:'item_0001',text:'Milk',done:false},bread={itemId:'item_0002',text:'Bread',done:false};
 const addBread={expectedDataRevision:1,changes:[{op:'add',text:'Bread'}]};
 /** A Bot with a shared list on a continuable route, and the server side of the list and its ledger. */
-function listed(t:any,worker:Run,answers:Record<string,(payload:any)=>unknown>={}){
+function listed(t:any,worker:Run,answers:Record<string,(payload:any)=>unknown>={},list:Record<string,unknown>=groceries){
  const f=durable(t,worker),inner=f.mock.service.hostMessages.bind(f.mock.service);
  const replies:Record<string,(payload:any)=>unknown>={readTaskList:()=>({dataRevision:1,items:[{...milk,updatedBy:{kind:'user',uid:'member',generation:1},updatedAt:1}]}),
   recordOperation:p=>({operationId:p.operationId,state:'dispatched',dispatch:true}),writeTaskList:()=>({applied:true,dataRevision:2,items:[milk,bread]}),...answers};
  f.mock.service.hostMessages=async(c,command)=>{const result:any=await inner(c,command);
-  if(command.action==='startTask'||command.action==='continueTask')return {...result,sharedList:groceries};
+  if(command.action==='startTask'||command.action==='continueTask')return {...result,sharedList:list};
   return replies[command.action as string]?replies[command.action as string]!(command.payload) as any:result;};
- return {...f,input:{...f.input,sharedList:groceries}};
+ return {...f,input:{...f.input,sharedList:list as typeof groceries}};
 }
 test('a Bot reads its shared list and changes it through the ledger: recorded first, then sent once under the id of its step',async t=>{
  const outcomes:any[]=[];
@@ -799,4 +799,72 @@ test('the private process serves list operations only to a run that was offered 
   [boot(),read,serve({established:true,succeeded:true,result:{items:'x'.repeat(65*1024)}})],[boot(),read,async()=>{throw new Error('SERVICE_UNAVAILABLE');}],
  ] as const)await assert.rejects(runTeamHost({...base,bootstrap:bootstrap as any,authorize,operate:operate as any,spawnProcess:conversing(JSON.parse(JSON.stringify(frame)),result,false).spawn}),/TEAM_HOST_PROTOCOL/);
  assert.equal(calls.length,served+1);
+});
+
+// M2: a list whose changes the requester approves. The Bot's proposal is a wait; only its approval lets the write through.
+const asking={...groceries,approval:'requester' as const},proposed={waitId,kind:'tool_approval' as const,logicalStepId:step,question:JSON.stringify(addBread),requestDigest:'e'.repeat(64)};
+const proposing=()=>({...asked(),wait:proposed});
+const decideAs=(f:ReturnType<typeof listed>,decision?:'approve'|'deny')=>{const task=f.mock.tasks.find(t=>t.taskId==='task00001');
+ Object.assign(task,{state:'queued',resume:{waitId,answerMessageId:'answer000001',answerSeq:3,...(decision?{decision}:{})}});f.mock.wake();};
+test('a proposed list change waits for the requester as an approval of exactly that write, and the approved write names it in the ledger',async t=>{
+ const outcomes:any[]=[];
+ const f=listed(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint({wait:proposed});if(o.bootstrap.type==='run')return proposing();
+  outcomes.push(await o.operate!({tool:'list_write',logicalStepId:step,approvalRef:waitId,arguments:addBread}));return done('Bread is on the list');},{},asking);
+ await f.connector.publishLocalBot('owner',f.input);assert.deepEqual(f.sent('publishSharedBot')[0].payload.sharedList,asking);
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>f.sent('pauseTask').length===1);await f.connector.idle();
+ const b=(await f.privateStore.bindings('owner'))[0]!,first=f.launches[0]!.bootstrap;
+ assert.deepEqual(first.sharedList,asking);assert.equal(first.askRequester,true);
+ // The request carries the change itself and the ledger id its write will have; it has no free-text question.
+ assert.deepEqual({...f.sent('pauseTask')[0].payload,pausedAt:0},{deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:'permit00001',inputGrantIds:b.grantIds,waitId,kind:'tool_approval',
+  approval:{operationId:stepId(),logicalStepId:step,...addBread},requestDigest:proposed.requestDigest,checkpointDigest,pausedAt:0,expiresInMs:86400000,dispatchedRequests:1,outputAudience:{mode:'published_inputs'}});
+ await quiet(f);assert.equal(f.sent('recordOperation').length,0);assert.equal(f.sent('writeTaskList').length,0);assert.equal(f.launches.length,1);
+ // A reply in words is not a decision: nothing continues.
+ decideAs(f);await quiet(f);assert.equal(f.sent('continueTask').length,0);assert.equal(f.launches.length,1);
+ decideAs(f,'approve');await finished(f);
+ assert.deepEqual(f.launches[1]!.bootstrap.continuation,{epoch:2,expected_checkpoint_digest:checkpointDigest,answer:{wait_id:waitId,message_id:'answer000001',text:'Lisbon',approved:true}});
+ assert.deepEqual(f.launches[1]!.bootstrap.sharedList,asking);
+ const records=f.sent('recordOperation');assert.equal(records.length,1);
+ assert.deepEqual({...records[0].payload,dispatchedAt:0},{deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:'permit00002',operationId:stepId(),logicalStepId:step,
+  category:'store_idempotent',tool:{name:'TeamListWrite',version:'1'},approvalRef:waitId,digest:digest(JSON.stringify({changes:[{op:'add',text:'Bread'}],expectedDataRevision:1})),dispatchedAt:0});
+ assert.equal(f.sent('writeTaskList').length,1);assert.deepEqual(outcomes,[{established:true,succeeded:true,result:{dataRevision:2,items:[milk,bread]}}]);
+ assert.equal(completions(f)[0].payload.text,'Bread is on the list');
+});
+test('a declined change continues the task with the refusal and writes nothing; a write the service will not accept without approval is a refusal to the Bot',async t=>{
+ const outcomes:any[]=[];let continued=0;
+ const f=listed(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint({wait:proposed});if(o.bootstrap.type==='run')return proposing();continued++;return done('Left the list as it was');},{},asking);
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await settle(()=>f.sent('pauseTask').length===1);await f.connector.idle();
+ decideAs(f,'deny');await finished(f);
+ assert.equal(continued,1);assert.equal(f.launches[1]!.bootstrap.continuation?.answer?.approved,false);
+ assert.equal(f.sent('recordOperation').length,0);assert.equal(f.sent('writeTaskList').length,0);assert.equal(completions(f)[0].payload.text,'Left the list as it was');
+ const g=listed(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();outcomes.push(await o.operate!({tool:'list_write',logicalStepId:step,approvalRef:waitId,arguments:addBread}));return done();},
+  {recordOperation:()=>{throw new TeamsApiError('APPROVAL_REQUIRED',403);}},asking);
+ await g.connector.publishLocalBot('owner',g.input);g.mock.tasks.push(queued());g.mock.wake();await finished(g);
+ assert.deepEqual(outcomes,[{established:true,succeeded:false,result:{error:'APPROVAL_REQUIRED'}}]);assert.equal(g.sent('writeTaskList').length,0);
+});
+test('a proposal that is not a list change the service would take ends the task instead of asking anyone',async t=>{
+ for(const [question,list] of [['{"expectedDataRevision":1,"changes":[]}',asking],['not json',asking],[JSON.stringify(addBread),groceries]] as const){
+  const f=listed(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:{...proposed,question}}):{...asked(),wait:{...proposed,question}},{},list);
+  await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+  assert.equal(f.sent('pauseTask').length,0);assert.equal(completions(f)[0].payload.outcome,'failed');
+ }
+});
+test('the private process passes an approval only on a list that asks for one, and reads an approval wait with its change',async()=>{
+ const scope={teamId,sharedBotId,conversationId,sessionEpoch:1},live={scope,sessionRevision:1,lastMessageSeq:2,lastChangeSeq:2,bootstrapFromSeq:0};
+ const result={version:3,type:'result',status:'completed',cursor:live,text:'Done',finishedAt:1,dispatchedRequests:2,attemptDispatchedRequests:1,deniedTools:0,usage:{status:'missing'}};
+ const base={executable:'/mock',home:'/private-home',tmp:'/private-tmp',signal:new AbortController().signal,assertCurrent:()=>{}};
+ const boot=(sharedList:unknown=asking)=>({version:3 as const,type:'run' as const,storageRoot:'/private-root',workerExecutable:'/worker',scope,taskId:'task00001',askRequester:true,sharedList});
+ const write={version:3,type:'operation',id:'operation-1',tool:'list_write',logicalStepId:step,approvalRef:waitId,arguments:addBread};
+ const calls:any[]=[],serve=async(operation:any)=>{calls.push(operation);return {established:true,succeeded:true,result:{dataRevision:2,items:[milk,bread]}};};
+ const f=conversing(write,result);await runTeamHost({...base,bootstrap:boot() as any,operate:serve,spawnProcess:f.spawn});
+ assert.deepEqual(calls,[{tool:'list_write',logicalStepId:step,approvalRef:waitId,arguments:addBread}]);
+ const {approvalRef:_ref,...bare}=write;
+ for(const [bootstrap,frame] of [[boot(),bare],[boot(),{...write,approvalRef:'wait_1'}],[boot(groceries),write],[boot(),{version:3,type:'operation',id:'operation-1',tool:'list_read',approvalRef:waitId,arguments:{}}]] as const)
+  await assert.rejects(runTeamHost({...base,bootstrap:bootstrap as any,operate:serve,spawnProcess:conversing(JSON.parse(JSON.stringify(frame)),result,false).spawn}),/TEAM_HOST_PROTOCOL/);
+ assert.equal(calls.length,1);
+ // An approval wait carries the whole change, which may be longer than any question.
+ const long={...proposed,question:JSON.stringify({expectedDataRevision:1,changes:Array.from({length:20},()=>({op:'add',text:'x'.repeat(400)}))})};
+ const waiting=(wait:unknown)=>({version:3,type:'result',status:'waiting',cursor:live,wait,checkpointDigest,pausedAt:1731300000000,dispatchedRequests:1,attemptDispatchedRequests:1,deniedTools:0,usage:{status:'missing'}});
+ const paused=await runTeamHost({...base,bootstrap:boot() as any,spawnProcess:frames([waiting(long)])});assert.deepEqual((paused as any).wait,long);
+ for(const wait of [{...long,kind:'human_input'},{...proposed,kind:'approval'},(({kind:_kind,...rest})=>rest)(proposed),{...proposed,question:'x'.repeat(65*1024)}])
+  await assert.rejects(runTeamHost({...base,bootstrap:boot() as any,spawnProcess:frames([waiting(wait)])}),/TEAM_HOST_PROTOCOL/);
 });

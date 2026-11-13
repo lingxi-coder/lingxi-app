@@ -562,6 +562,114 @@
       }
     },
     {
+      "name": "valid-decideWait-approve",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "decideWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "decision": "approve"
+        }
+      }
+    },
+    {
+      "name": "valid-decideWait-deny",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "decideWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "decision": "deny"
+        }
+      }
+    },
+    {
+      "name": "reject-decideWait-other-decision",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "decideWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "decision": "maybe"
+        }
+      }
+    },
+    {
+      "name": "reject-decideWait-boolean-decision",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "decideWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "decision": true
+        }
+      }
+    },
+    {
+      "name": "reject-decideWait-no-wait",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "decideWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "decision": "approve"
+        }
+      }
+    },
+    {
+      "name": "reject-decideWait-with-text",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "decideWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "decision": "approve",
+          "text": "Approved"
+        }
+      }
+    },
+    {
       "name": "reject-cancelTask-short-id",
       "valid": false,
       "input": {

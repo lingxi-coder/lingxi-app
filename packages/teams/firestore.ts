@@ -1,6 +1,6 @@
 import type { DocumentData, Firestore, FirestoreError } from 'firebase/firestore';
 import type { BlockEntry, FriendCard, TeamOffer } from './friends.js';
-import type { MessageScope, MessageSnapshot, TeamConversation, TeamMessage } from './messages.js';
+import type { ListApproval, ListApprovalChange, MessageScope, MessageSnapshot, TeamConversation, TeamMessage } from './messages.js';
 
 function timestamp(value: unknown): string | null {
   if (value && typeof value === 'object' && 'toDate' in value && typeof value.toDate === 'function') return value.toDate().toISOString();
@@ -76,7 +76,23 @@ export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
     createdAt: timestamp(value.createdAt), editedAt: timestamp(value.editedAt), ...(value.replyTo ? { replyTo: value.replyTo } : {}),
     ...(value.recalled ? { recalled: true } : {}), ...(value.mentions ? { mentions: value.mentions } : {}),
     ...(value.taskId ? { taskId: value.taskId } : {}), ...(value.taskIds ? { taskIds: value.taskIds } : {}), ...(value.artifactId ? { artifactId: value.artifactId } : {}),
-    ...(value.waitId ? { waitId: value.waitId } : {}) };
+    ...(value.waitId ? { waitId: value.waitId } : {}),
+    ...(approvalOf(value.approval) ? { approval: approvalOf(value.approval)! } : {}),
+    ...(value.decision === 'approve' || value.decision === 'deny' ? { decision: value.decision } : {}) };
+}
+/** The approval request on a Bot's message. A request that does not read as one is not shown as one. */
+function approvalOf(value: unknown): ListApproval | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { title, changes } = value as { title?: unknown; changes?: unknown };
+  if (typeof title !== 'string' || !Array.isArray(changes) || !changes.length) return undefined;
+  const read: ListApprovalChange[] = [];
+  for (const change of changes as Array<Record<string, unknown>>) {
+    if (!change || typeof change !== 'object' || !['add', 'update', 'remove'].includes(change.op as string)) return undefined;
+    if (change.op === 'add' && typeof change.text !== 'string') return undefined;
+    read.push({ op: change.op as ListApprovalChange['op'], ...(typeof change.text === 'string' ? { text: change.text } : {}), ...(typeof change.itemId === 'string' ? { itemId: change.itemId } : {}),
+      ...(typeof change.done === 'boolean' ? { done: change.done } : {}), ...(change.op === 'add' ? {} : { item: typeof change.item === 'string' ? change.item : null }) });
+  }
+  return { title, changes: read };
 }
 
 /** SDK snapshots are the only ordinary-message read path, including offline reads. */

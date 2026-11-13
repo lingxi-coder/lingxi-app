@@ -98,7 +98,8 @@ export function BotRun({ task, api, scope, zh, renderMarkdown, snapshot, onReply
   const unchecked = task.state === 'needs_reconciliation';
   const stopping = task.state === 'running' && task.cancelRequestedAt !== undefined;
   const wait = task.state === 'waiting' ? task.wait : undefined;
-  const canReply = !!wait && !!onReply && isMember(wait.recipient)
+  // An approval is decided on the request itself, never by a typed reply.
+  const canReply = !!wait && wait.kind === 'human_input' && !!onReply && isMember(wait.recipient)
     && !snapshot.pending.some(item => { const payload = pendingPayload(item); return 'waitId' in payload && payload.waitId === wait.waitId; });
   const cancel = async () => {
     if (cancelling) return; setCancelling(true); setError('');
@@ -107,7 +108,7 @@ export function BotRun({ task, api, scope, zh, renderMarkdown, snapshot, onReply
     finally { setCancelling(false); onChanged?.(); }
   };
   return <section className="team-bot-run" aria-label={t('Task status', '任务状态')}>
-    <p role="status">{stopping ? t('Cancelling…', '正在取消…') : labels[task.state][zh ? 1 : 0]}</p>
+    <p role="status">{stopping ? t('Cancelling…', '正在取消…') : wait?.kind === 'tool_approval' ? t('Waiting for approval', '等待批准') : labels[task.state][zh ? 1 : 0]}</p>
     {wait ? <p className="teams-hint">{isMember(wait.recipient) ? t('Waiting for you', '等待你回复') : t(`Waiting for ${nameOf(wait.recipient.uid)}`, `等待 ${nameOf(wait.recipient.uid)} 回复`)} · {zh ? `${expiresIn(wait.expiresAt, Date.now(), zh)}过期` : `expires ${expiresIn(wait.expiresAt, Date.now(), zh)}`}</p> : null}
     {unchecked ? <p className="teams-hint">{maintains
       ? t('An action outside the chat may or may not have gone through. Check it and confirm the result.', '会话之外的某个操作可能已执行，也可能没有。请核实并确认结果。')

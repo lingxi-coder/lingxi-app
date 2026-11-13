@@ -8,13 +8,13 @@ export interface SharedBotCard {
   revision: number; state: 'draft' | 'published' | 'paused' | 'retired';
   permitted: boolean; ready: boolean; onlineUntil: number; usePolicy: UsePolicy;
   quotas: RequestQuotas; instanceId?: string;
-  /** The Bot keeps a list its members and its runs change together. */
-  sharedList?: { title: string };
+  /** The Bot keeps a list its members and its runs change together. With `approval`, a run only proposes a change and the member who asked decides. */
+  sharedList?: { title: string; approval?: 'requester' };
 }
 export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'expired' | 'interrupted' | 'authorization_required' | 'revoked' | 'cancelled' | 'needs_reconciliation';
 export type TaskUsage = { status: 'missing' } | { status: 'partial' | 'complete'; inputTokens: number; outputTokens: number; costMicros?: number; currency?: string };
-/** The human question a waiting task is blocked on; present only while `state` is `waiting`. */
-export interface TaskWait { waitId: string; kind: 'human_input'; recipient: MemberRef; expiresAt: number; messageId: string }
+/** What a waiting task is blocked on: a question to `recipient`, or (`tool_approval`) a list change only they can approve. Present only while `state` is `waiting`. */
+export interface TaskWait { waitId: string; kind: 'human_input' | 'tool_approval'; recipient: MemberRef; expiresAt: number; messageId: string }
 export interface TeamTaskView {
   taskId: string; conversationId: string; sharedBotId: string; requester: MemberRef;
   /** `deadline` ends the current phase: pick-up limit while queued, running budget while running, wait expiry while waiting. */
@@ -55,6 +55,7 @@ export interface MemberExecutionPayloads {
   submit: { conversationId: string; messageId: string; changeId: string; text: string; targets: string[]; replyTo?: string };
   pauseSharedBot: { sharedBotId: string; expectedRevision: number };
   answerWait: { conversationId: string; waitId: string; messageId: string; changeId: string; text: string };
+  decideWait: { conversationId: string; waitId: string; messageId: string; changeId: string; decision: 'approve' | 'deny' };
   cancelTask: { taskId: string };
   getTask: { taskId: string };
   listTasks: { conversationId?: string; after?: string };
@@ -82,7 +83,7 @@ export interface SelectedSharedFile { token: string; kind: 'file' | 'skill'; nam
 export interface PublishLocalBotInput extends ExecutionScope {
   publicationId: string; sharedBotId: string; instanceId: string; expectedRevision: number;
   role: string; usePolicy: UsePolicy; fileTokens: string[]; resourceBindings?: Record<string, string>; quotas: RequestQuotas;
-  /** Give the Bot a shared list: its title, and what the Bot is told the list is for. */
-  sharedList?: { title: string; description: string };
+  /** Give the Bot a shared list: its title, and what the Bot is told the list is for. With `approval: 'requester'` the Bot asks the member it works for before each change. */
+  sharedList?: { title: string; description: string; approval?: 'none' | 'requester' };
 }
 export const sharedBotUsable = (card: SharedBotCard): boolean => card.state === 'published' && card.permitted;

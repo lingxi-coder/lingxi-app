@@ -79,6 +79,11 @@ export function messageErrorText(code: string, zh: boolean): string {
     case 'INPUT_GRANT_REQUIRED':
     case 'INPUT_AUDIENCE_NARROWER':
       return t('The selected resources cannot be shared with this audience. Choose authorized resources or a narrower audience.', '选定资料无法向此受众共享，请选择有权共享的资料或缩小受众。');
+    case 'WAIT_KIND_MISMATCH':
+      return t('This request needs a different kind of reply. Refresh and try again.', '此请求需要另一种回复方式，请刷新后重试。');
+    case 'APPROVAL_REQUIRED':
+    case 'APPROVAL_UNSUPPORTED':
+      return t('This change needs an approval it does not have, so it was not made.', '此修改需要批准但尚未获批，因此未执行。');
     case 'WAIT_CLOSED':
     case 'WAIT_REQUIRED':
       return t('This question is no longer waiting for a reply.', '此问题已不再等待回复。');

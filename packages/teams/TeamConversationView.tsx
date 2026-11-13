@@ -5,6 +5,7 @@ import { MemberHome } from './MemberHome';
 import { snippet } from './compose.js';
 import { Composer, composerLock } from './Composer';
 import { messageErrorText } from './errors.js';
+import { ApprovalCard } from './ApprovalCard';
 import { pendingPayload, type TeamConversation, type TeamMessage } from './messages.js';
 import { ArtifactButton, BotRun } from './BotRunCards';
 import { buildStreamRows, formatClock, placeTasks, visibleStart, WINDOW_SIZE } from './stream.js';
@@ -141,9 +142,20 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
   };
   const scope = { teamId: team.id, generation: team.generation };
   // Answer mode ends by itself once the task is not waiting for this viewer on that question any more.
-  const answerTask = answerWait ? runs.tasks.find(task => task.state === 'waiting' && task.wait?.waitId === answerWait && isViewer(task.wait.recipient)) : undefined;
+  const answerTask = answerWait ? runs.tasks.find(task => task.state === 'waiting' && task.wait?.waitId === answerWait && task.wait.kind === 'human_input' && isViewer(task.wait.recipient)) : undefined;
   useEffect(() => { if (answerWait && !answerTask) setAnswerWait(undefined); }, [answerWait, answerTask]);
-  const answerable = (task: TeamTaskView | undefined) => !lock && !!task?.wait && isViewer(task.wait.recipient);
+  // Only a question is answered in words; a proposed change is approved or declined on its own card.
+  const answerable = (task: TeamTaskView | undefined) => !lock && !!task?.wait && task.wait.kind === 'human_input' && isViewer(task.wait.recipient);
+  /** The service writes an approval request and its reply in English; a Chinese viewer reads them in Chinese. */
+  const localized = (message: TeamMessage): TeamMessage => !zh || message.recalled ? message
+    : message.approval && message.author.kind === 'shared_bot' ? { ...message, text: `请求修改清单“${message.approval.title}”（${message.approval.changes.length} 项修改）。` }
+    : message.decision && message.waitId ? { ...message, text: message.decision === 'approve' ? '已批准' : '已拒绝' } : message;
+  /** Where a Bot's request to change its list stands for this viewer. The reply to it carries the decision. */
+  const approvalOf = (message: TeamMessage, waiting: TeamTaskView | undefined): { state: 'decide' | 'waiting' | 'approved' | 'declined' | 'closed'; decider: string } => {
+    if (waiting?.wait) return { state: !lock && isViewer(waiting.wait.recipient) ? 'decide' : 'waiting', decider: nameOf(waiting.wait.recipient.uid) };
+    const reply = messages.find(candidate => candidate.waitId === message.waitId && candidate.decision !== undefined && candidate.author.kind === 'user');
+    return reply ? { state: reply.decision === 'approve' ? 'approved' : 'declined', decider: authorOf(reply).name } : { state: 'closed', decider: '' };
+  };
   const answerPending = (waitId: string) => snapshot.pending.some(item => { const payload = pendingPayload(item); return 'waitId' in payload && payload.waitId === waitId; });
   const lastOwn = [...messages].reverse().find(message => isMine(message) && !message.recalled);
   const unseen = pinned ? 0 : messages.filter(message => message.seq > seen && !isMine(message)).length;
@@ -261,13 +273,15 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
             const tasks = runs.tasks.filter(task => task.replyId === message.id);
             // A Bot's question; while its task still waits for this viewer, Reply on it answers instead of quoting.
             const question = message.author.kind === 'shared_bot' && message.waitId !== undefined;
+            const approval = question && !message.recalled ? message.approval : undefined;
             const waiting = question ? runs.tasks.find(task => task.state === 'waiting' && task.wait?.waitId === message.waitId) : undefined;
             const answering = answerable(waiting) ? waiting : undefined;
             const placed = unanswered.after.get(message.id), grouped = row.grouped && !afterTask && !question;
             afterTask = !!placed;
-            return <Fragment key={row.key}><MessageItem message={message} grouped={grouped} author={author} mine={mine} owner={message.author.kind === 'shared_bot' ? nameOf(snapshot.bots.find(bot => bot.sharedBotId === (message.author as Extract<TeamMessage['author'], { kind: 'shared_bot' }>).sharedBotId)?.maintainer.uid ?? '') : ''}
-              quote={quoteOf(message)} locale={tag} zh={zh} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} question={question}
-              onReply={lock ? undefined : answering ? () => startAnswer(answering) : answer} onEdit={mine && participant ? edit : undefined} onRecall={mine && participant ? setRecall : undefined}>
+            return <Fragment key={row.key}><MessageItem message={localized(message)} grouped={grouped} author={author} mine={mine} owner={message.author.kind === 'shared_bot' ? nameOf(snapshot.bots.find(bot => bot.sharedBotId === (message.author as Extract<TeamMessage['author'], { kind: 'shared_bot' }>).sharedBotId)?.maintainer.uid ?? '') : ''}
+              quote={quoteOf(message)} locale={tag} zh={zh} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} question={question && !approval} approval={!!approval}
+              onReply={lock ? undefined : answering ? () => startAnswer(answering) : answer} onEdit={mine && participant && !message.decision ? edit : undefined} onRecall={mine && participant && !message.decision ? setRecall : undefined}>
+              {approval ? <div className="tw-embed"><ApprovalCard api={workspace.api} scope={scope} conversationId={conversation.id} message={message} approval={approval} zh={zh} onChanged={runs.refresh} {...approvalOf(message, waiting)} /></div> : null}
               {answering && !answerPending(message.waitId!)
                 ? <div className="tw-embed"><div className="teams-row-actions"><button type="button" aria-label={t('Reply to the Bot’s question', '回复 Bot 的问题')} onClick={() => startAnswer(answering)}>{t('Reply', '回复')}</button></div></div> : null}
               {message.artifactId && !tasks.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={scope} artifactId={message.artifactId} zh={zh} renderMarkdown={renderMarkdown} people={snapshot} /> : null}
@@ -328,8 +342,8 @@ function TaskRow({ task, author, renderAvatar, children }: { task: TeamTaskView;
   </li>;
 }
 
-function MessageItem({ message, grouped, author, mine, owner, quote, question, locale, zh, renderAvatar, renderMarkdown, onReply, onEdit, onRecall, children }: {
-  message: TeamMessage; grouped: boolean; author: Identity; mine: boolean; owner: string; quote?: { author: string; text: string }; question?: boolean; locale: string; zh: boolean; renderAvatar?: RenderAvatar; renderMarkdown?: RenderMarkdown;
+function MessageItem({ message, grouped, author, mine, owner, quote, question, approval, locale, zh, renderAvatar, renderMarkdown, onReply, onEdit, onRecall, children }: {
+  message: TeamMessage; grouped: boolean; author: Identity; mine: boolean; owner: string; quote?: { author: string; text: string }; question?: boolean; /** A request to approve a change; the card under it says what. */ approval?: boolean; locale: string; zh: boolean; renderAvatar?: RenderAvatar; renderMarkdown?: RenderMarkdown;
   onReply?(message: TeamMessage): void; onEdit?(message: TeamMessage): void; onRecall?(message: TeamMessage): void; children?: ReactNode;
 }): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
@@ -346,6 +360,7 @@ function MessageItem({ message, grouped, author, mine, owner, quote, question, l
         <b className="tw-msg-author">{author.name}</b>
         {author.kind === 'bot' ? <span className="tw-tag">Bot</span> : null}
         {question ? <span className="tw-tag">{t('Question', '提问')}</span> : null}
+        {approval ? <span className="tw-tag">{t('Approval', '审批')}</span> : null}
         {owner ? <small>{t('Owner', '所有者')}: {owner}</small> : null}
         {time}
       </div> : null}

@@ -30,6 +30,7 @@ const payloads: Record<string, Check> = {
   submit: shape({ conversationId: id, messageId: id, changeId: id, text: v => typeof v === 'string' && v.length >= 1 && new TextEncoder().encode(v).length <= 8192, targets: list(id, 1, 8), replyTo: optional(id) }),
   pauseSharedBot: shape({ sharedBotId: id, expectedRevision: positive }),
   answerWait: shape({ conversationId: id, waitId: id, messageId: id, changeId: id, text: v => typeof v === 'string' && v.length >= 1 && new TextEncoder().encode(v).length <= 8192 }),
+  decideWait: shape({ conversationId: id, waitId: id, messageId: id, changeId: id, decision: v => v === 'approve' || v === 'deny' }),
   cancelTask: shape({ taskId: id }),
   getTask: shape({ taskId: id }),
   listTasks: shape({ conversationId: optional(id), after: optional(id) }),

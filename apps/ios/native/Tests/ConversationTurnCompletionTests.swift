@@ -187,6 +187,142 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertEqual(mode, .bash)
         }
 
+        func testQueuedBashClaimAdoptsOwnerBeforeOutputCursorAndCancellation() async throws {
+            let source = makeSource()
+            var commands: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { command in
+                commands.append(command)
+                if case let .cancel(turnID?) = command {
+                    source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                        sessionId: "test-session", turnId: turnID, state: .cancelled,
+                        firstSequence: 1, lastSequence: 7, safeToResume: false, reason: "explicit_cancel"
+                    )))
+                }
+            }
+            let firstSent = await source.send("first")
+            let first = try XCTUnwrap(firstSent)
+            await flushTasks()
+            source.applyForTesting(.turnStarted(turnId: first.clientTurnId))
+            let queuedToken = await source.send("!printf queued")
+            XCTAssertEqual(queuedToken, first)
+            await flushTasks()
+            let queuedID = try XCTUnwrap(commands.compactMap { command -> UInt64? in
+                guard case let .sendPrompt(_, .bash?, _, id?, _) = command else { return nil }
+                return id
+            }.last)
+            let listener = source.makeEventListenerForTesting()
+            listener.enqueueForTesting(.turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
+            listener.enqueueForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                sessionId: "test-session", turnId: queuedID, state: .running,
+                firstSequence: 0, lastSequence: 0, safeToResume: true, reason: nil
+            )))
+            listener.enqueueForTesting(.turnStarted(turnId: queuedID))
+            listener.enqueueForTesting(.textDelta(text: "queued output".clientTextDto))
+            listener.enqueueForTesting(.turnEventReplay(sessionId: "test-session", turnId: queuedID,
+                sequence: 7, eventJson: "{\"type\":\"text_delta\",\"text\":\"queued output\"}"))
+            await listener.waitUntilIdle()
+
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertEqual(source.model.activeTurnToken?.clientTurnId, queuedID)
+            XCTAssertEqual(source.model.messages.last?.text, "queued output")
+            let cursor = try await source.durableAttachCursorForTesting()
+            XCTAssertEqual(cursor, 7, "the new owner must be durable before its replay cursor is acknowledged")
+            try await source.cancelAndWait()
+            XCTAssertTrue(commands.contains { if case let .cancel(turnId) = $0 { return turnId == queuedID }; return false })
+            XCTAssertFalse(source.model.streaming)
+            await source.waitForDurableCleanupForTesting()
+            let continued = await source.send("continue")
+            XCTAssertNotNil(continued)
+        }
+
+        func testQueuedClaimFromPreviousSessionCannotAdoptNewSession() async throws {
+            let source = makeSource()
+            var queuedID: UInt64?
+            source.setCommandSubmitterForTesting { command in
+                if case let .sendPrompt(_, .bash?, _, id, _) = command { queuedID = id }
+            }
+            let firstSent = await source.send("first")
+            let first = try XCTUnwrap(firstSent)
+            await flushTasks()
+            source.applyForTesting(.turnStarted(turnId: first.clientTurnId))
+            _ = await source.send("!printf old")
+            await flushTasks()
+            let oldID = try XCTUnwrap(queuedID)
+            source.expectSessionResumeForTesting("new-session")
+            source.applyForTesting(.sessionResumed(sessionId: "new-session", mode: .code, messages: []))
+            let listener = source.makeEventListenerForTesting()
+            listener.enqueueForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                sessionId: "test-session", turnId: oldID, state: .running,
+                firstSequence: 0, lastSequence: 0, safeToResume: true, reason: nil
+            )))
+            listener.enqueueForTesting(.turnStarted(turnId: oldID))
+            listener.enqueueForTesting(.textDelta(text: "late old output".clientTextDto))
+            await listener.waitUntilIdle()
+            XCTAssertEqual(source.model.activeSessionId, "new-session")
+            XCTAssertFalse(source.model.streaming)
+            XCTAssertNil(source.model.activeTurnToken)
+            XCTAssertFalse(source.model.messages.contains { $0.text == "late old output" })
+        }
+
+        func testQueuedTerminalsBeforeClaimRetireEveryAdmissionAndAllowContinue() async throws {
+            let source = makeSource()
+            var ids: [UInt64] = []
+            source.setCommandSubmitterForTesting { command in
+                if case let .sendPrompt(_, _, _, id?, _) = command { ids.append(id) }
+            }
+            let firstSent = await source.send("first")
+            let first = try XCTUnwrap(firstSent)
+            await flushTasks()
+            source.applyForTesting(.turnStarted(turnId: first.clientTurnId))
+            _ = await source.send("queued one")
+            _ = await source.send("queued two")
+            await flushTasks()
+            let members = ids.filter { $0 != first.clientTurnId }
+            XCTAssertEqual(members.count, 2)
+            let listener = source.makeEventListenerForTesting()
+            listener.enqueueForTesting(.turnEnded(outcome: .cancelled, stopReason: "cancelled", cost: zeroCost))
+            for member in members {
+                listener.enqueueForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                    sessionId: "test-session", turnId: member, state: .cancelled,
+                    firstSequence: 0, lastSequence: 0, safeToResume: false, reason: "explicit_cancel"
+                )))
+            }
+            await listener.waitUntilIdle()
+            await source.waitForDurableCleanupForTesting()
+            let continued = await source.send("continue")
+            XCTAssertNotNil(continued, "queued terminals must release the idle admission fence")
+        }
+
+        func testMidTurnAppendRetiresQueuedClaimWithoutChangingLiveOwner() async throws {
+            let source = makeSource()
+            var ids: [UInt64] = []
+            source.setCommandSubmitterForTesting { command in
+                if case let .sendPrompt(_, _, _, id?, _) = command { ids.append(id) }
+            }
+            let firstSent = await source.send("first")
+            let first = try XCTUnwrap(firstSent)
+            await flushTasks()
+            source.applyForTesting(.turnStarted(turnId: first.clientTurnId))
+            _ = await source.send("append now")
+            await flushTasks()
+            let queuedID = try XCTUnwrap(ids.last)
+            source.applyForTesting(.userTranscriptRowIdentity(rowToken: "client-turn:\(queuedID)", uuid: UUID().uuidString))
+            XCTAssertEqual(source.model.activeTurnToken, first)
+            source.applyForTesting(.textDelta(text: "current output".clientTextDto))
+            source.applyForTesting(.turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
+            let listener = source.makeEventListenerForTesting()
+            listener.enqueueForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                sessionId: "test-session", turnId: queuedID, state: .running,
+                firstSequence: 0, lastSequence: 0, safeToResume: true, reason: nil
+            )))
+            listener.enqueueForTesting(.turnStarted(turnId: queuedID))
+            listener.enqueueForTesting(.textDelta(text: "stale appended output".clientTextDto))
+            await listener.waitUntilIdle()
+            XCTAssertFalse(source.model.streaming)
+            XCTAssertTrue(source.model.messages.contains { $0.text == "current output" })
+            XCTAssertFalse(source.model.messages.contains { $0.text == "stale appended output" })
+        }
+
         func testLeadingBangSubmitsExactBashCommandAndMode() async {
             let source = makeSource()
             var submitted: [ClientCommand] = []

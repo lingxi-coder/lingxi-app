@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { admissionId, sharedBotPermits } from './team-execution-contract.mjs';
-import { sharedBotCommand } from './shared-bot-commands.mjs';
+import { serviceBotCommand, sharedBotCommand } from './shared-bot-commands.mjs';
+import { serviceScope } from './hosted-bot-service.mjs';
 import { messagePreview } from './team-message-preview.mjs';
 import { prepareSharedConversation } from './team-conversations.mjs';
 import { attachable, cancelUpload, createUpload, finalizeUpload, putUploadPart, readAttachmentPart, revokeAttachment, taskFiles } from './team-attachments.mjs';
@@ -81,15 +82,19 @@ function taskView(task, now) {
 export class SharedBotsStore {
   constructor(db, clock = Date.now) { this.db = db; this.clock = clock; }
   async execute(user, raw) {
-    const command = sharedBotCommand.parse(raw);
-    const { teamId, generation, action, payload: p } = command;
+    // The scope a command works in is a Team or a hosted Bot service. The two never mix: a command names exactly one,
+    // and nothing below falls back from one to the other.
+    const service = raw?.serviceId !== undefined;
+    const command = (service ? serviceBotCommand : sharedBotCommand).parse(raw);
+    const { generation, action, payload: p } = command;
     const requestDigest = hash(command), now = this.clock();
     return this.db.runTransaction(async tx => {
-      const team = this.db.doc(`teams/${teamId}`);
+      const team = service ? serviceScope.root(this.db, command.serviceId) : this.db.doc(`teams/${command.teamId}`);
       const receiptRef = team.collection('executionReceipts').doc(hash([user.uid, generation, command.commandId]));
       const [teamDoc, selfDoc, receiptDoc] = await tx.getAll(team, team.collection('members').doc(user.uid), receiptRef);
       const self = selfDoc.data(), receipt = receiptDoc.data();
-      if (teamDoc.data()?.state !== 'active' || !self) deny(403, 'MEMBERSHIP_REQUIRED');
+      if (service) serviceScope.check(teamDoc.data(), self, user.uid);
+      else if (teamDoc.data()?.state !== 'active' || !self) deny(403, 'MEMBERSHIP_REQUIRED');
       if (self.generation !== generation) deny(409, 'STALE_MEMBERSHIP');
       const identity = memberIdentity(user.uid, self);
       if (receipt) {
@@ -99,7 +104,10 @@ export class SharedBotsStore {
         // Reads recheck current ACL below; a cached read receipt must not bypass revocation.
         if (!grantsCapability(action) && !readActions.has(action)) return receipt.response;
       }
-      const context = { tx, team, self, identity, user, command, now };
+      const context = { tx, team, self, identity, user, command, now, service };
+      // A service takes only the commands its scope lists and applies its own gates; what it returns runs after the command.
+      const leave = service ? await serviceScope.enter({ tx, root: team, service: teamDoc.data(), self, identity, action, payload: p, now,
+        liveState: task => taskView(task, now).state }) : undefined;
       let response;
       if (action === 'createConversation') {
         // A friendship's pair team (docs/FRIENDS.md) holds its friend chat and one Bot DM per shared Bot, never a group or channel.
@@ -148,6 +156,7 @@ export class SharedBotsStore {
       else if (action === 'readAttachmentPart') response = await readAttachmentPart(this, context);
       else if (action === 'revokeAttachment') response = await revokeAttachment(this, context);
       else deny(400, 'INVALID_INPUT');
+      leave?.(response);
       if (!readActions.has(action)) {
         const saved = { schemaVersion: 1, requestDigest,
           response: grantsCapability(action) ? { execute: false, taskId: p.taskId } : response, at: now,
@@ -159,7 +168,7 @@ export class SharedBotsStore {
       return response;
     }, { maxAttempts: 20 });
   }
-  async publish({ tx, team, identity, command: { payload: p }, now }) {
+  async publish({ tx, team, identity, command: { payload: p }, now, service }) {
     const ref = team.collection('sharedBots').doc(p.sharedBotId), existing = (await tx.get(ref)).data();
     if (existing && !ownerOf(existing, identity)) deny(403, 'MAINTAINER_REQUIRED');
     if ((existing?.identity.revision ?? 0) !== p.expectedRevision) deny(409, 'BOT_REVISION_CONFLICT');
@@ -177,7 +186,8 @@ export class SharedBotsStore {
     const previousDeployment = (await tx.get(deploymentRef)).data();
     if (previousDeployment && (!same(previousDeployment.owner, identity) || previousDeployment.sharedBotId !== p.sharedBotId
       || d.revision <= previousDeployment.revision)) deny(409, 'DEPLOYMENT_REVISION_CONFLICT');
-    const members = (await tx.get(team.collection('members'))).docs.map(doc => memberIdentity(doc.id, doc.data()));
+    // A service's Bot is published for whoever holds an entitlement when they ask: its callers are not listed, and are not read here.
+    const members = service ? [identity] : (await tx.get(team.collection('members'))).docs.map(doc => memberIdentity(doc.id, doc.data()));
     // An offer was made for the revision it names: a new publication ends it.
     const handover = await this.handover(tx, team, ref, existing);
     if (p.usePolicy.mode === 'listed' && p.usePolicy.members.some(value => !members.some(member => same(value, member)))) deny(403, 'CURRENT_RECIPIENT_REQUIRED');
@@ -1000,10 +1010,11 @@ export class SharedBotsStore {
     tx.set(team.collection('signals').doc(p.sharedBotId), { updatedAt: new Date(now) });
     return { sharedBotId: p.sharedBotId, dataRevision: next.dataRevision };
   }
-  async tasks({ tx, team, identity, command: { action, payload: p }, now }) {
+  async tasks({ tx, team, self, identity, command: { action, payload: p }, now, service }) {
     if (action === 'getTask') {
       const task = (await tx.get(team.collection('tasks').doc(p.taskId))).data();
-      if (!task) deny(404, 'TASK_REQUIRED');
+      // Callers of a service are strangers to each other: another caller's task answers exactly as one that does not exist.
+      if (!task || (service && self.role !== 'owner' && task.requester.uid !== identity.uid)) deny(404, 'TASK_REQUIRED');
       await this.conversation(tx, team, task.conversationId, identity);
       return taskView(task, now);
     }

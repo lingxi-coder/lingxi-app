@@ -463,6 +463,57 @@ Then it writes the files that follow the release, the new `market-package.json`,
 - A Team is not told that a Bot it uses has a newer release.
 - The review's text is English only, like the rest of the Market tab.
 
+## M3-6 — a Bot offered outside Teams: the hosted Bot service (service layer only)
+
+A publisher can offer one of their Bots to people who are in none of their Teams (design 17, HostedBotService; I7 and I11, and the online parts of I2 and I9). This is not the local BotService: that one manages Bot instances on a device, and a hosted service reuses it only for that. This increment is the service layer in `apps/firebase`. No client and no host uses it yet.
+
+**A scope of its own.** A service is `services/{serviceId}`. Callers are never added to a Team and no Team generation is made up for them. The root has the shape the execution ledger works in, so `shared-bots.mjs` runs inside it unchanged: admission, daily quotas, permits, waits, operations and task states are the same code as in a Team.
+
+| Under `services/{serviceId}` | What it is |
+|---|---|
+| the service record | publisher, name, description, audience, limits, retention text, `online`, `cost: 'publisher'`, `visibility: 'requester_and_publisher'` |
+| `members/{uid}` | the publisher (`owner`) and each caller's entitlement (`member`, with a generation) |
+| `entitlements/{uid}` | the last generation a caller held |
+| `active/{uid}`, `active/_service` | the tasks counted against the concurrency limits |
+| `sharedBots`, `deployments`, `conversations`, `tasks`, `requestQuotas`, … | what the ledger writes; a conversation is one session |
+
+Beside it: `serviceUsers/{uid}/entered/{serviceId}` (what a person entered), `serviceUsers/{uid}/reportDays/{day}` and `serviceReports/{id}`. The Firestore rules deny all of this to clients; everything goes through the API.
+
+**Commands.** `POST /v1/services` takes `createService`, `updateService`, `setServiceOnline`, `withdrawService`, `getService`, `enterService`, `leaveService`, `reportService` and `listServices`. Sessions and tasks use the existing ledger and message routes with `serviceId` in place of `teamId`. A command names one scope: one with both is refused, a service id used as a Team id is `MEMBERSHIP_REQUIRED`, and a Team id used as a service id is `NOT_FOUND`.
+
+**Only what the scope lists.** A caller has `createConversation`, `submit`, `answerWait`, `decideWait`, `cancelTask`, `getTask`, `listTasks`, and reads with `list`, `sync` and `read`. The publisher has the publishing and host commands and reads. Everything else is `SERVICE_SCOPE_UNSUPPORTED`: the Bot directory, shared lists, documents, handover, conversation policy, attachments, writing a plain message. No command falls back to the publisher's authority when it is not listed. The publication must be the service's one Bot, usable by everyone in the scope, with no shared list (`INVALID_SERVICE_PUBLICATION`). A session is a `bot_dm` with that Bot (`INVALID_SERVICE_SESSION`), at most 50 per caller.
+
+**The gates, in the order a request meets them.**
+
+1. Signed in (the API's token check).
+2. Audience: `public`, or up to 200 named accounts. To anyone the audience does not name, the service answers `NOT_FOUND`, the same as an id that does not exist.
+3. Entry: `enterService` needs `acknowledged: true`. Before that the caller is shown who pays (the publisher), who can read a session (the caller and the publisher) and what is kept (the publisher's retention text); `getService` returns these. Without entry: `SERVICE_ENTRY_REQUIRED`.
+4. The off switch: a new service is off. While off, `submit`, `startTask` and `continueTask` are `SERVICE_DISABLED`; reading stays.
+5. Daily quotas: the ledger's own counters in this scope. `quotas.team` is the service's day, `quotas.member` each caller's (`REQUEST_QUOTA_EXCEEDED`).
+6. Concurrency: `limits.userConcurrent` (1–5) per caller across their sessions and `limits.serviceConcurrent` (1–50) for the service (`SERVICE_USER_BUSY`, `SERVICE_BUSY`, both 429). A refused request leaves no message, no task and no quota use. Sending the same message again is not a second request.
+
+`getService` gives a caller one `availability`: `withdrawn`, `disabled`, `not_ready` (no published Bot), `host_offline`, `service_quota_exhausted`, `user_quota_exhausted` or `available`, and their daily allowance left. It gives the publisher's display name and nothing else of the publisher.
+
+**Isolation.** A caller lists and reads their own sessions only. Another caller's session is `CONVERSATION_REQUIRED` and another caller's task answers as a task that does not exist. The publisher reads every session, as each caller was told, and cannot write in one.
+
+**Losing access.** Narrowing the audience refuses the people it leaves out at once, then removes their entitlements; a task of theirs that had not started is `TASK_REVOKED`. `leaveService` is the caller's own way out. Entering again is a new generation and the old one is `STALE_MEMBERSHIP`; the caller's earlier sessions are theirs again. `withdrawService` is final: every command is `SERVICE_WITHDRAWN` (410) and the service leaves every caller's list; the publisher still sees it, as withdrawn.
+
+**Reports.** `reportService` writes to `serviceReports` with the reporter, the publisher, a reason and optional text and session (only the reporter's own session). Five per person per day (`REPORT_LIMIT`), idempotent by `reportId`. A report is not in anything the publisher can ask for, and can be made after a service is withdrawn.
+
+**Tests.** `hosted-bot-service.emulator.test.mjs` (7), now part of `npm run test:teams`: off by default and each availability; entry, a full request and answer, and who reads a session; the scope's refusals and the Team/service mix-ups; the switch, quota and both concurrency limits; narrowing, leaving and re-entry; withdrawal and reports; the HTTP route. The whole suite: 211 + 10 emulator tests and 64 unit tests pass.
+
+**Not done.**
+
+- No host: Desktop cannot yet publish a Bot into a service or find and run a service's tasks. Until it can, no service can answer anyone.
+- No client UI on any of the four clients: opening a service, the disclosure before entering, sessions, the publisher's switch and limits, reporting.
+- Nothing is deployed, and nothing ran against the real project.
+- No directory: a person reaches a service by its id. `listServices` returns what they published and what they entered.
+- Nobody reads reports through the product; there is no review tool, and no automatic action on a reported service.
+- Files in a service session are refused.
+- Cost is always the publisher's. A caller paying, or a split, is not modelled.
+- Retention is the publisher's statement shown to the caller; nothing deletes sessions on a schedule.
+- A caller who was removed cannot read or export their earlier sessions while they are out.
+
 ## Current integration status, 2026-11-05
 
 The sections below record earlier increments and their failures; this table supersedes their pending source-work statements. M0/M1 release acceptance remains open.

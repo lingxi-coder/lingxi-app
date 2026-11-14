@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { TeamConversationError, conversationRecord } from './team-conversations.mjs';
 import { TeamMessagesStore, TeamMessageError } from './team-messages.mjs';
 import { SharedBotError } from './shared-bots.mjs';
+import { HostedBotServiceError, HostedBotServices } from './hosted-bot-service.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
@@ -269,7 +270,7 @@ export function createTeamsHandler({ store, friends, verifyToken, createCustomTo
       if (friends && path === '/v1/friends/profile' && request.method === 'GET') return reply(await friends.profile(user));
       const detail = /^\/v1\/teams\/([A-Za-z0-9_-]{8,64})$/u.exec(path);
       if (detail && detail[1] !== 'session' && request.method === 'GET') return reply(await store.detail(user.uid, detail[1]));
-      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
+      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', '/v1/services', ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
       const raw = await request.text();
       if (Buffer.byteLength(raw) > (path === '/v1/teams/messages' ? 1048576 : 16384)) fail(413, 'REQUEST_TOO_LARGE');
       let body;
@@ -279,12 +280,15 @@ export function createTeamsHandler({ store, friends, verifyToken, createCustomTo
         return reply({ uid: user.uid, customToken: await createCustomToken(user.uid) });
       }
       if (path === '/v1/teams/messages') return reply(await new TeamMessagesStore(store.db, store.clock).execute(user, body));
+      // Hosted Bot services: the commands about a service itself. Its sessions use /v1/teams/messages with `serviceId`.
+      if (path === '/v1/services') return reply(await new HostedBotServices(store.db, store.clock).execute(user, body));
       if (path === '/v1/friends') return reply(await friends.execute(user, body));
       return reply(await store.execute(user, body));
     } catch (error) {
       if (error instanceof z.ZodError) return reply({ error: { code: 'INVALID_INPUT' } }, 400);
       if (error instanceof TeamMessageError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof SharedBotError) return reply({ error: { code: error.code } }, error.status);
+      if (error instanceof HostedBotServiceError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof TeamsError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof TeamConversationError) return reply({ error: { code: error.code } }, error.status);
       return reply({ error: { code: 'SERVICE_UNAVAILABLE' } }, 503);

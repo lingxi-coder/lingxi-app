@@ -158,5 +158,10 @@ export const sharedBotCommand = z.discriminatedUnion('action', Object.entries(pa
   schemaVersion: z.literal(1), commandId: executionId, teamId: executionId,
   generation: positive, action: z.literal(action), payload,
 }).strict()));
+/** The same commands addressed to a hosted Bot service (`hosted-bot-service.mjs`): `serviceId` names the scope and `generation` is the caller's entitlement. */
+export const serviceBotCommand = z.discriminatedUnion('action', Object.entries(payloads).map(([action, payload]) => z.object({
+  schemaVersion: z.literal(1), commandId: executionId, serviceId: executionId,
+  generation: positive, action: z.literal(action), payload,
+}).strict()));
 export const executionActions = new Set(Object.keys(payloads));
 export const definitionDigest = digest;

@@ -4,6 +4,7 @@ import { createTeamConversation } from './team-conversations.mjs';
 import { SharedBotsStore } from './shared-bots.mjs';
 import { messagePreview } from './team-message-preview.mjs';
 import { recallAttachments } from './team-attachments.mjs';
+import { serviceMessageActions, serviceScope } from './hosted-bot-service.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
@@ -45,7 +46,12 @@ export class TeamMessagesStore {
   constructor(db, clock = Date.now) { this.db = db; this.clock = clock; }
   async execute(user, raw) {
     if (raw?.schemaVersion !== undefined) return new SharedBotsStore(this.db, this.clock).execute(user, raw);
-    const input = messageCommand.parse(raw);
+    // A hosted Bot service's sessions are read with the same commands, addressed by `serviceId`. They are written only
+    // through the execution ledger, so nothing but reading is taken here.
+    const service = raw?.serviceId !== undefined;
+    if (service && !serviceMessageActions.has(raw.action)) fail(403, 'SERVICE_SCOPE_UNSUPPORTED');
+    const { serviceId, ...rest } = service ? raw : {};
+    const input = service ? { ...messageCommand.parse({ ...rest, teamId: id.parse(serviceId) }), teamId: undefined } : messageCommand.parse(raw);
     if (input.action === 'mutate' && (input.messageId.startsWith('bot_') || input.changeId.startsWith('bot_'))) fail(400, 'INVALID_INPUT');
     if (input.action === 'create') {
       if (!input.participantUids.includes(user.uid)) fail(403, 'CONVERSATION_REQUIRED');
@@ -55,9 +61,10 @@ export class TeamMessagesStore {
       return { conversationId: input.conversationId, lastSeq: value.lastSeq };
     }
     return this.db.runTransaction(async tx => {
-      const teamRef = this.db.doc(`teams/${input.teamId}`);
+      const teamRef = service ? serviceScope.root(this.db, serviceId) : this.db.doc(`teams/${input.teamId}`);
       const [team, self] = await tx.getAll(teamRef, teamRef.collection('members').doc(user.uid));
-      if (team.data()?.state !== 'active' || !self.exists) fail(403, 'MEMBERSHIP_REQUIRED');
+      if (service) serviceScope.check(team.data(), self.data(), user.uid);
+      else if (team.data()?.state !== 'active' || !self.exists) fail(403, 'MEMBERSHIP_REQUIRED');
       if (self.data().generation !== input.generation) fail(409, 'STALE_MEMBERSHIP');
       const threads = teamRef.collection('conversations');
       if (input.action === 'list') {

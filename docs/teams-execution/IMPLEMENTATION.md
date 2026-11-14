@@ -422,6 +422,47 @@ Tests: the joining rule on both phones (`TeamsComposeLogic.appendingTranscript`)
 - Files at the full 20 MiB were not run through the worker. The test uses one 1.6 MiB file, just over the old row limit: the unoptimized worker needs about a minute and a half per run for 3.5 MiB of files, and a 13 MiB run did not finish in five minutes. The time grows with the size of the rows in the transcript and is paid again by every later task of that conversation. It has not been measured in an optimized build.
 - Nothing is deployed. The runtime change is on its own branch and the app does not pin it yet.
 
+## M3-5 — moving an installed Bot to a newer release (Desktop)
+
+A Bot installed from the market stays on the release it was installed as. Its owner can now move it to the newest release of the same listing, and what they changed locally is kept (design 16.4, I8 and I13). Only Desktop installs market Bots, so only Desktop has this.
+
+**What counts as the local change.** The Bot keeps the manifest of its installed release in `market-package.json`. The role (`home/LINGXI.md`) and each packaged Skill (`home/skills/<name>/SKILL.md`) are compared by SHA-256 with that manifest and with the new release. Per file:
+
+| The release | The owner | Result |
+|---|---|---|
+| did not change it | did not change it | nothing |
+| did not change it | changed or deleted it | the owner's stays (`kept`) |
+| changed, added or removed it | left it as installed | follows the release (`update`, `add`, `remove`) |
+| changed it | made the same change | nothing |
+| changed, added or removed it | changed it differently | `conflict` |
+
+A Skill is the same Skill across releases by its name. A file in conflict is shown with both texts and the owner picks "Keep mine" or "Use the new release's" for each one. The merge is per file; lines inside a file are not merged.
+
+**Looking and deciding.** "Check for a new release" (Bot, Market tab) downloads and verifies the newest release exactly as an install does (`marketRelease.ts`, now shared by both) and returns a plan: the files above, a license change, and the tools and resources added, removed or newly required. Looking writes nothing. The plan carries a digest of everything it was made from: both releases, the Bot's files, its record revision and the outcome per file.
+
+**Carrying it out.** `upgrade` rebuilds the plan and refuses, with nothing written, when:
+
+- the plan's digest or the Bot's revision is not the reviewed one (`BOT_UPGRADE_CHANGED`): the owner looks again;
+- a conflict has no choice (`BOT_UPGRADE_CHOICE_REQUIRED`);
+- the release adds a tool or a resource and the owner did not agree (`BOT_UPGRADE_APPROVAL_REQUIRED`). A resource that only becomes required, and anything removed, needs no agreement;
+- the signed-in account or the market is not the one the Bot was installed with.
+
+Then it writes the files that follow the release, the new `market-package.json`, and the record (`marketOrigin.releaseId` and `digest`, revision + 1). The name and the description follow the release only while they are still the ones the installed release gave. If the app quits between the files and the record, the next check finds the files already in place and finishes.
+
+**What is never touched.** Skills the owner added, files beside a packaged Skill, memory, conversations, settings, the model, workspaces. Declining ("Stay on …") is doing nothing. An upgrade is never a second copy of the Bot.
+
+**Teams (I13).** A Team runs the snapshot a Bot was published with, not the Bot's folder. An upgrade does not stop running Team tasks and does not change what a Team is served; the new release reaches a Team when the maintainer publishes the Bot again, which is a new Bot revision with its own confirmation. Updating authorizes nothing by itself: the owner still binds their own resources when sharing.
+
+**Tests.** Electron `bot-market-upgrade.test.ts` (7): the per-file rule; an upgrade that updates, adds and keeps, with the owner's Skill, memory, model and name untouched and no Team task stopped; conflicts refused until each is chosen, then carried out, and kept choices surviving the next release; added access refused without agreement, removed access not asking; a stale plan, another account, a corrupt download and a Bot not from the market; removal and an interrupted upgrade; the review's text and its disabled button. `bot-market-package.test.ts` (9) still passes on the shared release code.
+
+**Not done.**
+
+- Nothing ran against the real market or in a signed Desktop app. The upgrade uses the market's existing routes; nothing on the service changed.
+- The app does not look for new releases by itself and shows no badge: the owner presses the button.
+- Lines inside one file are not merged. Cost conditions are not part of a Bot package, so they are not listed.
+- A Team is not told that a Bot it uses has a newer release.
+- The review's text is English only, like the rest of the Market tab.
+
 ## Current integration status, 2026-11-05
 
 The sections below record earlier increments and their failures; this table supersedes their pending source-work statements. M0/M1 release acceptance remains open.

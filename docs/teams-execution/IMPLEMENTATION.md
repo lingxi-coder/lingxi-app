@@ -463,9 +463,9 @@ Then it writes the files that follow the release, the new `market-package.json`,
 - A Team is not told that a Bot it uses has a newer release.
 - The review's text is English only, like the rest of the Market tab.
 
-## M3-6 — a Bot offered outside Teams: the hosted Bot service (service, Desktop host, Web and Desktop screens)
+## M3-6 — a Bot offered outside Teams: the hosted Bot service (service, Desktop host, screens on all four clients)
 
-A publisher can offer one of their Bots to people who are in none of their Teams (design 17, HostedBotService; I7 and I11, and the online parts of I2 and I9). This is not the local BotService: that one manages Bot instances on a device, and a hosted service reuses it only for that. Done so far: the service layer in `apps/firebase`, the Desktop host, and the screens on Web and Desktop. iOS and Android have nothing yet.
+A publisher can offer one of their Bots to people who are in none of their Teams (design 17, HostedBotService; I7 and I11, and the online parts of I2 and I9). This is not the local BotService: that one manages Bot instances on a device, and a hosted service reuses it only for that. Done so far: the service layer in `apps/firebase`, the Desktop host, the screens on Web and Desktop, and the caller's screens on iOS and Android.
 
 **A scope of its own.** A service is `services/{serviceId}`. Callers are never added to a Team and no Team generation is made up for them. The root has the shape the execution ledger works in, so `shared-bots.mjs` runs inside it unchanged: admission, daily quotas, permits, waits, operations and task states are the same code as in a Team.
 
@@ -516,18 +516,22 @@ Beside it: `serviceUsers/{uid}/entered/{serviceId}` (what a person entered), `se
 - *Reporting and leaving.* The report dialog says it goes to LingXi and not to the publisher, and names the open session only when the person ticks that. Leaving is confirmed.
 - *Offering one (Desktop only).* The publisher picks a local Bot, the name and description people see, the published role, daily requests per person and in all, requests at once per person and in all, and their retention statement, and accepts in a checkbox that this computer answers, that they pay, and that they can read every session. The service is created off, the Bot is published into it, and the publisher turns it on. If the publication fails, the service is withdrawn again so that nothing is left that can answer nobody. Each service shows whether it is on, whether this computer is answering, its link, and has "Turn on/off" and "Withdraw" (confirmed, final).
 
+**Screens (iOS and Android).** "Bot services" in the Team switcher and on the no-teams screen opens a full-screen sheet with the caller's side only: the services the person uses, a link or id looked up with the same terms, "Agree and open", sessions (ask, the Bot's answer through the chat's Markdown renderer with web links only, answer its question, approve or decline, cancel), report and leave from the menu. A phone hosts and offers nothing; a publisher who opens their own link is told it is theirs. The open session is read on the same 2 s / 10 s timer and not at all while the app is in the background. A page that does not continue the change log, or carries a message of anyone but the person and the service's Bot, is refused whole and the session is read again from the start. Another account closes everything (iOS: the auth listener; Android: the screen is keyed by the account). The words are in `resources/translations` (`services_*`, five languages).
+
 A page's commands are checked before they leave: Desktop main and the Web API send a session or task command only when it is one of the caller's seven actions or three reads, in a service scope, with no Team named (`isServiceMessageCommand`).
 
 **Tests.**
 
 - Service: `hosted-bot-service.emulator.test.mjs` (7), part of `npm run test:teams`: off by default and each availability; entry, a full request and answer, and who reads a session; the scope's refusals, the two id spaces and the Team/service mix-ups; the switch, quota and both concurrency limits; narrowing, leaving and re-entry; withdrawal and reports; the HTTP route. The whole suite: 211 + 10 emulator tests and 64 unit tests pass.
 - Desktop: `teams-host.test.ts` (4 new, 96 in all): a service Bot is published and served with `serviceId` on every command and never a Team; the Desktop service reads a session through the API and watches nothing; a withdrawn service stops its request and is asked nothing more; a page's command leaves only when it is a caller's. `hosted-service.test.ts` (5): the id space, the session reader (every request kind, paging, edits, refusals, starting over), the transport.
+- iOS: `HostedServiceTests` (7, macOS): links, the words for every availability, refusal and ended request in all five languages, telling a service from the publisher's own, the change log and its refusals, commands built and checked like their Team counterparts with `serviceId`, report and the acknowledgement. Whole-app differential type-check: no new diagnostics.
+- Android: `HostedServiceTest` (9): the same rules, and the screen's model against a fake service (looking enters nothing; agreeing opens it; a refused first request is sent again into the same session; the Bot's question is answered; withdrawal closes the sessions; another account sees nothing of the first; a report carries the session only when chosen; leaving).
 - Web: `hosted-services-ui.test.ts` (7): links; the terms and that looking enters nothing; asking, a refusal, the answer, the Bot's question, cancelling; a service that cannot answer; report and leave; offering, a failed publication, the switch and withdrawal. `remoteHosting.test.ts` covers the new route and its policy.
 
 **Not done.**
 
 - Nothing is deployed, and nothing ran against the real project, in a signed Desktop app, in a real browser or with a real model. Every check above is a fake or the emulator.
-- iOS and Android have no service screens.
+- iOS and Android have no publisher side and are not reached by a `/services/<id>` link yet (no app link or universal link): the person pastes the link.
 - No directory: a person reaches a service by its link. The list shows what they entered and what they offer.
 - The server can offer a service to named accounts only; the screen offers that choice only when it is handed a list of people to pick from, and neither host passes one yet. A service made in the screen is open to anyone with the link.
 - A service cannot be edited after it is made (name, limits, audience, retention): the server takes `updateService`, the screen does not send it.

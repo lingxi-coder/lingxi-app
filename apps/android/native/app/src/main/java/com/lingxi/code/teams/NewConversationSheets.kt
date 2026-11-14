@@ -68,7 +68,7 @@ internal fun TeamsSheet(title: String, onDismiss: () -> Unit, content: @Composab
 @Composable
 internal fun TeamSwitcherSheet(
     teams: List<TeamSummary>, selectedId: String, unreadByTeam: Map<String, Int>,
-    onSelect: (String) -> Unit, onCreate: () -> Unit, onJoin: () -> Unit, onDetails: () -> Unit, onDismiss: () -> Unit,
+    onSelect: (String) -> Unit, onCreate: () -> Unit, onJoin: () -> Unit, onDetails: () -> Unit, onDismiss: () -> Unit, onServices: () -> Unit = {},
 ) {
     TeamsSheet(stringResource(R.string.teams_switch_team), onDismiss) {
         teams.forEach { team ->
@@ -89,6 +89,9 @@ internal fun TeamSwitcherSheet(
         TextButton(onClick = onCreate) { Text(stringResource(R.string.teams_create)) }
         TextButton(onClick = onJoin) { Text(stringResource(R.string.teams_join)) }
         if (selectedId.isNotEmpty()) TextButton(onClick = onDetails) { Text(stringResource(R.string.teams_team_details)) }
+        HorizontalDivider()
+        // A Bot someone offers outside their Teams: not a Team, so not among them.
+        TextButton(onClick = onServices, modifier = Modifier.testTag("teams.switcher.services")) { Text(stringResource(R.string.services_title)) }
     }
 }
 

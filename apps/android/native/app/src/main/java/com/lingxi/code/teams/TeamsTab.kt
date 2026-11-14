@@ -132,6 +132,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 action = {
                     Button(onClick = { workspace.teamsModel.clearError(); sheet = "create" }) { Text(stringResource(R.string.teams_create)) }
                     OutlinedButton(onClick = { workspace.teamsModel.clearError(); joinPrefill = ""; sheet = "join" }) { Text(stringResource(R.string.teams_join)) }
+                    TextButton(onClick = { sheet = "services" }, modifier = Modifier.testTag("teams.empty.services")) { Text(stringResource(R.string.services_title)) }
                 },
             )
             team == null -> TeamsMessageState(
@@ -194,8 +195,10 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 onSelect = { id -> sheet = ""; setStack(emptyList()); workspace.selectTeam(id) },
                 onCreate = { workspace.teamsModel.clearError(); sheet = "create" },
                 onJoin = { workspace.teamsModel.clearError(); joinPrefill = ""; sheet = "join" },
-                onDetails = { sheet = ""; openDetails() }, onDismiss = dismiss,
+                onDetails = { sheet = ""; openDetails() }, onDismiss = dismiss, onServices = { sheet = "services" },
             )
+            // Keyed by the account: another account's services are never shown.
+            sheet == "services" -> androidx.compose.runtime.key(uid) { HostedServicesScreen(onClose = dismiss) }
             sheet == "create" -> CreateTeamSheet(
                 busy = teams.busy, error = teams.error,
                 onSubmit = { name -> workspace.teamsModel.execute(mapOf("action" to "create", "teamId" to UUID.randomUUID().toString(), "name" to name.trim())) { sheet = ""; setStack(emptyList()) } },

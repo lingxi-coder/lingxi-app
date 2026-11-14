@@ -49,6 +49,8 @@ final class TeamMessagingModel {
     private var membershipReady = false
     /// The first directory snapshot of this run has arrived.
     private(set) var directoryReady = false
+    /// Counts the service's Bot change signals (a Bot, its tasks or its shared list changed). An open list reads itself again on each.
+    private(set) var botSignals = 0
     /// Conversations whose first `reads/{uid}` snapshot has not arrived yet. Their `lastReadSeq` is not known, so
     /// nothing is unread, no "new messages" divider is placed and nothing is marked read until it is.
     private(set) var readsPending: Set<String> = []
@@ -59,7 +61,7 @@ final class TeamMessagingModel {
     /// The listeners were stopped by a failure; a good refresh must not hide the error until `reconnect()`.
     @ObservationIgnored private var listenersFailed = false
     @ObservationIgnored private var authListener: AuthStateDidChangeListenerHandle?
-    private var uid = ""
+    private(set) var uid = ""
     private var teamId = ""
     private var generation = 0
     private var active = false
@@ -162,7 +164,7 @@ final class TeamMessagingModel {
             Task { @MainActor in
                 guard let self, self.active, self.lifecycle == life, self.watchGeneration == watch, self.auth.currentUser?.uid == self.uid else { return }
                 if let error { self.listenerFailed(error); return }
-                if snapshot?.metadata.isFromCache == false { self.artifactNeedsValidation = true; self.botsDirty = true; self.refresh() }
+                if snapshot?.metadata.isFromCache == false { self.artifactNeedsValidation = true; self.botsDirty = true; self.botSignals += 1; self.refresh() }
             }
         }
     }
@@ -431,6 +433,12 @@ final class TeamMessagingModel {
     }
     /// Saves `changes` on top of `expectedDataRevision`, or saves nothing. Sending the same `operationId` again repeats the same
     /// request, so a save whose answer was lost is not applied twice.
+    /// A page of the list's history, newest first; `beforeRevision` is the oldest revision of the page before.
+    func listHistory(_ sharedBotId: String, beforeRevision: Int? = nil) async throws -> TeamSharedListHistory {
+        var payload: [String: Any] = ["sharedBotId": sharedBotId]
+        if let beforeRevision { payload["beforeRevision"] = beforeRevision }
+        return try await execute("listHistory", payload: payload, life: lifecycle)
+    }
     func writeList(_ sharedBotId: String, operationId: String, expectedDataRevision: Int, changes: [TeamSharedListChange]) async throws {
         let _: TeamSharedListWritten = try await execute("writeList", payload: ["sharedBotId": sharedBotId, "operationId": operationId,
                                                                              "expectedDataRevision": expectedDataRevision, "changes": changes.map(\.payload)], life: lifecycle)

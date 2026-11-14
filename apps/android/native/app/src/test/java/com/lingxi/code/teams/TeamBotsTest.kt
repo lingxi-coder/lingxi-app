@@ -62,6 +62,27 @@ class TeamBotsTest {
         assertEquals(listOf(TeamSharedListItem("item_0001", "Bread", true)), list.items)
         assertEquals(2L, list.dataRevision)
     }
+    @Test fun theListHistorySaysWhoChangedWhatAndKeepsOlderPagesWhenTheNewestIsReadAgain() {
+        val newest = TeamSharedListHistory.parse(JSONObject("""{"sharedBotId":"sharedbot_01","dataRevision":4,"hasMore":true,"revisions":[{"dataRevision":4,"author":{"kind":"shared_bot","sharedBotId":"sharedbot_01","taskId":"task_0001","requester":{"uid":"bob","generation":1}},"changes":[{"op":"update","itemId":"item_0001","text":"Whole milk","done":true,"before":{"text":"Milk","done":false}}],"createdAt":3},{"dataRevision":3,"author":{"kind":"user","uid":"alice","generation":1},"changes":[{"op":"remove","itemId":"item_0003","before":{"text":"Wine","done":false}}],"createdAt":2}]}"""))
+        val older = TeamSharedListHistory.parse(JSONObject("""{"sharedBotId":"sharedbot_01","dataRevision":4,"hasMore":false,"revisions":[{"dataRevision":2,"author":{"kind":"user","uid":"carol","generation":1},"changes":[{"op":"add","itemId":"item_0002","text":"Oat milk"},{"op":"update","itemId":"item_0001","done":false,"before":{"text":"Milk","done":false}}],"createdAt":1}]}"""))
+        val rules = TeamSharedListHistoryRules
+        assertEquals(listOf(TeamSharedListHistoryRules.Line.Renamed("Milk", "Whole milk"), TeamSharedListHistoryRules.Line.Ticked("Whole milk")), rules.lines(newest.revisions[0].changes[0]))
+        assertEquals(listOf(TeamSharedListHistoryRules.Line.Removed("Wine")), rules.lines(newest.revisions[1].changes[0]))
+        assertEquals(listOf(TeamSharedListHistoryRules.Line.Added("Oat milk"), TeamSharedListHistoryRules.Line.Unchanged("Milk")), older.revisions[0].changes.flatMap(rules::lines))
+        val members = listOf(TeamMember("alice", "Alice", "owner", 1), TeamMember("bob", "Bob", "member", 1))
+        assertEquals(TeamSharedListHistoryRules.Author.Bot("Helper", TeamSharedListHistoryRules.Person.Member("Bob")), rules.author(newest.revisions[0].author, "alice", members, "Helper"))
+        assertEquals(TeamSharedListHistoryRules.Author.Of(TeamSharedListHistoryRules.Person.You), rules.author(newest.revisions[1].author, "alice", members, "Helper"))
+        assertEquals("carol is not a member", TeamSharedListHistoryRules.Author.Of(TeamSharedListHistoryRules.Person.Former), rules.author(older.revisions[0].author, "alice", members, "Helper"))
+        assertEquals("an earlier membership of the same person is not the current one", TeamSharedListHistoryRules.Author.Of(TeamSharedListHistoryRules.Person.Former),
+            rules.author(newest.revisions[1].author, "bob", listOf(TeamMember("alice", "Alice", "owner", 2)), "Helper"))
+        val both = rules.merge(rules.merge(null, newest, true), older, false)
+        assertEquals(listOf(4L, 3L, 2L), both.revisions.map { it.dataRevision }); assertFalse(both.hasMore)
+        val again = rules.merge(both, newest, true)
+        assertEquals("reading the newest page again keeps the older page", listOf(4L, 3L, 2L), again.revisions.map { it.dataRevision }); assertFalse(again.hasMore)
+        fun history(payload: JSONObject) = command().put("action", "listHistory").put("payload", payload)
+        TeamExecutionContract.validate(history(JSONObject().put("sharedBotId", "sharedbot_01").put("beforeRevision", 3)))
+        assertTrue(runCatching { TeamExecutionContract.validate(history(JSONObject().put("sharedBotId", "sharedbot_01").put("beforeRevision", 0))) }.isFailure)
+    }
     @Test fun durableCommandsSurviveRestartAndStayInTheirAccountTeamGeneration() {
         val directory = Files.createTempDirectory("team-execution-").toFile()
         try {

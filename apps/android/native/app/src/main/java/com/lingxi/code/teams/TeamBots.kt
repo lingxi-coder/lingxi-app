@@ -145,6 +145,7 @@ internal object TeamExecutionContract {
             }
             "listOperations" -> { shape(setOf("taskId")); requireId("taskId") }
             "readList" -> { shape(setOf("sharedBotId")); requireId("sharedBotId") }
+            "listHistory" -> { shape(setOf("sharedBotId"), setOf("beforeRevision")); requireId("sharedBotId"); if (p.has("beforeRevision") && !integer(p.opt("beforeRevision"), 1)) fail() }
             "writeList" -> {
                 shape(setOf("sharedBotId", "operationId", "expectedDataRevision", "changes")); requireId("sharedBotId"); requireId("operationId")
                 val changes = p.optJSONArray("changes") ?: fail()

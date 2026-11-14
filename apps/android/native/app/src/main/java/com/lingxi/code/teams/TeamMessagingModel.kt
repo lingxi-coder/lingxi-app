@@ -29,7 +29,9 @@ import java.util.UUID
  * `reads` document, so [TeamMessageConversation.lastReadSeq] is real. [botsLoaded] / [botsFailed] feed `composerLock`.
  */
 internal data class TeamMessagingState(val cache: TeamMessageCache? = null, val selected: String = "", val offline: Boolean = true, val error: String = "", val revoked: Boolean = false, val submitting: Boolean = false, val bots: List<TeamBotCard> = emptyList(), val tasks: List<TeamTask> = emptyList(), val artifact: TeamArtifact? = null,
-    val directoryCached: Boolean = true, val directoryReady: Boolean = false, val readsReady: Boolean = false, val botsLoaded: Boolean = false, val botsFailed: Boolean = false)
+    val directoryCached: Boolean = true, val directoryReady: Boolean = false, val readsReady: Boolean = false, val botsLoaded: Boolean = false, val botsFailed: Boolean = false,
+    /** Counts the service's Bot change signals (a Bot, its tasks or its shared list changed). An open list reads itself again on each. */
+    val botSignals: Long = 0)
 /**
  * The selected team's full messaging: directory, reads, signals, the open thread, the HTTP command journal and the Bot
  * cards and runs. Owned by [TeamsWorkspace], which starts and stops it; [scope] runs on the main thread.
@@ -38,7 +40,9 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     private val storage = TeamCommandStorage(storageDirectory)
     private val mutable = MutableStateFlow(TeamMessagingState())
     val state = mutable.asStateFlow()
-    private var uid = ""
+    /** The signed-in member this model reads for. */
+    var uid = ""
+        private set
     private var teamId = ""
     private var generation = 0L
     private var active = false
@@ -118,7 +122,9 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         }
         signalListener = root.collection("signals").addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
             if (!active || lifecycle != life || auth.currentUser?.uid != uid) return@addSnapshotListener
-            if (error != null) listenerFailed(error) else if (snapshot?.metadata?.isFromCache == false) { artifactNeedsValidation = true; botsDirty = true; refresh() }
+            if (error != null) listenerFailed(error) else if (snapshot?.metadata?.isFromCache == false) {
+                artifactNeedsValidation = true; botsDirty = true; mutable.update { it.copy(botSignals = it.botSignals + 1) }; refresh()
+            }
         }
     }
     private fun listenerFailed(error: FirebaseFirestoreException) {
@@ -328,6 +334,11 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     /** A Bot's shared list as it is now. It is read on demand: the list is not part of the message stream. */
     suspend fun readList(sharedBotId: String): TeamSharedList = onModel { TeamSharedList.parse(execute("readList", JSONObject().put("sharedBotId", sharedBotId), lifecycle)) }
     /** Saves [changes] on top of [expectedDataRevision], or saves nothing. The same [operationId] sent again repeats the same request, so a save whose answer was lost is not applied twice. */
+    /** A page of the list's history, newest first; [beforeRevision] is the oldest revision of the page before. */
+    suspend fun listHistory(sharedBotId: String, beforeRevision: Long? = null): TeamSharedListHistory = onModel {
+        val payload = JSONObject().put("sharedBotId", sharedBotId); if (beforeRevision != null) payload.put("beforeRevision", beforeRevision)
+        TeamSharedListHistory.parse(execute("listHistory", payload, lifecycle))
+    }
     suspend fun writeList(sharedBotId: String, operationId: String, expectedDataRevision: Long, changes: List<TeamSharedListChange>) {
         onModel { execute("writeList", JSONObject().put("sharedBotId", sharedBotId).put("operationId", operationId).put("expectedDataRevision", expectedDataRevision).put("changes", changes.json()), lifecycle) }
     }

@@ -14,7 +14,7 @@ const same = (left, right) => hash(left) === hash(right);
 const randomId = () => randomBytes(24).toString('base64url');
 const nowDay = now => new Date(now).toISOString().slice(0, 10);
 const memberIdentity = (uid, member) => ({ uid, generation: member.generation });
-const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations', 'readTaskList', 'readList', 'getTransfer', 'readTransferPart', 'readAttachmentPart']);
+const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations', 'readTaskList', 'readList', 'listHistory', 'getTransfer', 'readTransferPart', 'readAttachmentPart']);
 /** An offer to hand a Bot over is open for seven days. */
 const transferMs = 7 * 24 * 60 * 60 * 1000, openTransfer = state => state === 'offered' || state === 'accepted';
 const revisionLimit = 200;
@@ -39,17 +39,26 @@ function identityPermitted(bot, identity) { return bot && sharedBotPermits(bot.i
 function ownerOf(bot, identity) { return bot && same(bot.identity.maintainer, identity); }
 /** The runtime's name of the list write; the ledger entry of a list write must carry it. */
 const listWriteTool = 'TeamListWrite', listItemLimit = 500, listBytes = 48 * 1024;
+/** How many of a list's latest revisions are kept, and how many one history page carries. */
+const listHistoryKept = 200, listHistoryPage = 20;
 const listView = list => ({ dataRevision: list.dataRevision, items: list.items.map(({ itemId, text, done }) => ({ itemId, text, done })) });
 /** The list after one write, or why nothing is saved. A write is all of its changes or none of them. */
 function applyListChanges(list, { expectedDataRevision, changes }, author, now) {
   if (list.dataRevision !== expectedDataRevision) return { error: 'DATA_REVISION_CONFLICT' };
   let items = list.items, nextItem = list.nextItem;
+  // What the revision says happened: each change with the item it touched as it was before.
+  const log = [];
   for (const change of changes) {
     if (change.op === 'add') {
-      items = [...items, { itemId: `item_${String(nextItem).padStart(4, '0')}`, text: change.text.trim(), done: false, updatedBy: author, updatedAt: now }];
+      const itemId = `item_${String(nextItem).padStart(4, '0')}`;
+      items = [...items, { itemId, text: change.text.trim(), done: false, updatedBy: author, updatedAt: now }];
+      log.push({ op: 'add', itemId, text: change.text.trim() });
       nextItem += 1;
     } else {
-      if (!items.some(item => item.itemId === change.itemId)) return { error: 'LIST_ITEM_REQUIRED' };
+      const before = items.find(item => item.itemId === change.itemId);
+      if (!before) return { error: 'LIST_ITEM_REQUIRED' };
+      log.push({ op: change.op, itemId: change.itemId, ...(change.text === undefined ? {} : { text: change.text.trim() }),
+        ...(change.done === undefined ? {} : { done: change.done }), before: { text: before.text, done: before.done } });
       items = change.op === 'remove' ? items.filter(item => item.itemId !== change.itemId)
         : items.map(item => item.itemId !== change.itemId ? item : { ...item, ...(change.text === undefined ? {} : { text: change.text.trim() }),
           ...(change.done === undefined ? {} : { done: change.done }), updatedBy: author, updatedAt: now });
@@ -57,7 +66,14 @@ function applyListChanges(list, { expectedDataRevision, changes }, author, now) 
   }
   // The whole list is one tool result for the Bot, so it is bounded in bytes as well as in items.
   if (items.length > listItemLimit || Buffer.byteLength(JSON.stringify(items.map(({ itemId, text, done }) => ({ itemId, text, done }))), 'utf8') > listBytes) return { error: 'LIST_LIMIT' };
-  return { ...list, dataRevision: list.dataRevision + 1, items, nextItem, updatedAt: now };
+  return { list: { ...list, dataRevision: list.dataRevision + 1, items, nextItem, updatedAt: now }, log };
+}
+/** Save one applied write as the list's next revision, and let the oldest kept one go. */
+function recordListRevision(tx, listRef, list, log, author, operationId, now) {
+  const revisions = listRef.collection('revisions'), id = revision => String(revision).padStart(10, '0');
+  tx.create(revisions.doc(id(list.dataRevision)), { schemaVersion: 1, dataRevision: list.dataRevision, parentRevision: list.dataRevision - 1,
+    operationId, author, changes: log, createdAt: now });
+  if (list.dataRevision > listHistoryKept) tx.delete(revisions.doc(id(list.dataRevision - listHistoryKept)));
 }
 function taskView(task, now) {
   const over = task.deadline <= now;
@@ -142,6 +158,7 @@ export class SharedBotsStore {
       else if (action === 'writeTaskList') response = await this.writeTaskList(context);
       else if (action === 'readList') response = await this.list(context);
       else if (action === 'writeList') response = await this.writeList(context);
+      else if (action === 'listHistory') response = await this.listHistory(context);
       else if (action === 'prepareTask' || action === 'validateTask') response = await this.taskContext(context);
       else if (action === 'completeTask') response = await this.complete(context);
       else if (action === 'getTask' || action === 'listTasks') response = await this.tasks(context);
@@ -975,13 +992,14 @@ export class SharedBotsStore {
     if (answerSnapshot.exists) return { ...answerSnapshot.data().answer, items: listView(list).items };
     if (operation.state !== 'dispatched') deny(409, 'OPERATION_CONFLICT');
     if (task.cancelRequestedAt) deny(409, 'TASK_CANCELLED');
-    const next = applyListChanges(list, p, { kind: 'shared_bot', sharedBotId: task.sharedBotId, taskId: task.taskId }, now);
-    const answer = next.error ? { applied: false, error: next.error, dataRevision: list.dataRevision } : { applied: true, dataRevision: next.dataRevision };
-    if (!next.error) tx.set(listRef, next);
+    const author = { kind: 'shared_bot', sharedBotId: task.sharedBotId, taskId: task.taskId, requester: task.requester };
+    const applied = applyListChanges(list, p, author, now), next = applied.list;
+    const answer = applied.error ? { applied: false, error: applied.error, dataRevision: list.dataRevision } : { applied: true, dataRevision: next.dataRevision };
+    if (!applied.error) { tx.set(listRef, next); recordListRevision(tx, listRef, next, applied.log, author, p.operationId, now); }
     tx.create(answerRef, { schemaVersion: 1, operationId: p.operationId, taskId: task.taskId, digest, answer, createdAt: now });
     tx.update(operationRef, { state: answer.applied ? 'succeeded' : 'failed', resultDigest: hash(answer), reference: null, settledAt: now, settledRecordedAt: now });
     if (answer.applied) tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
-    return { ...answer, items: listView(next.error ? list : next).items };
+    return { ...answer, items: listView(applied.error ? list : next).items };
   }
   /** A Bot's list is read and changed by the members who may use the Bot, and by its maintainer. */
   async listAccess(tx, team, identity, sharedBotId) {
@@ -1003,12 +1021,23 @@ export class SharedBotsStore {
       if (saved.digest !== digest || !same(saved.author, identity)) deny(409, 'OPERATION_CONFLICT');
       return { sharedBotId: p.sharedBotId, dataRevision: saved.dataRevision };
     }
-    const next = applyListChanges(list, p, { kind: 'user', ...identity }, now);
-    if (next.error) deny(409, next.error === 'DATA_REVISION_CONFLICT' ? 'LIST_REVISION_CONFLICT' : next.error);
+    const author = { kind: 'user', ...identity }, applied = applyListChanges(list, p, author, now), next = applied.list;
+    if (applied.error) deny(409, applied.error === 'DATA_REVISION_CONFLICT' ? 'LIST_REVISION_CONFLICT' : applied.error);
     tx.set(ref, next);
+    recordListRevision(tx, ref, next, applied.log, author, p.operationId, now);
     tx.create(answerRef, { schemaVersion: 1, operationId: p.operationId, digest, author: identity, dataRevision: next.dataRevision, createdAt: now });
     tx.set(team.collection('signals').doc(p.sharedBotId), { updatedAt: new Date(now) });
     return { sharedBotId: p.sharedBotId, dataRevision: next.dataRevision };
+  }
+  /** Who changed the list, when and how: its kept revisions, newest first, a page at a time. A change by the Bot names
+   * the request it was made for, so its source task can be looked up. */
+  async listHistory({ tx, team, identity, command: { payload: p } }) {
+    const { ref, list } = await this.listAccess(tx, team, identity, p.sharedBotId);
+    let query = ref.collection('revisions').orderBy('dataRevision', 'desc');
+    if (p.beforeRevision !== undefined) query = query.where('dataRevision', '<', p.beforeRevision);
+    const rows = (await tx.get(query.limit(listHistoryPage + 1))).docs.map(doc => doc.data());
+    return { sharedBotId: p.sharedBotId, dataRevision: list.dataRevision, hasMore: rows.length > listHistoryPage,
+      revisions: rows.slice(0, listHistoryPage).map(r => ({ dataRevision: r.dataRevision, author: r.author, changes: r.changes, createdAt: r.createdAt })) };
   }
   async tasks({ tx, team, self, identity, command: { action, payload: p }, now, service }) {
     if (action === 'getTask') {

@@ -52,6 +52,16 @@ export type SharedListChange = { op: 'add'; text: string } | { op: 'update'; ite
 export interface SharedListWrite { expectedDataRevision: number; changes: SharedListChange[] }
 export interface SharedList { sharedBotId: string; title: string; description: string; dataRevision: number; items: SharedListItem[]; updatedAt: number }
 export interface SharedListWritten { sharedBotId: string; dataRevision: number }
+/** Who made a revision of a list: a member, or the Bot while it worked on a member's request. */
+export type SharedListAuthor = { kind: 'user'; uid: string; generation: number }
+  | { kind: 'shared_bot'; sharedBotId: string; taskId: string; requester: { uid: string; generation: number } };
+/** One change of a revision, with the item as it was before for a change or removal. */
+export type SharedListLoggedChange = { op: 'add'; itemId: string; text: string }
+  | { op: 'update'; itemId: string; text?: string; done?: boolean; before: { text: string; done: boolean } }
+  | { op: 'remove'; itemId: string; before: { text: string; done: boolean } };
+export interface SharedListRevision { dataRevision: number; author: SharedListAuthor; changes: SharedListLoggedChange[]; createdAt: number }
+/** A page of a list's history, newest first. The service keeps the latest 200 revisions. */
+export interface SharedListHistory { sharedBotId: string; dataRevision: number; hasMore: boolean; revisions: SharedListRevision[] }
 export interface ExecutionScope { teamId: string; generation: number }
 export interface MemberExecutionPayloads {
   listSharedBots: Record<string, never>;
@@ -79,6 +89,7 @@ export interface MemberExecutionPayloads {
   resolveOperation: { taskId: string; operationId: string; resolution: 'succeeded' | 'failed' };
   readList: { sharedBotId: string };
   writeList: SharedListWrite & { sharedBotId: string; operationId: string };
+  listHistory: { sharedBotId: string; beforeRevision?: number };
   setConversationPolicy: { conversationId: string; expectedRevision: number; targets: string[] };
   /** The maintainer takes an offered Bot back, or the member it was offered to declines it. */
   endTransfer: { transferId: string };

@@ -200,7 +200,7 @@ export class TeamsService {
     if (this.account.snapshot().user?.uid !== expectedUid) throw new Error('INVALID_SESSION');
     if (!command || !/^[A-Za-z0-9_-]{8,64}$/u.test(command.teamId) || !Number.isSafeInteger(command.generation) || command.generation < 1) throw new Error('INVALID_INPUT');
     if ('schemaVersion' in command) {
-      if (command.schemaVersion !== 1 || !['listSharedBots', 'createConversation', 'submit', 'pauseSharedBot', 'answerWait', 'cancelTask', 'getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'reviseArtifact', 'listOperations', 'resolveOperation', 'readList', 'writeList', 'decideWait', 'setConversationPolicy', 'endTransfer',
+      if (command.schemaVersion !== 1 || !['listSharedBots', 'createConversation', 'submit', 'pauseSharedBot', 'answerWait', 'cancelTask', 'getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'reviseArtifact', 'listOperations', 'resolveOperation', 'readList', 'writeList', 'listHistory', 'decideWait', 'setConversationPolicy', 'endTransfer',
         'createUpload', 'putUploadPart', 'finalizeUpload', 'cancelUpload', 'readAttachmentPart', 'revokeAttachment'].includes(command.action)) throw new Error('INVALID_INPUT');
       if (command.action === 'pauseSharedBot') this.host?.stopBinding(command.teamId, command.payload.sharedBotId);
     } else if (!['create', 'read', 'mutate'].includes(command.action)) throw new Error('INVALID_INPUT');

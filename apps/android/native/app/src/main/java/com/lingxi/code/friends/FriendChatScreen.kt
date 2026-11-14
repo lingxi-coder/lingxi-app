@@ -125,7 +125,7 @@ private fun FriendChat(
     var dialog by rememberSaveable(friendUid) { mutableStateOf("") }
     // The shared list of one of the chat's Bots; it closes with the friendship's generation.
     var listOf by remember(friendUid, pair.generation) { mutableStateOf<TeamBotCard?>(null) }
-    listOf?.let { bot -> TeamSharedListDialog(bot, chat.messagingModel) { listOf = null } }
+    listOf?.let { bot -> TeamSharedListDialog(bot, chat.messagingModel, teams.detail?.members.orEmpty()) { listOf = null } }
     LaunchedEffect(dialog) { if (dialog == "profile") workspace.refreshName(friendUid) }
 
     if (messaging.revoked) {

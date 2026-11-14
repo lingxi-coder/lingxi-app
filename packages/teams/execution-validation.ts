@@ -54,6 +54,7 @@ const payloads: Record<string, Check> = {
   listOperations: shape({ taskId: id }),
   readList: shape({ sharedBotId: id }),
   writeList: shape({ sharedBotId: id, operationId: id, ...listWrite }),
+  listHistory: shape({ sharedBotId: id, beforeRevision: optional(positive) }),
   resolveOperation: shape({ taskId: id, operationId: v => typeof v === 'string' && /^[a-f0-9]{64}$/u.test(v), resolution: oneOf('succeeded', 'failed') }),
   setConversationPolicy: shape({ conversationId: id, expectedRevision: integer, targets: list(id, 0, 8) }),
   endTransfer: shape({ transferId: id }),

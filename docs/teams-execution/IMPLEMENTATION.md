@@ -22,7 +22,7 @@ Main merge is authorized only after M0/M1 acceptance. No merge-to-main or comple
 - Runtime: the SDK branch `claude/teams-m2-runtime-20261111` is pushed at `d51c2fec` (merged with harness-runtime main). Its own test suite did not run for that merge: SDK CI runs only on pull requests and main, and this machine had no room to build it. The app pins every harness-runtime package to `d51c2fec`.
 - Deployed to the existing project from branch `claude/teams-m2-20261111` (not pushed): functions `teamsApi` and `prunePushRegistrations`, the `(default)` Firestore rules (unchanged against main) and its four indexes, and Hosting (the Web build, with `/services` and the `/v1/services` route). The other functions were not redeployed; their code is the same as on main. Checked after deploy: `/`, `/services` and `/services/<id>` load, and `/v1/services` and `/v1/teams/messages` refuse a request without sign-in with `SIGN_IN_REQUIRED`.
 - Team file bytes stay in Firestore as base64 parts (decided 2026-11-13); no Cloud Storage bucket is added.
-- Not done after deploy: nothing was run with a real account, a signed Desktop app or a phone against the deployed service. The Q06 cloud-list deviation is still open.
+- Not done after deploy: nothing was run with a real account, a signed Desktop app or a phone against the deployed service. The Q06 list placement was decided on 2026-11-14 (see Q06 below); its history and live lists came after this deploy.
 
 ## M2 / Q02 — durable human waits, continue permits and cancellation (Firebase backend)
 
@@ -89,11 +89,24 @@ Target: detailed design 0.5 and development plan 1.4, M0 then M1a/M1b.
 
 ## M2 / Q06 — the shared list (Firebase backend) and its runtime tools
 
-**Deviation from the detailed design, to be confirmed.** Design §14.3 puts the list in the maintainer's Local App
-instance and reaches it through `serviceBroker`/`remoteGateway` with a new TeamAppGrant. That gateway work is not built.
-The list is instead one server-owned document per shared Bot (`teams/{team}/lists/{sharedBotId}`), so members see the same
-data on every client without the maintainer's Desktop being online, and so the write can be verified in the emulator. The
-runtime and host only know a "list service" with read and operation-id write; a Local App adapter can replace the store later.
+**Decided 2026-11-14: the design is revised; the list stays server-owned.** Design §14.3 put the list in the maintainer's
+Local App instance, reached through `serviceBroker`/`remoteGateway` with a new TeamAppGrant. That no longer fits the
+project: the remote gateway needs a tunnel per maintainer and a wildcard TLS origin (`LINGXI_LOCAL_APP_REMOTE_ORIGIN`, off
+by default), and a Local App has no revision or compare-and-set data API, so a list there could not give the conflict and
+idempotency guarantees below. The list is one server-owned document per shared Bot (`teams/{team}/lists/{sharedBotId}`):
+members see the same data on every client without the maintainer's Desktop being online, and every write is verified in
+the emulator. TeamAppGrant is not built. What the design asks of the list and the old placement did not provide is added:
+revision history with its source (J5) and open lists that follow changes (J4), below.
+
+- History (J5): every applied write, by a member or by a Bot's task, stores `lists/{sharedBotId}/revisions/{dataRevision}`
+  `{dataRevision, parentRevision, operationId, author, changes, createdAt}` in the same transaction. `author` is
+  `{kind: 'user', uid, generation}` or `{kind: 'shared_bot', sharedBotId, taskId, requester}`; each change keeps the item
+  as it was before (`before {text, done}`), so a removal still says what was removed. The newest 200 revisions are kept: the
+  write of revision r deletes r − 200. A refused or repeated write records nothing. Members read it with
+  `listHistory {sharedBotId, beforeRevision?}` (who may read the list), newest first, 20 per page, with `hasMore`.
+- Live lists (J4): a list write also writes the Bot's change signal (`teams/{team}/signals/{sharedBotId}`), which clients
+  already watch for Bot changes. An open list (and its history, once opened) is read again on that signal, so a change by
+  another member or by the Bot shows without Refresh. Reads that finish out of order never replace a newer revision.
 
 - Publication: `publishSharedBot.sharedList {title, description}` (optional). The first publication with a list creates it
   empty; later publications keep its items; a publication without it stops sharing but deletes nothing. The Bot card carries
@@ -145,8 +158,17 @@ runtime and host only know a "list service" with read and operation-id write; a 
   `TeamSharedListScreen.kt`) follows `SharedListDialog`: tick, rename, remove and add, one change per save on top of the
   revision that was read; a refused save reads the list again, says the list changed and keeps what was typed; a repeated
   save of the same change on the same revision reuses its operation id (`TeamSharedListOperation`); an item over 500 bytes
-  is refused before it is sent. The list is read when the screen opens and on Refresh: it is not live. Tests:
-  `Tests/TeamBotTests.swift`, `TeamBotsTest.kt`. Checked by compilation and unit tests only, not on a device or simulator.
+  is refused before it is sent. Tests: `Tests/TeamBotTests.swift`, `TeamBotsTest.kt`. Checked by compilation and unit
+  tests only, not on a device or simulator.
+- History and live lists on all four clients: the list screen has a collapsed History section that lists each revision with
+  who made it ("You", the member's name, "a former member" for an earlier membership, or "<Bot>, for <requester>") and what
+  changed (added, removed, renamed, ticked, unticked), with "Show older changes" while there is more, and says that the
+  latest 200 changes are kept. Reading the newest page again keeps the older pages already shown. The list and the opened
+  history refresh on the Bot's change signal (Web/Desktop `onMessagesChanged` with `signal.bots`; iOS and Android the
+  messaging model's `botSignals` counter). `listHistory` is in the shared contract (validators and vectors) and in the
+  Desktop allowlist. Tests: the emulator suite (authors, `before`, paging, pruning at 200, a removed audience), the Web
+  scenario in `apps/web/test/teams-bots-ui.test.ts`, `TeamBotTests.swift` and `TeamBotsTest.kt` (lines, authors, merge).
+  The new backend is not deployed.
 - Known limit: `dispatchedAt` is the host clock (as `pausedAt` is). A host clock ahead of the service, or behind the start of
   the attempt, makes the record answer `TASK_EXPIRED`, which ends the run.
 

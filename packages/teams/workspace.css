@@ -371,6 +371,10 @@
 .tw-list-items label { display: flex; flex-direction: row; align-items: center; gap: 8px; overflow-wrap: anywhere; }
 .tw-list-items label input { width: auto; flex: none; }
 .tw-list-items [data-done='true'] { color: var(--tw-muted); text-decoration: line-through; }
+.tw-list-history summary { cursor: pointer; }
+.tw-list-history ol { display: flex; flex-direction: column; gap: 10px; margin: 8px 0; padding: 0; list-style: none; max-height: 40vh; overflow: auto; }
+.tw-list-history ol p { margin: 0; overflow-wrap: anywhere; }
+.tw-list-history ul { margin: 2px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
 .tw-list-items form input, .tw-list-add input { flex: 1; min-width: 0; }
 
 /* ── Friends (FriendsSidebar, FriendsMain and its pages) ── */

@@ -187,6 +187,9 @@ enum TeamExecutionContract {
                   !body.isEmpty, body.utf8.count <= documentBytes else { try fail() }
         case "listOperations": try shape(["taskId"]); try id("taskId")
         case "readList": try shape(["sharedBotId"]); try id("sharedBotId")
+        case "listHistory":
+            try shape(["sharedBotId"], ["beforeRevision"]); try id("sharedBotId")
+            if payload["beforeRevision"] != nil { guard integer(payload["beforeRevision"], minimum: 1) != nil else { try fail() } }
         case "writeList":
             try shape(["sharedBotId", "operationId", "expectedDataRevision", "changes"]); try id("sharedBotId"); try id("operationId")
             guard integer(payload["expectedDataRevision"], minimum: 0) != nil, let changes = payload["changes"] as? [[String: Any]],

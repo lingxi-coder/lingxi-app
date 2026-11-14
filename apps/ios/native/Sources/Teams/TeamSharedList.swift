@@ -21,6 +21,75 @@ struct TeamSharedList: Decodable, Equatable, Sendable {
     let items: [TeamSharedListItem]
 }
 struct TeamSharedListWritten: Decodable, Sendable { let sharedBotId: String; let dataRevision: Int }
+/// Who made a revision (`listHistory`): a member (`user`), or the Bot (`shared_bot`) while it worked on `requester`'s request.
+struct TeamSharedListAuthor: Decodable, Equatable, Sendable {
+    let kind: String
+    var uid: String? = nil
+    var generation: Int? = nil
+    var sharedBotId: String? = nil
+    var taskId: String? = nil
+    var requester: TeamMemberRef? = nil
+}
+struct TeamSharedListBefore: Decodable, Equatable, Sendable { let text: String; let done: Bool }
+/// One change of a revision; `before` is the item as it was, for a change or a removal.
+struct TeamSharedListLoggedChange: Decodable, Equatable, Sendable {
+    let op: String
+    let itemId: String
+    var text: String? = nil
+    var done: Bool? = nil
+    var before: TeamSharedListBefore? = nil
+}
+struct TeamSharedListRevision: Decodable, Equatable, Identifiable, Sendable {
+    let dataRevision: Int
+    let author: TeamSharedListAuthor
+    let changes: [TeamSharedListLoggedChange]
+    let createdAt: Double
+    var id: Int { dataRevision }
+}
+/// A page of a list's history, newest first. The service keeps the latest 200 revisions.
+struct TeamSharedListHistory: Decodable, Equatable, Sendable {
+    let sharedBotId: String
+    let dataRevision: Int
+    let hasMore: Bool
+    let revisions: [TeamSharedListRevision]
+}
+/// The history as far as it was opened, and what it says in words (Desktop `SharedListDialog`).
+enum TeamSharedListHistoryRules {
+    enum Line: Equatable, Sendable { case added(String), removed(String), renamed(String, String), ticked(String), unticked(String), unchanged(String) }
+    enum Person: Equatable, Sendable { case you, member(String), former }
+    /// A member by name, or the Bot and the member whose request it was working on.
+    enum Author: Equatable, Sendable { case person(Person), bot(String, for: Person) }
+    /// What one change did. A change that renamed and ticked an item says both.
+    static func lines(_ change: TeamSharedListLoggedChange) -> [Line] {
+        if change.op == "add" { return [.added(change.text ?? "")] }
+        let was = change.before?.text ?? ""
+        if change.op == "remove" { return [.removed(was)] }
+        var lines: [Line] = []
+        if let text = change.text, text != was { lines.append(.renamed(was, text)) }
+        let name = change.text ?? was
+        if let done = change.done, done != change.before?.done { lines.append(done ? .ticked(name) : .unticked(name)) }
+        return lines.isEmpty ? [.unchanged(name)] : lines
+    }
+    static func author(_ author: TeamSharedListAuthor, viewer: String, members: [TeamMember], botName: String) -> Author {
+        func person(_ ref: TeamMemberRef?) -> Person {
+            guard let ref else { return .former }
+            if ref.uid == viewer { return .you }
+            let name = members.first { $0.uid == ref.uid && $0.generation == ref.generation }?.displayName ?? ""
+            return name.isEmpty ? .former : .member(name)
+        }
+        if author.kind == "shared_bot" { return .bot(botName, for: person(author.requester)) }
+        return .person(person(author.uid.flatMap { uid in author.generation.map { TeamMemberRef(uid: uid, generation: $0) } }))
+    }
+    /// Adds a page to what is shown. Reading the newest page again keeps the older pages already shown, so whether there is
+    /// more is still what the oldest page shown said.
+    static func merge(_ current: TeamSharedListHistory?, _ page: TeamSharedListHistory, newest: Bool) -> TeamSharedListHistory {
+        var known: [Int: TeamSharedListRevision] = [:]
+        for revision in (current?.revisions ?? []) + page.revisions { known[revision.dataRevision] = revision }
+        let hasMore = newest ? current?.hasMore ?? page.hasMore : page.hasMore
+        return TeamSharedListHistory(sharedBotId: page.sharedBotId, dataRevision: max(page.dataRevision, current?.dataRevision ?? 0), hasMore: hasMore,
+                                     revisions: known.values.sorted { $0.dataRevision > $1.dataRevision })
+    }
+}
 /// One change of a `writeList` request, exactly as the service accepts it.
 enum TeamSharedListChange: Equatable, Sendable {
     case add(text: String)

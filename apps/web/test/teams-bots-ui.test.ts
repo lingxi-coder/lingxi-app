@@ -501,11 +501,15 @@ scenario('A task whose outside action is unconfirmed says so; only the maintaine
 });
 /** The Bot directory with a Bot that keeps a shared list. The items live in `store`; `store.lose` drops the answer of the next write after saving it. */
 async function openList(context: Parameters<Parameters<typeof scenario>[1]>[0]) {
-  const store = { dataRevision: 1, next: 2, lose: false, items: [{ itemId: 'item_0001', text: 'Milk', done: false }] }, saved = new Map<string, number>(), sent: any[] = [];
+  const store = { dataRevision: 1, next: 2, lose: false, items: [{ itemId: 'item_0001', text: 'Milk', done: false }], history: [] as any[] }, saved = new Map<string, number>(), sent: any[] = [];
   const { fake, workspace } = await open(context), inner = fake.messages;
   fake.messages = async <T>(command: MessageCommand) => {
-    if (!('schemaVersion' in command) || command.action !== 'readList' && command.action !== 'writeList') return inner<T>(command);
+    if (!('schemaVersion' in command) || command.action !== 'readList' && command.action !== 'writeList' && command.action !== 'listHistory') return inner<T>(command);
     sent.push(structuredClone(command)); const sharedBotId = command.payload.sharedBotId;
+    if (command.action === 'listHistory') {
+      const before = command.payload.beforeRevision ?? Infinity, older = store.history.filter(r => r.dataRevision < before);
+      return { sharedBotId, dataRevision: store.dataRevision, hasMore: older.length > 2, revisions: older.slice(0, 2) } as T;
+    }
     if (command.action === 'readList') return { sharedBotId, title: 'Groceries', description: 'What the household needs.', dataRevision: store.dataRevision, items: structuredClone(store.items), updatedAt: 1 } as T;
     const p = command.payload, again = saved.get(p.operationId); if (again !== undefined) return { sharedBotId, dataRevision: again } as T;
     if (p.expectedDataRevision !== store.dataRevision) throw new Error('LIST_REVISION_CONFLICT');
@@ -523,7 +527,7 @@ async function openList(context: Parameters<Parameters<typeof scenario>[1]>[0]) 
   const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
   const writes = () => sent.flatMap(c => c.action === 'writeList' ? [c.payload] : []);
   const add = { box: () => page.oneByLabel('New item'), form: () => page.oneByClass('tw-list-add') };
-  return { page, store, writes, add, fake, workspace };
+  return { page, store, writes, add, fake, workspace, sent };
 }
 scenario('A shared list opens from its Bot; adding, ticking, renaming and removing each save one change on top of the list that was read', async context => {
   const list = await openList(context), { page } = list;
@@ -565,6 +569,33 @@ scenario('A list change whose answer was lost is repeated with the same operatio
   assert.equal(list.writes().length, 2); assert.equal(list.writes()[0].operationId, list.writes()[1].operationId);
   assert.deepEqual(list.store.items.map(item => item.text), ['Milk', 'Eggs']); assert.equal(list.add.box().props.value, '');
   assert.doesNotMatch(page.text(), /Could not sync messages/);
+});
+scenario('An open list shows what others save without Refresh, and its history says who changed what, a page at a time', async context => {
+  const list = await openList(context), { page } = list; await page.click(page.button('List: Groceries'));
+  await page.type(list.add.box(), 'Eggs');
+  // Bob saves while the list is open: the Bot's change signal brings it in, and what Alice was typing stays.
+  list.store.items.push({ itemId: 'item_0002', text: 'Oat milk', done: false }); list.store.dataRevision = 2;
+  await page.during(() => list.fake.signal({ bots: true }));
+  assert.match(page.text(), /Oat milk/); assert.equal(list.add.box().props.value, 'Eggs');
+  // A signal about a conversation is not about the list.
+  const reads = () => list.sent.filter(c => c.action === 'readList').length, before = reads();
+  await page.during(() => list.fake.signal({ conversationId: 'test-chat' }));
+  assert.equal(reads(), before);
+  assert.equal(list.sent.some(c => c.action === 'listHistory'), false, 'history is read only when it is opened');
+  list.store.history = [
+    { dataRevision: 4, author: { kind: 'shared_bot', sharedBotId: 'assistant-fixture', taskId: 'task_0001', requester: { uid: 'bob', generation: 1 } }, createdAt: 3,
+      changes: [{ op: 'update', itemId: 'item_0001', text: 'Whole milk', done: true, before: { text: 'Milk', done: false } }] },
+    { dataRevision: 3, author: { kind: 'user', uid: 'alice', generation: 1 }, createdAt: 2, changes: [{ op: 'remove', itemId: 'item_0003', before: { text: 'Wine', done: false } }] },
+    { dataRevision: 2, author: { kind: 'user', uid: 'bob', generation: 1 }, createdAt: 1, changes: [{ op: 'add', itemId: 'item_0002', text: 'Oat milk' }] },
+    { dataRevision: 1, author: { kind: 'user', uid: 'carol', generation: 1 }, createdAt: 0, changes: [{ op: 'update', itemId: 'item_0001', done: false, before: { text: 'Milk', done: true } }] }];
+  await page.during(() => page.oneByClass('tw-list-history').props.onToggle({ currentTarget: { open: true } }));
+  const text = page.text();
+  assert.match(text, /Fixture Bot, for Bob/); assert.match(text, /Renamed “Milk” to “Whole milk”; ticked “Whole milk”/);
+  assert.match(text, /You/); assert.match(text, /Removed “Wine”/); assert.doesNotMatch(text, /Oat milk”/);
+  await page.click(page.button('Show older changes'));
+  assert.match(page.text(), /Added “Oat milk”/); assert.match(page.text(), /a former member/); assert.match(page.text(), /Unticked “Milk”/);
+  assert.equal(page.has('Show older changes'), false);
+  assert.deepEqual(list.sent.flatMap(c => c.action === 'listHistory' ? [c.payload.beforeRevision ?? null] : []), [null, 3]);
 });
 scenario('Publication offers a shared list, names it in the review, and carries an existing list into the next publication', async context => {
   const published: any[] = [];

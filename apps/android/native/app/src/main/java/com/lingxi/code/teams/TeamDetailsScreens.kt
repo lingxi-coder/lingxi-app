@@ -77,7 +77,7 @@ internal fun TeamDetailsScreen(
     var confirmation by remember { mutableStateOf<Pair<Int, Map<String, Any>>?>(null) }
     // The shared list of one Bot of this team; a change of account, team or membership closes it.
     var listOf by remember(uid, team.id, current.generation) { mutableStateOf<TeamBotCard?>(null) }
-    listOf?.let { bot -> TeamSharedListDialog(bot, workspace.messagingModel) { listOf = null } }
+    listOf?.let { bot -> TeamSharedListDialog(bot, workspace.messagingModel, detail?.members.orEmpty()) { listOf = null } }
     val model = workspace.teamsModel
     val busy = teams.busy
 

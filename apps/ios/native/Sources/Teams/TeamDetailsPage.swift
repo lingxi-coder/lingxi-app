@@ -68,7 +68,7 @@ struct TeamDetailsPage: View {
             }
         }
         .sheet(item: $listOf) { bot in
-            if let model = workspace.messaging { TeamSharedListSheet(bot: bot, model: model) { listOf = nil } }
+            if let model = workspace.messaging { TeamSharedListSheet(bot: bot, model: model, members: workspace.directory) { listOf = nil } }
         }
         .sheet(isPresented: $inviting) {
             if let team = workspace.team {

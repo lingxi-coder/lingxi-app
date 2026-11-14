@@ -91,7 +91,7 @@ struct FriendBotsView: View {
         .listStyle(.insetGrouped)
         .safeAreaInset(edge: .top, spacing: 0) { banners(chat) }
         .sheet(item: $listOf) { bot in
-            if let model = workspace.messaging { TeamSharedListSheet(bot: bot, model: model) { listOf = nil } }
+            if let model = workspace.messaging { TeamSharedListSheet(bot: bot, model: model, members: workspace.directory) { listOf = nil } }
         }
         .confirmationDialog(
             Text("friends_share_bot_stop"),

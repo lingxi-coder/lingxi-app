@@ -1047,6 +1047,65 @@
       }
     },
     {
+      "name": "valid-listHistory",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listHistory",
+        "payload": {
+          "sharedBotId": "sharedbot_01"
+        }
+      }
+    },
+    {
+      "name": "valid-listHistory-before",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listHistory",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "beforeRevision": 21
+        }
+      }
+    },
+    {
+      "name": "reject-listHistory-zero-before",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listHistory",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "beforeRevision": 0
+        }
+      }
+    },
+    {
+      "name": "reject-listHistory-unknown-payload",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listHistory",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "after": "x"
+        }
+      }
+    },
+    {
       "name": "reject-readList-unknown-payload",
       "valid": false,
       "input": {

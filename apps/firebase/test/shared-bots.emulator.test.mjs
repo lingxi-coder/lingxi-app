@@ -866,6 +866,9 @@ const add = text => ({ op: 'add', text });
 const memberWrite = (operationId, expectedDataRevision, changes, actor = member) =>
   execute('writeList', { sharedBotId: 'sharedbot_01', operationId, expectedDataRevision, changes }, actor);
 const readList = (actor = member) => execute('readList', { sharedBotId: 'sharedbot_01' }, actor);
+const listHistory = (beforeRevision, actor = member) =>
+  execute('listHistory', { sharedBotId: 'sharedbot_01', ...(beforeRevision === undefined ? {} : { beforeRevision }) }, actor);
+const by = actor => ({ kind: 'user', uid: actor.uid, generation: 1 });
 /** Record a task's list write in the ledger, as the host does before it sends the write. */
 async function recordWrite(started, step, write, permitId = started.permitId, approvalRef) {
   const payload = recordPayload(started, { step, category: 'store_idempotent', permitId, tool: { name: 'TeamListWrite', version: '1' }, digest: digestOf(write),
@@ -896,6 +899,15 @@ test('list: one list per Bot that members change in turn; an outdated change is 
   assert.equal((await memberWrite('operation_06', 2, [{ op: 'remove', itemId: 'item_0001' }, { op: 'update', itemId: 'item_0002', text: 'Rye bread' }], owner)).dataRevision, 3);
   const list = await readList();
   assert.deepEqual({ dataRevision: list.dataRevision, items: list.items }, { dataRevision: 3, items: [{ itemId: 'item_0002', text: 'Rye bread', done: false }] });
+  // Every saved write is a revision that says who made it and what each item was before; refused writes left none.
+  assert.deepEqual(await listHistory(undefined, other), { sharedBotId: 'sharedbot_01', dataRevision: 3, hasMore: false, revisions: [
+    { dataRevision: 3, author: by(owner), createdAt: now, changes: [
+      { op: 'remove', itemId: 'item_0001', before: { text: 'Milk', done: true } },
+      { op: 'update', itemId: 'item_0002', text: 'Rye bread', before: { text: 'Bread', done: false } }] },
+    { dataRevision: 2, author: by(other), createdAt: now, changes: [
+      { op: 'add', itemId: 'item_0002', text: 'Bread' }, { op: 'update', itemId: 'item_0001', done: true, before: { text: 'Milk', done: false } }] },
+    { dataRevision: 1, author: by(member), createdAt: now, changes: [{ op: 'add', itemId: 'item_0001', text: 'Milk' }] }] });
+  await assert.rejects(execute('listHistory', { sharedBotId: 'sharedbot_01', beforeRevision: 0 }, member));
   for (const invalid of [[], [add('')], [add('x'.repeat(501))], [{ op: 'update', itemId: 'item_0002' }], [{ op: 'clear' }], Array.from({ length: 21 }, () => add('x'))]) {
     await assert.rejects(memberWrite(`operation_bad_${++serial}`, 3, invalid));
   }
@@ -908,6 +920,7 @@ test('list: one list per Bot that members change in turn; an outdated change is 
   await republish({ usePolicy: { mode: 'listed', members: [{ uid: member.uid, generation: 1 }] } });
   assert.deepEqual((await readList()).items, list.items);
   await assert.rejects(readList(other), { code: 'LIST_REQUIRED' });
+  await assert.rejects(listHistory(undefined, other), { code: 'LIST_REQUIRED' });
   assert.equal((await readList(owner)).dataRevision, 3);
   const filled = Array.from({ length: 20 }, (_, i) => add(`Item ${i}`));
   let revision = 3;
@@ -920,6 +933,21 @@ test('list: one list per Bot that members change in turn; an outdated change is 
   const short = (await readList()).items.slice(0, 20).map(item => ({ op: 'update', itemId: item.itemId, text: 'y'.repeat(500) }));
   await assert.rejects(memberWrite('operation_long_full', revision, short), { code: 'LIST_LIMIT' });
   assert.equal((await readList()).items.length, 499);
+  // History comes a page at a time, newest first.
+  const first = await listHistory();
+  assert.equal(first.hasMore, true);
+  assert.deepEqual(first.revisions.map(r => r.dataRevision), Array.from({ length: 20 }, (_, i) => revision - i));
+  const second = await listHistory(first.revisions.at(-1).dataRevision);
+  assert.deepEqual(second.revisions.map(r => r.dataRevision), Array.from({ length: revision - 20 }, (_, i) => revision - 20 - i));
+  assert.equal(second.hasMore, false);
+  // Only the latest 200 revisions are kept.
+  const toggled = (await readList()).items[0].itemId;
+  for (let i = 0; i < 200; i += 1) revision = (await memberWrite(`operation_toggle_${i}`, revision, [{ op: 'update', itemId: toggled, done: i % 2 === 0 }])).dataRevision;
+  const kept = (await db.collection('teams').doc(teamId).collection('lists').doc('sharedbot_01').collection('revisions').get()).docs.map(doc => doc.data().dataRevision);
+  assert.deepEqual([kept.length, Math.min(...kept), Math.max(...kept)], [200, revision - 199, revision]);
+  let pages = 0, before;
+  for (let page = await listHistory(); ; page = await listHistory(before)) { pages += 1; before = page.revisions.at(-1).dataRevision; if (!page.hasMore) break; }
+  assert.deepEqual([pages, before], [10, revision - 199]);
 });
 test('list: a task writes through its ledger operation; the change and the outcome are saved together and only once', options, async () => {
   publication = 1;
@@ -958,6 +986,10 @@ test('list: a task writes through its ledger operation; the change and the outco
   const stale = { expectedDataRevision: 1, changes: [add('Eggs')] }, second = await recordWrite(started, `${taskId}/t1/c0`, stale);
   assert.deepEqual(await taskWrite(started, second.payload.operationId, stale), { applied: false, error: 'DATA_REVISION_CONFLICT', dataRevision: 2, items });
   assert.equal((await operationData(second.payload.operationId)).state, 'failed');
+  // The Bot's revision names the request it was made for; the failed one left none.
+  const botRevisions = (await listHistory()).revisions;
+  assert.deepEqual(botRevisions.map(r => r.dataRevision), [2, 1]);
+  assert.deepEqual(botRevisions[0].author, { kind: 'shared_bot', sharedBotId: 'sharedbot_01', taskId, requester: { uid: member.uid, generation: 1 } });
   assert.deepEqual(await taskWrite(started, second.payload.operationId, stale), { applied: false, error: 'DATA_REVISION_CONFLICT', dataRevision: 2, items });
   // The worker died after the record: the next attempt repeats the same operation and it is applied once.
   const third = { expectedDataRevision: 2, changes: [add('Eggs')] }, pending = await recordWrite(started, `${taskId}/t2/c0`, third);

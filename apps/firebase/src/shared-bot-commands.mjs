@@ -139,6 +139,8 @@ const payloads = {
   writeTaskList: z.object({ ...host, ...task, permitId: executionId, operationId: digest, ...listWrite }).strict(),
   readList: z.object({ sharedBotId: executionId }).strict(),
   writeList: z.object({ sharedBotId: executionId, operationId: executionId, ...listWrite }).strict(),
+  // A page of the list's history; `beforeRevision` is the oldest revision of the page before.
+  listHistory: z.object({ sharedBotId: executionId, beforeRevision: positive.optional() }).strict(),
   resolveOperation: z.object({ ...task, operationId: digest, resolution: z.enum(['succeeded', 'failed']) }).strict(),
   listOperations: z.object(task).strict(),
   answerWait: z.object({ ...thread, waitId: executionId, messageId: executionId, changeId: executionId, text }).strict(),

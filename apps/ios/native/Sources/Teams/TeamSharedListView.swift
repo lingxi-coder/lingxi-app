@@ -8,6 +8,8 @@ struct TeamSharedListSheet: View {
 
     let bot: TeamBotCard
     let model: TeamMessagingModel
+    /// The team's members, to name who changed the list.
+    let members: [TeamMember]
     let onClose: () -> Void
     @State private var list: TeamSharedList?
     @State private var text = ""
@@ -16,6 +18,9 @@ struct TeamSharedListSheet: View {
     @State private var error = ""
     @State private var moved = false
     @State private var operation: TeamSharedListOperation?
+    @State private var history: TeamSharedListHistory?
+    @State private var historyOpen = false
+    @State private var historyError = ""
 
     var body: some View {
         NavigationStack {
@@ -45,6 +50,12 @@ struct TeamSharedListSheet: View {
                         }
                         if !TeamSharedListRules.fits(text) { Text("teams_list_too_long").font(.footnote).foregroundStyle(.red) }
                     }
+                    Section {
+                        DisclosureGroup("teams_list_history", isExpanded: $historyOpen) { historyRows }
+                            .accessibilityIdentifier("teams.list.history")
+                    } footer: {
+                        if historyOpen { Text("teams_list_history_kept") }
+                    }
                 } else if error.isEmpty {
                     HStack(spacing: 10) { ProgressView(); Text("teams_list_loading").foregroundStyle(.secondary) }
                 }
@@ -60,13 +71,21 @@ struct TeamSharedListSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("common_close", action: onClose) }
                 ToolbarItem(placement: .primaryAction) {
-                    Button("teams_list_refresh", systemImage: "arrow.clockwise") { attempt { moved = false; try await read() } }
+                    Button("teams_list_refresh", systemImage: "arrow.clockwise") { attempt { moved = false; try await read(); if history != nil { await page(nil) } } }
                         .disabled(busy)
                         .accessibilityIdentifier("teams.list.refresh")
                 }
             }
         }
         .task { attempt { try await read() } }
+        // Someone else, or the Bot, changed the list: show it without waiting for Refresh. What is being typed stays.
+        .onChange(of: model.botSignals) {
+            Task { @MainActor in
+                try? await read()
+                if history != nil { await page(nil) }
+            }
+        }
+        .onChange(of: historyOpen) { _, open in if open, history == nil { Task { await page(nil) } } }
         .accessibilityIdentifier("teams.list.\(bot.sharedBotId)")
     }
 
@@ -128,8 +147,67 @@ struct TeamSharedListSheet: View {
         }
     }
 
+    @ViewBuilder
+    private var historyRows: some View {
+        if let history {
+            if history.revisions.isEmpty { Text("teams_list_history_empty").font(.footnote).foregroundStyle(.secondary) }
+            ForEach(history.revisions) { revision in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(verbatim: "\(authorText(revision.author)) · \(Date(timeIntervalSince1970: revision.createdAt / 1000).formatted(date: .abbreviated, time: .shortened))")
+                        .font(.footnote.weight(.semibold))
+                    ForEach(Array(revision.changes.flatMap(TeamSharedListHistoryRules.lines).enumerated()), id: \.offset) { _, line in
+                        Text(verbatim: lineText(line)).font(.footnote)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
+            if history.hasMore {
+                Button("teams_list_history_older") { Task { await page(history.revisions.last?.dataRevision) } }
+                    .accessibilityIdentifier("teams.list.history.older")
+            }
+        } else if historyError.isEmpty {
+            HStack(spacing: 10) { ProgressView(); Text("teams_list_history_loading").foregroundStyle(.secondary) }
+        }
+        if !historyError.isEmpty { Text(LocalizedStringKey(TeamsErrors.key(historyError))).font(.footnote).foregroundStyle(.red) }
+    }
+
+    private func authorText(_ author: TeamSharedListAuthor) -> String {
+        func person(_ person: TeamSharedListHistoryRules.Person, inline: Bool) -> String {
+            switch person {
+            case .you: inline ? String(localized: "teams_list_history_you_inline") : String(localized: "teams_list_history_you")
+            case .member(let name): name
+            case .former: inline ? String(localized: "teams_list_history_former_inline") : String(localized: "teams_list_history_former")
+            }
+        }
+        switch TeamSharedListHistoryRules.author(author, viewer: model.uid, members: members, botName: bot.name) {
+        case .person(let who): return person(who, inline: false)
+        case .bot(let name, let who): let requester = person(who, inline: true); return String(localized: "teams_list_history_for \(name) \(requester)")
+        }
+    }
+
+    private func lineText(_ line: TeamSharedListHistoryRules.Line) -> String {
+        switch line {
+        case .added(let text): String(localized: "teams_list_added \(text)")
+        case .removed(let text): String(localized: "teams_list_removed \(text)")
+        case .renamed(let was, let text): String(localized: "teams_list_renamed \(was) \(text)")
+        case .ticked(let text): String(localized: "teams_list_ticked \(text)")
+        case .unticked(let text): String(localized: "teams_list_unticked \(text)")
+        case .unchanged(let text): String(localized: "teams_list_unchanged \(text)")
+        }
+    }
+
+    /// The newest page (`before` nil) or the page before `before`. A failure is shown in the history and keeps what is shown.
+    private func page(_ before: Int?) async {
+        do {
+            let next = try await model.listHistory(bot.sharedBotId, beforeRevision: before)
+            history = TeamSharedListHistoryRules.merge(history, next, newest: before == nil); historyError = ""
+        } catch let failure as TeamMessageFailure { historyError = failure.code } catch { historyError = "SERVICE_UNAVAILABLE" }
+    }
+
+    /// Reads the list. A read that answers after a newer one is dropped, so the list never goes back.
     private func read() async throws {
         let next = try await model.readList(bot.sharedBotId)
+        if let list, next.dataRevision < list.dataRevision { return }
         list = next
         if let editing, !next.items.contains(where: { $0.itemId == editing.itemId }) { self.editing = nil }
     }

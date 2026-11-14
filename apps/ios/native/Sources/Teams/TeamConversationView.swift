@@ -12,6 +12,7 @@ struct TeamConversationView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
+    @Environment(AppNavigationModel.self) private var navigation
     let conversationID: String
     /// Called when the conversation is gone (the viewer is not in it any more). By default the screen pops itself;
     /// the wide layout's pane clears its selection instead.
@@ -36,6 +37,8 @@ struct TeamConversationView: View {
     @State private var savedText: String?
     @State private var draft = TeamComposerDraft()
     @State private var draftLoaded = false
+    /// The app's voice input, made the first time the microphone is used here. What it hears goes into the box.
+    @State private var voice: VoiceInteractionController?
     @FocusState private var composerFocused: Bool
 
     var body: some View {
@@ -60,7 +63,10 @@ struct TeamConversationView: View {
         }
         .onDisappear {
             if draftLoaded, editing == nil { workspace.setDraft(draft, for: conversationID) }
+            voice?.close()
         }
+        // Another account, another team, or the viewer's membership changed: what was being said is dropped, not moved.
+        .onChange(of: workspace.draftKey(conversationID)) { _, _ in voice?.close() }
         // Without `.contain` the identifier is copied onto every child (composer input, send, rows).
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.conversation.\(conversationID)")
@@ -108,11 +114,13 @@ struct TeamConversationView: View {
         return VStack(spacing: 0) {
             banners(context)
             stream(context, messages: messages)
+            voicePanel
             TeamComposerView(
                 context: context, draft: $draft, editing: editing, replying: replying(context, messages: messages), busy: workspace.messageBusy,
                 files: carrying ? workspace.files(for: conversationID) : [], refusals: carrying ? workspace.refusals(for: conversationID) : [],
                 onChooseFiles: carrying ? { workspace.addFiles($0, to: conversationID) } : nil,
                 onRemoveFile: { workspace.removeFile($0, from: conversationID) }, onDismissRefusals: { workspace.dismissRefusals(for: conversationID) },
+                listening: voice?.capturePhase == .listening, onVoice: toggleVoice,
                 focus: $composerFocused, onSend: { Task { await send(context) } },
                 onCancelEdit: endEdit, onCancelReply: { draft.replyToID = nil })
         }
@@ -388,6 +396,43 @@ struct TeamConversationView: View {
     /// Whether the message being written carries the draft's files: a new message does, an edit and an answer to a Bot's question do not.
     private func carriesFiles(_ context: TeamConversationContext) -> Bool { editing == nil && answering(context) == nil }
 
+    // MARK: Voice
+
+    /// What the voice input shows while it is used (as in a chat): how to set it up when it cannot listen — the
+    /// box stays usable for typing — or what it is hearing.
+    @ViewBuilder
+    private var voicePanel: some View {
+        if let voice {
+            let settings = { navigation.showSettings(.voice, origin: navigation.selectedTab) }
+            if let guidance = AudioSetupGuidance.forPhase(voice.phase, message: voice.statusDetail) {
+                AudioSetupBanner(guidance: guidance, onConfigure: settings, onDismiss: voice.close)
+            } else if voice.isPresented {
+                InlineVoicePanel(controller: voice, onConfigure: settings)
+            }
+        }
+    }
+
+    /// The microphone button: starts listening, or ends it so the words are recognized. The words are added to the
+    /// box of the conversation they were spoken in, for the viewer to read, change and send; they are never sent
+    /// from here, and ones that arrive after the account, the team or the membership changed are dropped.
+    private func toggleVoice() {
+        let controller = voice ?? VoiceInteractionController()
+        voice = controller
+        switch controller.capturePhase {
+        case .idle:
+            let key = workspace.draftKey(conversationID)
+            composerFocused = false
+            controller.startDictation { heard in
+                guard workspace.draftKey(conversationID) == key else { return }
+                draft.text = TeamsComposeLogic.appendingTranscript(heard, to: draft.text)
+            }
+        case .listening:
+            controller.finishListening()
+        case .finishing:
+            break
+        }
+    }
+
     private func startReply(_ message: TeamMessage) {
         if editing != nil { endEdit() }
         draft.replyToID = message.id
@@ -396,6 +441,8 @@ struct TeamConversationView: View {
 
     /// An edit borrows the box: the draft is set aside and comes back when the edit ends.
     private func beginEdit(_ message: TeamMessage) {
+        // Words still being spoken were for the message set aside, not for the one being changed.
+        voice?.cancelDictation()
         if editing == nil { savedText = draft.text }
         editing = message
         draft.replyToID = nil
@@ -405,6 +452,7 @@ struct TeamConversationView: View {
     }
 
     private func endEdit() {
+        voice?.cancelDictation()
         editing = nil
         draft.text = savedText ?? ""
         savedText = nil

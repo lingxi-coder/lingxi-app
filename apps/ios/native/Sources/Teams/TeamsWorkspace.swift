@@ -497,7 +497,9 @@ final class TeamsWorkspace {
         if draft.isEmpty { drafts.removeValue(forKey: draftKey(conversationID)) } else { drafts[draftKey(conversationID)] = draft }
     }
 
-    private func draftKey(_ conversationID: String) -> String { "\(uid ?? ""):\(selectedTeamID):\(team?.generation ?? 0):\(conversationID)" }
+    /// What an unsent message belongs to: the account, the team as the viewer is in it now, and the conversation.
+    /// Anything that started under one key (an upload, words being spoken) is dropped when the key is another.
+    func draftKey(_ conversationID: String) -> String { "\(uid ?? ""):\(selectedTeamID):\(team?.generation ?? 0):\(conversationID)" }
 
     // MARK: Files of an unsent message
 

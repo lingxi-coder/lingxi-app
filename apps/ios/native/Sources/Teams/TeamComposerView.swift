@@ -20,6 +20,10 @@ struct TeamComposerView: View {
     var onChooseFiles: (([TeamChosenFile]) -> Void)?
     var onRemoveFile: (String) -> Void = { _ in }
     var onDismissRefusals: () -> Void = {}
+    /// Whether the microphone is taking words for this box now.
+    var listening = false
+    /// Starts taking spoken words for the box, or ends it. The words are put in the box and never sent.
+    var onVoice: () -> Void = {}
     var focus: FocusState<Bool>.Binding
     let onSend: () -> Void
     let onCancelEdit: () -> Void
@@ -230,6 +234,11 @@ struct TeamComposerView: View {
                 .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .accessibilityIdentifier("teams.composer.input")
                 .onChange(of: draft.text) { _, _ in dismissedMention = -1 }
+            Button(action: onVoice) {
+                Image(systemName: listening ? "stop.fill" : "mic").font(.system(size: 18, weight: .medium)).frame(width: 32, height: 32)
+            }
+            .accessibilityLabel(Text(LocalizedStringKey(listening ? "composer_stop_recording" : "composer_record")))
+            .accessibilityIdentifier("teams.composer.voice")
             Button(action: onSend) {
                 Image(systemName: editing != nil ? "checkmark.circle.fill" : "arrow.up.circle.fill").font(.system(size: 30))
             }

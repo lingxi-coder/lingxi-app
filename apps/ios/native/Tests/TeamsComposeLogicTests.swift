@@ -144,4 +144,15 @@ final class TeamsComposeLogicTests: XCTestCase {
         XCTAssertEqual(TeamsComposeLogic.mentionCandidates(bots: cards, conversation: group, chosenKeys: [String](), query: "  DEL ").map(\.sharedBotId), ["sharedbot_d"])
         XCTAssertEqual(TeamsComposeLogic.mentionCandidates(bots: cards, conversation: group, chosenKeys: Set(["sharedbot_a", "sharedbot_d"]), query: "").map(\.sharedBotId), [])
     }
+
+    func testSpokenWordsAreAddedToTheBoxAndNeverReplaceIt() {
+        XCTAssertEqual(TeamsComposeLogic.appendingTranscript("hello there", to: ""), "hello there")
+        XCTAssertEqual(TeamsComposeLogic.appendingTranscript("  hello there\n", to: "  \n"), "hello there")
+        XCTAssertEqual(TeamsComposeLogic.appendingTranscript("and more", to: "typed"), "typed and more")
+        XCTAssertEqual(TeamsComposeLogic.appendingTranscript("and more", to: "typed "), "typed and more")
+        XCTAssertEqual(TeamsComposeLogic.appendingTranscript("第二句", to: "第一句\n"), "第一句\n第二句")
+        // Nothing heard (silence, a cancelled recognition) leaves the box exactly as it was.
+        XCTAssertEqual(TeamsComposeLogic.appendingTranscript("", to: "typed "), "typed ")
+        XCTAssertEqual(TeamsComposeLogic.appendingTranscript(" \n ", to: ""), "")
+    }
 }

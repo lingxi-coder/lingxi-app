@@ -83,6 +83,15 @@ enum TeamsComposeLogic {
         return String(String.UnicodeScalarView(scalars.prefix(length))) + "…"
     }
 
+    /// What the box says once spoken words are added: after what is already there, with a space between, never in
+    /// its place. Nothing heard changes nothing. The words are only ever put in the box; sending is the reader's.
+    static func appendingTranscript(_ transcript: String, to text: String) -> String {
+        let heard = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if heard.isEmpty { return text }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return heard }
+        return text + (text.last?.isWhitespace == true ? "" : " ") + heard
+    }
+
     /// Why the composer is replaced by an explanation. A Bot's owner reading someone else's Bot DM cannot
     /// send; a Bot DM needs a usable Bot card among its participants, and while the cards are unknown the
     /// reason says whether they are being checked or could not be verified.

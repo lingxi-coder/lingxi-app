@@ -89,7 +89,7 @@ const globToRegExp = (glob: string): RegExp => {
 const matches = (source: string, route: string): boolean => globToRegExp(source).test(route);
 
 test('membership and friend requests reach teamsApi before the general catalog rewrite', () => {
-  for (const route of ['/v1/teams', '/v1/teams/session', '/v1/teams/team-test', '/v1/friends', '/v1/friends/profile']) {
+  for (const route of ['/v1/teams', '/v1/teams/session', '/v1/teams/team-test', '/v1/friends', '/v1/friends/profile', '/v1/services']) {
     assert.deepEqual(config.hosting.rewrites.find(entry => matches(entry.source, route))?.function,
       { functionId: 'teamsApi', region: 'us-central1' });
   }

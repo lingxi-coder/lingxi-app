@@ -247,6 +247,13 @@
         }
       },
       {
+        "source": "/v1/services",
+        "function": {
+          "functionId": "teamsApi",
+          "region": "us-central1"
+        }
+      },
+      {
         "source": "/v1/friends",
         "function": {
           "functionId": "teamsApi",

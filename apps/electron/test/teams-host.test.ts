@@ -1094,3 +1094,37 @@ test('a file that cannot be read for another reason ends the try before a permit
  down=false;f.mock.wake();await settle(()=>f.mock.commands.some(c=>c.action==='completeTask'));
  const done=f.mock.commands.find(c=>c.action==='completeTask')!.payload;assert.equal(done.outcome,'failed');assert.equal('readFiles' in done,false);
 });
+test('a Bot offered as a hosted service is published and served in the service scope, never as a Team',async t=>{
+ const serviceId='s_service_0001';const runs:TeamHostProcessOptions[]=[];
+ const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};runs.push(o);return {status:'completed',cursor,text:'Done',finishedAt:Date.now()};});
+ // The fake's list() has team00001 only: a service is nobody's Team, and is served all the same.
+ await f.connector.publishLocalBot('owner',{...f.input,teamId:serviceId});
+ f.mock.tasks.push({taskId:'task00001',conversationId:'session001',sharedBotId,requester:{uid:'caller',generation:1},state:'queued',messageId:'message000001',messageSeq:1,createdAt:Date.now(),deadline:Date.now()+300000});
+ f.connector.revoke();await settle(()=>f.mock.commands.some(c=>c.action==='completeTask'));await f.connector.idle();
+ for(const action of ['publishSharedBot','listSharedBots','activateDeployment','heartbeatDeployment','listHostTasks','startTask','completeTask'])assert.ok(f.mock.commands.some(c=>c.action===action),action);
+ // Every command names the service and none names a Team.
+ assert.ok(f.mock.commands.every(c=>c.serviceId===serviceId&&c.generation===1&&!('teamId' in c)));
+ // The session is read as the service's, which the Desktop service routes to the API.
+ assert.equal(runs.length,1);assert.ok(f.mock.reads.length>=1);assert.ok(f.mock.reads.every(r=>r.teamId===serviceId&&r.conversationId==='session001'));
+ assert.deepEqual((await f.connector.status('owner')).bots.map(b=>[b.teamId,b.state]),[[serviceId,'ready']]);
+});
+test('the Desktop service reads a hosted service session through the API and watches nothing of it',async t=>{
+ const serviceId='s_service_0001';let uid='owner',epoch=0,watched=0;const service=new TeamsService({snapshot:()=>({user:{uid}}),sessionEpoch:()=>epoch,getIdToken:async()=>'token',onChanged:()=>()=>{}},{});t.after(()=>service.close());
+ (service as any).connect=async()=>({db:{}});(service as any).sdk={collection:()=>({}),onSnapshot:()=>{watched++;return()=>{};}};
+ (service as any).dataSession={read:async()=>{throw Error('A service session is not in the data session');},close:async()=>{}};
+ const sent:Array<{url:string;body:any}>=[];const real=globalThis.fetch;t.after(()=>{globalThis.fetch=real;});
+ globalThis.fetch=(async(url:string,init:RequestInit)=>{const body=JSON.parse(init.body as string);sent.push({url,body});
+  if(body.action==='sync')return new Response(JSON.stringify({conversation:{lastSeq:1,lastChangeSeq:1},hasMore:false,changes:body.after?[]:[{seq:1,messageId:'message000001'}],
+   messages:body.after?[]:[{id:'message000001',seq:1,changeSeq:1,changeId:'change000001',text:'Hello',author:{kind:'user',uid:'caller',displayName:'Caller'},createdAt:'2026-11-13T00:00:00.000Z',editedAt:null}]}));
+  return new Response(JSON.stringify(body.action==='listServices'?{published:[],entered:[]}:{tasks:[]}));}) as typeof fetch;
+ const context=service.hostContext()!;
+ const read=await service.hostReadChat(context,{teamId:serviceId,generation:1,conversationId:'session001',mode:'recent',throughSeq:1});
+ assert.deepEqual(read.messages.map(m=>[m.messageId,m.text,m.createdAt]),[['message000001','Hello',Date.UTC(2026,10,13)]]);
+ assert.deepEqual(sent[0]!.body,{action:'sync',serviceId,generation:1,conversationId:'session001',after:0});assert.ok(sent[0]!.url.endsWith('/v1/teams/messages'));
+ // The host's task list for a service sets no listener: a service's records cannot be watched, and the host asks again on its timer.
+ await service.hostMessages(context,{schemaVersion:1,commandId:'command001',serviceId,generation:1,action:'listHostTasks',payload:{}});assert.equal(watched,0);
+ assert.deepEqual(await service.services({action:'listServices'},'owner'),{published:[],entered:[]});assert.ok(sent.at(-1)!.url.endsWith('/v1/services'));
+ await assert.rejects(service.services({action:'listServices'},'other'),/INVALID_SESSION/);
+ // Another account starts with nothing followed and reads nothing with the old context.
+ uid='other';epoch++;await assert.rejects(service.hostReadChat(context,{teamId:serviceId,generation:1,conversationId:'session001',mode:'recent',throughSeq:1}),/INVALID_SESSION/);
+});

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { TeamConversationError, conversationRecord } from './team-conversations.mjs';
 import { TeamMessagesStore, TeamMessageError } from './team-messages.mjs';
 import { SharedBotError } from './shared-bots.mjs';
-import { HostedBotServiceError, HostedBotServices } from './hosted-bot-service.mjs';
+import { HostedBotServiceError, HostedBotServices, SERVICE_PREFIX } from './hosted-bot-service.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
@@ -127,6 +127,7 @@ export class TeamsStore {
     const input = command.parse(raw), now = new Date(this.clock());
     if (input.action === 'create') {
       if (input.teamId.startsWith(PAIR_PREFIX)) fail(400, 'PAIR_TEAM');
+      if (input.teamId.startsWith(SERVICE_PREFIX)) fail(400, 'RESERVED_TEAM_ID');
       return this.db.runTransaction(async tx => {
         const ref = this.team(input.teamId), previous = await tx.get(ref);
         if (previous.exists) {

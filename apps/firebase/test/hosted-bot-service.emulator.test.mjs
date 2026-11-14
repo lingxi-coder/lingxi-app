@@ -7,7 +7,7 @@ import { TeamMessagesStore } from '../src/team-messages.mjs';
 import { HostedBotServices } from '../src/hosted-bot-service.mjs';
 
 const options = { skip: !process.env.FIRESTORE_EMULATOR_HOST, timeout: 60000 };
-const projectId = 'demo-lingxi-hosted-service', serviceId = 'service_travel', sharedBotId = 'sharedbot_01';
+const projectId = 'demo-lingxi-hosted-service', serviceId = 's_travel_0001', sharedBotId = 'sharedbot_01';
 const publisher = { uid: 'publisher', name: 'Pat Publisher' }, alice = { uid: 'alice', name: 'Alice' }, bob = { uid: 'bob', name: 'Bob' }, eve = { uid: 'eve', name: 'Eve' };
 const host = { deploymentId: 'deployment_01', hostId: 'host_0001', accountEpoch: 1 };
 let app, db, services, messages, now, serial = 0;
@@ -145,7 +145,13 @@ test('service: the scope takes only what it lists; nothing made for a Team reach
   const teams = new TeamsStore(db, () => now);
   await teams.execute(alice, { action: 'create', teamId: 'team_of_alice', name: 'Alice team' });
   await assert.rejects(messages.execute(alice, { schemaVersion: 1, commandId: 'command_svc001', serviceId: 'team_of_alice', generation: 1, action: 'listTasks', payload: {} }), { code: 'NOT_FOUND' });
-  await assert.rejects(services.execute(alice, { action: 'getService', serviceId: 'team_of_alice' }), { code: 'NOT_FOUND' });
+  await assert.rejects(messages.execute(alice, { action: 'list', serviceId: 'team_of_alice', generation: 1 }), { code: 'NOT_FOUND' });
+  // The two id spaces do not meet: a service's id starts with `s_`, and no Team can be given such an id.
+  await assert.rejects(services.execute(alice, { action: 'getService', serviceId: 'team_of_alice' }), { name: 'ZodError' });
+  await assert.rejects(services.execute(alice, { action: 'createService', ...definition(), serviceId: 'team_of_alice' }), { name: 'ZodError' });
+  await assert.rejects(teams.execute(alice, { action: 'create', teamId: 's_team_of_alice', name: 'Alice team' }), { code: 'RESERVED_TEAM_ID' });
+  // The publisher's host sees the one Bot it serves here; a caller has no directory.
+  assert.deepEqual((await ledger('listSharedBots', {}, publisher)).bots.map(bot => [bot.sharedBotId, bot.state, bot.maintainer.uid]), [[sharedBotId, 'published', 'publisher']]);
   // A command naming both scopes is not a command.
   await assert.rejects(messages.execute(alice, { schemaVersion: 1, commandId: 'command_both01', serviceId, teamId: 'team_of_alice', generation: 1, action: 'listTasks', payload: {} }), { name: 'ZodError' });
 });
@@ -280,7 +286,7 @@ test('service: the HTTP API takes service commands at /v1/services and answers w
     return { status: response.status, body: await response.json() };
   };
   assert.equal((await post('/v1/services', 'alice', { action: 'getService', serviceId })).body.availability, 'available');
-  assert.deepEqual(await post('/v1/services', 'alice', { action: 'getService', serviceId: 'service_missing' }), { status: 404, body: { error: { code: 'NOT_FOUND' } } });
+  assert.deepEqual(await post('/v1/services', 'alice', { action: 'getService', serviceId: 's_missing_0001' }), { status: 404, body: { error: { code: 'NOT_FOUND' } } });
   assert.deepEqual(await post('/v1/services', 'alice', { action: 'setServiceOnline', serviceId, online: false }), { status: 403, body: { error: { code: 'PUBLISHER_REQUIRED' } } });
   assert.equal((await post('/v1/services', 'alice', { action: 'enterService', serviceId, acknowledged: true })).body.generation, 1);
   assert.deepEqual(await post('/v1/teams/messages', 'alice', { schemaVersion: 1, commandId: 'command_http01', serviceId, generation: 1, action: 'listSharedBots', payload: {} }),

@@ -5,6 +5,7 @@ import { TeamsApiError, teamsTransport, type TeamCommand, type TeamDetail, type 
 import type { MessageSignal, MessageSnapshot, MessageCommand } from '../../../../../packages/teams/messages';
 import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, SelectedSharedFile } from '../../../../../packages/teams/execution';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source';
+import { createServiceChatReader, isServiceId, servicesTransport, type ServiceCommand } from '../../../../../packages/teams/hosted-service';
 import type { TeamsFirestoreSession, TeamsFirestoreOptions } from './firestore.js';
 
 export interface Account {
@@ -35,6 +36,8 @@ export class TeamsService {
   private session?: TeamsFirestoreSession;
   private opening?: Promise<TeamsFirestoreSession>;
   private dataSession?: import('./messageWindow.js').TeamsMessageSession;
+  /** Sessions of hosted Bot services this account's host follows; a new account starts with none. */
+  private serviceChat?: { epoch: number; reader: ReturnType<typeof createServiceChatReader> };
   private dataOperation: Promise<void> = Promise.resolve();
   private dataOpening?: Promise<import('./messageWindow.js').TeamsMessageSession>;
   private sdk?: typeof import('./firestore.js');
@@ -284,9 +287,28 @@ export class TeamsService {
   }
   /** UI and every Bot read through the same UID/project message service and SDK cache. */
   async hostReadChat(context: TeamAccountContext, request: ChatReadRequest): Promise<ChatReadResult> {
-    this.assertHostContext(context); const session = await this.connectMessages(context.uid); this.assertHostContext(context);
+    this.assertHostContext(context);
+    // A hosted Bot service's sessions are read through the API: its records are not readable directly.
+    if (isServiceId(request.teamId)) {
+      if (this.serviceChat?.epoch !== context.epoch) this.serviceChat = { epoch: context.epoch, reader: createServiceChatReader(command => this.checked(context.uid, '/messages', command)) };
+      const result = await this.serviceChat.reader.read(request); this.assertHostContext(context); return result;
+    }
+    const session = await this.connectMessages(context.uid); this.assertHostContext(context);
     const result = await session.read(request); this.assertHostContext(context); return result;
   }
   execute(command: TeamCommand, expectedUid: string): Promise<TeamResult> { return this.checked(expectedUid, '', command); }
+  /** A command about a hosted Bot service itself (`/v1/services`). */
+  async services<T>(command: ServiceCommand, expectedUid: string): Promise<T> {
+    this.syncAccount(); if (this.account.snapshot().user?.uid !== expectedUid || !this.uid) throw new Error('INVALID_SESSION');
+    const uid = this.uid, epoch = this.epoch;
+    const result = await servicesTransport(this.base, async () => {
+      this.syncAccount(); if (epoch !== this.epoch) throw new Error('INVALID_SESSION');
+      const token = await this.account.getIdToken();
+      this.syncAccount(); if (epoch !== this.epoch || this.account.snapshot().user?.uid !== uid) throw new Error('INVALID_SESSION');
+      return token;
+    })<T>(command);
+    this.syncAccount(); if (epoch !== this.epoch || this.account.snapshot().user?.uid !== uid) throw new Error('INVALID_SESSION');
+    return result;
+  }
   close(): void { this.stopAccount(); this.host?.close(); this.host = undefined; this.reset(false); this.events.removeAllListeners(); }
 }

@@ -7,6 +7,7 @@ import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, Pu
 import { isSharedListWrite } from '../../../../../packages/teams/execution-validation.js';
 import { TeamsApiError, type TeamSummary } from '../../../../../packages/teams/index.js';
 import type { ChatReadRequest, ChatReadResult, ChatSourceMessage } from '../../../../../packages/teams/chat-source.js';
+import { isServiceId } from '../../../../../packages/teams/hosted-service.js';
 import { ATTACHMENT_MESSAGE_BYTES, ATTACHMENT_MESSAGE_FILES, downloadAttachment, type MessageAttachment } from '../../../../../packages/teams/attachments.js';
 import type { BotStore } from '../bots/store.js';
 import { validateBotManifest } from '../bots/package.js';
@@ -164,7 +165,9 @@ export class TeamConnector implements LocalTeamHost {
     // The server's answer for a finished friendship is known: repeat it locally, so a pass that meets the team again makes no call.
     if (this.ended.has(binding.teamId)) throw new TeamsApiError('MEMBERSHIP_REQUIRED', 403);
     const revision = this.revision;
-    try { return await this.options.service.hostMessages<T>(c, { schemaVersion: 1, commandId, teamId: binding.teamId, generation: binding.generation, action, payload }); }
+    // A Bot offered as a hosted service is published in the service's own scope: the same commands, named with `serviceId`. `binding.teamId` is then the service's id.
+    const scope = isServiceId(binding.teamId) ? { serviceId: binding.teamId } : { teamId: binding.teamId };
+    try { return await this.options.service.hostMessages<T>(c, { schemaVersion: 1, commandId, ...scope, generation: binding.generation, action, payload }); }
     catch (error) {
       // Only a friendship's team: an ordinary team the person left is skipped by the `list()` check in `discover()`. A reset since the call began owns the set.
       if (revision === this.revision && binding.teamId.startsWith(PAIR_PREFIX) && error instanceof TeamsApiError && error.status === 403 && error.code === 'MEMBERSHIP_REQUIRED') this.ended.add(binding.teamId);
@@ -503,7 +506,8 @@ export class TeamConnector implements LocalTeamHost {
     for (let index = 0; index < bindings.length; index += 1) {
       let b = bindings[index]!;
       // A friendship's team is never in `list()`: its binding stands on the stored generation (always 1), and the server checks the membership with every command (D24).
-      if (!b.teamId.startsWith(PAIR_PREFIX) && !teams.some(t => t.id === b.teamId && t.generation === b.generation)) { this.served.set(scopeKey(b),{ state: 'stopped' }); continue; }
+      // Nor is a hosted service: its publisher is its owner at generation 1 for as long as it exists, and the server refuses a withdrawn one.
+      if (!b.teamId.startsWith(PAIR_PREFIX) && !isServiceId(b.teamId) && !teams.some(t => t.id === b.teamId && t.generation === b.generation)) { this.served.set(scopeKey(b),{ state: 'stopped' }); continue; }
       try {
         const { bots } = await this.command<{ bots: SharedBotCard[] }>(c,b,'listSharedBots',{}); assert();
         const card = bots.find(v => v.sharedBotId === b.sharedBotId); if (!card || card.state !== 'published' || card.revision !== b.revision || card.maintainer.uid !== c.uid) { inactive.add(scopeKey(b)); this.served.set(scopeKey(b),{ state: 'stopped' }); this.stopBinding(b.teamId,b.sharedBotId); continue; }

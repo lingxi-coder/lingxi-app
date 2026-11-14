@@ -32,7 +32,9 @@ const limits = z.object({ userConcurrent: z.number().int().min(1).max(5), servic
 const name = z.string().trim().min(1).max(80), description = z.string().max(500);
 /** What the publisher says is kept, and for how long. Shown to a caller before they enter. */
 const retention = z.string().trim().min(1).max(500);
-const scope = { serviceId: id };
+/** The id space of a service: no Team has such an id (Team creation refuses it), so a client that holds only an id knows which scope it names. */
+export const SERVICE_PREFIX = 's_';
+const scope = { serviceId: id.refine(value => value.startsWith(SERVICE_PREFIX)) };
 export const serviceCommand = z.discriminatedUnion('action', [
   z.object({ action: z.literal('createService'), ...scope, sharedBotId: id, name, description, audience, limits, retention }).strict(),
   z.object({ action: z.literal('updateService'), ...scope, expectedRevision: positive, name: name.optional(), description: description.optional(),
@@ -65,7 +67,7 @@ const publisherLimit = 20, reportsPerDay = 5, sessionLimit = 50;
 /** Reading a session's messages (`team-messages.mjs`): the caller reads their own, the publisher every one, as each caller was told on entering. */
 export const serviceMessageActions = new Set(['list', 'sync', 'read']);
 const callerActions = new Set(['createConversation', 'submit', 'answerWait', 'decideWait', 'cancelTask', 'getTask', 'listTasks']);
-const publisherActions = new Set(['publishSharedBot', 'pauseSharedBot', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks',
+const publisherActions = new Set(['publishSharedBot', 'pauseSharedBot', 'listSharedBots', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks',
   'prepareTask', 'validateTask', 'startTask', 'continueTask', 'pauseTask', 'completeTask',
   'recordOperation', 'settleOperation', 'resolveOperation', 'listOperations', 'getTask', 'listTasks']);
 /** Commands that give a run its next piece of work: refused while the service is off. */

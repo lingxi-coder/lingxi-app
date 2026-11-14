@@ -27,6 +27,8 @@ export interface TeamSidebarProps {
   onConversationSelected?(id: string): void;
   /** Show a conversation's details. Without it the row menu has no such entry. */
   onOpenDetails?(id: string): void;
+  /** Show Bot services (Bots offered outside Teams). Without it the sidebar has no such entry. */
+  onOpenServices?(): void;
   /** An invitation opened from a link. The join dialog opens with it filled in, but never joins by itself. */
   initialInvite?: string;
   onInviteHandled?(): void;
@@ -73,7 +75,7 @@ type DialogState = { kind: 'createTeam' } | { kind: 'joinTeam'; code: string } |
  * Channels, Direct messages and Bot DMs. It owns only transient UI state (menus, dialogs, the
  * focused row); everything else comes from the workspace.
  */
-export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSettings, onConversationSelected, onOpenDetails, initialInvite, onInviteHandled, onInviteResolved, locale, now, query }: TeamSidebarProps): ReactElement {
+export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSettings, onConversationSelected, onOpenDetails, onOpenServices, initialInvite, onInviteHandled, onInviteResolved, locale, now, query }: TeamSidebarProps): ReactElement {
   const t = (en: string, cn: string) => zh ? cn : en;
   const tag = locale ?? (zh ? 'zh-CN' : 'en-US');
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -193,6 +195,7 @@ export function TeamSidebar({ workspace, snapshot, zh, renderAvatar, onOpenSetti
         })}
       </div>}
 
+    {onOpenServices ? <button type="button" className="tw-link tw-sidebar-services" onClick={onOpenServices}>{t('Bot services', 'Bot 服务')}</button> : null}
     {dialog?.kind === 'createTeam' ? <CreateTeamDialog workspace={workspace} snapshot={snapshot} zh={zh} onClose={() => setDialog(null)} /> : null}
     {dialog?.kind === 'joinTeam' ? <JoinTeamDialog workspace={workspace} snapshot={snapshot} zh={zh} initialCode={dialog.code} onClose={() => { setDialog(null); onInviteResolved?.(); }} /> : null}
     {dialog?.kind === 'channel' ? <NewConversationDialog workspace={workspace} snapshot={snapshot} zh={zh} mode="channel" renderAvatar={renderAvatar} onClose={() => setDialog(null)} /> : null}

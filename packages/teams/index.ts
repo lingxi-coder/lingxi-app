@@ -35,6 +35,9 @@ export interface TeamsApi extends MessageApi {
   setHostBackground?(change: { openAtLogin?: boolean; keepAwake?: boolean }): Promise<void>;
   /** Show where the system lets the owner allow the app to open at login. */
   openLoginItems?(): Promise<void>;
+  /** Hosted Bot services (Bots offered outside Teams): a command about a service, and a session or task command in a service's scope. */
+  services?<T>(command: import('./hosted-service.js').ServiceCommand): Promise<T>;
+  serviceMessages?<T>(command: Record<string, unknown> & { serviceId: string; generation: number; action: string }): Promise<T>;
   list(): Promise<{ teams: TeamSummary[] }>;
   detail(teamId: string): Promise<TeamDetail>;
   execute(command: TeamCommand): Promise<TeamResult>;
@@ -55,6 +58,8 @@ export interface DesktopTeamsApi {
   execute(uid: string, command: TeamCommand): Promise<TeamResult>;
   onChanged: TeamsApi['onChanged'];
   messages<T>(uid: string, command: MessageCommand): Promise<T>;
+  services<T>(uid: string, command: import('./hosted-service.js').ServiceCommand): Promise<T>;
+  serviceMessages<T>(uid: string, command: Record<string, unknown> & { serviceId: string; generation: number; action: string }): Promise<T>;
   onMessagesChanged: MessageApi['onMessagesChanged'];
   watchMessages(uid: string, scope: import('./messages').MessageScope, conversationId: string, next: (snapshot: import('./messages').MessageSnapshot) => void): () => void;
 }

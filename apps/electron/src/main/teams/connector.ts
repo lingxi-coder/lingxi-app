@@ -163,7 +163,7 @@ export class TeamConnector implements LocalTeamHost {
   private async command<T>(c: TeamAccountContext, binding: Pick<SharedBotBinding, 'teamId' | 'generation'>, action: string, payload: Record<string, unknown>, commandId = newId()): Promise<T> {
     this.assert(c);
     // The server's answer for a finished friendship is known: repeat it locally, so a pass that meets the team again makes no call.
-    if (this.ended.has(binding.teamId)) throw new TeamsApiError('MEMBERSHIP_REQUIRED', 403);
+    if (this.ended.has(binding.teamId)) throw isServiceId(binding.teamId) ? new TeamsApiError('SERVICE_WITHDRAWN', 410) : new TeamsApiError('MEMBERSHIP_REQUIRED', 403);
     const revision = this.revision;
     // A Bot offered as a hosted service is published in the service's own scope: the same commands, named with `serviceId`. `binding.teamId` is then the service's id.
     const scope = isServiceId(binding.teamId) ? { serviceId: binding.teamId } : { teamId: binding.teamId };
@@ -171,6 +171,8 @@ export class TeamConnector implements LocalTeamHost {
     catch (error) {
       // Only a friendship's team: an ordinary team the person left is skipped by the `list()` check in `discover()`. A reset since the call began owns the set.
       if (revision === this.revision && binding.teamId.startsWith(PAIR_PREFIX) && error instanceof TeamsApiError && error.status === 403 && error.code === 'MEMBERSHIP_REQUIRED') this.ended.add(binding.teamId);
+      // A withdrawn service stays withdrawn: it is asked nothing more either.
+      if (revision === this.revision && isServiceId(binding.teamId) && error instanceof TeamsApiError && error.code === 'SERVICE_WITHDRAWN') this.ended.add(binding.teamId);
       throw error;
     }
   }

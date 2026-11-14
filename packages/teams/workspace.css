@@ -407,3 +407,21 @@
 @media (prefers-contrast: more) {
   .tw-row[data-selected='true'] .tw-row-main, .tw-compose-box, .tw-embed .teams-card, .tw-member-home .teams-card { border: 1px solid var(--tw-fg); }
 }
+
+/* ── Bot services (Bots offered outside Teams): the list page and a caller's sessions ── */
+.hosted-services { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 760px; margin: 0 auto; padding: 20px; overflow-y: auto; height: 100%; box-sizing: border-box; }
+.hosted-services h2 { font-size: 17px; margin: 0; }
+.hosted-services h3 { font-size: 13px; margin: 12px 0 0; }
+.hosted-services p, .hosted-services ul { margin: 0; }
+.hosted-services code { font-size: 12px; overflow-wrap: anywhere; user-select: all; }
+.hosted-services fieldset { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0; padding: 8px 12px; border: 1px solid var(--tw-line); border-radius: 10px; }
+.hosted-services details > summary { cursor: pointer; padding: 6px 0; font-weight: 600; }
+.hosted-service .tw-conv-head { flex-wrap: wrap; gap: 8px; }
+.hosted-service .tw-conv-head select { width: auto; max-width: 220px; }
+.hosted-service-state[data-online='true'] { color: var(--tw-online); }
+.hosted-service-note { margin: 0; padding: 4px 20px; font-size: 12px; line-height: 1.5; color: var(--tw-muted); }
+.tw-msg-body.hosted-service-note { padding: 0; }
+.hosted-service-note[role='alert'] { color: var(--tw-danger); }
+.hosted-service-composer { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px 16px 16px; }
+.hosted-service-composer textarea { flex: 1; min-height: 44px; max-height: 200px; resize: vertical; }
+.tw-sidebar-services { flex: none; margin: 4px 12px 10px; padding: 6px 8px; text-align: start; }

@@ -28,6 +28,7 @@ export function desktopTeamsApi(desktop: DesktopTeamsApi, uid: string, backgroun
     openBotMarket: () => desktop.openBotMarket(uid),
     list: () => desktop.list(uid), detail: teamId => desktop.detail(uid, teamId), execute: command => desktop.execute(uid, command),
     watchMessages: (scope, conversationId, next) => desktop.watchMessages(uid, scope, conversationId, next),
+    services: command => desktop.services(uid, command), serviceMessages: command => desktop.serviceMessages(uid, command),
     messages: command => desktop.messages(uid, command), onMessagesChanged: callback => desktop.onMessagesChanged(callback),
     onChanged: callback => desktop.onChanged(callback),
   };

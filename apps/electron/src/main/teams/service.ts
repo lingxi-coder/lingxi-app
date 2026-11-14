@@ -5,7 +5,7 @@ import { TeamsApiError, teamsTransport, type TeamCommand, type TeamDetail, type 
 import type { MessageSignal, MessageSnapshot, MessageCommand } from '../../../../../packages/teams/messages';
 import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, SelectedSharedFile } from '../../../../../packages/teams/execution';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source';
-import { createServiceChatReader, isServiceId, servicesTransport, type ServiceCommand } from '../../../../../packages/teams/hosted-service';
+import { createServiceChatReader, isServiceId, isServiceMessageCommand, servicesTransport, type ServiceCommand } from '../../../../../packages/teams/hosted-service';
 import type { TeamsFirestoreSession, TeamsFirestoreOptions } from './firestore.js';
 
 export interface Account {
@@ -297,8 +297,15 @@ export class TeamsService {
     const result = await session.read(request); this.assertHostContext(context); return result;
   }
   execute(command: TeamCommand, expectedUid: string): Promise<TeamResult> { return this.checked(expectedUid, '', command); }
+  /** A caller's session or task command in a hosted Bot service's scope. Only what a caller may send there leaves this computer. */
+  async serviceMessages<T>(command: unknown, expectedUid: string): Promise<T> {
+    if (this.account.snapshot().user?.uid !== expectedUid) throw new Error('INVALID_SESSION');
+    if (!isServiceMessageCommand(command)) throw new Error('INVALID_INPUT');
+    return this.checked<T>(expectedUid, '/messages', command);
+  }
   /** A command about a hosted Bot service itself (`/v1/services`). */
   async services<T>(command: ServiceCommand, expectedUid: string): Promise<T> {
+    if (!['createService', 'updateService', 'setServiceOnline', 'withdrawService', 'getService', 'enterService', 'leaveService', 'reportService', 'listServices'].includes(command?.action)) throw new Error('INVALID_INPUT');
     this.syncAccount(); if (this.account.snapshot().user?.uid !== expectedUid || !this.uid) throw new Error('INVALID_SESSION');
     const uid = this.uid, epoch = this.epoch;
     const result = await servicesTransport(this.base, async () => {

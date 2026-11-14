@@ -67,6 +67,13 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
           if (!command.command || typeof command.command !== 'object') throw new Error('INVALID_INPUT');
           value = await service.messages(command.command as Parameters<TeamsService['messages']>[0], command.uid);
           break;
+        case 'services':
+          if (!command.command || typeof command.command !== 'object') throw new Error('INVALID_INPUT');
+          value = await service.services(command.command as Parameters<TeamsService['services']>[0], command.uid);
+          break;
+        case 'serviceMessages':
+          value = await service.serviceMessages(command.command, command.uid);
+          break;
         case 'execute':
           if (!command.command || typeof command.command !== 'object') throw new Error('INVALID_INPUT');
           value = await service.execute(command.command as Parameters<TeamsService['execute']>[0], command.uid);

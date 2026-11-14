@@ -61,7 +61,7 @@ test('the sign-in page has its own, lighter policy and the strict one does not a
 
 test('security zones have disjoint policy patterns', () => {
   const withPolicy = config.hosting.headers.filter((entry) => entry.headers.some((header) => header.key === 'Content-Security-Policy')).map((entry) => entry.source);
-  assert.deepEqual(withPolicy, ['/remote', '/remote/**', '/login/remote', '/teams', '/teams/**', '/friends', '/friends/**']);
+  assert.deepEqual(withPolicy, ['/remote', '/remote/**', '/login/remote', '/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**']);
 });
 
 test('Teams and Friends alone get Firestore connectivity and invitation and friend links suppress referrers', () => {
@@ -71,9 +71,12 @@ test('Teams and Friends alone get Firestore connectivity and invitation and frie
   // Friends is in the teams security zone: the same policy, never cached, never leaking a friend code in a referrer (D1).
   assert.equal(policyFor('/friends'), teamPolicy);
   assert.equal(policyFor('/friends/**'), teamPolicy);
+  // Bot services are in the same zone: a stranger's Bot writes what the page shows, and a service link is never leaked in a referrer.
+  assert.equal(policyFor('/services'), teamPolicy);
+  assert.equal(policyFor('/services/**'), teamPolicy);
   assert.ok(directives(teamPolicy).get('connect-src')!.includes('https://firestore.googleapis.com'));
   assert.ok(!directives(policyFor('/remote')!).get('connect-src')!.includes('https://firestore.googleapis.com'));
-  for (const source of ['/teams', '/teams/**', '/friends', '/friends/**', '/open/team/join', '/open/friend/add']) {
+  for (const source of ['/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**', '/open/team/join', '/open/friend/add']) {
     const headers = config.hosting.headers.find(entry => entry.source === source)?.headers;
     assert.equal(headers?.find(header => header.key === 'Referrer-Policy')?.value, 'no-referrer', source);
     assert.equal(headers?.find(header => header.key === 'Cache-Control')?.value, 'no-store', source);

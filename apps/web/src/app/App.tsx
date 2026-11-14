@@ -13,7 +13,7 @@ import { DownloadPage, HomePage, PricingPage } from '../pages/PublicPages';
 import { PublicLayout } from '../layouts/PublicLayout';
 import { detectInitialRegion, Locale, Region } from '../utils/locale';
 import { usePersistentState } from './usePersistentState';
-import { isRemoteRoute, useRouter } from './router';
+import { isRemoteRoute, parseServiceRoute, useRouter } from './router';
 import { useTheme } from './useTheme';
 
 const AdminModelsPage = lazy(() => import('../pages/AdminModelsPage'));
@@ -25,6 +25,7 @@ const RemotePage = lazy(() => import('../pages/RemotePage'));
 const RemoteSignInPage = lazy(() => import('../pages/RemoteSignInPage'));
 const TeamsPage = lazy(() => import('../pages/TeamsPage'));
 const FriendsPage = lazy(() => import('../pages/FriendsPage'));
+const ServicesPage = lazy(() => import('../pages/ServicesPage'));
 
 export function App() {
   const route = useRouter();
@@ -37,7 +38,9 @@ export function App() {
   useEffect(() => {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
     document.documentElement.dataset.theme = theme;
-    if (route === '/teams' || route === '/teams/join') {
+    if (route === '/services' || route.startsWith('/services/')) {
+      document.title = locale === 'zh' ? 'Bot 服务 — 灵犀 LingXi' : 'Bot services — LingXi';
+    } else if (route === '/teams' || route === '/teams/join') {
       document.title = locale === 'zh' ? '团队 — 灵犀 LingXi' : 'Teams — LingXi';
     } else if (route === '/friends' || route === '/friends/add') {
       const title = locale === 'zh' ? '好友 — 灵犀 LingXi' : 'Friends — LingXi';
@@ -74,6 +77,8 @@ export function App() {
 
   if (route.startsWith('/open/')) return <OpenLinkPage locale={locale} />;
   if (route === '/teams' || route === '/teams/join') return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载团队…' : 'Loading teams…'}</main>}><TeamsPage locale={locale} /></Suspense>;
+
+  if (route === '/services' || route.startsWith('/services/')) return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载…' : 'Loading…'}</main>}><ServicesPage locale={locale} serviceId={parseServiceRoute(route) ?? undefined} /></Suspense>;
 
   if (route === '/friends' || route === '/friends/add') return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载好友…' : 'Loading friends…'}</main>}><FriendsPage locale={locale} route={route} badge={friendsBadge} onBadge={setFriendsBadge} /></Suspense>;
 

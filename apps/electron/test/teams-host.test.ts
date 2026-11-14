@@ -1128,3 +1128,25 @@ test('the Desktop service reads a hosted service session through the API and wat
  // Another account starts with nothing followed and reads nothing with the old context.
  uid='other';epoch++;await assert.rejects(service.hostReadChat(context,{teamId:serviceId,generation:1,conversationId:'session001',mode:'recent',throughSeq:1}),/INVALID_SESSION/);
 });
+test('a withdrawn service stops its running request and is asked nothing more until the account starts again',async t=>{
+ const serviceId='s_service_0001';const runs:TeamHostProcessOptions[]=[];const f=fixture(t,hold(runs));
+ await f.connector.publishLocalBot('owner',{...f.input,teamId:serviceId});f.mock.tasks.push(queued());f.mock.wake();await settle(()=>runs.length===1);
+ const original=f.mock.service.hostMessages.bind(f.mock.service),reached:string[]=[];
+ f.mock.service.hostMessages=async(c,command)=>{if(command.serviceId===serviceId){reached.push(command.action as string);throw new TeamsApiError('SERVICE_WITHDRAWN',410);}return original(c,command);};
+ await wakeAndIdle(f);await settle(()=>runs[0]!.signal.aborted);await new Promise(r=>setTimeout(r,60));await f.connector.idle();
+ assert.ok(reached.length>=1);assert.deepEqual((await f.connector.status('owner')).bots.map(b=>b.state),['stopped']);
+ const calls=reached.length;for(let pass=0;pass<3;pass++)await wakeAndIdle(f);assert.equal(reached.length,calls);
+});
+test('the Desktop service sends a page\'s service commands only when they are a caller\'s, in a service scope',async t=>{
+ const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'token',onChanged:()=>()=>{}},{});t.after(()=>service.close());
+ const sent:any[]=[];const real=globalThis.fetch;t.after(()=>{globalThis.fetch=real;});globalThis.fetch=(async(_url:string,init:RequestInit)=>{sent.push(JSON.parse(init.body as string));return new Response('{}');}) as typeof fetch;
+ const scope={serviceId:'s_service_0001',generation:1},task={schemaVersion:1,commandId:'command00001',...scope};
+ await service.serviceMessages({action:'list',...scope},'owner');
+ await service.serviceMessages({...task,action:'submit',payload:{conversationId:'session001',messageId:'message000001',changeId:'change000001',text:'Hello',targets:['sharedbot001']}},'owner');
+ assert.equal(sent.length,2);assert.ok(sent.every(c=>c.serviceId===scope.serviceId&&!('teamId' in c)));
+ for(const command of [{action:'list',teamId:'team00001',generation:1},{action:'list',...scope,teamId:'team00001'},{action:'mutate',...scope},{action:'list',serviceId:'team00001',generation:1},
+  {...task,action:'publishSharedBot',payload:{}},{...task,action:'listSharedBots',payload:{}},{...task,action:'startTask',payload:{}},{...task,action:'submit',payload:{conversationId:'session001'}}])
+  await assert.rejects(service.serviceMessages(command,'owner'),/INVALID_INPUT/);
+ await assert.rejects(service.serviceMessages({action:'list',...scope},'other'),/INVALID_SESSION/);
+ await assert.rejects(service.services({action:'deleteEverything'} as any,'owner'),/INVALID_INPUT/);assert.equal(sent.length,2);
+});

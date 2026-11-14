@@ -463,9 +463,9 @@ Then it writes the files that follow the release, the new `market-package.json`,
 - A Team is not told that a Bot it uses has a newer release.
 - The review's text is English only, like the rest of the Market tab.
 
-## M3-6 — a Bot offered outside Teams: the hosted Bot service (service layer only)
+## M3-6 — a Bot offered outside Teams: the hosted Bot service (service, Desktop host, Web and Desktop screens)
 
-A publisher can offer one of their Bots to people who are in none of their Teams (design 17, HostedBotService; I7 and I11, and the online parts of I2 and I9). This is not the local BotService: that one manages Bot instances on a device, and a hosted service reuses it only for that. This increment is the service layer in `apps/firebase`. No client and no host uses it yet.
+A publisher can offer one of their Bots to people who are in none of their Teams (design 17, HostedBotService; I7 and I11, and the online parts of I2 and I9). This is not the local BotService: that one manages Bot instances on a device, and a hosted service reuses it only for that. Done so far: the service layer in `apps/firebase`, the Desktop host, and the screens on Web and Desktop. iOS and Android have nothing yet.
 
 **A scope of its own.** A service is `services/{serviceId}`. Callers are never added to a Team and no Team generation is made up for them. The root has the shape the execution ledger works in, so `shared-bots.mjs` runs inside it unchanged: admission, daily quotas, permits, waits, operations and task states are the same code as in a Team.
 
@@ -479,9 +479,11 @@ A publisher can offer one of their Bots to people who are in none of their Teams
 
 Beside it: `serviceUsers/{uid}/entered/{serviceId}` (what a person entered), `serviceUsers/{uid}/reportDays/{day}` and `serviceReports/{id}`. The Firestore rules deny all of this to clients; everything goes through the API.
 
-**Commands.** `POST /v1/services` takes `createService`, `updateService`, `setServiceOnline`, `withdrawService`, `getService`, `enterService`, `leaveService`, `reportService` and `listServices`. Sessions and tasks use the existing ledger and message routes with `serviceId` in place of `teamId`. A command names one scope: one with both is refused, a service id used as a Team id is `MEMBERSHIP_REQUIRED`, and a Team id used as a service id is `NOT_FOUND`.
+**Ids.** A service id starts with `s_`. `createService` takes no other id and no Team can be created with one (`RESERVED_TEAM_ID`), so an id alone says which scope it names. This is what lets the Desktop host keep one kind of record for both.
 
-**Only what the scope lists.** A caller has `createConversation`, `submit`, `answerWait`, `decideWait`, `cancelTask`, `getTask`, `listTasks`, and reads with `list`, `sync` and `read`. The publisher has the publishing and host commands and reads. Everything else is `SERVICE_SCOPE_UNSUPPORTED`: the Bot directory, shared lists, documents, handover, conversation policy, attachments, writing a plain message. No command falls back to the publisher's authority when it is not listed. The publication must be the service's one Bot, usable by everyone in the scope, with no shared list (`INVALID_SERVICE_PUBLICATION`). A session is a `bot_dm` with that Bot (`INVALID_SERVICE_SESSION`), at most 50 per caller.
+**Commands.** `POST /v1/services` (its own hosting rewrite) takes `createService`, `updateService`, `setServiceOnline`, `withdrawService`, `getService`, `enterService`, `leaveService`, `reportService` and `listServices`. Sessions and tasks use the existing ledger and message routes with `serviceId` in place of `teamId`. A command names one scope: one with both is refused, a service id used as a Team id is `MEMBERSHIP_REQUIRED`, and a Team id used as a service id is `NOT_FOUND`.
+
+**Only what the scope lists.** A caller has `createConversation`, `submit`, `answerWait`, `decideWait`, `cancelTask`, `getTask`, `listTasks`, and reads with `list`, `sync` and `read`. The publisher has the publishing and host commands, `listSharedBots` (its host checks the one Bot it serves) and reads. Everything else is `SERVICE_SCOPE_UNSUPPORTED`: the Bot directory, shared lists, documents, handover, conversation policy, attachments, writing a plain message. No command falls back to the publisher's authority when it is not listed. The publication must be the service's one Bot, usable by everyone in the scope, with no shared list (`INVALID_SERVICE_PUBLICATION`). A session is a `bot_dm` with that Bot (`INVALID_SERVICE_SESSION`), at most 50 per caller.
 
 **The gates, in the order a request meets them.**
 
@@ -500,19 +502,44 @@ Beside it: `serviceUsers/{uid}/entered/{serviceId}` (what a person entered), `se
 
 **Reports.** `reportService` writes to `serviceReports` with the reporter, the publisher, a reason and optional text and session (only the reporter's own session). Five per person per day (`REPORT_LIMIT`), idempotent by `reportId`. A report is not in anything the publisher can ask for, and can be made after a service is withdrawn.
 
-**Tests.** `hosted-bot-service.emulator.test.mjs` (7), now part of `npm run test:teams`: off by default and each availability; entry, a full request and answer, and who reads a session; the scope's refusals and the Team/service mix-ups; the switch, quota and both concurrency limits; narrowing, leaving and re-entry; withdrawal and reports; the HTTP route. The whole suite: 211 + 10 emulator tests and 64 unit tests pass.
+**The host (Desktop).** The Bot is published into the service's scope by the same connector that serves Teams. A service binding is a Team binding whose scope id is a service id:
+
+- every host command is sent with `serviceId` in place of `teamId`;
+- the binding is not looked for among the account's Teams: the publisher is the service's owner at generation 1 for as long as it exists;
+- the session is read through the API (`createServiceChatReader` in `packages/teams/hosted-service.ts`), with the same requests and the same checks as the Team reader. It follows the session's change log from the start, keeps it in memory, and afterwards asks only for what changed. A read that does not add up (a gap in the log, a missing message, an author that is neither a person nor the Bot) is refused and the next read starts over;
+- nothing of a service can be watched, so new requests are found on the connector's own timer (5 s);
+- a withdrawn service answers `SERVICE_WITHDRAWN` once; its running request is stopped and it is asked nothing more until the account starts again.
+
+**Screens (Web and Desktop).** One component, `packages/teams/HostedServices.tsx`, on both. Web shows it at `/services` and `/services/<id>` (the link a publisher hands out), in the Teams security zone: the same content policy, never cached, no referrer. Desktop shows it in the Teams page, from "Bot services" at the foot of the Teams sidebar.
+
+- *Using one.* A link or an id is looked up and its terms are shown: who offers it, that it is not a Team, who can read a session, who pays, what the publisher says is kept, how many requests a day and at once, and that it can be reported and left. Nothing is entered by looking; "Agree and open" sends the acknowledgement. A publisher who opens their own link is told it is theirs and shown no terms. Then the person has their sessions with the Bot: a new session, a request, the answer (the Bot's text through the host's Markdown renderer, the same one the Team chat uses; a person's text as typed), the Bot's question answered in the same box, approve or decline, cancel. A refusal is said in words, with "Nothing was sent" where that is so, and the text stays in the box. The page reads an open session every 2 s while the Bot is answering and every 10 s otherwise.
+- *Reporting and leaving.* The report dialog says it goes to LingXi and not to the publisher, and names the open session only when the person ticks that. Leaving is confirmed.
+- *Offering one (Desktop only).* The publisher picks a local Bot, the name and description people see, the published role, daily requests per person and in all, requests at once per person and in all, and their retention statement, and accepts in a checkbox that this computer answers, that they pay, and that they can read every session. The service is created off, the Bot is published into it, and the publisher turns it on. If the publication fails, the service is withdrawn again so that nothing is left that can answer nobody. Each service shows whether it is on, whether this computer is answering, its link, and has "Turn on/off" and "Withdraw" (confirmed, final).
+
+A page's commands are checked before they leave: Desktop main and the Web API send a session or task command only when it is one of the caller's seven actions or three reads, in a service scope, with no Team named (`isServiceMessageCommand`).
+
+**Tests.**
+
+- Service: `hosted-bot-service.emulator.test.mjs` (7), part of `npm run test:teams`: off by default and each availability; entry, a full request and answer, and who reads a session; the scope's refusals, the two id spaces and the Team/service mix-ups; the switch, quota and both concurrency limits; narrowing, leaving and re-entry; withdrawal and reports; the HTTP route. The whole suite: 211 + 10 emulator tests and 64 unit tests pass.
+- Desktop: `teams-host.test.ts` (4 new, 96 in all): a service Bot is published and served with `serviceId` on every command and never a Team; the Desktop service reads a session through the API and watches nothing; a withdrawn service stops its request and is asked nothing more; a page's command leaves only when it is a caller's. `hosted-service.test.ts` (5): the id space, the session reader (every request kind, paging, edits, refusals, starting over), the transport.
+- Web: `hosted-services-ui.test.ts` (7): links; the terms and that looking enters nothing; asking, a refusal, the answer, the Bot's question, cancelling; a service that cannot answer; report and leave; offering, a failed publication, the switch and withdrawal. `remoteHosting.test.ts` covers the new route and its policy.
 
 **Not done.**
 
-- No host: Desktop cannot yet publish a Bot into a service or find and run a service's tasks. Until it can, no service can answer anyone.
-- No client UI on any of the four clients: opening a service, the disclosure before entering, sessions, the publisher's switch and limits, reporting.
-- Nothing is deployed, and nothing ran against the real project.
-- No directory: a person reaches a service by its id. `listServices` returns what they published and what they entered.
+- Nothing is deployed, and nothing ran against the real project, in a signed Desktop app, in a real browser or with a real model. Every check above is a fake or the emulator.
+- iOS and Android have no service screens.
+- No directory: a person reaches a service by its link. The list shows what they entered and what they offer.
+- The server can offer a service to named accounts only; the screen offers that choice only when it is handed a list of people to pick from, and neither host passes one yet. A service made in the screen is open to anyone with the link.
+- A service cannot be edited after it is made (name, limits, audience, retention): the server takes `updateService`, the screen does not send it.
+- A service Bot carries its role only. Files and Skills, and Bots that need files bound, cannot be offered.
 - Nobody reads reports through the product; there is no review tool, and no automatic action on a reported service.
 - Files in a service session are refused.
 - Cost is always the publisher's. A caller paying, or a split, is not modelled.
 - Retention is the publisher's statement shown to the caller; nothing deletes sessions on a schedule.
 - A caller who was removed cannot read or export their earlier sessions while they are out.
+- The publisher has no screen for reading callers' sessions, although the service lets them and callers are told so.
+- A session is polled, not pushed: an answer shows up to 2 s late, and a new request reaches the publisher's computer up to 5 s late.
+- The screen's text is in the component (English and Chinese), like the other Teams screens, not in the translation files.
 
 ## Current integration status, 2026-11-05
 

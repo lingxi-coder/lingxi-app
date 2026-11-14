@@ -1,5 +1,7 @@
 import { TeamsApiError } from './index.js';
 import { chatSourceMessage, type ChatReadRequest, type ChatReadResult, type ChatSourceMessage } from './chat-source.js';
+import { executionCommand, type LocalPublishableBot, type MemberExecutionPayloads, type PublishLocalBotInput, type SharedHostStatus } from './execution.js';
+import { isMemberExecutionCommand } from './execution-validation.js';
 
 /**
  * A Bot offered to people outside its publisher's Teams (a hosted Bot service). A service is a scope of its own: it is
@@ -12,7 +14,7 @@ export const SERVICE_PREFIX = 's_';
 export const isServiceId = (value: unknown): value is string => typeof value === 'string' && /^s_[A-Za-z0-9_-]{6,62}$/u.test(value);
 export function newServiceId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return SERVICE_PREFIX + btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+  return SERVICE_PREFIX + btoa(String.fromCharCode(...bytes)).replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=/gu, '');
 }
 
 export type ServiceAudience = { mode: 'public' } | { mode: 'users'; uids: string[] };
@@ -137,4 +139,89 @@ export function createServiceChatReader(call: (command: Record<string, unknown>)
       return next;
     },
   };
+}
+
+/** A caller's entitlement in a service: what every session and task command names. */
+export interface ServiceScope { serviceId: string; generation: number }
+/** A session of a service as the API lists it. */
+export interface ServiceSession { id: string; kind: 'bot_dm'; title: string; lastSeq: number; lastChangeSeq: number; lastReadSeq: number }
+/** A message of a session as the API's `sync` gives it. Times are ISO text. */
+export interface ServiceMessage {
+  id: string; seq: number; changeSeq: number; text: string; createdAt: string | null; recalled?: boolean; waitId?: string;
+  author: { kind: 'user'; uid: string; displayName?: string } | { kind: 'shared_bot'; sharedBotId: string; displayName?: string };
+}
+export interface ServiceSync { conversation: ServiceSession; changes: Array<{ seq: number; messageId: string }>; messages: ServiceMessage[]; hasMore: boolean }
+/** What a client needs to use services. The last three exist only where Bots are hosted (Desktop), for the publisher. */
+export interface HostedServicesApi {
+  services<T>(command: ServiceCommand): Promise<T>;
+  /** A session or task command in a service's scope: the Team message route with `serviceId`. */
+  serviceMessages<T>(command: Record<string, unknown> & { serviceId: string; generation: number; action: string }): Promise<T>;
+  localBots?(): Promise<LocalPublishableBot[]>;
+  publishLocalBot?(input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }>;
+  hostStatus?(): Promise<SharedHostStatus>;
+}
+/** The caller's actions in a service's scope; the service refuses every other one. */
+export const SERVICE_READ_ACTIONS = ['list', 'sync', 'read'] as const;
+export const SERVICE_TASK_ACTIONS = ['createConversation', 'submit', 'answerWait', 'decideWait', 'cancelTask', 'getTask', 'listTasks'] as const;
+/** Whether a value is a command a caller may send in a service's scope. Hosts check this before sending what a page asked for. */
+export function isServiceMessageCommand(value: unknown): value is Record<string, unknown> & { serviceId: string; generation: number; action: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const command = value as Record<string, unknown>;
+  if (!isServiceId(command.serviceId) || 'teamId' in command || !Number.isSafeInteger(command.generation) || (command.generation as number) < 1) return false;
+  if (!('schemaVersion' in command)) return (SERVICE_READ_ACTIONS as readonly unknown[]).includes(command.action);
+  // The same shape as its Team counterpart, with the scope named differently.
+  const { serviceId, ...rest } = command;
+  return (SERVICE_TASK_ACTIONS as readonly unknown[]).includes(command.action) && isMemberExecutionCommand({ ...rest, teamId: serviceId });
+}
+/** A task command in a service's scope, checked like its Team counterpart. */
+export function serviceCommand<A extends typeof SERVICE_TASK_ACTIONS[number]>(scope: ServiceScope, action: A, payload: MemberExecutionPayloads[A]) {
+  const { teamId, ...command } = executionCommand({ teamId: scope.serviceId, generation: scope.generation }, action, payload) as
+    { teamId: string; schemaVersion: 1; commandId: string; generation: number; action: A; payload: MemberExecutionPayloads[A] };
+  return { ...command, serviceId: teamId };
+}
+/** The service a link or a pasted id names: `…/services/<id>` or the id itself. */
+export function serviceIdFrom(input: string): string | null {
+  const value = input.trim();
+  if (isServiceId(value)) return value;
+  try { const found = /^\/services\/([^/]+)\/?$/u.exec(new URL(value).pathname)?.[1]; return isServiceId(found) ? found : null; } catch { return null; }
+}
+export const serviceLink = (origin: string, serviceId: string): string => `${origin}/services/${serviceId}`;
+
+/** Why a service would not answer now, in words. */
+export function availabilityText(availability: ServiceAvailability, zh: boolean): string {
+  const t = (en: string, cn: string) => zh ? cn : en;
+  switch (availability) {
+    case 'available': return t('Available', '可用');
+    case 'disabled': return t('Turned off by its publisher', '发布者已关闭');
+    case 'not_ready': return t('Not set up yet', '尚未就绪');
+    case 'host_offline': return t('The publisher’s computer is offline', '发布者的电脑不在线');
+    case 'service_quota_exhausted': return t('Today’s requests for this service are used up', '该服务今日的请求次数已用完');
+    case 'user_quota_exhausted': return t('You have used today’s requests', '你今日的请求次数已用完');
+    case 'withdrawn': return t('Withdrawn', '已下线');
+  }
+}
+/** What a refusal means to the person who met it. Unknown codes are shown as they are. */
+export function serviceErrorText(code: string, zh: boolean): string {
+  const t = (en: string, cn: string) => zh ? cn : en;
+  const known: Record<string, string> = {
+    NOT_FOUND: t('There is no such service, or it is not offered to this account.', '没有这个服务，或它未向此账号开放。'),
+    SERVICE_ENTRY_REQUIRED: t('Open the service and agree to its terms first.', '请先打开该服务并同意其说明。'),
+    SERVICE_ACCESS_REQUIRED: t('This service is no longer offered to this account.', '该服务已不再向此账号开放。'),
+    STALE_MEMBERSHIP: t('Your access changed. Open the service again.', '你的访问已变更，请重新打开该服务。'),
+    SERVICE_WITHDRAWN: t('The publisher withdrew this service.', '发布者已下线该服务。'),
+    SERVICE_DISABLED: t('The publisher turned this service off. Nothing was sent.', '发布者已关闭该服务，消息未发送。'),
+    SERVICE_USER_BUSY: t('Wait for your earlier request to finish. Nothing was sent.', '请等待你之前的请求完成，消息未发送。'),
+    SERVICE_BUSY: t('The service is busy with other people’s requests. Nothing was sent; try again shortly.', '该服务正在处理其他人的请求，消息未发送，请稍后再试。'),
+    REQUEST_QUOTA_EXCEEDED: t('Today’s requests are used up. Nothing was sent.', '今日的请求次数已用完，消息未发送。'),
+    HOST_UNAVAILABLE: t('The publisher’s computer is offline. Nothing was sent.', '发布者的电脑不在线，消息未发送。'),
+    SERVICE_SESSION_LIMIT: t('You have the most sessions this service allows.', '你在该服务中的会话数已达上限。'),
+    REPORT_LIMIT: t('You have sent today’s reports. Try again tomorrow.', '你今日的举报次数已用完，请明天再试。'),
+    SERVICE_LIMIT: t('You offer the most services one account may.', '你提供的服务数已达上限。'),
+    PUBLISHER_REQUIRED: t('Only the publisher can do this.', '只有发布者可以执行此操作。'),
+    SIGN_IN_REQUIRED: t('Sign in first.', '请先登录。'),
+    TEAM_MODEL_UNAVAILABLE: t('This Bot’s model is not set up on this computer.', '此电脑上尚未配置该 Bot 的模型。'),
+    RESOURCE_BINDING_REQUIRED: t('This Bot needs files chosen for it, which a service does not carry yet.', '该 Bot 需要绑定文件，服务暂不支持。'),
+    SERVICE_UNAVAILABLE: t('The service could not be reached. Try again.', '无法连接服务，请重试。'),
+  };
+  return known[code] ?? code;
 }

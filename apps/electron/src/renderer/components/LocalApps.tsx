@@ -118,7 +118,6 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop 
       </article>)}
     </div>}
     {apps.length > 0 && !filtered.length && <p className="local-app-no-results">{tr('desktop_apps_no_results', query)}</p>}
-    <details className="local-app-hosting"><summary>{tr('apps_hosting')}</summary><p>{tr('desktop_apps_deployment_hint')}</p>{!remoteConfigured && <p>{tr('desktop_apps_remote_unconfigured')}</p>}</details>
     {selected && <aside className="local-app-logs" aria-label={tr('desktop_apps_logs')}><header><strong>{apps.find(a => a.id === selected)?.name ?? tr('desktop_app')} · {tr('desktop_logs')}</strong><button onClick={() => setSelected(null)} aria-label={tr('desktop_close_logs')}>×</button></header>
       <h3>Versions</h3><p>Switching code keeps application data. Data format changes require a verified migration.</p>
       {versions.map(version => { const app = apps.find(a => a.id === selected); return <div key={version.revision} className="local-app-actions"><span>v{version.revision} · {new Date(version.createdAtMs).toLocaleString(locale)}{app?.currentRevision === version.revision ? ' · Current' : ''}</span><button disabled={busy === selected || !app || app.currentRevision === undefined || app.currentRevision === version.revision} onClick={() => app?.currentRevision !== undefined && void act(selected, () => appsApi().useVersion(selected, version.revision, app.currentRevision!))}>Use version</button></div>; })}

@@ -1,0 +1,5 @@
+.transcript-leaf-window { min-width: 0; }
+.transcript-leaf { display: flow-root; min-width: 0; }
+.transcript-leaf-spacer { pointer-events: none; }
+/* Both kinds of windows need actual leaf heights throughout their overscan. */
+.transcript-leaf-window[data-leaf-windowed='true'] .transcript-run-item { content-visibility: visible; contain-intrinsic-size: none; }

@@ -119,6 +119,32 @@ final class EngineConversationSource: ConversationSource {
     private var originalPrompts: [ConversationTurnToken: OriginalPrompt] = [:]
     private var cancelledBeforeAdmission: Set<ConversationTurnToken> = []
     private var acceptedSidePrompts: Set<ConversationTurnToken> = []
+    private struct QueuedTurnAdmission {
+        let sessionID: String
+        let epoch: UInt64
+        let engineIdentity: ObjectIdentifier?
+        let turnID: UInt64
+        let originalPrompt: ConversationUnsentPrompt?
+    }
+    /// Busy sends keep their own correlator until the engine either appends
+    /// them inside the current turn or claims them as a later executor.
+    private var acceptedQueuedTurns: [UInt64: QueuedTurnAdmission] = [:]
+    private var queuedTurnClaimPending = false
+    private var unownedExecutorObserved = false
+    private struct QueuedAdmissionKey: Hashable {
+        let sessionID: String
+        let turnID: UInt64
+    }
+    private var queuedAdmissionRetirements: [QueuedAdmissionKey: Task<Void, Never>] = [:]
+    private var queuedAdmissionRetirementFailures: Set<QueuedAdmissionKey> = []
+    private var unconfirmedQueuedTurnIDs: Set<UInt64> = []
+    private var queuedSubmissionsInFlight: Set<UInt64> = []
+    private struct NativeSubmissionKey: Hashable { let turnID: UInt64; let epoch: UInt64 }
+    private var nativeSubmissionsInFlight: Set<NativeSubmissionKey> = []
+    private var nativeSubmissionWaiters: [NativeSubmissionKey: [CheckedContinuation<Void, Never>]] = [:]
+    private var queuedAdmissionRestoreTask: Task<Void, Never>?
+    private var queuedRecoveryTask: Task<Void, Never>?
+    private var testTurnAdmissionQuery: ((String, [UInt64]) async throws -> [MobileTurnAdmissionDto])?
     private var rejectedPromptRestorers: [ConversationTurnToken: (ConversationUnsentPrompt) -> Bool] = [:]
     private var currentAssistantBlockKey: UInt64?
     private var assistantRowsByBlock: [UInt64: Set<UUID>] = [:]
@@ -465,6 +491,13 @@ final class EngineConversationSource: ConversationSource {
     /// A terminal SessionResumed transcript is authoritative; retained
     /// envelopes are only a projection source while recovery is nonterminal.
     private var replayProjectionState: TurnRecoveryStateDto?
+    private var retainedReplayCursor: (sessionID: String, token: ConversationTurnToken, sequence: UInt64)?
+    private var queuedRestoreAttempt: UUID?
+    private var preparedQueuedRestore: (attempt: UUID, sessionID: String, epoch: UInt64, engine: ObjectIdentifier?)?
+    private var queuedActivationTask: Task<Bool, Never>?
+    private var queuedActivationTurnID: UInt64?
+    private var queuedActivationEpoch: UInt64?
+    private var queuedActivationAttempt: UUID?
     private var pauseAcknowledgements: [ConversationTurnToken: [CheckedContinuation<Void, Error>]] = [:]
     /// Cancel's command acknowledgement only means the host accepted the
     /// request. Keep ownership until the FIFO listener observes a terminal
@@ -891,10 +924,31 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func invalidateTurnContext() {
+        acceptedQueuedTurns.removeAll()
+        unconfirmedQueuedTurnIDs.removeAll()
+        queuedSubmissionsInFlight.removeAll()
+        nativeSubmissionsInFlight.removeAll()
+        let submissionWaiters = nativeSubmissionWaiters.values.flatMap { $0 }
+        nativeSubmissionWaiters.removeAll()
+        for waiter in submissionWaiters { waiter.resume() }
+        queuedAdmissionRestoreTask?.cancel()
+        queuedAdmissionRestoreTask = nil
+        preparedQueuedRestore = nil
+        queuedRestoreAttempt = nil
+        queuedActivationTask?.cancel()
+        queuedActivationTask = nil
+        queuedActivationTurnID = nil
+        queuedActivationEpoch = nil
+        queuedActivationAttempt = nil
+        queuedRecoveryTask?.cancel()
+        queuedRecoveryTask = nil
+        queuedTurnClaimPending = false
+        unownedExecutorObserved = false
         durableRecoveryTask?.cancel()
         durableRecoveryTask = nil
         durableLookupPending = false
         durableRecoveryPhase = nil
+        retainedReplayCursor = nil
         terminalRecoveryStates.removeAll()
         unresolvedRecoveryTurnID = nil
         needsDurableForegroundRecoveryTurnID = nil
@@ -923,6 +977,8 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func clearTurnPointers(keepEpoch: Bool = true) {
+        retainedReplayCursor = nil
+        unownedExecutorObserved = false
         if let token = activeConversationTurnToken {
             originalPrompts.removeValue(forKey: token)
             cancelledBeforeAdmission.remove(token)
@@ -1128,7 +1184,7 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
-    private func ensureActiveRun() -> ConversationExecutionRun {
+    private func ensureActiveRun(status: ConversationExecutionStatus = .running) -> ConversationExecutionRun {
         if let itemIndex = activeRunItemIndex,
            model.items.indices.contains(itemIndex),
            case let .run(run) = model.items[itemIndex] {
@@ -1138,7 +1194,7 @@ final class EngineConversationSource: ConversationSource {
             id: "session-\(sessionEpoch)-turn-\(currentTurnId ?? 0)",
             sessionId: model.activeSessionId,
             turnId: currentTurnId,
-            status: .running
+            status: status
         )
         model.items.append(.run(run))
         activeRunItemIndex = model.items.count - 1
@@ -1371,7 +1427,8 @@ final class EngineConversationSource: ConversationSource {
         default:
             break
         }
-        guard let currentTurnId, let activeTurnEpoch, activeTurnEpoch == sessionEpoch else {
+        guard !unownedExecutorObserved,
+              let currentTurnId, let activeTurnEpoch, activeTurnEpoch == sessionEpoch else {
             return false
         }
         switch event {
@@ -1380,6 +1437,554 @@ final class EngineConversationSource: ConversationSource {
         default:
             return true
         }
+    }
+
+    private func queuedTurnAdmission(for event: ClientEvent) -> QueuedTurnAdmission? {
+        let turnID: UInt64
+        switch event {
+        case let .turnRecoveryState(snapshot) where snapshot.state == .running:
+            guard canonicalSessionID(snapshot.sessionId) == canonicalSessionID(model.activeSessionId) else { return nil }
+            turnID = snapshot.turnId
+        case let .turnStarted(id?):
+            turnID = id
+        default:
+            return nil
+        }
+        guard currentTurnId != turnID, !isSideChat, !model.sessionTransitionPending,
+              let admission = acceptedQueuedTurns[turnID],
+              admission.epoch == sessionEpoch,
+              admission.sessionID == canonicalSessionID(model.activeSessionId),
+              admission.engineIdentity == handle.map(ObjectIdentifier.init) else { return nil }
+        return admission
+    }
+
+    func needsQueuedTurnClaim(_ event: ClientEvent) -> Bool {
+        pendingQueuedActivationMatches(event) || queuedTurnAdmission(for: event) != nil
+            || unprovenQueuedOwner(for: event) != nil
+    }
+
+    private func unprovenQueuedOwner(for event: ClientEvent) -> UInt64? {
+        let turnID: UInt64
+        switch event {
+        case let .turnRecoveryState(snapshot) where snapshot.state == .running:
+            guard canonicalSessionID(snapshot.sessionId) == canonicalSessionID(model.activeSessionId) else { return nil }
+            turnID = snapshot.turnId
+        case let .turnStarted(id?): turnID = id
+        default: return nil
+        }
+        guard !isSideChat, !model.sessionTransitionPending, currentTurnId != turnID,
+              acceptedQueuedTurns.values.contains(where: { queuedAdmissionIsCurrent($0) }) else { return nil }
+        return turnID
+    }
+
+    /// A retained member can prove its coalesced executor even if a crash
+    /// happened between retiring individual member IDs on the client.
+    private func expandQueuedOwners(_ facts: [MobileTurnAdmissionDto], sessionID: String,
+                                    epoch: UInt64, engine: ObjectIdentifier?) async throws {
+        for fact in facts where fact.admitted {
+            guard let snapshot = fact.recovery, canonicalSessionID(snapshot.sessionId) == sessionID,
+                  snapshot.turnId != fact.turnId,
+                  let member = acceptedQueuedTurns[fact.turnId], queuedAdmissionIsCurrent(member),
+                  acceptedQueuedTurns[snapshot.turnId] == nil else { continue }
+            let state = try await durableTurns?.state(sessionID: sessionID)
+            guard sessionEpoch == epoch, handle.map(ObjectIdentifier.init) == engine,
+                  queuedAdmissionIsCurrent(member) else { throw CancellationError() }
+            // An exact active correlator can be reused; otherwise persist
+            // the owner before a later callback can claim its raw output.
+            if state?.isActive != true || state?.turnID != snapshot.turnId {
+                try await durableTurns?.adoptQueuedOwner(sessionID: sessionID, memberTurnID: fact.turnId,
+                                                        ownerTurnID: snapshot.turnId)
+            }
+            guard sessionEpoch == epoch, handle.map(ObjectIdentifier.init) == engine,
+                  queuedAdmissionIsCurrent(member) else { throw CancellationError() }
+            acceptedQueuedTurns[snapshot.turnId] = QueuedTurnAdmission(sessionID: sessionID, epoch: epoch,
+                engineIdentity: engine, turnID: snapshot.turnId, originalPrompt: nil)
+        }
+    }
+
+    private func pendingQueuedActivationMatches(_ event: ClientEvent) -> Bool {
+        guard let id = queuedActivationTurnID, queuedActivationEpoch == sessionEpoch,
+              queuedActivationTask != nil else { return false }
+        switch event {
+        case let .turnRecoveryState(snapshot):
+            return snapshot.state == .running && snapshot.turnId == id
+                && canonicalSessionID(snapshot.sessionId) == canonicalSessionID(model.activeSessionId)
+        case let .turnStarted(turnID?): return turnID == id
+        default: return false
+        }
+    }
+
+    /// The listener pauses its FIFO here so the new durable correlator exists
+    /// before any output or replay cursor from this executor is acknowledged.
+    func prepareQueuedTurnClaim(_ event: ClientEvent) async -> Bool {
+        if pendingQueuedActivationMatches(event), let task = queuedActivationTask {
+            let id = queuedActivationTurnID, epoch = sessionEpoch
+            let claimed = await task.value
+            return claimed && sessionEpoch == epoch && currentTurnId == id
+        }
+        let claimEpoch = sessionEpoch
+        queuedTurnClaimPending = true
+        defer { if sessionEpoch == claimEpoch { queuedTurnClaimPending = false } }
+        if queuedTurnAdmission(for: event) == nil, let ownerID = unprovenQueuedOwner(for: event) {
+            unownedExecutorObserved = true
+            let epoch = sessionEpoch, engine = handle.map(ObjectIdentifier.init)
+            let owner = canonicalSessionID(model.activeSessionId)
+            do {
+                let ids = acceptedQueuedTurns.values.filter { queuedAdmissionIsCurrent($0) }.map(\.turnID)
+                guard let facts = try await queryTurnAdmissions(sessionID: owner, turnIDs: ids) else { return false }
+                try await expandQueuedOwners(facts, sessionID: owner, epoch: epoch, engine: engine)
+                guard sessionEpoch == epoch, handle.map(ObjectIdentifier.init) == engine,
+                      acceptedQueuedTurns[ownerID] != nil else { return false }
+            } catch {
+                if sessionEpoch == epoch, handle.map(ObjectIdentifier.init) == engine {
+                    model.error = ConversationError(kind: .host, message: "The queued executor identity could not be verified: \(error)")
+                }
+                return false
+            }
+        }
+        guard let admission = queuedTurnAdmission(for: event) else { return false }
+        unownedExecutorObserved = true
+        let visiblePredecessor = currentTurnId
+        var persistedPredecessor: UInt64?
+        if visiblePredecessor == nil {
+            let cleanup = durableCleanupTasks.filter { durableCheckpointOwners[$0.key] == admission.sessionID }
+            for task in cleanup.values { await task.value }
+            do {
+                if let record = try await durableTurns?.state(sessionID: admission.sessionID),
+                   record.isActive, record.turnID != admission.turnID { persistedPredecessor = record.turnID }
+            } catch {
+                if queuedAdmissionIsCurrent(admission) {
+                    model.error = ConversationError(kind: .host, message: "The queued turn checkpoint could not be read: \(error)")
+                }
+                return false
+            }
+        }
+        guard queuedAdmissionIsCurrent(admission), currentTurnId == visiblePredecessor else { return false }
+        if let predecessor = visiblePredecessor ?? persistedPredecessor {
+            await waitForNativeSubmission(turnID: predecessor, epoch: admission.epoch)
+            do {
+                guard let facts = try await queryTurnAdmissions(sessionID: admission.sessionID,
+                    turnIDs: [predecessor, admission.turnID]),
+                      queuedAdmissionIsCurrent(admission),
+                      let previous = facts.first(where: { $0.turnId == predecessor }),
+                      previous.settled || !previous.admitted || previous.queued,
+                      let next = facts.first(where: { $0.turnId == admission.turnID }), next.admitted,
+                      next.recovery?.turnId == admission.turnID else { return false }
+                if previous.queued {
+                    let original = activeConversationTurnToken.flatMap { originalPrompts[$0]?.item }
+                    try await durableTurns?.deferActive(turnID: predecessor, sessionID: admission.sessionID)
+                    guard queuedAdmissionIsCurrent(admission), currentTurnId == visiblePredecessor else { return false }
+                    acceptedQueuedTurns[predecessor] = QueuedTurnAdmission(sessionID: admission.sessionID,
+                        epoch: admission.epoch, engineIdentity: admission.engineIdentity, turnID: predecessor,
+                        originalPrompt: original)
+                    durableCheckpointOwners.removeValue(forKey: predecessor)
+                } else if !previous.admitted, let token = activeConversationTurnToken {
+                    settlePromptRejectedBeforeAdmission(token)
+                }
+                let state = previous.recovery?.state ?? .cancelled
+                if !previous.queued {
+                    if cancellationOperation?.turnId == predecessor { terminalRecoveryStates[predecessor] = state }
+                    durableCheckpointOwners[predecessor] = admission.sessionID
+                    clearDurableCheckpoint(predecessor)
+                }
+                unresolvedRecoveryTurnID = nil
+                needsDurableForegroundRecoveryTurnID = nil
+                model.hasUnresolvedTurnRecovery = false
+                model.hasInactiveDurableRecovery = false
+                if visiblePredecessor != nil {
+                    if previous.queued { settleCorrelatedMainRun() }
+                    else { finishActiveRun(state == .cancelled ? .cancelled : .completed) }
+                    clearTurnPointers(keepEpoch: false)
+                }
+            } catch {
+                if queuedAdmissionIsCurrent(admission) {
+                    model.error = ConversationError(kind: .host, message: "The queued turn owner could not be verified: \(error)")
+                }
+                return false
+            }
+        }
+        return await activateQueuedTurn(admission)
+    }
+
+    private func queuedAdmissionIsCurrent(_ admission: QueuedTurnAdmission) -> Bool {
+        sessionEpoch == admission.epoch && !model.sessionTransitionPending
+            && (canonicalSessionID(model.activeSessionId) == admission.sessionID
+                || (model.activeSessionId.isEmpty && !hasConfirmedSessionState))
+            && admission.engineIdentity == handle.map(ObjectIdentifier.init)
+            && acceptedQueuedTurns[admission.turnID]?.epoch == admission.epoch
+            && acceptedQueuedTurns[admission.turnID]?.sessionID == admission.sessionID
+    }
+
+    private func queryTurnAdmissions(sessionID: String, turnIDs: [UInt64]) async throws -> [MobileTurnAdmissionDto]? {
+        if let testTurnAdmissionQuery { return try await testTurnAdmissionQuery(sessionID, turnIDs) }
+        if testCommandSubmitter != nil { return nil }
+        let engine = try await ensureHandle()
+        let facts = try await engine.queryTurnAdmissions(expectedSessionId: sessionID, turnIds: turnIDs)
+        guard handle === engine else { throw CancellationError() }
+        return facts
+    }
+
+    private func waitForNativeSubmission(turnID: UInt64, epoch: UInt64) async {
+        let key = NativeSubmissionKey(turnID: turnID, epoch: epoch)
+        guard nativeSubmissionsInFlight.contains(key) else { return }
+        await withCheckedContinuation { nativeSubmissionWaiters[key, default: []].append($0) }
+    }
+
+    private func nativeSubmissionFinished(_ command: ClientCommand, epoch: UInt64) {
+        guard case let .sendPrompt(_, _, _, turnID?, _) = command else { return }
+        let key = NativeSubmissionKey(turnID: turnID, epoch: epoch)
+        nativeSubmissionsInFlight.remove(key)
+        for waiter in nativeSubmissionWaiters.removeValue(forKey: key) ?? [] { waiter.resume() }
+    }
+
+    private func retireQueuedID(_ turnID: UInt64, sessionID: String) {
+        guard let durableTurns else { return }
+        let key = QueuedAdmissionKey(sessionID: sessionID, turnID: turnID)
+        guard queuedAdmissionRetirements[key] == nil else { return }
+        let task = Task { @MainActor [self] in
+            do {
+                try await durableTurns.removeQueued(turnID: turnID, sessionID: sessionID)
+                queuedAdmissionRetirementFailures.remove(key)
+            } catch {
+                queuedAdmissionRetirementFailures.insert(key)
+                if canonicalSessionID(model.activeSessionId) == sessionID {
+                    model.error = ConversationError(kind: .host, message: "The queued conversation checkpoint could not be retired: \(error)")
+                }
+            }
+            queuedAdmissionRetirements.removeValue(forKey: key)
+        }
+        queuedAdmissionRetirements[key] = task
+    }
+
+    private func retireQueuedAdmission(_ admission: QueuedTurnAdmission) {
+        guard queuedAdmissionIsCurrent(admission) else { return }
+        acceptedQueuedTurns.removeValue(forKey: admission.turnID)
+        unconfirmedQueuedTurnIDs.remove(admission.turnID)
+        retireQueuedID(admission.turnID, sessionID: admission.sessionID)
+    }
+
+    private func restoreRejectedQueuedPrompt(_ admission: QueuedTurnAdmission) {
+        if let row = pendingUserRowsByToken.removeValue(forKey: "client-turn:\(admission.turnID)") {
+            removeMessage(id: row)
+        }
+        if let original = admission.originalPrompt,
+           !model.unsentPrompts.contains(where: { $0.token == original.token }) {
+            model.unsentPrompts.append(original)
+        }
+    }
+
+    private func queuedSubmissionFinished(turnID: UInt64, sessionID: String, epoch: UInt64,
+                                          engineIdentity: ObjectIdentifier?, error: Error? = nil) {
+        guard sessionEpoch == epoch, handle.map(ObjectIdentifier.init) == engineIdentity,
+              canonicalSessionID(model.activeSessionId) == sessionID || model.activeSessionId.isEmpty else { return }
+        queuedSubmissionsInFlight.remove(turnID)
+        guard let admission = acceptedQueuedTurns[turnID], queuedAdmissionIsCurrent(admission) else { return }
+        if let error {
+            if let clientError = error as? ClientError, case let .Rejected(message) = clientError,
+               message == "turn_cancelled_before_admission" {
+                retireQueuedAdmission(admission)
+                restoreRejectedQueuedPrompt(admission)
+                model.error = ConversationError(kind: .host, message: "The queued prompt was not delivered. It remains in unsent prompts.")
+            } else {
+                unconfirmedQueuedTurnIDs.insert(turnID)
+                model.error = ConversationError(kind: .host, message: "The queued prompt delivery is unconfirmed: \(error)")
+            }
+        }
+        recoverQueuedTurnIfIdle(sessionID: sessionID)
+    }
+
+    private func activateQueuedTurn(_ admission: QueuedTurnAdmission) async -> Bool {
+        if let task = queuedActivationTask {
+            if queuedActivationTurnID == admission.turnID, queuedActivationEpoch == admission.epoch {
+                return await task.value
+            }
+            _ = await task.value
+        }
+        guard queuedAdmissionIsCurrent(admission), currentTurnId == nil else { return false }
+        let attempt = UUID()
+        queuedActivationTurnID = admission.turnID
+        queuedActivationEpoch = admission.epoch
+        queuedActivationAttempt = attempt
+        let task = Task { @MainActor [self] in
+            defer {
+                if queuedActivationAttempt == attempt {
+                    queuedActivationTask = nil
+                    queuedActivationTurnID = nil
+                    queuedActivationEpoch = nil
+                    queuedActivationAttempt = nil
+                }
+            }
+            return await performQueuedTurnActivation(admission)
+        }
+        queuedActivationTask = task
+        return await task.value
+    }
+
+    private func performQueuedTurnActivation(_ admission: QueuedTurnAdmission) async -> Bool {
+        guard queuedAdmissionIsCurrent(admission), currentTurnId == nil else { return false }
+        let turnID = admission.turnID
+        acceptedQueuedTurns.removeValue(forKey: turnID)
+        unconfirmedQueuedTurnIDs.remove(turnID)
+        let token = startTurnOwner(turnID)
+        unownedExecutorObserved = false
+        // The preceding terminal schedules the previous owner's clear. A
+        // new begin must wait for that exact clear rather than overwrite it.
+        let previousCleanup = durableCleanupTasks.filter { durableCheckpointOwners[$0.key] == admission.sessionID }
+        for task in previousCleanup.values { await task.value }
+        let queuedCleanup = queuedAdmissionRetirements.filter { $0.key.sessionID == admission.sessionID }
+        for task in queuedCleanup.values { await task.value }
+        guard activeConversationTurnToken == token, sessionEpoch == admission.epoch,
+              canonicalSessionID(model.activeSessionId) == admission.sessionID,
+              admission.engineIdentity == handle.map(ObjectIdentifier.init) else { return false }
+        do {
+            let existing = try await durableTurns?.state(sessionID: admission.sessionID)
+            guard activeConversationTurnToken == token, sessionEpoch == admission.epoch,
+                  admission.engineIdentity == handle.map(ObjectIdentifier.init) else { return false }
+            if existing?.isActive != true || existing?.turnID != turnID {
+                try await durableTurns?.begin(sessionID: admission.sessionID, turnID: turnID, workspace: model.workspaceState?.cwd)
+            }
+            guard activeConversationTurnToken == token, sessionEpoch == admission.epoch,
+                  canonicalSessionID(model.activeSessionId) == admission.sessionID,
+                  admission.engineIdentity == handle.map(ObjectIdentifier.init) else { return false }
+            durableCheckpointOwners[turnID] = admission.sessionID
+        } catch {
+            // The host has already accepted this input. Keep its live output
+            // and Stop owner, but do not claim that recovery was persisted.
+            guard activeConversationTurnToken == token, sessionEpoch == admission.epoch,
+                  canonicalSessionID(model.activeSessionId) == admission.sessionID,
+                  admission.engineIdentity == handle.map(ObjectIdentifier.init) else { return false }
+            durableUnconfirmedOwners.insert(admission.sessionID)
+            if let saved = try? await durableTurns?.state(sessionID: admission.sessionID),
+               saved.turnID == turnID, saved.isActive,
+               sessionEpoch == admission.epoch, admission.engineIdentity == handle.map(ObjectIdentifier.init) {
+                durableCheckpointOwners[turnID] = admission.sessionID
+            }
+            guard activeConversationTurnToken == token, sessionEpoch == admission.epoch,
+                  admission.engineIdentity == handle.map(ObjectIdentifier.init) else { return false }
+            model.error = ConversationError(kind: .host, message: "The queued conversation checkpoint could not be saved: \(error)")
+        }
+        guard activeConversationTurnToken == token, sessionEpoch == admission.epoch,
+              canonicalSessionID(model.activeSessionId) == admission.sessionID,
+              admission.engineIdentity == handle.map(ObjectIdentifier.init) else {
+            clearDurableCheckpoint(turnID)
+            return false
+        }
+        return true
+    }
+
+    /// SessionResumed enters this preparation before the callback FIFO can
+    /// apply any queued executor's Running/output envelopes. Only IDs live in
+    /// the client ledger; native checkpoints remain the prompt/image authority.
+    private func prepareDurableSessionRecovery(sessionID: String) {
+        guard let durableTurns else { return }
+        let owner = canonicalSessionID(sessionID), epoch = sessionEpoch
+        let attempt = UUID()
+        queuedRestoreAttempt = attempt
+        durableLookupPending = true
+        queuedAdmissionRestoreTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if sessionEpoch == epoch, canonicalSessionID(model.activeSessionId) == owner {
+                    queuedAdmissionRestoreTask = nil
+                    durableLookupPending = false
+                }
+            }
+            do {
+                guard let record = try await durableTurns.state(sessionID: owner) else {
+                    guard sessionEpoch == epoch, canonicalSessionID(model.activeSessionId) == owner else { return }
+                    preparedQueuedRestore = (attempt, owner, epoch, handle.map(ObjectIdentifier.init))
+                    return
+                }
+                let ids = Array(Set(record.queuedTurnIDs + (record.isActive ? [record.turnID] : [])))
+                let facts = try await queryTurnAdmissions(sessionID: owner, turnIDs: ids)
+                try Task.checkCancellation()
+                guard sessionEpoch == epoch, canonicalSessionID(model.activeSessionId) == owner else { return }
+                let engineIdentity = handle.map(ObjectIdentifier.init)
+                var queuedIDs = record.queuedTurnIDs
+                if record.isActive, let current = facts?.first(where: { $0.turnId == record.turnID }) {
+                    if current.queued || current.settled
+                        || (current.admitted && current.recovery.map { $0.turnId != record.turnID } == true) {
+                        try await durableTurns.deferActive(turnID: record.turnID, sessionID: owner)
+                        guard sessionEpoch == epoch, handle.map(ObjectIdentifier.init) == engineIdentity,
+                              canonicalSessionID(model.activeSessionId) == owner else { return }
+                        durableCheckpointOwners.removeValue(forKey: record.turnID)
+                        queuedIDs.insert(record.turnID, at: 0)
+                    } else if !current.admitted {
+                        durableCheckpointOwners[record.turnID] = owner
+                        clearDurableCheckpoint(record.turnID)
+                        await durableCleanupTasks[record.turnID]?.value
+                    }
+                } else if !record.isActive {
+                    // Confirm an earlier uncertain terminal handoff before a
+                    // successor begin is allowed to replace the active ID.
+                    durableCheckpointOwners[record.turnID] = owner
+                    clearDurableCheckpoint(record.turnID)
+                    await durableCleanupTasks[record.turnID]?.value
+                }
+                guard sessionEpoch == epoch, handle.map(ObjectIdentifier.init) == engineIdentity,
+                      canonicalSessionID(model.activeSessionId) == owner else { return }
+                for id in queuedIDs {
+                    let admission = QueuedTurnAdmission(sessionID: owner, epoch: epoch,
+                        engineIdentity: engineIdentity, turnID: id, originalPrompt: nil)
+                    acceptedQueuedTurns[id] = admission
+                    // An admitted successor can finish while this read is in
+                    // flight. Retain its ID until the listener has drained
+                    // Running/output/terminal callbacks after SessionResumed.
+                    if let fact = facts?.first(where: { $0.turnId == id }), !fact.admitted {
+                        retireQueuedAdmission(admission)
+                    }
+                }
+                if record.isActive, facts?.first(where: { $0.turnId == record.turnID })?.admitted == true,
+                   acceptedQueuedTurns[record.turnID] == nil {
+                    // A state read and the later native slot read can straddle
+                    // completion. Retain the exact known ID for its real FIFO
+                    // prefix without treating stale Running as live proof.
+                    acceptedQueuedTurns[record.turnID] = QueuedTurnAdmission(sessionID: owner, epoch: epoch,
+                        engineIdentity: engineIdentity, turnID: record.turnID, originalPrompt: nil)
+                }
+                if let facts {
+                    try await expandQueuedOwners(facts, sessionID: owner, epoch: epoch, engine: engineIdentity)
+                    if let live = facts.first(where: { $0.executorActive && !$0.settled }),
+                       let snapshot = live.recovery,
+                       !facts.contains(where: { $0.admitted && $0.recovery.map { $0.turnId != snapshot.turnId } == true }) {
+                        if record.isActive, record.turnID == snapshot.turnId,
+                           acceptedQueuedTurns[snapshot.turnId] == nil {
+                            acceptedQueuedTurns[snapshot.turnId] = QueuedTurnAdmission(sessionID: owner, epoch: epoch,
+                                engineIdentity: engineIdentity, turnID: snapshot.turnId, originalPrompt: nil)
+                        }
+                        if let admission = acceptedQueuedTurns[snapshot.turnId], currentTurnId == nil {
+                            let claimed = await activateQueuedTurn(admission)
+                            guard sessionEpoch == epoch, handle.map(ObjectIdentifier.init) == engineIdentity else { return }
+                            if claimed { adoptVerifiedLiveExecutor(snapshot) }
+                        }
+                    }
+                }
+                let removals = queuedAdmissionRetirements.filter { $0.key.sessionID == owner }
+                for task in removals.values { await task.value }
+                try Task.checkCancellation()
+                guard sessionEpoch == epoch, handle.map(ObjectIdentifier.init) == engineIdentity,
+                      canonicalSessionID(model.activeSessionId) == owner else { return }
+                preparedQueuedRestore = (attempt, owner, epoch, engineIdentity)
+            } catch {
+                guard sessionEpoch == epoch, canonicalSessionID(model.activeSessionId) == owner else { return }
+                durableUnconfirmedOwners.insert(owner)
+                model.error = ConversationError(kind: .host, message: "The queued conversation recovery record could not be verified: \(error)")
+            }
+        }
+    }
+
+    func waitForQueuedAdmissionRestore() async -> UUID? {
+        let attempt = queuedRestoreAttempt
+        await queuedAdmissionRestoreTask?.value
+        return attempt
+    }
+
+    /// Called only after the SessionResumed suffix has drained. Live queued
+    /// claims have already awaited their ledger begin inside the FIFO gate.
+    func finishQueuedAdmissionRestore(_ attempt: UUID?) {
+        guard let attempt, let prepared = preparedQueuedRestore, prepared.attempt == attempt,
+              queuedRestoreAttempt == attempt else { return }
+        preparedQueuedRestore = nil
+        guard sessionEpoch == prepared.epoch,
+              canonicalSessionID(model.activeSessionId) == prepared.sessionID,
+              handle.map(ObjectIdentifier.init) == prepared.engine,
+              currentTurnId == nil, !model.sessionTransitionPending else { return }
+        reattachDurableTurnIfNeeded(sessionID: prepared.sessionID)
+    }
+
+    private func queuedRecoveryIDs(sessionID: String) async throws -> [UInt64] {
+        let persisted = try await durableTurns?.queuedTurnIDs(sessionID: sessionID) ?? []
+        let remaining = acceptedQueuedTurns.values.filter {
+            $0.sessionID == sessionID && queuedAdmissionIsCurrent($0) && !persisted.contains($0.turnID)
+        }.map(\.turnID).sorted()
+        return persisted + remaining
+    }
+
+    private func recoverQueuedTurnIfIdle(sessionID: String) {
+        let owner = canonicalSessionID(sessionID), epoch = sessionEpoch
+        guard !isSideChat, currentTurnId == nil, !model.isCancelling,
+              !model.sessionTransitionPending, queuedAdmissionRestoreTask == nil,
+              queuedRecoveryTask == nil, durableRecoveryTask == nil,
+              !queuedTurnClaimPending,
+              acceptedQueuedTurns.values.contains(where: { $0.sessionID == owner }),
+              !acceptedQueuedTurns.values.contains(where: { $0.sessionID == owner && queuedSubmissionsInFlight.contains($0.turnID) }) else { return }
+        queuedRecoveryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { if sessionEpoch == epoch { queuedRecoveryTask = nil } }
+            do {
+                let ids = try await queuedRecoveryIDs(sessionID: owner)
+                guard var facts = try await queryTurnAdmissions(sessionID: owner, turnIDs: ids) else { return }
+                try Task.checkCancellation()
+                guard sessionEpoch == epoch, canonicalSessionID(model.activeSessionId) == owner,
+                      currentTurnId == nil, !model.sessionTransitionPending else { return }
+                let engineIdentity = handle.map(ObjectIdentifier.init)
+                try await expandQueuedOwners(facts, sessionID: owner, epoch: epoch, engine: engineIdentity)
+                let expandedIDs = try await queuedRecoveryIDs(sessionID: owner)
+                if expandedIDs != ids {
+                    guard let expanded = try await queryTurnAdmissions(sessionID: owner, turnIDs: expandedIDs) else { return }
+                    facts = expanded
+                }
+                guard sessionEpoch == epoch, handle.map(ObjectIdentifier.init) == engineIdentity,
+                      canonicalSessionID(model.activeSessionId) == owner, currentTurnId == nil else { return }
+                for fact in facts where fact.settled || !fact.admitted {
+                    if let admission = acceptedQueuedTurns[fact.turnId], queuedAdmissionIsCurrent(admission),
+                       !queuedSubmissionsInFlight.contains(fact.turnId) {
+                        retireQueuedAdmission(admission)
+                        if !fact.admitted { restoreRejectedQueuedPrompt(admission) }
+                    }
+                }
+                let removals = queuedAdmissionRetirements.filter { $0.key.sessionID == owner }
+                for task in removals.values { await task.value }
+                guard sessionEpoch == epoch, currentTurnId == nil,
+                      handle.map(ObjectIdentifier.init) == engineIdentity,
+                      canonicalSessionID(model.activeSessionId) == owner,
+                      !model.sessionTransitionPending else { return }
+                // A previously claimed cold executor blocks the native queue
+                // barrier. Restore that exact persisted ID before ordinary
+                // private pending inputs, even if those were admitted earlier.
+                if let fact = facts.first(where: { $0.admitted && !$0.settled && !$0.queued
+                    && ($0.recovery == nil || $0.recovery?.turnId == $0.turnId)
+                    && acceptedQueuedTurns[$0.turnId] != nil }),
+                   let admission = acceptedQueuedTurns[fact.turnId], queuedAdmissionIsCurrent(admission) {
+                    queuedTurnClaimPending = true
+                    let claimed = await activateQueuedTurn(admission)
+                    queuedTurnClaimPending = false
+                    if claimed, sessionEpoch == epoch, handle.map(ObjectIdentifier.init) == engineIdentity,
+                       canonicalSessionID(model.activeSessionId) == owner {
+                        if fact.executorActive, let snapshot = fact.recovery, snapshot.turnId == fact.turnId {
+                            adoptVerifiedLiveExecutor(snapshot)
+                        } else {
+                            reattachDurableTurnIfNeeded(sessionID: owner, expectedTurnID: fact.turnId)
+                        }
+                    }
+                } else if let pending = facts.first(where: { $0.admitted && !$0.settled && $0.queued
+                    && acceptedQueuedTurns[$0.turnId] != nil }) {
+                    // Rebuild a marker after uncertain native publication; the
+                    // existing native ID makes this idempotent, never a resend.
+                    try await submitCommand(.resumeTurn(turnId: pending.turnId), expectedSessionEpoch: epoch)
+                }
+            } catch {
+                if sessionEpoch == epoch, canonicalSessionID(model.activeSessionId) == owner {
+                    model.error = ConversationError(kind: .host, message: "The queued conversation delivery could not be repaired: \(error)")
+                }
+            }
+        }
+    }
+
+    private func adoptVerifiedLiveExecutor(_ snapshot: TurnRecoverySnapshotDto) {
+        guard currentTurnId == snapshot.turnId,
+              canonicalSessionID(snapshot.sessionId) == canonicalSessionID(model.activeSessionId),
+              !Self.isTerminalRecoveryState(snapshot.state) else { return }
+        replayingTurnID = nil
+        retainedReplayCursor = nil
+        durableRecoveryPhase = nil
+        executorOwnedTurnID = snapshot.turnId
+        unresolvedRecoveryTurnID = snapshot.state == .waitingForUser ? snapshot.turnId : nil
+        needsDurableForegroundRecoveryTurnID = nil
+        model.hasUnresolvedTurnRecovery = unresolvedRecoveryTurnID != nil
+        model.hasInactiveDurableRecovery = false
+        model.streaming = true
+        unownedExecutorObserved = false
     }
 
     func makeSideChat(requestID: String) async throws -> EngineConversationSource {
@@ -1662,6 +2267,7 @@ final class EngineConversationSource: ConversationSource {
         Self.turnLog.debug(
             "cancel returned turn=\(operation.turnId, privacy: .public)"
         )
+        recoverQueuedTurnIfIdle(sessionID: operation.sessionID)
     }
 
     private func awaitCancellation(_ turnId: UInt64) async throws {
@@ -1686,7 +2292,9 @@ final class EngineConversationSource: ConversationSource {
         guard let durableTurns, let owner = durableCheckpointOwners[turnID],
               durableCleanupPending[owner]?.contains(turnID) != true else { return }
         durableCleanupPending[owner, default: []].insert(turnID)
+        let queuedCleanup = queuedAdmissionRetirements.filter { $0.key.sessionID == owner }
         let cleanup = Task { @MainActor [self] in
+            for task in queuedCleanup.values { await task.value }
             do {
                 try await durableTurns.clear(turnID: turnID, sessionID: owner)
                 durableCheckpointOwners.removeValue(forKey: turnID)
@@ -1702,12 +2310,24 @@ final class EngineConversationSource: ConversationSource {
             durableCleanupPending[owner]?.remove(turnID)
             if durableCleanupPending[owner]?.isEmpty == true { durableCleanupPending.removeValue(forKey: owner) }
             durableCleanupTasks.removeValue(forKey: turnID)
+            recoverQueuedTurnIfIdle(sessionID: owner)
         }
         durableCleanupTasks[turnID] = cleanup
     }
 
     private func durableOwnerIsBlocked(_ owner: String) -> Bool {
         guard !owner.isEmpty else { return false }
+        let failedQueued = queuedAdmissionRetirementFailures.filter { $0.sessionID == owner }
+        for key in failedQueued { retireQueuedID(key.turnID, sessionID: owner) }
+        if queuedAdmissionRetirements.keys.contains(where: { $0.sessionID == owner })
+            || !failedQueued.isEmpty {
+            model.error = ConversationError(kind: .host, message: "The previous queued checkpoint is still being retired.")
+            return true
+        }
+        if acceptedQueuedTurns.values.contains(where: { $0.sessionID == owner && unconfirmedQueuedTurnIDs.contains($0.turnID) }) {
+            model.error = ConversationError(kind: .host, message: "The queued prompt delivery is unconfirmed. Reopen the conversation to recover it.")
+            return true
+        }
         if durableUnconfirmedOwners.contains(owner) {
             model.error = ConversationError(kind: .host, message: "The previous prompt delivery is unconfirmed. Reopen the conversation to recover it.")
             return true
@@ -1722,6 +2342,11 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func startPrompt(_ prompt: TurnPrompt) -> ConversationTurnToken {
+        startTurnOwner(prompt.turnId)
+    }
+
+    private func startTurnOwner(_ turnID: UInt64) -> ConversationTurnToken {
+        unownedExecutorObserved = false
         model.notice = nil
         model.streaming = true
         model.hasInactiveDurableRecovery = false
@@ -1736,16 +2361,16 @@ final class EngineConversationSource: ConversationSource {
         streamingItemIndex = nil
         currentResponseMessageIDs = []
         replayProjectionState = nil
-        currentTurnId = prompt.turnId
-        executorOwnedTurnID = prompt.turnId
+        currentTurnId = turnID
+        executorOwnedTurnID = turnID
         activeTurnEpoch = sessionEpoch
         let token = ConversationTurnToken(
-            clientTurnId: prompt.turnId,
+            clientTurnId: turnID,
             sessionEpoch: sessionEpoch
         )
         model.activeTurnToken = token
         Self.turnLog.debug(
-            "prompt submit turn=\(prompt.turnId, privacy: .public) epoch=\(self.sessionEpoch, privacy: .public)"
+            "prompt submit turn=\(turnID, privacy: .public) epoch=\(self.sessionEpoch, privacy: .public)"
         )
 
         return token
@@ -1836,18 +2461,24 @@ final class EngineConversationSource: ConversationSource {
                               !model.sessionTransitionPending, !sideEnded, !sideClosing,
                               let token = admit() else { return false }
                         admittedToken = token
+                        if case let .sendPrompt(_, _, _, turnID?, _) = command {
+                            nativeSubmissionsInFlight.insert(NativeSubmissionKey(turnID: turnID, epoch: epoch))
+                        }
                         continuation.resume(returning: token)
                         return true
                     }
+                    nativeSubmissionFinished(command, epoch: epoch)
                     if let token = admittedToken { onSuccess(token) }
                 } catch {
+                    nativeSubmissionFinished(command, epoch: epoch)
                     if let token = admittedToken {
                         onFailure(token, error)
                         #if DEBUG
                         promptFailureHandledForTesting?(token)
                         #endif
                     } else {
-                        if !(error is CancellationError) {
+                        if epoch == sessionEpoch, generation == promptAdmissionGeneration,
+                           !(error is CancellationError) {
                             model.error = ConversationError(kind: .host, message: "\(error)")
                         }
                         continuation.resume(returning: nil)
@@ -1946,6 +2577,9 @@ final class EngineConversationSource: ConversationSource {
             !model.isCancelling,
             !model.slashCommandPending,
             !model.sessionTransitionPending,
+            !queuedTurnClaimPending,
+            queuedActivationTask == nil,
+            model.streaming || acceptedQueuedTurns.isEmpty,
             pauseAcknowledgements.isEmpty,
             unresolvedRecoveryTurnID == nil,
             !model.isSelectedAgentReadOnly
@@ -1991,6 +2625,11 @@ final class EngineConversationSource: ConversationSource {
         if durableOwnerIsBlocked(currentOwner) { return nil }
         if model.streaming {
             guard exactSlashCommand == nil, let token = activeConversationTurnToken else { return nil }
+            await waitForNativeSubmission(turnID: token.clientTurnId, epoch: token.sessionEpoch)
+            guard admissionEpoch == sessionEpoch, admissionGeneration == promptAdmissionGeneration,
+                  model.streaming, activeConversationTurnToken == token else { return nil }
+            let queuedEngine = handle.map(ObjectIdentifier.init)
+            var queuedOwner = currentOwner
             if let durableTurns {
                 do {
                     #if DEBUG
@@ -1999,17 +2638,41 @@ final class EngineConversationSource: ConversationSource {
                     guard let record = try await durableTurns.load(), record.turnID == token.clientTurnId else {
                         throw DurableConversationRecoveryError.invalidStore
                     }
+                    queuedOwner = canonicalSessionID(record.sessionID)
                     try Task.checkCancellation()
-                    guard admissionGeneration == promptAdmissionGeneration, !model.isCancelling,
+                    guard admissionEpoch == sessionEpoch, admissionGeneration == promptAdmissionGeneration,
+                          queuedEngine == handle.map(ObjectIdentifier.init), !model.isCancelling,
                           model.streaming, activeConversationTurnToken == token else { return nil }
                 } catch {
-                    if !(error is CancellationError) { model.error = ConversationError(kind: .host, message: "\(error)") }
+                    if admissionEpoch == sessionEpoch, admissionGeneration == promptAdmissionGeneration,
+                       queuedEngine == handle.map(ObjectIdentifier.init), activeConversationTurnToken == token,
+                       !(error is CancellationError) { model.error = ConversationError(kind: .host, message: "\(error)") }
                     return nil
                 }
             }
             let queuedTurnID = nextTurnId
             nextTurnId = nextTurnId == UInt64.max ? 1 : nextTurnId + 1
-            return await dispatchPrompt(.sendPrompt(
+            do {
+                try await durableTurns?.enqueue(sessionID: queuedOwner, ownerTurnID: token.clientTurnId, turnID: queuedTurnID)
+                try Task.checkCancellation()
+                guard admissionEpoch == sessionEpoch, admissionGeneration == promptAdmissionGeneration,
+                      model.streaming, activeConversationTurnToken == token,
+                      queuedEngine == handle.map(ObjectIdentifier.init) else {
+                    retireQueuedID(queuedTurnID, sessionID: queuedOwner)
+                    return nil
+                }
+            } catch {
+                // No FFI handoff occurred, even if the ledger publication was
+                // uncertain. Retiring this exact pending ID cannot replay it.
+                retireQueuedID(queuedTurnID, sessionID: queuedOwner)
+                if admissionEpoch == sessionEpoch, admissionGeneration == promptAdmissionGeneration,
+                   queuedEngine == handle.map(ObjectIdentifier.init), activeConversationTurnToken == token,
+                   !(error is CancellationError) {
+                    model.error = ConversationError(kind: .host, message: "\(error)")
+                }
+                return nil
+            }
+            let sent = await dispatchPrompt(.sendPrompt(
                 text: ClientTextDto(codeUnits: promptSourceCodeUnits), promptMode: promptMode,
                 images: images, turnId: queuedTurnID,
                 visualizationContext: chip.map { VisualizationRefDto(id: $0.id, revision: $0.revision) }),
@@ -2025,11 +2688,28 @@ final class EngineConversationSource: ConversationSource {
                     queued.visualizationContext = chip
                     appendMessage(queued)
                     pendingUserRowsByToken["client-turn:\(queuedTurnID)"] = queued.id
+                    acceptedQueuedTurns[queuedTurnID] = QueuedTurnAdmission(
+                        sessionID: queuedOwner,
+                        epoch: sessionEpoch,
+                        engineIdentity: queuedEngine,
+                        turnID: queuedTurnID,
+                        originalPrompt: ConversationUnsentPrompt(
+                            token: ConversationTurnToken(clientTurnId: queuedTurnID, sessionEpoch: admissionEpoch),
+                            sessionID: queuedOwner, sideID: nil, text: text, sourceCodeUnits: sourceCodeUnits,
+                            images: images, visualizationContext: chip, mayRestoreCapturedDraft: false,
+                            chipRevisionAtCapture: chipRevision, chipRevisionAfterAdmission: model.visualizationChipRevision)
+                    )
+                    queuedSubmissionsInFlight.insert(queuedTurnID)
                     return token
-                }, onFailure: { [self] token, error in
-                    guard activeConversationTurnToken == token else { return }
-                    model.error = ConversationError(kind: .host, message: "\(error)")
+                }, onSuccess: { [self] _ in
+                    queuedSubmissionFinished(turnID: queuedTurnID, sessionID: queuedOwner, epoch: admissionEpoch,
+                        engineIdentity: queuedEngine)
+                }, onFailure: { [self] _, error in
+                    queuedSubmissionFinished(turnID: queuedTurnID, sessionID: queuedOwner, epoch: admissionEpoch,
+                        engineIdentity: queuedEngine, error: error)
                 })
+            if sent == nil { retireQueuedID(queuedTurnID, sessionID: queuedOwner) }
+            return sent
         }
 
         let turnId = nextTurnId
@@ -2422,10 +3102,12 @@ final class EngineConversationSource: ConversationSource {
         // expired. Reattach from the latest in-memory client cursor before
         // asking the engine to resume it. Cold sources enter this same path
         // from SessionResumed below.
-        guard let recoveryTurnID = needsDurableForegroundRecoveryTurnID,
-              unresolvedRecoveryTurnID == recoveryTurnID
-        else { return }
-        reattachDurableTurnIfNeeded(sessionID: model.activeSessionId, expectedTurnID: recoveryTurnID)
+        if let recoveryTurnID = needsDurableForegroundRecoveryTurnID,
+           unresolvedRecoveryTurnID == recoveryTurnID {
+            reattachDurableTurnIfNeeded(sessionID: model.activeSessionId, expectedTurnID: recoveryTurnID)
+        } else {
+            recoverQueuedTurnIfIdle(sessionID: model.activeSessionId)
+        }
     }
 
     func providerCatalog() async throws -> [ProviderCatalogEntry] {
@@ -3894,6 +4576,15 @@ final class EngineConversationSource: ConversationSource {
         }
         externalEventHandler?(event)
         switch event {
+        case .textDelta, .thinkingDelta, .toolUseStarted, .turnEnded, .error:
+            if acceptTurnEvent(event), let index = activeRunItemIndex,
+               model.items.indices.contains(index), case let .run(run) = model.items[index], run.retry != nil {
+                updateActiveRun { $0.retry = nil }
+                model.statusLine = nil
+            }
+        default: break
+        }
+        switch event {
         case .turnStarted:
             guard acceptTurnEvent(event) else { return }
             model.promptSuggestion = nil
@@ -4414,7 +5105,13 @@ final class EngineConversationSource: ConversationSource {
 
         case let .userTranscriptRowIdentity(rowToken, uuid):
             guard rowToken.hasPrefix("client-turn:"), let identity = UUID(uuidString: uuid) else { return }
-            let tokens = rowToken.dropFirst("client-turn:".count).split(separator: ",").map { "client-turn:" + $0 }
+            let memberIDs = rowToken.dropFirst("client-turn:".count).split(separator: ",")
+            for member in memberIDs {
+                if let turnID = UInt64(member), let admission = acceptedQueuedTurns[turnID] {
+                    retireQueuedAdmission(admission)
+                }
+            }
+            let tokens = memberIDs.map { "client-turn:" + $0 }
             let rows = Set(tokens.compactMap { pendingUserRowsByToken.removeValue(forKey: $0) })
             bindTranscriptUUID(identity, to: rows)
         case let .assistantBlockStart(blockKey):
@@ -4594,6 +5291,23 @@ final class EngineConversationSource: ConversationSource {
 
         case let .turnRecoveryState(snapshot):
             guard snapshot.sessionId == model.activeSessionId else { return }
+            if Self.isTerminalRecoveryState(snapshot.state),
+               let queued = acceptedQueuedTurns[snapshot.turnId],
+               queued.sessionID == canonicalSessionID(snapshot.sessionId),
+               queued.epoch == sessionEpoch,
+               queued.engineIdentity == handle.map(ObjectIdentifier.init) {
+                // A queued envelope can be cancelled before it becomes a
+                // separate executor or appends a user row. Its terminal proof
+                // retires this admission even though it is not the live turn.
+                retireQueuedAdmission(queued)
+            }
+            if Self.isTerminalRecoveryState(snapshot.state),
+               let operation = cancellationOperation,
+               operation.turnId == snapshot.turnId, operation.epoch == sessionEpoch,
+               operation.sessionID == canonicalSessionID(snapshot.sessionId),
+               operation.engineIdentity == handle.map(ObjectIdentifier.init) {
+                terminalRecoveryStates[snapshot.turnId] = snapshot.state
+            }
             let isCorrelated = snapshot.turnId == currentTurnId
                 || snapshot.turnId == unresolvedRecoveryTurnID
                 || snapshot.turnId == replayingTurnID
@@ -4610,6 +5324,7 @@ final class EngineConversationSource: ConversationSource {
                 // for the correlated turn; a delayed state from an older
                 // session must not unlock the composer.
                 guard isCorrelated else { return }
+                unownedExecutorObserved = false
                 let isAttachSnapshot: Bool = {
                     guard case let .attaching(turnID) = durableRecoveryPhase else {
                         return false
@@ -4811,8 +5526,15 @@ final class EngineConversationSource: ConversationSource {
             // content a second time. Nonterminal recovery keeps the retained
             // suffix so partial work remains visible.
             if replayingTurnID == turnId,
-               replayProjectionState.map({ !Self.isTerminalRecoveryState($0) }) ?? true {
+               replayProjectionState.map({ !Self.isTerminalRecoveryState($0) }) ?? true,
+               case let .attaching(attachingID) = durableRecoveryPhase, attachingID == turnId,
+               var cursor = retainedReplayCursor,
+               cursor.sessionID == canonicalSessionID(sessionId),
+               cursor.token == activeConversationTurnToken,
+               sequence > cursor.sequence {
                 applyRetainedTurnEvent(eventJson, turnID: turnId)
+                cursor.sequence = sequence
+                retainedReplayCursor = cursor
             }
             durableTurns?.updateSequence(turnID: turnId, sequence: sequence)
 
@@ -5101,7 +5823,7 @@ final class EngineConversationSource: ConversationSource {
             model.sessionRefreshRevision &+= 1
             refreshSessionAgentsAfterTransition()
             refreshBackgroundTasks()
-            reattachDurableTurnIfNeeded(sessionID: sessionId)
+            prepareDurableSessionRecovery(sessionID: sessionId)
 
         case .sessionEnded:
             model.promptSuggestion = nil
@@ -5281,10 +6003,21 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func waitForDurableCleanupForTesting() async {
+        while let pending = queuedAdmissionRetirements.values.first { await pending.value }
         while let pending = durableCleanupTasks.values.first { await pending.value }
     }
 
-    func waitForDurableRecoveryForTesting() async { await durableRecoveryTask?.value }
+    func waitForDurableRecoveryForTesting() async {
+        let attempt = await waitForQueuedAdmissionRestore()
+        finishQueuedAdmissionRestore(attempt)
+        await durableRecoveryTask?.value
+        await queuedRecoveryTask?.value
+        await durableRecoveryTask?.value
+    }
+
+    func setTurnAdmissionQueryForTesting(_ query: ((String, [UInt64]) async throws -> [MobileTurnAdmissionDto])?) {
+        testTurnAdmissionQuery = query
+    }
 
     func cancelForTesting() {
         guard model.streaming, currentTurnId != nil else { return }
@@ -5347,8 +6080,8 @@ final class EngineConversationSource: ConversationSource {
     /// PR-4 item 1 guard: only append when a turn is actually in flight. After
     /// a cancel/turn-end we drop `streaming`/`streamingIndex`, so a late delta
     /// arriving from the engine must NOT resurrect or corrupt a message.
-    private func appendDelta(_ delta: String) -> UUID? {
-        guard model.streaming else { return nil }
+    private func appendDelta(_ delta: String, allowInactiveReplay: Bool = false) -> UUID? {
+        guard model.streaming || allowInactiveReplay else { return nil }
         if let i = streamingIndex,
            model.messages.indices.contains(i),
            activeRunEndsWithBoundary(for: model.messages[i].id) {
@@ -5647,6 +6380,7 @@ final class EngineConversationSource: ConversationSource {
                 images: attachedImages ? [] : uiMessageImages(from: dto.images)
             )
             message.sentAtMs = dto.sentAtMs
+            message.skillName = role == .user ? dto.skillName : nil
             message.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
             if role == .user, !attachedImages { message.visualizationContext = visualizationChip(from: dto) }
             segments.append(RenderedMessage(message: message, detail: detail))
@@ -6074,6 +6808,7 @@ final class EngineConversationSource: ConversationSource {
                 return false
             }
             let startsNewUserTurn = dto.role == "user"
+                && dto.skillName == nil
                 && !containsToolResult
                 && dto.blocks.contains { messageBlock(from: $0) != nil }
             if startsNewUserTurn {
@@ -6098,6 +6833,7 @@ final class EngineConversationSource: ConversationSource {
                     images: attachedImages ? [] : dtoImages
                 )
                 message.sentAtMs = dto.sentAtMs
+                message.skillName = role == .user ? dto.skillName : nil
                 message.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
                 if role == .user, !attachedImages { message.visualizationContext = visualizationChip(from: dto) }
                 attachedImages = true
@@ -6599,18 +7335,25 @@ final class EngineConversationSource: ConversationSource {
     private func reattachDurableTurnIfNeeded(sessionID: String, expectedTurnID: UInt64? = nil) {
         guard durableRecoveryTask == nil, let durableTurns else { return }
         let owner = canonicalSessionID(sessionID), epoch = sessionEpoch
+        let engineIdentity = handle.map(ObjectIdentifier.init)
         guard !owner.isEmpty else { return }
         durableLookupPending = true
         let recoveryTask = Task { @MainActor [weak self] in
             defer {
-                if self?.sessionEpoch == epoch {
+                if self?.sessionEpoch == epoch, self?.handle.map(ObjectIdentifier.init) == engineIdentity {
                     self?.replayingTurnID = nil
+                    self?.retainedReplayCursor = nil
                     self?.durableRecoveryPhase = nil
                     self?.durableRecoveryTask = nil
                     self?.durableLookupPending = false
+                    self?.recoverQueuedTurnIfIdle(sessionID: owner)
                 }
             }
             guard let self else { return }
+            let cleanup = self.durableCleanupTasks.filter { self.durableCheckpointOwners[$0.key] == owner }
+            for task in cleanup.values { await task.value }
+            guard self.sessionEpoch == epoch, self.handle.map(ObjectIdentifier.init) == engineIdentity,
+                  canonicalSessionID(self.model.activeSessionId) == owner else { return }
             let record: DurableConversationTurnRecord
             do {
                 guard let found = try await durableTurns.load() else {
@@ -6620,16 +7363,21 @@ final class EngineConversationSource: ConversationSource {
                 guard expectedTurnID == nil || found.turnID == expectedTurnID else { throw DurableConversationRecoveryError.invalidStore }
                 record = found
             } catch {
-                guard self.sessionEpoch == epoch, canonicalSessionID(self.model.activeSessionId) == owner else { return }
+                guard self.sessionEpoch == epoch, self.handle.map(ObjectIdentifier.init) == engineIdentity,
+                      canonicalSessionID(self.model.activeSessionId) == owner else { return }
                 self.durableUnconfirmedOwners.insert(owner)
                 self.model.error = ConversationError(kind: .host, message: "The conversation recovery record could not be read: \(error)")
                 return
             }
             guard self.sessionEpoch == epoch, canonicalSessionID(self.model.activeSessionId) == owner,
+                  self.handle.map(ObjectIdentifier.init) == engineIdentity,
                   canonicalSessionID(record.sessionID) == owner,
+                  self.currentTurnId == nil || self.currentTurnId == record.turnID,
                   self.reattachedTurnIDs.insert(record.turnID).inserted else { return }
             self.durableLookupPending = false
             self.durableCheckpointOwners[record.turnID] = owner
+            self.acceptedQueuedTurns.removeValue(forKey: record.turnID)
+            self.unconfirmedQueuedTurnIDs.remove(record.turnID)
             self.currentTurnId = record.turnID
             self.activeTurnEpoch = epoch
             self.unresolvedRecoveryTurnID = record.turnID
@@ -6640,26 +7388,73 @@ final class EngineConversationSource: ConversationSource {
             self.model.activeTurnToken = token
             self.model.streaming = false
             do {
+                if let facts = try await self.queryTurnAdmissions(sessionID: owner, turnIDs: [record.turnID]) {
+                    guard self.sessionEpoch == epoch, self.handle.map(ObjectIdentifier.init) == engineIdentity,
+                          canonicalSessionID(self.model.activeSessionId) == owner,
+                          self.currentTurnId == record.turnID else { return }
+                    if let fact = facts.first, fact.executorActive, !fact.settled,
+                       let snapshot = fact.recovery, snapshot.turnId == record.turnID {
+                        self.adoptVerifiedLiveExecutor(snapshot)
+                        return
+                    }
+                }
                 self.replayingTurnID = record.turnID
                 self.durableRecoveryPhase = .attaching(turnID: record.turnID)
                 self.replayProjectionState = nil
+                self.retainedReplayCursor = (owner, token, record.lastSequence)
                 try await self.submitCommand(.attachTurn(
                     turnId: record.turnID,
                     afterSequence: record.lastSequence
-                ))
+                ), expectedSessionEpoch: epoch)
                 // `onEvent` must return before the engine constructor or
                 // command submission can continue, so the callback only
                 // enqueues. Wait until the single listener pump has applied
                 // the recovery snapshot and every retained envelope before
                 // allowing live ResumeTurn events to be projected.
                 await self.listener?.waitUntilIdle()
+                try Task.checkCancellation()
+                guard self.sessionEpoch == epoch, self.handle.map(ObjectIdentifier.init) == engineIdentity,
+                      canonicalSessionID(self.model.activeSessionId) == owner,
+                      self.currentTurnId == record.turnID,
+                      self.replayProjectionState.map({ !Self.isTerminalRecoveryState($0) }) ?? true else { return }
+                if let facts = try await self.queryTurnAdmissions(sessionID: owner, turnIDs: [record.turnID]) {
+                    guard self.sessionEpoch == epoch, self.handle.map(ObjectIdentifier.init) == engineIdentity,
+                          canonicalSessionID(self.model.activeSessionId) == owner,
+                          self.currentTurnId == record.turnID else { return }
+                    if let fact = facts.first, fact.executorActive,
+                       let snapshot = fact.recovery, snapshot.turnId == record.turnID, !fact.settled {
+                        // Attach's Running snapshot alone can be a stale cold
+                        // checkpoint. Only this native slot proof establishes
+                        // a current executor, for which Resume would be busy.
+                        self.adoptVerifiedLiveExecutor(snapshot)
+                        return
+                    }
+                    if let fact = facts.first, fact.settled {
+                        await self.listener?.waitUntilIdle()
+                        guard self.sessionEpoch == epoch, self.handle.map(ObjectIdentifier.init) == engineIdentity,
+                              canonicalSessionID(self.model.activeSessionId) == owner,
+                              self.currentTurnId == record.turnID else { return }
+                        if let snapshot = fact.recovery, snapshot.turnId == record.turnID {
+                            self.apply(.turnRecoveryState(snapshot: snapshot))
+                        }
+                        return
+                    }
+                }
+                // Attach's retained suffix has drained. Resume emits live
+                // raw payloads followed by their acknowledgement envelopes;
+                // those envelopes must not project the raw payload twice.
+                self.replayingTurnID = nil
+                self.retainedReplayCursor = nil
                 self.durableRecoveryPhase = .resuming(turnID: record.turnID)
-                try await self.submitCommand(.resumeTurn(turnId: record.turnID))
+                try await self.submitCommand(.resumeTurn(turnId: record.turnID), expectedSessionEpoch: epoch)
                 // ResumeTurn emits its own recovery state before any new
                 // live envelopes. Drain that FIFO as well so a foreground
                 // call cannot race the first resumed delta.
                 await self.listener?.waitUntilIdle()
             } catch {
+                guard self.sessionEpoch == epoch, self.handle.map(ObjectIdentifier.init) == engineIdentity,
+                      canonicalSessionID(self.model.activeSessionId) == owner,
+                      self.currentTurnId == record.turnID else { return }
                 self.restoreFailedDurableRecovery(record: record, error: error)
             }
         }
@@ -6702,14 +7497,21 @@ final class EngineConversationSource: ConversationSource {
         else { return }
         switch type {
         case "text_delta":
-            if let text = object["text"] as? String {
-                apply(.textDelta(text: text.clientTextDto))
+            if let text = object["text"] as? String, !text.isEmpty {
+                // Retained text is a projection of the inactive owner, not a
+                // live stream or speech delta. Preserve its row boundaries
+                // without acquiring an execution lease for a new run.
+                _ = ensureActiveRun(status: .restored)
+                if let messageID = appendDelta(text, allowInactiveReplay: true) {
+                    appendTextBoundaryActivity(messageID: messageID)
+                }
             }
         case "tool_use_started":
             if let id = object["id"] as? String,
                let tool = object["tool"] as? String,
                let inputJSON = object["input_json"] as? String,
                let header = retainedToolHeader(object["header"]) {
+                _ = ensureActiveRun(status: .restored)
                 apply(.toolUseStarted(
                     id: id,
                     tool: tool,
@@ -6721,6 +7523,7 @@ final class EngineConversationSource: ConversationSource {
             if let id = object["id"] as? String,
                let tool = object["tool"] as? String,
                let elapsed = object["elapsed_ms"] as? NSNumber {
+                _ = ensureActiveRun(status: .restored)
                 apply(.toolHeartbeat(
                     id: id,
                     tool: tool,
@@ -6733,6 +7536,7 @@ final class EngineConversationSource: ConversationSource {
                let resultJSON = object["result_json"] as? String,
                let isError = object["is_error"] as? Bool,
                let display = retainedToolResultDisplay(object["display"]) {
+                _ = ensureActiveRun(status: .restored)
                 apply(.toolUseResult(
                     id: id,
                     tool: tool,
@@ -6750,13 +7554,17 @@ final class EngineConversationSource: ConversationSource {
         // `retainedTurnEventToReply` projected both.
         case "thinking_delta":
             if let thinking = object["thinking"] as? String {
+                if !thinking.isEmpty || object["signature"] is String {
+                    _ = ensureActiveRun(status: .restored)
+                }
                 apply(.thinkingDelta(
                     thinking: thinking,
                     signature: object["signature"] as? String
                 ))
             }
         case "system_notice":
-            if let message = object["message"] as? String {
+            if let message = object["message"] as? String, !message.isEmpty {
+                _ = ensureActiveRun(status: .restored)
                 apply(.systemNotice(
                     message: message.clientTextDto,
                     isError: object["is_error"] as? Bool ?? false

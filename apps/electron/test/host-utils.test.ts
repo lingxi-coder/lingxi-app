@@ -509,6 +509,19 @@ test('credential envelope keeps plugin secrets on the private channel', () => {
   assert.deepEqual(JSON.parse(buildCredentialEnvelope({ pluginSecrets: { 'weather@official': { API_KEY: 'plugin-secret' } } })), { plugin_secrets: { 'weather@official': { API_KEY: 'plugin-secret' } } });
 });
 
+test('deferred accounts retain their Host root and Broker domain without loading a snapshot or keys', () => {
+  for (const channel of ['development', 'production'] as const) {
+    const envelope = JSON.parse(buildCredentialEnvelope({
+      providerAccountHome: '/host/account-root', providerAccountBackend: `desktop-broker:${channel}`,
+    }));
+    assert.deepEqual(envelope, {
+      provider_account_home: '/host/account-root', provider_account_backend: `desktop-broker:${channel}`, plugin_secrets: {},
+    });
+    assert.equal('provider_accounts' in envelope, false);
+    assert.equal('provider_account_credentials' in envelope, false);
+  }
+});
+
 test('diagnostics redact secrets, strip control characters, truncate, and remain bounded', () => {
   const secret = 'sk-super-secret-value';
   const sanitized = sanitizeDiagnostic(`token=${secret}\u0001 ${'x'.repeat(3_000)}`, [secret]);

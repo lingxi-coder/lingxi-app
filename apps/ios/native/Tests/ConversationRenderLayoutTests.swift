@@ -2,6 +2,19 @@ import XCTest
 @testable import LingxiCode
 
 final class ConversationRenderLayoutTests: XCTestCase {
+    func testRepeatedSingleLineResultNeedsNoDisclosureButExtraContentDoes() {
+        func display(_ body: String? = "Ready", lines: UInt32 = 1, truncated: Bool = false) -> ConversationToolResultDisplay {
+            ConversationToolResultDisplay(headline: "Ready", headlineKind: nil, headlineArgs: [], diff: nil,
+                body: body, bodyLines: lines, bodyTruncated: truncated, collapsed: false)
+        }
+        XCTAssertFalse(display().hasExpandableContent)
+        XCTAssertFalse(display(nil, lines: 0).hasExpandableContent)
+        XCTAssertTrue(display("More detail").hasExpandableContent)
+        XCTAssertTrue(display("Ready\nMore detail", lines: 2).hasExpandableContent)
+        XCTAssertTrue(display(truncated: true).hasExpandableContent)
+        XCTAssertTrue(display(lines: 20).hasExpandableContent)
+    }
+
     func testCompletedQuestionAnswersRemainInTranscriptWithoutRunActivity() throws {
         var completed = run(id: "question-run", status: .completed)
         var ask = tool(id: "ask", name: "AskUserQuestion")
@@ -203,5 +216,19 @@ final class ConversationRenderLayoutTests: XCTestCase {
             inputSummary: nil,
             elapsedMs: nil
         )
+    }
+}
+
+final class ToolDenialPresentationTests: XCTestCase {
+    func testGateRefusalRetainsFullReasonAndSource() {
+        let reason = "Automatic approval review failed: Bad Request"
+        XCTAssertEqual(ToolDenialPresentation(failed: true, headline: "Failed", body: reason)?.reason, reason)
+        XCTAssertEqual(ToolDenialPresentation(failed: true, headline: "Failed", body: reason)?.autoReview, true)
+        XCTAssertEqual(ToolDenialPresentation(failed: true, headline: "Permission to use Bash has been denied.", body: nil)?.autoReview, false)
+    }
+    func testCommandFailuresAndSuccessfulQuotesStayOrdinaryResults() {
+        XCTAssertNil(ToolDenialPresentation(failed: false, headline: "Permission denied", body: nil))
+        XCTAssertNil(ToolDenialPresentation(failed: true, headline: "Failed", body: "bash: ./private: Permission denied"))
+        XCTAssertNil(ToolDenialPresentation(failed: true, headline: "Process exited with code 1", body: nil))
     }
 }

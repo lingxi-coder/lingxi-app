@@ -6,7 +6,7 @@ let root: string | undefined;
 
 /** Read fixtures from the locked runtime identity, never an adjacent checkout. */
 export function runtimePath(...segments: string[]): string {
-  root ??= execFileSync('python3', [
+  root ??= execFileSync(process.env.PYTHON || 'python3', [
     fileURLToPath(new URL('../../../scripts/lib/runtime_source.py', import.meta.url)),
     '--root',
   ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();

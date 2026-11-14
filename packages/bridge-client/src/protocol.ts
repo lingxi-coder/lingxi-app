@@ -863,6 +863,8 @@ export interface LoopWakeupDto {
 }
 
 export interface MessageDto {
+  /** Host-authored Skill companion identity; independent of document wording. */
+  skill_name?: string | null;
   transcript_uuid?: string | null;
   /** Original persisted message time in Unix milliseconds. */
   sent_at_ms?: number | null;

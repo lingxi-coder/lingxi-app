@@ -4,7 +4,6 @@ import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ClientEvent } from '@lingxi/bridge-client';
 import { emptyDesktopState, reduceDesktopEvent } from '../src/renderer/bridge/desktopState';
-import { secondsRemaining } from '../src/renderer/components/ApiRetryNotice';
 import { Stage } from '../src/renderer/components/Stage';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
@@ -49,33 +48,19 @@ test('the notice never survives into another session', () => {
   }
 });
 
-test('the countdown runs down and floors at zero', () => {
-  assert.equal(secondsRemaining(30_000, 0), 30);
-  assert.equal(secondsRemaining(30_000, 10_500), 20);
-  assert.equal(secondsRemaining(30_000, 30_000), 0);
-  assert.equal(secondsRemaining(30_000, 99_000), 0, 'never negative');
-});
-
 const stage = (apiRetry: unknown) => renderToStaticMarkup(React.createElement(
   Theme.Provider, { value: tokens(false) },
   React.createElement(Stage, { liveItems: [], running: true, sessionKey: 'k', apiRetry } as never),
 ));
 
-test('the retry reads as an error, not as neutral progress', () => {
-  // The row exists because a call FAILED. In the same grey as "Thinking…" it
-  // reads as ordinary work in progress — the impression that made a
-  // rate-limited turn look like nothing was wrong.
-  const danger = tokens(false).danger;
+test('the reconnect notice is neutral and exposes expanded error details', () => {
   const html = stage(reduce(retry()).apiRetry);
-  assert.ok(html.includes(danger), `the notice must use the danger token ${danger}`);
-  const notice = html.slice(html.indexOf('data-run-type="api-retry"'), html.indexOf('transcript-disclosure-chevron'));
-  assert.ok(
-    !notice.includes(`color:${tokens(false).text3}`),
-    'the muted token is what it used to be styled with',
-  );
-  // The sweep band stays on the same hue, so the row never smears to a
-  // different colour mid-animation.
-  assert.match(html, /color-mix\(in oklab, [^)]*\)/);
+  assert.match(html, /--retry-text:/);
+  assert.doesNotMatch(html, /--sweep-base:/);
+  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, /aria-controls="disclosure-body-/);
+  assert.match(html, /transcript-api-retry-icon/);
+  assert.match(html, /class="transcript-api-retry-message">rate limited<\/p>/);
 });
 
 test('the retry replaces the bare Thinking indicator the user was stuck on', () => {
@@ -83,7 +68,6 @@ test('the retry replaces the bare Thinking indicator the user was stuck on', () 
   assert.match(waiting, /Thinking/);
   const retrying = stage(reduce(retry()).apiRetry);
   assert.doesNotMatch(retrying, /Thinking/, 'a multi-minute backoff must not read as "Thinking…"');
-  assert.match(retrying, /Retrying in 30s/);
-  assert.match(retrying, /attempt 2\/5/);
+  assert.match(retrying, /Reconnecting 2\/5/);
   assert.match(retrying, /rate limited/, 'the reason is what tells the user to stop waiting');
 });

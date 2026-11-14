@@ -120,6 +120,8 @@ mod workspace_resume_tests;
 
 #[path = "catalog_worker.rs"]
 mod catalog_worker;
+#[path = "history_page.rs"]
+mod history_page;
 
 /// Serve bounded metadata requests without resolving providers or building an engine.
 pub async fn run_session_catalog_worker() -> Result<(), String> {
@@ -556,6 +558,9 @@ pub struct CredentialEnvelope {
     /// Canonical Host account root, independent of the session settings root.
     #[serde(default)]
     pub provider_account_home: Option<PathBuf>,
+    /// Host credential domain, available before the deferred account projection.
+    #[serde(default)]
+    pub provider_account_backend: Option<String>,
     /// Private access-only account material. Never forwarded to clients.
     #[serde(default)]
     pub provider_account_credentials: BTreeMap<String, secret::AccountCredential>,
@@ -1414,14 +1419,14 @@ async fn prepare_selected_boot_session_after_capture(
         if &current != authority || content != snapshot.content.as_ref() {
             return Err("selected transcript snapshot source changed".into());
         }
-        let loaded = session::jsonl::route_lines(&content);
-        validate_captured_transcript(
-            &authority.path(),
-            uuid,
-            &content,
-            &loaded,
-            cfg.restore_draft,
-        )?;
+        let fallback;
+        let loaded = if let Some(loaded) = cfg.prepared_session_resume() {
+            loaded
+        } else {
+            fallback = session::jsonl::route_lines(&content);
+            &fallback
+        };
+        validate_captured_transcript(&authority.path(), uuid, &content, loaded, cfg.restore_draft)?;
         return validate_selected_session_mode(&content, uuid, expected);
     }
     let (authority, preflight) = capture_selected_transcript_source(&cfg.lingxi_home, &path, uuid)?;
@@ -1461,15 +1466,14 @@ async fn prepare_selected_boot_session_after_capture(
     }
     let content = preflight;
     let path = authority.path();
-    let loaded = if cfg.restore_draft {
-        // The ordinary transcript loader deliberately excludes zero-message
-        // files. Drafts use the same captured source and strict validation,
-        // without broadening historical-session discovery or resume.
-        session::jsonl::route_lines(&content)
-    } else {
-        session::jsonl::loader::route_captured_session_source(&path, uuid, &content)
-            .map_err(|error| format!("selected transcript is not resumable: {error}"))?
-    };
+    // The claim proved both the physical source and every byte unchanged.
+    // Reuse the preflight projection while still applying the ordinary loader's
+    // identity/native-compact validation. Draft admission remains separate.
+    let loaded = preview;
+    if !cfg.restore_draft {
+        session::jsonl::loader::validate_captured_session_source(&path, uuid, &content, &loaded)
+            .map_err(|error| format!("selected transcript is not resumable: {error}"))?;
+    }
     validate_captured_transcript(&path, uuid, &content, &loaded, cfg.restore_draft)?;
     // The source can change between the preflight and the writer claim.
     validate_selected_session_mode(&content, uuid, expected)?;
@@ -1513,6 +1517,12 @@ async fn prepare_selected_boot_session_after_capture(
         source_session_id: uuid.to_string(),
         content: content.into(),
     });
+    cfg.session_resume_loaded = Some(harness_runtime::desktop::DesktopSessionResumeLoaded::new(
+        cfg.session_resume_snapshot
+            .as_ref()
+            .expect("the claimed capture was just installed"),
+        Arc::new(loaded),
+    ));
     cfg.session_transcript_path = Some(path);
     cfg.session_transcript_authority = Some(authority);
     cfg.session_writer_lease = Some(lease);
@@ -2095,8 +2105,49 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
         None,
         BTreeMap::new(),
         None,
+        None,
     ))
     .await
+}
+
+fn resolve_provider_account_scope(
+    home: &std::path::Path,
+    snapshot_scope: Option<&str>,
+    host_backend: Option<&str>,
+    fallback_backend: &str,
+) -> Result<String, String> {
+    let backend = match host_backend {
+        Some(backend @ ("desktop-broker:development" | "desktop-broker:production")) => backend,
+        Some(_) => return Err("invalid Host account backend".into()),
+        None => fallback_backend,
+    };
+    let expected = harness_runtime::provider_accounts::account_store_scope(home, backend);
+    if host_backend.is_some() && snapshot_scope.is_some_and(|scope| scope != expected) {
+        return Err("account store scope mismatch".into());
+    }
+    Ok(snapshot_scope.unwrap_or(&expected).to_owned())
+}
+
+fn seed_deferred_broker_directory(
+    snapshot: &mut Option<lingxi_core::host::provider_accounts::AccountSnapshot>,
+    scope: &str,
+    broker_owned: bool,
+) {
+    if broker_owned && snapshot.is_none() {
+        // Bind the SDK account pool and its credential consumers before the
+        // Host's asynchronous projection arrives. This process-local empty
+        // directory is never persisted or presented as the Host configuration.
+        *snapshot = Some(lingxi_core::host::provider_accounts::AccountSnapshot {
+            store_scope: scope.to_owned(),
+            config_revision: 0,
+            accounts: Vec::new(),
+            provider_policies: BTreeMap::new(),
+            health: Vec::new(),
+            scoped_health: Vec::new(),
+            model_entitlements: Vec::new(),
+            model_availability: Vec::new(),
+        });
+    }
 }
 
 /// Assemble all account routes with private, process-local Host credentials.
@@ -2105,6 +2156,7 @@ pub async fn assemble_with_account_credentials(
     provider_accounts: Option<lingxi_core::host::provider_accounts::AccountSnapshot>,
     mut provider_account_credentials: BTreeMap<String, secret::AccountCredential>,
     provider_account_home: Option<PathBuf>,
+    provider_account_backend: Option<String>,
 ) -> Result<BoundServer, String> {
     if cfg.team_invocation.is_none() {
         crate::provider_settings::apply_managed(&mut cfg).await?;
@@ -2217,11 +2269,10 @@ pub async fn assemble_with_account_credentials(
         SettingsContext {
             plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
             fusion_layers: Some(Arc::new({
-                let mut config = cfg.clone();
+                let config = cfg.clone_for_runtime_controls();
                 // Settings reloads outlive individual session mounts. The
                 // bootstrap lease belongs to the hydrated session, not this
                 // configuration snapshot.
-                config.session_writer_lease = None;
                 move || harness_runtime::desktop::fusion_settings_layers_for_config(&config)
             })),
             paths,
@@ -2391,16 +2442,20 @@ pub async fn assemble_with_account_credentials(
         shared.provider_accounts = Some(snapshot);
     }
     shared.provider_account_home = Some(account_home.clone());
-    let account_scope = shared
-        .provider_accounts
-        .as_ref()
-        .map(|s| s.store_scope.clone())
-        .unwrap_or_else(|| {
-            harness_runtime::provider_accounts::account_store_scope(
-                &account_home,
-                &format!("{:?}", shared.credentials.account_storage_backend()),
-            )
-        });
+    let account_scope = resolve_provider_account_scope(
+        &account_home,
+        shared
+            .provider_accounts
+            .as_ref()
+            .map(|s| s.store_scope.as_str()),
+        provider_account_backend.as_deref(),
+        &format!("{:?}", shared.credentials.account_storage_backend()),
+    )?;
+    seed_deferred_broker_directory(
+        &mut shared.provider_accounts,
+        &account_scope,
+        provider_account_backend.is_some(),
+    );
     let account_catalog_source = cfg.startup_catalog.clone();
     let account_catalog_inputs = provider_config::AssembleInputs {
         official_catalog: None,
@@ -3435,7 +3490,10 @@ mod tests {
         cfg.restore_draft = true;
         cfg.initial_conversation_mode = Some(ConversationMode::Chat);
         prepare_draft_boot_session(&mut cfg).await.unwrap();
-        assert_eq!(cfg.session_transcript_path.as_ref(), Some(&path));
+        assert_eq!(
+            cfg.session_transcript_path.as_ref(),
+            Some(&path.canonicalize().unwrap())
+        );
         assert_eq!(
             cfg.session_resume_snapshot
                 .as_ref()
@@ -3654,6 +3712,22 @@ mod tests {
         let snapshot = cfg.session_resume_snapshot.as_ref().unwrap();
         assert_eq!(snapshot.source_session_id, id);
         assert_eq!(snapshot.content.as_ref(), selected_content);
+        let prepared = cfg
+            .prepared_session_resume()
+            .expect("boot retains its validated parse");
+        let prepared_address = prepared as *const session::jsonl::LoadedTranscript;
+        let proof = crate::workspace_commands::ColdBootResume::capture(&cfg).unwrap();
+        assert!(proof.is_some());
+        assert_eq!(
+            cfg.prepared_session_resume().unwrap() as *const _,
+            prepared_address
+        );
+        prepare_selected_boot_session(&mut cfg).await.unwrap();
+        assert_eq!(
+            cfg.prepared_session_resume().unwrap() as *const _,
+            prepared_address,
+            "revalidating an unchanged writer capture must reuse the same parsed source"
+        );
         assert_eq!(cfg.session_writer_lease.as_ref().unwrap().session_id(), id);
         assert_eq!(std::fs::read(&default_path).unwrap(), default_bytes);
         assert_eq!(
@@ -4756,6 +4830,98 @@ mod tests {
     }
 
     #[test]
+    fn deferred_account_envelope_retains_host_domain_without_credentials() {
+        let mut input = std::io::Cursor::new(
+            br#"{"provider_account_home":"/host/accounts","provider_account_backend":"desktop-broker:development","plugin_secrets":{}}"#.to_vec(),
+        );
+        let envelope = read_credential_envelope(&mut input).unwrap();
+        assert_eq!(
+            envelope.provider_account_home,
+            Some(PathBuf::from("/host/accounts"))
+        );
+        assert_eq!(
+            envelope.provider_account_backend.as_deref(),
+            Some("desktop-broker:development")
+        );
+        assert!(envelope.provider_accounts.is_none());
+        assert!(envelope.provider_account_credentials.is_empty());
+    }
+
+    #[test]
+    fn deferred_account_scope_matches_later_broker_projection_in_both_channels() {
+        let root = tempfile::tempdir().unwrap();
+        let mut scopes = Vec::new();
+        for backend in ["desktop-broker:development", "desktop-broker:production"] {
+            let projected =
+                harness_runtime::provider_accounts::account_store_scope(root.path(), backend);
+            let initial =
+                resolve_provider_account_scope(root.path(), None, Some(backend), "Memory").unwrap();
+            assert_eq!(initial, projected);
+            assert_eq!(
+                resolve_provider_account_scope(
+                    root.path(),
+                    Some(&projected),
+                    Some(backend),
+                    "Native"
+                )
+                .unwrap(),
+                initial
+            );
+            assert!(resolve_provider_account_scope(
+                root.path(),
+                Some("another-domain"),
+                Some(backend),
+                "Memory"
+            )
+            .is_err());
+            scopes.push(initial);
+        }
+        assert_ne!(scopes[0], scopes[1]);
+        assert!(resolve_provider_account_scope(
+            root.path(),
+            None,
+            Some("desktop-broker:other"),
+            "Memory"
+        )
+        .is_err());
+        assert_eq!(
+            resolve_provider_account_scope(root.path(), Some("legacy-domain"), None, "Native")
+                .unwrap(),
+            "legacy-domain"
+        );
+    }
+
+    #[test]
+    fn deferred_broker_pool_accepts_the_later_host_directory_without_adopting_native_scope() {
+        use llm_runtime::accounts::{AccountPool, MemoryAccountPoolStore};
+        use std::sync::{Arc, RwLock};
+
+        for scope in ["broker-development", "broker-production"] {
+            let mut snapshot = None;
+            seed_deferred_broker_directory(&mut snapshot, scope, true);
+            let seed = snapshot.unwrap();
+            assert!(seed.accounts.is_empty());
+            assert_eq!(seed.config_revision, 0);
+            let pool = AccountPool::from_directory(
+                Arc::new(RwLock::new(seed.clone())),
+                Arc::new(MemoryAccountPoolStore::default()),
+            );
+            let mut published = seed.clone();
+            published.config_revision = 7;
+            pool.refresh(published.clone()).unwrap();
+            let mut existing = Some(published);
+            seed_deferred_broker_directory(&mut existing, scope, true);
+            assert_eq!(existing.unwrap().config_revision, 7);
+            let mut wrong_domain = seed;
+            wrong_domain.store_scope = "native-storage".into();
+            assert!(pool.refresh(wrong_domain).is_err());
+        }
+        let mut native = None;
+        seed_deferred_broker_directory(&mut native, "native-storage", false);
+        assert!(native.is_none());
+    }
+
+    #[test]
     fn resolve_uses_model_override() {
         let args = BridgeArgs {
             model: Some("custom-model".to_string()),
@@ -4867,25 +5033,26 @@ mod tests {
         );
     }
 
-    // `block_on` polls the root future on its calling thread; size both that
-    // thread and Tokio's workers to the supported desktop runtime budget.
-    fn run_on_supported_runtime_stack<F, Fut>(test: F)
+    // Debug builds retain larger execution futures than optimized Desktop
+    // builds. Give both the polling thread and spawned workers a test budget.
+    fn run_runtime_test<F, Fut>(test: F)
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()>,
     {
         let worker = std::thread::Builder::new()
             .name("desktop-runtime-test".into())
-            .stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
+            .stack_size(64 * 1024 * 1024)
             .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
-                    .thread_stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
+                    .worker_threads(2)
+                    .thread_stack_size(64 * 1024 * 1024)
                     .build()
-                    .expect("build supported-stack Tokio runtime");
+                    .expect("build debug test Tokio runtime");
                 runtime.block_on(test());
             })
-            .expect("spawn supported-stack test thread");
+            .expect("spawn debug runtime test thread");
         if let Err(panic) = worker.join() {
             std::panic::resume_unwind(panic);
         }
@@ -4896,7 +5063,7 @@ mod tests {
     /// than display-only output, regardless of the user's `/goal` policy.
     #[test]
     fn assembled_bridge_runs_injected_local_command_as_owned_turn() {
-        run_on_supported_runtime_stack(|| async {
+        run_runtime_test(|| async {
             use bridge::wire::Frame;
             use bridge::{BridgeRequest, Capabilities, ClientHello, BRIDGE_PROTOCOL_VERSION};
             use client::protocol::{commands::ClientCommand, events::ClientEvent};

@@ -146,10 +146,11 @@ private enum PluginDirectoryTab: String, Hashable {
 
 struct PluginsPage: View {
     let host: SettingsHost
+    var skillsOnly = false
     @Environment(\.theme) private var t
     @Environment(\.openURL) private var openURL
     @State private var repository = DesktopSettingsRepository.shared
-    @State private var directoryTab = PluginDirectoryTab.personal
+    @State private var directoryTab = PluginDirectoryTab.publicDirectory
     @State private var vendors: [String: String] = [:]
     @State private var busy: String?
     @State private var error: String?
@@ -157,12 +158,58 @@ struct PluginsPage: View {
     @State private var addingMarketplace = false
     @State private var marketplaceSource = ""
     @State private var pendingPublicMarketplace: PublicExtensionMarketplace?
+    @State private var focusedRecommendation: PublicExtensionMarketplace?
 
     private var catalog: PluginCatalog { repository.pluginCatalog }
+    private var focusedPluginID: String? {
+        focusedRecommendation.flatMap { publicMarketplacePluginID($0, registered: catalog.marketplaces) }
+    }
+    private var installedPlugins: [InstalledPlugin] {
+        focusedRecommendation == nil ? catalog.installed : catalog.installed.filter { $0.id == focusedPluginID }
+    }
+    private var installablePlugins: [AvailablePlugin] {
+        focusedRecommendation == nil ? catalog.installable : catalog.installable.filter { $0.id == focusedPluginID }
+    }
 
     private func marketplaceRegistration(for item: PublicExtensionItem) -> PublicMarketplaceRegistration? {
         guard let marketplace = item.marketplace else { return nil }
         return publicMarketplaceRegistration(marketplace, registered: catalog.marketplaces)
+    }
+
+    private func installedRecommendation(_ item: PublicExtensionItem) -> InstalledPlugin? {
+        guard let marketplace = item.marketplace,
+              let id = publicMarketplacePluginID(marketplace, registered: catalog.marketplaces) else { return nil }
+        return catalog.installed.first { $0.id == id }
+    }
+
+    private func removeRecommendation(_ item: PublicExtensionItem) {
+        let generation = repository.sourceGeneration
+        if let plugin = installedRecommendation(item) {
+            confirmation = PluginConfirmation(
+                title: String(localized: "plugins_uninstall_title \(plugin.displayName)"),
+                body: String(localized: "plugins_uninstall_body"),
+                confirm: String(localized: "plugins_action_uninstall"), destructive: true
+            ) {
+                guard repository.sourceGeneration == generation, installedRecommendation(item)?.id == plugin.id else {
+                    error = String(localized: "plugins_catalog_refresh_first")
+                    return
+                }
+                run(plugin.id, ["action": "uninstall", "plugin": plugin.id])
+            }
+        } else if case .some(.registered(let name)) = marketplaceRegistration(for: item) {
+            confirmation = PluginConfirmation(
+                title: String(localized: "public_extensions_remove_source"),
+                body: String(localized: "plugins_marketplace_remove_body"),
+                confirm: String(localized: "plugins_marketplace_remove"), destructive: true
+            ) {
+                guard repository.sourceGeneration == generation,
+                      marketplaceRegistration(for: item) == .registered(name: name) else {
+                    error = String(localized: "plugins_catalog_refresh_first")
+                    return
+                }
+                run("marketplace:\(name)", ["action": "marketplace_remove", "name": name])
+            }
+        }
     }
 
     var body: some View {
@@ -186,7 +233,11 @@ struct PluginsPage: View {
             }
         }
         .task(id: repository.sourceGeneration) {
+            focusedRecommendation = nil
             if repository.connected { await repository.admin(domain: "plugin", action: "get_catalog") }
+        }
+        .onChange(of: directoryTab) { _, tab in
+            if tab == .publicDirectory { focusedRecommendation = nil }
         }
         .task(id: repository.catalogs["plugin"]) {
             let catalog = catalog
@@ -242,6 +293,7 @@ struct PluginsPage: View {
             }
             PublicExtensionDirectoryList(
                 kind: .plugin,
+                skillsOnly: skillsOnly,
                 actionTitle: { item in
                     if case nil = item.marketplace {
                         return String(localized: "public_extensions_open_documentation")
@@ -264,7 +316,11 @@ struct PluginsPage: View {
                             marketplaceSource = marketplace.source
                             pendingPublicMarketplace = marketplace
                             addingMarketplace = true
-                        case .some(.registered(_)), .some(.nameConflict(_)):
+                        case .some(.registered(_)):
+                            focusedRecommendation = marketplace.plugin == nil ? nil : marketplace
+                            directoryTab = .personal
+                        case .some(.nameConflict(_)):
+                            focusedRecommendation = nil
                             directoryTab = .personal
                         case .none:
                             openOfficialDocumentation(for: item)
@@ -281,7 +337,13 @@ struct PluginsPage: View {
                             && !marketplace.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     }
                     return URL(string: item.documentationURL)?.scheme?.lowercased() == "https"
-                }
+                },
+                removalTitle: { item in
+                    if installedRecommendation(item) != nil { return String(localized: "plugins_action_uninstall") }
+                    if case .some(.registered(_)) = marketplaceRegistration(for: item) { return String(localized: "public_extensions_remove_source") }
+                    return nil
+                },
+                remove: removeRecommendation
             )
         }
     }
@@ -322,11 +384,15 @@ struct PluginsPage: View {
                 enteredSource: enteredSource,
                 registered: repository.pluginCatalog.marketplaces
             ) {
-            case .registered, .nameConflict:
+            case .registered:
+                focusedRecommendation = enteredSource == candidate.source && candidate.plugin != nil ? candidate : nil
+                directoryTab = .personal
+            case .nameConflict:
                 // A catalog update may have happened while the confirmation was
                 // open. Let the user inspect/manage that current catalog; do not
                 // submit an add that the engine could silently treat as a no-op.
                 directoryTab = .personal
+                focusedRecommendation = nil
             case .notRegistered:
                 guard publicMarketplaceConfirmationIsCurrent(
                     capturedGeneration: sourceGeneration,
@@ -341,6 +407,8 @@ struct PluginsPage: View {
                         "action": "marketplace_add",
                         "source": enteredSource,
                     ])
+                    focusedRecommendation = enteredSource == candidate.source && candidate.plugin != nil ? candidate : nil
+                    directoryTab = .personal
                 } catch is CancellationError {
                 } catch {
                     self.error = error.localizedDescription
@@ -356,14 +424,14 @@ struct PluginsPage: View {
         }
 
         SettingsSection(label: String(localized: "plugins_section_installed")) {
-            if catalog.installed.isEmpty { PluginNoteRow(text: String(localized: "plugins_installed_empty")) }
-            ForEach(catalog.installed) { plugin in
+            if installedPlugins.isEmpty { PluginNoteRow(text: String(localized: "plugins_installed_empty")) }
+            ForEach(installedPlugins) { plugin in
                 SettingsRow(
                     icon: pluginIcon(plugin.id),
                     label: plugin.displayName,
                     sub: pluginSubtitle(vendor: vendors[plugin.id], version: plugin.version),
                     chevron: false,
-                    isLast: plugin.id == catalog.installed.last?.id,
+                    isLast: plugin.id == installedPlugins.last?.id,
                     onTap: { host.push(.pluginDetail(plugin.id)) }
                 ) {
                     if busy == plugin.id {
@@ -378,7 +446,7 @@ struct PluginsPage: View {
             }
         }
 
-        let installable = catalog.installable
+        let installable = installablePlugins
         SettingsSection(label: String(localized: "plugins_section_available")) {
             if installable.isEmpty {
                 PluginNoteRow(text: String(localized: catalog.marketplaces.isEmpty ? "plugins_marketplaces_empty" : "plugins_available_empty"))

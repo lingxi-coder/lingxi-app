@@ -209,15 +209,22 @@ test('summary follows the last call primary argument rather than its fallback ti
 });
 
 
-test('a single failed search reveals its full error only in its own disclosure', () => {
+test('a single-line search error stays inline while additional details retain a disclosure', () => {
   const error = 'Error: WebSearch is not supported by the selected model/profile.';
   const item: ToolRunItem = { ...tool('failed-search', 'error'), tool: 'WebSearch', view: { verb: 'web', label: 'Web Search', title: 'Search', primary: '武汉 今日天气' }, result: { headline: error, body: error, body_lines: 1, body_truncated: false } };
-  const closed = renderGroup([item], true, false);
+  for (const open of [false, true]) {
+    const html = renderGroup([item], open, open);
+    assert.equal((html.match(/not supported/g) ?? []).length, 1);
+    assert.doesNotMatch(html, /<button|aria-expanded|tool-group-trigger|Call unsuccessful/);
+  }
+  const details = { ...item, result: { ...item.result!, body: `${error}\nSelect another profile and retry.`, body_lines: 2 } };
+  const closed = renderGroup([details], true, false);
   assert.equal((closed.match(/<button/g) ?? []).length, 1);
   assert.doesNotMatch(closed, /not supported|tool-group-trigger/);
   assert.match(closed, /Call unsuccessful/);
-  const opened = renderGroup([item], false, true);
+  const opened = renderGroup([details], false, true);
   assert.equal((opened.match(/not supported/g) ?? []).length, 1);
+  assert.match(opened, /Select another profile and retry/);
   assert.match(opened, /tool-result-error/);
   assert.match(opened, /aria-expanded="true"/);
 });

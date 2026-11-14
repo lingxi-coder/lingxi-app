@@ -194,6 +194,18 @@ class ToolCallStateTest {
         assertFalse(display.hasExpandableContent)
     }
 
+    @Test
+    fun repeatedSingleLineResult_hasNoDisclosure_butAdditionalContentDoes() {
+        val line = ToolResultDisplayUi(headline = "Ready", body = "Ready", bodyLines = 1)
+        assertFalse(line.hasExpandableContent)
+        assertTrue(line.copy(body = "More detail").hasExpandableContent)
+        assertTrue(line.copy(body = "Ready\nMore detail", bodyLines = 2).hasExpandableContent)
+        assertTrue(line.copy(bodyTruncated = true).hasExpandableContent)
+        assertTrue(line.copy(bodyLines = 20).hasExpandableContent)
+        assertTrue(line.copy(diff = StructuredDiffUi(rows = emptyList(), gutterWidth = 1,
+            additions = 1, removals = 0, truncatedRows = 0)).hasExpandableContent)
+    }
+
     // --- plan -------------------------------------------------------------
 
     @Test

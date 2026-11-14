@@ -1112,8 +1112,9 @@ final class ConversationModel: ObservableObject {
             guard case let .run(run) = item else { return false }
             return run.status == .running
                 || run.activeWorkers > 0
-                || run.tools.contains(where: { $0.status == .running })
-                || run.shellCards.contains(where: { $0.status == .running })
+                || (run.status != .restored
+                    && (run.tools.contains(where: { $0.status == .running })
+                        || run.shellCards.contains(where: { $0.status == .running })))
         }
     }
 }

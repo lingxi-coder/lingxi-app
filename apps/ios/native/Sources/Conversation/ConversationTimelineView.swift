@@ -287,8 +287,8 @@ struct ConversationTimelineView: View {
             case .reasoning:
                 continue
             case let .message(id, message):
-                if let tool = previousTool, ConversationSkillInstructions.matches(message, tool: tool) {
-                    result[index] = .skillInstructions(id: id, message: message, name: tool.header?.primary ?? tool.tool)
+                if let name = ConversationSkillInstructions.name(message, previousTool: previousTool) {
+                    result[index] = .skillInstructions(id: id, message: message, name: name)
                 }
                 previousTool = nil
             default:
@@ -424,7 +424,6 @@ struct ConversationTimelineView: View {
 
 struct ConversationSkillInstructionsRow: View {
     @Environment(\.theme) private var t
-    @ScaledMetric(relativeTo: .footnote) private var detailHeight: CGFloat = 280
     let name: String
     let text: String
     let isExpanded: Bool
@@ -441,19 +440,15 @@ struct ConversationSkillInstructionsRow: View {
                         .font(.caption.weight(.semibold)).foregroundStyle(t.text3)
                         .accessibilityHidden(true)
                 }
-                .frame(minHeight: 44).padding(.horizontal, 6).contentShape(Rectangle())
+                .frame(minHeight: 44).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityValue(isExpanded ? String(localized: "chat_agent_details_collapse") : String(localized: "chat_agent_details_expand"))
             .accessibilityIdentifier("conversation.skill-instructions.toggle")
             if isExpanded {
-                ScrollView {
+                ToolDetailPanel(title: name) {
                     AIText(markdown: ConversationSkillInstructions.displayText(text), compact: true)
-                        .padding(.leading, 20).padding(.trailing, 6).padding(.vertical, 6)
                 }
-                .frame(maxHeight: detailHeight)
-                .overlay(alignment: .leading) { Rectangle().fill(t.border).frame(width: 1) }
-                .padding(.leading, 15)
                 .accessibilityIdentifier("conversation.skill-instructions.body")
             }
         }
@@ -483,7 +478,7 @@ private struct ConversationToolBatchRow: View {
                     ToolCallView(trace: trace, isExpanded: expandedToolCalls.contains(trace.id), compact: true,
                                  onToggle: { onToggleTool(trace.id) })
                 }
-            } else if !unified, ordinaryTools.count == 1, let trace = ordinaryTools.first {
+            } else if ordinaryTools.count == 1, reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let trace = ordinaryTools.first {
                 ToolCallView(trace: trace, isExpanded: expandedToolCalls.contains(trace.id), compact: true,
                              onToggle: { onToggleTool(trace.id) })
             } else if unified || !ordinaryTools.isEmpty {
@@ -518,7 +513,6 @@ private struct ConversationToolBatchRow: View {
                         )
                 }
                 .frame(minHeight: 44)
-                .padding(.horizontal, 6)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -540,7 +534,6 @@ private struct ConversationToolBatchRow: View {
                     )
                     .id("\(id):\(trace.id)")
                 }
-                .padding(.leading, 12)
             }
             }
             if isExpanded && !reasoning.isEmpty { AIText(markdown: reasoning).padding(.leading, 24) }

@@ -1,4 +1,5 @@
 import type { ProviderAccountSnapshot } from '../../shared/providerAccounts.js';
+import type { TranscriptHistoryCursor, TranscriptHistoryPage } from '../../shared/sessionHistory.js';
 import type { ProviderAccountsApi } from '../../shared/providerAccounts.js';
 import type { LocalAppsApi, LocalAppEditRequest } from '../../shared/localApps';
 import type { ProjectCreationPurpose, ProjectFolderSelection } from '../../shared/projectCreation';
@@ -239,6 +240,7 @@ export interface LingxiApi {
   cancelSessionHandoff(requestId: string): Promise<void>;
   onConversationShown?(callback: (snapshot: BootstrapState) => void): Unsubscribe;
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace, authoringAppId?: string, authoringVersion?: number): Promise<BootstrapState>;
+  loadSessionHistory(sessionId: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage>;
   prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
   releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
   preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;

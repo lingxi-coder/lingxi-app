@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { before } from 'node:test';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { McpServers } from '../src/renderer/components/settings/pages/McpServers';
@@ -8,11 +8,12 @@ import { Plugins } from '../src/renderer/components/settings/pages/Plugins';
 import { permissionModeOptions, PERMISSION_MODE_OPTIONS } from '../src/renderer/model/permissionModes';
 import { chatCatalog } from '../src/renderer/i18n/chatCatalog';
 import { extensionCatalog } from '../src/renderer/i18n/extensionCatalog';
-import { DESKTOP_LOCALES, LANGUAGE_STORAGE_KEY, translate, type DesktopLocale } from '../src/renderer/i18n/locale';
+import { DESKTOP_LOCALES, LANGUAGE_STORAGE_KEY, loadLocaleCatalog, translate, type DesktopLocale } from '../src/renderer/i18n/locale';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 
 (globalThis as { React?: typeof React }).React = React;
+before(async () => { await Promise.all(DESKTOP_LOCALES.map(loadLocaleCatalog)); });
 
 function renderInLocale(locale: DesktopLocale, element: React.ReactElement): string {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');

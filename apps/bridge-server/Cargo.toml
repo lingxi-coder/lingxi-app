@@ -64,6 +64,7 @@ http-client = { workspace = true }
 platform-posix = { workspace = true }
 platform-pty = { workspace = true }
 uuid = "1.10"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 # `AudioResultDto` carries recorded/synthesized audio as base64 (the same
 # convention as `ImageRefDto`); `audio_bridge` decodes it back to the `Vec<u8>`
 # the `platform_api::{VoiceRecording, TtsAudio}` structs hold.

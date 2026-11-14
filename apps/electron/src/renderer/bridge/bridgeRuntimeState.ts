@@ -206,6 +206,7 @@ export function displayedSession(
 }
 
 export interface RuntimeState {
+  history?: import('../../shared/sessionHistory.js').TranscriptHistoryState;
   submittedSession?: SubmittedSession;
   connection: ConnectionState;
   conversation: ConversationState;

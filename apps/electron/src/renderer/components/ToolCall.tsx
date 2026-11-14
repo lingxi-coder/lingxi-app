@@ -1,3 +1,4 @@
+import { toolDenial } from '../model/toolDenial';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { LocalAppCard } from './LocalApps';
@@ -45,6 +46,7 @@ import { Disclosure } from './Disclosure';
 import { Icon } from './Icon';
 import { MarkdownContent } from './MarkdownContent';
 import { ToolActivityIcon } from './ToolActivityIcon';
+import { ToolDetailPanel } from './ToolDetailPanel';
 import { ComputerApplicationIcon } from './ComputerApplicationIcon';
 import { AgentAvatar } from './AgentAvatar';
 import { ModUiParentSite } from './modUiAbovePrompt';
@@ -60,18 +62,6 @@ const TITLE_STYLE: CSSProperties = Object.freeze({
   // part that identifies it.
   direction: 'rtl',
   textAlign: 'left',
-});
-
-const BODY_STYLE: CSSProperties = Object.freeze({
-  margin: '6px 0 0 22px',
-  padding: 10,
-  maxHeight: 260,
-  overflow: 'auto',
-  whiteSpace: 'pre-wrap',
-  overflowWrap: 'anywhere',
-  borderRadius: 7,
-  fontSize: 11.5,
-  lineHeight: 1.5,
 });
 
 export interface ToolCallProps {
@@ -152,16 +142,18 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
   useI18n();
   const { result } = item;
   const view = toolDisplayHeader(item);
+  const denial = toolDenial(item.status === 'error', result?.headline, result?.body);
+  const denialTitle = denial ? tr(denial.autoReview ? 'desktop_ui_tool_denied_auto_review' : 'desktop_ui_tool_denied') : '';
   const permissionRequest = /permission/i.test(`${item.tool} ${view.label} ${view.title}`);
   const isLocalApp = item.tool === 'LocalApp';
   const skillInstructions = item.view.verb.toLowerCase() === 'skill';
-  const expandable = toolHasBody(item);
+  const expandable = Boolean(denial) || toolHasBody(item);
   const isOpen = open ?? false;
 
   // Compose from the parts so the argument can be truncated on its own; fall
   // back to the pre-composed English `title` when there is no primary.
   const presentation = permissionRequest ? null : toolRowPresentation(item);
-  const title = presentation ? <>
+  const title = denial ? <span>{denialTitle}</span> : presentation ? <>
     <span className="tool-row-action">{presentation.action}</span>
     <span className={presentation.file ? 'tool-row-argument tool-row-file' : 'tool-row-argument'}
       title={presentation.argument} style={{ ...TITLE_STYLE, direction: presentation.file ? 'rtl' : 'ltr', fontWeight: 400 }}>
@@ -221,11 +213,14 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       ? 'x'
       : 'info';
 
-  const showResponse = !(isLocalApp && item.status !== 'error') && !(presentation && item.status === 'done' && body !== undefined);
+  // Without a detail body, the result must remain visible in this row.
+  const responseInTitle = presentation?.argument === summaryResponse;
+  const showResponse = !(isLocalApp && item.status !== 'error' && (expandable || responseInTitle))
+    && !(presentation && item.status === 'done' && body !== undefined && expandable);
   const diffStats = item.status === 'done' && !permissionRequest && diff && ['update', 'create'].includes(view.verb) ? diff : undefined;
   const summary = (
     <span className="tool-call-summary" style={requiresCode ? { flexWrap: 'wrap', overflow: 'visible' } : undefined}>
-      <ToolGlyph item={item} permissionRequest={permissionRequest} />
+      {denial ? <span style={{ color: t.dark ? "#e9a56b" : "#a64212", display: "inline-flex", flexShrink: 0 }}><ToolActivityIcon name="shield-terminal" /></span> : <ToolGlyph item={item} permissionRequest={permissionRequest} />}
       <span
         className="tool-row-title"
         style={{
@@ -237,7 +232,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
         }}
       >
         {title}
-        {view.sub_line && !(presentation && view.verb === 'shell') && (
+        {!denial && view.sub_line && !(presentation && view.verb === 'shell') && (
           <span className="tool-row-inline-detail mono-code">
             {' · '}{view.sub_line.prefix}{view.sub_line.text}
           </span>
@@ -246,7 +241,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       {diffStats && <span className="tool-row-diff-stats" aria-label={tr('desktop_ui_edit_counts', diffStats.additions, diffStats.removals)}>+{diffStats.additions} −{diffStats.removals}</span>}
       {(item.status === 'running' || (item.status === 'done' && diffStats && diffStats.additions + diffStats.removals > 0)) &&
         <span className="tool-row-state-dot" role={item.status === 'running' ? 'status' : undefined} aria-label={item.status === 'running' ? tr("remote_status_running") : tr("desktop_ui_file_changed")} />}
-      {showResponse && !diffStats && summaryResponse && <span className={compactError ? 'tool-row-status' : 'tool-row-response'}
+      {!denial && showResponse && !diffStats && summaryResponse && <span className={compactError ? 'tool-row-status' : 'tool-row-response'}
         style={requiresCode ? { flex: '1 0 100%', whiteSpace: 'normal', overflowWrap: 'anywhere' } : undefined}>{summaryResponse}</span>}
     </span>
   );
@@ -262,26 +257,16 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       permissionRequest && jsonBody === undefined ? (
         <div className="permission-tool-message">{body}</div>
       ) : skillInstructions && jsonBody === undefined ? (
-        <div className="tool-skill-instructions" tabIndex={0} role="region" aria-label={tr("desktop_ui_skill_instructions")}
-          style={{ margin: '4px 0 8px', padding: '4px 0 4px 14px', maxHeight: 320, overflow: 'auto',
-            borderLeft: `1px solid ${t.borderStrong}`, fontSize: 13, lineHeight: 1.6 }}>
+        <div className="tool-skill-instructions">
           <MarkdownContent text={body} variant="compact" />
         </div>
       ) : jsonBody !== undefined ? (
-        <div style={{ marginTop: 6 }}>
+        <div className="tool-result-code">
           <CodeBlock code={jsonBody} language="json" variant="tool" />
         </div>
       ) : (
         <pre
-          className={compactError ? 'tool-result-error' : 'mono-code tool-result-text'}
-          style={{
-            ...BODY_STYLE,
-            fontSize: compactError ? '0.8rem' : BODY_STYLE.fontSize,
-            marginLeft: 0,
-            background: t.windowBg,
-            color: t.text2,
-            border: `0.5px solid ${t.border}`,
-          }}
+          className={compactError ? 'tool-result-error tool-result-text' : 'mono-code tool-result-text'}
         >
           {body}
         </pre>
@@ -299,6 +284,32 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       </div>
     )}
   </>;
+  const detailContent = denial ? <>
+    <ToolDetailPanel label={view.verb === 'shell' ? 'Shell' : view.label}
+      footer={view.verb === 'shell' ? tr('desktop_ui_tool_denied_exit_unknown') : undefined}>
+      {view.sub_line && <div className="tool-denial-command"><pre className="mono-code tool-result-command">{view.sub_line.prefix}{view.sub_line.text}</pre>
+        <button type="button" className="tool-denial-copy" aria-label={tr('chat_copy_code')}
+          onClick={() => { void navigator.clipboard.writeText(view.sub_line!.text); }}><Icon name="copy" size={14} /></button></div>}
+      {!view.sub_line && view.primary && <pre className="mono-code tool-result-command">{view.primary}</pre>}
+      <pre className="mono-code tool-result-text">{tr('desktop_ui_tool_denied_no_output')}</pre>
+    </ToolDetailPanel>
+    <div className="tool-denial-reason">
+      <div className="tool-denial-reason-label">{tr('desktop_ui_tool_denied_reason')}</div>
+      <div style={{ color: t.text3, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{denial.reason}</div>
+      {translatedTruncation && <div>{translatedTruncation}</div>}
+    </div>
+  </> : permissionRequest ? resultContent : (
+    <ToolDetailPanel label={view.verb === 'shell' ? 'Shell' : skillInstructions ? tr('desktop_ui_skill_instructions') : view.label}
+      footer={<>
+        <Icon name={item.status === 'done' ? 'check' : item.status === 'error' ? 'x' : 'clock'} size={13} stroke={1.7} />
+        <span>{tr(`desktop_ui_tool_result_${item.status}`)}</span>
+      </>}>
+      {view.verb === 'shell' && view.sub_line && <pre className="mono-code tool-result-command">
+        {view.sub_line.prefix}{view.sub_line.text}
+      </pre>}
+      {resultContent}
+    </ToolDetailPanel>
+  );
   const answeredQuestions = questionAnswers(item);
   const rowContent = localAppReference(item) ? (
     <LocalAppCard item={item} />
@@ -315,7 +326,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       data-status={item.status}
       data-kind={permissionRequest ? 'permission' : isLocalApp ? 'local-app' : undefined}
       style={{
-        maxWidth: 760,
+        minWidth: 0, maxWidth: '100%',
         display: 'flex', flexDirection: 'column', gap: 4,
         padding: permissionRequest ? '2px 0' : 0, position: 'relative',
         '--tool-label-color': item.status === 'error' || permissionRequest ? t.text2 : t.text3,
@@ -345,12 +356,12 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
           keepMounted={item.status !== 'running' && Boolean(modUiSessionId)}
           onToggle={() => onSetOpen(item.id, !isOpen)}
           summary={summary}
-          label={`${presentation ? `${presentation.action} ${presentation.argument}${presentation.qualifier ?? ''}` : view.primary ? `${view.label}(${view.primary})${view.qualifier ?? ''}` : view.title}${!diffStats && summaryResponse && (!isLocalApp || showResponse) ? ` · ${summaryResponse}` : ''}`}
+          label={denial ? denialTitle : `${presentation ? `${presentation.action} ${presentation.argument}${presentation.qualifier ?? ''}` : view.primary ? `${view.label}(${view.primary})${view.qualifier ?? ''}` : view.title}${!diffStats && summaryResponse && (!isLocalApp || showResponse) ? ` · ${summaryResponse}` : ''}`}
           buttonClassName="tool-disclosure-trigger"
           buttonStyle={{ width: permissionRequest ? '100%' : 'fit-content', maxWidth: '100%', minHeight: permissionRequest ? 40 : 28, margin: 0, padding: '2px 0', borderRadius: 7 }}
           bodyStyle={permissionRequest
             ? { marginLeft: 0, padding: '0 14px 14px 56px' }
-            : { marginLeft: 29 }}
+            : { minWidth: 0, marginLeft: 0 }}
         >
           <ModUiParentSite
             sessionId={item.status === 'running' ? '' : modUiSessionId ?? ''}
@@ -358,9 +369,9 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
             component="ToolResult"
             instanceId={`tool-result:${item.id}`}
             props={nativeToolResultProps(item)}
-            engineFallback={isOpen ? resultContent : null}
+            engineFallback={isOpen ? detailContent : null}
           >
-            {isOpen ? resultContent : null}
+            {isOpen ? detailContent : null}
           </ModUiParentSite>
         </Disclosure>
       ) : (

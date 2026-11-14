@@ -831,12 +831,15 @@ export function buildBridgeArguments(config: {
  */
 export function buildCredentialEnvelope(config: {
   providerAccountHome?: string;
+  providerAccountBackend?: 'desktop-broker:development' | 'desktop-broker:production';
   providerAccounts?: ProviderAccountSnapshot;
   providerAccountCredentials?: Record<string, RuntimeProviderAccountCredential>;
   pluginSecrets?: Record<string, Record<string, string>>;
 }): string {
   return `${JSON.stringify({
-    ...(config.providerAccounts ? { provider_accounts: config.providerAccounts, ...(config.providerAccountHome ? { provider_account_home: config.providerAccountHome } : {}), provider_account_credentials: config.providerAccountCredentials ?? {} } : {}),
+    ...(config.providerAccountHome ? { provider_account_home: config.providerAccountHome } : {}),
+    ...(config.providerAccountBackend ? { provider_account_backend: config.providerAccountBackend } : {}),
+    ...(config.providerAccounts ? { provider_accounts: config.providerAccounts, provider_account_credentials: config.providerAccountCredentials ?? {} } : {}),
     plugin_secrets: config.pluginSecrets ?? {},
   })}\n`;
 }

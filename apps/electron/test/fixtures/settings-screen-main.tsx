@@ -55,8 +55,13 @@ function Fixture() {
   const navCalls = useRef<string[]>([]);
   const extensionCalls = useRef<Array<{ domain: string; command: Record<string, unknown> }>>([]);
   const [hookOperation, setHookOperation] = useState<ConfigurationOperationEvent>();
-  const [extensionCatalogs, setExtensionCatalogs] = useState<{ plugins?: object; skills?: object; document?: object }>({});
-  const pluginAdmin = useCallback(async (command: Record<string, unknown>) => { extensionCalls.current.push({ domain: 'plugin', command }); }, []);
+  const [extensionCatalogs, setExtensionCatalogs] = useState<{ plugins?: object | null; skills?: object; document?: object; mcp?: object }>({});
+  const pluginAdmin = useCallback(async (command: Record<string, unknown>) => {
+    extensionCalls.current.push({ domain: 'plugin', command });
+    const payload = typeof command.payload_json === 'string' ? JSON.parse(command.payload_json) : {};
+    if (command.action === 'apply_operation' && payload.action === 'uninstall') return { details_json: JSON.stringify({ credentialCleanup: { pluginId: payload.plugin, lastScopeRemoved: true } }) };
+  }, []);
+  const mcpAdmin = useCallback(async (command: Record<string, unknown>) => { extensionCalls.current.push({ domain: 'mcp', command }); }, []);
   const skillAdmin = useCallback(async (command: Record<string, unknown>) => { extensionCalls.current.push({ domain: 'skill', command }); }, []);
   const hookAdmin = useCallback(async (command: { action: string; scope?: string }) => {
     if (command.action !== 'get_document') throw new Error(`Unsupported hook admin fixture action: ${command.action}`);
@@ -258,7 +263,7 @@ function Fixture() {
         policies_json: JSON.stringify({ strictKnownMarketplaces: false, allowedMarketplaces: ['acme'] }, null, 2),
         revisions: { user: 'a'.repeat(64), project: 'b'.repeat(64), local: 'c'.repeat(64) },
       }),
-    },
+    } as { type: 'plugin_catalog'; catalog_json: string } | undefined,
     configurationOperations: hookOperation ? { hook: hookOperation } : {},
     refreshMcpServers: noopAsyncVoid,
     refreshSkills: noopAsyncVoid,
@@ -311,7 +316,7 @@ function Fixture() {
     upsertMcpServer: noopAsyncVoid,
     removeMcpServer: noopAsyncVoid,
     skillAdmin,
-    mcpAdmin: noopAsyncVoid,
+    mcpAdmin,
     hookAdmin,
     fusionAdmin: noopAsyncVoid,
     fusionCatalogEvent: { type: 'fusion_catalog' as const, catalog_json: JSON.stringify({
@@ -320,11 +325,14 @@ function Fixture() {
     }) },
     pluginAdmin,
     setPluginSecret: async () => ({ pluginId: 'secure@acme', key: 'TOKEN', configured: true, masked: '••••••••', restartRequired: false }),
+    cleanupPluginSecretsAfterUninstall: async (pluginId: string) => { extensionCalls.current.push({ domain: 'credential', command: { action: 'cleanup', pluginId } }); return { status: 'cleared' as const }; },
     clearPluginSecret: async () => ({ pluginId: 'secure@acme', key: 'TOKEN', configured: false, restartRequired: false }),
     runSlashCommand: async (command: string) => { navCalls.current.push(`slash:${command}`); return true; },
   };
 
-  if (extensionCatalogs.plugins) bridge.pluginCatalogEvent.catalog_json = JSON.stringify(extensionCatalogs.plugins);
+  if (extensionCatalogs.plugins === null) bridge.pluginCatalogEvent = undefined;
+  else if (extensionCatalogs.plugins && bridge.pluginCatalogEvent) bridge.pluginCatalogEvent.catalog_json = JSON.stringify(extensionCatalogs.plugins);
+  if (extensionCatalogs.mcp) bridge.mcpConfigurationSnapshotEvent.snapshot_json = JSON.stringify(extensionCatalogs.mcp);
   if (extensionCatalogs.skills) bridge.skillCatalogEvent.catalog_json = JSON.stringify(extensionCatalogs.skills);
   if (extensionCatalogs.document) bridge.skillDocumentEvent.document_json = JSON.stringify(extensionCatalogs.document);
 
@@ -450,6 +458,7 @@ function Fixture() {
       focusOpener: () => (document.getElementById('opener') as HTMLButtonElement | null)?.focus(),
       state: () => ({
         settingsSnapshotReady: settingsSnapshotEvent !== null,
+        pluginCatalogReady: bridge.pluginCatalogEvent !== undefined,
         hasLayerSwitcher: Boolean(document.querySelector('[data-testid="layer-switcher"]')),
         userDisabled: (document.querySelector('[data-layer="user"]') as HTMLButtonElement | null)?.disabled ?? null,
         projectDisabled: (document.querySelector('[data-layer="project"]') as HTMLButtonElement | null)?.disabled ?? null,
@@ -480,7 +489,7 @@ function Fixture() {
       }),
     };
     return () => { delete window.__settingsScreenTest; };
-  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, lastProviderSettingsPatch, providerSettings, credentialWrites, providerAccountSnapshot, settingsSnapshotEvent]);
+  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, lastProviderSettingsPatch, providerSettings, credentialWrites, providerAccountSnapshot, settingsSnapshotEvent, extensionCatalogs]);
 
   return (
     <Theme.Provider value={tokens(fixtureTheme === 'dark')}>
@@ -503,7 +512,7 @@ declare global {
   interface Window {
     __settingsScreenTest?: {
       selectPage(id: string): Promise<void>;
-      setExtensionCatalogs(catalogs: { plugins?: object; skills?: object; document?: object }): void;
+      setExtensionCatalogs(catalogs: { plugins?: object | null; skills?: object; document?: object; mcp?: object }): void;
       setHasProject(value: boolean): void;
       setConnected(value: boolean): void;
       setSessionLoading(value: boolean): void;

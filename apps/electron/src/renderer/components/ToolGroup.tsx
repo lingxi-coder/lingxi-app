@@ -10,6 +10,7 @@ import { ToolActivityIcon } from './ToolActivityIcon';
 import { ComputerApplicationIcon } from './ComputerApplicationIcon';
 import { groupComputerApplication } from './computerApplication';
 import { useT } from '../theme/ThemeContext';
+import { TranscriptLeafWindow } from './TranscriptLeafWindow';
 
 interface ToolGroupProps {
   group: TranscriptToolGroup;
@@ -24,7 +25,7 @@ export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen }: 
   useI18n();
   if (group.tools.some((tool) => questionAnswers(tool))) {
     return <div className="transcript-tool-group">
-      {group.tools.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
+      <TranscriptLeafWindow items={group.tools} renderItem={tool => <ToolCall item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />} />
     </div>;
   }
   const active = group.tools.filter((tool) => tool.status === 'running');
@@ -49,7 +50,7 @@ export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen }: 
     : !active.length && allFailed ? tr('desktop_ui_tool_calls_unsuccessful') : '';
   const state = [runningState, outcomeState].filter(Boolean).join(' · ');
   const calls = (tools: typeof group.tools) => <div className="tool-group-calls">
-    {tools.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
+    <TranscriptLeafWindow items={tools} gap={2} renderItem={tool => <ToolCall item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />} />
   </div>;
   return <div className="transcript-tool-group" data-tool-group-id={group.id}
     data-task-workflow={taskWorkflow || undefined}

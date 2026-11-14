@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { before } from 'node:test';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ComputerAccessRequestDto } from '@lingxi/bridge-client';
@@ -7,12 +7,13 @@ import { ComputerAccessPrompt } from '../src/renderer/components/ComputerAccessP
 import { ComputerUse } from '../src/renderer/components/settings/pages/ComputerUse';
 import { BrowserSettings } from '../src/renderer/components/settings/pages/ComputerUseBrowser';
 import { computerCatalog } from '../src/renderer/i18n/computerCatalog';
-import { DESKTOP_LOCALES, LANGUAGE_STORAGE_KEY, translate, type DesktopLocale } from '../src/renderer/i18n/locale';
+import { DESKTOP_LOCALES, LANGUAGE_STORAGE_KEY, loadLocaleCatalog, translate, type DesktopLocale } from '../src/renderer/i18n/locale';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import type { ComputerSettingsSnapshot } from '../src/shared/computerSettings';
 
 (globalThis as { React?: typeof React }).React = React;
+before(async () => { await Promise.all(DESKTOP_LOCALES.map(loadLocaleCatalog)); });
 
 function renderInLocale(locale: DesktopLocale, element: React.ReactElement): string {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');

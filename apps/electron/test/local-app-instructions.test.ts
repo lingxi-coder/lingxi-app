@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { Stage } from '../src/renderer/components/Stage';
 import { LocalAppInstructions } from '../src/renderer/components/LocalAppInstructions';
 import { skillInstructionNames } from '../src/renderer/components/localAppInstructionPresentation';
+import { conversationFromMessages, prependHistory } from '../src/renderer/bridge/conversation';
 import { transcriptRows } from '../src/renderer/components/transcriptRows';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
@@ -94,4 +95,42 @@ test('expanded instructions keep the entire document readable in both themes', (
     assert.match(html, /font-size:13px/);
     assert.doesNotMatch(html, /2.15em|hidden=""/);
   }
+});
+
+test('current local-app document stays collapsed when the tool body is unavailable', () => {
+  const text = '# Local apps\n\nCreate an application project, publish it into this device\'s Apps library, and verify the published application.\n\n## Choose the execution host and interfaces\n\nCurrent instructions.';
+  for (const newline of ['\n', '\r\n']) {
+    const prompt = { ...body, text: text.replace(/\n/g, newline) };
+    const html = render(React.createElement(Stage, { liveItems: [skill, prompt], sessionKey: 'current-local-app' }));
+    assert.match(html, /data-run-type="skill-instructions"/);
+    assert.match(html, /aria-expanded="false"/);
+    assert.doesNotMatch(html, /user-message-bubble|Show more|Choose the execution host/);
+    assert.equal(skillInstructionNames([{ ...skill, view: { ...skill.view, primary: 'another-skill' } }, prompt]).size, 0);
+    assert.equal(skillInstructionNames([{ ...skill, status: 'error' }, prompt]).size, 0);
+    assert.equal(skillInstructionNames([prompt]).size, 0);
+  }
+});
+
+
+test('host Skill identity survives restored text-only results, renamed documents and history paging', () => {
+  const messages = [
+    { role: 'assistant', blocks: [{ type: 'tool_use' as const, id: 'api', tool: 'Skill',
+      input_json: '{"skill":"lingxi-api"}', header: { ...skill.view, primary: 'lingxi-api' } }] },
+    { role: 'user', blocks: [{ type: 'tool_result' as const, id: 'api', tool: 'Skill',
+      result_json: '"Launching skill: lingxi-api"', is_error: false,
+      display: { headline: 'Launching skill: lingxi-api' } }] },
+    { role: 'user', skill_name: 'lingxi-api', transcript_uuid: 'api-guide-row',
+      blocks: [{ type: 'text' as const, text: '# Renamed guide\n\nCompletely revised instructions.' }] },
+  ];
+  for (const state of [conversationFromMessages(messages),
+    prependHistory(conversationFromMessages(messages.slice(2)), messages.slice(0, 2), 'older')]) {
+    const rows = transcriptRows(state.items, false);
+    assert.equal(rows.at(-1)?.type, 'skill-instructions');
+    const html = render(React.createElement(Stage, { liveItems: state.items, sessionKey: 'restored-skill' }));
+    assert.match(html, /data-run-type="skill-instructions"/);
+    assert.match(html, /data-message-uuid="api-guide-row"/);
+    assert.doesNotMatch(html, /user-message-bubble|Show more|Completely revised instructions/);
+  }
+  const ordinary = conversationFromMessages([{ ...messages[2]!, skill_name: undefined }]);
+  assert.equal(transcriptRows(ordinary.items, false)[0]?.type, 'narration');
 });

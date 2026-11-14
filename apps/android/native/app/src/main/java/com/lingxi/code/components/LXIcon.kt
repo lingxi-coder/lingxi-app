@@ -64,7 +64,7 @@ enum class LXIconName {
     Menu, SideChat, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, AudioWave, Paperclip,
     Chevron, Sun, Moon, Check, Pin, Brain, ArrowUp, Folder, Clock, Message,
     ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share, ListChecks, Send,
-    ArrowRight, Terminal, Lightbulb, Apps, AppBuilder, McpFallback, Globe, Computer,
+    ShieldTerminal, ArrowRight, Terminal, Lightbulb, Apps, AppBuilder, McpFallback, Globe, Computer,
     /** The Bots tab: a robot head, distinct from [Sparkle] (which already means "AI" elsewhere). */
     Bot,
     /** The Teams tab: a group of people ([Link], which the old Teams drawer row used, is not one). */
@@ -72,6 +72,22 @@ enum class LXIconName {
     /** The Friends tab: one person, as [Users] is a group. */
     User,
 }
+
+/** Shield and terminal path shared with the reference refusal row. */
+private val shieldTerminalIcon = ImageVector.Builder(
+    name = "ShieldTerminal", defaultWidth = 24.dp, defaultHeight = 24.dp,
+    viewportWidth = 16f, viewportHeight = 17f,
+).apply {
+    path(stroke = SolidColor(Color.Black), strokeLineWidth = 1.1f,
+        strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round) {
+        moveTo(8f, 1f); lineTo(14f, 4f); lineTo(14f, 9f)
+        curveTo(14f, 12f, 11.5f, 14f, 8f, 16f)
+        curveTo(4.5f, 14f, 2f, 12f, 2f, 9f)
+        lineTo(2f, 4f); close()
+        moveTo(5f, 6f); lineTo(7f, 8f); lineTo(5f, 10f)
+        moveTo(9f, 10f); lineTo(11f, 10f)
+    }
+}.build()
 
 /** Matches the desktop computer-use glyph on a 16-point grid. */
 private val computerIcon = ImageVector.Builder(
@@ -139,6 +155,7 @@ val LXIconName.materialIcon: ImageVector get() = when (this) {
     LXIconName.Globe -> Icons.Outlined.Language
     LXIconName.Copy -> Icons.Outlined.ContentCopy
     LXIconName.Share -> Icons.Outlined.Share
+    LXIconName.ShieldTerminal -> shieldTerminalIcon
     LXIconName.Terminal -> Icons.Outlined.Terminal
     LXIconName.Lightbulb -> Icons.Outlined.Lightbulb
     LXIconName.Apps -> Icons.Outlined.Apps

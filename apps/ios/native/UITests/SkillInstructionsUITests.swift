@@ -20,6 +20,8 @@ final class SkillInstructionsUITests: XCTestCase {
             XCTAssertFalse(child.exists)
             tools.tap()
             XCTAssertTrue(child.waitForExistence(timeout: 5), app.debugDescription)
+            let childHeader = app.buttons["conversation.tool-call.ui-skill-read-second.toggle"]
+            if childHeader.exists { XCTAssertEqual(tools.frame.minX, childHeader.frame.minX, accuracy: 1) }
             capture(app, "tools-expanded-\(theme)")
             tools.tap()
             XCTAssertFalse(child.exists)
@@ -30,6 +32,8 @@ final class SkillInstructionsUITests: XCTestCase {
             toggle.tap()
             XCTAssertTrue(app.staticTexts["LingXi API guide"].waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Base directory for this skill")).firstMatch.exists)
+            let panel = app.descendants(matching: .any)["conversation.skill-instructions.body"]
+            XCTAssertEqual(toggle.frame.minX, panel.frame.minX, accuracy: 1)
             capture(app, "skill-expanded-\(theme)")
             toggle.tap()
             XCTAssertFalse(app.staticTexts["LingXi API guide"].exists)

@@ -5,6 +5,16 @@ import XCTest
 
 @MainActor
 final class PublicExtensionDirectoryTests: XCTestCase {
+    func testRecommendedPluginTargetFollowsVerifiedMarketplaceAliases() {
+        let candidate = PublicExtensionMarketplace(source: "anthropics/skills", name: "anthropic-agent-skills", plugin: "document-skills")
+        let alias = PluginMarketplace(name: "my-skills", sourceJSON: #"{"source":"github","repo":"anthropics/skills"}"#, installLocation: nil, lastUpdated: nil)
+        XCTAssertEqual(publicMarketplacePluginID(candidate, registered: [alias]), "document-skills@my-skills")
+        XCTAssertNil(publicMarketplacePluginID(candidate, registered: []))
+        let conflict = PluginMarketplace(name: "anthropic-agent-skills", sourceJSON: #"{"source":"github","repo":"other/skills"}"#, installLocation: nil, lastUpdated: nil)
+        XCTAssertNil(publicMarketplacePluginID(candidate, registered: [alias, conflict]))
+        XCTAssertNil(publicMarketplacePluginID(PublicExtensionMarketplace(source: candidate.source, name: candidate.name, plugin: nil), registered: [alias]))
+    }
+
     func testParsesIOSItemsAndKeepsUnknownMCPConfigFields() throws {
         let json = """
         {
@@ -21,6 +31,7 @@ final class PublicExtensionDirectoryTests: XCTestCase {
               "requirements": {"en": "Optional API key"},
               "sourceUrl": "https://example.test/source",
               "documentationUrl": "https://example.test/docs",
+              "examples": [{"en": "Find current documentation", "zh-Hans": "查询最新文档"}],
               "mcp": {
                 "name": "context7",
                 "config": {
@@ -65,6 +76,8 @@ final class PublicExtensionDirectoryTests: XCTestCase {
         let mcp = try XCTUnwrap(directory.items.first)
         XCTAssertEqual(mcp.mcpName, "context7")
         XCTAssertEqual(mcp.localizedDescription(locale: Locale(identifier: "zh-Hans")), "文档")
+        XCTAssertEqual(mcp.localizedExamples(locale: Locale(identifier: "zh-Hans")), ["查询最新文档"])
+        XCTAssertEqual(mcp.localizedExamples(locale: Locale(identifier: "de-DE")), ["Find current documentation"])
         let config = try XCTUnwrap(mcp.mcpConfig)
         XCTAssertEqual(config["url"] as? String, "https://example.test/mcp")
         XCTAssertEqual(config["headers"] as? [String: String], ["Authorization": "Bearer ${CONTEXT7_API_KEY}"])

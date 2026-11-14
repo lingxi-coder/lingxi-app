@@ -4,6 +4,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TranscriptToolGroupTest {
+    @Test fun hostSkillIdentitySurvivesRevisedTextAndMissingAdjacentCall() {
+        val dto = com.lingxi.code.bindings.client.MessageDto(
+            transcriptUuid = "skill-row", role = "user", skillName = "lingxi-api",
+            blocks = listOf(com.lingxi.code.bindings.client.MessageBlockDto.Text(com.lingxi.code.bindings.client.ClientTextDto("# Renamed guide\n\nRevised instructions.".map { it.code.toUShort() }))))
+        val restored = transcriptFromDtos(listOf(dto)).single()
+        assertEquals("lingxi-api", restored.skillName)
+        val row = buildChatRenderItems(state(restored)).single() as ChatRenderItem.SkillInstructions
+        assertEquals("lingxi-api", row.name)
+        assertTrue(buildChatRenderItems(state(restored.copy(skillName = null))).single() is ChatRenderItem.Message)
+    }
+
     @Test fun activityTypesNeverReorderOrMergeAcrossOtherCalls() {
         val calls = listOf("Read", "Read", "Edit", "Read", "mcp__a__search", "mcp__b__search", "Skill", "skill", "Read", "Skill")
             .mapIndexed { index, name -> ToolCallUi(index.toString(), name) }
@@ -96,6 +107,19 @@ class TranscriptToolGroupTest {
         assertEquals("injected", rows.filterIsInstance<ChatRenderItem.SkillInstructions>().single().key)
         val ordinary = buildChatRenderItems(state(message("assistant", MessageContent.Tool(call)), user.copy(text = "Another request")))
         assertTrue(ordinary.last() is ChatRenderItem.Message)
+    }
+
+    @Test fun currentLocalAppTitleMatchesWithoutToolBody() {
+        val call = ToolCallUi("skill", "Skill", status = AgentToolStatus.Completed,
+            header = ToolHeaderUi(ToolVerbUi.Skill, "Skill", primary = "local-app", title = "Skill(local-app)"))
+        for (title in listOf("Local apps", "Desktop Local Apps")) {
+            for (newline in listOf("\n", "\r\n")) {
+                val text = "# $title\n\nCreate an application project.".replace("\n", newline)
+                assertTrue(matchesSkillInstructions(call, text))
+                assertFalse(matchesSkillInstructions(call.copy(header = call.header?.copy(primary = "other")), text))
+                assertFalse(matchesSkillInstructions(call.copy(status = AgentToolStatus.Failed), text))
+            }
+        }
     }
 
     @Test fun skillDirectoryPreamblesMatchWithoutFoldingUnrelatedUserText() {

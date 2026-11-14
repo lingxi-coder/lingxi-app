@@ -1002,6 +1002,14 @@ function validateCommand(name: string, v: unknown): void {
     case 'record_prompt_suggestion_submission':
       assert.ok(isString(o['text']));
       break;
+    case 'decision_configuration_changed':
+      exactObjectKeys(o, ['type', 'configured']);
+      assert.ok(isBool(o['configured']));
+      break;
+    case 'decision_response':
+      exactObjectKeys(o, ['type', 'request_id', 'result_json']);
+      assert.ok(isString(o['request_id']) && isString(o['result_json']));
+      break;
     case 'skill_admin':
     case 'mcp_admin':
     case 'plugin_admin':
@@ -1596,6 +1604,17 @@ function validateEvent(name: string, v: unknown): void {
       assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'audio_request':
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'decision_request':
+      exactObjectKeys(o, ['type', 'request_id', 'input_json', 'timeout_ms']);
+      assert.ok(isString(o['request_id']) && isString(o['input_json']));
+      assert.ok(Number.isSafeInteger(o['timeout_ms']) && (o['timeout_ms'] as number) >= 0);
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'decision_cancel':
+      exactObjectKeys(o, ['type', 'request_id']);
+      assert.ok(isString(o['request_id']));
       assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'audio_cancel':

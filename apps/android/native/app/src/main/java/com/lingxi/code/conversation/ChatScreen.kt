@@ -473,6 +473,9 @@ fun ChatScreen(
             if (modelSetupRequired) {
                 ModelSetupBanner(onOpenModelSettings = onOpenModelSettings, availabilityNotice = modelAvailabilityNotice)
             }
+            state.agentRun?.takeIf { it.active }?.let { run ->
+                run.retry?.let { ReconnectNotice(it, run.turnId, Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) }
+            }
             // Match iOS: one runtime footer, with execution details in summary sheets.
             state.compaction?.let { CompactionProgressRow(it) }
                 ?: state.error?.takeUnless { modelSetupRequired }?.let {

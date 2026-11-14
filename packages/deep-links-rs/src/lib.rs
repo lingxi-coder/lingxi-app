@@ -93,7 +93,17 @@ pub fn parse(raw: &str) -> Result<Target, &'static str> {
     }
     let mut params = BTreeMap::new();
     for (key, value) in u.query_pairs() {
-        if !["workspace", "message", "mode", "scope", "code", "versionId", "intentId", "uid"].contains(&key.as_ref())
+        if ![
+            "workspace",
+            "message",
+            "mode",
+            "scope",
+            "code",
+            "versionId",
+            "intentId",
+            "uid",
+        ]
+        .contains(&key.as_ref())
             || value.is_empty()
             || value.len() > 512
             || value.chars().any(char::is_control)
@@ -157,12 +167,28 @@ pub fn parse(raw: &str) -> Result<Target, &'static str> {
         }
         id.make_ascii_lowercase();
     }
-    let valid_id = |id: &str| !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-    if params.get("intentId").is_some_and(|id| !route.starts_with("market/bot/") || !valid_id(id)) { return Err("Invalid Bot handoff identity"); }
-    if params.get("versionId").is_some_and(|id| !route.starts_with("market/bot/") || !valid_id(id)) {
+    let valid_id = |id: &str| {
+        !id.is_empty()
+            && id.len() <= 128
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    };
+    if params
+        .get("intentId")
+        .is_some_and(|id| !route.starts_with("market/bot/") || !valid_id(id))
+    {
+        return Err("Invalid Bot handoff identity");
+    }
+    if params
+        .get("versionId")
+        .is_some_and(|id| !route.starts_with("market/bot/") || !valid_id(id))
+    {
         return Err("Invalid Bot release identity");
     }
-    if route.starts_with("market/bot/") && (!valid_id(&route[11..]) || params.keys().any(|k| k != "versionId" && k != "intentId")) {
+    if route.starts_with("market/bot/")
+        && (!valid_id(&route[11..]) || params.keys().any(|k| k != "versionId" && k != "intentId"))
+    {
         return Err("Invalid Bot market link");
     }
     let payload = if let Some(fragment) = u.fragment() {

@@ -7,6 +7,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Wifi
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -21,6 +25,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
@@ -52,6 +57,14 @@ internal fun AgentRunTimeline(
     onToggleToolCall: (String) -> Unit = {},
     agents: List<SessionAgentUi> = emptyList(),
 ) {
+    val singleTool = state.tools.singleOrNull()
+    if (singleTool != null && !isAgentLaunchTool(singleTool.tool) && state.reasoning.isBlank() && !state.reasoningTruncated &&
+        state.notices.isEmpty() && state.activeWorkers == 0 && state.teamName == null &&
+        state.usage == null && state.formattedCost == null) {
+        ToolCallView(singleTool.toToolCall(), singleTool.id in expandedToolCalls, { onToggleToolCall(singleTool.id) },
+            modifier = modifier.testTag(UiTags.AGENT_RUN_TIMELINE))
+        return
+    }
     // Keep one fixed header; execution phases only replace its content.
     var expanded by rememberSaveable(state.turnId) { mutableStateOf(false) }
     val title = when (state.outcome) {
@@ -154,4 +167,23 @@ private fun TraceFooter(state: AgentRunState) {
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+}
+
+/** Recovery stays neutral and readable, with details expanded on first appearance. */
+@Composable
+internal fun ReconnectNotice(retry: AgentRetryState, turnId: Long, modifier: Modifier = Modifier) {
+    var expanded by rememberSaveable(turnId) { mutableStateOf(true) }
+    val color = LingXiTheme.palette.text3
+    val disclosureState = stringResource(if (expanded) R.string.chat_run_collapse else R.string.chat_run_expand)
+    Column(modifier.fillMaxWidth().testTag("conversation.reconnect")) {
+        Row(Modifier.heightIn(min = 44.dp).semantics { stateDescription = disclosureState }
+            .clickable(role = Role.Button) { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Icons.Outlined.Wifi, contentDescription = null, tint = color, modifier = Modifier.size(18.dp))
+            Text(stringResource(R.string.chat_retry_status, retry.attempt, retry.maxRetries),
+                color = color, style = MaterialTheme.typography.bodyMedium)
+            LXIcon(if (expanded) LXIconName.Chevron else LXIconName.ChevronR, size = 12.dp, color = color)
+        }
+        if (expanded) Text(retry.message, color = color, style = MaterialTheme.typography.bodyMedium)
+    }
 }

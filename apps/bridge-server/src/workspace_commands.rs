@@ -76,13 +76,19 @@ impl ColdBootResume {
         if uuid::Uuid::parse_str(&snapshot.source_session_id).ok() != Some(session_id) {
             return Err("cold resume snapshot does not match the active session".into());
         }
-        let loaded = session::jsonl::route_lines(&snapshot.content);
+        let fallback;
+        let loaded = if let Some(loaded) = cfg.prepared_session_resume() {
+            loaded
+        } else {
+            fallback = session::jsonl::route_lines(&snapshot.content);
+            &fallback
+        };
         let mode = session::JsonlWriter::fixed_session_mode_from_source(
             &snapshot.content,
             &session_id.to_string(),
         )?;
         let (messages, _) =
-            session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
+            session::jsonl::build_conversation_chain(loaded, &session_id.to_string());
         // Explicit mobile draft anchors are allowed by the cold loader and
         // have no display baseline or deferred tool calls to replay.
         let replayed = if messages.is_empty()
@@ -93,9 +99,9 @@ impl ColdBootResume {
             None
         } else {
             Some(
-                orchestrator::resume::replay_captured_session(
+                orchestrator::resume::replay_prepared_session(
                     path.clone(),
-                    snapshot.content.to_string(),
+                    &snapshot.content,
                     loaded,
                     session_id,
                 )
@@ -109,6 +115,40 @@ impl ColdBootResume {
             mode,
         }))
     }
+}
+
+fn recent_display_history(
+    history: &[lingxi_core::types::ConversationMessage],
+) -> &[lingxi_core::types::ConversationMessage] {
+    let start = history
+        .iter()
+        .rposition(|message| {
+            matches!(message,
+                lingxi_core::types::ConversationMessage::System { subtype, .. }
+                    if subtype.as_deref() == Some("compact_boundary")
+            )
+        })
+        .unwrap_or(0);
+    &history[start..]
+}
+
+/// Bound the Desktop baseline before lowering and transport, including when
+/// the pinned SDK still restores a full display history. Model state is separate.
+pub(crate) fn lower_initial_transcript(
+    replayed: &orchestrator::ReplayedSession,
+) -> Vec<client::protocol::message::MessageDto> {
+    client::adapter::lowering::lower_transcript_with_identities(
+        recent_display_history(&replayed.display_history),
+        &replayed.client_state_tool_results,
+    )
+    .into_iter()
+    .map(|(id, mut message)| {
+        let uuid = id.as_uuid().to_string();
+        message.sent_at_ms = replayed.display_timestamps.get(&uuid).copied();
+        message.transcript_uuid = Some(uuid);
+        message
+    })
+    .collect()
 }
 
 fn merge_live_display_history(
@@ -137,11 +177,16 @@ fn merge_live_resume_projection(
     >,
 ) {
     use lingxi_core::types::{ContentBlock, ConversationMessage};
-    let captured_ids = replayed
+    let mut captured_ids = replayed
         .display_history
         .iter()
         .map(ConversationMessage::id)
         .collect::<std::collections::HashSet<_>>();
+    captured_ids.extend(replayed.messages.iter().filter_map(|row| {
+        uuid::Uuid::parse_str(&row.uuid)
+            .ok()
+            .map(lingxi_core::types::MessageId::from_uuid)
+    }));
     let tool_names = replayed
         .display_history
         .iter()
@@ -184,7 +229,14 @@ fn merge_live_resume_projection(
             replayed.client_state_tool_results.insert(id, raw.clone());
         }
     }
-    merge_live_display_history(&mut replayed.display_history, live.to_vec());
+    // The live model chain can retain pre-compact rows that the initial display
+    // deliberately omitted. Only post-capture additions belong in this merge.
+    let additions = live
+        .iter()
+        .filter(|message| !captured_ids.contains(&message.id()))
+        .cloned()
+        .collect();
+    merge_live_display_history(&mut replayed.display_history, additions);
 }
 
 #[derive(Default)]
@@ -311,7 +363,7 @@ impl WorkspaceCommands {
             .map_err(|error| format!("cold resume completion failed: {error}"))?;
         let messages = if let Some(mut replayed) = captured.replayed {
             self.merge_live_resume_display(&mut replayed).await?;
-            client::adapter::lowering::lower_replayed_transcript(&replayed)
+            lower_initial_transcript(&replayed)
         } else {
             let live = runtime.orchestrator.snapshot_history().await;
             client::adapter::lowering::lower_transcript(&live)
@@ -1161,6 +1213,116 @@ mod tests {
         assert_eq!(busy.string_at("/status"), Some("rejected"));
         assert_eq!(busy.string_at("/reason"), Some("busy"));
         assert_eq!(busy.string_at("/message"), Some("A turn is in progress \u{2014} the working directory can only change while the session is idle. Wait for the turn to finish (or interrupt it), then retry."));
+    }
+
+    #[test]
+    fn initial_transcript_starts_at_latest_compact_and_preserves_source_rows() {
+        use lingxi_core::types::{CompactBoundaryMetadata, ConversationMessage, MessageId};
+        let mut history = vec![ConversationMessage::user(
+            MessageId::new(),
+            "old history".into(),
+        )];
+        assert_eq!(recent_display_history(&history).len(), 1);
+        for text in ["first", "latest"] {
+            history.push(ConversationMessage::compact_boundary(
+                MessageId::new(),
+                text.into(),
+                CompactBoundaryMetadata::default(),
+            ));
+            history.push(ConversationMessage::user(MessageId::new(), text.into()));
+        }
+        let recent = recent_display_history(&history);
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].id(), history[3].id());
+        assert_eq!(recent[1].text_content(), "latest");
+        assert_eq!(history.len(), 5);
+    }
+
+    #[test]
+    fn initial_transcript_lowering_keeps_uuid_clock_and_model_context() {
+        let root = tempfile::tempdir().unwrap();
+        let session_id = uuid::Uuid::new_v4();
+        let ids = (0..5).map(|_| uuid::Uuid::new_v4()).collect::<Vec<_>>();
+        let mut rows = vec![
+            serde_json::json!({"type":"fixed-session-mode","sessionId":session_id,"sessionMode":"code","instructionEpoch":0}),
+        ];
+        for (index, id) in ids.iter().enumerate() {
+            let mut row = serde_json::json!({"uuid":id,"sessionId":session_id,"timestamp":"2026-11-12T00:00:00Z","parentUuid":if index == 2 || index == 4 { Some(ids[index - 1]) } else { None }});
+            let body = if index == 1 || index == 3 {
+                serde_json::json!({"type":"system","subtype":"compact_boundary","content":"compact","compactMetadata":{}})
+            } else {
+                serde_json::json!({"type":"user","message":{"role":"user","content":format!("message {index}")}})
+            };
+            row.as_object_mut()
+                .unwrap()
+                .extend(body.as_object().unwrap().clone());
+            rows.push(row);
+        }
+        let source = rows
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        let loaded = session::jsonl::route_lines(&source);
+        let replayed = orchestrator::resume::replay_captured_session(
+            root.path().join(format!("{session_id}.jsonl")),
+            source,
+            loaded,
+            session_id,
+        )
+        .unwrap();
+        let model_ids = replayed
+            .state
+            .history
+            .iter()
+            .map(|message| message.id())
+            .collect::<Vec<_>>();
+        let messages = lower_initial_transcript(&replayed);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].transcript_uuid.as_deref(),
+            Some(ids[3].to_string().as_str())
+        );
+        assert_eq!(
+            messages[1].transcript_uuid.as_deref(),
+            Some(ids[4].to_string().as_str())
+        );
+        assert!(messages
+            .iter()
+            .all(|message| message.sent_at_ms == Some(1794441600000)));
+        assert_eq!(
+            model_ids,
+            replayed
+                .state
+                .history
+                .iter()
+                .map(|message| message.id())
+                .collect::<Vec<_>>()
+        );
+        // A preserved model-context row must not return to the display tail
+        // when live SessionStart/deferred messages are merged after hydration.
+        let mut replayed = replayed;
+        replayed
+            .messages
+            .push(serde_json::from_value(rows[1].clone()).unwrap());
+        let added = lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "live startup prompt".into(),
+        );
+        let retained = lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::from_uuid(ids[0]),
+            "retained pre-compact model row".into(),
+        );
+        merge_live_resume_projection(
+            &mut replayed,
+            &[retained, added.clone()],
+            &Default::default(),
+        );
+        let displayed = lower_initial_transcript(&replayed);
+        assert_eq!(displayed.len(), 3);
+        assert_eq!(
+            displayed[2].transcript_uuid,
+            Some(added.id().as_uuid().to_string())
+        );
     }
 
     #[test]

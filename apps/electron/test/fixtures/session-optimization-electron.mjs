@@ -94,8 +94,16 @@ async function main() {
     assert.deepEqual(opened, { projectPath: '/fixture/session-optimization', sessionId: '00000000-0000-4000-8000-000000001770',
       selection: { scope: 'all', transcriptPath: '/fixture/Exact Case/中文 chosen copy.jsonl' } });
     assert.equal(await js('document.activeElement.id'), 'open-picker');
+    await js(`${fixture}.openDeferred(1)`);
+    await wait(`${fixture}.state().sessionLoading && ${fixture}.state().pending.length === 1`);
+    await js(`${fixture}.openDeferred(2)`);
+    await wait(`${fixture}.state().pending.length === 2`);
+    await js(`${fixture}.completeOpen(2)`);
+    await wait(`!${fixture}.state().sessionLoading && ${fixture}.state().activeSessionId === '00000000-0000-4000-8000-000000000002'`);
+    await js(`${fixture}.completeOpen(1)`); await settle();
+    assert.equal((await js(`${fixture}.state()`)).activeSessionId, '00000000-0000-4000-8000-000000000002');
     process.stdout.write(JSON.stringify({ stages, streamedUpdates: 90, fullResults: 5002, maximumMounted: Math.max(initial.mounted, manual.mounted, navigated.mounted),
-      activeDescendant: true, manualScroll: true, keyboard: true, narrowZoom: true, exactSource: true }) + '\n');
+      activeDescendant: true, manualScroll: true, keyboard: true, narrowZoom: true, exactSource: true, overlappingNavigation: true }) + '\n');
   } finally { win.destroy(); app.quit(); }
 }
 main().catch(error => { process.stderr.write(String(error.stack) + '\n'); app.exit(1); });

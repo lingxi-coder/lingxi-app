@@ -56,7 +56,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget, Wrap};
 use tool_api::ask_user_question::AskUserQuestionExchange;
 use tui_core::orchestrator_bridge::RunningAgentStatus;
 use tui_core::permission_bridge::PermissionExchange;
@@ -120,6 +120,8 @@ pub struct BottomPaneStatus {
     /// The spinner/status text shown while running (owner-computed from its
     /// turn state: activity label, elapsed seconds, animation frame).
     pub text: String,
+    /// Recovery detail, rendered on a separate, wrapped neutral line.
+    pub retry_message: Option<String>,
     /// Session-cumulative cost (`$0.0000` — `TurnEvent::CostUpdated`),
     /// appended dim at the end of the status row when known.
     pub cost: Option<String>,
@@ -2242,6 +2244,12 @@ impl BottomPane {
     fn status_indicator_line(&self) -> Line<'static> {
         let dim = crate::style_adapter::to_ratatui(self.theme.dim);
         let claude = crate::style_adapter::to_ratatui(self.theme.claude);
+        if self.status.retry_message.is_some() {
+            return Line::from(vec![
+                Span::raw("  "),
+                Span::styled(self.status.text.clone(), Style::default().fg(dim)),
+            ]);
+        }
         // While compacting (`/compact`), claude-code shows only the
         // `Compacting conversation…` message — no interrupt/cancel hint, no
         // cost (compaction runs off the turn loop and isn't Esc-cancellable
@@ -2297,13 +2305,22 @@ impl BottomPane {
         ])
     }
 
-    /// Rows the status indicator occupies at `cols`: 0 when idle, 1 for a normal
-    /// turn, 2 while compacting when the progress bar fits (`compact_bar_width`),
-    /// else 1 (narrow terminal → message only, matching claude-code hiding the
-    /// bar under `Gt_`).
-    fn status_rows(&self, cols: u16) -> u16 {
-        if !self.status.running {
-            return 0;
+    /// Use the same wrapping for measuring and painting recovery details.
+    fn retry_detail(&self) -> Paragraph<'_> {
+        Paragraph::new(self.status.retry_message.as_deref().unwrap_or_default())
+            .style(Style::default().fg(crate::style_adapter::to_ratatui(self.theme.dim)))
+            .wrap(Wrap { trim: false })
+    }
+
+    fn running_status_rows(&self, cols: u16) -> u16 {
+        if self.status.retry_message.is_some() {
+            return 1u16.saturating_add(
+                u16::try_from(
+                    self.retry_detail()
+                        .line_count(cols.saturating_sub(2).max(1)),
+                )
+                .unwrap_or(u16::MAX),
+            );
         }
         if self.status.compact_percent.is_some()
             && crate::spinner_status::compact_bar_width(cols).is_some()
@@ -2312,6 +2329,13 @@ impl BottomPane {
         } else {
             1
         }
+    }
+
+    fn status_rows(&self, cols: u16) -> u16 {
+        if !self.status.running {
+            return 0;
+        }
+        self.running_status_rows(cols)
     }
 
     /// Footer props for the current pane state (mode selection that codex
@@ -2463,18 +2487,10 @@ impl BottomPane {
         let agent_rows =
             u16::try_from(input_status::agent_lines(&self.running_agents, &self.theme).len())
                 .unwrap_or(u16::MAX);
-        // The status indicator is 2 rows while compacting (spinner line + the
-        // progress bar) when the bar fits, else 1 for a normal running turn.
-        // The caller supplies a fresh `running` (the pane's own flag can be
-        // stale by a tick); `compact_percent` is read from `self.status`.
+        // Recovery details and compaction progress can add rows. The caller
+        // supplies a fresh `running`; the pane's own flag can be stale by a tick.
         let status = if running {
-            if self.status.compact_percent.is_some()
-                && crate::spinner_status::compact_bar_width(width).is_some()
-            {
-                2
-            } else {
-                1
-            }
+            self.running_status_rows(width)
         } else {
             0
         };
@@ -2526,6 +2542,17 @@ impl Renderable for BottomPane {
                 ..status_area
             };
             Paragraph::new(self.status_indicator_line()).render(line_area, buf);
+            if self.status.retry_message.is_some() && status_area.height > 1 {
+                self.retry_detail().render(
+                    Rect {
+                        x: status_area.x.saturating_add(2),
+                        y: status_area.y.saturating_add(1),
+                        width: status_area.width.saturating_sub(2),
+                        height: status_area.height - 1,
+                    },
+                    buf,
+                );
+            }
             // Second row (compaction only): the pill progress bar + `N%`.
             if let Some(percent) = self.status.compact_percent {
                 if let (Some(width), true) = (
@@ -3664,6 +3691,7 @@ mod tests {
             text: "Simmering… (esc to interrupt)".to_string(),
             cost: None,
             compact_percent: None,
+            retry_message: None,
         });
         let area = Rect::new(0, 0, 80, pane.desired_height(80));
         let mut buf = Buffer::empty(area);
@@ -4530,6 +4558,7 @@ mod tests {
             text: "Working…".to_string(),
             cost: None,
             compact_percent: None,
+            retry_message: None,
         });
         assert!(matches!(
             pane.handle_key(ctrl_c),
@@ -4556,6 +4585,7 @@ mod tests {
             text: "✻ Working… (1s · esc to interrupt)".to_string(),
             cost: None,
             compact_percent: None,
+            retry_message: None,
         });
         // Running + no local surface: Esc surfaces the interrupt intent (the
         // spinner's "esc to interrupt" hint), never Quit.
@@ -4693,6 +4723,31 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_details_wrap_without_overlapping_the_composer() {
+        use crate::renderable::Renderable;
+        let mut pane = BottomPane::new(Theme::dark());
+        pane.set_task_running(BottomPaneStatus {
+            running: true,
+            text: "⌁ Reconnecting 1/5".into(),
+            retry_message: Some("stream disconnected before completion: transport error".into()),
+            ..Default::default()
+        });
+        for width in [24, 80] {
+            let area = Rect::new(0, 0, width, pane.desired_height(width));
+            let mut buf = Buffer::empty(area);
+            pane.render(area, &mut buf);
+            let rendered = (0..area.height)
+                .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(rendered.contains("Reconnecting 1/5"), "{rendered}");
+            assert!(rendered.contains("stream disconnected"), "{rendered}");
+            assert!(rendered.contains("transport error"), "{rendered}");
+            assert!(pane.status_rows(width) >= 2);
+        }
+    }
+
+    #[test]
     fn status_line_variants_running_armed_and_vim_label() {
         let mut pane = pane();
         // Running: the spinner + Ctrl-C hint sits on the FIRST row (the
@@ -4702,6 +4757,7 @@ mod tests {
             text: "✻ Working… (3s · esc to interrupt)".to_string(),
             cost: None,
             compact_percent: None,
+            retry_message: None,
         });
         let area = Rect::new(0, 0, 80, pane.desired_height(80));
         let mut buf = Buffer::empty(area);
@@ -4752,6 +4808,7 @@ mod tests {
             text: String::new(),
             cost: Some("$0.0123".to_string()),
             compact_percent: None,
+            retry_message: None,
         });
         let area = Rect::new(0, 0, 90, pane.desired_height(90));
         let mut buf = Buffer::empty(area);
@@ -4768,6 +4825,7 @@ mod tests {
             text: "✻ Working… (3s · esc to interrupt)".to_string(),
             cost: Some("$0.0123".to_string()),
             compact_percent: None,
+            retry_message: None,
         });
         let area = Rect::new(0, 0, 90, pane.desired_height(90));
         let mut buf = Buffer::empty(area);
@@ -4789,6 +4847,7 @@ mod tests {
             text: "· Compacting conversation\u{2026}".to_string(),
             cost: Some("$0.0123".to_string()),
             compact_percent: Some(4),
+            retry_message: None,
         });
         let area = Rect::new(0, 0, 90, pane.desired_height(90));
         let mut buf = Buffer::empty(area);
@@ -4825,6 +4884,7 @@ mod tests {
             cost: None,
             // cols=15 → compact_bar_width None → message-only (1 row).
             compact_percent: Some(10),
+            retry_message: None,
         });
         let area = Rect::new(0, 0, 15, pane.desired_height(15));
         let mut buf = Buffer::empty(area);

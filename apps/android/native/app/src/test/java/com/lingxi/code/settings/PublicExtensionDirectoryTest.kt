@@ -8,12 +8,24 @@ import com.lingxi.code.plugins.PluginMarketplace
 
 class PublicExtensionDirectoryTest {
     @Test
+    fun recommendedPluginTargetFollowsVerifiedMarketplaceAliases() {
+        val candidate = PublicExtensionMarketplace("anthropics/skills", "anthropic-agent-skills", "document-skills")
+        val alias = PluginMarketplace("my-skills", """{"source":"github","repo":"anthropics/skills"}""", null, null)
+        assertEquals("document-skills@my-skills", publicMarketplacePluginId(candidate, listOf(alias)))
+        assertEquals(null, publicMarketplacePluginId(candidate, emptyList()))
+        val conflict = PluginMarketplace("anthropic-agent-skills", """{"source":"github","repo":"other/skills"}""", null, null)
+        assertEquals(null, publicMarketplacePluginId(candidate, listOf(alias, conflict)))
+        assertEquals(null, publicMarketplacePluginId(candidate.copy(pluginId = null), listOf(alias)))
+    }
+
+    @Test
     fun directoryFiltersForAndroidAndResolvesFiveLanguageKeys() {
         val entries = parsePublicExtensionDirectory(
             """{"schemaVersion":1,"items":[
                 {"id":"github","kind":"mcp","name":"GitHub","publisher":"GitHub","category":"development","platforms":["android","ios"],
                  "description":{"en":"Work with repositories","zh-Hans":"管理仓库","zh-Hant":"管理儲存庫","ja":"リポジトリを管理","ko":"저장소 관리"},
                  "sourceUrl":"https://example.com/source","documentationUrl":"https://example.com/docs",
+                 "examples":[{"en":"Review open issues","zh-Hans":"审查未关闭的问题"}],
                  "mcp":{"name":"github","config":{"url":"https://example.com/mcp","headers":{"Authorization":"Bearer reference"},"env":{"TOKEN":"GITHUB_TOKEN"}}}},
                 {"id":"desktop-only","kind":"mcp","name":"Desktop","publisher":"Example","category":"development","platforms":["macos"],"description":{"en":"Desktop only"},"sourceUrl":"https://example.com/source","documentationUrl":"https://example.com/docs"}
             ]}""",
@@ -22,6 +34,7 @@ class PublicExtensionDirectoryTest {
         assertEquals(listOf("github"), entries.map { it.id })
         assertEquals("管理儲存庫", entries.single().localizedDescription("zh-Hant-TW"))
         assertEquals("Work with repositories", entries.single().localizedDescription("en-US"))
+        assertEquals("审查未关闭的问题", entries.single().examples.single()["zh-Hans"])
         assertEquals("GITHUB_TOKEN", org.json.JSONObject(entries.single().mcpConfigJson!!).getJSONObject("env").getString("TOKEN"))
         assertTrue(entries.single().mcpConfigJson!!.contains("Authorization"))
     }

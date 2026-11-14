@@ -14,6 +14,13 @@ confirmation flow. After the engine has fetched and validated the marketplace,
 its real catalog supplies the individual plugin installation operation. The
 directory is not a replacement for marketplace manifests or their authority.
 
+Plugin entries may declare a `skills` list to appear in Skills recommendations.
+These names are discovery/search metadata; adding a recommendation installs the
+complete upstream plugin package through the same source validation, scope,
+preview and confirmation flow. Desktop follows the chosen package after adding
+its marketplace. Android and iOS expose the same packages from Skills browsing.
+Do not copy only `SKILL.md` or replace upstream skill content with local prompts.
+
 The installer reads the current Claude `.claude-plugin/plugin.json` and
 `.claude-plugin/marketplace.json` formats alongside LingXi's native metadata.
 When both formats are present, native metadata has precedence; an invalid
@@ -43,6 +50,11 @@ sources and actual published package versions before changing executable MCP
 recipes. Pin npm package versions rather than using `@latest`; allow only HTTPS
 source/documentation links. Do not add secrets, shell scripts, automatic
 installation hooks or provider credentials.
+
+The recommendations were expanded on 2026-11-12 after checking Anthropic's
+published marketplace and skill manifests, Superpowers, and the official Notion,
+Linear, Figma and Supabase MCP setup documentation. Supabase's draft starts in
+read-only mode. These are curated recommendations, not a live popularity ranking.
 
 Initial sources were checked on 2026-10-25 against the maintained repositories:
 ChromeDevTools/chrome-devtools-mcp, microsoft/playwright-mcp,

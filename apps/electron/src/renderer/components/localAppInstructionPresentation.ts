@@ -16,6 +16,14 @@ export function skillInstructionNames(items: readonly RunItem[]): ReadonlyMap<st
   const ids = new Map<string, string>();
   let skill: Extract<RunItem, { type: 'tool' }> | undefined;
   for (const item of items) {
+    // Persisted host identity survives resume, paging and document changes.
+    // Restored tool results often contain only "Launching skill: …".
+    if (item.type === 'narration' && item.role === 'user' && item.skillName
+      && !item.images?.length && !item.delivery) {
+      ids.set(item.id, item.skillName);
+      skill = undefined;
+      continue;
+    }
     if (item.type === 'thinking') continue;
     if (item.type === 'tool') {
       skill = item.status === 'done' && item.view.verb.toLowerCase() === 'skill' ? item : undefined;
@@ -26,7 +34,7 @@ export function skillInstructionNames(items: readonly RunItem[]): ReadonlyMap<st
       const body = output && typeof output === 'object' && !Array.isArray(output) && typeof output.body === 'string'
         ? normalizedText(output.body).trim() : '';
       const text = skillInstructionText(item.text);
-      const knownLocalApp = skill.view.primary === 'local-app' && /^# Desktop Local Apps\r?\n/.test(text);
+      const knownLocalApp = skill.view.primary === 'local-app' && /^# (?:Desktop Local Apps|Local apps)\n/.test(text);
       if ((body && (text === body || text.startsWith(`${body}\n`))) || knownLocalApp) {
         ids.set(item.id, skill.view.primary || skill.view.label);
       }

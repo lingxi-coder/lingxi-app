@@ -680,6 +680,22 @@ export class BridgeClient extends EventEmitter {
     if (!result || typeof result !== 'object' || (result as { status?: unknown }).status !== 'ok') throw new Error('invalid runtime controls restore response');
   }
 
+  /** Read a committed recent display baseline; never performs a session resume. */
+  async captureTranscriptCheckpoint(sessionId: string): Promise<Extract<ClientEvent, { type: 'session_resumed' }>> {
+    const socket = this.ws;
+    if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('Transcript checkpoints require a connected owner.');
+    const result = await this.request('desktop_transcript_checkpoint', { session_id: sessionId }, 30_000);
+    if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) throw new Error('The transcript checkpoint connection changed.');
+    const event = validateClientEvent(result);
+    if (event.type !== 'session_resumed' || event.session_id !== sessionId) throw new Error('Invalid transcript checkpoint owner.');
+    if (event.messages.some(message => !message || typeof message !== 'object'
+      || typeof message.role !== 'string' || !Array.isArray(message.blocks)
+      || message.blocks.some(block => !block || typeof block !== 'object' || typeof block.type !== 'string'))) {
+      throw new Error('Invalid transcript checkpoint messages.');
+    }
+    return event;
+  }
+
   async resumeSessionFromTranscript(sessionId: string, transcriptPath: string, expectedMode: 'chat' | 'code', signal?: AbortSignal): Promise<void> {
     // The Desktop resume owner pauses its deadline for live tool interactions.
     // Its signal replaces the fixed request deadline only for that owner.

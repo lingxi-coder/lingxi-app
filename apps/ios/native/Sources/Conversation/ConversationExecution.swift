@@ -410,6 +410,15 @@ struct ConversationToolResultDisplay: Equatable, Hashable {
     let bodyTruncated: Bool
     /// The body exceeds the inline budget — render it collapsed.
     let collapsed: Bool
+
+    /// A result already shown in the summary needs no second disclosure.
+    var hasExpandableContent: Bool {
+        if diff != nil || bodyTruncated { return true }
+        guard let body, !body.isEmpty else { return false }
+        let content = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return bodyLines > 1 || content.contains("\n") || content.contains("\r")
+            || content != headline?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 /// Lifecycle state of one plan item. Mirrors `PlanTaskStateDto`.
@@ -955,13 +964,20 @@ enum ConversationSkillInstructions {
         return body
     }
 
+    static func name(_ message: Message, previousTool: ConversationToolTrace?) -> String? {
+        guard message.role == .user, message.images.isEmpty else { return nil }
+        if let name = message.skillName, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return name }
+        guard let tool = previousTool, matches(message, tool: tool) else { return nil }
+        return tool.header?.primary ?? tool.tool
+    }
+
     static func matches(_ message: Message, tool: ConversationToolTrace) -> Bool {
         guard message.role == .user, message.images.isEmpty, tool.status == .completed,
               tool.tool.caseInsensitiveCompare("Skill") == .orderedSame else { return false }
         let text = displayText(message.text)
         let body = tool.skillBody.map(normalizedNewlines)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return (!body.isEmpty && (text == body || text.hasPrefix(body + "\n"))) ||
-            (tool.header?.primary == "local-app" && text.hasPrefix("# Desktop Local Apps\n"))
+            (tool.header?.primary == "local-app" && (text.hasPrefix("# Desktop Local Apps\n") || text.hasPrefix("# Local apps\n")))
     }
 }
 

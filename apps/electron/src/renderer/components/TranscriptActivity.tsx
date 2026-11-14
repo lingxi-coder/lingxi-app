@@ -10,6 +10,7 @@ import { ApiRetryNotice, type ApiRetryStatus } from './ApiRetryNotice';
 import { toolGroupSummary } from './toolPresentation';
 import type { TranscriptActivity as Activity } from './transcriptActivities';
 import './TranscriptActivity.css';
+import { TranscriptLeafWindow } from './TranscriptLeafWindow';
 
 export function TranscriptActivity({ activity, open, toolOpen, onSetOpen, modUiSessionId, retry }: {
   activity: Activity;
@@ -25,14 +26,29 @@ export function TranscriptActivity({ activity, open, toolOpen, onSetOpen, modUiS
   const thought = activity.thoughts.at(-1);
   const thinking = activity.active && !running;
   const thoughtLabel = thought?.text.trim().slice(-240).replace(/[\r\n]+/g, ' ');
-  const label = retry ? `Retrying… attempt ${retry.attempt}/${retry.max_retries} · ${retry.message}`
-    : thinking && thoughtLabel ? thoughtLabel
+  const label = thinking && thoughtLabel ? thoughtLabel
     : activity.tools.length ? toolGroupSummary(activity.tools)
     : thoughtLabel || (activity.active ? 'Thinking…' : tr('desktop_activity'));
   const failed = activity.tools.filter(tool => tool.status === 'error').length;
   const runningState = running > 0 ? tr('desktop_ui_running_count', running) : '';
   const failedState = failed > 0 ? tr('desktop_ui_tool_call_unsuccessful_count', failed) : '';
   const first = activity.tools[0];
+  // A lone tool owns its details; another disclosure only repeats its header.
+  if (activity.tools.length === 1 && first && !activity.thoughts.some(thought => thought.text.trim()) && !retry) {
+    return <ToolCall item={first} modUiSessionId={modUiSessionId}
+      open={toolOpen(first.id)} onSetOpen={onSetOpen} />;
+  }
+  if (retry) {
+    return <ApiRetryNotice retry={retry}>
+      {(activity.tools.length > 0 || activity.thoughts.some(thought => thought.text.trim())) &&
+        <div className="transcript-activity-details" style={{ '--activity-border': t.border } as CSSProperties}>
+          <TranscriptLeafWindow items={[...activity.tools, ...activity.thoughts.filter(thought => thought.text.trim())]}
+            renderItem={item => item.type === 'tool'
+              ? <ToolCall item={item} modUiSessionId={modUiSessionId} open={toolOpen(item.id)} onSetOpen={onSetOpen} />
+              : <MarkdownContent text={item.text} />} />
+        </div>}
+    </ApiRetryNotice>;
+  }
   return <div className="transcript-activity" data-activity-id={activity.id} data-active={activity.active || undefined}
     style={{ '--activity-text': t.text3, '--activity-highlight': t.text, '--activity-ring': t.accent,
       '--activity-border': t.border, '--activity-danger': t.danger } as CSSProperties}>
@@ -40,16 +56,17 @@ export function TranscriptActivity({ activity, open, toolOpen, onSetOpen, modUiS
       buttonClassName="transcript-activity-trigger" buttonStyle={{ fontSize: 13, lineHeight: '20px' }} label={[label, runningState, failedState].filter(Boolean).join(' · ')}
       summary={<>
         <ToolActivityIcon name={first ? toolIconName(first.view.verb, first.tool, first.view.icon) : 'spark'} />
-        <span className={`transcript-activity-label${activity.active && !retry ? ' running-sweep' : ''}`}
-          role={activity.active && !retry ? 'status' : undefined} title={label}
-          style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>{retry ? <ApiRetryNotice retry={retry} inline /> : label}</span>
+        <span className={`transcript-activity-label${activity.active ? ' running-sweep' : ''}`}
+          role={activity.active ? 'status' : undefined} title={label}
+          style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>{label}</span>
         {runningState && <span className="transcript-activity-state">{runningState}</span>}
         {failedState && <span className="transcript-activity-failed">{failedState}</span>}
       </>}>
       <div className="transcript-activity-details">
-        {activity.tools.map(tool => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId}
-          open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
-        {activity.thoughts.map(thought => thought.text.trim() && <MarkdownContent key={thought.id} text={thought.text} />)}
+        <TranscriptLeafWindow items={[...activity.tools, ...activity.thoughts.filter(thought => thought.text.trim())]}
+          renderItem={item => item.type === 'tool'
+            ? <ToolCall item={item} modUiSessionId={modUiSessionId} open={toolOpen(item.id)} onSetOpen={onSetOpen} />
+            : <MarkdownContent text={item.text} />} />
       </div>
     </Disclosure>
   </div>;

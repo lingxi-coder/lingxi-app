@@ -80,6 +80,8 @@ data class AgentRunNotice(
     val kind: AgentRunNoticeKind = AgentRunNoticeKind.Info,
 )
 
+data class AgentRetryState(val message: String, val attempt: Int, val maxRetries: Int)
+
 data class AgentRunUsage(
     val inputTokens: Long,
     val outputTokens: Long,
@@ -111,6 +113,7 @@ data class AgentRunState(
     val reasoningTruncated: Boolean = false,
     val tools: List<AgentToolRunState> = emptyList(),
     val notices: List<AgentRunNotice> = emptyList(),
+    val retry: AgentRetryState? = null,
     val usage: AgentRunUsage? = null,
     val formattedCost: String? = null,
     val activeWorkers: Int = 0,
@@ -251,6 +254,7 @@ internal fun AgentRunState.finish(outcome: AgentRunOutcome): AgentRunState {
     return copy(
         active = outcome == AgentRunOutcome.Running,
         outcome = outcome,
+        retry = if (outcome == AgentRunOutcome.Running) retry else null,
         reasoningActive = false,
         // Coordinator workers can outlive the reply stream. Keep the last
         // reported count until a later Coordinator(0) arrives so Android does

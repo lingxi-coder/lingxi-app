@@ -166,8 +166,10 @@ fun buildChatRenderItems(state: ChatState, anchoredMessageUuid: String? = null):
             }
         } else if (message.text.isNotBlank() || message.images.isNotEmpty() || message.blocks.isNotEmpty()) {
             val previousTool = (lastOrNull() as? ChatRenderItem.Tools)?.calls?.lastOrNull()
-            if (message.role == com.lingxi.code.model.Role.User && message.images.isEmpty() && previousTool != null && matchesSkillInstructions(previousTool, message.text)) {
-                add(ChatRenderItem.SkillInstructions(message, previousTool.header?.primary ?: previousTool.tool))
+            val skillName = message.skillName?.takeIf { it.isNotBlank() }
+                ?: previousTool?.takeIf { matchesSkillInstructions(it, message.text) }?.let { it.header?.primary ?: it.tool }
+            if (message.role == com.lingxi.code.model.Role.User && message.images.isEmpty() && skillName != null) {
+                add(ChatRenderItem.SkillInstructions(message, skillName))
             } else add(ChatRenderItem.Message(message))
         }
         val run = state.agentRunsByMessageId[message.id]

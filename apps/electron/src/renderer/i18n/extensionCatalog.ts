@@ -1,4 +1,39 @@
 export const extensionCatalog: Record<string, Record<string, string>> = {
+"desktop_extension_details_breadcrumb": {"en":"Extension details","zh-Hans":"扩展详情","zh-Hant":"擴充功能詳細資訊","ja":"拡張機能の詳細","ko":"확장 기능 상세"},
+"desktop_extension_examples": {"en":"Try asking","zh-Hans":"可以这样使用","zh-Hant":"可以這樣使用","ja":"こんな依頼ができます","ko":"이렇게 요청해 보세요"},
+"desktop_extension_copy_example_named": {"en":"Copy example: %1$s","zh-Hans":"复制示例：%1$s","zh-Hant":"複製範例：%1$s","ja":"例をコピー：%1$s","ko":"예시 복사: %1$s"},
+"desktop_extension_copy_failed": {"en":"Could not copy. Try again.","zh-Hans":"复制失败，请重试。","zh-Hant":"複製失敗，請重試。","ja":"コピーできませんでした。再試行してください。","ko":"복사하지 못했습니다. 다시 시도하세요."},
+"desktop_extension_example_copied": {"en":"Copied. Paste this into a conversation to get started.","zh-Hans":"已复制，粘贴到对话即可开始。","zh-Hant":"已複製，貼到對話即可開始。","ja":"コピーしました。会話に貼り付けて始められます。","ko":"복사했습니다. 대화에 붙여넣어 시작하세요."},
+"desktop_extension_copy_example_hint": {"en":"Select an example to copy it.","zh-Hans":"点击示例可复制。","zh-Hant":"點選範例即可複製。","ja":"例を選ぶとコピーできます。","ko":"예시를 선택하면 복사됩니다."},
+"desktop_extension_included_skills": {"en":"Included skills","zh-Hans":"包含的 Skills","zh-Hant":"包含的 Skills","ja":"含まれるスキル","ko":"포함된 스킬"},
+"desktop_extension_developer": {"en":"Developer","zh-Hans":"开发者","zh-Hant":"開發者","ja":"開発元","ko":"개발자"},
+"desktop_extension_category": {"en":"Category","zh-Hans":"分类","zh-Hant":"分類","ja":"カテゴリー","ko":"분류"},
+"desktop_extension_remove_named": {"en":"Remove %1$s?","zh-Hans":"移除 %1$s？","zh-Hant":"移除 %1$s？","ja":"%1$s を削除しますか？","ko":"%1$s을(를) 제거할까요?"},
+"desktop_extension_remove_configuration_note": {"en":"This removes the connection configuration in the selected scope. You can add it again later.","zh-Hans":"这会移除所选作用域中的连接配置，之后可以重新添加。","zh-Hant":"這會移除所選範圍中的連線設定，之後可以重新新增。","ja":"選択した範囲の接続設定を削除します。後から再追加できます。","ko":"선택한 범위의 연결 설정을 제거합니다. 나중에 다시 추가할 수 있습니다."},
+"desktop_extension_uninstall_named": {"en":"Uninstall %1$s","zh-Hans":"卸载 %1$s","zh-Hant":"解除安裝 %1$s","ja":"%1$s をアンインストール","ko":"%1$s 제거"},
+"desktop_extension_view_details_named": {"en":"View details for %1$s","zh-Hans":"查看 %1$s 详情","zh-Hant":"檢視 %1$s 詳細資訊","ja":"%1$s の詳細を表示","ko":"%1$s 상세 보기"},
+"desktop_extension_remove_source": {"en":"Remove source","zh-Hans":"移除来源","zh-Hant":"移除來源","ja":"提供元を削除","ko":"소스 제거"},
+  "desktop_extension_recommended_skills": {
+    "zh-Hans": "推荐 Skills",
+    "zh-Hant": "推薦 Skills",
+    "en": "Recommended skills",
+    "ja": "おすすめのスキル",
+    "ko": "추천 스킬"
+  },
+  "desktop_extension_skill_pack_note": {
+    "zh-Hans": "选一个技能包开始，添加后可用于个人或当前项目。",
+    "zh-Hant": "選一個技能包開始，新增後可用於個人或目前專案。",
+    "en": "Start with a complete skill pack for yourself or the current project.",
+    "ja": "スキルパックを選び、個人用または現在のプロジェクト用に追加できます。",
+    "ko": "개인 또는 현재 프로젝트에서 사용할 전체 스킬 팩을 선택하세요."
+  },
+  "desktop_extension_add_skill_pack_named": {
+    "zh-Hans": "添加技能包 %1$s",
+    "zh-Hant": "新增技能包 %1$s",
+    "en": "Add skill pack %1$s",
+    "ja": "スキルパック %1$s を追加",
+    "ko": "스킬 팩 %1$s 추가"
+  },
   "desktop_extension_unsaved_mcp": {
     "zh-Hans": "MCP 更改尚未保存。丢弃后切换标签页？",
     "zh-Hant": "MCP 變更尚未儲存。捨棄後切換分頁？",

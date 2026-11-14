@@ -899,30 +899,26 @@ test('session_resumed atomically replaces the transcript with lowered history', 
     ],
   });
   assert.equal(s.running, false);
-  assert.equal(s.items.length, 5);
+  assert.equal(s.items.length, 4);
   assert.deepEqual(s.items.map((item) => item.type), [
-    'narration',
     'compaction',
     'thinking',
     'tool',
     'narration',
   ]);
-  const user = s.items[0] as Narration;
-  assert.equal(user.text, 'prior question');
-  assert.equal(user.strong, true);
-  const boundary = s.items[1] as Compaction;
+  const boundary = s.items[0] as Compaction;
   assert.equal(boundary.status, 'complete');
   assert.equal(boundary.messagesBefore, 12);
   assert.equal(boundary.messagesAfter, 3);
   assert.deepEqual(s.summaries, [{
-    id: 'i2',
+    id: 'i1',
     content: 'hidden compact summary',
     messagesBefore: 12,
     messagesAfter: 3,
   }]);
   // A rehydrated reasoning block is NOT `streamed`, so it starts collapsed.
-  assert.equal((s.items[2] as Thinking).streamed, undefined);
-  const tool = s.items[3] as Tool;
+  assert.equal((s.items[1] as Thinking).streamed, undefined);
+  const tool = s.items[2] as Tool;
   assert.equal(tool.status, 'done');
   assert.equal(tool.view, READ_HEADER);
   assert.equal(tool.result, DISPLAY);

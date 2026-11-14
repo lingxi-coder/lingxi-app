@@ -561,7 +561,11 @@ function packagedAppBundleId(appPath) {
 }
 
 export async function waitForPackagedAppExit(child, requestQuit) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  const assertCleanExit = () => {
+    assert.equal(child.signalCode, null, 'packaged app must exit without a termination signal');
+    assert.equal(child.exitCode, 0, 'packaged app must exit successfully');
+  };
+  if (child.exitCode !== null || child.signalCode !== null) { assertCleanExit(); return; }
   let onExit;
   let timer;
   const exited = new Promise((resolvePromise) => {
@@ -572,13 +576,17 @@ export async function waitForPackagedAppExit(child, requestQuit) {
     // Subscribe before requesting quit: CDP may close its socket only after
     // the process has already exited. Listening afterwards loses that event.
     await requestQuit();
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (child.exitCode !== null || child.signalCode !== null) { assertCleanExit(); return; }
     await Promise.race([
       exited,
       new Promise((_, rejectPromise) => {
-        timer = setTimeout(() => rejectPromise(new Error('packaged app did not exit after Browser.close')), 10_000);
+        // macOS Chromium can finish its native profile fsync after `quit` and
+        // all application drains. An observed clean exit took 18.3 seconds;
+        // keep a finite deadline without terminating those durable writes.
+        timer = setTimeout(() => rejectPromise(new Error('packaged app did not exit after Browser.close within 30000ms')), 30_000);
       }),
     ]);
+    assertCleanExit();
   } finally {
     clearTimeout(timer);
     child.removeListener('exit', onExit);
@@ -1069,6 +1077,10 @@ async function assertDesktopGit(page, workspace, tempRoot) {
 }
 
 async function assertBottomTerminal(page) {
+  // The sidecar fixture was created through Host IPC, outside the renderer's
+  // navigation transaction. Observe its committed owner before testing scope.
+  await page.send('Page.reload', { ignoreCache: true });
+  await assertRendererContract(page, []);
   const scope = await evaluate(page, `(async () => {
     const state = await window.lingxi.bootstrap();
     return state.activeSession ?? { projectPath: state.workspace.path, sessionId: '__draft__' };
@@ -1728,7 +1740,7 @@ export async function runPackagedCredentialStability(appPath) {
   const runtime = runtimePathsForHome(home);
   writePackagedProfile(runtime, createAdversarialWorkspace(tempRoot));
   const env = sanitizePackagedAppEnvironment(process.env, {
-    HOME: home, CFFIXED_USER_HOME: home, TMPDIR: temporary, LINGXI_CONFIG_DIR: join(home, '.lingxi'),
+    HOME: home, CFFIXED_USER_HOME: home, __CFPREFERENCES_AVOID_DAEMON: '1', TMPDIR: temporary, LINGXI_CONFIG_DIR: join(home, '.lingxi'),
   });
   const port = await reserveLoopbackPort();
   const probe = await customProviderProbe();
@@ -1862,6 +1874,9 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   const env = sanitizePackagedAppEnvironment(process.env, {
     HOME: tempHome,
     CFFIXED_USER_HOME: tempHome,
+    // A disposable CFFIXED_USER_HOME must not wait on the real user's
+    // cfprefsd domain. Keep native Firebase preferences in this test home.
+    __CFPREFERENCES_AVOID_DAEMON: '1',
     TMPDIR: tempTmp,
     LINGXI_CONFIG_DIR: join(tempHome, ".lingxi"),
   });

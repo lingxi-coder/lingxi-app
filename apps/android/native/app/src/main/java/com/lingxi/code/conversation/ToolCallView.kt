@@ -1,21 +1,22 @@
 package com.lingxi.code.conversation
 
 import androidx.annotation.StringRes
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,7 +24,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,6 +39,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -52,13 +53,8 @@ import com.lingxi.code.theme.LingXiTheme
 /**
  * One tool call, rendered from the engine's PRE-DERIVED presentation.
  *
- * ```
- * ● Update(src/host.rs)            ← header (localized from verb + primary + qualifier)
- *   $ cargo test --all             ← optional sub-line
- * ⎿ Added 18 lines, removed 4      ← result headline (localized from kind + args)
- *   ┌ the diff, or the plain body ┐
- *   └ Show 42 more lines          ┘
- * ```
+ * Headers share the transcript's leading edge. Expanded commands, output and
+ * status appear in a separate rounded detail surface beneath the header.
  *
  * This composable NEVER touches `input_json` / `result_json`. Everything it
  * shows arrives on the wire already derived once, engine-side; re-deriving it
@@ -96,24 +92,25 @@ internal fun ToolCallView(
         return
     }
     val t = LingXiTheme.palette
-    val detailHost = LocalConversationDetail.current
-    val openDetail = { if (detailHost != null) detailHost("tool:${call.id}") else onToggleExpanded() }
     val display = call.display
-    val title = toolCallTitle(call)
+    val denial = toolDenialPresentation(call.status == AgentToolStatus.Failed, display?.headline, display?.body)
+    val title = if (denial != null) stringResource(if (denial.autoReview) R.string.tool_denied_auto_review else R.string.tool_denied) else toolCallTitle(call)
     val isSkill = call.header?.verb == ToolVerbUi.Skill || call.tool.equals("Skill", ignoreCase = true)
     val requiresCode = display != null && isLocalAppCodeRequired(call.tool, call.status, display.headline, display.body)
     val headline = if (requiresCode) stringResource(R.string.local_app_development_requires_code)
         else display?.let { resultHeadline(it) }
     val statusLabel = toolCallStatusLabel(call.status)
+    val disclosureState = stringResource(if (expanded) R.string.chat_run_collapse else R.string.chat_run_expand)
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val hovered by interaction.collectIsHoveredAsState()
     // Desktop parity: every result starts collapsed; the engine still owns
     // body/diff truncation and the client owns disclosure presentation.
-    val collapsible = display != null && display.hasExpandableContent
-    val showsContent = display != null &&
-        display.hasExpandableContent &&
-        expanded
+    val collapsible = denial != null || (display != null && display.hasExpandableContent)
+    val headlineInTitle = call.tool == "LocalApp" && call.status != AgentToolStatus.Failed &&
+        (call.header?.primary == null || call.header.primary == headline)
+    val rowTitle = if (denial == null && !collapsible && !requiresCode && headline != null && !headlineInTitle) "$title · $headline" else title
+    val showsContent = collapsible && expanded
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -124,11 +121,14 @@ internal fun ToolCallView(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 48.dp)
-                .then(if (collapsible) Modifier.clickable(interactionSource = interaction, indication = LocalIndication.current, onClick = openDetail) else Modifier)
+                .then(if (collapsible) Modifier.clickable(interactionSource = interaction, indication = LocalIndication.current, onClick = onToggleExpanded) else Modifier)
                 .then(if (collapsible) Modifier.testTag(UiTags.TOOL_CALL_TOGGLE) else Modifier)
                 .semantics(mergeDescendants = true) {
-                    contentDescription = "$statusLabel $title"
-                    if (collapsible) role = Role.Button
+                    contentDescription = "$statusLabel $rowTitle"
+                    if (collapsible) {
+                        role = Role.Button
+                        stateDescription = disclosureState
+                    }
                 },
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -137,55 +137,33 @@ internal fun ToolCallView(
                     modifier = Modifier.size(18.dp), color = t.text3, strokeWidth = 1.5.dp,
                 )
             } else {
-                com.lingxi.code.components.LXIcon(toolIconName(call.header?.verb, call.tool),
-                    size = 18.dp, color = if (call.status == AgentToolStatus.Failed) t.danger else t.text3)
+                com.lingxi.code.components.LXIcon(if (denial != null) com.lingxi.code.components.LXIconName.ShieldTerminal else toolIconName(call.header?.verb, call.tool),
+                    size = 18.dp, color = if (denial != null) (if (t.isDark) Color(0xFFE9A56B) else Color(0xFFA64212)) else if (call.status == AgentToolStatus.Failed) t.danger else t.text3)
             }
             Spacer(Modifier.width(9.dp))
             Column(modifier = Modifier.weight(1f, fill = false)) {
                 Text(
-                    text = title,
-                    color = if (isSkill) t.text2 else t.text3,
+                    text = rowTitle,
+                    color = if (expanded || focused || hovered) t.text else if (isSkill) t.text2 else t.text3,
                     fontSize = 13.sp,
                     fontWeight = if (isSkill) FontWeight.Normal else FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (isSkill && headline != null) {
+                if (isSkill && headline != null && collapsible) {
                     Text(headline, color = if (call.status == AgentToolStatus.Failed) t.danger else t.text3,
                         fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                if (expanded) call.header?.subLine?.let { sub ->
-                    Text(
-                        text = "${sub.prefix} ${sub.text}",
-                        color = t.text3,
-                        fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
-                        fontFamily = FontFamily.Monospace,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                if (expanded && call.tool.equals("Shell", ignoreCase = true) && call.header == null) {
-                    call.syntheticShellCommand?.let {
-                        Text(
-                            text = it,
-                            color = t.text3,
-                            fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
-                            fontFamily = FontFamily.Monospace,
-                            maxLines = 3,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
             }
-            if (call.status == AgentToolStatus.Failed || call.status == AgentToolStatus.Cancelled) {
+            if (denial == null && (call.status == AgentToolStatus.Failed || call.status == AgentToolStatus.Cancelled)) {
                 Spacer(Modifier.width(9.dp))
                 Text(statusLabel, color = toolCallStatusColor(call.status), fontSize = 12.sp, maxLines = 1)
             }
             if (collapsible) {
                 Spacer(Modifier.width(9.dp))
                 com.lingxi.code.components.LXIcon(
-                    com.lingxi.code.components.LXIconName.ChevronR,
-                    modifier = Modifier.alpha(if (focused || hovered) 1f else 0.75f),
+                    if (expanded) com.lingxi.code.components.LXIconName.Chevron else com.lingxi.code.components.LXIconName.ChevronR,
+                    modifier = Modifier.alpha(if (expanded || focused || hovered) 1f else 0.75f),
                     size = 16.dp, color = t.text3,
                     contentDescription = null,
                 )
@@ -218,28 +196,7 @@ internal fun ToolCallView(
             }
         }
 
-        if (showsContent && detailHost == null) {
-            val compact = LocalConfiguration.current.screenWidthDp < 840
-            Dialog(onDismissRequest = onToggleExpanded,
-                properties = DialogProperties(usePlatformDefaultWidth = !compact)) {
-                Column(
-                    modifier = (if (compact) Modifier.fillMaxSize() else Modifier.heightIn(max = 720.dp))
-                        .background(t.surface).padding(20.dp).verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(title, modifier = Modifier.weight(1f), color = t.text, fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize,
-                            fontWeight = FontWeight.SemiBold)
-                        Box(Modifier.size(48.dp).clickable(onClick = onToggleExpanded),
-                            contentAlignment = Alignment.Center) {
-                            com.lingxi.code.components.LXIcon(com.lingxi.code.components.LXIconName.X,
-                                color = t.text3, contentDescription = stringResource(R.string.chat_tool_show_less))
-                        }
-                    }
-                    ToolResultContent(call)
-                }
-            }
-        }
+        if (showsContent) ToolResultContent(call)
 
     }
 }
@@ -428,33 +385,96 @@ internal fun toolCallStatusColor(status: AgentToolStatus): Color {
 internal fun ToolResultContent(call: ToolCallUi) {
     val display = call.display ?: return
     val t = LingXiTheme.palette
+    val denial = toolDenialPresentation(call.status == AgentToolStatus.Failed, display.headline, display.body)
     val requiresCode = isLocalAppCodeRequired(call.tool, call.status, display.headline, display.body)
     val localizedRefusal = if (requiresCode) stringResource(R.string.local_app_development_requires_code) else null
-    Column(
-        modifier = Modifier.padding(start = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+    val isSkill = call.header?.verb == ToolVerbUi.Skill || call.tool.equals("Skill", ignoreCase = true)
+    val clipboard = LocalClipboardManager.current
+    val shell = call.header?.verb == ToolVerbUi.Shell || call.tool.equals("Shell", ignoreCase = true)
+    ToolDetailPanel(
+        label = if (shell) "Shell" else if (isSkill) stringResource(R.string.chat_tool_verb_skill) else call.header?.label ?: call.tool,
+        modifier = Modifier.testTag("conversation.tool-detail.${call.id}"),
+        footer = {
+            if (denial != null) {
+                if (shell) Text(stringResource(R.string.tool_denied_exit_unknown), color = t.text3, fontSize = 12.sp)
+            } else {
+                com.lingxi.code.components.LXIcon(
+                    when (call.status) {
+                        AgentToolStatus.Unknown -> com.lingxi.code.components.LXIconName.Clock
+                        AgentToolStatus.Completed -> com.lingxi.code.components.LXIconName.Check
+                        AgentToolStatus.Failed, AgentToolStatus.Cancelled -> com.lingxi.code.components.LXIconName.X
+                        AgentToolStatus.Running -> com.lingxi.code.components.LXIconName.Clock
+                    }, size = 13.dp, color = t.text3)
+                Text(toolCallStatusLabel(call.status), color = t.text3, fontSize = 12.sp)
+            }
+        },
     ) {
-        display.diff?.takeIf { it.rows.isNotEmpty() }?.let { DiffView(diff = it) }
-        display.body?.takeIf { it.isNotEmpty() }?.let { body ->
-            Text(
-                text = localizedRefusal ?: body,
-                color = t.text2,
-                fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
-                lineHeight = 17.sp,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(t.diffSurface)
-                    .padding(horizontal = 10.dp, vertical = 7.dp),
-            )
+        if (shell) {
+            val command = call.header?.subLine?.let { "${it.prefix} ${it.text}" } ?: call.syntheticShellCommand
+            command?.let {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                    Text(it, Modifier.weight(1f), color = t.text2, fontSize = 13.sp, lineHeight = 21.sp, fontFamily = FontFamily.Monospace)
+                    if (denial != null) androidx.compose.material3.IconButton(onClick = {
+                        clipboard.setText(AnnotatedString(call.header?.subLine?.text ?: call.syntheticShellCommand.orEmpty()))
+                    }, modifier = Modifier.size(40.dp)) {
+                        com.lingxi.code.components.LXIcon(com.lingxi.code.components.LXIconName.Copy,
+                            size = 14.dp, color = t.text3, contentDescription = stringResource(R.string.chat_copy_code))
+                    }
+                }
+            }
         }
-        if (display.bodyTruncated) {
+        if (denial != null) {
+            if (!shell) call.header?.primary?.let { Text(it, color = t.text2, fontSize = 13.sp, fontFamily = FontFamily.Monospace) }
+            Text(stringResource(R.string.tool_denied_no_output), color = t.text2, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+        } else {
+            display.diff?.takeIf { it.rows.isNotEmpty() }?.let { DiffView(diff = it) }
+            display.body?.takeIf { it.isNotEmpty() }?.let { body ->
+                if (isSkill && localizedRefusal == null) AIText(markdown = body, compact = true)
+                else SelectionContainer { Text(
+                    text = localizedRefusal ?: body,
+                    color = t.text2,
+                    fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
+                    lineHeight = 21.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.fillMaxWidth(),
+                ) }
+            }
+        }
+        if (denial == null && display.bodyTruncated) {
             Text(
                 text = stringResource(R.string.chat_tool_body_truncated),
                 color = t.text4,
                 fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
             )
         }
+    }
+    if (denial != null) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(stringResource(R.string.tool_denied_reason), color = t.text2, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            SelectionContainer { Text(denial.reason, color = t.text3, fontSize = 13.sp, lineHeight = 21.sp) }
+            if (display.bodyTruncated) Text(stringResource(R.string.chat_tool_body_truncated), color = t.text4, fontSize = 12.sp)
+        }
+    }
+}
+
+/** Full-width detail surface shared by tool results and Skill documents. */
+@Composable
+internal fun ToolDetailPanel(
+    label: String,
+    modifier: Modifier = Modifier,
+    footer: @Composable (androidx.compose.foundation.layout.RowScope.() -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val t = LingXiTheme.palette
+    val shape = RoundedCornerShape(12.dp)
+    val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.55f).dp.coerceAtMost(384.dp)
+    Column(modifier.fillMaxWidth().padding(top = 6.dp, bottom = 8.dp)
+        .clip(shape).background(t.surfaceHover).border(1.dp, t.border, shape)) {
+        Text(label, Modifier.padding(start = 14.dp, top = 10.dp, end = 14.dp), color = t.text2, fontSize = 13.sp)
+        Column(Modifier.fillMaxWidth().heightIn(max = maxHeight).verticalScroll(rememberScrollState())
+            .padding(horizontal = 14.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
+        if (footer != null) Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically,
+            content = footer)
     }
 }

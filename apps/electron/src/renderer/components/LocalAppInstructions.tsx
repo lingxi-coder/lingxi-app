@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { MarkdownContent } from './MarkdownContent';
+import { ToolDetailPanel } from './ToolDetailPanel';
 import { skillInstructionText } from './localAppInstructionPresentation';
 
 export function LocalAppInstructions({ id, text, name = 'local-app', open, onSetOpen }: {
@@ -28,9 +29,10 @@ export function LocalAppInstructions({ id, text, name = 'local-app', open, onSet
       <span className="local-app-instructions-label">{tr('desktop_instructions')}</span>
       <span className="local-app-instructions-chevron" aria-hidden="true"><Icon name={open ? 'chevron' : 'chevronR'} size={12} stroke={1.8} /></span>
     </button>
-    <div id={contentId} hidden={!open} className="local-app-instructions-body" tabIndex={open ? 0 : undefined}
-      role="region" aria-label={`${name} · ${tr('desktop_instructions')}`}>
-      {open && <MarkdownContent text={skillInstructionText(text)} variant="compact" />}
+    <div id={contentId} hidden={!open} className="local-app-instructions-body">
+      {open && <ToolDetailPanel label={`${name} · ${tr('desktop_instructions')}`}>
+        <MarkdownContent text={skillInstructionText(text)} variant="compact" />
+      </ToolDetailPanel>}
     </div>
   </section>;
 }

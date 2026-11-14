@@ -1,9 +1,11 @@
 import { tr } from '../i18n/locale';
+import { EMPTY_TRANSCRIPT_HISTORY, type TranscriptHistoryState } from '../../shared/sessionHistory';
 import { crossSessionMessage } from './messageOrigin';
 import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
 import { transcriptRowGap, useTranscriptWindow } from './useTranscriptWindow';
 import './TranscriptWindow.css';
+import { TranscriptLeafWindowScope } from './TranscriptLeafWindow';
 import { PlanPreview, PlanDocument } from './PlanDocument';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
@@ -303,6 +305,8 @@ import { foldOwners, visibleRows } from './loopFold';
 
 // ─── STAGE (the agent run scrollback) ────────────────────────
 interface StageProps {
+  history?: TranscriptHistoryState;
+  onLoadMoreHistory?(): Promise<void>;
   messageTarget?: string | null;
   onMessageLocated?(found: boolean): void;
   activityView?: boolean;
@@ -363,12 +367,13 @@ interface StageProps {
 const BOTTOM_SLACK = 24;
 const EMPTY_SUBMITTED_PLANS: readonly SubmittedPlan[] = [];
 
-export function Stage({ messageTarget, onMessageLocated, activityView = false, onReviewFiles, submittedPlans = EMPTY_SUBMITTED_PLANS, onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
+export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, messageTarget, onMessageLocated, activityView = false, onReviewFiles, submittedPlans = EMPTY_SUBMITTED_PLANS, onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
   const stageRef = useRef<HTMLDivElement>(null);
   const feedRef = useRef<HTMLDivElement>(null);
+  const historyTailSpace = useRef<HTMLDivElement>(null);
   /**
    * Whether the reader is parked at the tail. Kept in a ref because the scroll
    * path must read and write it without a re-render; `atTail` mirrors it purely
@@ -381,11 +386,11 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
   /** A pointer is down inside the transcript, so layout drift must not move it. */
   const pointerHeld = useRef(false);
   /**
-   * Deadline (`performance.now()`) before which a layout change may not snap the
-   * viewport. A wheel event reaches us before the scroll it causes, so this is
-   * the only way to avoid fighting the gesture for its first frame.
+   * Suspend automatic tail-follow while the reader is scrolling. Geometry
+   * compensation remains active: it must remove layout drift without undoing
+   * the scroll that the browser has already applied.
    */
-  const snapMutedUntil = useRef(0);
+  const followMutedUntil = useRef(0);
   /** Re-decides the follow once a wheel gesture has settled; see `onWheel`. */
   const settleTimer = useRef<number | undefined>(undefined);
   /**
@@ -394,11 +399,14 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
    * Element identity survives reflow, and `isConnected` retires an anchor whose
    * row was unmounted — an index would quietly point at a different message.
    */
-  const anchor = useRef<{ node: Element; text?: Range; offset: number } | null>(null);
+  const anchor = useRef<{ node: Element; text?: Range; offset: number; rowOffset: number; scrollTop: number; uuid?: string } | null>(null);
+  const layoutChanged = useRef<() => void>();
+  const reportLayout = useCallback(() => layoutChanged.current?.(), []);
   const compensatedScroll = useRef<number | null>(null);
   const scrollSession = useRef(sessionKey);
   /** The newest prompt seen, so a freshly sent one can re-arm the tail. */
   const lastPromptId = useRef<string | null>(null);
+  const lastTailId = useRef<string | null>(null);
 
   /**
    * Explicit open/closed choices, keyed by the item's STABLE id WITHIN a
@@ -455,9 +463,29 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
   ), running, new Set(submittedPlans.map(plan => plan.id))), [items, liveItems, running, pendingActivity, agents, anchors, submittedPlans]);
   const liveItemById = useMemo(() => new Map(liveItems.map(item => [item.id, item])), [liveItems]);
   const firstAssistantById = useMemo(() => assistantFirstOfReplyByItem(liveItems), [liveItems]);
+  // Paging may merge an older span into the first activity and change its row
+  // id. Carry its disclosure choice through surviving source IDs; individual
+  // tool choices already use their own stable IDs in the same store.
+  const previousGroupChoices = useRef({ sessionKey, sources: new Map<string, string>() });
+  const groupChoices = useMemo(() => {
+    const previous = previousGroupChoices.current.sessionKey === sessionKey ? previousGroupChoices.current.sources : new Map<string, string>();
+    const sources = new Map<string, string>(), aliases = new Map<string, string>();
+    for (const row of rows) {
+      if (row.type !== 'tool-group') continue;
+      const ids = [...row.tools.map(tool => tool.id), ...(isTranscriptActivity(row) ? row.thoughts.map(thought => thought.id) : [])];
+      const inherited = ids.map(id => previous.get(id)).find(id => id !== undefined);
+      const choice = collapseOpen(visible, sessionKey, row.id) !== undefined ? row.id : inherited ?? row.id;
+      aliases.set(row.id, choice);
+      for (const id of ids) sources.set(id, choice);
+    }
+    return { aliases, sources };
+  }, [rows, sessionKey, visible]);
+  useLayoutEffect(() => { previousGroupChoices.current = { sessionKey, sources: groupChoices.sources }; }, [sessionKey, groupChoices]);
+  const groupIsOpen = useCallback((id: string) => collapseOpen(visible, sessionKey, id)
+    ?? collapseOpen(visible, sessionKey, groupChoices.aliases.get(id) ?? id) ?? false, [visible, sessionKey, groupChoices]);
 
   const presentationRows = rows;
-  const windowing = useTranscriptWindow({ rows: presentationRows, sessionKey, viewport: stageRef, feed: feedRef, following: followTail });
+  const windowing = useTranscriptWindow({ rows: presentationRows, sessionKey, viewport: stageRef, feed: feedRef, following: followTail, onLayout: reportLayout });
   useEffect(() => {
     window.lingxi?.reportSessionRecovery?.({ phase: 'stage_commit', sessionKey,
       itemCount: liveItems.length, rowCount: presentationRows.length,
@@ -491,7 +519,16 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
    */
   const measureFollow = useCallback(() => {
     const node = stageRef.current;
-    if (!node) return;
+    if (!node || performance.now() < followMutedUntil.current) return;
+    const space = historyTailSpace.current;
+    const reserved = space?.offsetHeight ?? 0;
+    if (reserved) {
+      // Paging a short transcript preserves the blank area that was already
+      // below it. Removing it while parked there would clamp scrollTop and
+      // move the message. Release it once it is safely below the viewport.
+      if (node.scrollTop > Math.max(0, node.scrollHeight - reserved - node.clientHeight) + 0.5) return;
+      space!.style.height = '0px';
+    }
     setFollow(node.scrollHeight - node.scrollTop - node.clientHeight <= BOTTOM_SLACK);
   }, [setFollow]);
 
@@ -500,7 +537,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
   const syncTail = useCallback(() => {
     const node = stageRef.current;
     if (!node || !followTail.current || pointerHeld.current) return;
-    if (performance.now() < snapMutedUntil.current) return;
+    if (performance.now() < followMutedUntil.current) return;
     const bottom = Math.max(0, node.scrollHeight - node.clientHeight);
     if (Math.abs(node.scrollTop - bottom) > 0.5) node.scrollTop = bottom;
     anchor.current = null;
@@ -529,9 +566,18 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
       else low = middle + 1;
     }
     if (first === -1) { anchor.current = null; return; }
-    const element = rows[first]!;
+    const row = rows[first]!;
+    // Aggregate rows can span thousands of independently windowed leaves.
+    // Pin the actual leaf being read so prepend/recycling never substitutes
+    // an estimate of the aggregate's height for its reading position.
+    const leaf = Array.from(row.querySelectorAll<HTMLElement>('[data-transcript-leaf-id]'))
+      .find(leaf => { const bounds = leaf.getBoundingClientRect(); return bounds.bottom > containerTop && bounds.top < node.getBoundingClientRect().bottom; });
+    const element = leaf ?? row;
     const text = readingTextAnchor(element, containerTop);
-    anchor.current = { node: element, text, offset: (text ?? element).getBoundingClientRect().top - containerTop };
+    anchor.current = { node: element, text, offset: (text ?? element).getBoundingClientRect().top - containerTop,
+      rowOffset: element.getBoundingClientRect().top - containerTop,
+      scrollTop: node.scrollTop,
+      uuid: element.getAttribute('data-message-uuid') ?? undefined };
   }, []);
 
   /**
@@ -546,26 +592,58 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
     const node = stageRef.current;
     const held = anchor.current;
     if (!node || !held) return;
-    // The reader is driving. Compensating mid-gesture would re-apply their own
-    // wheel delta: the anchor was captured before the scroll event for that
-    // movement arrived, so the offset it recorded already includes it.
-    if (performance.now() < snapMutedUntil.current) return;
-    if (!held.node.isConnected) { anchor.current = null; return; }
+    if (!held.node.isConnected) {
+      const leafId = (held.node as HTMLElement).dataset?.transcriptLeafId;
+      const leaf = leafId && Array.from(feedRef.current?.querySelectorAll<HTMLElement>('[data-transcript-leaf-id]') ?? [])
+        .find(node => node.dataset.transcriptLeafId === leafId);
+      const matches = held.uuid && Array.from(feedRef.current?.querySelectorAll('[data-message-uuids]') ?? [])
+        .filter(row => row.getAttribute('data-message-uuids')?.split(' ').includes(held.uuid!));
+      const replacement = leaf || matches && (matches.find(row => row.hasAttribute('data-transcript-leaf-id')) ?? matches[0]);
+      if (!replacement) { anchor.current = null; return; }
+      held.node = replacement;
+      held.text = undefined;
+      held.offset = held.rowOffset;
+    }
+    if (held.text && !held.node.contains(held.text.startContainer)) { held.text = undefined; held.offset = held.rowOffset; }
     const target = held.text ?? held.node;
     const offset = target.getBoundingClientRect().top - node.getBoundingClientRect().top;
-    const delta = offset - held.offset;
+    // Compare content coordinates. A native wheel can move scrollTop before its
+    // scroll event is delivered; adding that movement back isolates the layout
+    // delta instead of restoring the reader to their previous scroll position.
+    const userScroll = performance.now() < followMutedUntil.current ? node.scrollTop - held.scrollTop : 0;
+    const delta = offset - held.offset + userScroll;
     if (Math.abs(delta) > 0.5) {
       node.scrollTop += delta;
       compensatedScroll.current = node.scrollTop;
     }
     held.offset = target.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    held.rowOffset = held.node.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    held.scrollTop = node.scrollTop;
   }, []);
 
+  const historyRequest = useRef<{ sessionKey: string; promise: Promise<void> } | null>(null);
+  const requestOlder = useCallback(() => {
+    if (!history.before || history.loading || !onLoadMoreHistory || historyRequest.current?.sessionKey === sessionKey) return;
+    followTail.current = false;
+    setAtTail(false);
+    captureAnchor();
+    const node = stageRef.current, feed = feedRef.current, space = historyTailSpace.current;
+    if (node && feed && space) {
+      const slack = node.clientHeight - feed.getBoundingClientRect().height;
+      if (slack > 0) space.style.height = `${space.offsetHeight + slack}px`;
+    }
+    const promise = Promise.resolve().then(onLoadMoreHistory).catch(() => undefined).finally(() => {
+      if (historyRequest.current?.promise === promise) historyRequest.current = null;
+    });
+    historyRequest.current = { sessionKey, promise };
+  }, [history.before, history.loading, onLoadMoreHistory, captureAnchor, sessionKey]);
+
   const armTail = useCallback(() => {
+    if (historyTailSpace.current) historyTailSpace.current.style.height = '0px';
     followTail.current = true;
     setAtTail(true);
     anchor.current = null;
-    snapMutedUntil.current = 0;
+    followMutedUntil.current = 0;
     // An explicit action must not be blocked by a lingering gesture flag.
     const node = stageRef.current;
     if (node) node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
@@ -577,6 +655,9 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
   useLayoutEffect(() => {
     if (scrollSession.current === sessionKey) return;
     scrollSession.current = sessionKey;
+    if (historyTailSpace.current) historyTailSpace.current.style.height = '0px';
+    window.clearTimeout(settleTimer.current);
+    followMutedUntil.current = 0;
     compensatedScroll.current = null;
     followTail.current = true;
     setAtTail(true);
@@ -586,10 +667,16 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
   }, [sessionKey, newestPromptId]);
 
   useLayoutEffect(() => {
+    const previousTail = lastTailId.current;
+    lastTailId.current = liveItems.at(-1)?.id ?? null;
     if (!newestPromptId || newestPromptId === lastPromptId.current) return;
     lastPromptId.current = newestPromptId;
+    // A newly discovered historical prompt is before the previous tail. Only
+    // an appended prompt expresses an intent to follow new output.
+    if (previousTail && liveItems.findIndex(item => item.id === newestPromptId)
+      <= liveItems.findIndex(item => item.id === previousTail)) return;
     armTail();
-  }, [newestPromptId, armTail]);
+  }, [newestPromptId, liveItems, armTail]);
 
   useLayoutEffect(() => {
     if (!messageTarget) { locatedMessage.current = null; revealInFlight.current = null; return; }
@@ -608,11 +695,16 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
       const row = presentationRows.find(row => row.id === source.id || (row.type === 'tool-group' && row.tools.some(tool => tool.id === source.id)) || (row.type === 'agents' && row.sourceIds.includes(source.id)));
       if (row) {
         if (windowing.reveal(row.id)) return;
+        if (row.type === 'tool-group' && row.tools.length > 1 && !groupIsOpen(row.id)) { setOpen(row.id, true); return; }
       }
     }
     const nodes = feedRef.current?.querySelectorAll<HTMLElement>('[data-message-uuids]');
-    const target = Array.from(nodes ?? []).find(node => node.dataset.messageUuids?.split(' ').includes(messageTarget));
-    if (!target) { revealInFlight.current = null; onMessageLocated?.(false); return; }
+    const matches = Array.from(nodes ?? []).filter(node => node.dataset.messageUuids?.split(' ').includes(messageTarget));
+    const target = matches.find(node => node.hasAttribute('data-transcript-leaf-id')) ?? matches[0];
+    if (!target) {
+      if (history.before && !history.error && onLoadMoreHistory) { if (!history.loading) requestOlder(); return; }
+      revealInFlight.current = null; onMessageLocated?.(false); return;
+    }
     locatedMessage.current = requestKey;
     revealInFlight.current = null;
     followTail.current = false;
@@ -620,7 +712,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
     anchor.current = null;
     target.scrollIntoView({ block: 'center' });
     onMessageLocated?.(true);
-  }, [messageTarget, sessionKey, rows, items, liveItems, foldedItemIds, visible, setOpen, onMessageLocated, presentationRows, windowing.reveal, windowing.start, windowing.end]);
+  }, [messageTarget, sessionKey, rows, items, liveItems, foldedItemIds, visible, setOpen, groupIsOpen, onMessageLocated, presentationRows, windowing.reveal, windowing.start, windowing.end, history, onLoadMoreHistory, requestOlder]);
 
   useLayoutEffect(() => {
     // A requested window is not mounted until the next commit. Refreshing from
@@ -643,11 +735,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
     const feed = feedRef.current;
     if (!node || !feed) return;
     // Also covers child-only updates, images, disclosures and viewport resizing.
-    const observer = new ResizeObserver(() => {
-      if (pointerHeld.current) return;
-      if (followTail.current) syncTail();
-      else restoreAnchor();
-    });
+    const observer = new ResizeObserver(reportLayout);
     observer.observe(node);
     observer.observe(feed);
     const release = () => {
@@ -666,14 +754,43 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
       window.removeEventListener('pointercancel', release);
       window.removeEventListener('blur', release);
     };
-  }, [captureAnchor, measureFollow, restoreAnchor, syncTail]);
+  }, [captureAnchor, measureFollow, reportLayout]);
+
+  const settleLeafLayout = useCallback(() => {
+    if (revealInFlight.current) return;
+    if (!followTail.current && !pointerHeld.current) restoreAnchor();
+    syncTail();
+    // A large scroll may first land in a spacer. Once its leaves mount,
+    // replace the temporary aggregate-row anchor with the actual reading leaf.
+    if (!anchor.current || !anchor.current.node.hasAttribute('data-transcript-leaf-id')
+      && anchor.current.node.querySelector('[data-leaf-windowed]')) captureAnchor();
+  }, [restoreAnchor, syncTail, captureAnchor]);
+  layoutChanged.current = settleLeafLayout;
+  const readingLeafId = useCallback(() => (anchor.current?.node as HTMLElement | undefined)?.dataset?.transcriptLeafId, []);
+  const targetLeafId = messageTarget && locatedMessage.current !== `${sessionKey}:${messageTarget}`
+    ? liveItems.find(item => transcriptRowUuids(item).includes(messageTarget))?.id : undefined;
+  const leafTargetPending = useCallback(() => Boolean(messageTarget) && locatedMessage.current !== `${sessionKey}:${messageTarget}`, [messageTarget, sessionKey]);
+  const leafScope = useMemo(() => ({ sessionKey, viewport: stageRef, following: followTail,
+    targetId: targetLeafId, targetPending: leafTargetPending, readingId: readingLeafId, onLayout: reportLayout }), [sessionKey, targetLeafId, leafTargetPending, readingLeafId, reportLayout]);
 
   return (
-    <div ref={stageRef} className={activityView ? "desktop-stage activity-view" : "desktop-stage"} tabIndex={windowing.enabled ? 0 : -1} onPointerDown={() => { pointerHeld.current = true; }} onWheel={() => {
-      // Arrives before the scroll it causes, and in either direction: the
-      // reader is driving, so no layout change may move the viewport under them
-      // until the gesture has settled.
-      snapMutedUntil.current = performance.now() + 150;
+    <TranscriptLeafWindowScope.Provider value={leafScope}>
+    <div ref={stageRef} className={activityView ? "desktop-stage activity-view" : "desktop-stage"} tabIndex={windowing.enabled ? 0 : -1} onPointerDown={() => { pointerHeld.current = true; }} onKeyDown={(event) => {
+      if (event.target === event.currentTarget && historyTailSpace.current?.offsetHeight
+        && (event.key === 'End' || event.key === 'ArrowDown' && (event.metaKey || event.ctrlKey))) {
+        event.preventDefault();
+        armTail();
+      }
+    }} onWheel={(event) => {
+      followMutedUntil.current = performance.now() + 150;
+      const node = stageRef.current;
+      if (event.deltaY > 0 && historyTailSpace.current?.offsetHeight && node
+        && node.scrollHeight - node.scrollTop - node.clientHeight <= BOTTOM_SLACK) armTail();
+      if (event.deltaY < 0 && followTail.current) {
+        setFollow(false);
+        captureAnchor();
+      }
+      if (event.deltaY < 0 && (stageRef.current?.scrollTop ?? Infinity) <= 160 && !history.error) requestOlder();
       // The gate has to lift by itself — nothing else runs once the gesture
       // stops, and a silently expired deadline would leave the viewport parked
       // while `atTail` still claimed the reader was at the tail.
@@ -691,9 +808,11 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
       // anchor across successive resize frames instead of choosing another line.
       if (stageRef.current?.scrollTop === compensatedScroll.current) return;
       compensatedScroll.current = null;
+      if (!followTail.current && !pointerHeld.current && performance.now() < followMutedUntil.current) restoreAnchor();
       measureFollow();
       windowing.refresh();
       captureAnchor();
+      if (!followTail.current && (stageRef.current?.scrollTop ?? Infinity) <= 160 && !history.error) requestOlder();
     }} style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto', paddingInlineStart: 'var(--conversation-gutter, 24px)', paddingInlineEnd: 'calc(var(--conversation-gutter, 24px) + var(--runtime-summary-scroll-overhang, 0px))', background: t.transcriptBg, position: 'relative' }}>
       <div
         ref={feedRef}
@@ -709,6 +828,11 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           display: 'flex', flexDirection: 'column', gap: 0,
         }}
       >
+        {(history.before || history.loading) && <div className="transcript-history-loader" style={{ minHeight: 40, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, color: t.text3, fontSize: 12 }}>
+          {history.loading ? <span role="status" aria-live="polite">{tr('desktop_history_loading')}</span>
+            : <><button type="button" onClick={requestOlder} style={{ color: 'inherit', background: 'transparent', border: 0, cursor: 'pointer', padding: 8 }}>{tr(history.error ? 'desktop_history_retry' : 'desktop_history_load_more')}</button>
+              {history.error && <span role="alert">{tr('desktop_history_failed')}</span>}</>}
+        </div>}
         {activityView && <div className="activity-view-heading" style={{ color: t.text3, borderBottom: `1px solid ${t.border}`, paddingBottom: 16, marginBottom: 12, fontSize: 13 }} role="status">{running ? tr('chat_working') : tr('desktop_activity')}{agents?.some(agent => agent.agent_id !== 'main' && agent.status === 'running') ? ` · ${tr('desktop_stage_subagents_working')}` : ''}</div>}
         {rows.length === 0 && !running && !agents?.some((agent) => agent.agent_id !== 'main') && (
           <div
@@ -790,7 +914,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
                   flexDirection: user ? 'column' : 'row',
                   alignItems: user ? 'flex-end' : undefined,
                   justifyContent: user ? undefined : 'flex-start',
-                  gap: user ? 4 : 10, width: '100%', animation: 'fade-in 0.3s ease',
+                  gap: user ? 4 : 10, width: '100%', animation: 'transcript-message-appear 0.3s ease',
                 }}
               >
                 {user && (peer || item.origin?.kind === 'device') && <div className="message-origin-caption" style={{ color: t.text3, display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', gap: '0.4em', maxWidth: 'min(700px, 90%)', padding: '0 4px 2px', fontSize: 12, lineHeight: 1.5, textAlign: 'end', overflowWrap: 'anywhere' }}>
@@ -820,7 +944,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
             );
           }
           if (isTranscriptActivity(item)) {
-            const expanded = collapseOpen(visible, sessionKey, item.id) ?? false;
+            const expanded = groupIsOpen(item.id);
             return <div className="transcript-run-item" data-run-type="activity">
               <NativeToolGroupSite sessionId={modUiSessionId} group={item} expanded={expanded}
                 stateToken={visible} contentToken={item.active ? apiRetry ?? undefined : undefined}>
@@ -836,7 +960,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
               return plan ? <PlanPreview key={tool.id} content={plan.content} status={plan.status} writing={tool.status === 'running' && plan.status === 'submitted'} onOpen={() => onOpenPlan ? onOpenPlan(plan.id) : setLocalPlan(plan)}/> : <ToolGroup key={tool.id} group={{...item,id:tool.id,tools:[tool]}} modUiSessionId={modUiSessionId} open={collapseOpen(visible,sessionKey,tool.id) ?? false} toolOpen={id=>collapseOpen(visible,sessionKey,id)} onSetOpen={setOpen}/>;
             })}</>;
             if (item.tools.length < 2) return <div className="transcript-run-item" data-run-type="tool" key={item.id}>{groupContent}</div>;
-            const expanded = collapseOpen(visible, sessionKey, item.id) ?? false;
+            const expanded = groupIsOpen(item.id);
             return <div className="transcript-run-item" data-run-type="tool" key={item.id}>
               <NativeToolGroupSite sessionId={modUiSessionId} group={item}
                 expanded={expanded} stateToken={visible} contentToken={planContentToken}>
@@ -845,7 +969,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
             </div>;
           }
           if (item.type === 'tool-group') {
-            const expanded = collapseOpen(visible, sessionKey, item.id) ?? false;
+            const expanded = groupIsOpen(item.id);
             const groupContent = <ToolGroup group={item} modUiSessionId={modUiSessionId} open={expanded}
               toolOpen={(id) => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} />;
             if (item.tools.length < 2) return <div className="transcript-run-item" data-run-type="tool" key={item.id}>{groupContent}</div>;
@@ -858,7 +982,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           }
           if (item.type === 'command') {
             return (
-              <div className="transcript-run-item" data-run-type="command" key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+              <div className="transcript-run-item" data-run-type="command" key={item.id} style={{ display: 'flex', gap: 10, animation: 'transcript-message-appear 0.3s ease' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <NativeCommandOutputRow
                     sessionId={modUiSessionId}
@@ -914,6 +1038,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
               ...(uuid && uuid === messageTarget ? { outline: `2px solid ${t.text3}`, outlineOffset: 4, borderRadius: 8 } : {}) }}>{content}</div>;
         })}
         {windowing.enabled && <div className="transcript-window-spacer" aria-hidden="true" style={{ height: windowing.after }} />}
+        <div ref={historyTailSpace} className="transcript-history-tail-space" aria-hidden="true" />
 
         {localPlan && <div role="dialog" aria-label={tr('desktop_stage_plan')} style={{position:'fixed',inset:'10%',zIndex:100,background:t.surface,overflow:'auto',borderRadius:16}}><button onClick={()=>setLocalPlan(null)}>{tr('desktop_stage_close_plan')}</button><PlanDocument content={localPlan.content}/></div>}
 
@@ -953,5 +1078,6 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
 
       </div>
     </div>
+    </TranscriptLeafWindowScope.Provider>
   );
 }

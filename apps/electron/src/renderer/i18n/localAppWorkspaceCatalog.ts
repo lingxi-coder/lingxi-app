@@ -13,7 +13,6 @@ const entries: Record<string, [string, string, string, string, string]> = {
   apps_no_development_chats: ['选择编辑，继续完善这个 App。', '選擇編輯，繼續完善這個 App。', 'Choose Edit to work on this app.', '編集を選んでアプリを改良しましょう。', '편집을 선택해 앱을 개선하세요.'],
   apps_edit_named: ['编辑 %s', '編輯 %s', 'Edit %s', '%s を編集', '%s 편집'],
   apps_create_hint: ['每个 App 从独立的开发对话开始。已有会话和草稿会保留。', '每個 App 從獨立的開發對話開始。現有對話和草稿會保留。', 'Each app starts in its own development chat. Your existing chats and drafts stay in place.', 'アプリごとに専用の開発チャットを開始します。既存のチャットと下書きは保持されます。', '앱마다 별도의 개발 채팅을 시작합니다. 기존 채팅과 초안은 유지됩니다.'],
-  apps_hosting: ['运行与设备访问', '執行與裝置存取', 'Hosting and device access', '実行とデバイスアクセス', '호스팅 및 기기 접근'],
 };
 export const localAppWorkspaceCatalog = Object.fromEntries(Object.entries(entries).map(([key, values]) =>
   [key, Object.fromEntries(['zh-Hans', 'zh-Hant', 'en', 'ja', 'ko'].map((locale, index) => [locale, values[index]]))]));

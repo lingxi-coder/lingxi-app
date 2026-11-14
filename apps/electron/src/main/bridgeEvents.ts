@@ -86,6 +86,7 @@ export const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'usage_update',
   'status_snapshot',
   'compaction_status',
+  'compaction_completed',
   'error',
   'message_identity',
   'message_retracted',

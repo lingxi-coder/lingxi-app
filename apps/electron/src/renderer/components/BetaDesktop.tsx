@@ -493,10 +493,6 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     () => (settings?.projects ?? []).filter((path) => path !== scheduledWorkspace && !localAppProjects.includes(path) && spaces?.projects[path]?.includes(currentSpace)),
     [scheduledWorkspace, settings?.projects, spaces?.projects, currentSpace, localAppProjects],
   );
-  const visibleDrafts = (spaces?.drafts ?? []).filter((draft) => draft.mode === currentSpace
-    && (draft.projectId === null || projects.includes(draft.projectId))
-    && !bridge.bootstrap?.projectCatalogs?.[draft.projectPath]?.sessions.some((row) =>
-      row.uuid === draft.sessionId && row.mode === draft.mode && row.message_count > 0));
   const generalPaths = useMemo(() => [...new Set([globalWorkspace, scheduledWorkspace].filter((path): path is string => Boolean(path)))], [globalWorkspace, scheduledWorkspace]);
   const ownedPaths = useMemo(() => [...new Set((spaces?.sessions ?? []).filter((owner) => owner.mode === currentSpace
     && (owner.projectId === null || projects.includes(owner.projectId))).map((owner) => owner.projectPath))], [spaces?.sessions, currentSpace, projects]);
@@ -533,15 +529,15 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const normalizedSearch = searchQuery.trim().toLocaleLowerCase();
   const matchesSearch = (value: string) => !normalizedSearch || value.toLocaleLowerCase().includes(normalizedSearch);
   useLayoutEffect(() => {
-    asideRef.current?.toggleAttribute('inert', sidebarCollapsed || bridge.sessionLoading);
-    railRef.current?.toggleAttribute('inert', bridge.sessionLoading);
-  }, [bridge.sessionLoading, sidebarCollapsed]);
+    asideRef.current?.toggleAttribute('inert', sidebarCollapsed || bridge.projectCreationOpen);
+    railRef.current?.toggleAttribute('inert', bridge.projectCreationOpen);
+  }, [bridge.projectCreationOpen, sidebarCollapsed]);
   const blockNavigation = useCallback((event: { target: EventTarget | null; preventDefault(): void; stopPropagation(): void }) => {
-    if (!bridge.sessionLoading) return;
+    if (!bridge.projectCreationOpen) return;
     if (event.target instanceof Element && event.target.closest('[data-conversation-space]')) return;
     event.preventDefault();
     event.stopPropagation();
-  }, [bridge.sessionLoading]);
+  }, [bridge.projectCreationOpen]);
   // Without a parent to keep the workspace mode, Home returns to the chat.
   const selectMode = (mode: SidebarMode) => {
     if (onSelectSidebarMode) onSelectSidebarMode(mode);
@@ -775,7 +771,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     [pinnedSessions],
   );
   const openSidebarSession = useCallback((projectPath: string, sessionId: string) => {
-    if (bridge.sessionLoading) return;
+    if (bridge.projectCreationOpen) return;
     onOpenChat?.();
     const key = `${projectPath}\0${sessionId}`;
     setOpeningSessionKey(key);
@@ -786,16 +782,16 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     void opening
       .catch(() => undefined)
       .finally(() => setOpeningSessionKey((current) => current === key ? null : current));
-  }, [bridge.bootstrap?.projectCatalogs, bridge.openSession, bridge.sessionLoading, onOpenChat]);
+  }, [bridge.bootstrap?.projectCatalogs, bridge.openSession, bridge.projectCreationOpen, onOpenChat]);
   const editProject = useCallback((projectPath: string) => {
-    if (bridge.sessionLoading) return;
+    if (bridge.projectCreationOpen) return;
     onOpenChat?.();
     setExpandedProjects((current) => current.has(projectPath) ? current : new Set([...current, projectPath]));
     setEditingProject(projectPath);
     void bridge.newSession(projectPath)
       .catch(() => undefined)
       .finally(() => setEditingProject((current) => current === projectPath ? null : current));
-  }, [bridge.newSession, bridge.sessionLoading, onOpenChat]);
+  }, [bridge.newSession, bridge.projectCreationOpen, onOpenChat]);
   const pinInput = (projectPath: string, sessionId: string, title: string) => ({ projectPath, sessionId, title });
   const manualSessionOrder = settings?.sidebar?.manualSessionOrder ?? {};
   const sortedSessions = useCallback((projectPath: string, sessions: readonly SessionRowDto[]) => {
@@ -934,7 +930,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   return (
     <>
     <div className="desktop-navigation" data-collapsed={sidebarCollapsed || undefined} data-workspace={children ? 'true' : undefined} style={{ '--rail-material': t.sidebarBg, '--sidebar-material': t.sidebarPanelBg, '--desktop-surface': t.stageBg, '--desktop-sidebar-width': `${sidebarWidth}px`, '--sidebar-button-surface': t.surface, '--desktop-accent': t.accent, '--text': t.text, '--text3': t.text3, '--nav-panel-border': t.border } as CSSProperties}>
-      <div ref={toolbarRef} className="drag-region desktop-window-toolbar" aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
+      <div ref={toolbarRef} className="drag-region desktop-window-toolbar" aria-disabled={bridge.projectCreationOpen || undefined} onClickCapture={blockNavigation}>
         <div className="desktop-sidebar-brand">
           <button type="button" className="desktop-rail-button desktop-rail-toggle" aria-label={sidebarCollapsed ? tr('desktop_show_sidebar') : tr('desktop_hide_sidebar')} aria-controls="desktop-session-sidebar" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? tr('desktop_show_sidebar') : tr('desktop_hide_sidebar')} onClick={() => setSidebarCollapsed(!sidebarCollapsed)}><DesktopIcon name="sidebar" size={19} /></button>
           <strong style={{ color: t.text, fontSize: 17, fontWeight: 650, letterSpacing: '-.035em', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>LingXi</strong>
@@ -951,7 +947,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         {topbar}
       </div>
       <div className="desktop-body">
-      <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
+      <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.projectCreationOpen || undefined} onClickCapture={blockNavigation}>
         <button type="button" className="desktop-rail-button" data-active={!scheduled && !changes && sidebarMode === 'home' || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={() => selectMode('home')}><DesktopIcon name="home" size={20} /></button>
         {botsAvailable && <button type="button" className="desktop-rail-button" data-active={!scheduled && !changes && sidebarMode === 'bots' || undefined} aria-label={tr('bots_title')} title={tr('bots_title')} onClick={() => selectMode('bots')}><Icon name="bot" size={21} stroke={1.7} /></button>}
         <button type="button" className="desktop-rail-button desktop-rail-teams" data-active={!scheduled && !changes && sidebarMode === 'teams' || undefined} aria-label={teamsRailLabel} title={teamsRailLabel} onClick={() => selectMode('teams')}>
@@ -975,7 +971,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       className="desktop-sidebar"
       ref={asideRef}
       aria-hidden={sidebarCollapsed || undefined}
-      aria-disabled={bridge.sessionLoading || undefined}
+      aria-disabled={bridge.projectCreationOpen || undefined}
       onClickCapture={blockNavigation}
       data-resizing={resizingSidebar || undefined}
       style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', '--desktop-accent': t.accent } as CSSProperties}
@@ -987,12 +983,12 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         <button
           className="sidebar-primary-action sidebar-new-chat"
           type="button"
-          disabled={bridge.sessionLoading || editingProject !== null}
+          disabled={bridge.projectCreationOpen || editingProject !== null}
           onClick={() => { onOpenChat?.(); invoke(() => bridge.newSession()); }}
           style={{
             width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
             padding: '8px 10px', borderRadius: 10, border: 0, background: 'transparent',
-            color: t.text, cursor: bridge.sessionLoading || editingProject !== null ? 'wait' : 'pointer', opacity: bridge.sessionLoading || editingProject !== null ? .5 : 1,
+            color: t.text, cursor: bridge.projectCreationOpen || editingProject !== null ? 'wait' : 'pointer', opacity: bridge.projectCreationOpen || editingProject !== null ? .5 : 1,
             textAlign: 'left', fontSize: 14, fontWeight: 500,
           }}
         >
@@ -1042,17 +1038,6 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           </section>
         ) : null}
 
-        {visibleDrafts.length > 0 && <section aria-label={tr('desktop_chat_drafts')} style={{ marginBottom: 12 }}>
-          <h2 style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600 }}>{tr('desktop_chat_drafts')}</h2>
-          {visibleDrafts.filter((draft) => matchesSearch(draft.sessionId) || matchesSearch(tr('desktop_chat_drafts'))).map((draft) =>
-            <button key={draft.sessionId} type="button" data-session-id={draft.sessionId}
-              aria-current={!scheduled && visibleSession?.sessionId === draft.sessionId ? 'page' : undefined}
-              onClick={() => openSidebarSession(draft.projectPath, draft.sessionId)}
-              style={{ display: 'block', width: '100%', padding: '7px 9px', border: 0, borderRadius: 7, textAlign: 'left',
-                background: visibleSession?.sessionId === draft.sessionId ? t.surfaceActive : 'transparent', color: t.text, cursor: 'pointer' }}>
-              {draft.handoff ? tr('desktop_handoff_source', draft.handoff.sourceMode === 'chat' ? 'Chat' : 'Code', draft.handoff.sourceSessionId.slice(0, 8)) : tr('desktop_chat_drafts')}
-            </button>)}
-        </section>}
         {globalSessions.length > 0 && <section aria-label={tr('drawer_search_section_sessions')}>
           <h2 style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>{tr('drawer_search_section_sessions')}</h2>
           {(normalizedSearch ? globalSessions.filter(({ session }) => matchesSearch(session.title || tr('remote_untitled'))) : showAllSessions['global'] ? globalSessions : globalSessions.slice(0, 5)).map(({ projectPath: workspace, session }) => {
@@ -1555,8 +1540,7 @@ export function BetaTopBar({ bridge, bot, app, runtimeCenterOpen, onToggleRuntim
   const remote = remoteIndicator(remoteState.sessions, bridge.activeSession?.sessionId);
   const owner = bridge.bootstrap?.conversationSpaces.sessions.find((entry) => entry.sessionId === bridge.activeSession?.sessionId);
   const sourceLabel = owner?.handoff && tr('desktop_handoff_source', owner.handoff.sourceMode === 'chat' ? 'Chat' : 'Code', owner.handoff.sourceSessionId);
-  const targetMode = owner?.mode === 'chat' ? 'Code' : 'Chat';
-  const handoffLabel = bridge.handoffPending ? tr('desktop_handoff_cancel') : bridge.handoffRetryAvailable ? tr('desktop_handoff_retry') : tr('desktop_handoff_continue', targetMode);
+  const handoffLabel = bridge.handoffPending ? tr('desktop_handoff_cancel') : tr('desktop_handoff_retry');
 
   const topbarActionTokens = {
     '--topbar-action-focus': t.surfaceHover,
@@ -1573,7 +1557,7 @@ export function BetaTopBar({ bridge, bot, app, runtimeCenterOpen, onToggleRuntim
         <span className="desktop-topbar-title" style={{ color: t.text }}>{bot?.name || app?.name || sessionTitle || basename(projectPath)}</span>
       </div>
       {sourceLabel && owner?.handoff && <button type="button" className="no-drag desktop-topbar-action" title={sourceLabel} disabled={bridge.sessionLoading} onClick={() => { void bridge.openHandoffSource(owner.handoff!); }} style={{ ...topbarActionTokens, width: 'auto', maxWidth: 220, minWidth: 0, padding: '0 8px', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sourceLabel}</button>}
-      {!bot && !app && owner && <button type="button" className="no-drag desktop-topbar-action"
+      {!bot && !app && owner && (bridge.handoffPending || bridge.handoffRetryAvailable) && <button type="button" className="no-drag desktop-topbar-action"
         disabled={bridge.sessionLoading || (!bridge.connected && !bridge.handoffPending)}
         title={handoffLabel}
         onClick={() => { void (bridge.handoffPending ? bridge.cancelSessionHandoff() : bridge.prepareSessionHandoff()); }}

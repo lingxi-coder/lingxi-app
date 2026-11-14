@@ -4,7 +4,7 @@ enum LXIconName: String, CaseIterable {
     case menu, edit, pencil, search, sparkle, sparkles, book, bookOpen, listFiles, workflow, cog, wrench, plus, mic, paperclip
     case chevron, sun, moon, check, pin, brain, arrowUp, folder, clock, message
     case chevronR, play, pause, x, skill, plug, dream, link, copy, share, listChecks, send, localApp
-    case warning, stop, squareStop, arrowRight, audioWave, terminal, globe, appBuilder, mcpFallback, computer
+    case shieldTerminal, warning, stop, squareStop, arrowRight, audioWave, terminal, globe, appBuilder, mcpFallback, computer
 }
 
 extension LXIconName {
@@ -54,6 +54,7 @@ extension LXIconName {
         case .squareStop: "stop.circle"
         case .arrowRight: "arrow.forward"
         case .audioWave: "waveform"
+        case .shieldTerminal: "terminal"
         case .terminal: "terminal"
         case .globe: "globe"
         case .appBuilder: "app.badge"
@@ -71,7 +72,21 @@ struct LXIcon: View {
 
     var body: some View {
         Group {
-            if name == .computer {
+            if name == .shieldTerminal {
+                Canvas { context, canvas in
+                    var path = Path()
+                    path.move(to: CGPoint(x: 8, y: 1))
+                    path.addLines([CGPoint(x: 14, y: 4), CGPoint(x: 14, y: 9)])
+                    path.addCurve(to: CGPoint(x: 8, y: 16), control1: CGPoint(x: 14, y: 12), control2: CGPoint(x: 11.5, y: 14))
+                    path.addCurve(to: CGPoint(x: 2, y: 9), control1: CGPoint(x: 4.5, y: 14), control2: CGPoint(x: 2, y: 12))
+                    path.addLine(to: CGPoint(x: 2, y: 4)); path.closeSubpath()
+                    path.move(to: CGPoint(x: 5, y: 6))
+                    path.addLines([CGPoint(x: 7, y: 8), CGPoint(x: 5, y: 10)])
+                    path.move(to: CGPoint(x: 9, y: 10)); path.addLine(to: CGPoint(x: 11, y: 10))
+                    context.scaleBy(x: canvas.width / 16, y: canvas.height / 17)
+                    context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.1, lineCap: .round, lineJoin: .round))
+                }
+            } else if name == .computer {
                 Canvas { context, canvas in
                     let scale = canvas.width / 16
                     var path = Path()

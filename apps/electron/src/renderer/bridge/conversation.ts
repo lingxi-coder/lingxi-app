@@ -49,6 +49,7 @@ import { spawnResultAgentId } from '../components/transcriptAgentPlacement';
  */
 
 import type { ClientEvent, ImageRefDto, MessageDto, MessageImageDto, PlanTaskDto, UiJsonValue } from '@lingxi/bridge-client';
+import { recentTranscript } from '../../shared/sessionHistory.js';
 // The SUBPATH, not the barrel: `@lingxi/bridge-client` re-exports `lockfile.js`,
 // which imports `node:fs`/`node:os`. A type-only import of the barrel is erased,
 // but a VALUE import of it drags Node builtins into the renderer bundle and the
@@ -638,7 +639,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       return emptyConversation();
 
     case 'session_resumed':
-      return { ...conversationFromMessages(event.messages), sessionKey: event.session_id };
+      return { ...conversationFromMessages(recentTranscript(event.messages)), sessionKey: event.session_id };
 
     case 'turn_started':
       // Opening a turn starts fresh streaming lines. Clear any outstanding
@@ -1374,6 +1375,7 @@ export function conversationFromMessages(
               type: 'narration',
               id: itemId(nextId++),
               text: block.text,
+              skillName: message.role === 'user' ? message.skill_name ?? undefined : undefined,
               strong: message.role === 'user',
               role: message.role === 'user' ? 'user' : 'assistant',
               sentAt,
@@ -1504,6 +1506,35 @@ export function conversationFromMessages(
     foldedItemIds,
     toolIndex: Object.fromEntries(toolIndex),
     nextId,
+  };
+}
+
+/** Prepending history must preserve live row ids, streaming indices and current state. */
+export function prependHistory(state: ConversationState, messages: readonly MessageDto[], pageId: string): ConversationState {
+  const knownRows = new Set(state.items.flatMap(transcriptRowUuids));
+  const page = conversationFromMessages(messages.filter(message => !message.transcript_uuid || !knownRows.has(message.transcript_uuid)));
+  const generated = new Set(page.items.filter(item => item.type !== 'tool' && /^i\d+$/.test(item.id)).map(item => item.id));
+  const remap = (id: string) => generated.has(id) ? `history:${pageId}:${id}` : id;
+  const existing = new Map(state.items.map(item => [item.id, item]));
+  const older = page.items.filter(item => !existing.has(item.id) || generated.has(item.id))
+    .map(item => ({ ...item, id: remap(item.id) }));
+  const previousTools = new Map(page.items.filter(item => item.type === 'tool').map(item => [item.id, item]));
+  const currentItems = state.items.map(item => {
+    const previous = previousTools.get(item.id);
+    if (item.type !== 'tool' || previous?.type !== 'tool') return item;
+    const restored = item.nativeInput === undefined && previous.nativeInput !== undefined
+      ? { ...item, tool: item.tool || previous.tool, view: previous.view, nativeInput: previous.nativeInput,
+        agentId: item.agentId ?? spawnResultAgentId(previous.tool, JSON.stringify(item.nativeOutput)) } : item;
+    return transcriptRowUuids(previous).reduce((tool, uuid) => attachTranscriptRowUuid(tool, uuid), restored);
+  });
+  if (older.length === 0 && currentItems.every((item, index) => item === state.items[index])) return state;
+  const items = [...older, ...currentItems];
+  const toolIndex = Object.fromEntries(items.flatMap((item, index) => item.type === 'tool' ? [[item.id, index]] : []));
+  return { ...state, items, toolIndex,
+    openAssistantIndex: state.openAssistantIndex < 0 ? -1 : state.openAssistantIndex + older.length,
+    openThinkingIndex: state.openThinkingIndex < 0 ? -1 : state.openThinkingIndex + older.length,
+    foldedItemIds: [...page.foldedItemIds.map(remap), ...state.foldedItemIds],
+    summaries: [...page.summaries.map(summary => ({ ...summary, id: remap(summary.id) })), ...state.summaries],
   };
 }
 

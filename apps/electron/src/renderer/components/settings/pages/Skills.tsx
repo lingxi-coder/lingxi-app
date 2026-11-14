@@ -2,6 +2,9 @@ import { useI18n } from '../../../i18n/useI18n';
 import { tr } from '../../../i18n/locale';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SkillAdminCommandDto, SkillDto } from '@lingxi/bridge-client';
+import { publicExtensionNavigationId, publicExtensionText, publicSkillRecommendations } from '../../../../shared/publicExtensionDirectory';
+import { isPublicExtensionInstalled } from '../../../../shared/publicMarketplace';
+import { ExtensionDetails } from './ExtensionDetails';
 import { ExtensionGlyph } from './ExtensionHubIcons';
 import { useSettingsDraftGuard } from '../useSettingsDraftGuard';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
@@ -70,6 +73,7 @@ interface SkillDocumentEnvelope {
 
 type SkillSelection =
   | { kind: 'list' }
+  | { kind: 'recommendation'; id: string }
   | { kind: 'skill'; id: string }
   | { kind: 'trash'; id: string }
   | { kind: 'create' };
@@ -175,6 +179,12 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   }, [adminAvailable, bridge.refreshSkills, bridge.skillAdmin]);
 
   useEffect(() => {
+    if (typeof bridge.pluginAdmin === 'function') {
+      void bridge.pluginAdmin({ action: 'get_catalog' }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_refresh_plugins_failed')));
+    }
+  }, [bridge.pluginAdmin]);
+
+  useEffect(() => {
     setSyncDraft(syncEnabled);
     setDraftCreateScope(defaultCreateScope(editingLayer));
     setRestoreScope(defaultCreateScope(editingLayer));
@@ -192,7 +202,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
     : trashedSkills;
 
   useEffect(() => {
-    if (selection.kind === 'create' || selection.kind === 'list') return;
+    if (selection.kind === 'create' || selection.kind === 'list' || selection.kind === 'recommendation') return;
     const existsInSkills = activeSkills.some((entry) => entry.id === selection.id);
     const existsInTrash = trashedSkills.some((entry) => entry.id === selection.id);
     if (!existsInSkills && !existsInTrash) {
@@ -289,7 +299,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
     setSelection(next);
   };
 
-  const dialogRef = useExtensionHubDialogFocus(selection.kind !== 'list', () => requestSelection({ kind: 'list' }));
+  const dialogRef = useExtensionHubDialogFocus(selection.kind !== 'list' && selection.kind !== 'recommendation', () => requestSelection({ kind: 'list' }));
 
   const discardDrafts = () => {
     if (selectedDocument) {
@@ -578,6 +588,11 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const sources = [...new Set(activeSkills.map((entry) => entry.source))];
   const activeSource = sources.includes(sourceFilter) ? sourceFilter : sources[0];
   const sourceSkills = filteredSkills.filter((entry) => entry.source === activeSource);
+  const recommendedSkills = publicSkillRecommendations.filter((entry) => !visibleQuery || [
+    entry.name, entry.publisher, ...(entry.skills ?? []), publicExtensionText(entry.description, locale),
+    publicExtensionText(entry.requirements, locale),
+  ].join(' ').toLowerCase().includes(visibleQuery));
+  const pluginCatalog = parseEventEnvelope<{ marketplaces?: Array<{ name: string; source_json?: string }>; installed?: Array<{ id: string }> }>(bridge.pluginCatalogEvent?.catalog_json, {});
   const skillRows = (entries: SkillCatalogItem[]) => <div className="extension-hub-list">{entries.map((entry) => <button className="extension-hub-row extension-hub-row-open" type="button" key={entry.id} onClick={() => requestSelection({ kind: 'skill', id: entry.id })}>
     <ExtensionIcon kind="skill" />
     <span className="extension-hub-row-copy"><span className="extension-hub-row-title">{entry.name}</span><span className="extension-hub-row-description">{entry.description || entry.whenToUse || tr('desktop_extension_skill_fallback')}</span></span>
@@ -585,6 +600,12 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   </button>)}</div>;
   const skillDescription = selectedSkill?.description || selectedSkill?.whenToUse;
   const previewMarkdown = selectedDocument?.markdown.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim() ?? '';
+
+  const recommendation = selection.kind === 'recommendation' ? publicSkillRecommendations.find((item) => item.id === selection.id) : undefined;
+  if (recommendation) {
+    const installed = isPublicExtensionInstalled(recommendation, pluginCatalog);
+    return <ExtensionHubLayout>{closePrompt}<ExtensionDetails item={recommendation} kind="skill" breadcrumb={tr('settings_title_skills')} onBack={() => requestSelection({ kind: 'list' })} status={installed ? tr('apps_installed') : undefined} actions={<button type="button" className={installed ? 'extension-hub-danger' : 'extension-hub-primary'} onClick={() => requestHubNavigation('plugins', publicExtensionNavigationId(recommendation, installed ? 'uninstall' : 'add'))}><ExtensionGlyph name={installed ? 'trash' : 'plus'} size={16} />{tr(installed ? 'plugins_action_uninstall' : 'workspace_confirm_add')}</button>}>{navigationPrompt}</ExtensionDetails></ExtensionHubLayout>;
+  }
 
   return (
     <ExtensionHubLayout>
@@ -599,6 +620,26 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel={tr('settings_title_skills')} />
       {pageError && selection.kind === 'list' && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
       {selection.kind === 'list' && navigationPrompt}
+      <section className="extension-catalog-section extension-skills-recommended" aria-labelledby="recommended-skills-title">
+        <h2 id="recommended-skills-title" className="extension-hub-group-title">{tr('desktop_extension_recommended_skills')}</h2>
+        <p className="extension-recommendations-note">{tr('desktop_extension_skill_pack_note')}</p>
+        <div className="extension-hub-list">
+          {recommendedSkills.map((entry) => {
+            const installed = isPublicExtensionInstalled(entry, pluginCatalog);
+            return <article key={entry.id} className="extension-hub-row extension-recommendation-row">
+            <ExtensionIcon kind="skill" />
+            <button type="button" className="extension-hub-row-copy extension-hub-row-open" aria-label={tr('desktop_extension_view_details_named', entry.name)} onClick={() => requestSelection({ kind: 'recommendation', id: entry.id })}>
+              <span className="extension-hub-row-title">{entry.name}</span>
+              <span className="extension-hub-row-description">{publicExtensionText(entry.description, locale)}</span>
+              <span className="extension-recommendation-meta">{entry.publisher} · {entry.skills!.slice(0, 4).join(', ')}{entry.skills!.length > 4 ? '…' : ''}</span>
+            </button>
+            <button type="button" className={installed ? 'extension-hub-danger' : 'extension-hub-primary'} onClick={() => requestHubNavigation('plugins', publicExtensionNavigationId(entry, installed ? 'uninstall' : 'add'))} aria-label={tr(installed ? 'desktop_extension_uninstall_named' : 'desktop_extension_add_skill_pack_named', entry.name)}>
+              <ExtensionGlyph name={installed ? 'trash' : 'plus'} size={14} />{tr(installed ? 'plugins_action_uninstall' : 'workspace_confirm_add')}
+            </button>
+          </article>; })}
+        </div>
+        {!recommendedSkills.length && <div className="extension-hub-empty">{tr('desktop_extension_no_skill_results')}</div>}
+      </section>
       <section className="extension-catalog-section extension-skills-installed">
         <h2 className="extension-hub-group-title">{tr('apps_installed')}</h2>
         {skillRows(showAllInstalled || search ? filteredSkills : filteredSkills.slice(0, 6))}
@@ -654,7 +695,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
             </> : detail}
           </div>
           {selection.kind === 'skill' && !editingDocument && <footer className="extension-detail-footer">
-            <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable} aria-describedby={uninstallDisabledReason ? 'skill-uninstall-readonly-reason' : undefined} onClick={handleTrashSkill}>{tr('apps_action_uninstall')}</button>
+            <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable && !selectedSkill?.pluginOwner} aria-describedby={uninstallDisabledReason ? 'skill-uninstall-readonly-reason' : undefined} onClick={() => selectedSkill?.pluginOwner ? requestHubNavigation('plugins', selectedSkill.pluginOwner) : handleTrashSkill()}>{tr('apps_action_uninstall')}</button>
             <button type="button" className="extension-hub-primary" disabled={tryingSkill || !!selectedSkill?.parseError || !selectedDocument} onClick={() => {
               if (!selectedSkill) return;
               setTryingSkill(true);

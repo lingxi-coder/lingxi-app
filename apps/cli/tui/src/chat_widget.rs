@@ -321,8 +321,6 @@ struct ApiRetryState {
     attempt: u32,
     /// Configured retry cap.
     max_retries: u32,
-    /// When the backoff ends — drives the live "Retrying in Ns…" countdown.
-    deadline: std::time::Instant,
 }
 
 /// Pending ← handoff while the current tool is allowed to reach its boundary.
@@ -508,8 +506,8 @@ pub struct ChatWidget {
     compacting_unknown_phase: bool,
     /// Active API retry-backoff status (Claude Code's `SystemAPIErrorMessage`).
     /// `Some` while an API request is backing off before its next attempt; the
-    /// spinner shows `"<message> · Retrying in Ns… (attempt X/Y)"` with a live
-    /// countdown. Cleared when the turn produces content, starts, or ends.
+    /// status shows `Reconnecting X/Y` with the error underneath.
+    /// Cleared when the turn produces content, starts, or ends.
     api_retry: Option<ApiRetryState>,
     /// Human label for what the turn is currently doing (e.g. `Running Bash`),
     /// set from `ToolUseStart` and shown by the spinner instead of a bare verb.
@@ -2181,17 +2179,13 @@ impl ChatWidget {
                 message,
                 attempt,
                 max_retries,
-                delay_ms,
+                delay_ms: _,
             } => {
-                // An API request is backing off before its next attempt — show
-                // Claude Code's `SystemAPIErrorMessage` line with a live
-                // countdown. Cleared when content arrives / the turn ends.
+                // Recovery status clears when content arrives or the turn ends.
                 self.api_retry = Some(ApiRetryState {
                     message,
                     attempt,
                     max_retries,
-                    deadline: std::time::Instant::now()
-                        + std::time::Duration::from_millis(delay_ms),
                 });
             }
             TurnEvent::ContextPressure {
@@ -6292,6 +6286,7 @@ impl ChatWidget {
                 ),
                 cost: self.cost.clone(),
                 compact_percent: pct,
+                retry_message: None,
             };
         }
         BottomPaneStatus {
@@ -6299,6 +6294,7 @@ impl ChatWidget {
             text: self.spinner_text(),
             cost: self.cost.clone(),
             compact_percent: None,
+            retry_message: self.api_retry.as_ref().map(|retry| retry.message.clone()),
         }
     }
 
@@ -6828,21 +6824,10 @@ impl ChatWidget {
     /// `ToolUseStart`), then the verb sampled once for this turn from
     /// [`spinner::SPINNER_VERBS`] (Gap A).
     fn spinner_text(&self) -> String {
-        let frame = self.spinner_frame();
-        // While an API request is backing off, replace the verb with Claude
-        // Code's `SystemAPIErrorMessage` line + a live countdown (attempt X/Y),
-        // so the retry/error/backoff is visible during the otherwise-silent wait.
-        if let Some(r) = &self.api_retry {
-            let remaining = r
-                .deadline
-                .saturating_duration_since(std::time::Instant::now())
-                .as_secs();
-            let unit = if remaining == 1 { "second" } else { "seconds" };
-            return format!(
-                "{} {} · Retrying in {remaining} {unit}… (attempt {}/{})",
-                frame, r.message, r.attempt, r.max_retries
-            );
+        if let Some(retry) = &self.api_retry {
+            return format!("⌁ Reconnecting {}/{}", retry.attempt, retry.max_retries);
         }
+        let frame = self.spinner_frame();
         let verb = spinner::todo_leader_verb(self.current_todo.as_ref())
             .or_else(|| self.activity.clone())
             .unwrap_or_else(|| self.spinner_verb.to_string());
@@ -13997,21 +13982,14 @@ mod tests {
             max_retries: 10,
             delay_ms: 5_000,
         });
-        // The running line surfaces the error + attempt + a live countdown
-        // (Claude Code's `SystemAPIErrorMessage`), not the plain verb.
-        let text = widget.spinner_text();
-        assert!(
-            text.contains("provider internal error"),
-            "shows the error: {text}"
+        assert_eq!(widget.spinner_text(), "⌁ Reconnecting 3/10");
+        assert_eq!(
+            widget.pane_status().retry_message.as_deref(),
+            Some("provider internal error")
         );
-        assert!(text.contains("Retrying in"), "shows the countdown: {text}");
-        assert!(text.contains("(attempt 3/10)"), "shows attempt/max: {text}");
-        // Content arriving means the retried request succeeded → clear it.
         widget.apply_turn_event(TurnEvent::TextDelta("hi".to_string()));
-        assert!(
-            !widget.spinner_text().contains("Retrying in"),
-            "retry status cleared once content streams"
-        );
+        assert!(!widget.spinner_text().contains("Reconnecting"));
+        assert!(widget.pane_status().retry_message.is_none());
     }
 
     #[test]

@@ -4,154 +4,62 @@
 .ask-question-summary-pair { display: grid; gap: 4px; }
 .ask-question-summary-pair p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ask-question-summary-trigger:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 3px; }
-/* Scoped to the pending prompt; completed transcript answers keep their rhythm. */
-section.ask-user-question-inline {
-  border-radius: 18px;
+/* Pending questions share one quiet surface and a persistent reply composer. */
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline {
+  border: 1px solid var(--dialog-border);
+  border-radius: 24px;
   background: var(--dialog-window);
-  box-shadow: 0 0 0 1px var(--dialog-border), 0 8px 24px -20px rgb(0 0 0 / 24%);
-  max-height: min(64vh, 560px);
+  box-shadow: none;
+  max-height: min(72vh, 640px);
   font-optical-sizing: auto;
 }
-section.ask-user-question-inline .inline-interaction-header {
-  min-height: 48px;
-  padding: 10px 18px 0;
-  gap: 9px;
-}
-section.ask-user-question-inline .inline-interaction-header h2 {
-  color: var(--dialog-text-2);
-  font-size: 13px;
-  font-weight: 600;
-}
-section.ask-user-question-inline .inline-interaction-heading-icon {
-  width: 24px;
-  height: 24px;
-  background: transparent;
-  color: var(--dialog-text-2);
-}
-section.ask-user-question-inline .inline-interaction-close { width: 32px; height: 32px; }
-section.ask-user-question-inline .ask-dialog-progress {
-  background: var(--dialog-surface-hover);
-  padding: 5px 8px;
-  border-radius: 20px;
-  color: var(--dialog-text-2);
-  font-size: 11px;
-  font-weight: 500;
-}
-section.ask-user-question-inline .ask-dialog-body {
-  padding: 8px 20px 16px;
-  gap: 8px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--dialog-border-strong) transparent;
-}
-section.ask-user-question-inline .ask-dialog-instructions {
-  color: var(--dialog-text-2);
-  font-size: 12px;
-}
-section.ask-user-question-inline .ask-dialog-question-list { gap: 12px; }
-section.ask-user-question-inline .ask-dialog-question-card {
-  background: transparent;
-  box-shadow: none;
-  border-radius: 0;
-  overflow: visible;
-}
-section.ask-user-question-inline .ask-dialog-question-trigger {
-  min-height: 44px;
-  grid-template-columns: minmax(0, 1fr) auto;
-  padding: 8px 0 12px;
-  gap: 8px;
-  border-bottom: 0;
-  border-radius: 6px;
-}
-section.ask-user-question-inline .ask-dialog-question-index,
-section.ask-user-question-inline .ask-dialog-question-header { display: none; }
-section.ask-user-question-inline .ask-dialog-question-copy { gap: 4px; }
-section.ask-user-question-inline .ask-dialog-question-title {
-  color: var(--dialog-text);
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -.015em;
-  line-height: 1.45;
-}
-section.ask-user-question-inline .ask-dialog-answer-summary {
-  color: var(--dialog-text-2);
-  font-size: 13px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-section.ask-user-question-inline .ask-dialog-options { padding: 1px; gap: 8px; }
-section.ask-user-question-inline .ask-dialog-option {
-  min-height: 58px;
-  box-sizing: border-box;
-  padding: 11px 13px;
-  grid-template-columns: 24px minmax(0, 1fr);
-  gap: 12px;
-  border-radius: 12px;
-  background: var(--dialog-surface);
-}
-section.ask-user-question-inline .ask-dialog-option-index {
-  width: 24px;
-  height: 24px;
-  font-size: 11px;
-  background: var(--dialog-window);
-  box-shadow: 0 0 0 1px var(--dialog-border-strong);
-}
-section.ask-user-question-inline .ask-dialog-option:has(input[type='checkbox']) .ask-dialog-option-index { border-radius: 6px; }
-section.ask-user-question-inline .ask-dialog-option:hover { background: var(--dialog-surface-hover); }
-section.ask-user-question-inline .ask-dialog-option:has(input:checked),
-section.ask-user-question-inline .ask-dialog-other[data-selected='true'] {
-  background: color-mix(in oklab, var(--dialog-accent) 6%, var(--dialog-surface));
-  box-shadow: 0 0 0 1.5px var(--dialog-accent);
-}
-section.ask-user-question-inline .ask-dialog-option:has(input:checked) .ask-dialog-option-index,
-section.ask-user-question-inline .ask-dialog-other-choice:has(input:checked) .ask-dialog-other-icon {
-  background: var(--dialog-accent);
-  color: white;
-  box-shadow: none;
-}
-section.ask-user-question-inline .ask-dialog-option-title { font-size: 13px; font-weight: 600; }
-section.ask-user-question-inline .ask-dialog-option-description { font-size: 12px; line-height: 1.45; }
-section.ask-user-question-inline .ask-dialog-option:active { scale: .995; transition-duration: 60ms; }
-section.ask-user-question-inline .ask-dialog-other {
-  grid-template-columns: 24px minmax(0, 1fr);
-  padding: 10px 13px 12px;
-  gap: 7px 12px;
-  border-radius: 12px;
-  background: var(--dialog-surface);
-}
-section.ask-user-question-inline .ask-dialog-other-choice { min-height: 28px; gap: 12px; }
-section.ask-user-question-inline .ask-dialog-other-icon { width: 24px; height: 24px; }
-section.ask-user-question-inline .ask-dialog-other-input {
-  min-height: 38px;
-  padding: 8px 10px;
-  font-size: 12px;
-}
-section.ask-user-question-inline .ask-dialog-other-input:focus-visible { border-color: var(--dialog-accent); }
-section.ask-user-question-inline .ask-dialog-footer {
-  padding: 10px 20px 14px;
-  border-top: 0;
-  background: var(--dialog-window);
-  box-shadow: 0 -8px 12px -12px var(--dialog-border-strong);
-}
-section.ask-user-question-inline .desktop-dialog-action--primary {
-  background: var(--dialog-accent);
-  color: white;
-  box-shadow: none;
-  min-width: 88px;
-}
-section.ask-user-question-inline .desktop-dialog-action { min-height: 36px; font-size: 13px; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .inline-interaction-header { padding: 16px 20px 8px; gap: 10px; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .inline-interaction-header h2 { margin: 0; color: var(--dialog-text-2); font-size: 15px; font-weight: 450; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .inline-interaction-heading-icon { background: transparent; color: var(--dialog-text-2); }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .inline-interaction-close { width: 32px; height: 32px; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-progress { color: var(--dialog-text-3); font-size: 12px; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-body { padding: 6px 10px 0; gap: 8px; scrollbar-width: thin; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-question-list { gap: 12px; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-question-card { background: transparent; box-shadow: none; border-radius: 0; overflow: visible; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-question-card .ask-dialog-question-trigger { min-height: 44px; grid-template-columns: minmax(0, 1fr) auto; padding: 10px 10px 16px; gap: 8px; border-bottom: 0; border-radius: 8px; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-question-index,
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-question-header { display: none; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-question-card:only-child .ask-dialog-question-trailing { display: none; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-question-title { color: var(--dialog-text); font-size: 16px; font-weight: 600; letter-spacing: 0; line-height: 1.5; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-answer-summary { color: var(--dialog-text-2); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-options { padding: 1px; gap: 4px; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option { min-height: 44px; box-sizing: border-box; padding: 8px 10px; grid-template-columns: 24px minmax(0, 1fr) 20px; gap: 12px; border-radius: 15px; background: transparent; box-shadow: none; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option-index,
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option:has(input:checked) .ask-dialog-option-index { width: 24px; height: 24px; border-radius: 6px; font-size: 14px; font-weight: 450; color: var(--dialog-text-2); background: var(--dialog-surface); box-shadow: inset 0 0 0 1px var(--dialog-border); }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option:hover,
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option:has(input:checked) { background: var(--dialog-surface-hover); box-shadow: none; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option-arrow { display: flex; color: var(--dialog-text-3); opacity: 0; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option:hover .ask-dialog-option-arrow,
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option:has(input:checked) .ask-dialog-option-arrow,
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option:focus-within .ask-dialog-option-arrow { opacity: 1; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option-title { font-size: 15px; font-weight: 550; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option-description { font-size: 12px; line-height: 1.45; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option:active { scale: .995; transition-duration: 60ms; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-footer { display: block; padding: 10px; border-top: 0; box-shadow: none; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-composer { display: flex; align-items: center; gap: 12px; padding: 7px 9px 7px 14px; border: 1px solid var(--dialog-border-strong); border-radius: 18px; color: var(--dialog-text-3); }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-composer:focus-within { border-color: var(--dialog-text); box-shadow: 0 0 0 1px var(--dialog-text); }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-composer > svg { flex-shrink: 0; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-composer-input { flex: 1; min-width: 0; width: 100%; padding: 6px 0; border: 0; background: transparent; color: var(--dialog-text); font: inherit; font-size: 15px; line-height: 1.5; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-composer-input:focus-visible { outline: none; }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-composer-input::placeholder { color: var(--dialog-text-3); }
+section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-composer .desktop-dialog-actions { flex-shrink: 0; gap: 8px; }
 @media (max-width: 600px) {
-  section.ask-user-question-inline .inline-interaction-header { padding-inline: 12px; }
-  section.ask-user-question-inline .ask-dialog-body { padding-inline: 14px; }
-  section.ask-user-question-inline .ask-dialog-footer { padding-inline: 14px; }
-  section.ask-user-question-inline .ask-dialog-question-title { font-size: 15px; }
+  section.inline-interaction-card.interaction-prompt.ask-user-question-inline .inline-interaction-header { padding: 12px 14px 4px; }
+  section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-composer { flex-wrap: wrap; gap: 8px; }
+  section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-composer-input { flex-basis: calc(100% - 36px); }
+  section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-question-title { font-size: 15px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  section.ask-user-question-inline .ask-dialog-option:active { scale: 1; }
+  section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option { transition: none; }
+  section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option:active { scale: 1; }
 }
 @media (prefers-contrast: more) {
-  section.ask-user-question-inline .ask-dialog-option,
-  section.ask-user-question-inline .ask-dialog-other { box-shadow: 0 0 0 1px var(--dialog-text-2); }
-  section.ask-user-question-inline .ask-dialog-option:has(input:checked),
-  section.ask-user-question-inline .ask-dialog-other[data-selected='true'] { outline: 2px solid var(--dialog-accent); }
+  section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option { outline: 1px solid var(--dialog-text-2); }
+  section.inline-interaction-card.interaction-prompt.ask-user-question-inline .ask-dialog-option:has(input:checked) { outline: 2px solid var(--dialog-text); }
 }

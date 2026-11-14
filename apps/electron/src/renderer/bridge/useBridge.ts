@@ -1,4 +1,7 @@
 import type { SessionMetadataSelection } from '../../shared/sessionWorkspace.js';
+import { EMPTY_TRANSCRIPT_HISTORY, initialHistory, recentTranscript } from '../../shared/sessionHistory.js';
+import { prependHistory } from './conversation.js';
+import { prependRuntimeHistory } from './runtimeCenterState.js';
 import type { ProviderAccountsApi } from '../../shared/providerAccounts';
 import { COMPACT_DURING_TURN, isCompactTurnRejection } from './compactRejection';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
@@ -296,6 +299,7 @@ export function useBridge(): UseBridge {
   const latestBootstrapRevisionRef = useRef<number | null>(null);
   const latestBootstrapProjectPathsRef = useRef(new Set<string>());
   const navigationOperationRef = useRef(0);
+  const historyFlights = useRef(new Map<string, Promise<void>>());
   const requestedSpaceRef = useRef<'chat' | 'code' | null>(null);
   const confirmedSpaceRef = useRef<'chat' | 'code' | null>(null);
   const pinOperationRef = useRef(0);
@@ -670,7 +674,6 @@ export function useBridge(): UseBridge {
   }, [completeTrackedSpeech, host]);
 
   const beginNavigationOperation = useCallback((): number => {
-    if (sessionLoadingRef.current) throw new Error('Wait for the session to finish opening before navigating.');
     pendingSessionRef.current = null;
     setSessionReady(false);
     sessionLoadingRef.current = false;
@@ -708,6 +711,9 @@ export function useBridge(): UseBridge {
     providerAccountSourceMounted.current = true;
     return () => { providerAccountSourceMounted.current = false; providerAccountSourceGeneration.current++; };
   }, [accountSnapshotRefresh]);
+  useEffect(() => {
+    if (host?.providerAccounts && bootstrap) void accountSnapshotRefresh.refresh().catch(() => undefined);
+  }, [accountSnapshotRefresh, activeSessionId, Boolean(bootstrap), host]);
 
   // Returns the catalog it fetched as well as writing it into `bootstrap`. A
   // caller acting on a click cannot read the bootstrap it just triggered — the
@@ -876,7 +882,9 @@ export function useBridge(): UseBridge {
     const offEvent = host.onEvent((envelope: SequencedRuntimeEventEnvelope<ClientEvent>) => {
       const sessionId = envelope.sessionId;
       if (removedRuntimeIds.current.has(sessionId)) return;
-      const event = envelope.event;
+      const rawEvent = envelope.event;
+      const event = rawEvent.type === 'session_resumed'
+        ? { ...rawEvent, messages: [...recentTranscript(rawEvent.messages)] } : rawEvent;
       if (event.type === 'session_started' || event.type === 'session_resumed' || event.type === 'session_ended') {
         host.reportSessionRecovery?.({ phase: 'renderer_base', sessionId, sequence: envelope.sequence,
           eventType: event.type, messageCount: event.type === 'session_resumed' ? event.messages.length : 0 });
@@ -1001,10 +1009,12 @@ export function useBridge(): UseBridge {
         completeTrackedSpeech(sessionId, event.type === 'turn_ended' ? 'turn_ended' : 'stale');
       }
       updateRuntime(sessionId, (state) => {
-        let next = { ...state, conversation: reduceEventWithPendingFusion(state.conversation, event, sessionId, restoringFusion ? pendingFusion?.raw : undefined), desktop: reduceDesktopEvent(state.desktop, event), runtimeCenter: reduceRuntimeCenterEvent(state.runtimeCenter, event, sessionId) };
+        let next: RuntimeState = { ...state, conversation: reduceEventWithPendingFusion(state.conversation, event, sessionId, restoringFusion ? pendingFusion?.raw : undefined), desktop: reduceDesktopEvent(state.desktop, event), runtimeCenter: reduceRuntimeCenterEvent(state.runtimeCenter, event, sessionId) };
+        if (event.type === 'session_started' || event.type === 'session_ended') next.history = undefined;
         if (event.type === 'session_resumed') {
           next = {
             ...next,
+            history: initialHistory(event.messages),
             runtimeCenter: addRuntimeResources(
               next.runtimeCenter,
               resourcesFromRestoredMessages(sessionId, event.messages),
@@ -2302,7 +2312,6 @@ export function useBridge(): UseBridge {
   }, [command, refreshDiagnostics, requestTaskList]);
 
   const newSession = useCallback(async (requestedProjectPath?: string, purpose?: import('../../shared/settings').NewSessionPurpose) => {
-    if (sessionLoadingRef.current) return;
     if (!host || !bootstrap) return;
     const projectId = requestedProjectPath ?? null;
     const mode = bootstrap.conversationSpaces.activeMode;
@@ -2860,6 +2869,36 @@ export function useBridge(): UseBridge {
     [runConfigurationAdmin],
   );
 
+  const loadMoreHistory = useCallback((): Promise<void> => {
+    const sessionId = activeSessionIdRef.current;
+    if (!host || !sessionId || sessionLoadingRef.current) return Promise.resolve();
+    const pending = historyFlights.current.get(sessionId);
+    if (pending) return pending;
+    const before = runtimeStatesRef.current.get(sessionId)?.history?.before;
+    if (!before) return Promise.resolve();
+    updateRuntime(sessionId, state => ({ ...state, history: { before, loading: true } }));
+    const loading = Promise.resolve().then(async () => {
+      try {
+        const page = await host.loadSessionHistory(sessionId, before);
+        updateRuntime(sessionId, state => {
+          if (state.history?.before !== before) return state;
+          const conversation = prependHistory(state.conversation, page.messages, `${before.uuid}:${before.offset ?? 'initial'}`);
+          return {
+            ...state, conversation,
+            runtimeCenter: prependRuntimeHistory(state.runtimeCenter, sessionId, page.messages, conversation.items),
+            history: { before: page.before, loading: false },
+          };
+        });
+      } catch (cause) {
+        updateRuntime(sessionId, state => state.history?.before !== before ? state : {
+          ...state, history: { before, loading: false, error: messageFrom(cause) },
+        });
+      }
+    }).finally(() => { if (historyFlights.current.get(sessionId) === loading) historyFlights.current.delete(sessionId); });
+    historyFlights.current.set(sessionId, loading);
+    return loading;
+  }, [host, updateRuntime]);
+
   const presentedCatalogs = useMemo(() => bootstrap ? submittedSessionCatalogs(
     bootstrap.projectCatalogs, submittedSessions.values(), bootstrap.settings.archivedSessions ?? [],
   ) : undefined, [bootstrap?.projectCatalogs, bootstrap?.settings.archivedSessions, submittedSessions]);
@@ -2868,6 +2907,7 @@ export function useBridge(): UseBridge {
   ) : null, [bootstrap, presentedCatalogs]);
 
   return {
+    history: runtime?.history ?? EMPTY_TRANSCRIPT_HISTORY, loadMoreHistory,
     linkDraft, offerLinkDraft: setLinkDraft, clearLinkDraft: () => setLinkDraft(null),
     scheduledScopes, refreshScheduledScopes, scheduledContext, manageScheduled, readScheduledHistory, openScheduledSession,
     uiSurfaceClientId: stableUiSurfaceClientId,

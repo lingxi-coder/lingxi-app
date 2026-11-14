@@ -42,6 +42,17 @@ internal object TeamsComposeLogic {
         return bots.filter { it.selectable && "shared_bot:${it.sharedBotId}" in conversation.participants && it.sharedBotId !in chosenKeys && (needle.isEmpty() || it.name.lowercase().contains(needle)) }
     }
 
+    /**
+     * What the box says once spoken words are added: after what is already there, with a space between, never in its place.
+     * Nothing heard changes nothing. The words are only ever put in the box; sending is the reader's.
+     */
+    fun appendingTranscript(transcript: String, text: String): String {
+        val heard = transcript.trim()
+        if (heard.isEmpty()) return text
+        if (text.isBlank()) return heard
+        return text + (if (text.last().isWhitespace()) "" else " ") + heard
+    }
+
     /** One line of a message for a quote or a reply bar: whitespace runs collapsed, cut at [length] code points plus an ellipsis. */
     fun snippet(text: String, length: Int = 90): String {
         val flat = text.replace(spaces, " ").trim()

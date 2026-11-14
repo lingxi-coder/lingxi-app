@@ -89,4 +89,41 @@ class TeamsComposeLogicTest {
         assertFalse(TeamsComposeLogic.canSendText("　\n"))
         assertTrue(TeamsComposeLogic.canSendText(" a "))
     }
+
+    @Test fun spokenWordsAreAddedToTheBoxAndNeverReplaceIt() {
+        assertEquals("hello there", TeamsComposeLogic.appendingTranscript("hello there", ""))
+        assertEquals("hello there", TeamsComposeLogic.appendingTranscript("  hello there\n", "  \n"))
+        assertEquals("typed and more", TeamsComposeLogic.appendingTranscript("and more", "typed"))
+        assertEquals("typed and more", TeamsComposeLogic.appendingTranscript("and more", "typed "))
+        assertEquals("第一句\n第二句", TeamsComposeLogic.appendingTranscript("第二句", "第一句\n"))
+        // Nothing heard (silence, a cancelled recognition) leaves the box exactly as it was.
+        assertEquals("typed ", TeamsComposeLogic.appendingTranscript("", "typed "))
+        assertEquals("", TeamsComposeLogic.appendingTranscript(" \n ", ""))
+    }
+
+    @Test fun wordsSpokenForOneBoxNeverReachAnother() {
+        val box = "uid1:team1:3:conv1:"
+        assertTrue(TeamVoiceLogic.delivers(box, box))
+        // Another conversation, another account, a new membership generation, a message being changed: all are other boxes.
+        assertFalse(TeamVoiceLogic.delivers(box, "uid1:team1:3:conv2:"))
+        assertFalse(TeamVoiceLogic.delivers(box, "uid2:team1:3:conv1:"))
+        assertFalse(TeamVoiceLogic.delivers(box, "uid1:team1:4:conv1:"))
+        assertFalse(TeamVoiceLogic.delivers(box, "uid1:team1:3:conv1:msg1"))
+        // Nothing was being spoken (it was cancelled): words that still arrive are dropped.
+        assertFalse(TeamVoiceLogic.delivers(null, box))
+    }
+
+    @Test fun theMicrophonesOwnEndIsWordsAnExplanationOrNothing() {
+        assertEquals(TeamVoiceLogic.End.Heard, TeamVoiceLogic.end(com.lingxi.code.voice.VoiceCapturePhase.Completed))
+        assertEquals(TeamVoiceLogic.End.Failed, TeamVoiceLogic.end(com.lingxi.code.voice.VoiceCapturePhase.Failed))
+        assertEquals(TeamVoiceLogic.End.Quiet, TeamVoiceLogic.end(com.lingxi.code.voice.VoiceCapturePhase.PermissionRequired))
+        assertEquals(TeamVoiceLogic.End.Quiet, TeamVoiceLogic.end(com.lingxi.code.voice.VoiceCapturePhase.Cancelled))
+        for (phase in listOf(com.lingxi.code.voice.VoiceCapturePhase.Idle, com.lingxi.code.voice.VoiceCapturePhase.Starting, com.lingxi.code.voice.VoiceCapturePhase.Listening, com.lingxi.code.voice.VoiceCapturePhase.Stopping)) {
+            assertEquals(null, TeamVoiceLogic.end(phase))
+            assertFalse(TeamVoiceLogic.abandoned(phase))
+        }
+        assertTrue(TeamVoiceLogic.abandoned(com.lingxi.code.voice.VoiceCapturePhase.Cancelled))
+        assertTrue(TeamVoiceLogic.abandoned(com.lingxi.code.voice.VoiceCapturePhase.Failed))
+        assertFalse(TeamVoiceLogic.abandoned(com.lingxi.code.voice.VoiceCapturePhase.Completed))
+    }
 }

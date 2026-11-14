@@ -71,6 +71,8 @@ internal object TeamsTags {
     const val COMPOSER_LOCK = "teams.composerLock"
     const val ASK_BOT = "teams.askBot"
     const val ATTACH = "teams.attach"
+    const val VOICE = "teams.voice"
+    const val LISTENING = "teams.listening"
     const val DRAFT_FILES = "teams.composer.files"
     const val REFUSED_FILES = "teams.composer.files.refused"
     const val SHEET = "teams.sheet"

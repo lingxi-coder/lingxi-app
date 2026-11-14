@@ -37,6 +37,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
+import com.lingxi.code.conversation.AudioSetupBanner
 import com.lingxi.code.theme.BotAvatar
 
 /**
@@ -55,6 +56,8 @@ internal fun TeamComposer(
     files: List<TeamDraftFile> = emptyList(), refusals: List<TeamFileRefusal> = emptyList(),
     /** Null where files cannot be added now. */
     onChooseFiles: ((List<TeamChosenFile>) -> Unit)? = null, onRemoveFile: (String) -> Unit = {}, onDismissRefusals: () -> Unit = {},
+    /** What the unsent message belongs to (the workspace's draft key). Words spoken into the box are for it alone. Null: no microphone here. */
+    voiceTarget: String? = null,
 ) {
     val bots = messaging.bots
     val lock = TeamsComposeLogic.composerLock(uid, conversation.kind, conversation.participants, bots, messaging.botsLoaded, messaging.botsFailed, conversation.readers)
@@ -91,8 +94,17 @@ internal fun TeamComposer(
         if (editing == null) onDraft(draft.copy(text = value.text, targets = targets, replyToId = replyTo?.id))
     }
 
+    // Spoken words are added to the box, to be read, changed and sent by hand. A message being changed is another box.
+    val voice = if (voiceTarget == null) null else rememberTeamVoice("$voiceTarget:${editing?.id.orEmpty()}") { heard ->
+        val text = TeamsComposeLogic.appendingTranscript(heard, field.text)
+        update(TextFieldValue(text, TextRange(text.length)))
+    }
+
     Column(modifier.fillMaxWidth()) {
         HorizontalDivider()
+        val openVoiceSettings = LocalOpenVoiceSettings.current
+        voice?.guidance?.let { AudioSetupBanner(it, onConfigure = openVoiceSettings, onDismiss = voice.dismiss) }
+        if (voice?.listening == true) TeamVoiceListening()
         if (candidates.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 Text(stringResource(R.string.teams_composer_bots_can_ask), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -157,6 +169,7 @@ internal fun TeamComposer(
                 },
                 modifier = Modifier.weight(1f).testTag(TeamsTags.COMPOSER_FIELD),
             )
+            if (voice != null) TeamVoiceButton(voice, enabled = !messaging.submitting)
             IconButton(
                 enabled = canSend, modifier = Modifier.testTag(TeamsTags.SEND),
                 onClick = { val submitted = field.text; onSend(submitted, if (editing == null && askable) draft.targets.sorted() else emptyList()) { if (field.text == submitted) field = TextFieldValue("") } },

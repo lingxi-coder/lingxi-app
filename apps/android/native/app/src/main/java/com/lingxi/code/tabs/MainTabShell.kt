@@ -68,6 +68,8 @@ import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.friends.FriendsBadge
 import com.lingxi.code.friends.FriendsTab
+import com.lingxi.code.settings.SettingsRoutes
+import com.lingxi.code.teams.LocalOpenVoiceSettings
 import com.lingxi.code.teams.TeamsBadge
 import com.lingxi.code.teams.TeamsTab
 import kotlinx.coroutines.flow.StateFlow
@@ -212,8 +214,10 @@ private fun TabBodies(
                 val body = Modifier.fillMaxSize()
                 when (selected) {
                     AppTab.Bots -> bots(body)
-                    AppTab.Teams -> teams(body)
-                    AppTab.Friends -> friends(body)
+                    // A Team or friend conversation's voice input opens the voice settings and comes back to its tab.
+                    AppTab.Teams, AppTab.Friends -> CompositionLocalProvider(
+                        LocalOpenVoiceSettings provides { state.openSettings(SettingsRoutes.VOICE, selected) },
+                    ) { if (selected == AppTab.Teams) teams(body) else friends(body) }
                     AppTab.Settings -> settings(body)
                     AppTab.Chats -> Unit
                 }

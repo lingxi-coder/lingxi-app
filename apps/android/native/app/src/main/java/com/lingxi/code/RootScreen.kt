@@ -915,7 +915,8 @@ fun RootScreen(
     var audioGuidance by remember { mutableStateOf<com.lingxi.code.voice.AudioSetupGuidance?>(null) }
     val captureState by com.lingxi.code.voice.VoiceCaptureStore.state.collectAsState()
     LaunchedEffect(captureState.phase, captureState.errorMessage) {
-        if (captureState.phase == com.lingxi.code.voice.VoiceCapturePhase.Failed) {
+        // The capture state is the app's, not this screen's: a failure while another tab is using the microphone is that tab's to explain.
+        if (captureState.phase == com.lingxi.code.voice.VoiceCapturePhase.Failed && (tabState == null || tabState.selected == com.lingxi.code.tabs.AppTab.Chats)) {
             audioGuidance = com.lingxi.code.voice.AudioSetupGuidance.fromError(message = captureState.errorMessage ?: captureState.statusText)
             voiceActive = false
         }

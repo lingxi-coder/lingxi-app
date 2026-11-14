@@ -349,6 +349,7 @@ private fun ConversationBody(
             conversation = conversation, label = label, uid = uid, messaging = messaging, draft = draft,
             replyTo = replyTo, editing = editing, replyAuthor = replyTo?.let(::authorOf).orEmpty(),
             onDraft = ::setDraft, onCancelReply = { setDraft(draft.copy(replyToId = null)) }, onCancelEdit = { editingId = null },
+            voiceTarget = workspace.draftKey(conversationId),
             onSend = { text, targets, done ->
                 val editingMessage = editing
                 // A reply to a Bot's question that still waits for the viewer is its answer: it continues that task and asks no Bot.

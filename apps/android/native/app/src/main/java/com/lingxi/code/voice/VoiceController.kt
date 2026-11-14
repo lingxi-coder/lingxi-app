@@ -363,18 +363,20 @@ class VoiceCapture internal constructor(
 }
 
 private object HeldVoiceSessionRegistry {
-    private var capture: VoiceCapture? = null
+    // More than one screen holds a capture at a time: the chat stays composed behind the other tabs,
+    // and a Team conversation has its own.
+    private val captures = mutableListOf<VoiceCapture>()
 
     fun attach(value: VoiceCapture) {
-        capture = value
+        captures += value
     }
 
     fun detach(value: VoiceCapture) {
-        if (capture === value) capture = null
+        captures.removeAll { it === value }
     }
 
     fun cancelActive() {
-        capture?.takeIf { it.isActive() }?.cancel()
+        captures.filter { it.isActive() }.forEach { it.cancel() }
     }
 }
 

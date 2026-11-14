@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The sheets of the Teams tab.
 enum TeamsSheet: String, Identifiable {
-    case switcher, createTeam, joinTeam, newMessage, newChannel, newBot
+    case switcher, createTeam, joinTeam, newMessage, newChannel, newBot, services
     var id: String { rawValue }
 }
 
@@ -28,6 +28,7 @@ struct TeamSwitcherSheet: View {
     let onCreate: () -> Void
     let onJoin: () -> Void
     let onDetails: () -> Void
+    let onServices: () -> Void
 
     var body: some View {
         let unread = workspace.unreadByTeam
@@ -66,6 +67,10 @@ struct TeamSwitcherSheet: View {
                     if workspace.team != nil {
                         Button("teams_team_details", systemImage: "info.circle", action: onDetails).accessibilityIdentifier("teams.switcher.details")
                     }
+                }
+                Section {
+                    // A Bot someone offers outside their Teams: not a Team, so not among them.
+                    Button("services_title", systemImage: "sparkles", action: onServices).accessibilityIdentifier("teams.switcher.services")
                 }
             }
             .navigationTitle("teams_switch_team")

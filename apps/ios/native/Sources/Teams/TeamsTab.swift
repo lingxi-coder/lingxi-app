@@ -211,6 +211,9 @@ struct TeamsTab: View {
                 Button("teams_join") { joinPrefill = ""; sheet = .joinTeam }
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("teams.empty.join")
+                Button("services_title") { sheet = .services }
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("teams.empty.services")
             }
         }
         .navigationTitle("teams_title")
@@ -246,11 +249,14 @@ struct TeamsTab: View {
                 onDetails: {
                     self.sheet = nil
                     showDetails()
-                })
+                },
+                onServices: { self.sheet = .services })
         case .createTeam:
             CreateTeamSheet { self.sheet = nil }
         case .joinTeam:
             JoinTeamSheet(prefill: joinPrefill) { self.sheet = nil }
+        case .services:
+            HostedServicesView()
         case .newMessage, .newChannel, .newBot:
             if let uid = workspace.uid {
                 NewConversationSheet(mode: sheet, uid: uid) { id in

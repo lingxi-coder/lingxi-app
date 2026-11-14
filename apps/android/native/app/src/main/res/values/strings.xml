@@ -3133,4 +3133,27 @@
     <string name="services_left_today_fmt">今日剩余请求：%1$d。</string>
     <string name="services_ask_hint_fmt">向 %1$s 提问</string>
     <string name="services_leave_title_fmt">退出 %1$s？</string>
+    <string name="chat_question_skip">跳过</string>
+    <string name="extension_directory_category">分类</string>
+    <string name="extension_directory_copy_hint">点击示例可复制到剪贴板。</string>
+    <string name="extension_directory_developer">开发者</string>
+    <string name="extension_directory_example_copied">示例已复制</string>
+    <string name="extension_directory_examples">可以这样使用</string>
+    <string name="extension_directory_included_skills">包含的 Skills</string>
+    <string name="extension_directory_information">信息</string>
+    <string name="extension_directory_remove_mcp_note">是否从该作用域移除此 MCP 连接配置？</string>
+    <string name="extension_directory_remove_source">移除来源</string>
+    <string name="public_extensions_copy_hint">点击示例可复制到剪贴板。</string>
+    <string name="public_extensions_developer">开发者</string>
+    <string name="public_extensions_example_copied">示例已复制</string>
+    <string name="public_extensions_examples">可以这样使用</string>
+    <string name="public_extensions_included_skills">包含的 Skills</string>
+    <string name="public_extensions_information">信息</string>
+    <string name="public_extensions_remove_mcp_note">是否从该作用域移除此 MCP 连接配置？</string>
+    <string name="public_extensions_remove_source">移除来源</string>
+    <string name="tool_denied">操作已被拒绝</string>
+    <string name="tool_denied_auto_review">自动审核拒绝了此操作</string>
+    <string name="tool_denied_exit_unknown">退出码未知</string>
+    <string name="tool_denied_no_output">无输出</string>
+    <string name="tool_denied_reason">拒绝原因</string>
 </resources>

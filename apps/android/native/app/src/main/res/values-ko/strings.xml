@@ -3133,4 +3133,27 @@
     <string name="services_left_today_fmt">오늘 남은 요청: %1$d.</string>
     <string name="services_ask_hint_fmt">%1$s에게 질문</string>
     <string name="services_leave_title_fmt">%1$s에서 나가시겠습니까?</string>
+    <string name="chat_question_skip">건너뛰기</string>
+    <string name="extension_directory_category">카테고리</string>
+    <string name="extension_directory_copy_hint">예시를 누르면 복사됩니다.</string>
+    <string name="extension_directory_developer">개발자</string>
+    <string name="extension_directory_example_copied">예시를 복사했습니다</string>
+    <string name="extension_directory_examples">이렇게 요청해 보세요</string>
+    <string name="extension_directory_included_skills">포함된 Skills</string>
+    <string name="extension_directory_information">정보</string>
+    <string name="extension_directory_remove_mcp_note">설정된 범위에서 이 MCP 연결을 제거할까요?</string>
+    <string name="extension_directory_remove_source">소스 제거</string>
+    <string name="public_extensions_copy_hint">예시를 누르면 복사됩니다.</string>
+    <string name="public_extensions_developer">개발자</string>
+    <string name="public_extensions_example_copied">예시를 복사했습니다</string>
+    <string name="public_extensions_examples">이렇게 요청해 보세요</string>
+    <string name="public_extensions_included_skills">포함된 Skills</string>
+    <string name="public_extensions_information">정보</string>
+    <string name="public_extensions_remove_mcp_note">설정된 범위에서 이 MCP 연결을 제거할까요?</string>
+    <string name="public_extensions_remove_source">소스 제거</string>
+    <string name="tool_denied">작업이 거부됨</string>
+    <string name="tool_denied_auto_review">자동 검토에서 작업을 거부함</string>
+    <string name="tool_denied_exit_unknown">종료 코드 알 수 없음</string>
+    <string name="tool_denied_no_output">출력 없음</string>
+    <string name="tool_denied_reason">거부된 이유</string>
 </resources>

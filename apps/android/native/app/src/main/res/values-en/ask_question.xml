@@ -4,5 +4,4 @@
         <item quantity="one">Asked %1$d question</item>
         <item quantity="other">Asked %1$d questions</item>
     </plurals>
-    <string name="chat_question_skip">Skip</string>
 </resources>

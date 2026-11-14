@@ -3133,4 +3133,27 @@
     <string name="services_left_today_fmt">本日の残りリクエスト：%1$d。</string>
     <string name="services_ask_hint_fmt">%1$s に質問</string>
     <string name="services_leave_title_fmt">%1$s から退出しますか？</string>
+    <string name="chat_question_skip">スキップ</string>
+    <string name="extension_directory_category">カテゴリー</string>
+    <string name="extension_directory_copy_hint">例をタップするとコピーできます。</string>
+    <string name="extension_directory_developer">開発者</string>
+    <string name="extension_directory_example_copied">例をコピーしました</string>
+    <string name="extension_directory_examples">こんな依頼ができます</string>
+    <string name="extension_directory_included_skills">含まれる Skills</string>
+    <string name="extension_directory_information">情報</string>
+    <string name="extension_directory_remove_mcp_note">設定されているスコープからこの MCP 接続を削除しますか？</string>
+    <string name="extension_directory_remove_source">ソースを削除</string>
+    <string name="public_extensions_copy_hint">例をタップするとコピーできます。</string>
+    <string name="public_extensions_developer">開発者</string>
+    <string name="public_extensions_example_copied">例をコピーしました</string>
+    <string name="public_extensions_examples">こんな依頼ができます</string>
+    <string name="public_extensions_included_skills">含まれる Skills</string>
+    <string name="public_extensions_information">情報</string>
+    <string name="public_extensions_remove_mcp_note">設定されているスコープからこの MCP 接続を削除しますか？</string>
+    <string name="public_extensions_remove_source">ソースを削除</string>
+    <string name="tool_denied">操作が拒否されました</string>
+    <string name="tool_denied_auto_review">自動レビューにより操作が拒否されました</string>
+    <string name="tool_denied_exit_unknown">終了コード不明</string>
+    <string name="tool_denied_no_output">出力なし</string>
+    <string name="tool_denied_reason">拒否された理由</string>
 </resources>

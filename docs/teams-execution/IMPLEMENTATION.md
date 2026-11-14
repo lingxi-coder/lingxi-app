@@ -17,6 +17,13 @@ The new family Bot was published through the real five-file review UI to self/hi
 Main merge is authorized only after M0/M1 acceptance. No merge-to-main or complete-QA-cleanup claim is made. The checkpoints below are historical and may describe earlier pending states.
 
 
+## M2/M3 runtime pin and deploy — 2026-11-13
+
+- Runtime: the SDK branch `claude/teams-m2-runtime-20261111` is pushed at `d51c2fec` (merged with harness-runtime main). Its own test suite did not run for that merge: SDK CI runs only on pull requests and main, and this machine had no room to build it. The app pins every harness-runtime package to `d51c2fec`.
+- Deployed to the existing project from branch `claude/teams-m2-20261111` (not pushed): functions `teamsApi` and `prunePushRegistrations`, the `(default)` Firestore rules (unchanged against main) and its four indexes, and Hosting (the Web build, with `/services` and the `/v1/services` route). The other functions were not redeployed; their code is the same as on main. Checked after deploy: `/`, `/services` and `/services/<id>` load, and `/v1/services` and `/v1/teams/messages` refuse a request without sign-in with `SIGN_IN_REQUIRED`.
+- Team file bytes stay in Firestore as base64 parts (decided 2026-11-13); no Cloud Storage bucket is added.
+- Not done after deploy: nothing was run with a real account, a signed Desktop app or a phone against the deployed service. The Q06 cloud-list deviation is still open.
+
 ## M2 / Q02 — durable human waits, continue permits and cancellation (Firebase backend)
 
 Implemented in `apps/firebase/src/shared-bots.mjs` and `shared-bot-commands.mjs`; no scheduler, no UI, no compatibility shim. Records changed in place (there is no deployed data).
@@ -249,8 +256,8 @@ all.
 
 What this does not cover: the Desktop host process and the runtime worker are scripted here, not killed. Their own recovery
 is tested in `apps/electron/test/teams-host.test.ts` and the SDK's `team_continuation_process` tests, each against a stand-in
-for the other side. A run with a signed Desktop package, real process kills and real devices has not been done: it needs the
-SDK branch pushed and pinned, and nothing here is deployed.
+for the other side. A run with a signed Desktop package, real process kills and real devices has not been done. The SDK branch
+is now pushed and pinned, and the service is deployed (see the 2026-11-13 section).
 
 ## M3-1 — keeping, replacing and no longer sharing a Bot's files
 
@@ -348,7 +355,7 @@ A member attaches pictures and documents to a Team message. Everyone who reads t
 
 **Limits.** PNG, JPEG, PDF and plain text. 10 MiB a file, 5 files and 20 MiB a message. What a member has uploaded and not yet sent: at most 10 files and 40 MiB, kept for 24 hours.
 
-**Where the bytes are.** In Firestore, as base64 parts of 700 KiB under `teams/{team}/uploads/{uploadId}/parts/{index}`; the rules deny every client read and write there. The design names a private object store; the app has no Cloud Storage bucket today, so this uses the database that is already there. Only `team-attachments.mjs` puts, reads and deletes parts, so moving them to a bucket later changes that one file. **This is a deviation to confirm.**
+**Where the bytes are.** In Firestore, as base64 parts of 700 KiB under `teams/{team}/uploads/{uploadId}/parts/{index}`; the rules deny every client read and write there. The design names a private object store; the app has no Cloud Storage bucket today, so this uses the database that is already there. This was kept as the decision on 2026-11-13. Only `team-attachments.mjs` puts, reads and deletes parts, so moving them to a bucket later changes that one file. **This is a deviation to confirm.**
 
 **The upload record** `teams/{team}/uploads/{uploadId}`: conversation, uploader, name, type, length, SHA-256, and a state.
 
@@ -420,7 +427,7 @@ Tests: the joining rule on both phones (`TeamsComposeLogic.appendingTranscript`)
 - The phone UI has no UI test and has not run on a device or simulator.
 - Nothing ran in a real browser, the Desktop app, on a phone, or against a real model. No real provider has been sent a Team file.
 - Files at the full 20 MiB were not run through the worker. The test uses one 1.6 MiB file, just over the old row limit: the unoptimized worker needs about a minute and a half per run for 3.5 MiB of files, and a 13 MiB run did not finish in five minutes. The time grows with the size of the rows in the transcript and is paid again by every later task of that conversation. It has not been measured in an optimized build.
-- Nothing is deployed. The runtime change is on its own branch and the app does not pin it yet.
+- Deployed 2026-11-13, and the app pins the runtime change (see the 2026-11-13 section); nothing has run against the deployed service yet.
 
 ## M3-5 — moving an installed Bot to a newer release (Desktop)
 
@@ -530,7 +537,7 @@ A page's commands are checked before they leave: Desktop main and the Web API se
 
 **Not done.**
 
-- Nothing is deployed, and nothing ran against the real project, in a signed Desktop app, in a real browser or with a real model. Every check above is a fake or the emulator.
+- Deployed 2026-11-13 (see that section), but nothing ran against the real project, in a signed Desktop app, in a real browser or with a real model. Every check above is a fake or the emulator.
 - iOS and Android have no publisher side and are not reached by a `/services/<id>` link yet (no app link or universal link): the person pastes the link.
 - No directory: a person reaches a service by its link. The list shows what they entered and what they offer.
 - The server can offer a service to named accounts only; the screen offers that choice only when it is handed a list of people to pick from, and neither host passes one yet. A service made in the screen is open to anyone with the link.

@@ -342,9 +342,9 @@ On all four, a Bot chat from before the handover shows why it no longer answers,
 
 **Not done.** Nothing here has run on a device or against the deployed project, and nothing is deployed. Native clients show no offer: the maintainer and the recipient use Desktop or Web. The owner control on iOS and Android is compiled and type-checked but has no UI test. A handover does not move the task history of the earlier deployment, by design.
 
-## M3-4 — files in a Team message (service, Web, Desktop, iOS, Android, the Bot's model)
+## M3-4 — files in a Team message, and voice in the phone composer (service, Web, Desktop, iOS, Android, the Bot's model)
 
-A member attaches pictures and documents to a Team message. Everyone who reads the conversation can open them, and a Bot that is asked gets them as real model input. Phones and voice are not done yet (see the end).
+A member attaches pictures and documents to a Team message. Everyone who reads the conversation can open them, and a Bot that is asked gets them as real model input. On a phone a member can also speak a message into the box. What is not done is at the end.
 
 **Limits.** PNG, JPEG, PDF and plain text. 10 MiB a file, 5 files and 20 MiB a message. What a member has uploaded and not yet sent: at most 10 files and 40 MiB, kept for 24 hours.
 
@@ -404,9 +404,19 @@ Things that follow from existing rules:
 
 Tests: iOS `TeamAttachmentsTests` (12, on macOS) and the whole-app type check; Android `TeamAttachmentsTest` (10) and two model tests in `TeamMessagingQueueTest` (upload in parts with a busy service, send, read back, take back; refusals and files never queued for another conversation, an edit, an answer or unchecked).
 
+**Voice on iOS and Android.** The Team composer has a microphone button. It uses the app's existing voice input and adds no recorder or recognizer: on iOS `VoiceInteractionController` with its panel and its setup banner, on Android `rememberVoiceCapture` with its setup notice. No audio is uploaded or kept in the team's history; only the text the member sends is.
+
+- What is heard is added to the text in the box, after what is already there. It is never sent from there: the member reads it, changes it and presses send. On iOS the words arrive when the member ends the recording; on Android what has been heard so far is shown above the box while the microphone listens, and goes into the box at the end.
+- Cancelling (closing the panel, leaving the conversation, the app going to the background on Android) adds nothing and sends nothing.
+- When the microphone cannot be used (permission refused, voice not set up, a failure), a notice says so and links to the voice settings, which return to the Teams or Friends tab. The box stays usable for typing the whole time.
+- Words belong to the box they were spoken into: the account, the team as the member is in it, the conversation, and whether a message is being changed. If any of these changes, the recording is cancelled and a transcript that still arrives is dropped. Starting or ending an edit cancels it too.
+- Android: the app's held-capture registry now keeps every capture that is attached rather than the last one, so opening a Team conversation does not unregister the chat's capture. The chat screen no longer shows a failure notice for a capture another tab was using.
+
+Tests: the joining rule on both phones (`TeamsComposeLogic.appendingTranscript`), and on Android the rules for which box words reach and for how a recording that ends by itself is treated (`TeamVoiceLogic`). iOS logic tests 68, Android Teams tests 105, and the iOS whole-app type check pass.
+
 **Not done.**
 
-- Voice in the Team composer (L1, L5) is not started on either phone.
+- Voice has not been used on a phone: L1 (record, change the text, send, cancel, refuse the permission) and L5 (accuracy on voice samples) need real devices. No test drives the microphone or the recognizer.
 - The phone UI has no UI test and has not run on a device or simulator.
 - Nothing ran in a real browser, the Desktop app, on a phone, or against a real model. No real provider has been sent a Team file.
 - Files at the full 20 MiB were not run through the worker. The test uses one 1.6 MiB file, just over the old row limit: the unoptimized worker needs about a minute and a half per run for 3.5 MiB of files, and a 13 MiB run did not finish in five minutes. The time grows with the size of the rows in the transcript and is paid again by every later task of that conversation. It has not been measured in an optimized build.

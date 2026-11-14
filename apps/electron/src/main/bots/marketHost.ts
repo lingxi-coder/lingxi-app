@@ -23,6 +23,7 @@ import {
   type PreparedBotPackage,
 } from './package.js';
 import { BotMarketInstaller } from './marketInstaller.js';
+import { BotMarketUpgrader } from './marketUpgrade.js';
 import type { BotStore } from './store.js';
 import type { BotService } from './service.js';
 import { botUi } from './rendererIpc.js';
@@ -30,6 +31,7 @@ import { botUi } from './rendererIpc.js';
 export class BotMarketHost {
   private readonly api: MarketApiClient;
   private readonly installer: BotMarketInstaller;
+  private readonly upgrader: BotMarketUpgrader;
   private readonly prepared = new Map<string, PreparedBotPackage>();
   private readonly publications = new MarketInstallGuard<BotMarketResponse>();
   constructor(
@@ -66,6 +68,19 @@ export class BotMarketHost {
         return result.response === 1;
       },
     });
+    this.upgrader = this.makeUpgrader();
+  }
+  /** The upgrader shares the installer's market client and account. */
+  private makeUpgrader(): BotMarketUpgrader {
+    const { options } = this;
+    return new BotMarketUpgrader({
+      store: options.store,
+      api: this.api,
+      accountId: options.accountId,
+      assertAvailable: () => options.service.assertAvailable(),
+      upgradeBot: (botId, expectedRevision, release) =>
+        options.service.upgradeFromMarket(botId, expectedRevision, release),
+    });
   }
   private async remember(prepared: PreparedBotPackage): Promise<void> {
     while (this.prepared.size >= 8) {
@@ -99,6 +114,13 @@ export class BotMarketHost {
         request.intentId,
       );
       return record ? botUi(record) : null;
+    }
+    if (request.action === 'checkUpgrade')
+      return this.upgrader.check(request.botId);
+    if (request.action === 'upgrade') {
+      const record = await this.upgrader.apply(request);
+      this.options.changed?.();
+      return botUi(record);
     }
     if (request.action === 'recover') {
       const owner = this.options.accountId();

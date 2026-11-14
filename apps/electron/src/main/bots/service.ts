@@ -188,6 +188,15 @@ export class BotService {
     return record;
   }
 
+  /** A market Bot's record moves to another release. The files were merged by the caller; conversations, memory and settings are not touched. */
+  upgradeFromMarket(botId: string, expectedRevision: number, release: { releaseId: string; digest: string; name?: string; description?: string }): BotRecord {
+    this.assertAvailable();
+    this.assertNotDeleting(botId);
+    const record = this.store.upgradeFromMarket(botId, expectedRevision, release);
+    this.changed();
+    return record;
+  }
+
   /** Stop the Bot's sessions, then move its folder to the trash folder. Rejects while a session is working. */
   async delete(botId: string): Promise<void> {
     this.assertAvailable();

@@ -493,6 +493,27 @@ export class BotStore {
   }
 
   /** Change a Bot that is still at `expectedRevision`; a Bot changed meanwhile is a conflict. */
+  /**
+   * A market Bot moved to another release of the listing it was installed from. Its files are already in place; the record is
+   * what says which release it is. `name` and `description` are given only when the owner never wrote their own.
+   */
+  upgradeFromMarket(botId: string, expectedRevision: number, release: { releaseId: string; digest: string; name?: string; description?: string }): BotRecord {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) throw new Error('invalid revision');
+    const current = this.get(botId);
+    if (current.revision !== expectedRevision) throw new BotConflictError();
+    if (!current.marketOrigin) throw new Error('This Bot was not installed from the market');
+    const next: BotRecord = {
+      ...current,
+      ...(release.name !== undefined ? { name: botName(release.name) } : {}),
+      ...(release.description !== undefined ? { description: botDescription(release.description) } : {}),
+      marketOrigin: parseMarketOrigin({ ...current.marketOrigin, releaseId: release.releaseId, digest: release.digest }),
+      revision: current.revision + 1,
+      updated_at: Math.max(this.now(), current.updated_at),
+    };
+    writeFileAtomic(this.recordPath(botId), serialize(next));
+    return next;
+  }
+
   update(botId: string, expectedRevision: number, patch: BotPatch, prepare?: (record: BotRecord) => void): BotRecord {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) throw new Error('invalid revision');
     const current = this.get(botId);

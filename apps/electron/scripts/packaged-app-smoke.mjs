@@ -281,6 +281,34 @@ async function waitFor(predicate, { timeoutMs = 20_000, intervalMs = 100, label 
   }
 }
 
+export async function restartPackagedBridgeWhenIdle(page, sessionId, { timeoutMs = 20_000, intervalMs = 100 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  const busyGuard = 'cancel active turns and pending interactions before restarting the engine';
+  const remaining = () => {
+    const budget = deadline - Date.now();
+    if (budget <= 0) throw new Error(`packaged bridge restart did not become idle within ${timeoutMs}ms`);
+    return budget;
+  };
+  for (;;) {
+    const snapshot = await evaluate(page, 'window.lingxi.bootstrap()', remaining());
+    assert.equal(snapshot.activeSession?.sessionId, sessionId, 'restart must retain the intended active session');
+    const target = snapshot.runtimes.find(runtime => runtime.sessionId === sessionId);
+    const visiblyIdle = target?.connection.status === 'connected'
+      && snapshot.runtimes.filter(runtime => runtime.projectPath === target.projectPath)
+        .every(runtime => !runtime.turnActive && runtime.pendingInteractions === 0 && runtime.pendingAskUserQuestions === 0);
+    if (visiblyIdle) {
+      try {
+        // Only the host knows about pending resume/metadata work. Its admission
+        // guard remains authoritative after the public-state preflight.
+        return await evaluate(page, `window.lingxi.restartBridge(${JSON.stringify(sessionId)})`, remaining());
+      } catch (error) {
+        if (!String(error?.message ?? error).split('\n')[0].endsWith(busyGuard)) throw error;
+      }
+    }
+    await delay(Math.min(intervalMs, remaining()));
+  }
+}
+
 function reserveLoopbackPort() {
   return new Promise((resolvePromise, rejectPromise) => {
     import('node:net').then(({ createServer }) => {
@@ -421,7 +449,7 @@ async function connectToDebugger(port, rendererUrl) {
   }
 }
 
-async function evaluate(page, expression) {
+async function evaluate(page, expression, timeoutMs = 280_000) {
   // Bootstrap can include health, account listing and an OAuth metadata read.
   // Each native helper has a bounded 90s cold-start deadline. Keep CDP alive
   // for that chain; individual UI checks retain their own readiness deadlines.
@@ -429,7 +457,7 @@ async function evaluate(page, expression) {
     expression,
     awaitPromise: true,
     returnByValue: true,
-  }, 280_000);
+  }, timeoutMs);
   if (result.exceptionDetails) {
     throw new Error(`renderer evaluation failed: ${result.exceptionDetails.text ?? 'unknown error'}${result.exceptionDetails.exception?.description ? `: ${result.exceptionDetails.exception.description}` : ''}`);
   }
@@ -1440,7 +1468,7 @@ async function assertColdSessionOpen(page, sessionId, activateWindow) {
         assert(!closed.runtimes.some(runtime => runtime.sessionId === sessionId), 'cold cycle must dispose the previous runtime');
         await evaluate(page, `window.lingxi.openSession(${JSON.stringify(before.workspace.path)}, ${JSON.stringify(sessionId)})`);
       } else {
-        await evaluate(page, `window.lingxi.restartBridge(${JSON.stringify(sessionId)})`);
+        await restartPackagedBridgeWhenIdle(page, sessionId);
       }
     }
     const beforeReload = (await page.send('Page.getFrameTree')).frameTree.frame;
@@ -1936,7 +1964,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     coldSession = await prepareCustomProvider(page, customProbe);
     // Provider routes are assembled when the sidecar boots. This turn is now
     // exercised before the full app restart, so first load the saved route.
-    await evaluate(page, `window.lingxi.restartBridge(${JSON.stringify(coldSession)})`);
+    await restartPackagedBridgeWhenIdle(page, coldSession);
     await assertCustomProviderRequest(page, customProbe, coldSession);
     // Commit another foreground session so that only that session is restored
     // at relaunch. The earlier saved UUID must then take the true cold-open path.

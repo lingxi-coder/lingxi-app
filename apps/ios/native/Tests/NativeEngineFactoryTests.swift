@@ -138,24 +138,23 @@ final class NativeEngineFactoryTests: XCTestCase {
     }
 
     func testNativeEmptyOwnerColdRestoresOnlyItsOriginalPathAndMode() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("empty-owner-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+        let root = fixture.sandboxRoot
         let dirs = MobileUserStorage.directories(managedRoot: root.appendingPathComponent("runtime").path)
         let mediaHost = try IOSNativeMediaHostComposition(
             audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)).nativeHost
         func build(mode: SessionModeDto = .chat, sessionID: String? = nil, path: String? = nil) throws -> MobileEngineHandle {
-            let launch = try mobileWorkspaceTestLaunchConfiguration(sandboxRoot: root, apiBase: "http://127.0.0.1:9", model: "",
+            let launch = try fixture.launchConfiguration(apiBase: "http://127.0.0.1:9", model: "",
                 sessionMode: mode, initialSessionId: sessionID, initialSessionTranscriptPath: path)
-            return try buildIosEngineWithConfig(config: launch, listener: NoopEventListener(), mediaHost: mediaHost,
+            return fixture.track(try buildIosEngineWithConfig(config: launch, listener: NoopEventListener(), mediaHost: mediaHost,
                 share: ShareImpl(), notifications: NotificationImpl(), clipboard: ClipboardImpl(),
-                permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
+                permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil))
         }
         var first: MobileEngineHandle? = try build()
         let owner = await first!.workspaceState()
         XCTAssertNotNil(UUID(uuidString: owner.sessionId))
         XCTAssertTrue((owner.transcriptPath as NSString).isAbsolutePath)
-        XCTAssertEqual(owner.cwd, dirs.chatGuestCwd)
+        XCTAssertEqual(owner.cwd, fixture.guestCwd(.chat))
         first = nil
         let firstReleased = await waitForMobileSessionRelease(lingxiHome: dirs.configHome, sessionId: owner.sessionId, timeoutMs: 8_000)
         XCTAssertTrue(firstReleased)
@@ -163,7 +162,7 @@ final class NativeEngineFactoryTests: XCTestCase {
 
         var code: MobileEngineHandle? = try build(mode: .code)
         let codeOwner = await code!.workspaceState()
-        XCTAssertEqual(codeOwner.cwd, dirs.codeGuestCwd)
+        XCTAssertEqual(codeOwner.cwd, fixture.guestCwd(.code))
         XCTAssertNotEqual(codeOwner.sessionId, owner.sessionId)
         XCTAssertNotEqual(codeOwner.cwd, owner.cwd)
         code = nil
@@ -175,7 +174,7 @@ final class NativeEngineFactoryTests: XCTestCase {
         let restoredOwner = await restored!.workspaceState()
         XCTAssertEqual(restoredOwner.sessionId, owner.sessionId)
         XCTAssertEqual(restoredOwner.transcriptPath, owner.transcriptPath)
-        XCTAssertEqual(restoredOwner.cwd, dirs.chatGuestCwd)
+        XCTAssertEqual(restoredOwner.cwd, fixture.guestCwd(.chat))
         restored = nil
         let restoredReleased = await waitForMobileSessionRelease(lingxiHome: dirs.configHome, sessionId: owner.sessionId, timeoutMs: 8_000)
         XCTAssertTrue(restoredReleased)
@@ -197,21 +196,18 @@ final class NativeEngineFactoryTests: XCTestCase {
     }
 
     func testNativeCdColdRestoresCwdFromTheOriginalExactSource() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("cd-owner-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+        let root = fixture.sandboxRoot
         let dirs = MobileUserStorage.directories(managedRoot: root.appendingPathComponent("runtime").path)
-        let movedDirectory = URL(fileURLWithPath: dirs.home).appendingPathComponent("moved", isDirectory: true)
-        try FileManager.default.createDirectory(at: movedDirectory, withIntermediateDirectories: true)
-        let targetCwd = dirs.guestHome + "/moved"
+        let targetCwd = try fixture.extraWorkspace("moved").guest
         let mediaHost = try IOSNativeMediaHostComposition(
             audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)).nativeHost
         func build(sessionID: String? = nil, path: String? = nil) throws -> MobileEngineHandle {
-            let launch = try mobileWorkspaceTestLaunchConfiguration(sandboxRoot: root, apiBase: "http://127.0.0.1:9", model: "",
+            let launch = try fixture.launchConfiguration(apiBase: "http://127.0.0.1:9", model: "",
                 sessionMode: .chat, initialSessionId: sessionID, initialSessionTranscriptPath: path)
-            return try buildIosEngineWithConfig(config: launch, listener: NoopEventListener(), mediaHost: mediaHost,
+            return fixture.track(try buildIosEngineWithConfig(config: launch, listener: NoopEventListener(), mediaHost: mediaHost,
                 share: ShareImpl(), notifications: NotificationImpl(), clipboard: ClipboardImpl(),
-                permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
+                permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil))
         }
         var first: MobileEngineHandle? = try build()
         let original = await first!.workspaceState()
@@ -248,14 +244,13 @@ final class NativeEngineFactoryTests: XCTestCase {
     }
 
     func testNativeScheduledControllerDoesNotCreateAConversationSource() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("scheduler-controller-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try await exerciseIsolatedSchedulerController(root: root)
+        let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+        try await exerciseIsolatedSchedulerController(fixture: fixture)
     }
 
-    private func exerciseIsolatedSchedulerController(root: URL) async throws {
-        let config = try mobileWorkspaceTestLaunchConfiguration(sandboxRoot: root, apiBase: "http://127.0.0.1:9", model: "",
+    private func exerciseIsolatedSchedulerController(fixture: MobileWorkspaceNativeTestFixture) async throws {
+        let root = fixture.sandboxRoot
+        let config = try fixture.launchConfiguration(apiBase: "http://127.0.0.1:9", model: "",
                                                                 schedulerController: true)
         let mediaHost = try IOSNativeMediaHostComposition(
             audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
@@ -263,6 +258,7 @@ final class NativeEngineFactoryTests: XCTestCase {
         let handle = try buildIosEngineWithConfig(config: config, listener: NoopEventListener(), mediaHost: mediaHost,
             share: ShareImpl(), notifications: NotificationImpl(), clipboard: ClipboardImpl(),
             permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
+        fixture.track(handle)
         try await Task.sleep(for: .milliseconds(100))
         let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?.allObjects.compactMap { $0 as? URL } ?? []
         XCTAssertTrue(files.filter { $0.pathExtension == "jsonl" }.isEmpty,
@@ -271,14 +267,13 @@ final class NativeEngineFactoryTests: XCTestCase {
     }
 
     func testNativeSchedulerCallsSwiftAdmissionBeforeAnyTranscriptWrite() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("scheduler-admission-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try await exerciseNativeSchedulerAdmission(root: root)
+        let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+        try await exerciseNativeSchedulerAdmission(fixture: fixture)
     }
 
-    private func exerciseNativeSchedulerAdmission(root: URL) async throws {
-        let (handle, store, task) = try await makeNativeSchedulerFixture(root: root)
+    private func exerciseNativeSchedulerAdmission(fixture: MobileWorkspaceNativeTestFixture) async throws {
+        let root = fixture.sandboxRoot
+        let (handle, store, task) = try await makeNativeSchedulerFixture(fixture: fixture)
         let gate = CronOwnerAdmissionGate()
         var beginCount = 0
         let callback = FfiCronOwnerAdmission(gate: gate, scope: .global(appSandboxRoot: root.path), task: task,
@@ -304,26 +299,22 @@ final class NativeEngineFactoryTests: XCTestCase {
     }
 
     func testNativeSchedulerCancellationWaitsForTheSwiftOwnerCallback() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("scheduler-cancel-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try await exerciseNativeSchedulerCancellation(root: root)
+        let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+        try await exerciseNativeSchedulerCancellation(fixture: fixture)
     }
 
     func testNativeProjectSchedulerListFireAndLedgerKeepTheirRootAfterCd() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("scheduler-project-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+        let root = fixture.sandboxRoot
         let managedRoot = root.appendingPathComponent("runtime").path
         let dirs = MobileUserStorage.directories(managedRoot: managedRoot)
         let repository = ProjectRepository(projectsRoot: URL(fileURLWithPath: dirs.projects, isDirectory: true),
                                            userHome: URL(fileURLWithPath: dirs.home, isDirectory: true))
         var project = try repository.createInternal(name: "Project")
         let before = CronScope.project(project)
-        let moved = URL(fileURLWithPath: dirs.home).appendingPathComponent("elsewhere", isDirectory: true)
-        try FileManager.default.createDirectory(at: moved, withIntermediateDirectories: true)
-        project.record.activeDirectory = "/home/lingxi/elsewhere"
-        project.workspace = ProjectWorkspace(projectId: project.id, hostURL: moved, guestPath: project.record.activeDirectory)
+        let moved = try fixture.extraWorkspace("elsewhere")
+        project.record.activeDirectory = moved.guest
+        project.workspace = ProjectWorkspace(projectId: project.id, hostURL: moved.host, guestPath: project.record.activeDirectory)
         let after = CronScope.project(project)
         XCTAssertEqual(before, after)
 
@@ -338,13 +329,14 @@ final class NativeEngineFactoryTests: XCTestCase {
         let tasks = try await secondStore.listStrict()
         XCTAssertEqual(tasks.map(\.id), [task.id])
 
-        let launch = try mobileWorkspaceTestLaunchConfiguration(sandboxRoot: root, apiBase: "http://127.0.0.1:9", model: "",
+        let launch = try fixture.launchConfiguration(apiBase: "http://127.0.0.1:9", model: "",
                                                                 schedulerController: true, projectCwd: after.projectCwd)
         let mediaHost = try IOSNativeMediaHostComposition(
             audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)).nativeHost
         let handle = try buildIosEngineWithConfig(config: launch, listener: NoopEventListener(), mediaHost: mediaHost,
             share: ShareImpl(), notifications: NotificationImpl(), clipboard: ClipboardImpl(),
             permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
+        fixture.track(handle)
         let callback = BeginOnlyCronOwnerAdmission()
         let admission = MobileCronAdmission(owner: callback)
         _ = await handle.runCronTaskNow(taskId: task.id, ownerAdmission: admission)
@@ -360,8 +352,9 @@ final class NativeEngineFactoryTests: XCTestCase {
         withExtendedLifetime(handle) {}
     }
 
-    private func exerciseNativeSchedulerCancellation(root: URL) async throws {
-        let (handle, store, task) = try await makeNativeSchedulerFixture(root: root)
+    private func exerciseNativeSchedulerCancellation(fixture: MobileWorkspaceNativeTestFixture) async throws {
+        let root = fixture.sandboxRoot
+        let (handle, store, task) = try await makeNativeSchedulerFixture(fixture: fixture)
         let started = expectation(description: "Swift owner callback started")
         let callback = PausingCronOwnerAdmission(started: started)
         let admission = MobileCronAdmission(owner: callback)
@@ -391,7 +384,8 @@ final class NativeEngineFactoryTests: XCTestCase {
         withExtendedLifetime(handle) {}
     }
 
-    private func makeNativeSchedulerFixture(root: URL) async throws -> (MobileEngineHandle, MobileCronStoreHandle, CronTaskRecord) {
+    private func makeNativeSchedulerFixture(fixture: MobileWorkspaceNativeTestFixture) async throws -> (MobileEngineHandle, MobileCronStoreHandle, CronTaskRecord) {
+        let root = fixture.sandboxRoot
         let managedRoot = root.appendingPathComponent("runtime").path
         let directories = MobileUserStorage.directories(managedRoot: managedRoot)
         let store = try buildIosCronStore(appSandboxRoot: root.path, managedRoot: managedRoot, projectCwd: nil)
@@ -401,7 +395,7 @@ final class NativeEngineFactoryTests: XCTestCase {
         automation.sessionScopeKey = "scheduled"
         let created = try await store.createConfigured(cronExpr: "0 9 * * *", prompt: "Test", recurring: true,
             automationJson: String(decoding: JSONEncoder().encode(automation), as: UTF8.self))
-        let launch = try mobileWorkspaceTestLaunchConfiguration(sandboxRoot: root, apiBase: "http://127.0.0.1:9", model: "",
+        let launch = try fixture.launchConfiguration(apiBase: "http://127.0.0.1:9", model: "",
                                                                 schedulerController: true, projectCwd: directories.scheduledCwd)
         let mediaHost = try IOSNativeMediaHostComposition(
             audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
@@ -409,6 +403,7 @@ final class NativeEngineFactoryTests: XCTestCase {
         let handle = try buildIosEngineWithConfig(config: launch, listener: NoopEventListener(), mediaHost: mediaHost,
             share: ShareImpl(), notifications: NotificationImpl(), clipboard: ClipboardImpl(),
             permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
+        fixture.track(handle)
         let task = CronTaskRecord(id: created.id, cron: "0 9 * * *", prompt: "Test", createdAtMs: 0,
             lastFiredAtMs: nil, recurring: true, nextFireMs: nil, human: "Daily", automation: automation)
         return (handle, store, task)

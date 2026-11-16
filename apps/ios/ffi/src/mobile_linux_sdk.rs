@@ -160,10 +160,19 @@ fn validate_project_mount_grants(
         ));
     }
     let mut validated = Vec::<MountSpec>::with_capacity(config.project_mount_grants.len());
+    let scheduled_root = config
+        .brand_profile()
+        .workspace_container_guest_path()
+        .join("scheduled");
     for grant in &config.project_mount_grants {
         if !matches!(grant.purpose, MountPurpose::External) || grant.read_only {
             return Err(MobileLinuxError::InvalidRequest(
                 "Project mount grants must be writable External mounts".into(),
+            ));
+        }
+        if Path::new(&grant.guest_path) == scheduled_root.as_path() {
+            return Err(MobileLinuxError::InvalidRequest(
+                "Project mount grants may not expose the scheduled controller root".into(),
             ));
         }
         let normalized = validate_mount(grant, config)?;
@@ -428,15 +437,13 @@ fn validate_mount(
         ));
     }
 
-    // Compare the normalized mount with the normalized managed root.  On iOS
-    // `/var` and `/private/var` name the same sandbox; the explicit lexical
-    // check below still rejects an alias inside the managed account.
-    let mut canonical_mount = mount.clone();
-    canonical_mount.host_path = host_path.clone();
+    // The SDK accepts both the configured managed root and its canonical
+    // spelling (for example /var and /private/var on iOS), while retaining the
+    // original child spelling needed to reject symlinks inside the account.
     let persistent_workspace = mobile_linux_core::is_persistent_user_workspace(
-        &managed_root,
+        &config.managed_root,
         &brand_profile,
-        &canonical_mount,
+        mount,
     );
     let exact_persistent_project_mount =
         exact_home_mapping && host_path.starts_with(&user_home_host) && host_path != user_home_host;
@@ -464,6 +471,11 @@ fn validate_mount(
     }
 
     if matches!(mount.purpose, MountPurpose::Workspace) {
+        if mount.read_only {
+            return Err(MobileLinuxError::InvalidRequest(
+                "managed workspace mounts must be writable".into(),
+            ));
+        }
         if mount.guest_path != config.workspace_guest_path() {
             return Err(MobileLinuxError::InvalidRequest(format!(
                 "workspace mount guest_path must be {}",
@@ -771,7 +783,7 @@ mod tests {
             normalize_host_path(&config.workspace_host_path, "workspace_host_path")
                 .expect("normalized workspace path")
         );
-        assert_eq!(mount.guest_path, "/home/lingxi/.lingxi/default");
+        assert_eq!(mount.guest_path, "/home/lingxi/.lingxi-workspaces/default");
     }
 
     #[test]
@@ -810,6 +822,26 @@ mod tests {
     }
 
     #[test]
+    fn persistent_workspace_accepts_configured_and_canonical_managed_root_spellings() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(&temp.path().join("app"));
+        config.stable_workspace_id = "projects".into();
+        config.workspace_host_path =
+            branding::workspace_home(&config.brand_config_home()).join("projects");
+        fs::create_dir_all(&config.workspace_host_path).unwrap();
+        let canonical_workspace = config.workspace_host_path.canonicalize().unwrap();
+        let mut mount = config.default_workspace_mount();
+        // On iOS/macOS the configured temp root can use /var while the
+        // canonical workspace uses /private/var. Both are trusted root forms.
+        validate_mount(&mount, &config).expect("configured managed-root spelling");
+        mount.host_path = canonical_workspace.clone();
+        validate_mount(&mount, &config).expect("canonical host with configured managed root");
+        config.managed_root = config.managed_root.canonicalize().unwrap();
+        config.workspace_host_path = canonical_workspace;
+        validate_mount(&mount, &config).expect("canonical managed-root spelling");
+    }
+
+    #[test]
     fn managed_projects_mount_does_not_expose_config_siblings_or_aliases() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = test_config(&temp.path().join("app"));
@@ -845,11 +877,19 @@ mod tests {
         }
         #[cfg(unix)]
         {
-            let alias = config.brand_config_home().join("projects-alias");
-            std::os::unix::fs::symlink(&config.workspace_host_path, &alias).unwrap();
-            changed = workspace;
-            changed.host_path = alias;
-            assert!(validate_mount(&changed, &config).is_err());
+            for alias in [
+                config.brand_config_home().join("projects-alias"),
+                config
+                    .workspace_host_path
+                    .parent()
+                    .unwrap()
+                    .join("projects-alias"),
+            ] {
+                std::os::unix::fs::symlink(&config.workspace_host_path, &alias).unwrap();
+                changed = workspace.clone();
+                changed.host_path = alias;
+                assert!(validate_mount(&changed, &config).is_err());
+            }
         }
     }
 

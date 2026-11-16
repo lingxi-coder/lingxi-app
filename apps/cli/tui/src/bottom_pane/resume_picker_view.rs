@@ -179,10 +179,14 @@ mod tests {
     }
 
     #[test]
-    fn empty_state_enter_cancels() {
+    fn empty_state_enter_stays_until_escape() {
         let mut v = view(vec![]);
         assert!(matches!(
             v.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::Pending
+        ));
+        assert!(matches!(
+            v.handle_key(press(KeyCode::Esc)),
             ViewOutcome::Cancelled
         ));
     }

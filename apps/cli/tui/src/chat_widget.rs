@@ -11399,10 +11399,21 @@ mod tests {
         widget.apply_turn_event(TurnEvent::TurnStarted);
         let committed = widget.transcript.committed_cells().len();
         widget.apply_turn_event(TurnEvent::ThinkingDelta("Inspect layout".into()));
-        for (name, input) in [
-            ("Read", serde_json::json!({"file_path":"Stage.tsx"})),
-            ("Bash", serde_json::json!({"command":"check layout"})),
-        ] {
+        let operations = [
+            (
+                "Read",
+                serde_json::json!({"file_path":"Stage.tsx"}),
+                serde_json::json!({"type":"text","file":{
+                    "content":"retained read result","numLines":1,"totalLines":1
+                }}),
+            ),
+            (
+                "Bash",
+                serde_json::json!({"command":"check layout"}),
+                serde_json::json!({"stdout":"retained shell result","stderr":"","interrupted":false}),
+            ),
+        ];
+        for (name, input, result) in operations.iter().cloned() {
             let id = lingxi_core::types::ToolUseId::from(format!("shared-{name}"));
             widget.apply_turn_event(TurnEvent::ToolUseStart {
                 id: id.clone(),
@@ -11417,13 +11428,19 @@ mod tests {
             widget.apply_turn_event(TurnEvent::ToolUseResult {
                 id,
                 tool: name.into(),
-                result: serde_json::json!({"output":"retained result"}),
+                result,
             });
             widget.apply_turn_event(TurnEvent::ThinkingDelta("\nCheck another operation".into()));
             assert_eq!(widget.transcript.committed_cells().len(), committed);
         }
         let fold = widget.activity_fold.as_ref().unwrap();
         assert_eq!(fold.entries.len(), 2);
+        for (entry, (name, input, result)) in fold.entries.iter().zip(&operations) {
+            assert_eq!(entry.id, format!("shared-{name}"));
+            assert_eq!(entry.tool.as_str(), *name);
+            assert_eq!(&entry.input, input);
+            assert_eq!(entry.result.as_ref(), Some(result));
+        }
         let details = fold
             .styled_lines(80, &Theme::dark(), true)
             .into_iter()
@@ -11431,7 +11448,8 @@ mod tests {
             .map(|span| span.text)
             .collect::<String>();
         assert!(details.contains("Inspect layout"));
-        assert!(details.contains("retained result"));
+        assert!(details.contains("retained read result"));
+        assert!(details.contains("retained shell result"));
         widget.apply_turn_event(TurnEvent::TextDelta("Final reply".into()));
         assert!(widget.activity_fold.is_none());
         assert_eq!(widget.transcript.committed_cells().len(), committed + 1);
@@ -11722,6 +11740,7 @@ mod tests {
     #[test]
     fn switching_fullscreen_seals_the_existing_group_before_new_rules_apply() {
         use crate::history_cell::tool::ActivityFoldCell;
+        use crate::history_cell::StyledCell;
 
         let mut widget = widget();
         submit_command(&mut widget, "mixed");
@@ -11758,6 +11777,13 @@ mod tests {
             .as_any()
             .downcast_ref::<ActivityFoldCell>()
             .expect("inline read fold committed before the mode switch");
+        assert!(first.sealed);
+        assert!(!first.thinking);
+        assert_eq!(first.entries.len(), 1);
+        assert_eq!(first.entries[0].id, "read");
+        assert_eq!(first.entries[0].tool, "Read");
+        assert_eq!(first.entries[0].input, serde_json::json!({"file_path":"/a"}));
+        assert_eq!(first.entries[0].result, Some(serde_json::json!("ok")));
         let first_summary = first
             .display_lines(
                 80,
@@ -11768,12 +11794,30 @@ mod tests {
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(first_summary.contains("Read · 1 call"), "{first_summary}");
+        assert!(first_summary.contains("Read(/a)"), "{first_summary}");
+        assert!(first_summary.contains("Read 1 line"), "{first_summary}");
+        let first_details = first
+            .styled_lines(80, &Theme::dark(), true)
+            .into_iter()
+            .flat_map(|line| line.spans)
+            .map(|span| span.text)
+            .collect::<String>();
+        assert!(first_details.contains("ok"), "{first_details}");
 
         let second = cells(&widget)[2]
             .as_any()
             .downcast_ref::<ActivityFoldCell>()
             .expect("fullscreen bash fold committed after the mode switch");
+        assert!(second.sealed);
+        assert!(!second.thinking);
+        assert_eq!(second.entries.len(), 1);
+        assert_eq!(second.entries[0].id, "bash");
+        assert_eq!(second.entries[0].tool, "Bash");
+        assert_eq!(
+            second.entries[0].input,
+            serde_json::json!({"command":"echo hi"})
+        );
+        assert_eq!(second.entries[0].result, Some(serde_json::json!("hi")));
         let second_summary = second
             .display_lines(
                 80,
@@ -11784,7 +11828,12 @@ mod tests {
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(second_summary.contains("Bash · 1 call"), "{second_summary}");
+        assert!(
+            second_summary.contains("Running 1 shell command…"),
+            "{second_summary}"
+        );
+        assert!(second_summary.contains("echo hi"), "{second_summary}");
+        assert!(second_summary.contains(" · hi"), "{second_summary}");
     }
 
     /// `!`-prefixed bash mode runs the command inline (no LLM turn): it echoes

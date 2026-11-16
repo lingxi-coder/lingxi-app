@@ -495,6 +495,82 @@ fn mobile_linux_run_command_rejects_empty_command() {
     ));
 }
 
+fn android_workspace_config(root: &std::path::Path) -> super::AndroidMobileLinuxConfigFfi {
+    let managed = root.join("runtime");
+    let paths =
+        harness_runtime::mobile::mobile_user_directories(managed.display().to_string()).unwrap();
+    paths.prepare().unwrap();
+    super::AndroidMobileLinuxConfigFfi {
+        mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+        brand_id: paths.brand_id.clone(),
+        linux_user: paths.linux_user.clone(),
+        config_dir_name: paths.config_dir_name.clone(),
+        managed_root: managed.display().to_string(),
+        app_sandbox_root: root.display().to_string(),
+        workspace_host_path: Some(paths.projects),
+        stable_workspace_id: Some("projects".into()),
+        abi: "arm64-v8a".into(),
+        rootfs_version: "test".into(),
+        archive_sha256: None,
+    }
+}
+
+#[test]
+fn android_workspace_mount_accepts_configured_and_canonical_managed_root_spellings() {
+    let temp = tempfile::tempdir().unwrap();
+    let configured = android_workspace_config(temp.path());
+    let canonical_workspace =
+        std::fs::canonicalize(configured.workspace_host_path.as_deref().unwrap()).unwrap();
+    let mut canonical_host = configured.clone();
+    canonical_host.workspace_host_path = Some(canonical_workspace.display().to_string());
+    let mut canonical_root = canonical_host.clone();
+    canonical_root.managed_root = std::fs::canonicalize(&canonical_root.managed_root)
+        .unwrap()
+        .display()
+        .to_string();
+    for config in [configured, canonical_host, canonical_root] {
+        let mount = super::linux_runtime::configured_android_workspace_mount(&config)
+            .expect("the actual runtime mount builder accepts trusted root spellings");
+        assert_eq!(
+            mount.host_path.as_path(),
+            std::path::Path::new(config.workspace_host_path.as_deref().unwrap())
+        );
+        assert_eq!(mount.host_path.canonicalize().unwrap(), canonical_workspace);
+        assert_eq!(mount.guest_path, "/home/lingxi/.lingxi-workspaces/projects");
+        assert_eq!(mount.purpose, mobile_linux_api::MountPurpose::Workspace);
+        assert!(!mount.read_only);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn android_workspace_mount_rejects_aliases_and_managed_runtime_data_before_sdk_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = android_workspace_config(temp.path());
+    let workspace = std::path::Path::new(config.workspace_host_path.as_deref().unwrap());
+    let home = workspace.parent().unwrap().parent().unwrap();
+    for alias in [
+        home.join(&config.config_dir_name).join("projects-alias"),
+        workspace.parent().unwrap().join("projects-alias"),
+    ] {
+        std::os::unix::fs::symlink(workspace, &alias).unwrap();
+        let mut aliased = config.clone();
+        aliased.workspace_host_path = Some(alias.display().to_string());
+        assert!(super::linux_runtime::configured_android_workspace_mount(&aliased).is_err());
+    }
+    for protected in [
+        std::path::Path::new(&config.managed_root).join("rootfs"),
+        home.join(&config.config_dir_name),
+    ] {
+        std::fs::create_dir_all(&protected).unwrap();
+        let mut changed = config.clone();
+        changed.workspace_host_path = Some(protected.display().to_string());
+        assert!(super::linux_runtime::configured_android_workspace_mount(&changed).is_err());
+    }
+    super::linux_runtime::configured_android_workspace_mount(&config)
+        .expect("rejected aliases cannot affect the legitimate workspace");
+}
+
 /// Minimal host-side [`super::AndroidGitCredentialProvider`] impl for tests:
 /// exercises the bridge onto `tool_api::GitCredentialProvider`.
 struct TestCredProvider;

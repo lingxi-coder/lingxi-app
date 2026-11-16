@@ -88,17 +88,24 @@ mark use the same 0.24 x size rounded rectangle.
 | Desktop and Web | token `--tw-own: var(--teams-own, color-mix(in srgb, var(--tw-accent) 6%, transparent))`, defined with the other tokens on `.tw-scope, .tw-dialog`; the row uses `background: var(--tw-own)`. The accent already switches per scheme, so one definition covers light and dark. |
 
 **U4 Run card.** One anatomy on every client: (1) state: glyph and label; (2) title: the Bot's name; (3) detail: one line;
-(4) action: at most one button. Applies to the Team task card (`TeamTaskCard` in `Teams/TeamBotViews.swift` and
+(4) actions: the fewest that fit the state (see below). Applies to the Team task card (`TeamTaskCard` in `Teams/TeamBotViews.swift` and
 `teams/TeamBotComponents.kt`) and `BotRun` in `packages/teams/BotRunCards.tsx`. The fixed-size `ConversationExecutionRunCard`
 in `Conversation/ConversationExecutionViews.swift` belongs to the main chat: it only gets the type fix of U7.
 - The state is never colour alone: the glyph and the label are always both there. The glyph is decorative (hidden from assistive
   technology); the label is the accessible state. The card is one accessibility element: "Bot, state, detail", with the action
   exposed as a button.
-- Tone: only Completed uses the ok colour and only Failed the danger colour; the other six states use the muted tone.
-- The detail line is the usage line (U5) once a run has finished, and the state's detail text before that.
+- Tone: only Completed uses the ok colour and only Failed the danger colour; every other state uses the muted tone.
+- The detail line is the state's detail text, or for Waiting who the task waits for and when the wait expires, and for Needs
+  checking what has to be confirmed (maintainer or not). The usage line (U5) follows for Completed always, and for any other state
+  only when the run reports usage, so a cost is never hidden.
+- The label reads "Cancelling…" (`teams_task_cancelling`) while a cancel is on its way, and "Waiting for approval"
+  (`teams_task_waiting_approval`) when a Waiting task waits on a tool approval.
 - Active states (Queued, Processing, Authorization required) offer "Refresh status" (`teams_run_refresh`); today the state
   label itself is the refresh button on iOS and Android, which hides the action. A finished run with a document offers "Open
-  document" (`teams_artifact_open`). Failed, Expired, Interrupted and Access revoked have no button: the detail says what to do.
+  document" (`teams_artifact_open`). Failed, Expired, Interrupted, Cancelled and Access revoked have no button: the detail says what to do.
+- Added with Teams M2: the requester or the maintainer can Cancel a Queued, Processing or Waiting task (`teams_task_cancel`);
+  the recipient of a Bot's question gets Reply; Needs checking offers Review actions (maintainer) or View actions (requester).
+  So Waiting can show Refresh, Reply and Cancel together; that is the one exception to a single action.
 - Reduce motion: the Processing spinner becomes its static glyph.
 
 | State | Label key | Detail key | SF Symbol | Material icon | CSS (inline SVG `Icon`) | Tone |
@@ -111,6 +118,9 @@ in `Conversation/ConversationExecutionViews.swift` belongs to the main chat: it 
 | interrupted | `teams_run_interrupted` | `teams_run_interrupted_detail` | `pause.circle` | `PauseCircle` | pause | muted |
 | authorization_required | `teams_run_authorization_required` | `teams_run_authorization_required_detail` | `lock.circle` | `Lock` | lock | muted |
 | revoked | `teams_run_revoked` | `teams_run_revoked_detail` | `nosign` | `Block` | ban | muted |
+| waiting | `teams_task_waiting` | written by the card (who, expiry) | `ellipsis.bubble` | `Pending` | dots | muted |
+| cancelled | `teams_task_cancelled` | Web: "This request was cancelled."; mobile: none | `xmark.circle` | `Cancel` | x in circle | muted |
+| needs_reconciliation | `teams_task_needs_checking` | written by the card (maintainer or not) | `questionmark.circle` | `FactCheck` | help | muted |
 | any other value | `chat_status_unknown` | none | `questionmark.circle` | `HelpOutline` | help | muted |
 
 What the states mean, from `apps/firebase/src/shared-bots.mjs`: a queued task past its deadline reads Expired (the Bot's Desktop

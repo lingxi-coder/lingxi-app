@@ -133,7 +133,6 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         __desktop_config.isolated_credential_storage = true;
         __desktop_config.credential_storage_policy =
             lingxi_core::host::CredentialStoragePolicy::NativePreferred;
-        __desktop_config.recent_models = Vec::new();
         __desktop_config.fallback_model = None;
         __desktop_config.custom_betas = Vec::new();
         __desktop_config.flag_settings = None;

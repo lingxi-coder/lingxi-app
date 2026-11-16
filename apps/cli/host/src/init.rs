@@ -899,28 +899,11 @@ pub(crate) fn resolve_desktop_config_at(
         __desktop_config.trusted_network_directories = Vec::new();
         __desktop_config.lingxi_home = lingxi_home;
         __desktop_config.default_model = default_model;
-        // Only a `--model` flag is an EXPLICIT choice; the persisted
-        // `settings.model` and the built-in default remain eligible for the
-        // engine's boot-time connected-provider fallback. (An `ANTHROPIC_MODEL`
-        // env pin is exempted from the fallback via `default_model_env_pinned`
-        // below — NOT by widening this flag-only field, which the `--agent`
+        // Only a `--model` flag is an EXPLICIT choice. (An `ANTHROPIC_MODEL`
+        // env pin is carried separately by `default_model_env_pinned` below —
+        // NOT by widening this flag-only field, which the `--agent`
         // model-override gate keys on as claude-code's `userSpecifiedModel`.)
         __desktop_config.default_model_explicit = argv.model.is_some();
-        // Prior `/model` picks (settings `recentModels`, most-recent-first) —
-        // the fallback's first-preference pass. Best-effort read; empty on any
-        // failure. `recentModels` lives in the USER settings.json, so the read
-        // honors the same `--setting-sources` gate as the sibling loaders.
-        __desktop_config.recent_models = if incl_user {
-            tui_core::recent_models::load_recent_models()
-                .into_iter()
-                .map(|r| harness_runtime::desktop::RecentModelRef {
-                    provider: r.provider_id,
-                    model: r.request_model,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
         __desktop_config.fallback_model = fallback_model;
         __desktop_config.custom_betas = argv.betas.clone().unwrap_or_default();
         __desktop_config.flag_settings = flag_settings.clone();
@@ -1119,8 +1102,8 @@ pub(crate) fn resolve_desktop_config_at(
         // (`u4i` port; an invalid value already warned on stderr in `run_cli`
         // and normalizes to `None` here) → main-loop `output_config.effort`.
         __desktop_config.initial_effort = argv.normalized_effort().0;
-        // `ANTHROPIC_MODEL` env pin (resolved above) — exempts the model from the
-        // boot connected-provider fallback without counting as `userSpecifiedModel`.
+        // `ANTHROPIC_MODEL` env pin (resolved above) — marks the model as
+        // user/env-owned without counting as `userSpecifiedModel`.
         __desktop_config.default_model_env_pinned = default_model_env_pinned;
         // Boot SESSION thinking config (claude-code `qIe()` + the `wn` arm):
         // `MAX_THINKING_TOKENS` env > `--max-thinking-tokens` flag >
@@ -1421,17 +1404,6 @@ pub async fn build_runtime_from_config(
         Arc::new(NoopPermissionRequestSink);
     let rt = build(cfg, output, permission_sink).await?;
     crate::startup_trace::mark("runtime_build_end");
-    // Boot-time connected-provider fallback notice: one stderr line, emitted at
-    // the shared choke point every mode's runtime flows through — before the
-    // interactive TUI enters the alt-screen, and off stdout so `--print`/
-    // stream-json output stays parseable.
-    if let Some(n) = &rt.default_model_fallback {
-        eprintln!(
-            "Note: default model {} is unavailable (its provider is not connected). \
-             Using {} instead — run /model to change it, or /connect to reconnect the provider.",
-            n.from, n.to
-        );
-    }
     Ok(Runtime {
         desktop: Box::new(rt),
         #[cfg(test)]
@@ -3553,7 +3525,7 @@ mod tests {
         let _lock = MODEL_ENV_LOCK.lock().unwrap();
         // A non-empty ANTHROPIC_MODEL overrides the settings-derived / built-in
         // default (it is applied ABOVE load_settings_model), and marks the model
-        // env-pinned so the boot connected-provider fallback is exempt.
+        // env-pinned (user/env-owned provenance).
         let _g = ModelEnvGuard::set("claude-opus-4-1-20250805");
         let argv = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
         let cfg = resolve_desktop_config(&argv, permission::PermissionMode::Default);

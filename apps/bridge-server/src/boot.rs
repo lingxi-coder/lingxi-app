@@ -893,12 +893,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> Result<DesktopConfig, String
             )
         });
         __desktop_config.default_model = default_model;
-        // Only a `--model` arg is an explicit per-session choice; the built-in
-        // default stays eligible for the engine's connected-provider fallback.
+        // Only a `--model` arg is an explicit per-session choice.
         __desktop_config.default_model_explicit = args.model.is_some();
-        // The bridge does not read the TUI's `settings.recentModels`; the
-        // fallback uses the static provider order only.
-        __desktop_config.recent_models = Vec::new();
         // The Electron bridge does not expose --fallback-model (CLI --print
         // only); the Opus consecutive-529 fallback stays disabled here.
         __desktop_config.fallback_model = None;
@@ -5291,10 +5287,9 @@ mod tests {
             __desktop_config.cwd = cwd.clone();
             __desktop_config.lingxi_home = settings_dir;
             __desktop_config.default_model = "claude-sonnet-4-20250514".to_string();
-            // Deterministic across host machines: a dev keychain with real
-            // provider keys must not trigger the connected-provider fallback.
+            // Deterministic across host machines: the fixture model is
+            // user-owned, so managed/settings model changes never replace it.
             __desktop_config.default_model_explicit = true;
-            __desktop_config.recent_models = Vec::new();
             __desktop_config.fallback_model = None;
             __desktop_config.custom_betas = Vec::new();
             __desktop_config.flag_settings = None;

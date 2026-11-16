@@ -206,7 +206,7 @@ export function validatePermissionResponse(value: unknown): PermissionResponseDt
 
 export function validateComputerAccessResponse(value: unknown): ComputerAccessResponseDto {
   const input = object(value);
-  exactKeys(input, ['granted_apps', 'clipboard_read', 'clipboard_write', 'system_key_combos']);
+  exactKeys(input, ['granted_apps', 'clipboard_read', 'clipboard_write', 'system_key_combos', 'interaction_action', 'preferred_mode']);
   if (!Array.isArray(input['granted_apps']) || input['granted_apps'].length > 64) {
     throw new Error('invalid computer access response');
   }
@@ -214,11 +214,21 @@ export function validateComputerAccessResponse(value: unknown): ComputerAccessRe
   for (const key of ['clipboard_read', 'clipboard_write', 'system_key_combos'] as const) {
     if (typeof input[key] !== 'boolean') throw new Error('invalid computer access response');
   }
+  const interactionAction = input['interaction_action'];
+  if (interactionAction !== undefined && interactionAction !== 'allow' && interactionAction !== 'continue' && interactionAction !== 'exit') {
+    throw new Error('invalid computer interaction action');
+  }
+  const preferredMode = input['preferred_mode'];
+  if (preferredMode !== undefined && preferredMode !== 'background' && preferredMode !== 'full_control') {
+    throw new Error('invalid computer interaction mode');
+  }
   return {
     granted_apps,
     clipboard_read: input['clipboard_read'] as boolean,
     clipboard_write: input['clipboard_write'] as boolean,
     system_key_combos: input['system_key_combos'] as boolean,
+    ...(interactionAction === undefined ? {} : { interaction_action: interactionAction }),
+    ...(preferredMode === undefined ? {} : { preferred_mode: preferredMode }),
   };
 }
 

@@ -74,7 +74,7 @@ export type {
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '33.0.0';
+export const CLIENT_PROTOCOL_VERSION = '34.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -1156,6 +1156,18 @@ export interface TccStateDto {
  * When {@link tcc_state} is present, the client shows the TCC panel instead of
  * the app-allowlist panel (a required macOS permission is missing).
  */
+export interface ComputerInteractionDetailsDto {
+  reason?: string;
+  explanation?: string;
+  next_preview?: string;
+  /** Descriptive anchor JSON, string-lowered for the shared UniFFI boundary. */
+  anchor_json?: string;
+}
+
+export type ComputerInteractionDto = ComputerInteractionDetailsDto & {
+  kind: 'takeover' | 'teach_access' | 'teach_step';
+};
+
 export interface ComputerAccessRequestDto {
   request_id: number;
   reason: string;
@@ -1165,6 +1177,7 @@ export interface ComputerAccessRequestDto {
   clipboard_write: boolean;
   system_key_combos: boolean;
   tcc_state?: TccStateDto;
+  interaction?: ComputerInteractionDto;
 }
 
 /**
@@ -1177,6 +1190,9 @@ export interface ComputerAccessResponseDto {
   clipboard_read: boolean;
   clipboard_write: boolean;
   system_key_combos: boolean;
+  interaction_action?: 'allow' | 'continue' | 'exit';
+  /** A user preference, separate from full-screen takeover consent. */
+  preferred_mode?: 'background' | 'full_control';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

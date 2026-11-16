@@ -117,7 +117,7 @@ test('asynchronous lockfile capture and bounded discovery preserve synchronous s
 });
 
 test('client DTO protocol version tracks the source contract major', () => {
-  assert.equal(CLIENT_PROTOCOL_VERSION, '33.0.0');
+  assert.equal(CLIENT_PROTOCOL_VERSION, '34.0.0');
 });
 
 test('versionCompatible matches the Rust major-version rule (fail-closed)', () => {

@@ -397,7 +397,7 @@ class RemoteConversationSourceTest {
             valid.copy(outgoing = listOf(RemoteOutgoingPromptFfi("id", "text", emptyList(), RemoteOutgoingStatusFfi.SENDING, null, null))),
             valid.copy(pending = pending.copy(questions = listOf(AskUserQuestionRequestDto(1uL, emptyList(), null, false)))),
             valid.copy(pending = pending.copy(computerAccess = listOf(
-                ComputerAccessRequestDto(1uL, "reason", emptyList(), AccessTierDto.READ, false, false, false, null)))),
+                ComputerAccessRequestDto(1uL, "reason", emptyList(), AccessTierDto.READ, false, false, false, null, null)))),
             valid.copy(turn = valid.turn.copy(running = true)),
             valid.copy(turn = valid.turn.copy(turnId = 1uL)),
             valid.copy(firstMessageIndex = 1uL),

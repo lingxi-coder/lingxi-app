@@ -5535,6 +5535,7 @@ mod tests {
                 clipboard_write: false,
                 system_key_combos: false,
                 tcc_state: None,
+                interaction: None,
             },
             resp_tx,
         });

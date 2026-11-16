@@ -909,5 +909,96 @@ export const computerCatalog: Record<string, Record<string, string>> = {
     "en": "Elevated risk",
     "ja": "高いリスク",
     "ko": "높은 위험"
+  },
+  "desktop_computer_takeover_title": {
+    "zh-Hans": "允许接管整个屏幕？",
+    "zh-Hant": "允許接管整個螢幕？",
+    "en": "Allow full-screen control?",
+    "ja": "画面全体の操作を許可しますか？",
+    "ko": "전체 화면 제어를 허용할까요?"
+  },
+  "desktop_computer_takeover_description": {
+    "zh-Hans": "灵犀将暂时操作整个桌面，而不局限于已选择的应用。请监督接下来的操作。",
+    "zh-Hant": "靈犀將暫時操作整個桌面，而不限於已選擇的應用程式。請監督接下來的操作。",
+    "en": "LingXi will temporarily control the whole desktop, beyond the selected applications. Monitor the upcoming actions.",
+    "ja": "LingXiは選択済みのアプリに限らず、デスクトップ全体を一時的に操作します。次の操作を確認してください。",
+    "ko": "LingXi가 선택한 앱을 넘어 데스크톱 전체를 일시적으로 제어합니다. 다음 작업을 지켜봐 주세요."
+  },
+  "desktop_computer_takeover_allow": {
+    "zh-Hans": "允许全屏控制",
+    "zh-Hant": "允許全螢幕控制",
+    "en": "Allow full-screen control",
+    "ja": "画面全体の操作を許可",
+    "ko": "전체 화면 제어 허용"
+  },
+  "desktop_computer_teach_access_title": {
+    "zh-Hans": "允许教学模式使用这些应用？",
+    "zh-Hant": "允許教學模式使用這些應用程式？",
+    "en": "Allow these apps for a guided tour?",
+    "ja": "ガイドでこれらのアプリを使用しますか？",
+    "ko": "안내에 이 앱들을 사용하도록 허용할까요?"
+  },
+  "desktop_computer_teach_allow": {
+    "zh-Hans": "允许并开始教学",
+    "zh-Hant": "允許並開始教學",
+    "en": "Allow and start tour",
+    "ja": "許可してガイドを開始",
+    "ko": "허용하고 안내 시작"
+  },
+  "desktop_computer_teach_step_title": {
+    "zh-Hans": "教学步骤确认",
+    "zh-Hant": "教學步驟確認",
+    "en": "Guided tour step",
+    "ja": "ガイドのステップ",
+    "ko": "안내 단계 확인"
+  },
+  "desktop_computer_next_preview": {
+    "zh-Hans": "下一步",
+    "zh-Hant": "下一步",
+    "en": "Next step",
+    "ja": "次のステップ",
+    "ko": "다음 단계"
+  },
+  "desktop_computer_teach_continue": {
+    "zh-Hans": "继续",
+    "zh-Hant": "繼續",
+    "en": "Continue",
+    "ja": "続ける",
+    "ko": "계속"
+  },
+  "desktop_computer_teach_end": {
+    "zh-Hans": "结束教学",
+    "zh-Hant": "結束教學",
+    "en": "End tour",
+    "ja": "ガイドを終了",
+    "ko": "안내 종료"
+  },
+  "desktop_computer_mode_title": {
+    "zh-Hans": "操作方式",
+    "zh-Hant": "操作方式",
+    "en": "Interaction mode",
+    "ja": "操作モード",
+    "ko": "작업 방식"
+  },
+  "desktop_computer_mode_background": {
+    "zh-Hans": "后台操作",
+    "zh-Hant": "背景操作",
+    "en": "Background",
+    "ja": "バックグラウンド",
+    "ko": "백그라운드"
+  },
+  "desktop_computer_mode_full_control": {
+    "zh-Hans": "全屏操作",
+    "zh-Hant": "全螢幕操作",
+    "en": "Full-screen",
+    "ja": "画面全体",
+    "ko": "전체 화면"
+  },
+  "desktop_computer_mode_hint": {
+    "zh-Hans": "这是操作方式偏好；需要接管整个屏幕时，灵犀仍会单独请求确认。",
+    "zh-Hant": "這是操作方式偏好；需要接管整個螢幕時，靈犀仍會另行請求確認。",
+    "en": "This sets your preference. LingXi will still ask separately before taking over the whole screen.",
+    "ja": "操作方法の設定です。画面全体を操作する前には、別途確認を求めます。",
+    "ko": "선호하는 작업 방식을 설정합니다. 전체 화면을 제어하기 전에는 별도로 확인을 요청합니다."
   }
 };

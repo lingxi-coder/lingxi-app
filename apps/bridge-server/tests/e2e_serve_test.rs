@@ -52,8 +52,8 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         __desktop_config.cwd = cwd.clone();
         __desktop_config.lingxi_home = cwd.join(".lingxi");
         __desktop_config.default_model = "claude-sonnet-4-20250514".to_string();
-        // Deterministic across host machines: a dev keychain with real provider
-        // keys must not trigger the connected-provider fallback mid-test.
+        // Deterministic across host machines: the fixture model is user-owned,
+        // so managed/settings model changes never replace it mid-test.
         __desktop_config.default_model_explicit = true;
         // Same hazard, one layer deeper. The native keychain is keyed by OS
         // USER, not by `lingxi_home`, so pointing that at a tempdir does NOT
@@ -66,7 +66,6 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         __desktop_config.isolated_credential_storage = true;
         __desktop_config.credential_storage_policy =
             lingxi_core::host::CredentialStoragePolicy::NativePreferred;
-        __desktop_config.recent_models = Vec::new();
         __desktop_config.fallback_model = None;
         __desktop_config.custom_betas = Vec::new();
         __desktop_config.flag_settings = None;

@@ -473,6 +473,12 @@ pub trait CommandRouter: Send + Sync + 'static {
         Err("desktop runtime snapshot is unavailable".into())
     }
 
+    /// Read a committed display baseline without changing model context or
+    /// replaying deferred tools. The requesting host fences its event sequence.
+    async fn transcript_checkpoint(&self, _session_id: uuid::Uuid) -> Result<ClientEvent, String> {
+        Err("desktop transcript checkpoint is unavailable".into())
+    }
+
     /// Authenticated, private Native `set_cwd` control request.
     async fn set_working_directory(
         &self,
@@ -1025,7 +1031,7 @@ impl EngineCommandRouter {
                 return Err(format!("resume plan mode failed: {error}"));
             }
         }
-        if let Err(error) = self
+        let resume_result = self
             .handle
             .resume_session(
                 lingxi_core::types::SessionId::from_uuid(uuid),
@@ -1042,17 +1048,23 @@ impl EngineCommandRouter {
                 }),
                 runtime_snapshot,
             )
-            .await
-        {
-            if resume_plan_mode {
-                let _ = self.handle.set_plan_mode(previous_plan_mode).await;
-                let _ = self
-                    .handle
-                    .set_permission_mode(&previous_permission_mode)
-                    .await;
+            .await;
+        let committed_failure = match resume_result {
+            Ok(()) => None,
+            Err(error @ lingxi_core::host::HandleError::ResumeCommitted { .. }) => Some(format!(
+                "Session restored, but follow-up restoration failed: {error}"
+            )),
+            Err(error) => {
+                if resume_plan_mode {
+                    let _ = self.handle.set_plan_mode(previous_plan_mode).await;
+                    let _ = self
+                        .handle
+                        .set_permission_mode(&previous_permission_mode)
+                        .await;
+                }
+                return Err(format!("resume_session failed: {error}"));
             }
-            return Err(format!("resume_session failed: {error}"));
-        }
+        };
         if let Some(expected) = pinned_fork_source {
             let mut pending = self
                 .pending_fork_sources
@@ -1072,7 +1084,7 @@ impl EngineCommandRouter {
             // streamed results with a pre-activation transcript snapshot.
             workspace.merge_live_resume_display(&mut replayed).await?;
         }
-        let messages = client::adapter::lowering::lower_replayed_transcript(&replayed);
+        let messages = crate::workspace_commands::lower_initial_transcript(&replayed);
 
         // The device-level reasoning default is the counterpart to
         // Electron's persisted model/permission preferences. Apply it
@@ -1087,8 +1099,24 @@ impl EngineCommandRouter {
             )
             .await;
 
-        self.emit_resumed_session(uuid, messages, restored_usage, presence_warning, sink)
+        self.emit_resumed_session(
+            uuid,
+            messages,
+            restored_usage,
+            presence_warning,
+            sink.clone(),
+        )
+        .await;
+        // The durable identity is already mounted. A rejected acknowledgment
+        // would make hosts roll back their selected source to the old writer.
+        // Report the failed follow-up without rejecting the completed mount.
+        if let Some(message) = committed_failure {
+            sink.emit(ClientEvent::SystemNotice {
+                message: message.into(),
+                is_error: true,
+            })
             .await;
+        }
         Ok(())
     }
 
@@ -2347,6 +2375,49 @@ impl CommandRouter for EngineCommandRouter {
             }
         }
     }
+    async fn transcript_checkpoint(&self, session_id: uuid::Uuid) -> Result<ClientEvent, String> {
+        if self.is_turn_active() || self.handle.current_session_id().await.as_uuid() != session_id {
+            return Err("desktop transcript checkpoint requires the idle session owner".into());
+        }
+        let workspace = self
+            .workspace_commands
+            .as_ref()
+            .ok_or("desktop transcript checkpoint is unavailable")?;
+        let capture = workspace
+            .capture_current_transcript(lingxi_core::types::SessionId::from_uuid(session_id))
+            .await?;
+        let checkpoint = tokio::task::spawn_blocking(move || {
+            let loaded = session::jsonl::loader::route_captured_session_source(
+                &capture.transcript_path,
+                session_id,
+                &capture.source,
+            )
+            .map_err(|error| error.to_string())?;
+            let mode = session::JsonlWriter::fixed_session_mode_from_source(
+                &capture.source,
+                &session_id.to_string(),
+            )?;
+            let replayed = orchestrator::resume::project_transcript_checkpoint(
+                capture.transcript_path,
+                &capture.source,
+                &loaded,
+                session_id,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok::<_, String>(ClientEvent::SessionResumed {
+                session_id: session_id.to_string(),
+                mode: lower_conversation_mode(mode),
+                messages: crate::workspace_commands::lower_initial_transcript(&replayed),
+            })
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        if self.is_turn_active() || self.handle.current_session_id().await.as_uuid() != session_id {
+            return Err("the session changed during desktop transcript checkpoint".into());
+        }
+        Ok(checkpoint)
+    }
+
     async fn runtime_snapshot(&self) -> Result<Vec<ClientEvent>, String> {
         if self.team_registry.is_none() {
             return Err("desktop runtime snapshot is unavailable".into());

@@ -30,12 +30,47 @@ struct TeamMessageConversation: Equatable, Identifiable, Sendable {
     var sharedBotId: String? = nil
     /// The pointer to the newest message; `nil` = no message yet. Parsed strictly (`TeamsPointerParser`).
     var lastMessage: TeamLastMessage? = nil
+    /// Who can read it, as written when it was made: its people and the maintainers its Bots had then. `nil` when the source does not say.
+    var readers: [String]? = nil
     func merging(_ old: TeamMessageConversation?) -> TeamMessageConversation {
         var value = self; value.lastReadSeq = max(old?.lastReadSeq ?? 0, lastReadSeq); value.lastSeq = max(old?.lastSeq ?? 0, lastSeq); value.lastChangeSeq = max(old?.lastChangeSeq ?? 0, lastChangeSeq); return value
     }
     var unread: Int { max(0, lastSeq - lastReadSeq) }
     /// The raw SharedBot ID stored on a DM or carried by its explicit `shared_bot:` participant.
     var effectiveSharedBotId: String? { sharedBotId ?? participants.first { $0.hasPrefix("shared_bot:") }.map { String($0.dropFirst(11)) } }
+}
+/// A Bot's request to change its list: the list and exactly the changes the approval is for.
+struct TeamListApproval: Decodable, Equatable, Sendable {
+    struct Change: Decodable, Equatable, Sendable {
+        let op: String
+        var text: String? = nil
+        var done: Bool? = nil
+        /// The item as it read when the Bot asked: `nil` for an added item, and for one that was already gone.
+        var item: String? = nil
+    }
+    let title: String
+    let changes: [Change]
+    init(title: String, changes: [Change]) { self.title = title; self.changes = changes }
+    private enum CodingKeys: String, CodingKey { case title, changes }
+    /// Never fails: one unreadable request must not hide the conversation it is in. It then has no changes and is not shown as a request.
+    init(from decoder: Decoder) throws {
+        let c = try? decoder.container(keyedBy: CodingKeys.self)
+        title = (try? c?.decode(String.self, forKey: .title)) ?? ""
+        changes = (try? c?.decode([Change].self, forKey: .changes)) ?? []
+    }
+    /// Every change is one the list knows, so each can be said in words.
+    var readable: Bool {
+        !changes.isEmpty && changes.allSatisfy { ["add", "update", "remove"].contains($0.op) && ($0.op != "add" || $0.text != nil) && ($0.op != "update" || $0.text != nil || $0.done != nil) }
+    }
+}
+/// The requester's reply to such a request. Anything but the two decisions reads as no decision.
+struct TeamWaitDecision: Decodable, Equatable, Sendable {
+    let approved: Bool?
+    init(approved: Bool?) { self.approved = approved }
+    init(from decoder: Decoder) throws {
+        let raw = try? decoder.singleValueContainer().decode(String.self)
+        approved = raw == "approve" ? true : raw == "deny" ? false : nil
+    }
 }
 struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     struct Author: Decodable, Equatable, Sendable {
@@ -69,6 +104,23 @@ struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     var taskIds: [String]? = nil
     var taskId: String? = nil
     var artifactId: String? = nil
+    /// On a Bot's question and on the answer to it: the wait they belong to.
+    var waitId: String? = nil
+    /// On a Bot's request to approve a list change.
+    var approval: TeamListApproval? = nil
+    /// On the requester's reply to such a request.
+    var decision: TeamWaitDecision? = nil
+    /// Files the message carries, in the order they were added.
+    var attachments: [TeamMessageAttachment]? = nil
+    /// On a Bot's reply: the files of this conversation its model was given.
+    var readFiles: [TeamReadFile]? = nil
+    /// The files to show: none on a recalled message.
+    var files: [TeamMessageAttachment] { recalled == true ? [] : attachments ?? [] }
+    /// The request to show under this message, if it is one a Bot made and it can be read.
+    var approvalRequest: TeamListApproval? {
+        guard author.kind != "user", recalled != true, waitId != nil, let approval, approval.readable else { return nil }
+        return approval
+    }
 
 }
 struct TeamMessageIntent: Codable, Equatable, Identifiable, Sendable {
@@ -82,16 +134,28 @@ struct TeamMessageIntent: Codable, Equatable, Identifiable, Sendable {
     let text: String
     let replyTo: String?
     var targets: [String]? = nil
+    /// Set when the message answers a Bot's question: it is sent as `answerWait` and continues that task instead of starting one.
+    /// `replyTo` then names the question only for the pending bubble; the server links the answer itself.
+    var waitId: String? = nil
+    /// Checked uploads of this sender for this conversation that the new message carries. It may then have no text and ask no Bot.
+    var attachments: [String]? = nil
+    /// Their names, for the pending bubble only.
+    var attachmentNames: [String]? = nil
     var error: String?
     var leaseUntil: Double?
     var attempted: Bool?
     var id: String { changeId }
     var body: [String: Any] {
-        let targets = targets ?? []
+        let targets = targets ?? [], attachments = attachments ?? []
         var payload: [String: Any] = ["conversationId": conversationId, "messageId": messageId, "changeId": changeId, "text": text]
+        if let waitId {
+            payload["waitId"] = waitId
+            return ["schemaVersion": 1, "commandId": changeId, "teamId": teamId, "generation": generation, "action": "answerWait", "payload": payload]
+        }
         if let replyTo { payload["replyTo"] = replyTo }
-        if operation == "create", !targets.isEmpty {
+        if operation == "create", !targets.isEmpty || !attachments.isEmpty {
             payload["targets"] = targets
+            if !attachments.isEmpty { payload["attachments"] = attachments }
             return ["schemaVersion": 1, "commandId": changeId, "teamId": teamId, "generation": generation, "action": "submit", "payload": payload]
         }
         payload["action"] = "mutate"; payload["operation"] = operation

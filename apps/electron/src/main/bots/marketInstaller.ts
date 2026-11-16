@@ -1,6 +1,5 @@
-import { promises as fs, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
 import type {
   BotMarketOrigin,
   BotPackageManifest,
@@ -10,29 +9,14 @@ import {
   MarketInstallGuard,
   marketApplicationId,
 } from '../local-apps/marketLinkInstaller.js';
+import { canonical, sha256 } from '../local-apps/sourcePackage.js';
 import {
-  canonical,
-  sha256,
-  unpackSource,
-  type SourceFile,
-} from '../local-apps/sourcePackage.js';
-import { validateBotManifest, validatePublicBotText } from './package.js';
+  checkedBotRelease,
+  downloadBotRelease,
+  installedDescription,
+} from './marketRelease.js';
 import type { BotCreateInput, BotRecord, BotStore } from './store.js';
-import { skillName } from './content.js';
 
-interface BotRelease {
-  id: string;
-  appId: string;
-  resourceKind: 'bot';
-  schema: 3;
-  manifest: BotPackageManifest;
-  files: SourceFile[];
-  dependencies: unknown[];
-  releaseDigest: string;
-  sha256: string;
-  sizeBytes: number;
-  downloadPath: string;
-}
 export interface BotInstallOptions {
   createBot(
     input: BotCreateInput,
@@ -159,64 +143,8 @@ export class BotMarketInstaller {
     if (prior) return acknowledge(prior);
     if (handoff?.status === 'installed')
       throw new Error('This Bot handoff was completed on another Desktop');
-    const release = await request<BotRelease>(
-      `bots/${listingId}/versions/${versionId}`,
-    );
-    if (
-      release.resourceKind !== 'bot' ||
-      release.schema !== 3 ||
-      release.id !== versionId ||
-      release.appId !== listingId
-    )
-      throw new Error('Invalid Bot market release');
-    const manifest = validateBotManifest(release.manifest);
-    const platform =
-      process.platform === 'darwin'
-        ? 'macos'
-        : process.platform === 'win32'
-          ? 'windows'
-          : 'linux';
-    if (!manifest.runtime.hostingTargets.includes(platform))
-      throw new Error('This Bot requires another Desktop host');
-    if (!Array.isArray(release.dependencies) || release.dependencies.length)
-      throw new Error('This Bot has unsupported dependencies');
-    if (
-      !Array.isArray(release.files) ||
-      release.files.length !== manifest.files.length + 1 ||
-      release.files.some((f) => f.executable !== false)
-    )
-      throw new Error('Invalid Bot package inventory');
-    const declared = new Map(manifest.files.map((f) => [f.path, f]));
-    for (const f of release.files) {
-      const expected = declared.get(f.path);
-      if (
-        f.path !== 'lingxi-bot.json' &&
-        (!expected ||
-          canonical({ ...expected, executable: false }) !== canonical(f))
-      )
-        throw new Error('Bot file inventory mismatch');
-    }
-    const size = release.sizeBytes;
-    if (
-      !Number.isSafeInteger(size) ||
-      size <= 0 ||
-      size > 25 * 1024 * 1024 ||
-      !/^[a-f0-9]{64}$/.test(release.sha256)
-    )
-      throw new Error('Bot package exceeds download limits');
-    const digest = sha256(
-      Buffer.from(
-        canonical({
-          schema: 1,
-          artifactSha256: release.sha256,
-          manifest,
-          files: release.files,
-          dependencies: [],
-        }),
-      ),
-    );
-    if (digest !== release.releaseDigest)
-      throw new Error('Bot release checksum mismatch');
+    const checked = await checkedBotRelease(request, listingId, versionId);
+    const { manifest, digest } = checked;
     if (handoff && handoff.releaseDigest !== digest)
       throw new Error('Bot handoff release digest changed');
     if (!(await this.options.confirm(manifest))) return null;
@@ -238,128 +166,76 @@ export class BotMarketInstaller {
         stage: 'downloading',
       }),
     );
-    // Authentication is restricted to the canonical same-origin v3 content proxy.
-    const expected = new URL(
-        `bots/${listingId}/versions/${versionId}/download`,
-        api.base,
-      ),
-      download = new URL(release.downloadPath, api.base);
-    if (download.href !== expected.href)
-      throw new Error('Invalid authenticated Bot download route');
-    const response = await api.fetcher(download, {
-      headers: { Authorization: `Bearer ${await api.token()}` },
-      redirect: 'error',
-      signal: AbortSignal.timeout(60_000),
-    });
-    if (!response.ok || !response.body) throw new Error('Bot download failed');
-    const chunks: Buffer[] = [];
-    let received = 0;
-    for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
-      received += chunk.byteLength;
-      if (received > size) throw new Error('Bot exceeds declared package size');
-      chunks.push(Buffer.from(chunk));
-    }
-    const bytes = Buffer.concat(chunks);
-    if (bytes.length !== size || sha256(bytes) !== release.sha256)
-      throw new Error('Bot package checksum mismatch');
-    const stage = join(directory, `stage-${randomUUID()}`);
-    try {
-      await unpackSource(bytes, release.files, stage, 'lingxi-bot.json');
-      if (
-        canonical(
-          JSON.parse(await fs.readFile(join(stage, 'lingxi-bot.json'), 'utf8')),
-        ) !== canonical(manifest)
-      )
-        throw new Error('Bot manifest differs from approved release');
-      const content = new Map<string, string>();
-      for (const file of manifest.files) {
-        const value = new TextDecoder('utf-8', { fatal: true }).decode(
-          await fs.readFile(join(stage, file.path)),
-        );
-        validatePublicBotText(file.path, value);
-        content.set(file.path, value);
-      }
-      const skills = manifest.skills.map((s) => {
-        const match = /^skills\/([^/]+)\/SKILL\.md$/.exec(s.path);
-        if (!match) throw new Error('Bot only supports named text Skills');
-        return { name: skillName(match[1]), text: content.get(s.path)! };
-      });
-      if (
-        new Set(skills.map((s) => s.name.toLowerCase())).size !== skills.length
-      )
-        throw new Error('Duplicate Bot Skills');
-      checkAccount();
-      await durableWrite(
-        join(directory, 'intent.json'),
-        JSON.stringify({
-          schema: 1,
-          requestId: intent,
-          accountId,
-          listingId,
-          releaseId: versionId,
-          digest,
-          stage: 'verified',
-        }),
-      );
-      checkAccount();
-      const origin: BotMarketOrigin = {
-        market: api.base.href,
+    const { content, skills } = await downloadBotRelease(api, checked, directory);
+    checkAccount();
+    await durableWrite(
+      join(directory, 'intent.json'),
+      JSON.stringify({
+        schema: 1,
+        requestId: intent,
         accountId,
         listingId,
         releaseId: versionId,
         digest,
-        installIntent: intent,
-      };
-      // Different handoff receipts can verify the same persisted install identity in parallel.
-      // Recheck after the last await, then keep lookup + creation synchronous. Each caller
-      // still completes its own receipt below, including when another caller created the Bot.
-      const committed = find();
-      const record =
-        committed ??
-        this.options.createBot(
-          {
-            name: manifest.name,
-            description: `Installed Bot ${manifest.version}. Configure your model and resource authorizations before sharing.`,
-            persona: content.get(manifest.entry)!,
-          },
-          origin,
-          (draft) => {
-            for (const skill of skills) {
-              const dir = join(
-                store.homeDir(draft.bot_id),
-                'skills',
-                skill.name,
-              );
-              mkdirSync(dir, { recursive: true, mode: 0o700 });
-              writeFileSync(join(dir, 'SKILL.md'), skill.text, {
-                flag: 'wx',
-                mode: 0o600,
-              });
-            }
-            writeFileSync(
-              join(store.botDir(draft.bot_id), 'market-package.json'),
-              canonical(manifest),
-              { flag: 'wx', mode: 0o600 },
+        stage: 'verified',
+      }),
+    );
+    checkAccount();
+    const origin: BotMarketOrigin = {
+      market: api.base.href,
+      accountId,
+      listingId,
+      releaseId: versionId,
+      digest,
+      installIntent: intent,
+    };
+    // Different handoff receipts can verify the same persisted install identity in parallel.
+    // Recheck after the last await, then keep lookup + creation synchronous. Each caller
+    // still completes its own receipt below, including when another caller created the Bot.
+    const committed = find();
+    const record =
+      committed ??
+      this.options.createBot(
+        {
+          name: manifest.name,
+          description: installedDescription(manifest.version),
+          persona: content.get(manifest.entry)!,
+        },
+        origin,
+        (draft) => {
+          for (const skill of skills) {
+            const dir = join(
+              store.homeDir(draft.bot_id),
+              'skills',
+              skill.name,
             );
-          },
-        );
-      if (!committed) this.options.changed();
-      await durableWrite(
-        join(directory, 'intent.json'),
-        JSON.stringify({
-          schema: 1,
-          requestId: intent,
-          accountId,
-          listingId,
-          releaseId: versionId,
-          digest,
-          stage: 'awaiting_bindings',
-          instanceId: record.bot_id,
-        }),
+            mkdirSync(dir, { recursive: true, mode: 0o700 });
+            writeFileSync(join(dir, 'SKILL.md'), skill.text, {
+              flag: 'wx',
+              mode: 0o600,
+            });
+          }
+          writeFileSync(
+            join(store.botDir(draft.bot_id), 'market-package.json'),
+            canonical(manifest),
+            { flag: 'wx', mode: 0o600 },
+          );
+        },
       );
-      return await acknowledge(record);
-    } finally {
-      await fs.rm(stage, { recursive: true, force: true });
-    }
+    if (!committed) this.options.changed();
+    await durableWrite(
+      join(directory, 'intent.json'),
+      JSON.stringify({
+        schema: 1,
+        requestId: intent,
+        accountId,
+        listingId,
+        releaseId: versionId,
+        digest,
+        stage: 'awaiting_bindings',
+        instanceId: record.bot_id,
+      }),
+    );
+    return await acknowledge(record);
   }
 }

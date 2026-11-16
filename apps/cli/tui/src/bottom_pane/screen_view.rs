@@ -295,7 +295,11 @@ impl ScreenView {
         let account_block = cost::render::usage_by_account_block(&cost.by_account);
         if !account_block.is_empty() {
             usage_lines.push(Line::from(""));
-            usage_lines.extend(account_block.lines().map(|line| Line::from(line.to_string())));
+            usage_lines.extend(
+                account_block
+                    .lines()
+                    .map(|line| Line::from(line.to_string())),
+            );
         }
         usage_lines.push(Line::from(""));
         usage_lines.push(Line::from(Span::styled(

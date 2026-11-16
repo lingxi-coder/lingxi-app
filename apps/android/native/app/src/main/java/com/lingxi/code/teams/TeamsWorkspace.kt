@@ -11,6 +11,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -69,6 +70,8 @@ internal class TeamsWorkspace(
 ) {
     val teamsModel = TeamsViewModel(scope, apiRoot, auth, db)
     val messagingModel = TeamMessagingModel(scope, File(context.noBackupFilesDir, "team-messages"), apiRoot, auth, db)
+    /** Where a file being opened is written for the app that shows it; emptied before each open and when the account changes. */
+    val openedFiles = File(context.cacheDir, TEAM_FILES_DIRECTORY)
 
     val teams: StateFlow<TeamsState> get() = teamsModel.state
     val messaging: StateFlow<TeamMessagingState> get() = messagingModel.state
@@ -97,10 +100,21 @@ internal class TeamsWorkspace(
     private var wasRevoked = false
     private var lastSelectedUnread: Pair<String, Int>? = null
     private val drafts = mutableMapOf<String, ComposerDraft>()
+    private val mutableDraftFiles = MutableStateFlow<Map<String, List<TeamDraftFile>>>(emptyMap())
+    private val mutableFileRefusals = MutableStateFlow<Map<String, List<TeamFileRefusal>>>(emptyMap())
+    /**
+     * The files of unsent messages and what was last refused when files were chosen, by [draftKey]. Flows: an upload moves on while
+     * its conversation is closed, and the composer shows where it stands when it is opened again.
+     */
+    val draftFiles: StateFlow<Map<String, List<TeamDraftFile>>> = mutableDraftFiles
+    val fileRefusals: StateFlow<Map<String, List<TeamFileRefusal>>> = mutableFileRefusals
+    /** The uploads in progress, by upload id. */
+    private val uploads = mutableMapOf<String, Job>()
 
     fun start() {
         if (started) return
         started = true
+        scope.launch(Dispatchers.IO) { openedFiles.deleteRecursively() }
         if (pair != null) {
             currentUid = pair.uid; startedTeam = pair.summary
             messagingModel.start(pair.uid, pair.summary)
@@ -119,9 +133,10 @@ internal class TeamsWorkspace(
         val selected = state.teams.firstOrNull { it.id == state.selectedId }
         val running = startedTeam
         if (selected == null) {
-            if (running != null) { rememberUnread(running); messagingModel.reset(); startedTeam = null; mutableCollapsed.value = emptySet() }
+            if (running != null) { rememberUnread(running); endUploads(); messagingModel.reset(); startedTeam = null; mutableCollapsed.value = emptySet() }
         } else if (running?.id != selected.id || running.generation != selected.generation) {
             if (running != null) rememberUnread(running)
+            endUploads()
             messagingModel.start(uid, selected)
             startedTeam = selected
         }
@@ -156,9 +171,12 @@ internal class TeamsWorkspace(
 
     private fun accountChanged(uid: String?) {
         currentUid = uid; startedTeam = null; persistedSelection = null; autoSelecting = false; wasRevoked = false; lastSelectedUnread = null
+        endUploads()
         messagingModel.reset()
         watchers.values.forEach { it.stop() }; watchers.clear(); watched.value = emptyMap()
         drafts.clear(); mutableCollapsed.value = emptySet()
+        mutableDraftFiles.value = emptyMap(); mutableFileRefusals.value = emptyMap()
+        scope.launch(Dispatchers.IO) { openedFiles.deleteRecursively() }
     }
 
     private fun rememberUnread(team: TeamSummary) {
@@ -184,7 +202,7 @@ internal class TeamsWorkspace(
     // --- what the screens call -----------------------------------------------------------------------
 
     /** Ends a friend chat's workspace: its listeners and its coroutines. The process workspace is never closed. */
-    fun close() { messagingModel.reset(); scope.cancel() }
+    fun close() { endUploads(); messagingModel.reset(); scope.cancel() }
 
     fun selectTeam(teamId: String) { if (teamsModel.state.value.selectedId != teamId) teamsModel.select(teamId) }
 
@@ -197,7 +215,7 @@ internal class TeamsWorkspace(
         teamsModel.refresh()
         val state = messagingModel.state.value
         val team = startedTeam
-        if (team != null && (state.revoked || state.error == "INVALID_DATA")) messagingModel.start(uid, team) else messagingModel.reconnect()
+        if (team != null && (state.revoked || state.error == "INVALID_DATA")) { endUploads(); messagingModel.start(uid, team) } else messagingModel.reconnect()
         watchers.values.forEach { it.stop() }; watchers.clear()
         syncWatchers(uid, teamsModel.state.value)
     }
@@ -210,12 +228,76 @@ internal class TeamsWorkspace(
         scope.launch { prefs.setCollapsed(uid, teamId, next) }
     }
 
-    private fun draftKey(conversationId: String) = "${currentUid}:${teamsModel.state.value.selectedId}:${startedTeam?.generation ?: 0}:$conversationId"
+    /** What a conversation's unsent state is kept under: the account, the team, its generation and the conversation. */
+    fun draftKey(conversationId: String) = "${currentUid}:${teamsModel.state.value.selectedId}:${startedTeam?.generation ?: 0}:$conversationId"
     fun draft(conversationId: String): ComposerDraft = drafts[draftKey(conversationId)] ?: ComposerDraft()
     fun setDraft(conversationId: String, draft: ComposerDraft) { if (draft == ComposerDraft()) drafts.remove(draftKey(conversationId)) else drafts[draftKey(conversationId)] = draft }
 
+    // --- files of an unsent message --------------------------------------------------------------------
+
+    /**
+     * Adds chosen files to a conversation's unsent message and starts uploading the ones it takes; the others are kept as refusals
+     * with the reason for each. An upload reports to the draft it was started for and to no other: one of another conversation, team
+     * or account never sees it.
+     */
+    fun addFiles(conversationId: String, chosen: List<TeamChosenFile>) {
+        if (!started || conversationId.isEmpty() || messagingModel.state.value.selected != conversationId) return
+        val key = draftKey(conversationId)
+        val readable = chosen.filter { it.error == null }
+        val admission = TeamAttachments.admit(mutableDraftFiles.value[key].orEmpty().map { it.byteLength }, readable.map { TeamAttachments.Picked(it.name, it.type, it.bytes.size) })
+        val refused = chosen.filter { it.error != null }.map { TeamFileRefusal(TeamAttachments.name(it.name), it.error!!) } + admission.refused
+        mutableFileRefusals.update { if (refused.isEmpty()) it - key else it + (key to refused) }
+        for (accepted in admission.accepted) {
+            val bytes = readable[accepted.index].bytes
+            val file = TeamDraftFile(java.util.UUID.randomUUID().toString(), accepted.name, accepted.mime, bytes.size)
+            mutableDraftFiles.update { it + (key to it[key].orEmpty() + file) }
+            lateinit var job: Job
+            job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+                try {
+                    messagingModel.upload(conversationId, file.uploadId, file.name, file.mime, bytes) { sent -> updateFile(key, file.uploadId) { it.copy(sent = sent) } }
+                    updateFile(key, file.uploadId) { it.copy(state = TeamDraftFile.State.Ready, sent = it.byteLength) }
+                } catch (error: kotlinx.coroutines.CancellationException) { throw error }
+                catch (error: Exception) { updateFile(key, file.uploadId) { it.copy(state = TeamDraftFile.State.Failed, error = (error as? TeamMessageFailure)?.code ?: "UPLOAD_FAILED") } }
+                finally { if (uploads[file.uploadId] === job) uploads.remove(file.uploadId) }
+            }
+            uploads[file.uploadId] = job
+            job.start()
+        }
+    }
+
+    private fun updateFile(key: String, uploadId: String, change: (TeamDraftFile) -> TeamDraftFile) {
+        mutableDraftFiles.update { all -> all[key]?.let { files -> all + (key to files.map { if (it.uploadId == uploadId) change(it) else it }) } ?: all }
+    }
+
+    private fun dropFiles(key: String, drop: (TeamDraftFile) -> Boolean) {
+        mutableDraftFiles.update { all -> all[key]?.filterNot(drop)?.let { kept -> if (kept.isEmpty()) all - key else all + (key to kept) } ?: all }
+    }
+
+    /** Takes a file out of an unsent message and gives its upload up. */
+    fun removeFile(conversationId: String, uploadId: String) {
+        val key = draftKey(conversationId)
+        if (mutableDraftFiles.value[key]?.none { it.uploadId == uploadId } != false) return
+        dropFiles(key) { it.uploadId == uploadId }
+        val running = uploads.remove(uploadId)
+        running?.cancel()
+        scope.launch { running?.join(); messagingModel.cancelUpload(uploadId) }
+    }
+
+    fun dismissRefusals(conversationId: String) { mutableFileRefusals.update { it - draftKey(conversationId) } }
+
+    /** The files a message was sent with leave the draft; they are the message's now. */
+    fun filesSent(conversationId: String, uploadIds: List<String>) = dropFiles(draftKey(conversationId)) { it.uploadId in uploadIds }
+
+    /** An upload belongs to the team it was started in: closing the team ends it, and the file leaves its draft. Checked files stay. */
+    private fun endUploads() {
+        uploads.values.forEach { it.cancel() }; uploads.clear()
+        mutableDraftFiles.update { all -> all.mapValues { (_, files) -> files.filter { it.state == TeamDraftFile.State.Ready } }.filterValues { it.isNotEmpty() } }
+    }
+
     companion object {
         const val MAX_WATCHED_TEAMS = 20
+        /** Under the cache directory; the app's file provider shares it (`res/xml/file_paths.xml`). */
+        const val TEAM_FILES_DIRECTORY = "team-files"
         const val SECTION_CHANNELS = "channels"
         const val SECTION_DIRECT = "direct"
         const val SECTION_BOTS = "bots"

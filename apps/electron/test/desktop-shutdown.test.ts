@@ -4,6 +4,7 @@ import { setImmediate } from 'node:timers/promises';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { sanitizeDiagnostic } from '../src/main/host-utils.js';
 
 // Execute the entry point's actual shutdown aggregation without importing
 // Electron or starting the app. No parallel shutdown implementation is tested.
@@ -38,6 +39,7 @@ test('a failed shutdown phase cannot quit before delayed provider cleanup settle
       flush: () => { flushes++; return diagnosticsDrain; },
     },
     app: { quit: () => { quits++; } },
+    sanitizeDiagnostic,
   });
   // Observe a regression's rejection too, so the ordering assertion identifies
   // premature quit rather than leaving an unhandled rejected promise.
@@ -56,4 +58,21 @@ test('a failed shutdown phase cannot quit before delayed provider cleanup settle
   await completion;
   assert.ok(events.some(event => event.phase === 'provider_accounts' && event.status === 'completed'));
   assert.equal(quits, 1);
+});
+
+test('a conversation flush failure is recorded and still completes diagnostics and quit', async () => {
+  const events: string[] = [];
+  await runInNewContext(script, {
+    shutdownPhases: [],
+    flushConversationSpaces: async () => { throw new Error('conversation flush failed'); },
+    shutdownDiagnostics: {
+      add: (level: string, _source: string, value: string) => events.push(`${level}:${value}`),
+      flush: async () => { events.push('diagnostics flushed'); },
+    },
+    sanitizeDiagnostic,
+    app: { quit: () => { events.push('quit'); } },
+  });
+  assert.ok(events.some(event => event.includes('"phase":"conversation_spaces","status":"failed"')));
+  assert.ok(events.some(event => event.includes('conversation flush failed')));
+  assert.deepEqual(events.slice(-2), ['diagnostics flushed', 'quit']);
 });

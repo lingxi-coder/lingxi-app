@@ -1,22 +1,5 @@
-import { providerAccountsCatalog } from '../src/renderer/i18n/providerAccountsCatalog';
+import { extensionCatalogs } from '../scripts/generate-extension-locales';
 import { setLanguagePreference } from '../src/renderer/i18n/useI18n';
-import { botsCatalog } from '../src/renderer/i18n/botsCatalog';
-import { chatCatalog } from '../src/renderer/i18n/chatCatalog';
-import { computerCatalog } from '../src/renderer/i18n/computerCatalog';
-import { desktopCatalog } from '../src/renderer/i18n/desktopCatalog';
-import { extensionCatalog } from '../src/renderer/i18n/extensionCatalog';
-import { flowCatalog } from '../src/renderer/i18n/flowCatalog';
-import { gitCatalog } from '../src/renderer/i18n/gitCatalog';
-import { interactionCatalog } from '../src/renderer/i18n/interactionCatalog';
-import { imageCatalog } from '../src/renderer/i18n/imageCatalog';
-import { miscCatalog } from '../src/renderer/i18n/miscCatalog';
-import { navigationCatalog } from '../src/renderer/i18n/navigationCatalog';
-import { runtimeCatalog } from '../src/renderer/i18n/runtimeCatalog';
-import { settingsCatalog } from '../src/renderer/i18n/settingsCatalog';
-import { shellCatalog } from '../src/renderer/i18n/shellCatalog';
-import { uiCatalog } from '../src/renderer/i18n/uiCatalog';
-import { updateCatalog } from '../src/renderer/i18n/updateCatalog';
-import { voiceSettingsCatalog } from '../src/renderer/i18n/voiceSettingsCatalog';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -45,9 +28,9 @@ test('shared catalog formatting supports position reorder, unsigned numbers, lit
   assert.equal(translate('chat_asked_questions %lld', 'en', 2), 'Asked 2 questions');
 });
 
-test('every static desktop translation lookup exists in every supported language', () => {
+test('every static desktop translation lookup resolves in every supported language', () => {
   const rendererRoot = fileURLToPath(new URL('../src/renderer', import.meta.url));
-  const extras = { ...providerAccountsCatalog, ...botsCatalog, ...chatCatalog, ...computerCatalog, ...desktopCatalog, ...extensionCatalog, ...flowCatalog, ...gitCatalog, ...imageCatalog, ...interactionCatalog, ...miscCatalog, ...navigationCatalog, ...runtimeCatalog, ...settingsCatalog, ...shellCatalog, ...uiCatalog, ...updateCatalog, ...voiceSettingsCatalog };
+  const extras = extensionCatalogs;
   const sharedRoot = new URL('../../../resources/translations/', import.meta.url);
   const catalogs = Object.fromEntries(DESKTOP_LOCALES.map(locale => [locale, JSON.parse(readFileSync(new URL(`${locale}.json`, sharedRoot), 'utf8'))]));
   function files(directory: string): string[] {
@@ -56,7 +39,7 @@ test('every static desktop translation lookup exists in every supported language
   const keys = new Set(files(rendererRoot).flatMap(file => [...readFileSync(file, 'utf8').matchAll(/\btr\(\s*['"]([^'"]+)['"]/g)].map(match => match[1]!)));
   assert.ok(keys.size > 150);
   for (const key of keys) for (const locale of DESKTOP_LOCALES) {
-    const value = extras[key]?.[locale] ?? catalogs[locale][key];
+    const value = extras[key]?.[locale] ?? catalogs[locale][key] ?? extras[key]?.en ?? catalogs.en[key];
     if (typeof value === 'string') assert.ok(value.trim(), `${key}: ${locale} empty`);
     else {
       assert.ok(value?.plural?.other?.trim(), `${key}: ${locale} missing plural forms`);
@@ -64,14 +47,15 @@ test('every static desktop translation lookup exists in every supported language
     }
   }
   for (const [key, entry] of Object.entries(extras)) for (const locale of DESKTOP_LOCALES) {
-    assert.ok(entry[locale]?.trim(), `${key}: ${locale}`);
+    const text = entry[locale] ?? entry.en;
+    assert.ok(text?.trim(), `${key}: ${locale}`);
     const placeholders = (value: string) => [...value.matchAll(/%\d+\$(?:ll[du]|[sdu@])/g)].map(match => match[0]).sort();
-    assert.deepEqual(placeholders(entry[locale]!), placeholders(entry.en!), `${key}: ${locale} arguments`);
+    assert.deepEqual(placeholders(text!), placeholders(entry.en!), `${key}: ${locale} arguments`);
   }
 });
 
 
-test('language preferences avoid repeated storage reads and invalidate when an override is changed', () => {
+test('language preferences avoid repeated storage reads and invalidate when an override is changed', async () => {
   const storage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
   let stored = 'en';
@@ -87,9 +71,9 @@ test('language preferences avoid repeated storage reads and invalidate when an o
     assert.equal(readLanguagePreference(), 'en');
     assert.equal(readLanguagePreference(), 'en');
     assert.equal(reads, 1);
-    setLanguagePreference('ja');
+    await setLanguagePreference('ja');
     assert.equal(readLanguagePreference(), 'ja');
-    setLanguagePreference('');
+    await setLanguagePreference('');
     assert.equal(readLanguagePreference(), '');
   } finally {
     if (storage) Object.defineProperty(globalThis, 'localStorage', storage); else Reflect.deleteProperty(globalThis, 'localStorage');

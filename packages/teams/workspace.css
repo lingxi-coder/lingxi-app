@@ -255,6 +255,27 @@
 .tw-context-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tw-context b { color: var(--tw-fg); }
 .tw-targets { display: flex; flex-wrap: wrap; gap: 6px; }
+/* Files: in an unsent message (chips with their upload state) and in a sent one (pictures in place, other files as rows). */
+.tw-files { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 0; padding: 0; list-style: none; }
+.tw-file { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; padding: 6px 8px; border: 1px solid var(--tw-border); border-radius: 10px; background: var(--tw-bg); font-size: 12px; }
+.tw-file[data-kind='image'] { flex-wrap: wrap; align-items: flex-end; max-width: 320px; }
+.tw-file[data-state='failed'] { border-color: var(--tw-danger); }
+.tw-file[data-state='revoked'] { color: var(--tw-muted); border-style: dashed; }
+.tw-file-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.tw-file-text b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.tw-file-text small { color: var(--tw-muted); }
+.tw-file[data-state='failed'] small { color: var(--tw-danger); }
+.tw-file-actions { display: inline-flex; align-items: center; gap: 2px; }
+.tw-file-picture { flex-basis: 100%; padding: 0; border: 0; border-radius: 8px; background: var(--tw-hover); overflow: hidden; cursor: zoom-in; }
+.tw-file-picture img { display: block; max-width: 100%; max-height: 240px; object-fit: contain; }
+.tw-file-placeholder { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 72px; color: var(--tw-muted); cursor: pointer; }
+.tw-file-full { display: block; max-width: 100%; max-height: 75vh; margin: 0 auto; object-fit: contain; }
+.tw-file-textview { max-height: 70vh; margin: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.tw-file-refusals { margin: 0; padding: 6px 10px; list-style: none; border-radius: 8px; background: var(--tw-hover); font-size: 12px; color: var(--tw-danger); }
+.tw-file-refusals b { color: var(--tw-fg); }
+.tw-pending-files { color: var(--tw-muted); font-size: 12px; }
+/* The files a Bot read for its reply: one quiet line over the reply, cut with an ellipsis; the full list is its tooltip. */
+.tw-msg-sources { margin: 0 0 2px; color: var(--tw-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tw-target { display: inline-flex; align-items: center; gap: 2px; padding: 0 2px 0 10px; border-radius: 14px; background: var(--tw-selected); font-size: 12px; font-weight: 600; min-height: 28px; }
 .tw-compose-box { position: relative; display: flex; flex-direction: column; padding: 10px 12px 8px; border: 1px solid var(--tw-border); border-radius: 16px; background: var(--tw-surface); box-shadow: 0 3px 14px rgb(0 0 0 / 5%); transition: border-color 0.14s ease, box-shadow 0.14s ease; }
 .tw-compose-box:focus-within { border-color: var(--tw-focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--tw-focus) 35%, transparent); }
@@ -332,6 +353,14 @@
 @keyframes tw-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .tw-run-spin { animation: none; opacity: 0; } .tw-run-still { opacity: 1; } }
 .tw-embed .team-bot-presence[data-online='true'] { color: var(--tw-online); }
+.tw-embed .team-bot-host { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; padding: 12px 14px; border: 1px solid var(--tw-line); border-radius: 14px; background: var(--tw-surface); font-size: 12px; line-height: 1.5; }
+.tw-embed .team-bot-handover { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--tw-line); font-size: 12px; line-height: 1.5; }
+.tw-embed .team-bot-handover p { margin: 0; }
+.tw-embed .team-bot-host h4 { margin: 0; font-size: 13px; }
+.tw-embed .team-bot-host ul { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.tw-embed .team-bot-host li[data-state='ready'] b { color: var(--tw-online); }
+.tw-embed .team-bot-host p { margin: 0; }
+.tw-embed .team-bot-host p[role='alert'] { color: var(--tw-danger); }
 .tw-embed .teams-modal { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: rgba(0, 0, 0, 0.45); }
 .tw-embed .teams-modal > section { max-width: 460px; padding: 20px; border-radius: 14px; background: var(--tw-surface); color: var(--tw-fg); box-shadow: var(--tw-shadow); }
 .tw-embed .teams-modal h2 { font-size: 16px; margin: 0 0 12px; }
@@ -355,6 +384,29 @@
 .tw-member-home > ol > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 16px 0; border-bottom: 1px solid var(--tw-line); }
 .tw-home { margin: 8px; text-align: start; }
 .tw-artifact { max-height: 75vh; overflow: auto; padding: 20px; }
+.tw-artifact .tw-dialog-actions { margin-top: 14px; }
+.tw-dialog:has(.tw-artifact, .tw-doc-edit) { max-width: 720px; }
+.tw-dialog textarea { width: 100%; min-height: 220px; padding: 8px 10px; color: inherit; background: transparent; border: 1px solid var(--tw-border); border-radius: 8px; font: inherit; line-height: 1.5; resize: vertical; }
+.tw-doc-conflict { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--tw-danger); border-radius: 10px; max-height: 40vh; overflow: auto; }
+.tw-doc-conflict h3 { margin: 0; font-size: 14px; }
+.tw-doc-history { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.tw-doc-history li { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--tw-line); }
+.tw-doc-history li:last-child { border-bottom: 0; padding-bottom: 0; }
+.tw-dialog .teams-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.tw-embed .team-approval { padding: 10px 12px; border: 1px solid var(--tw-line); border-radius: 10px; background: var(--tw-surface); display: flex; flex-direction: column; gap: 8px; }
+.tw-embed .team-approval p { margin: 0; }
+.tw-embed .team-approval ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.tw-list-items { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; max-height: 50vh; overflow: auto; }
+.tw-list-items li, .tw-list-items form, .tw-list-add { display: flex; align-items: center; gap: 8px; }
+.tw-list-items form, .tw-list-items label { flex: 1; min-width: 0; }
+.tw-list-items label { display: flex; flex-direction: row; align-items: center; gap: 8px; overflow-wrap: anywhere; }
+.tw-list-items label input { width: auto; flex: none; }
+.tw-list-items [data-done='true'] { color: var(--tw-muted); text-decoration: line-through; }
+.tw-list-history summary { cursor: pointer; }
+.tw-list-history ol { display: flex; flex-direction: column; gap: 10px; margin: 8px 0; padding: 0; list-style: none; max-height: 40vh; overflow: auto; }
+.tw-list-history ol p { margin: 0; overflow-wrap: anywhere; }
+.tw-list-history ul { margin: 2px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
+.tw-list-items form input, .tw-list-add input { flex: 1; min-width: 0; }
 
 /* ── Friends (FriendsSidebar, FriendsMain and its pages) ── */
 .tw-friends-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 700; }
@@ -391,6 +443,23 @@
   .tw-row[data-selected='true'] .tw-row-main, .tw-compose-box, .tw-embed .teams-card, .tw-member-home .teams-card { border: 1px solid var(--tw-fg); }
 }
 
+/* ── Bot services (Bots offered outside Teams): the list page and a caller's sessions ── */
+.hosted-services { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 760px; margin: 0 auto; padding: 20px; overflow-y: auto; height: 100%; box-sizing: border-box; }
+.hosted-services h2 { font-size: 17px; margin: 0; }
+.hosted-services h3 { font-size: 13px; margin: 12px 0 0; }
+.hosted-services p, .hosted-services ul { margin: 0; }
+.hosted-services code { font-size: 12px; overflow-wrap: anywhere; user-select: all; }
+.hosted-services fieldset { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0; padding: 8px 12px; border: 1px solid var(--tw-line); border-radius: 10px; }
+.hosted-services details > summary { cursor: pointer; padding: 6px 0; font-weight: 600; }
+.hosted-service .tw-conv-head { flex-wrap: wrap; gap: 8px; }
+.hosted-service .tw-conv-head select { width: auto; max-width: 220px; }
+.hosted-service-state[data-online='true'] { color: var(--tw-online); }
+.hosted-service-note { margin: 0; padding: 4px 20px; font-size: 12px; line-height: 1.5; color: var(--tw-muted); }
+.tw-msg-body.hosted-service-note { padding: 0; }
+.hosted-service-note[role='alert'] { color: var(--tw-danger); }
+.hosted-service-composer { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px 16px 16px; }
+.hosted-service-composer textarea { flex: 1; min-height: 44px; max-height: 200px; resize: vertical; }
+.tw-sidebar-services { flex: none; margin: 4px 12px 10px; padding: 6px 8px; text-align: start; }
 /* U6: on a touch screen no control is smaller than 44 x 44. Last in the file on purpose: the base rules of the same weight (`.tw-embed button`, `.tw-mention`, `.tw-target`) come before it and so give way. */
 @media (hover: none) and (pointer: coarse) {
   .tw-scope button, .tw-dialog button, .tw-embed button, .tw-scope .tw-menu-item, .tw-scope .tw-tab, .tw-scope .tw-switcher { min-height: 44px; }

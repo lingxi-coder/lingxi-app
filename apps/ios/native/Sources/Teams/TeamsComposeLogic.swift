@@ -8,7 +8,7 @@ import Foundation
 
 /// Why the composer cannot be used. `none` = the composer is shown.
 enum ComposerLock: Equatable, Sendable {
-    case none, ownerReading, botUnverified, botChecking, botUnavailable
+    case none, ownerReading, botHandedOver, botUnverified, botChecking, botUnavailable
 }
 
 /// The `@query` being typed right before the caret; `start` is the UTF-16 offset of the `@`.
@@ -83,11 +83,22 @@ enum TeamsComposeLogic {
         return String(String.UnicodeScalarView(scalars.prefix(length))) + "…"
     }
 
+    /// What the box says once spoken words are added: after what is already there, with a space between, never in
+    /// its place. Nothing heard changes nothing. The words are only ever put in the box; sending is the reader's.
+    static func appendingTranscript(_ transcript: String, to text: String) -> String {
+        let heard = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if heard.isEmpty { return text }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return heard }
+        return text + (text.last?.isWhitespace == true ? "" : " ") + heard
+    }
+
     /// Why the composer is replaced by an explanation. A Bot's owner reading someone else's Bot DM cannot
     /// send; a Bot DM needs a usable Bot card among its participants, and while the cards are unknown the
     /// reason says whether they are being checked or could not be verified.
-    static func composerLock(uid: String, kind: String, participants: [String], bots: [TeamBotCard], botsLoaded: Bool, botsUnverified: Bool) -> ComposerLock {
+    /// A Bot DM from before its Bot changed maintainer (`readers`) is a record: the Bot answers in a new one.
+    static func composerLock(uid: String, kind: String, participants: [String], readers: [String]? = nil, bots: [TeamBotCard], botsLoaded: Bool, botsUnverified: Bool) -> ComposerLock {
         if !participants.isEmpty, !participants.contains("user:\(uid)") { return .ownerReading }
+        if TeamsListLogic.botDmHandedOver(kind: kind, participants: participants, readers: readers, bots: bots) { return .botHandedOver }
         if kind == "bot_dm", !participants.contains(where: { key in key.hasPrefix("shared_bot:") && bots.contains { $0.sharedBotId == String(key.dropFirst(11)) && $0.selectable } }) {
             if botsUnverified { return .botUnverified }
             if !botsLoaded { return .botChecking }

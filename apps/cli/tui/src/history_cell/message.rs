@@ -443,7 +443,7 @@ pub(crate) fn thinking_lines(
     // a thinking block with no content would leave a bodyless
     // `∴ Thinking (ctrl+o to expand)` line that expands to nothing. (Redacted
     // thinking — signature-only — is a separate `✻ Thinking…` marker.)
-    if thinking.trim().is_empty() {
+    if !verbose || thinking.trim().is_empty() {
         return Vec::new();
     }
     let header = |text: &str| StyledLine {
@@ -456,9 +456,6 @@ pub(crate) fn thinking_lines(
             },
         )],
     };
-    if !verbose {
-        return vec![header("\u{2234} Thinking (ctrl+o to expand)")];
-    }
     let mut out = vec![header("\u{2234} Thinking\u{2026}")];
     // Expanded: a gap=1 blank row, then the markdown body indented 2 and
     // dim-colored (claude-code `<Box paddingLeft={2}><Markdown dimColor>`).
@@ -742,8 +739,12 @@ impl StyledCell for ThinkingCell {
 pub struct RedactedThinkingCell;
 
 impl StyledCell for RedactedThinkingCell {
-    fn styled_lines(&self, _width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
-        redacted_thinking_lines(theme)
+    fn styled_lines(&self, _width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine> {
+        if verbose {
+            redacted_thinking_lines(theme)
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -977,8 +978,8 @@ mod tests {
         assert_eq!(cell.thinking(), "step one\nstep two");
         assert_eq!(
             plain(&cell),
-            vec!["\u{2234} Thinking (ctrl+o to expand)".to_string()],
-            "collapsed shows only the hint"
+            Vec::<String>::new(),
+            "reasoning stays in activity details instead of a separate collapsed row"
         );
         let expanded: Vec<String> = cell
             .display_lines(
@@ -1035,10 +1036,17 @@ mod tests {
     }
 
     #[test]
-    fn redacted_thinking_cell_renders_the_bare_dim_marker() {
+    fn redacted_thinking_is_available_only_in_expanded_details() {
         let cell = RedactedThinkingCell;
-        assert_eq!(plain(&cell), vec!["✻ Thinking…".to_string()]);
-        let styled = cell.display_lines(80, &Theme::dark(), RenderMode::default());
+        assert!(plain(&cell).is_empty());
+        let styled = cell.display_lines(
+            80,
+            &Theme::dark(),
+            RenderMode {
+                raw: false,
+                verbose: true,
+            },
+        );
         assert_eq!(
             styled[0].spans[0].style.fg,
             Some(crate::style_adapter::to_ratatui(Theme::dark().dim))

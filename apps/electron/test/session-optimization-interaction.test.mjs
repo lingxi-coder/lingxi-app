@@ -40,7 +40,7 @@ test('real renderer keeps streaming catalogs stable and windows the complete ses
     });
     assert.deepEqual(result.stages, ['empty', 'pending', 'authoritative']);
     assert.equal(result.streamedUpdates, 90); assert.equal(result.fullResults, 5002); assert.ok(result.maximumMounted <= 15);
-    for (const check of ['activeDescendant', 'manualScroll', 'keyboard', 'narrowZoom', 'exactSource']) assert.equal(result[check], true, check);
+    for (const check of ['activeDescendant', 'manualScroll', 'keyboard', 'narrowZoom', 'exactSource', 'overlappingNavigation']) assert.equal(result[check], true, check);
     process.stdout.write(`Session optimization evidence: ${JSON.stringify(result)}\n`);
   } finally {
     if (child && child.exitCode === null) {

@@ -43,7 +43,7 @@ internal data class TeamUsageStrings(
 }
 
 /** The glyph of a run state; the screen picks the icon (Material `Schedule`, `CheckCircle`, ...) and shows a spinner for [Spinner] unless motion is reduced. */
-internal enum class RunGlyph { Clock, Spinner, Check, Alert, Expired, Paused, Locked, Blocked, Unknown }
+internal enum class RunGlyph { Clock, Spinner, Check, Alert, Expired, Paused, Locked, Blocked, Waiting, Cancelled, Checking, Unknown }
 
 /** Only Completed is [Ok] and only Failed [Danger]; every other state is [Muted]. */
 internal enum class RunTone { Ok, Danger, Muted }
@@ -51,11 +51,14 @@ internal enum class RunTone { Ok, Danger, Muted }
 /** How one state of a Bot task reads and looks on the run card (U4). The glyph is decorative; the [label] is the accessible state, so the state is never colour alone. */
 internal data class TeamRunState(
     @StringRes val label: Int,
-    /** What to do or what is going on, one sentence; null for Completed (the card shows the usage line) and for a state this app does not know. */
+    /**
+     * What to do or what is going on, one sentence; null for Completed (the card shows the usage line), for a state this app does not know, and for Waiting,
+     * Cancelled and Needs checking, whose line the card writes itself (who the task waits for, what to check, what the run used).
+     */
     @StringRes val detail: Int?,
     val glyph: RunGlyph,
     val tone: RunTone,
-    /** A task that is still going (Queued, Processing, Authorization required) offers "Refresh status"; the others say what to do in their detail. */
+    /** A task that is still going or still waits for someone (Queued, Processing, Waiting, Authorization required, Needs checking) offers "Refresh status"; the others say what to do in their detail. */
     val active: Boolean,
 )
 
@@ -69,7 +72,19 @@ internal object TeamsBotText {
         "interrupted" -> TeamRunState(R.string.teams_run_interrupted, R.string.teams_run_interrupted_detail, RunGlyph.Paused, RunTone.Muted, active = false)
         "authorization_required" -> TeamRunState(R.string.teams_run_authorization_required, R.string.teams_run_authorization_required_detail, RunGlyph.Locked, RunTone.Muted, active = true)
         "revoked" -> TeamRunState(R.string.teams_run_revoked, R.string.teams_run_revoked_detail, RunGlyph.Blocked, RunTone.Muted, active = false)
+        // The states Teams M2 added; they keep their own words, are muted like the other open states, and the card writes their detail line.
+        "waiting" -> TeamRunState(R.string.teams_task_waiting, null, RunGlyph.Waiting, RunTone.Muted, active = true)
+        "cancelled" -> TeamRunState(R.string.teams_task_cancelled, null, RunGlyph.Cancelled, RunTone.Muted, active = false)
+        "needs_reconciliation" -> TeamRunState(R.string.teams_task_needs_checking, null, RunGlyph.Checking, RunTone.Muted, active = true)
         else -> TeamRunState(R.string.chat_status_unknown, null, RunGlyph.Unknown, RunTone.Muted, active = false)
+    }
+
+    /** The word for [task]'s state: "Cancelling" while a cancel is on its way, "Waiting for approval" when it waits on a tool approval, else the state's own [TeamRunState.label]. */
+    @StringRes
+    fun stateLabel(task: TeamTask): Int = when {
+        task.cancelling -> R.string.teams_task_cancelling
+        task.state == "waiting" && task.wait?.kind == "tool_approval" -> R.string.teams_task_waiting_approval
+        else -> runState(task.state).label
     }
 
     /**

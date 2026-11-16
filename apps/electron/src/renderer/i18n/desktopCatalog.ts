@@ -1,5 +1,9 @@
 /** Desktop-only copy. Shared strings remain in resources/translations. */
 export const desktopCatalog: Record<string, Record<string, string>> = {
+  desktop_history_loading: { 'zh-Hans': '正在加载更早的消息…', 'zh-Hant': '正在載入更早的訊息…', en: 'Loading earlier messages…', ja: '過去のメッセージを読み込み中…', ko: '이전 메시지를 불러오는 중…' },
+  desktop_history_load_more: { 'zh-Hans': '加载更早的消息', 'zh-Hant': '載入更早的訊息', en: 'Load earlier messages', ja: '過去のメッセージを読み込む', ko: '이전 메시지 불러오기' },
+  desktop_history_retry: { 'zh-Hans': '重试加载', 'zh-Hant': '重試載入', en: 'Retry loading', ja: '再試行', ko: '다시 시도' },
+  desktop_history_failed: { 'zh-Hans': '历史消息加载失败', 'zh-Hant': '歷史訊息載入失敗', en: 'Could not load earlier messages', ja: '過去のメッセージを読み込めませんでした', ko: '이전 메시지를 불러오지 못했습니다' },
   "desktop_project_trust_title": {
     "zh-Hans": "信任此文件夹？",
     "zh-Hant": "信任此資料夾？",
@@ -343,20 +347,6 @@ export const desktopCatalog: Record<string, Record<string, string>> = {
     "en": "Runs on this computer · Available to paired devices",
     "ja": "このコンピューターで実行 · ペアリング済みデバイスで利用可能",
     "ko": "이 컴퓨터에서 실행 · 페어링된 기기에서 사용 가능"
-  },
-  "desktop_apps_deployment_hint": {
-    "zh-Hans": "手机和电脑均可部署应用。长时间任务推荐运行在电脑上，手机可连接使用。",
-    "zh-Hant": "手機與電腦皆可部署應用程式。長時間工作建議在電腦執行，手機可連線使用。",
-    "en": "Apps can run on a phone or computer. A computer is recommended for long tasks, with access from your phone.",
-    "ja": "アプリはスマートフォンでもコンピューターでも実行できます。長時間のタスクにはコンピューターを推奨し、スマートフォンから接続できます。",
-    "ko": "앱은 휴대폰이나 컴퓨터에서 실행할 수 있습니다. 긴 작업은 컴퓨터에서 실행하고 휴대폰으로 접속하는 것을 권장합니다."
-  },
-  "desktop_apps_remote_unconfigured": {
-    "zh-Hans": "此电脑尚未配置远程应用访问。配置完成后，可逐个应用向已配对设备开放。",
-    "zh-Hant": "此電腦尚未設定遠端應用程式存取。設定後，可逐一向已配對裝置開放。",
-    "en": "Remote app access is not configured on this computer. Once configured, choose which apps paired devices may open.",
-    "ja": "このコンピューターではリモートアクセスが未設定です。設定後、ペアリング済みデバイスに公開するアプリを選べます。",
-    "ko": "이 컴퓨터에 원격 앱 접근이 설정되지 않았습니다. 설정 후 페어링된 기기에 공개할 앱을 선택할 수 있습니다."
   },
   "desktop_apps_revoke": {
     "zh-Hans": "撤销权限",

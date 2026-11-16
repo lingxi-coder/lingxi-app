@@ -6,16 +6,17 @@ enum TeamsBotText {
     struct RunState: Equatable {
         /// Only Completed is `ok` (green) and only Failed `danger` (red); every other state is `muted`.
         enum Tone: Equatable { case ok, danger, muted }
-        /// The state as a word: `teams_run_*`, `chat_status_completed`, `chat_status_failed` or `chat_status_unknown`.
+        /// The state as a word: `teams_run_*`, `teams_task_*` (waiting, cancelled, needs checking), `chat_status_completed`,
+        /// `chat_status_failed` or `chat_status_unknown`.
         let labelKey: String
-        /// What to do or what is going on, one sentence. `nil` for Completed (the card shows the usage line instead) and for a state
-        /// this app does not know.
+        /// What to do or what is going on, one sentence. `nil` for Completed (the card shows the usage line instead), for a state this
+        /// app does not know and for the three states whose lines the card writes itself (Waiting, Cancelled, Needs checking).
         let detailKey: String?
         /// An SF Symbol. Processing shows a spinner instead (`spins`), and this symbol under Reduce Motion.
         let symbol: String
         let tone: Tone
-        /// A task that is still going (Queued, Processing, Authorization required) offers "Refresh status". The others have no action
-        /// of their own: their detail says what to do.
+        /// A task that is still going or whose outcome is still open (Queued, Processing, Authorization required, Waiting, Needs
+        /// checking) offers "Refresh status". The others have no action of their own: their detail says what to do.
         let active: Bool
         /// Only Processing: a spinner moves where the glyph would be.
         var spins = false
@@ -31,6 +32,11 @@ enum TeamsBotText {
         case "interrupted": RunState(labelKey: "teams_run_interrupted", detailKey: "teams_run_interrupted_detail", symbol: "pause.circle", tone: .muted, active: false)
         case "authorization_required": RunState(labelKey: "teams_run_authorization_required", detailKey: "teams_run_authorization_required_detail", symbol: "lock.circle", tone: .muted, active: true)
         case "revoked": RunState(labelKey: "teams_run_revoked", detailKey: "teams_run_revoked_detail", symbol: "nosign", tone: .muted, active: false)
+        // The three states of Teams M2/M3. They have no detail of their own here: the card says what it waits for, or why the outcome
+        // is unknown, in the lines that know the person (`teams_task_waiting_you`, `teams_task_needs_checking_*`).
+        case "waiting": RunState(labelKey: "teams_task_waiting", detailKey: nil, symbol: "ellipsis.bubble", tone: .muted, active: true)
+        case "cancelled": RunState(labelKey: "teams_task_cancelled", detailKey: nil, symbol: "xmark.circle", tone: .muted, active: false)
+        case "needs_reconciliation": RunState(labelKey: "teams_task_needs_checking", detailKey: nil, symbol: "questionmark.circle", tone: .muted, active: true)
         default: RunState(labelKey: "chat_status_unknown", detailKey: nil, symbol: "questionmark.circle", tone: .muted, active: false)
         }
     }
@@ -122,7 +128,7 @@ enum TeamsBotText {
         return format(amount)
     }
 
-    static let allKeys = ["teams_run_queued", "teams_run_processing", "chat_status_completed", "chat_status_failed", "teams_run_expired", "teams_run_interrupted", "teams_run_authorization_required", "teams_run_revoked", "chat_status_unknown"]
+    static let allKeys = ["teams_run_queued", "teams_run_processing", "chat_status_completed", "chat_status_failed", "teams_run_expired", "teams_run_interrupted", "teams_run_authorization_required", "teams_run_revoked", "teams_task_waiting", "teams_task_cancelled", "teams_task_needs_checking", "chat_status_unknown"]
     /// The one-sentence details of the states that have one.
     static let allDetailKeys = ["teams_run_queued_detail", "teams_run_processing_detail", "teams_run_failed_detail", "teams_run_expired_detail", "teams_run_interrupted_detail", "teams_run_authorization_required_detail", "teams_run_revoked_detail"]
 }

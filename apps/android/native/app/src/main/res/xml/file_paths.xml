@@ -7,4 +7,6 @@
         name="shared_images"
         path="shared_images/" />
     <cache-path name="workspace_files" path="workspace-file-share/" />
+    <!-- A file of a Team message while another app shows it (TeamsWorkspace.TEAM_FILES_DIRECTORY). -->
+    <cache-path name="team_files" path="team-files/" />
 </paths>

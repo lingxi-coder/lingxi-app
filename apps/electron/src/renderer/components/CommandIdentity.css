@@ -26,6 +26,9 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--command-identity-color) 9%, transparent);
   color: var(--command-identity-color);
 }
+/* Retain the source glyph's advance so caret, selection and argument wrapping
+   stay aligned with the editable command while its icon replaces the slash. */
+.composer-command-slash { visibility: hidden; }
 .beta-rich-prompt[data-command-decorated='true']::selection,
 .beta-rich-prompt[data-command-decorated='true'] *::selection { color: transparent; }
 

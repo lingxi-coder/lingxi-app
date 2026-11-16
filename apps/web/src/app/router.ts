@@ -22,11 +22,13 @@ export const appRoutes = [
   '/teams/join',
   '/friends',
   '/friends/add',
+  '/services',
 ] as const;
 
 export type AppRoute =
   | (typeof appRoutes)[number]
   | `/open/${string}`
+  | `/services/${string}`
   | `/remote/${string}/${string}`
   | `/remote/${string}/bots/${string}`
   | `/docs/${string}`;
@@ -96,10 +98,16 @@ export function isRemoteRoute(route: string): boolean {
  * `pushState` would keep the old document's policy, so {@link navigateTo} loads
  * the new page instead.
  */
+/** `/services/<service_id>` names a hosted Bot service. The id is case-sensitive, so the path is kept as written. */
+export function parseServiceRoute(path: string): string | null {
+  const match = /^\/services\/(s_[A-Za-z0-9_-]{6,62})\/?$/u.exec(path.split(/[?#]/u)[0] ?? '');
+  return match ? match[1]! : null;
+}
+
 export type SecurityZone = 'remote' | 'sign-in' | 'site' | 'teams';
 
 export function securityZone(route: string): SecurityZone {
-  if (route === '/teams' || route.startsWith('/teams/') || route === '/friends' || route.startsWith('/friends/')) return 'teams';
+  if (route === '/teams' || route.startsWith('/teams/') || route === '/friends' || route.startsWith('/friends/') || route === '/services' || route.startsWith('/services/')) return 'teams';
   if (isRemoteRoute(route)) return 'remote';
   return route === '/login/remote' ? 'sign-in' : 'site';
 }
@@ -107,6 +115,8 @@ export function securityZone(route: string): SecurityZone {
 export function resolveRoute(path: string): AppRoute {
   if (path.split(/[?#]/u)[0]?.startsWith("/open/")) return path.split(/[?#]/u)[0] as AppRoute;
   if (parseRemoteRoute(path) || parseRemoteBotRoute(path)) return path.split(/[?#]/u)[0]!.replace(/\/$/u, '') as AppRoute;
+  const serviceId = parseServiceRoute(path);
+  if (serviceId) return `/services/${serviceId}`;
   const normalized = normalizePath(path);
   if ((appRoutes as readonly string[]).includes(normalized)) {
     return normalized as AppRoute;

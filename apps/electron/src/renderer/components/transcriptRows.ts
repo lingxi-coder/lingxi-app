@@ -1,7 +1,8 @@
-import type { RunItem, ToolRunItem } from '../model/runItem';
+import type { NarrationRunItem, RunItem, ToolRunItem } from '../model/runItem';
 import { localAppReference } from '../model/localAppReference';
 import { localAppToolRequiresCode } from '../bridge/localAppErrors';
 import { transcriptToolKey } from './toolPresentation';
+import { skillInstructionNames } from './localAppInstructionPresentation';
 
 export interface TranscriptToolGroup {
   readonly type: 'tool-group';
@@ -9,11 +10,17 @@ export interface TranscriptToolGroup {
   readonly tools: ToolRunItem[];
 }
 
-export type TranscriptRow = Exclude<RunItem, ToolRunItem> | TranscriptToolGroup;
+interface TranscriptSkillInstructions extends Omit<NarrationRunItem, 'type' | 'role'> {
+  readonly type: 'skill-instructions';
+  readonly name: string;
+}
+
+export type TranscriptRow = Exclude<RunItem, ToolRunItem> | TranscriptToolGroup | TranscriptSkillInstructions;
 
 /** Adjacent, related tools share a group; prose and deliverables retain their place. */
-export function transcriptRows(items: readonly RunItem[], running: boolean, hasPendingActivity = false): TranscriptRow[] {
+export function transcriptRows(items: readonly RunItem[], running: boolean, hasPendingActivity = false, includeThinking = false): TranscriptRow[] {
   const rows: TranscriptRow[] = [];
+  const instructions = skillInstructionNames(items);
   let group: TranscriptToolGroup | undefined;
   // Only the latest unfinished reasoning block can be active.
   let activeThinking: RunItem | undefined;
@@ -25,7 +32,7 @@ export function transcriptRows(items: readonly RunItem[], running: boolean, hasP
   }
   for (const item of items) {
     if (item.type === 'thinking') {
-      if (item === activeThinking) rows.push(item);
+      if (includeThinking || item === activeThinking) rows.push(item);
       continue;
     }
     if (item.type === 'tool') {
@@ -45,7 +52,13 @@ export function transcriptRows(items: readonly RunItem[], running: boolean, hasP
       continue;
     }
     group = undefined;
-    rows.push(item);
+    const name = item.type === 'narration' ? instructions.get(item.id) : undefined;
+    if (item.type === 'narration' && name !== undefined) {
+      const { role: _role, ...document } = item;
+      rows.push({ ...document, type: 'skill-instructions', name });
+    } else {
+      rows.push(item);
+    }
   }
   // Some providers never emit reasoning deltas. The turn still owes the user
   // a waiting indicator until it finishes, unless another activity owns it.

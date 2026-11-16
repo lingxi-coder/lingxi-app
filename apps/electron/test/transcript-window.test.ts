@@ -18,10 +18,15 @@ test('window boundaries preserve user-turn and compact activity spacing', () => 
   const user = { id: 'u', type: 'narration', role: 'user' };
   const tools = { id: 't', type: 'tool-group' };
   const agents = { id: 'g', type: 'agents' };
+  const instructions = { id: 's', type: 'skill-instructions' };
   assert.equal(transcriptRowGap(undefined, assistant), 0);
   assert.equal(transcriptRowGap(assistant, assistant), 1);
   assert.equal(transcriptRowGap(user, tools), 1.5);
   assert.equal(transcriptRowGap(tools, user), 1);
   assert.equal(transcriptRowGap(tools, agents), 0.125);
   assert.equal(transcriptRowGap(assistant, tools), 0.75);
+  assert.equal(transcriptRowGap(tools, instructions), 0.125);
+  assert.equal(transcriptRowGap(instructions, tools), 0.125);
+  assert.equal(transcriptRowGap(instructions, assistant), 0.75);
+  assert.equal(transcriptRowGap(instructions, user), 1);
 });

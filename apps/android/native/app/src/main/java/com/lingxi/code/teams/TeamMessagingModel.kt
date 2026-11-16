@@ -29,7 +29,9 @@ import java.util.UUID
  * `reads` document, so [TeamMessageConversation.lastReadSeq] is real. [botsLoaded] / [botsFailed] feed `composerLock`.
  */
 internal data class TeamMessagingState(val cache: TeamMessageCache? = null, val selected: String = "", val offline: Boolean = true, val error: String = "", val revoked: Boolean = false, val submitting: Boolean = false, val bots: List<TeamBotCard> = emptyList(), val tasks: List<TeamTask> = emptyList(), val artifact: TeamArtifact? = null,
-    val directoryCached: Boolean = true, val directoryReady: Boolean = false, val readsReady: Boolean = false, val botsLoaded: Boolean = false, val botsFailed: Boolean = false)
+    val directoryCached: Boolean = true, val directoryReady: Boolean = false, val readsReady: Boolean = false, val botsLoaded: Boolean = false, val botsFailed: Boolean = false,
+    /** Counts the service's Bot change signals (a Bot, its tasks or its shared list changed). An open list reads itself again on each. */
+    val botSignals: Long = 0)
 /**
  * The selected team's full messaging: directory, reads, signals, the open thread, the HTTP command journal and the Bot
  * cards and runs. Owned by [TeamsWorkspace], which starts and stops it; [scope] runs on the main thread.
@@ -38,7 +40,9 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     private val storage = TeamCommandStorage(storageDirectory)
     private val mutable = MutableStateFlow(TeamMessagingState())
     val state = mutable.asStateFlow()
-    private var uid = ""
+    /** The signed-in member this model reads for. */
+    var uid = ""
+        private set
     private var teamId = ""
     private var generation = 0L
     private var active = false
@@ -118,7 +122,9 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         }
         signalListener = root.collection("signals").addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
             if (!active || lifecycle != life || auth.currentUser?.uid != uid) return@addSnapshotListener
-            if (error != null) listenerFailed(error) else if (snapshot?.metadata?.isFromCache == false) { artifactNeedsValidation = true; botsDirty = true; refresh() }
+            if (error != null) listenerFailed(error) else if (snapshot?.metadata?.isFromCache == false) {
+                artifactNeedsValidation = true; botsDirty = true; mutable.update { it.copy(botSignals = it.botSignals + 1) }; refresh()
+            }
         }
     }
     private fun listenerFailed(error: FirebaseFirestoreException) {
@@ -224,12 +230,12 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                     val id = pending.optJSONObject("payload")?.getString("changeId") ?: pending.getString("changeId"); val lease = System.currentTimeMillis() + 30000
                     commit(life) { it.copy(outbox = it.outbox.map { value -> if ((value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) == id && !value.has("error") && value.optLong("leaseUntil") <= System.currentTimeMillis()) JSONObject(value.toString()).put("leaseUntil", lease).put("attempted", true) else value }) }
                     val intent = mutable.value.cache?.outbox?.find { (it.optJSONObject("payload")?.getString("changeId") ?: it.getString("changeId")) == id && it.optLong("leaseUntil") == lease } ?: continue
-                    val body = JSONObject(intent.toString()).also { it.remove("error"); it.remove("leaseUntil"); it.remove("attempted") }
+                    val body = JSONObject(intent.toString()).also { it.remove("error"); it.remove("leaseUntil"); it.remove("attempted"); it.remove("attachmentNames") }
                     try { call(body, life); commit(life) { it.copy(outbox = it.outbox.filter { pending -> (pending.optJSONObject("payload")?.getString("changeId") ?: pending.getString("changeId")) != id }) } }
                     catch (error: CancellationException) { throw error }
                     catch (error: Exception) {
                         val code = (error as? TeamMessageFailure)?.code ?: "SERVICE_UNAVAILABLE"
-                        val permanent = code in setOf("MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "INVALID_INPUT")
+                        val permanent = code in setOf("MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "INVALID_INPUT", "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED", "ATTACHMENT_REQUIRED", "ATTACHMENT_LIMIT", "UPLOAD_EXPIRED")
                         commit(life) { it.copy(outbox = it.outbox.map { value -> if ((value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) == id) JSONObject(value.toString()).also { it.remove("leaseUntil"); if (permanent) it.put("error", code) } else value }) }
                         if (!permanent) throw error
                     }
@@ -289,12 +295,56 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         val task = TeamTask.parse(execute("getTask", JSONObject().put("taskId", taskId), lifecycle))
         mutable.update { if (it.selected == selection) it.copy(tasks = if (it.tasks.any { old -> old.taskId == taskId }) it.tasks.map { old -> if (old.taskId == taskId) task else old } else it.tasks + task) else it }
     }
+    /** Stops a task: at once while it is queued or waiting, at the worker's next check while the Bot is working. A task that has already ended stays as it is. */
+    fun cancelTask(taskId: String) = launchOperation {
+        try { execute("cancelTask", JSONObject().put("taskId", taskId), lifecycle) }
+        catch (error: TeamMessageFailure) { if (error.code != "TASK_FINISHED") throw error }
+        refreshTask(taskId)
+    }
+    /** Approves or declines the list change a task waits on. [ids] are made once per decision by the caller: sending them again repeats the same command. */
+    fun decideWait(waitId: String, taskId: String, approve: Boolean, ids: TeamDecisionIds) = launchOperation {
+        val payload = JSONObject().put("conversationId", mutable.value.selected).put("waitId", waitId).put("messageId", ids.messageId).put("changeId", ids.changeId).put("decision", if (approve) "approve" else "deny")
+        call(executionCommand("decideWait", payload, ids.commandId), lifecycle)
+        refreshTask(taskId)
+    }
     fun openArtifact(artifactId: String) = launchOperation {
         val selection = mutable.value.selected
         val artifact = TeamArtifact.parse(execute("readArtifact", JSONObject().put("artifactId", artifactId), lifecycle))
         mutable.update { if (it.selected == selection) it.copy(artifact = artifact) else it }
     }
     fun closeArtifact() { mutable.update { it.copy(artifact = null) } }
+    /** One revision of a document ([revision] null: the newest). Reading checks the current Team membership every time. */
+    suspend fun readArtifact(artifactId: String, revision: Long? = null): TeamArtifact = onModel {
+        TeamArtifact.parse(execute("readArtifact", JSONObject().put("artifactId", artifactId).apply { if (revision != null) put("revision", revision) }, lifecycle))
+    }
+    suspend fun listArtifactRevisions(artifactId: String): TeamArtifactRevisions = onModel { TeamArtifactRevisions.parse(execute("listArtifactRevisions", JSONObject().put("artifactId", artifactId), lifecycle)) }
+    /** Saves [draft] as the revision after [expectedRevision], or saves nothing. The same [operationId] sent again repeats the same request. */
+    suspend fun reviseArtifact(artifactId: String, expectedRevision: Long, operationId: String, draft: TeamDocumentDraft) {
+        onModel { execute("reviseArtifact", JSONObject().put("artifactId", artifactId).put("expectedRevision", expectedRevision).put("operationId", operationId).put("document", draft.json()), lifecycle) }
+    }
+    /** What a task did outside the Chat. Only its requester and the Bot's maintainer may ask. */
+    suspend fun listOperations(taskId: String): List<TeamTaskOperation> = onModel { TeamTaskOperation.list(execute("listOperations", JSONObject().put("taskId", taskId), lifecycle)) }
+    /** The maintainer states what happened to an action nobody could verify. The task is read again either way: a refusal often means it has moved. */
+    suspend fun resolveOperation(taskId: String, operationId: String, happened: Boolean) {
+        onModel {
+            try { execute("resolveOperation", JSONObject().put("taskId", taskId).put("operationId", operationId).put("resolution", if (happened) "succeeded" else "failed"), lifecycle) }
+            finally { refreshTask(taskId) }
+        }
+    }
+    /** A Bot's shared list as it is now. It is read on demand: the list is not part of the message stream. */
+    suspend fun readList(sharedBotId: String): TeamSharedList = onModel { TeamSharedList.parse(execute("readList", JSONObject().put("sharedBotId", sharedBotId), lifecycle)) }
+    /** Saves [changes] on top of [expectedDataRevision], or saves nothing. The same [operationId] sent again repeats the same request, so a save whose answer was lost is not applied twice. */
+    /** A page of the list's history, newest first; [beforeRevision] is the oldest revision of the page before. */
+    suspend fun listHistory(sharedBotId: String, beforeRevision: Long? = null): TeamSharedListHistory = onModel {
+        val payload = JSONObject().put("sharedBotId", sharedBotId); if (beforeRevision != null) payload.put("beforeRevision", beforeRevision)
+        TeamSharedListHistory.parse(execute("listHistory", payload, lifecycle))
+    }
+    suspend fun writeList(sharedBotId: String, operationId: String, expectedDataRevision: Long, changes: List<TeamSharedListChange>) {
+        onModel { execute("writeList", JSONObject().put("sharedBotId", sharedBotId).put("operationId", operationId).put("expectedDataRevision", expectedDataRevision).put("changes", changes.json()), lifecycle) }
+    }
+    /** Runs a caller's request where the model's own work runs, so it sees the same account, team and generation checks. */
+    private suspend fun <T> onModel(block: suspend () -> T): T =
+        kotlinx.coroutines.withContext(scope.coroutineContext[kotlin.coroutines.ContinuationInterceptor] ?: kotlin.coroutines.EmptyCoroutineContext) { block() }
     fun create(kind: String, title: String, parties: List<String>, id: String, sharedBotIds: List<String> = emptyList(), onSuccess: () -> Unit) = launchOperation {
         requireTeamBotSelections(sharedBotIds, mutable.value.bots)
         if ((kind == "bot_dm" && sharedBotIds.size != 1) || (kind == "dm" && sharedBotIds.isNotEmpty())) throw TeamMessageFailure("BOT_SELECTION_STALE")
@@ -304,12 +354,27 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         commit(lifecycle) { if (it.creation != null) throw TeamMessageFailure("CREATION_PENDING"); it.copy(creation = intent) }
         select(id); onSuccess()
     }
-    fun queue(operation: String, text: String, messageId: String? = null, replyTo: String? = null, targets: List<String> = emptyList(), onSuccess: () -> Unit = {}) {
+    /**
+     * [waitId] makes a new message the answer to a Bot's question: it is sent as `answerWait`, asks no Bot and starts no task.
+     * [files]: checked uploads of [conversationId] that a new message carries; it may then have no text and ask no Bot. A message with
+     * files is only ever queued for the conversation they were uploaded for.
+     */
+    fun queue(operation: String, text: String, messageId: String? = null, replyTo: String? = null, targets: List<String> = emptyList(), waitId: String? = null,
+              files: List<TeamDraftFile> = emptyList(), conversationId: String? = null, onSuccess: () -> Unit = {}) {
         if (mutable.value.submitting) return
         mutable.update { it.copy(submitting = true) }; val life = lifecycle
         launchOperation {
             try {
-                if (!active || mutable.value.revoked || mutable.value.selected.isEmpty() || (operation != "recall" && (text.isBlank() || text.toByteArray(Charsets.UTF_8).size > 8192))) throw TeamMessageFailure("INVALID_INPUT")
+                val carries = operation == "create" && waitId == null && files.isNotEmpty()
+                if (files.isNotEmpty() && (!carries || files.size > TeamAttachments.MESSAGE_FILES || files.any { it.state != TeamDraftFile.State.Ready } || conversationId != mutable.value.selected)) throw TeamMessageFailure("INVALID_INPUT")
+                if (!active || mutable.value.revoked || mutable.value.selected.isEmpty() || (operation != "recall" && ((text.isBlank() && !carries) || text.toByteArray(Charsets.UTF_8).size > 8192))) throw TeamMessageFailure("INVALID_INPUT")
+                if (waitId != null) {
+                    if (operation != "create") throw TeamMessageFailure("INVALID_INPUT")
+                    val changeId = UUID.randomUUID().toString()
+                    val payload = JSONObject().put("conversationId", mutable.value.selected).put("waitId", waitId).put("messageId", UUID.randomUUID().toString()).put("changeId", changeId).put("text", text)
+                    commit(life) { it.copy(outbox = it.outbox + executionCommand("answerWait", payload, changeId)) }; onSuccess(); refresh()
+                    return@launchOperation
+                }
                 val targetsForSubmit = if (operation == "create") {
                     val conversation = mutable.value.cache?.conversations?.find { it.id == mutable.value.selected } ?: throw TeamMessageFailure("CONVERSATION_REQUIRED")
                     if (conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1) throw TeamMessageFailure("BOT_SELECTION_STALE")
@@ -317,12 +382,14 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                     requireTeamBotSelections(selected, mutable.value.bots, conversation.participants)
                     selected
                 } else emptyList()
-                val intent = JSONObject().put("action", "mutate").put("teamId", teamId).put("generation", generation).put("conversationId", mutable.value.selected).put("messageId", messageId ?: UUID.randomUUID().toString()).put("changeId", UUID.randomUUID().toString()).put("operation", operation).put("text", text)
+                val said = if (carries && text.isBlank()) "" else text
+                val intent = JSONObject().put("action", "mutate").put("teamId", teamId).put("generation", generation).put("conversationId", mutable.value.selected).put("messageId", messageId ?: UUID.randomUUID().toString()).put("changeId", UUID.randomUUID().toString()).put("operation", operation).put("text", said)
                 replyTo?.let { intent.put("replyTo", it) }
-                val command = if (targetsForSubmit.isNotEmpty()) {
-                    val payload = JSONObject().put("conversationId", intent.getString("conversationId")).put("messageId", intent.getString("messageId")).put("changeId", intent.getString("changeId")).put("text", text).put("targets", JSONArray(targetsForSubmit.distinct().sorted()))
+                val command = if (targetsForSubmit.isNotEmpty() || carries) {
+                    val payload = JSONObject().put("conversationId", intent.getString("conversationId")).put("messageId", intent.getString("messageId")).put("changeId", intent.getString("changeId")).put("text", said).put("targets", JSONArray(targetsForSubmit.distinct().sorted()))
                     replyTo?.let { payload.put("replyTo", it) }
-                    executionCommand("submit", payload, intent.getString("changeId"))
+                    if (carries) payload.put("attachments", JSONArray(files.map { it.uploadId }))
+                    executionCommand("submit", payload, intent.getString("changeId")).also { if (carries) it.put("attachmentNames", JSONArray(files.map { file -> file.name })) }
                 } else intent
                 commit(life) { it.copy(outbox = it.outbox + command) }; onSuccess(); refresh()
             } finally { if (life == lifecycle) mutable.update { it.copy(submitting = false) } }
@@ -338,7 +405,12 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         if (!intent.has("error") || intent.optLong("leaseUntil") > System.currentTimeMillis()) throw TeamMessageFailure("MESSAGE_IN_FLIGHT")
         cache.copy(commands = cache.commands.filter { it.getString("commandId") != commandId })
     }; refresh() }
-    fun discard(id: String) = launchOperation { commit(lifecycle) { if (it.outbox.any { value -> (value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) == id && ((value.optBoolean("attempted") && !value.has("error")) || value.optLong("leaseUntil") > System.currentTimeMillis()) }) throw TeamMessageFailure("MESSAGE_IN_FLIGHT"); it.copy(outbox = it.outbox.filter { value -> (value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) != id }) } }
+    fun discard(id: String) = launchOperation {
+        // The files of a message that was refused are no message's: they are given up, so they stop counting against the sender.
+        val files = mutable.value.cache?.outbox?.firstOrNull { value -> value.has("error") && value.optJSONObject("payload")?.optString("changeId") == id }?.optJSONObject("payload")?.optJSONArray("attachments")?.strings() ?: emptyList()
+        commit(lifecycle) { if (it.outbox.any { value -> (value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) == id && ((value.optBoolean("attempted") && !value.has("error")) || value.optLong("leaseUntil") > System.currentTimeMillis()) }) throw TeamMessageFailure("MESSAGE_IN_FLIGHT"); it.copy(outbox = it.outbox.filter { value -> (value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) != id }) }
+        for (uploadId in files) cancelUpload(uploadId)
+    }
     fun discardCreation() = launchOperation { commit(lifecycle) { if ((it.creation?.optBoolean("attempted") == true && !it.creation.has("error")) || (it.creation?.optLong("leaseUntil") ?: 0) > System.currentTimeMillis()) throw TeamMessageFailure("MESSAGE_IN_FLIGHT"); it.copy(creation = null) } }
     /** HTTP `read`: the list action sends the row's `lastSeq`, automatic mark-read the newest rendered `seq`. */
     fun markRead(conversationId: String, seq: Long) = launchOperation {
@@ -358,14 +430,76 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         if (!active) return
         val cache = mutable.value.cache ?: return
         val pending = (cache.outbox + cache.commands + listOfNotNull(cache.creation)).filter { !it.has("error") }
-        val earliest = (pending.map { it.optLong("leaseUntil") } + if (mutable.value.tasks.any { !it.terminal }) listOf(System.currentTimeMillis() + 3000) else emptyList()).minOrNull() ?: return
+        val earliest = (pending.map { it.optLong("leaseUntil") } + if (mutable.value.tasks.any { it.busy }) listOf(System.currentTimeMillis() + 3000) else emptyList()).minOrNull() ?: return
         val wait = maxOf(retryDelay, earliest - System.currentTimeMillis()); retryDelay = minOf(30000L, retryDelay * 2)
         retry = scope.launch { delay(wait); refresh() }
     }
     private fun executionCommand(action: String, payload: JSONObject, commandId: String = UUID.randomUUID().toString()) =
         JSONObject().put("schemaVersion", 1).put("commandId", commandId).put("teamId", teamId).put("generation", generation).put("action", action).put("payload", payload)
+    // --- files -------------------------------------------------------------------------------------
+
+    /**
+     * Uploads one file for one conversation and has it checked (Desktop `uploadAttachment`). Each step has its own stable command id, so a
+     * step repeated after a lost answer is the same step. Throws the service's code when the file is refused (`UPLOAD_TYPE_MISMATCH`,
+     * `UPLOAD_DIGEST_MISMATCH`, `UPLOAD_QUOTA_EXCEEDED`, …) and `INVALID_SESSION` when this team was closed or the account changed
+     * meanwhile: nothing more is sent then.
+     */
+    suspend fun upload(conversationId: String, uploadId: String, name: String, mime: String, bytes: ByteArray, onProgress: (Int) -> Unit) = onModel {
+        val life = lifecycle
+        val digest = withContext(Dispatchers.Default) { TeamAttachments.sha256Hex(bytes) }
+        val created = insist { call(executionCommand("createUpload", JSONObject().put("conversationId", conversationId).put("uploadId", uploadId).put("name", name).put("mime", mime).put("byteLength", bytes.size).put("sha256", digest), "${uploadId}_c"), life) }
+        if (created.optString("state") == "verified") { onProgress(bytes.size); return@onModel }
+        val parts = created.optInt("parts"); val partBytes = created.optInt("partBytes")
+        if (created.optString("state") != "uploading" || partBytes <= 0 || parts <= 0) throw TeamMessageFailure(created.optString("code").ifEmpty { "UPLOAD_FAILED" })
+        for (index in 0 until parts) {
+            val from = index.toLong() * partBytes
+            if (from >= bytes.size) throw TeamMessageFailure("UPLOAD_FAILED")
+            val until = minOf(bytes.size.toLong(), from + partBytes).toInt()
+            val data = withContext(Dispatchers.Default) { java.util.Base64.getEncoder().encodeToString(bytes.copyOfRange(from.toInt(), until)) }
+            insist { call(executionCommand("putUploadPart", JSONObject().put("uploadId", uploadId).put("index", index).put("data", data), "${uploadId}_p$index"), life, 90) }
+            onProgress(until)
+        }
+        val checked = insist { call(executionCommand("finalizeUpload", JSONObject().put("uploadId", uploadId), "${uploadId}_f"), life, 60) }
+        if (checked.optString("state") != "verified") throw TeamMessageFailure(checked.optString("code").ifEmpty { "UPLOAD_FAILED" })
+    }
+    /** Gives up a file that no message carries. Best effort: one that is not given up here ends by itself after a day. */
+    suspend fun cancelUpload(uploadId: String) {
+        try { onModel { execute("cancelUpload", JSONObject().put("uploadId", uploadId), lifecycle) } }
+        catch (error: CancellationException) { throw error } catch (_: Exception) { }
+    }
+    /**
+     * A file of a message, whole and checked against what the message says it is. Asked of the service every time and kept nowhere:
+     * only someone who reads that conversation now is answered.
+     */
+    suspend fun download(file: TeamMessageAttachment): ByteArray = onModel {
+        val life = lifecycle
+        suspend fun read(index: Int) = call(executionCommand("readAttachmentPart", JSONObject().put("attachmentId", file.attachmentId).put("index", index)), life, 90)
+        val first = read(0)
+        val parts = mutableListOf(first.getString("data"))
+        for (index in 1 until first.getInt("parts")) parts += read(index).getString("data")
+        withContext(Dispatchers.Default) { TeamAttachments.assemble(parts, file) }
+    }
+    /** The sender takes a file of their message back: its bytes are deleted and the message says so. */
+    suspend fun revokeAttachment(attachmentId: String) {
+        onModel { execute("revokeAttachment", JSONObject().put("attachmentId", attachmentId).put("changeId", UUID.randomUUID().toString()), lifecycle) }
+    }
+    /** A step of an upload: tried again, a little later each time, unless the answer will not change by asking again. */
+    private suspend fun insist(step: suspend () -> JSONObject): JSONObject {
+        var attempt = 0
+        while (true) {
+            try { return step() }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (attempt >= 3 || TeamAttachments.isFinal((error as? TeamMessageFailure)?.code.orEmpty())) throw error
+                delay(uploadRetryMs shl attempt); attempt++
+            }
+        }
+    }
+    /** The first pause before a step of an upload is tried again; a test shortens it. */
+    internal var uploadRetryMs = 500L
+
     private suspend fun execute(action: String, payload: JSONObject, life: Long) = call(executionCommand(action, payload), life)
-    private suspend fun call(input: JSONObject, life: Long): JSONObject {
+    private suspend fun call(input: JSONObject, life: Long, seconds: Long = 20): JSONObject {
         val owner = uid
         val user = auth.currentUser
         if (!active || life != lifecycle || user?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
@@ -373,7 +507,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         if (!active || life != lifecycle || auth.currentUser?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
         val body = JSONObject(input.toString()).put("teamId", teamId).put("generation", generation)
         if (body.has("schemaVersion")) TeamExecutionContract.validate(body)
-        val result = TeamHttp.request("$apiRoot/v1/teams/messages", token, body)
+        val result = TeamHttp.request("$apiRoot/v1/teams/messages", token, body, seconds)
         if (!active || life != lifecycle || auth.currentUser?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
         return result
     }

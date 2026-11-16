@@ -329,19 +329,20 @@ fun AIText(
     markdown: String,
     modifier: Modifier = Modifier,
     onOpenLink: (String) -> Unit = {},
+    compact: Boolean = false,
 ) {
     val blocks = remember(markdown) { parseMarkdownBlocks(markdown) }
     Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        blocks.forEach { block -> MdBlockView(block, onOpenLink) }
+        blocks.forEach { block -> MdBlockView(block, onOpenLink, compact) }
     }
 }
 
 /** Render one [MdBlock]. */
 @Composable
-private fun MdBlockView(block: MdBlock, onOpenLink: (String) -> Unit) {
+private fun MdBlockView(block: MdBlock, onOpenLink: (String) -> Unit, compact: Boolean) {
     val t = LingXiTheme.palette
     when (block) {
         is MdBlock.Paragraph -> {
@@ -350,8 +351,8 @@ private fun MdBlockView(block: MdBlock, onOpenLink: (String) -> Unit) {
                 text = text,
                 style = androidx.compose.ui.text.TextStyle(
                     color = t.text,
-                    fontSize = 14.sp,
-                    lineHeight = 23.1.sp,
+                    fontSize = if (compact) 13.sp else 14.sp,
+                    lineHeight = if (compact) 21.sp else 23.1.sp,
                 ),
                 onClick = { offset ->
                     text.getStringAnnotations("url", offset, offset)
@@ -365,7 +366,7 @@ private fun MdBlockView(block: MdBlock, onOpenLink: (String) -> Unit) {
         is MdBlock.Heading -> Text(
             inlineSpans(block.spans, t.surfaceHover, t.text2, t.accent),
             color = t.text, fontWeight = FontWeight.SemiBold,
-            fontSize = when (block.level) { 1 -> 25.sp; 2 -> 21.sp; else -> 18.sp },
+            fontSize = if (compact) 13.sp else when (block.level) { 1 -> 25.sp; 2 -> 21.sp; else -> 18.sp },
             modifier = Modifier.padding(top = 8.dp, bottom = 3.dp),
         )
         is MdBlock.Quote -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {

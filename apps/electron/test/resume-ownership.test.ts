@@ -32,19 +32,20 @@ async function expired(promise: Promise<void>) {
   await Promise.all([assert.rejects(promise, /timed out resuming/), new Promise((done) => setTimeout(done, 40))]);
 }
 
-test('a timed-out resume credential completion cannot resolve its next unconfirmed resume', async (t) => {
+test('prior background credentials cannot confirm the next resume after its owner times out', async (t) => {
   const credential = deferred<string | undefined>();
   const runtime = new SessionRuntime({ ...ref, expectedSessionMode: ref.mode, sessionResumeTimeoutMs: 20,
     launchConfig: () => ({ workspace: ref.projectPath, trusted: true }), resolveProviderAccounts: async () => { await credential.promise; return undefined; } });
   t.after(() => runtime.dispose());
   const client = wire(runtime);
+  const hydration = runtime.refreshProviderAccounts();
   const first = runtime.resumeOwnedSession();
-  resumeProof(client);
   await expired(first);
   let settled = false;
   const second = runtime.resumeOwnedSession().then(() => { settled = true; });
   const pending = (runtime as any).pendingSessionResume;
   credential.resolve(undefined);
+  await hydration;
   await new Promise((done) => setImmediate(done));
   assert.equal(settled, false);
   assert.strictEqual((runtime as any).pendingSessionResume, pending);
@@ -57,7 +58,9 @@ test('a prior restart broker load cannot reject a newer generation resume', asyn
   const credential = deferred<string | undefined>();
   const manager = new SessionRuntimeManager({ sessionResumeTimeoutMs: 20,
     launchConfig: (owned) => ({ workspace: owned.projectPath, sessionId: owned.sessionId, trusted: true }),
-    resolveProviderAccounts: async () => { await credential.promise; return undefined; } });
+    resolveProviderAccounts: async () => { await credential.promise; return {
+      providerAccounts: { storeScope: 'fixture', configRevision: 0, accounts: [], health: [] }, providerAccountCredentials: {},
+    }; } });
   t.after(() => manager.dispose());
   const runtime = await manager.ensure(ref, false);
   const internal = runtime as any;
@@ -68,19 +71,20 @@ test('a prior restart broker load cannot reject a newer generation resume', asyn
   const resumeSignals: AbortSignal[] = [];
   let launches = 0;
   let secondClient: ReturnType<typeof wire> | undefined;
+  let priorHydrationRejected: Promise<void> | undefined;
   const secondSent = deferred<void>();
   internal.startInternal = async () => {
     ++internal.generation;
     const client = wire(runtime);
     launches++;
+    if (launches === 1) priorHydrationRejected = assert.rejects(runtime.refreshProviderAccounts(), /interrupted/);
     Object.assign(client, {
       resumeSessionFromTranscript: async (sessionId: string, selectedPath: string, mode: string, signal: AbortSignal) => {
         assert.equal(sessionId, ref.sessionId);
         assert.equal(selectedPath, transcriptPath);
         assert.equal(mode, ref.mode);
         resumeSignals.push(signal);
-        if (launches === 1) resumeProof(client);
-        else { secondClient = client; secondSent.resolve(); }
+        if (launches !== 1) { secondClient = client; secondSent.resolve(); }
       },
     });
   };
@@ -93,6 +97,7 @@ test('a prior restart broker load cannot reject a newer generation resume', asyn
   assert.equal(resumeSignals.length, 2);
   assert.equal(resumeSignals[1].aborted, false);
   credential.resolve(undefined);
+  await priorHydrationRejected;
   await new Promise((done) => setImmediate(done));
   assert.equal(settled, false);
   assert.strictEqual(internal.pendingSessionResume, pending);

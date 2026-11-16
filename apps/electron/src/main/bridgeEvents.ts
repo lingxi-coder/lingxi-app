@@ -86,6 +86,7 @@ export const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'usage_update',
   'status_snapshot',
   'compaction_status',
+  'compaction_completed',
   'error',
   'message_identity',
   'message_retracted',
@@ -108,14 +109,14 @@ export const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
 /**
  * Whether the renderer shows a slash command as a user row when it is
  * submitted (`slashCommandEchoesRequest` in `renderer/bridge/conversation.ts`
- * is the rule; a test keeps the two in step): `/compact`, `/goal`, `/fusion`,
+ * is the rule; a test keeps the two in step): `/goal`, `/fusion`,
  * and `/plan` with a request.
  */
 export function slashRequestEchoes(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed) return false;
   const name = trimmed.split(/\s/, 1)[0]?.toLowerCase() ?? '';
-  if (name === '/compact' || name === '/goal' || name === '/fusion') return true;
+  if (name === '/goal' || name === '/fusion') return true;
   if (name !== '/plan') return false;
   const request = trimmed.slice(name.length).trim();
   return request.length > 0 && request !== 'open' && request !== 'share';

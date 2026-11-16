@@ -50,6 +50,9 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -71,9 +74,8 @@ import kotlinx.coroutines.sync.withLock
  * `SendPrompt`; main slash commands use `RunSlashCommand` so display results
  * and prompt-expanding commands retain the host's command lifecycle.
  *
- * NOTE: this type touches the UniFFI bindings + Android `Context`, so it is NOT
- * exercised by JVM unit tests. The pure [clientEventToReply] mapper carries the
- * mapping coverage; this wiring is covered by the on-device integration build.
+ * JVM tests exercise this adapter with typed native-handle doubles. Actual JNI,
+ * Android service and device integration still require the Android build.
  */
 internal fun ConversationSource.bindAudioOwner(owner: com.lingxi.code.voice.audio.AudioOwnerKey) {
     when (this) {
@@ -115,6 +117,19 @@ internal fun ConversationSource.releaseAuthoringSelection() {
     }
 }
 
+internal suspend fun queryQueuedAdmissions(handle: MobileEngineHandle, session: String, ids: List<Long>): List<QueuedTurnAdmission> =
+    handle.queryTurnAdmissions(session, ids.map(Long::toULong)).map {
+        QueuedTurnAdmission(it.turnId.toLong(), it.admitted, it.queued, it.settled, it.executorActive, it.recovery)
+    }
+
+internal class HeadlessSnapshotCapture(val sessionId: String) {
+    val replies = kotlinx.coroutines.flow.MutableSharedFlow<ClientEvent>(replay = 1)
+    fun accept(event: ClientEvent) {
+        if (event is ClientEvent.SessionAgentTranscript && event.agentId == "main" &&
+            canonicalSessionId(event.sessionId) == sessionId) replies.tryEmit(event)
+    }
+}
+
 class EngineConversationSource internal constructor(
     private val handle: MobileEngineHandle,
     private val mediaHost: AndroidNativeMediaHost,
@@ -142,6 +157,9 @@ class EngineConversationSource internal constructor(
     private val pendingAuthoringAdmission: com.lingxi.code.project.PendingAuthoringAdmission? = null,
     internal val authoringSourceIdentity: com.lingxi.code.project.AuthoringSourceIdentity? = null,
     private val authoringSessionBoundary: AuthoringSessionBoundary? = null,
+    private val queuedTurns: QueuedConversationTurns = QueuedConversationTurns(durableTurns,
+        { activeSession.value?.sessionId }, { session, ids -> queryQueuedAdmissions(handle, session, ids) }),
+    private val snapshotCapture: java.util.concurrent.atomic.AtomicReference<HeadlessSnapshotCapture?> = java.util.concurrent.atomic.AtomicReference(null),
 ) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource, DurableTranscriptSource, NativePromptReceiptSource {
     private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
     private val coldAuthoringRecovery = MutableStateFlow(ColdAuthoringRecoveryState.NotNeeded)
@@ -250,6 +268,45 @@ class EngineConversationSource internal constructor(
     private val durableAttachMutex = Mutex()
     private val durableAttachCoordinator = DurableAttachCoordinator()
     private val retainedUiTranscript = RetainedConversationTranscriptStore()
+    @Volatile private var headlessUiSnapshotRequested = false
+    private val headlessSnapshotMutex = Mutex()
+
+    internal fun requestHeadlessUiSnapshot() {
+        // A retained UI projection can belong to A while headless execution has
+        // already completed A and B. It cannot suppress this display refresh.
+        headlessUiSnapshotRequested = true
+    }
+
+    override suspend fun prepareHeadlessUiActivation(activation: ActivatedSession, onOwner: (Long, Boolean) -> Unit): ActivatedSession =
+        run {
+            if (!headlessUiSnapshotRequested) return@run activation
+            val selection = queuedTurns.recover(activation.sessionId)
+            selection.record?.let { onOwner(it.turnId, selection.executorActive || (!it.queuedOwner && !resumeOnUiAttach)) }
+            val fresh = captureUiSnapshot(activation)
+            check(activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(activation.sessionId)) { "Conversation changed during headless UI refresh" }
+            fresh.copy(transcriptComplete = selection.record == null)
+        }
+
+    override fun confirmHeadlessUiActivation(activation: ActivatedSession) {
+        if (activeSession.value?.sessionId?.let(::canonicalSessionId) == canonicalSessionId(activation.sessionId)) {
+            headlessUiSnapshotRequested = false
+        }
+    }
+
+    override suspend fun snapshotForQueuedHandoff(): List<Message>? = headlessSnapshotMutex.withLock {
+        activeSession.value
+    }?.let { captureUiSnapshot(it).transcript }
+
+    private suspend fun captureUiSnapshot(activation: ActivatedSession): ActivatedSession = eventScope.async {
+        headlessSnapshotMutex.withLock {
+            val capture = HeadlessSnapshotCapture(canonicalSessionId(activation.sessionId))
+            check(snapshotCapture.compareAndSet(null, capture))
+            try {
+                refreshHeadlessConversationSnapshot(activation.copy(kind = SessionActivationKind.Resumed, retainedProjection = null),
+                    capture.replies, { command -> withContext(NonCancellable) { handle.submit(command) } }, strings)
+            } finally { snapshotCapture.compareAndSet(capture, null) }
+        }
+    }.await()
 
     internal fun ownsDurableTurn(sessionId: String, turnId: Long, generation: String): Boolean {
         val record = durableTurns.load() ?: return false
@@ -281,18 +338,23 @@ class EngineConversationSource internal constructor(
         if (headlessRecoveryJob?.isActive != true) {
             headlessRecoveryJob = eventScope.launch {
                 combine(activeSession, headlessRecoveryWake) { activated, _ -> activated }.collect { activated ->
-                    val record = durableTurns.load() ?: return@collect
-                    if (
-                        activated != null &&
-                        canonicalSessionId(activated.sessionId) == canonicalSessionId(record.sessionId)
-                    ) {
-                        try {
-                            attachAndResume(record, forceAttach = false)
-                        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                            throw cancelled
-                        } catch (failure: Exception) {
-                            android.util.Log.w("ConversationRecovery", "Headless attach failed; it can be retried", failure)
+                    if (activated == null) return@collect
+                    try {
+                        val selection = queuedTurns.recover(activated.sessionId)
+                        selection.record?.takeIf { it.queuedOwner }?.let { ConversationServiceOwners.adoptQueuedExecutor(
+                            recoverySpec, it.sessionId, it.turnId, selection.executorActive) }
+                        queuedTurns.rejectionNotice(selection)?.let(eventRelay::offer)
+                        val record = selection.record ?: run {
+                            selection.repairPendingId?.let { handle.submit(ClientCommand.ResumeTurn(it.toULong())) }
+                            return@collect
                         }
+                        if (canonicalSessionId(activated.sessionId) == canonicalSessionId(record.sessionId)) {
+                            attachAndResume(record, forceAttach = false, knownLiveExecutor = selection.executorActive)
+                        }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        android.util.Log.w("ConversationRecovery", "Headless attach failed; it can be retried", failure)
                     }
                 }
             }
@@ -324,6 +386,46 @@ class EngineConversationSource internal constructor(
     override val clientEvents: Flow<ClientEvent> = events
     override val workflowProgress: Flow<WorkflowProgressUpdate> = workflowEvents
 
+    override fun queuedExecutorFor(event: ClientEvent): Long? = queuedTurns.executorFor(event)
+    internal fun queuedOwnerFor(event: ClientEvent): Long? = queuedTurns.ownerFor(event)
+    override fun queuedRecoveryOwnerFor(event: ClientEvent): Long? = queuedTurns.ownerFor(event)
+    override fun queuedProjectionSessionFor(event: ClientEvent): String? = queuedTurns.sessionFor(event)
+    override fun rawProjectionOwnerFor(event: ClientEvent): Long? = queuedTurns.rawOwnerFor(event)
+    override fun isDurableAttachSnapshot(event: ClientEvent): Boolean = queuedTurns.isAttachSnapshot(event)
+    override fun requiresQueuedTranscriptRepair(event: ClientEvent): Boolean = queuedTurns.requiresTranscriptRepair(event)
+    internal fun isQueuedRejection(event: ClientEvent): Boolean = queuedTurns.isRejection(event)
+    override fun hasQueuedTurnRecovery(): Boolean = queuedTurns.blocksNewTurn()
+
+    override suspend fun submitQueuedPrompt(command: ClientCommand.SendPrompt, ownerTurnId: Long,
+                                           tryBeginNative: () -> Boolean, onNotAdmitted: () -> Unit) {
+        check(turnAdmissionReady) { "Authoring binding is not ready" }
+        try {
+            queuedTurns.submit(command, ownerTurnId, tryBeginNative, onNotAdmitted) { handle.submit(command) }
+        } finally {
+            eventScope.launch { repairQueuedDelivery() }
+        }
+    }
+
+    private val queuedRepairMutex = Mutex()
+    private suspend fun repairQueuedDelivery() = queuedRepairMutex.withLock {
+        val session = activeSession.value?.sessionId ?: return@withLock
+        if (!queuedTurns.blocksNewTurn()) return@withLock
+        repeat(3) { attempt ->
+            try {
+                val selection = queuedTurns.recover(session)
+                queuedTurns.rejectionNotice(selection)?.let(eventRelay::offer)
+                val pending = selection.repairPendingId ?: return@withLock
+                handle.submit(ClientCommand.ResumeTurn(pending.toULong()))
+                return@withLock
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (attempt < 2) kotlinx.coroutines.delay(100)
+                else eventRelay.offer(ClientEvent.SystemNotice("The queued prompt delivery remains unconfirmed. Reopen the conversation to retry recovery.".toClientTextDto(), true))
+            }
+        }
+    }
+
     override suspend fun submitClientCommand(command: ClientCommand) {
         check(authoringSessionBoundary == null || (command !is ClientCommand.NewSession && command !is ClientCommand.ResumeSession &&
             command !is ClientCommand.ForkSession && command !== ClientCommand.ClearSession)) {
@@ -332,7 +434,9 @@ class EngineConversationSource internal constructor(
         check(turnAdmissionReady || maySubmitWhileAuthoringPending(command)) {
             "Authoring binding is not ready"
         }
-        handle.submit(command)
+        if (command is ClientCommand.LoadSessionAgentTranscript && command.agentId == "main") {
+            eventScope.async { headlessSnapshotMutex.withLock { withContext(NonCancellable) { handle.submit(command) } } }.await()
+        } else handle.submit(command)
     }
 
     override suspend fun providerAccountsSnapshot(): String = handle.providerAccountsSnapshot()
@@ -347,14 +451,18 @@ class EngineConversationSource internal constructor(
 
     override suspend fun attachDurableTurnForUi(afterSequence: Long) {
         val activeId = activeSession.value?.sessionId ?: return
-        val record = durableTurns.load()?.takeIf { canonicalSessionId(it.sessionId) == canonicalSessionId(activeId) }
+        val selection = queuedTurns.recover(activeId)
+        selection.record?.takeIf { it.queuedOwner }?.let { ConversationServiceOwners.adoptQueuedExecutor(
+            recoverySpec, it.sessionId, it.turnId, selection.executorActive) }
+        queuedTurns.rejectionNotice(selection)?.let(eventRelay::offer)
+        val record = selection.record?.takeIf { canonicalSessionId(it.sessionId) == canonicalSessionId(activeId) }
             ?: retainedUiTranscript.turnRecord(recoverySpec.scopeKey, activeId)
-            ?: return
+            ?: run { selection.repairPendingId?.let { handle.submit(ClientCommand.ResumeTurn(it.toULong())) }; return }
         if (
             activeSession.value?.let { canonicalSessionId(it.sessionId) } ==
                 canonicalSessionId(record.sessionId)
         ) {
-            attachAndResume(record, forceAttach = true, afterSequence = afterSequence)
+            attachAndResume(record, forceAttach = true, afterSequence = afterSequence, knownLiveExecutor = selection.executorActive)
         }
     }
 
@@ -362,6 +470,7 @@ class EngineConversationSource internal constructor(
         record: DurableConversationTurnRecord,
         forceAttach: Boolean,
         afterSequence: Long = 0L,
+        knownLiveExecutor: Boolean = false,
     ) {
         pendingAuthoringAdmission?.awaitReady()
         durableAttachMutex.withLock {
@@ -386,6 +495,7 @@ class EngineConversationSource internal constructor(
                 afterSequence = request.afterSequence,
             )
             try {
+                queuedTurns.beginAttach(latest.turnId)
                 handle.submit(
                     ClientCommand.AttachTurn(
                         turnId = latest.turnId.toULong(),
@@ -397,16 +507,38 @@ class EngineConversationSource internal constructor(
                 durableAttachCoordinator.rollback(request, owner)
                 ConversationHeadlessRecovery.markDurableAttachFailed(recoverySpec.ownerKey, this)
                 throw DurableAttachFailure(latest.turnId, "attach", error)
+            } finally {
+                queuedTurns.endAttach(latest.turnId)
+            }
+            if (latest.queuedOwner) {
+                val current = queryQueuedAdmissions(handle, latest.sessionId, listOf(latest.turnId)).single()
+                if (current.settled && current.recovery != null) {
+                    // No Resume of a historical owner while its successor runs.
+                    eventRelay.offer(ClientEvent.TurnRecoveryState(current.recovery))
+                    return@withLock
+                }
+                if (current.executorActive) {
+                    ConversationHeadlessRecovery.markDurableExecutorActive(recoverySpec.ownerKey, this)
+                    return@withLock
+                }
             }
             // Cold-process recovery needs ResumeTurn. A UI takeover resumes only
             // when the process coordinator reports that no headless/UI executor is
             // already attached to this source; retained-live sources only Attach.
-            val needsResume = if (forceAttach) shouldResumeDurableTurn(true, resumeForThisAttach)
+            val needsResume = if (latest.queuedOwner) true else !knownLiveExecutor &&
+                if (forceAttach) shouldResumeDurableTurn(true, resumeForThisAttach)
                 else !ConversationHeadlessRecovery.hasLiveExecutor(recoverySpec.ownerKey, this)
             if (needsResume) {
                 try {
                     handle.submit(ClientCommand.ResumeTurn(latest.turnId.toULong()))
                 } catch (error: Throwable) {
+                    // The watcher can acquire this exact queued owner after
+                    // the read-only proof but before Resume reaches native.
+                    if (latest.queuedOwner && runCatching { queuedTurns.recover(latest.sessionId) }.getOrNull()
+                            ?.let { it.executorActive && it.record?.turnId == latest.turnId } == true) {
+                        ConversationHeadlessRecovery.markDurableExecutorActive(recoverySpec.ownerKey, this)
+                        return@withLock
+                    }
                     durableReplayGate.cancelAttach(latest.turnId)
                     durableAttachCoordinator.rollback(request, owner)
                     ConversationHeadlessRecovery.markDurableAttachFailed(recoverySpec.ownerKey, this)
@@ -498,6 +630,7 @@ class EngineConversationSource internal constructor(
         check(authoringSessionBoundary == null || authoringSessionBoundary.permits(uuid)) { "Authoring source belongs to another session" }
         if (activeSession.value?.sessionId?.let(::canonicalSessionId) != canonicalSessionId(uuid)) {
             retainedUiTranscript.clear()
+            headlessUiSnapshotRequested = false
         }
         val record = durableTurns.load()
         if (record != null && canonicalSessionId(uuid) != canonicalSessionId(record.sessionId)) {
@@ -520,6 +653,7 @@ class EngineConversationSource internal constructor(
     override suspend fun newSession() {
         check(authoringSessionBoundary == null) { "A new authoring session needs its own source" }
         retainedUiTranscript.clear()
+        headlessUiSnapshotRequested = false
         durableTurns.clear()
         handle.submit(ClientCommand.NewSession(cwd = null, model = null, mode = initialRecoverySpec.sessionMode.toDto()))
     }
@@ -527,6 +661,7 @@ class EngineConversationSource internal constructor(
     override suspend fun newSession(cwd: String) {
         check(authoringSessionBoundary == null) { "A new authoring session needs its own source" }
         retainedUiTranscript.clear()
+        headlessUiSnapshotRequested = false
         durableTurns.clear()
         handle.submit(ClientCommand.NewSession(cwd = cwd, model = null, mode = initialRecoverySpec.sessionMode.toDto()))
     }
@@ -953,7 +1088,6 @@ class EngineConversationSource internal constructor(
             // suspend behind a slow collector without ever stalling Rust's event
             // callback or dropping assistant text / terminal events.
             val eventScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-            val eventRelay = LosslessEventRelay<ClientEvent>(eventScope)
             val workflowRelay = LosslessEventRelay<WorkflowProgressUpdate>(eventScope)
             // Resolves user-facing copy in the app's actual selected language
             // (via Context.getString, so it honors AppLanguageStore's locale
@@ -987,6 +1121,30 @@ class EngineConversationSource internal constructor(
             // The lifecycle event emitted by the engine confirms both the UUID
             // and immutable mode, together with the restored transcript.
             val activeSession = MutableStateFlow<ActivatedSession?>(null)
+            val engineReady = kotlinx.coroutines.CompletableDeferred<MobileEngineHandle>()
+            val sourceReady = kotlinx.coroutines.CompletableDeferred<EngineConversationSource>()
+            val snapshotCapture = java.util.concurrent.atomic.AtomicReference<HeadlessSnapshotCapture?>(null)
+            val queuedTurns = QueuedConversationTurns(durableTurns, { activeSession.value?.sessionId }) { session, ids ->
+                queryQueuedAdmissions(engineReady.await(), session, ids)
+            }
+            lateinit var eventRelay: LosslessEventRelay<ClientEvent>
+            eventRelay = LosslessEventRelay(eventScope) { event ->
+                try {
+                    val forward = queuedTurns.beforeEvent(event)
+                    queuedTurns.ownerFor(event)?.let { id -> activeSession.value?.sessionId?.let { session ->
+                        ConversationServiceOwners.adoptQueuedExecutor(recoverySpec, session, id, queuedTurns.executorFor(event) != null)
+                    } }
+                    if (event is ClientEvent.TurnStarted) permissionIngress.confirmTurnStarted()
+                    if (event is ClientEvent.SlashCommandResult) clearDurableSlashCommandCheckpoint(durableTurns, event)
+                    forward
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    eventRelay.offer(ClientEvent.SystemNotice(
+                        "The queued conversation ownership could not be verified. Reopen the conversation to retry recovery.".toClientTextDto(), true))
+                    false
+                }
+            }
             // The engine's REAL MCP listing (sibling of `models`). The listener
             // folds every inbound `McpServers` into this StateFlow; empty until a
             // `RefreshListings(Mcp)` reply lands (settings shows the mock list).
@@ -1035,6 +1193,8 @@ class EngineConversationSource internal constructor(
                 scenario = NativeEngineScenario.Interactive(
                     NativeEngineCallbacks(
                         onEvent = { event ->
+                            snapshotCapture.get()?.accept(event)
+                            queuedTurns.noteIncoming(event)
                             // The OUT-OF-BAND state paths: fold model catalog + session
                             // catalog + live-resume events into the StateFlows the picker /
                             // drawer / conversation observe, BEFORE forwarding to the
@@ -1048,6 +1208,9 @@ class EngineConversationSource internal constructor(
                                 val activation = sessionActivationFrom(event, strings)
                                 if (activation != null) authoringBoundary?.observe(activation.sessionId)
                                 activation ?: current
+                            }
+                            if (event is ClientEvent.SessionStarted || event is ClientEvent.SessionResumed) {
+                                activeSession.value?.sessionId?.let(durableTurns::selectSession)
                             }
                             when (event) {
                                 is ClientEvent.SessionStarted,
@@ -1102,25 +1265,10 @@ class EngineConversationSource internal constructor(
                                     repository.recordAudioProviderRegion(event.effectiveJson)
                                 }
                             }
-                            if (event is ClientEvent.TurnStarted) permissionIngress.confirmTurnStarted()
                             if (event is ClientEvent.PermissionRequestResolved) {
                                 permissionIngress.resolve(event.requestId)
                             }
-                            if (
-                                event is ClientEvent.TurnRecoveryState &&
-                                    event.snapshot.state in setOf(
-                                        TurnRecoveryStateDto.COMPLETED,
-                                        TurnRecoveryStateDto.FAILED,
-                                        TurnRecoveryStateDto.CANCELLED,
-                                    )
-                            ) {
-                                durableTurns.clear(
-                                    sessionId = event.snapshot.sessionId,
-                                    turnId = event.snapshot.turnId.toLong(),
-                                )
-                            }
                             if (event is ClientEvent.SlashCommandResult) {
-                                clearDurableSlashCommandCheckpoint(durableTurns, event)
                                 permissionIngress.endTurn()
                             }
                             if (event is ClientEvent.TurnEnded ||
@@ -1128,6 +1276,10 @@ class EngineConversationSource internal constructor(
                                 permissionIngress.endTurn()
                             }
                             durableReplayGate.forward(event, eventRelay::offer)
+                            if (event is ClientEvent.TurnRecoveryState && event.snapshot.state in setOf(
+                                TurnRecoveryStateDto.COMPLETED, TurnRecoveryStateDto.FAILED, TurnRecoveryStateDto.CANCELLED)) {
+                                eventScope.launch { sourceReady.await().repairQueuedDelivery() }
+                            }
                         },
                         onWorkflowProgress = { originSessionId, taskId, runId, progress ->
                             workflowRelay.offer(
@@ -1155,6 +1307,7 @@ class EngineConversationSource internal constructor(
                     context.getString(R.string.chat_engine_build_failed),
                 )
             }
+            engineReady.complete(handle)
             mediaContextEngine.set(handle)
             // Account management must remain available before an inference/audio route exists.
             kotlinx.coroutines.runBlocking { refreshMediaContext(handle) }
@@ -1257,7 +1410,10 @@ class EngineConversationSource internal constructor(
                 pendingAuthoringAdmission = effectiveAuthoringAdmission,
                 authoringSourceIdentity = authoringIdentity,
                 authoringSessionBoundary = authoringBoundary,
+                queuedTurns = queuedTurns,
+                snapshotCapture = snapshotCapture,
             )
+            sourceReady.complete(source)
             projectAdmission.recovery?.let { source.recoverAuthoringAfterNativeResume(context.applicationContext, it) }
             if (registerOnCreate) ConversationHeadlessRecovery.register(recoverySpec.ownerKey, source)
             return source

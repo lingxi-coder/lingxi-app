@@ -5,7 +5,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.isDialog
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -32,7 +32,7 @@ class LocalAppToolResultUiTest {
         val localized = context.getString(R.string.local_app_development_requires_code)
         rule.onAllNodesWithText(localized).assertCountEquals(1)
         rule.runOnIdle { expanded.value = true }
-        rule.onNode(hasText(localized) and hasAnyAncestor(isDialog())).assertIsDisplayed()
+        rule.onNode(hasText(localized) and hasAnyAncestor(hasTestTag("conversation.tool-detail.app-1"))).assertIsDisplayed()
         assertEquals(reason, call.display?.body)
     }
 }

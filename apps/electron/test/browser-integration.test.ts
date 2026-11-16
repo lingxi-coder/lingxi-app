@@ -1,14 +1,73 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BrowserIntegration, BROWSER_EXTENSION_ID, BROWSER_PROTOCOL, browserPermission } from '../src/main/browserIntegration.js';
 import type { ComputerDevicePolicy } from '../src/shared/computerSettings.js';
 import { keyDescription, permittedCdpMethod, permitsNavigation } from '../browser-extension/policy.js';
+import { browserCatalog, browserSettingsPath } from '../src/shared/browserCatalog.js';
 
-const policy = (): ComputerDevicePolicy => ({ revision:'one',enabled:true,apps:[],browser:{ history:'ask',siteTools:true,fullCdp:false,defaultBrowsing:'ask',defaultDownloads:'ask',sites:[] } });
+const policy = (): ComputerDevicePolicy => ({ revision:'one',enabled:true,apps:[],browser:{ selectedBrowser:'chrome',history:'ask',siteTools:true,fullCdp:false,defaultBrowsing:'ask',defaultDownloads:'ask',sites:[] } });
+
+test('each supported browser registers its own host and reports the selected identity to the agent', async () => {
+  for (const browser of browserCatalog.filter(browser => browser.profileDirectory)) {
+    const root = mkdtempSync(join(tmpdir(), 'lingxi-browser-adapter-'));
+    const current = policy(); current.browser.selectedBrowser = browser.id;
+    const profiles = join(root, 'profiles');
+    const service = new BrowserIntegration({ policy: () => current, descriptorPath: join(root, 'connection.json'), nativeHostPath: join(root, 'native-host'), bridgeExecutable: process.execPath, extensionDirectory: fileURLToPath(new URL('../browser-extension', import.meta.url)), nativeMessagingRoot: profiles });
+    try {
+      const agent = await service.start();
+      await service.install();
+      for (const candidate of browserCatalog.filter(candidate => candidate.profileDirectory)) {
+        assert.equal(existsSync(join(profiles, candidate.profileDirectory!, 'NativeMessagingHosts/com.lingxi.browser.json')), candidate.id === browser.id, browser.name);
+      }
+      assert.equal(service.status().browserId, browser.id);
+      assert.equal(service.status().connected, false, 'registration is not a completed handshake');
+      const suffix = browser.id === 'chrome' ? '' : `.${browser.id}`;
+      const native = JSON.parse(readFileSync(join(root, `connection.json.native${suffix}`), 'utf8'));
+      const handshake = (browserId: string) => fetch(native.url + '/extension/message', { method: 'POST', headers: { authorization: `Bearer ${native.token}` }, body: JSON.stringify({ protocol: BROWSER_PROTOCOL, extensionId: BROWSER_EXTENSION_ID, peerId: 'adapter-peer', browserId, type: 'hello' }) });
+      assert.equal((await handshake(browser.id === 'chrome' ? 'edge' : 'chrome')).status, 400, 'another browser cannot satisfy this selection');
+      assert.equal(service.status().connected, false);
+      assert.equal((await handshake(browser.id)).status, 200);
+      assert.equal(service.status().connected, true);
+      const response = await fetch(agent.url + '/agent', { method: 'POST', headers: { authorization: `Bearer ${agent.token}` }, body: JSON.stringify({ sessionId: 'status-only', action: 'status' }) });
+      const { result } = await response.json() as any;
+      assert.deepEqual(result.browser, { id: browser.id, name: browser.name });
+      assert.equal(result.settingsPath, browserSettingsPath);
+      assert.deepEqual(result.supportedBrowsers.map((browser: any) => browser.id), ['chrome', 'edge', 'brave', 'chromium']);
+    } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test('a fresh policy requires a selection and never silently registers Chrome', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-browser-no-selection-'));
+  const current = policy(); current.browser.selectedBrowser = null;
+  const service = new BrowserIntegration({ policy: () => current, descriptorPath: join(root, 'connection.json'), nativeHostPath: join(root, 'native-host'), bridgeExecutable: process.execPath, extensionDirectory: fileURLToPath(new URL('../browser-extension', import.meta.url)), nativeMessagingRoot: join(root, 'profiles') });
+  try {
+    await assert.rejects(service.install(), /Choose a supported browser/);
+    assert.equal(service.status().browserId, null);
+    assert.equal(service.status().connected, false);
+    assert.equal(existsSync(join(root, 'profiles')), false);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('an asynchronous setup cannot register a browser after its policy changed', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-browser-setup-race-'));
+  const current = policy();
+  const service = new BrowserIntegration({ policy: () => current, descriptorPath: join(root, 'connection.json'), nativeHostPath: join(root, 'native-host'), bridgeExecutable: process.execPath, extensionDirectory: fileURLToPath(new URL('../browser-extension', import.meta.url)), nativeMessagingRoot: join(root, 'profiles') });
+  try {
+    const setup = service.install();
+    current.revision = 'changed-during-setup';
+    current.browser.selectedBrowser = 'edge';
+    service.policyChanged();
+    await assert.rejects(setup, /settings changed/);
+    assert.equal(service.status().browserId, 'edge');
+    assert.equal(service.status().installed, false);
+    assert.equal(existsSync(join(root, 'profiles')), false);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
 async function fixture() {
   const root = mkdtempSync(join(tmpdir(),'lingxi-browser-test-'));
   let current = policy();
@@ -22,7 +81,7 @@ async function fixture() {
     const response = await fetch(descriptor.url+path,{ method:'POST',headers:{ authorization:`Bearer ${descriptor.token}`,'content-type':'application/json',...headers },body:JSON.stringify(input) });
     return { status:response.status,data:await response.json() as any };
   };
-  const nativePost = (input:Record<string,unknown>) => post(native,'/extension/message',{ ...input,protocol:BROWSER_PROTOCOL,extensionId:BROWSER_EXTENSION_ID,peerId });
+  const nativePost = (input:Record<string,unknown>) => post(native,'/extension/message',{ ...input,protocol:BROWSER_PROTOCOL,extensionId:BROWSER_EXTENSION_ID,browserId:'chrome',peerId });
   await nativePost({ type:'hello' });
   const controller = new AbortController();
   let holdAction: string | undefined;
@@ -46,7 +105,7 @@ async function fixture() {
     }
   })().catch(error => { if (!controller.signal.aborted) throw error; });
   return {
-    service,effects,controls,agent,native,post,nativePost,
+    root,service,effects,controls,agent,native,post,nativePost,
     call:(input:Record<string,unknown>) => post(agent,'/agent',{ sessionId:'controlled-session',...input }),
     change:(update:(value:ComputerDevicePolicy)=>void) => { const next = structuredClone(current); update(next); current = next; service.policyChanged(); },
     hold:(action:string) => { holdAction = action; return seenHold; },
@@ -63,6 +122,36 @@ test('browser transport separates agent and extension credentials and rejects we
     assert.equal((await f.post(f.native,'/agent',{ action:'tabs',sessionId:'x' })).status,403);
     assert.equal((await f.post(f.agent,'/agent',{ action:'tabs',sessionId:'x' },{ origin:'https://evil.test' })).status,403);
   } finally { await f.close(); }
+});
+
+test('switching browsers revokes the old transport, in-flight work and approval nonces', async () => {
+  const f = await fixture();
+  try {
+    const approval = await f.call({ action: 'navigate', url: 'https://example.test/path' });
+    f.change(value => { value.revision = 'edge-selection'; value.browser.selectedBrowser = 'edge'; });
+    assert.equal(f.service.status().browserId, 'edge');
+    assert.equal(f.service.status().connected, false);
+    assert.equal((await f.nativePost({ type: 'heartbeat' })).status, 403);
+    await f.service.install();
+    const native = JSON.parse(readFileSync(join(f.root, 'connection.json.native.edge'), 'utf8'));
+    assert.notEqual(native.token, f.native.token);
+    assert.equal((await f.post(native, '/extension/message', { protocol: BROWSER_PROTOCOL, extensionId: BROWSER_EXTENSION_ID, browserId: 'edge', peerId: 'edge-peer', type: 'hello' })).status, 200);
+    const replay = await f.call({ action: 'navigate', url: 'https://example.test/path', approvalNonce: approval.data.approval.nonce, approved: true });
+    assert.equal(replay.status, 400);
+    assert.deepEqual(f.effects, []);
+  } finally { await f.close(); }
+  const active = await fixture();
+  try {
+    active.change(value => { value.browser.defaultBrowsing = 'allow'; value.revision = 'allow'; });
+    const arrived = active.hold('navigate');
+    const request = active.call({ action: 'navigate', url: 'https://example.test/path' });
+    await arrived;
+    active.change(value => { value.browser.selectedBrowser = 'brave'; value.revision = 'brave-selection'; });
+    const response = await request;
+    assert.equal(response.status, 400);
+    assert.match(response.data.error, /permissions changed/);
+    assert.deepEqual(active.effects, []);
+  } finally { await active.close(); }
 });
 
 test('site approval binds the entire request, scopes and revision; tabs do not leak unapproved sites',async () => {
@@ -138,7 +227,7 @@ test('a different Chrome peer cannot inherit conversation grants or pending appr
     assert.equal((await f.call({ action:'history',approvalNonce:history.data.approval.nonce,approved:true })).status,200);
     const pending = await f.call({ action:'navigate',url:'https://example.test/path' });
     Date.now = () => now()+36_000;
-    const switched = await f.post(f.native,'/extension/message',{ protocol:BROWSER_PROTOCOL,extensionId:BROWSER_EXTENSION_ID,peerId:'different-profile',type:'hello' });
+    const switched = await f.post(f.native,'/extension/message',{ protocol:BROWSER_PROTOCOL,extensionId:BROWSER_EXTENSION_ID,browserId:'chrome',peerId:'different-profile',type:'hello' });
     assert.equal(switched.status,200);
     assert.ok((await f.call({ action:'history' })).data.approval,'profile A history consent does not authorize profile B');
     const replayed = await f.call({ action:'navigate',url:'https://example.test/path',approvalNonce:pending.data.approval.nonce,approved:true });

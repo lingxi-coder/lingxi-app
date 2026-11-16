@@ -115,6 +115,38 @@
       }
     },
     {
+      "name": "valid-answerWait",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "answerWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "text": "Lisbon"
+        }
+      }
+    },
+    {
+      "name": "valid-cancelTask",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "cancelTask",
+        "payload": {
+          "taskId": "task_0001"
+        }
+      }
+    },
+    {
       "name": "valid-setConversationPolicy",
       "valid": true,
       "input": {
@@ -454,6 +486,937 @@
           "targets": [
             "sharedbot_01"
           ]
+        }
+      }
+    },
+    {
+      "name": "reject-answerWait-no-wait",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "answerWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "text": "Lisbon"
+        }
+      }
+    },
+    {
+      "name": "reject-answerWait-empty-text",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "answerWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "text": ""
+        }
+      }
+    },
+    {
+      "name": "reject-answerWait-long-text",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "answerWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      }
+    },
+    {
+      "name": "reject-answerWait-unknown-payload",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "answerWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "text": "Lisbon",
+          "taskId": "task_0001"
+        }
+      }
+    },
+    {
+      "name": "valid-decideWait-approve",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "decideWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "decision": "approve"
+        }
+      }
+    },
+    {
+      "name": "valid-decideWait-deny",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "decideWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "decision": "deny"
+        }
+      }
+    },
+    {
+      "name": "reject-decideWait-other-decision",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "decideWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "decision": "maybe"
+        }
+      }
+    },
+    {
+      "name": "reject-decideWait-boolean-decision",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "decideWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "decision": true
+        }
+      }
+    },
+    {
+      "name": "reject-decideWait-no-wait",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "decideWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "decision": "approve"
+        }
+      }
+    },
+    {
+      "name": "reject-decideWait-with-text",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "decideWait",
+        "payload": {
+          "conversationId": "chat_0001",
+          "waitId": "wait_0001",
+          "messageId": "message_0002",
+          "changeId": "change_0002",
+          "decision": "approve",
+          "text": "Approved"
+        }
+      }
+    },
+    {
+      "name": "reject-cancelTask-short-id",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "cancelTask",
+        "payload": {
+          "taskId": "t1"
+        }
+      }
+    },
+    {
+      "name": "reject-cancelTask-unknown-payload",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "cancelTask",
+        "payload": {
+          "taskId": "task_0001",
+          "force": true
+        }
+      }
+    },
+    {
+      "name": "reject-pauseTask-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "pauseTask",
+        "payload": {
+          "taskId": "task_0001"
+        }
+      }
+    },
+    {
+      "name": "reject-continueTask-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "continueTask",
+        "payload": {
+          "taskId": "task_0001"
+        }
+      }
+    },
+    {
+      "name": "valid-readArtifact-revision",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "readArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "revision": 2
+        }
+      }
+    },
+    {
+      "name": "valid-listArtifactRevisions",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listArtifactRevisions",
+        "payload": {
+          "artifactId": "artifact_01"
+        }
+      }
+    },
+    {
+      "name": "valid-reviseArtifact",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "reviseArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "expectedRevision": 1,
+          "operationId": "operation_01",
+          "document": {
+            "title": "Trip plan",
+            "body": "# Trip plan\n\nPack passports."
+          }
+        }
+      }
+    },
+    {
+      "name": "valid-listOperations",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listOperations",
+        "payload": {
+          "taskId": "task_0001"
+        }
+      }
+    },
+    {
+      "name": "valid-resolveOperation",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "resolveOperation",
+        "payload": {
+          "taskId": "task_0001",
+          "operationId": "abababababababababababababababababababababababababababababababab",
+          "resolution": "failed"
+        }
+      }
+    },
+    {
+      "name": "reject-readArtifact-revision-0",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "readArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "revision": 0
+        }
+      }
+    },
+    {
+      "name": "reject-reviseArtifact-no-expected-revision",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "reviseArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "operationId": "operation_01",
+          "document": {
+            "title": "Trip plan",
+            "body": "# Trip plan\n\nPack passports."
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-reviseArtifact-empty-body",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "reviseArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "expectedRevision": 1,
+          "operationId": "operation_01",
+          "document": {
+            "title": "Trip plan",
+            "body": ""
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-reviseArtifact-blank-title",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "reviseArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "expectedRevision": 1,
+          "operationId": "operation_01",
+          "document": {
+            "title": "   ",
+            "body": "x"
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-reviseArtifact-long-title",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "reviseArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "expectedRevision": 1,
+          "operationId": "operation_01",
+          "document": {
+            "title": "ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+            "body": "x"
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-reviseArtifact-unknown-document-key",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "reviseArtifact",
+        "payload": {
+          "artifactId": "artifact_01",
+          "expectedRevision": 1,
+          "operationId": "operation_01",
+          "document": {
+            "title": "Trip plan",
+            "body": "# Trip plan\n\nPack passports.",
+            "format": "html"
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-listOperations-unknown-payload",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listOperations",
+        "payload": {
+          "taskId": "task_0001",
+          "all": true
+        }
+      }
+    },
+    {
+      "name": "reject-resolveOperation-short-operation",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "resolveOperation",
+        "payload": {
+          "taskId": "task_0001",
+          "operationId": "operation_01",
+          "resolution": "failed"
+        }
+      }
+    },
+    {
+      "name": "reject-resolveOperation-unknown-resolution",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "resolveOperation",
+        "payload": {
+          "taskId": "task_0001",
+          "operationId": "abababababababababababababababababababababababababababababababab",
+          "resolution": "unknown"
+        }
+      }
+    },
+    {
+      "name": "reject-recordOperation-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "recordOperation",
+        "payload": {
+          "taskId": "task_0001"
+        }
+      }
+    },
+    {
+      "name": "reject-settleOperation-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "settleOperation",
+        "payload": {
+          "taskId": "task_0001"
+        }
+      }
+    },
+    {
+      "name": "valid-readList",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "readList",
+        "payload": {
+          "sharedBotId": "sharedbot_01"
+        }
+      }
+    },
+    {
+      "name": "valid-writeList",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "update",
+              "itemId": "item_0001",
+              "done": true
+            },
+            {
+              "op": "update",
+              "itemId": "item_0002",
+              "text": "Rye bread",
+              "done": false
+            },
+            {
+              "op": "remove",
+              "itemId": "item_0003"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "valid-listHistory",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listHistory",
+        "payload": {
+          "sharedBotId": "sharedbot_01"
+        }
+      }
+    },
+    {
+      "name": "valid-listHistory-before",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listHistory",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "beforeRevision": 21
+        }
+      }
+    },
+    {
+      "name": "reject-listHistory-zero-before",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listHistory",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "beforeRevision": 0
+        }
+      }
+    },
+    {
+      "name": "reject-listHistory-unknown-payload",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listHistory",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "after": "x"
+        }
+      }
+    },
+    {
+      "name": "reject-readList-unknown-payload",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "readList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "revision": 1
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-no-changes",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": []
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-too-many-changes",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            },
+            {
+              "op": "add",
+              "text": "Milk"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-blank-text",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "add",
+              "text": "  "
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-long-text",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "add",
+              "text": "\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-empty-update",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "update",
+              "itemId": "item_0001"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-unknown-op",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "clear"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-unknown-change-key",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": 0,
+          "changes": [
+            {
+              "op": "remove",
+              "itemId": "item_0001",
+              "text": "Milk"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-missing-revision",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "changes": [
+            {
+              "op": "add",
+              "text": "Milk"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-writeList-negative-revision",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeList",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "operationId": "operation_01",
+          "expectedDataRevision": -1,
+          "changes": [
+            {
+              "op": "add",
+              "text": "Milk"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-readTaskList-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "readTaskList",
+        "payload": {
+          "taskId": "task_0001"
+        }
+      }
+    },
+    {
+      "name": "reject-writeTaskList-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "writeTaskList",
+        "payload": {
+          "taskId": "task_0001"
         }
       }
     }

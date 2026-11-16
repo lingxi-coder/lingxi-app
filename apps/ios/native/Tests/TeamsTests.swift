@@ -28,7 +28,8 @@ final class TeamsTests: XCTestCase {
             (["REQUEST_QUOTA_EXCEEDED"], "teams_error_request_quota"),
             (["MESSAGE_LISTENER_FAILED"], "teams_error_sync_failed"),
             (["MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT",
-              "BOT_REVISION_CONFLICT", "MAINTAINER_REQUIRED", "MESSAGE_IN_FLIGHT", "REPLY_REQUIRED"], "teams_message_failed"),
+              "BOT_REVISION_CONFLICT", "MAINTAINER_REQUIRED", "MESSAGE_IN_FLIGHT", "REPLY_REQUIRED",
+              "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED"], "teams_message_failed"),
             (["INVITE_UNAVAILABLE"], "teams_invite_error"),
             (["STORAGE_FAILED", "MESSAGE_STORAGE_FULL"], "teams_messages_storage_error"),
             (["SERVICE_UNAVAILABLE", "UNKNOWN", "SOMETHING_NEW", ""], "teams_error"),
@@ -56,12 +57,17 @@ final class TeamsTests: XCTestCase {
         let states: [String: String] = [
             "queued": "teams_run_queued", "running": "teams_run_processing", "completed": "chat_status_completed", "failed": "chat_status_failed",
             "expired": "teams_run_expired", "interrupted": "teams_run_interrupted", "authorization_required": "teams_run_authorization_required", "revoked": "teams_run_revoked",
+            "waiting": "teams_task_waiting", "cancelled": "teams_task_cancelled", "needs_reconciliation": "teams_task_needs_checking",
         ]
         for (state, key) in states { XCTAssertEqual(TeamsBotText.stateKey(state), key, state) }
-        for retired in ["pending", "claimed", "recovery", "recovered", "missed", "cancelled"] { XCTAssertEqual(TeamsBotText.stateKey(retired), "chat_status_unknown") }
+        for retired in ["pending", "claimed", "recovery", "recovered", "missed"] { XCTAssertEqual(TeamsBotText.stateKey(retired), "chat_status_unknown") }
         XCTAssertEqual(Set(TeamsBotText.allKeys), Set(states.values).union(["chat_status_unknown"]))
         let catalogue = try Catalogue.load()
-        for key in TeamsBotText.allKeys + TeamsBotText.allDetailKeys {
+        // The card looks up the cancelling and approval labels and the two needs-checking lines at run time (`TeamsText.localized`), so
+        // only this test sees a missing text.
+        let more = ["teams_task_cancelling", "teams_task_cancel", "teams_task_waiting_you %@", "teams_task_waiting_member %@ %@",
+                    "teams_task_waiting_approval", "teams_task_needs_checking_maintainer", "teams_task_needs_checking_hint"]
+        for key in TeamsBotText.allKeys + TeamsBotText.allDetailKeys + more {
             XCTAssertFalse((catalogue.value(key, "en") ?? "").isEmpty, "\(key) has no English text")
             XCTAssertFalse((catalogue.value(key, "zh-Hans") ?? "").isEmpty, "\(key) has no Chinese text")
         }
@@ -79,6 +85,10 @@ final class TeamsTests: XCTestCase {
             ("interrupted", "teams_run_interrupted", "teams_run_interrupted_detail", "pause.circle", .muted, false),
             ("authorization_required", "teams_run_authorization_required", "teams_run_authorization_required_detail", "lock.circle", .muted, true),
             ("revoked", "teams_run_revoked", "teams_run_revoked_detail", "nosign", .muted, false),
+            // Teams M2/M3: the card writes the lines of these three itself (who is waited for, why the outcome is unknown).
+            ("waiting", "teams_task_waiting", nil, "ellipsis.bubble", .muted, true),
+            ("cancelled", "teams_task_cancelled", nil, "xmark.circle", .muted, false),
+            ("needs_reconciliation", "teams_task_needs_checking", nil, "questionmark.circle", .muted, true),
             ("anything else", "chat_status_unknown", nil, "questionmark.circle", .muted, false),
         ]
         for row in table {

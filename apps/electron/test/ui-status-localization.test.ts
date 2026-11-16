@@ -28,11 +28,11 @@ function inLocale<T>(locale: DesktopLocale, action: () => T): T {
 const textHTML = (text: string) => renderToStaticMarkup(React.createElement(React.Fragment, null, text));
 const render = (element: React.ReactElement) => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, element));
 
-test('compaction phase titles, metrics, and elapsed time use the selected language', () => {
+test('compaction labels use the selected language without exposing internal metrics', () => {
   for (const locale of DESKTOP_LOCALES) inLocale(locale, () => {
-    for (const [phase, key] of Object.entries({ queued: 'desktop_ui_compact_waiting', preparing: 'chat_compaction_preparing', summarizing: 'chat_compaction_summarizing', restoring: 'chat_compaction_restoring' })) {
+    for (const phase of ['queued', 'preparing', 'summarizing', 'restoring']) {
       const html = render(React.createElement(CompactionStatus, { item: { type: 'compaction', id: 'running', status: 'running', phase } }));
-      assert.ok(html.includes(textHTML(translate(key, locale))), `${locale}: ${phase}`);
+      assert.ok(html.includes(textHTML(translate('chat_compacting_context', locale))), `${locale}: ${phase}`);
       assert.doesNotMatch(html, /desktop_ui_|chat_compaction_/);
     }
     for (const phase of ['future-phase', 'constructor']) {
@@ -43,9 +43,10 @@ test('compaction phase titles, metrics, and elapsed time use the selected langua
       type: 'compaction', id: 'complete', status: 'complete', startedAt: 1_000, finishedAt: 6_000,
       messagesBefore: 30, messagesAfter: 5, bytesSaved: 1_024,
     } }));
-    assert.ok(done.includes(textHTML(translate('desktop_ui_compact_metrics', locale, 30, 5, '1 KB'))), locale);
-    assert.ok(done.includes(translate('desktop_ui_elapsed', locale, 5)), locale);
-    assert.ok(done.includes(textHTML(translate('desktop_ui_percent_elapsed', locale, 100, 5))), locale);
+    assert.ok(done.includes(textHTML(translate('desktop_ui_compact_done', locale))), locale);
+    assert.doesNotMatch(done, /compact-status-detail|compact-status-elapsed|KB|%/);
+    const automatic = render(React.createElement(CompactionStatus, { item: { type: 'compaction', id: 'automatic', status: 'complete', automatic: true } }));
+    assert.ok(automatic.includes(textHTML(translate('desktop_ui_compact_done_automatic', locale))), locale);
     const error = render(React.createElement(CompactionStatus, { item: { type: 'compaction', id: 'error', status: 'error', detail: 'Opaque engine error %1$d' } }));
     assert.ok(error.includes('Opaque engine error %1$d'));
   });

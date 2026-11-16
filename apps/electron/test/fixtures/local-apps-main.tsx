@@ -5,4 +5,4 @@ import '../../src/renderer/components/LocalApps.css';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
-createRoot(document.getElementById('root')!).render(<Theme.Provider value={tokens(false)}><LocalApps visible canDevelop onCreate={() => undefined} onDevelopmentBlocked={() => undefined}/></Theme.Provider>);
+createRoot(document.getElementById('root')!).render(<Theme.Provider value={tokens(false)}><LocalApps visible canDevelop sidebarTarget={document.body} onCreate={() => undefined} onDevelopmentBlocked={() => undefined}/></Theme.Provider>);

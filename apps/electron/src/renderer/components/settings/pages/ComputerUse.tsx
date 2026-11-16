@@ -4,7 +4,8 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { useT } from '../../../theme/ThemeContext';
 import { Icon } from '../../Icon';
 import { Toggle } from '../primitives';
-import { GoogleChromeSettings } from './ComputerUseBrowser';
+import { BrowserSettings } from './ComputerUseBrowser';
+import { browserDefinition } from '../../../../shared/browserCatalog';
 import { useComputerSettings, type ComputerSettingsController } from './useComputerSettings';
 import type { ComputerApplicationPermission } from '../../../../shared/computerSettings';
 
@@ -43,6 +44,7 @@ export function ComputerUse() {
   const t = useT();
   const settings = useComputerSettings();
   const { state, pending, error } = settings;
+  const selectedBrowser = browserDefinition(state?.browserStatus.browserId);
   const [helpOpen, setHelpOpen] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
   const manageRef = useRef<HTMLButtonElement>(null);
@@ -68,7 +70,7 @@ export function ComputerUse() {
         {error ? <p role="alert" className="computer-settings-error">{error} <button type="button" onClick={() => void settings.refresh()} disabled={pending}>{tr('desktop_computer_reload')}</button></p>
           : pending ? <p role="status">{tr('desktop_computer_saving')}</p> : !state ? <p role="status">{tr('desktop_computer_loading')}</p> : null}
       </div>
-      {browserOpen ? <GoogleChromeSettings settings={settings} onBack={() => {
+      {browserOpen ? <BrowserSettings settings={settings} onBack={() => {
         returningFromBrowser.current = true;
         setBrowserOpen(false);
       }} /> : <>
@@ -88,11 +90,11 @@ export function ComputerUse() {
             <Toggle value={state?.enabled ?? false} disabled={!state?.capabilities.computer || pending} label={tr('desktop_computer_enable')} onChange={(enabled) => { if (state) void settings.execute({ action: 'setEnabled', revision: state.revision, enabled }); }} />
           </ControlRow>
           <ControlRow
-            icon={<ApplicationIcon bundleId="com.google.Chrome" fallback={<svg width="44" height="44" viewBox="0 0 48 48"><circle cx="24" cy="24" r="24" fill="#ea4335"/><path d="M24 24 12 44.8A24 24 0 0 1 3.2 12h20.8Z" fill="#34a853"/><path d="M24 12h20.8A24 24 0 0 1 12 44.8L24 24Z" fill="#fbbc05"/><circle cx="24" cy="24" r="10" fill="#4285f4" stroke="white" strokeWidth="2"/></svg>} />}
-            title="Google Chrome"
-            description={state?.browserStatus.connected ? tr('desktop_computer_browser_connected') : state?.browserStatus.installed ? tr('desktop_computer_browser_waiting_chrome') : tr('desktop_computer_browser_setup')}
+            icon={<svg width="40" height="40" viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="20" cy="20" r="16"/><ellipse cx="20" cy="20" rx="7" ry="16"/><path d="M5 14h30M5 26h30M4 20h32"/></svg>}
+            title={tr('desktop_computer_browser_title')}
+            description={selectedBrowser ? `${selectedBrowser.name} · ${state?.browserStatus.connected ? tr('desktop_computer_browser_connected') : state?.browserStatus.installed ? tr('desktop_computer_browser_waiting') : tr('desktop_computer_browser_not_setup')}` : tr('desktop_computer_browser_choose_description')}
           >
-            <button className="computer-use-manage" type="button" ref={manageRef} onClick={() => setBrowserOpen(true)} aria-label={tr('desktop_computer_manage_chrome')}>{tr('desktop_computer_manage')}</button>
+            <button className="computer-use-manage" type="button" ref={manageRef} onClick={() => setBrowserOpen(true)} aria-label={tr('desktop_computer_manage_browser')}>{tr('desktop_computer_manage')}</button>
           </ControlRow>
           <ControlRow
             icon={<ApplicationIcon bundleId="com.microsoft.Excel" fallback={<span className="computer-use-excel">X</span>} />}

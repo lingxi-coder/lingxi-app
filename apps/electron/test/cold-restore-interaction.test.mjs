@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import react from '@vitejs/plugin-react';
 import { createServer } from 'vite';
 
-test('cold replay reaches real Stage through retries and skipped Chromium paint', { timeout: 45000 }, async () => {
+test('cold replay reaches real Stage through retries, skipped paint and native activation', { timeout: 55000 }, async () => {
   const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
   const fixture = join(root, 'test/fixtures');
   const temp = mkdtempSync(join(tmpdir(), 'lingxi-cold-restore-'));
@@ -28,7 +28,7 @@ test('cold replay reaches real Stage through retries and skipped Chromium paint'
     let output = '', errors = '';
     child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { errors += chunk; });
     const code = await new Promise((resolveExit, reject) => {
-      const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`cold restore fixture timed out\n${errors}`)); }, 35000);
+      const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`cold restore fixture timed out\n${errors}`)); }, 45000);
       child.once('error', error => { clearTimeout(timer); reject(error); });
       child.once('exit', code => { clearTimeout(timer); resolveExit(code); });
     });
@@ -36,13 +36,19 @@ test('cold replay reaches real Stage through retries and skipped Chromium paint'
     const marker = output.split('\n').find(line => line.startsWith('COLD_RESTORE_RESULT:'));
     assert.ok(marker, `fixture must finish every scenario: ${output}`);
     const results = JSON.parse(marker.slice('COLD_RESTORE_RESULT:'.length));
-    assert.deepEqual(results.map(row => row.scenario), ['normal', 'reject', 'stall', 'skipped-paint', 'visible-again']);
+    assert.deepEqual(results.map(row => row.scenario), ['normal', 'reject', 'stall', 'skipped-paint', 'native-hidden', 'second-launch-visible', 'visible-again']);
     for (const row of results.slice(0, 3)) {
       assert.equal(row.itemCount, 2); assert.equal(row.textContent, true);
       assert.equal(row.attempts, row.scenario === 'normal' ? 1 : 2);
       assert(row.samples.some(sample => sample.phase === 'renderer_base' && sample.messageCount === 2));
       assert(row.samples.some(sample => sample.phase === 'stage_commit' && sample.rowCount === 2));
     }
+    const skipped = results.find(row => row.scenario === 'skipped-paint');
+    assert.equal(skipped.itemCount, 2);
+    assert.equal(skipped.textContent, true);
+    assert.equal(skipped.innerText, false);
+    assert(skipped.legacyTimeoutMs >= 20_000);
+    assert(skipped.samples.some(sample => sample.phase === 'renderer_visibility' && sample.visibility === 'hidden' && sample.focused === true));
     console.log(`Cold restore evidence: ${JSON.stringify(results)}`);
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');

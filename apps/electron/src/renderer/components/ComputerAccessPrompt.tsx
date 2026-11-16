@@ -24,12 +24,13 @@ import { useI18n } from '../i18n/useI18n';
  * from a previous request.
  */
 
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useId, useRef, useState, type CSSProperties } from 'react';
 import type { ComputerAccessRequestDto, ComputerAccessResponseDto } from '@lingxi/bridge-client';
 import type { SystemSettingsPane } from '../bridge/lingxi';
 import { useT } from '../theme/ThemeContext';
 import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
 import { Icon } from './Icon';
+import './ComputerAccessPrompt.css';
 
 export interface ComputerAccessPromptProps {
   /** The head request to render, or `null` to render nothing. */
@@ -56,6 +57,7 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
   const [clipboardRead, setClipboardRead] = useState(Boolean(request?.clipboard_read));
   const [clipboardWrite, setClipboardWrite] = useState(Boolean(request?.clipboard_write));
   const [systemKeyCombos, setSystemKeyCombos] = useState(Boolean(request?.system_key_combos));
+  const [preferredMode, setPreferredMode] = useState<'background' | 'full_control'>('background');
 
   // A NEW request always starts from a fresh pre-checked state — never carry
   // over stale checkbox state from a previous request.
@@ -64,6 +66,7 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
     setClipboardRead(Boolean(request?.clipboard_read));
     setClipboardWrite(Boolean(request?.clipboard_write));
     setSystemKeyCombos(Boolean(request?.system_key_combos));
+    setPreferredMode('background');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request?.request_id]);
 
@@ -95,6 +98,8 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
       clipboard_read: clipboardRead,
       clipboard_write: clipboardWrite,
       system_key_combos: systemKeyCombos,
+      preferred_mode: preferredMode,
+      ...(request.interaction?.kind === 'teach_access' ? { interaction_action: 'allow' as const } : {}),
     });
   };
 
@@ -102,6 +107,10 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
     display: 'flex', alignItems: 'center', gap: 10,
     padding: '7px 2px', fontSize: 13, color: t.text,
   };
+
+  if (!tcc && (request.interaction?.kind === 'takeover' || request.interaction?.kind === 'teach_step')) {
+    return <InteractionConfirmation key={request.request_id} request={request} onSubmit={onSubmit} onDeny={onDeny} />;
+  }
 
   if (!tcc) {
     const appName = request.apps.length === 1 ? request.apps[0]!.label : tr('desktop_computer_these_apps');
@@ -116,7 +125,7 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
     } as CSSProperties;
     return (
       <section
-        className="inline-interaction-card computer-access-prompt"
+        className="inline-interaction-card interaction-prompt computer-access-prompt"
         style={variables}
         role="region"
         aria-labelledby="lingxi-computer-access-title"
@@ -132,11 +141,14 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
       >
         <div className="computer-access-content">
           <p className="computer-access-risk-label"><Icon name="shieldAlert" size={19} stroke={1.7} />{tr('desktop_computer_risk')}</p>
-          <h2 id="lingxi-computer-access-title">{tr('desktop_computer_allow_prompt', appName)}</h2>
+          <h2 id="lingxi-computer-access-title">{request.interaction?.kind === 'teach_access'
+            ? tr('desktop_computer_teach_access_title') : tr('desktop_computer_allow_prompt', appName)}</h2>
           <p id="lingxi-computer-access-risk" className="computer-access-copy">
             {tr('desktop_computer_prompt_risk')}
           </p>
           <p id="lingxi-computer-access-detail" className="computer-access-reason">{request.reason}</p>
+          {request.interaction?.explanation ? <p className="computer-access-copy">{request.interaction.explanation}</p> : null}
+          {request.interaction?.next_preview ? <p className="computer-access-copy">{tr('desktop_computer_next_preview')}: {request.interaction.next_preview}</p> : null}
           <AppAllowlistPanel
             request={request}
             checkedApps={checkedApps}
@@ -149,6 +161,17 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
             onSystemKeyCombos={setSystemKeyCombos}
             checkboxRowStyle={checkboxRowStyle}
           />
+          <fieldset style={{ border: 0, padding: 0, margin: '14px 0 0' }}>
+            <legend style={{ fontSize: 12, fontWeight: 600 }}>{tr('desktop_computer_mode_title')}</legend>
+            {(['background', 'full_control'] as const).map(mode => (
+              <label key={mode} style={checkboxRowStyle} htmlFor={`computer-mode-${request.request_id}-${mode}`}>
+                <input id={`computer-mode-${request.request_id}-${mode}`} type="radio" name={`computer-mode-${request.request_id}`} checked={preferredMode === mode}
+                  onChange={() => setPreferredMode(mode)} aria-describedby="lingxi-computer-mode-hint" />
+                {tr(mode === 'background' ? 'desktop_computer_mode_background' : 'desktop_computer_mode_full_control')}
+              </label>
+            ))}
+            <p id="lingxi-computer-mode-hint" className="computer-access-copy">{tr('desktop_computer_mode_hint')}</p>
+          </fieldset>
         </div>
         <footer className="computer-access-footer">
           <span className="computer-access-scope">{tr('desktop_computer_session_scope')}</span>
@@ -157,7 +180,7 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
               {tr('permission_deny')} <kbd aria-hidden="true">Esc</kbd>
             </DesktopDialogButton>
             <DesktopDialogButton ref={primaryRef} variant="primary" onClick={submit}>
-              {tr('desktop_computer_allow_session')} <kbd aria-hidden="true">↵</kbd>
+              {tr(request.interaction?.kind === 'teach_access' ? 'desktop_computer_teach_allow' : 'desktop_computer_allow_session')} <kbd aria-hidden="true">↵</kbd>
             </DesktopDialogButton>
           </DesktopDialogActions>
         </footer>
@@ -193,6 +216,70 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
     >
       <TccPanel tcc={tcc} onOpenSystemSettings={onOpenSystemSettings} />
     </DesktopDialog>
+  );
+}
+
+/** Native modal: the browser owns the focus boundary, top layer and Escape. */
+function InteractionConfirmation({ request, onSubmit, onDeny }: Pick<ComputerAccessPromptProps, 'request' | 'onSubmit' | 'onDeny'> & { request: ComputerAccessRequestDto }) {
+  const { tr } = useI18n();
+  const t = useT();
+  const id = useId();
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const handled = useRef(false);
+  const step = request.interaction?.kind === 'teach_step';
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    handled.current = false;
+    dialog.returnValue = '';
+    dialog.showModal();
+    return () => { if (dialog.open) dialog.close(); };
+  }, []);
+  const variables = {
+    '--dialog-window': t.windowBg, '--dialog-surface': t.surface,
+    '--dialog-surface-hover': t.surfaceHover, '--dialog-border': t.border,
+    '--dialog-border-strong': t.borderStrong,
+    '--dialog-text': t.text, '--dialog-text-2': t.text2, '--dialog-text-3': t.text3,
+    '--dialog-accent': t.accent, '--dialog-accent-border': t.accentBorder,
+  } as CSSProperties;
+  return (
+    <dialog ref={dialogRef} className="computer-interaction-dialog" style={variables}
+      aria-labelledby={`${id}-title`} aria-describedby={`${id}-detail`}
+      onClose={(event) => {
+        const dialog = event.currentTarget;
+        if (dialog.open || !dialog.isConnected || handled.current) return;
+        handled.current = true;
+        const action = dialog.returnValue;
+        dialog.returnValue = '';
+        if (step ? action === 'continue' || action === 'exit' : action === 'allow') {
+          onSubmit(request.request_id, { granted_apps: [], clipboard_read: false, clipboard_write: false,
+            system_key_combos: false, interaction_action: action as 'allow' | 'continue' | 'exit' });
+        } else onDeny(request.request_id);
+      }}
+    >
+      <div className="desktop-dialog-panel desktop-dialog-panel--regular">
+        <header className="desktop-dialog-header">
+          <span className="desktop-dialog-icon" aria-hidden="true"><Icon name="shieldAlert" size={24} stroke={1.8} /></span>
+          <span className="desktop-dialog-heading-copy"><h2 id={`${id}-title`}>{tr(step ? 'desktop_computer_teach_step_title' : 'desktop_computer_takeover_title')}</h2></span>
+        </header>
+        <div className="desktop-dialog-body" id={`${id}-detail`}>
+          <p className="computer-access-reason">{request.interaction?.reason || request.reason}</p>
+          {!step ? <p className="computer-access-copy">{tr('desktop_computer_takeover_description')}</p> : null}
+          {request.interaction?.explanation ? <p className="computer-access-copy">{request.interaction.explanation}</p> : null}
+          {request.interaction?.next_preview ? <p className="computer-access-copy"><strong>{tr('desktop_computer_next_preview')}: </strong>{request.interaction.next_preview}</p> : null}
+        </div>
+        <form method="dialog" className="desktop-dialog-footer">
+          <DesktopDialogActions>
+            <DesktopDialogButton variant="cancel" value={step ? 'exit' : 'deny'} type="submit" autoFocus={!step}>
+              {tr(step ? 'desktop_computer_teach_end' : 'permission_deny')}
+            </DesktopDialogButton>
+            <DesktopDialogButton variant="primary" value={step ? 'continue' : 'allow'} type="submit" autoFocus={step}>
+              {tr(step ? 'desktop_computer_teach_continue' : 'desktop_computer_takeover_allow')}
+            </DesktopDialogButton>
+          </DesktopDialogActions>
+        </form>
+      </div>
+    </dialog>
   );
 }
 

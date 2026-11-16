@@ -40,6 +40,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
+import com.lingxi.code.conversation.AudioSetupBanner
 import com.lingxi.code.theme.BotAvatar
 
 /**
@@ -54,14 +55,21 @@ internal fun TeamComposer(
     replyTo: TeamMessage?, editing: TeamMessage?, replyAuthor: String,
     onDraft: (ComposerDraft) -> Unit, onCancelReply: () -> Unit, onCancelEdit: () -> Unit,
     onSend: (text: String, targets: List<String>, done: () -> Unit) -> Unit, modifier: Modifier = Modifier,
+    /** The files of the unsent message and the chosen ones that were not taken. Empty while a message is edited or a Bot's question is answered: neither carries files, and the files wait in the draft. */
+    files: List<TeamDraftFile> = emptyList(), refusals: List<TeamFileRefusal> = emptyList(),
+    /** Null where files cannot be added now. */
+    onChooseFiles: ((List<TeamChosenFile>) -> Unit)? = null, onRemoveFile: (String) -> Unit = {}, onDismissRefusals: () -> Unit = {},
+    /** What the unsent message belongs to (the workspace's draft key). Words spoken into the box are for it alone. Null: no microphone here. */
+    voiceTarget: String? = null,
 ) {
     val bots = messaging.bots
-    val lock = TeamsComposeLogic.composerLock(uid, conversation.kind, conversation.participants, bots, messaging.botsLoaded, messaging.botsFailed)
+    val lock = TeamsComposeLogic.composerLock(uid, conversation.kind, conversation.participants, bots, messaging.botsLoaded, messaging.botsFailed, conversation.readers)
     if (lock != ComposerLock.None) {
         Surface(modifier.fillMaxWidth().testTag(TeamsTags.COMPOSER_LOCK), color = MaterialTheme.colorScheme.surfaceVariant) {
             Text(
                 stringResource(when (lock) {
                     ComposerLock.OwnerReading -> R.string.teams_composer_lock_owner_reading
+                    ComposerLock.BotHandedOver -> R.string.teams_composer_lock_bot_handed_over
                     ComposerLock.BotUnverified -> R.string.teams_composer_lock_bot_unverified
                     ComposerLock.BotChecking -> R.string.teams_composer_lock_bot_checking
                     else -> R.string.teams_composer_lock_bot_unavailable
@@ -81,7 +89,7 @@ internal fun TeamComposer(
     val staleTargets = if (editing == null && askable) composerStaleTargets(draft.targets, bots, conversation) else emptySet()
     val staleBotDm = conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1
     val tooLong = TeamsComposeLogic.byteLength(field.text) > TeamsComposeLogic.MESSAGE_BYTES
-    val canSend = TeamsComposeLogic.canSendText(field.text) && !messaging.submitting && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
+    val canSend = TeamAttachments.canSend(field.text, files) && !messaging.submitting && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
     val hasAskableBots = askable && bots.any { it.selectable && "shared_bot:${it.sharedBotId}" in conversation.participants }
     fun update(value: TextFieldValue, targets: Set<String> = draft.targets) {
         field = value
@@ -89,8 +97,17 @@ internal fun TeamComposer(
         if (editing == null) onDraft(draft.copy(text = value.text, targets = targets, replyToId = replyTo?.id))
     }
 
+    // Spoken words are added to the box, to be read, changed and sent by hand. A message being changed is another box.
+    val voice = if (voiceTarget == null) null else rememberTeamVoice("$voiceTarget:${editing?.id.orEmpty()}") { heard ->
+        val text = TeamsComposeLogic.appendingTranscript(heard, field.text)
+        update(TextFieldValue(text, TextRange(text.length)))
+    }
+
     Column(modifier.fillMaxWidth()) {
         HorizontalDivider()
+        val openVoiceSettings = LocalOpenVoiceSettings.current
+        voice?.guidance?.let { AudioSetupBanner(it, onConfigure = openVoiceSettings, onDismiss = voice.dismiss) }
+        if (voice?.listening == true) TeamVoiceListening()
         if (candidates.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 Text(stringResource(R.string.teams_composer_bots_can_ask), Modifier.semantics { heading() }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -140,8 +157,10 @@ internal fun TeamComposer(
                 }
             }
         }
+        TeamDraftFiles(files, refusals, onRemoveFile, onDismissRefusals)
         if (staleTargets.isNotEmpty() || staleBotDm) Text(stringResource(R.string.teams_error_bot_access_changed), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.Bottom) {
+            if (onChooseFiles != null) TeamAttachButton(enabled = files.size < TeamAttachments.MESSAGE_FILES && !messaging.submitting, onChosen = onChooseFiles)
             OutlinedTextField(
                 value = field, onValueChange = { update(it) }, minLines = 1, maxLines = 6, isError = tooLong, enabled = !messaging.submitting,
                 placeholder = {
@@ -153,6 +172,7 @@ internal fun TeamComposer(
                 },
                 modifier = Modifier.weight(1f).testTag(TeamsTags.COMPOSER_FIELD),
             )
+            if (voice != null) TeamVoiceButton(voice, enabled = !messaging.submitting)
             IconButton(
                 enabled = canSend, modifier = Modifier.testTag(TeamsTags.SEND),
                 onClick = { val submitted = field.text; onSend(submitted, if (editing == null && askable) draft.targets.sorted() else emptyList()) { if (field.text == submitted) field = TextFieldValue("") } },
@@ -173,6 +193,8 @@ internal fun TeamComposer(
             }
         }
         val note = when {
+            files.any { it.state == TeamDraftFile.State.Failed } -> R.string.teams_file_note_failed
+            files.any { it.state == TeamDraftFile.State.Uploading } -> R.string.teams_file_note_uploading
             messaging.offline -> R.string.teams_composer_note_offline
             conversation.kind == "bot_dm" -> R.string.teams_composer_note_bot_dm
             hasAskableBots -> R.string.teams_composer_note_group

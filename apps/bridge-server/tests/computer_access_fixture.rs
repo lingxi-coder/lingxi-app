@@ -124,6 +124,7 @@ impl Tool for AccessRequestingTool {
             clipboard_write: false,
             system_key_combos: false,
             tcc_state: None,
+            interaction: None,
         };
         let response = self.access_resolver.resolve(request).await;
         Ok(ToolCallResult::from_data(Utf16JsonProjection::plain(

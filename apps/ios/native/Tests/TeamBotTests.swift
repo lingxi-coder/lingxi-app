@@ -19,6 +19,154 @@ final class TeamBotTests: XCTestCase {
             else { XCTAssertThrowsError(try TeamExecutionContract.validate(input), "\(row["name"] ?? "")") }
         }
     }
+    private func card(_ extra: String = "", permitted: Bool = true, state: String = "published") throws -> TeamBotCard {
+        let json = #"{"sharedBotId":"sharedbot_01","name":"Helper","description":"","maintainer":{"uid":"owner","generation":3},"revision":2,"state":"\#(state)","permitted":\#(permitted),"ready":true,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":1,"member":1,"bot":1}\#(extra)}"#
+        return try JSONDecoder().decode(TeamBotCard.self, from: Data(json.utf8))
+    }
+    func testTheListIsOfferedOnlyToThoseWhoMayReadIt() throws {
+        let member = TeamMemberRef(uid: "member", generation: 3), owner = TeamMemberRef(uid: "owner", generation: 3)
+        let listed = #","sharedList":{"title":"Groceries","approval":"requester"}"#
+        XCTAssertNil(try card().sharedList)
+        XCTAssertEqual(try card(listed).sharedList, TeamBotListInfo(title: "Groceries", approval: "requester"))
+        XCTAssertFalse(TeamSharedListRules.canOpen(try card(), viewer: member))
+        XCTAssertTrue(TeamSharedListRules.canOpen(try card(listed), viewer: member))
+        // Not allowed to use the Bot: only its maintainer still reads the list.
+        XCTAssertFalse(TeamSharedListRules.canOpen(try card(listed, permitted: false), viewer: member))
+        XCTAssertTrue(TeamSharedListRules.canOpen(try card(listed, permitted: false), viewer: owner))
+        XCTAssertFalse(TeamSharedListRules.canOpen(try card(listed, state: "paused"), viewer: owner))
+    }
+    func testARepeatedListSaveKeepsItsOperationAndAnyOtherChangeGetsANewOne() {
+        var made = 0
+        let id = { made += 1; return "operation_000\(made)" }
+        let first = TeamSharedListOperation.of(nil, revision: 4, changes: [.add(text: "Bread")], newId: id)
+        XCTAssertEqual(first.id, "operation_0001")
+        // The answer was lost and the person saves again: the same request.
+        XCTAssertEqual(TeamSharedListOperation.of(first, revision: 4, changes: [.add(text: "Bread")], newId: id), first)
+        // Other text, or the same text on a newer list, is another change.
+        XCTAssertEqual(TeamSharedListOperation.of(first, revision: 4, changes: [.add(text: "Milk")], newId: id).id, "operation_0002")
+        XCTAssertEqual(TeamSharedListOperation.of(first, revision: 5, changes: [.add(text: "Bread")], newId: id).id, "operation_0003")
+    }
+    func testEveryListChangeIsACommandTheServiceAccepts() throws {
+        let changes: [TeamSharedListChange] = [.add(text: "Bread"), .setText(itemId: "item_0001", text: "Rye bread"), .setDone(itemId: "item_0001", done: true), .remove(itemId: "item_0002")]
+        var body = command("writeList")
+        body["payload"] = ["sharedBotId": sharedBotId, "operationId": "operation_0001", "expectedDataRevision": 0, "changes": changes.map(\.payload)]
+        XCTAssertNoThrow(try TeamExecutionContract.validate(body))
+        XCTAssertTrue(TeamSharedListRules.usable(" Bread "))
+        XCTAssertFalse(TeamSharedListRules.usable("  \n"))
+        // 500 bytes fit; one more does not, and multi-byte text is counted in bytes.
+        XCTAssertTrue(TeamSharedListRules.usable(String(repeating: "a", count: 500)))
+        XCTAssertFalse(TeamSharedListRules.usable(String(repeating: "a", count: 501)))
+        XCTAssertFalse(TeamSharedListRules.fits(String(repeating: "\u{6E05}", count: 167)))
+        body["payload"] = ["sharedBotId": sharedBotId, "operationId": "operation_0001", "expectedDataRevision": 0, "changes": [TeamSharedListChange.add(text: String(repeating: "a", count: 501)).payload]]
+        XCTAssertThrowsError(try TeamExecutionContract.validate(body))
+    }
+    func testAListThatMovedIsReadAgainAndSaysSo() throws {
+        XCTAssertTrue(TeamSharedListRules.moved("LIST_REVISION_CONFLICT"))
+        XCTAssertTrue(TeamSharedListRules.moved("LIST_ITEM_REQUIRED"))
+        XCTAssertFalse(TeamSharedListRules.moved("LIST_LIMIT"))
+        XCTAssertEqual(TeamsErrors.key("LIST_REVISION_CONFLICT"), "teams_list_moved")
+        XCTAssertEqual(TeamsErrors.key("LIST_LIMIT"), "teams_error_list_full")
+        XCTAssertEqual(TeamsErrors.key("LIST_REQUIRED"), "teams_error_list_unavailable")
+        let list = try JSONDecoder().decode(TeamSharedList.self, from: Data(#"{"sharedBotId":"sharedbot_01","title":"Groceries","description":"","dataRevision":2,"items":[{"itemId":"item_0001","text":"Bread","done":true}],"updatedAt":5}"#.utf8))
+        XCTAssertEqual(list.items, [TeamSharedListItem(itemId: "item_0001", text: "Bread", done: true)])
+        XCTAssertEqual(list.dataRevision, 2)
+    }
+    func testTheListHistorySaysWhoChangedWhatAndKeepsOlderPagesWhenTheNewestIsReadAgain() throws {
+        let page = { (json: String) in try JSONDecoder().decode(TeamSharedListHistory.self, from: Data(json.utf8)) }
+        let newest = try page(#"{"sharedBotId":"sharedbot_01","dataRevision":4,"hasMore":true,"revisions":[{"dataRevision":4,"author":{"kind":"shared_bot","sharedBotId":"sharedbot_01","taskId":"task_0001","requester":{"uid":"bob","generation":1}},"changes":[{"op":"update","itemId":"item_0001","text":"Whole milk","done":true,"before":{"text":"Milk","done":false}}],"createdAt":3},{"dataRevision":3,"author":{"kind":"user","uid":"alice","generation":1},"changes":[{"op":"remove","itemId":"item_0003","before":{"text":"Wine","done":false}}],"createdAt":2}]}"#)
+        let older = try page(#"{"sharedBotId":"sharedbot_01","dataRevision":4,"hasMore":false,"revisions":[{"dataRevision":2,"author":{"kind":"user","uid":"carol","generation":1},"changes":[{"op":"add","itemId":"item_0002","text":"Oat milk"},{"op":"update","itemId":"item_0001","done":false,"before":{"text":"Milk","done":false}}],"createdAt":1}]}"#)
+        typealias Rules = TeamSharedListHistoryRules
+        XCTAssertEqual(Rules.lines(newest.revisions[0].changes[0]), [.renamed("Milk", "Whole milk"), .ticked("Whole milk")])
+        XCTAssertEqual(Rules.lines(newest.revisions[1].changes[0]), [.removed("Wine")])
+        XCTAssertEqual(older.revisions[0].changes.flatMap(Rules.lines), [.added("Oat milk"), .unchanged("Milk")])
+        let members = [TeamMember(uid: "alice", displayName: "Alice", role: "owner", generation: 1), TeamMember(uid: "bob", displayName: "Bob", role: "member", generation: 1)]
+        XCTAssertEqual(Rules.author(newest.revisions[0].author, viewer: "alice", members: members, botName: "Helper"), .bot("Helper", for: .member("Bob")))
+        XCTAssertEqual(Rules.author(newest.revisions[1].author, viewer: "alice", members: members, botName: "Helper"), .person(.you))
+        XCTAssertEqual(Rules.author(older.revisions[0].author, viewer: "alice", members: members, botName: "Helper"), .person(.former), "carol is not a member")
+        XCTAssertEqual(Rules.author(newest.revisions[1].author, viewer: "bob", members: [TeamMember(uid: "alice", displayName: "Alice", role: "owner", generation: 2)], botName: "Helper"),
+                       .person(.former), "an earlier membership of the same person is not the current one")
+        let both = Rules.merge(Rules.merge(nil, newest, newest: true), older, newest: false)
+        XCTAssertEqual(both.revisions.map(\.dataRevision), [4, 3, 2]); XCTAssertFalse(both.hasMore)
+        let again = Rules.merge(both, newest, newest: true)
+        XCTAssertEqual(again.revisions.map(\.dataRevision), [4, 3, 2], "reading the newest page again keeps the older page")
+        XCTAssertFalse(again.hasMore)
+        var body: [String: Any] = ["schemaVersion": 1, "commandId": "command_0001", "teamId": "team_0001", "generation": 1, "action": "listHistory",
+                                   "payload": ["sharedBotId": "sharedbot_01", "beforeRevision": 3]]
+        XCTAssertNoThrow(try TeamExecutionContract.validate(body))
+        body["payload"] = ["sharedBotId": "sharedbot_01", "beforeRevision": 0]
+        XCTAssertThrowsError(try TeamExecutionContract.validate(body))
+    }
+    func testADocumentEditIsValidOnlyAsTheServiceStoresIt() throws {
+        let artifact = try JSONDecoder().decode(TeamArtifact.self, from: Data(#"{"artifactId":"artifact_0001","revision":2,"digest":"d","document":{"title":"Plan","body":"One"},"currentRevision":3}"#.utf8))
+        XCTAssertTrue(artifact.old)
+        var draft = TeamDocumentDraft(artifact.document)
+        XCTAssertFalse(draft.changed(from: artifact.document))
+        // Spaces around the title are not a change; the body is compared exactly.
+        draft.title = " Plan "
+        XCTAssertFalse(draft.changed(from: artifact.document))
+        draft.body = "One\n"
+        XCTAssertTrue(draft.changed(from: artifact.document))
+        XCTAssertTrue(draft.valid)
+        var body = command("reviseArtifact")
+        body["payload"] = ["artifactId": "artifact_0001", "expectedRevision": 3, "operationId": "operation_0001", "document": draft.payload]
+        XCTAssertNoThrow(try TeamExecutionContract.validate(body))
+        XCTAssertEqual(draft.payload["title"] as? String, "Plan")
+        draft.title = String(repeating: "t", count: 121)
+        XCTAssertFalse(draft.valid)
+        draft.title = "Plan"; draft.body = ""
+        XCTAssertFalse(draft.valid)
+        draft.body = String(repeating: "a", count: TeamExecutionContract.documentBytes + 1)
+        XCTAssertTrue(draft.tooLong)
+        XCTAssertFalse(draft.valid)
+    }
+    func testARepeatedDocumentSaveKeepsItsOperationAndAnyOtherEditGetsANewOne() {
+        var made = 0
+        let id = { made += 1; return "operation_000\(made)" }
+        let draft = TeamDocumentDraft(title: "Plan ", body: "Two")
+        let first = TeamDocumentOperation.of(nil, revision: 3, draft: draft, newId: id)
+        XCTAssertEqual(TeamDocumentOperation.of(first, revision: 3, draft: TeamDocumentDraft(title: "Plan", body: "Two"), newId: id), first)
+        XCTAssertEqual(TeamDocumentOperation.of(first, revision: 3, draft: TeamDocumentDraft(title: "Plan", body: "Three"), newId: id).id, "operation_0002")
+        // Saving the same text over a newer revision is another decision.
+        XCTAssertEqual(TeamDocumentOperation.of(first, revision: 4, draft: draft, newId: id).id, "operation_0003")
+    }
+    func testTheHistoryNamesMembersAndBotsAndKeepsAGenericNameForThoseWhoLeft() throws {
+        let history = try JSONDecoder().decode(TeamArtifactRevisions.self, from: Data(#"{"artifactId":"artifact_0001","currentRevision":2,"revisions":[{"revision":2,"parentRevision":1,"digest":"b","title":"Plan","author":{"kind":"user","uid":"member","generation":3},"createdAt":2000},{"revision":1,"parentRevision":null,"digest":"a","title":"Plan","author":{"kind":"shared_bot","sharedBotId":"sharedbot_01"},"createdAt":1000,"sourceTaskId":"task_0001"}]}"#.utf8))
+        let members = [TeamMember(uid: "member", displayName: "Ada", role: "member", generation: 3)]
+        let strings = TeamsListStrings.en
+        XCTAssertEqual(history.revisions.map(\.revision), [2, 1])
+        XCTAssertNil(history.revisions[1].parentRevision)
+        XCTAssertEqual(TeamDocumentRules.authorName(history.revisions[0].author, members: members, bots: [try card()], strings: strings), "Ada")
+        XCTAssertEqual(TeamDocumentRules.authorName(history.revisions[1].author, members: members, bots: [try card()], strings: strings), "Helper")
+        XCTAssertEqual(TeamDocumentRules.authorName(history.revisions[0].author, members: [], bots: [], strings: strings), strings.member)
+        XCTAssertEqual(TeamDocumentRules.authorName(history.revisions[1].author, members: [], bots: [], strings: strings), strings.bot)
+        XCTAssertEqual(TeamsErrors.key("ARTIFACT_REVISION_LIMIT"), "teams_error_doc_limit")
+        XCTAssertEqual(TeamsErrors.key("ARTIFACT_UNCHANGED"), "teams_error_doc_unchanged")
+    }
+    func testOnlyAnActionNobodyCouldVerifyAsksForADecision() throws {
+        let listed = try JSONDecoder().decode(TeamTaskOperations.self, from: Data(#"{"taskId":"task_0001","operations":[{"operationId":"a","logicalStepId":"s1","category":"queryable","tool":{"name":"send_mail","version":"1"},"state":"dispatched","epoch":1,"dispatchedAt":1000},{"operationId":"b","logicalStepId":"s2","category":"unqueryable","tool":{"name":"post","version":"1"},"state":"unknown","epoch":1,"dispatchedAt":1000},{"operationId":"c","logicalStepId":"s3","category":"unqueryable","tool":{"name":"post","version":"1"},"state":"succeeded","epoch":1,"dispatchedAt":1000,"settledAt":2000,"resolvedBy":{"uid":"owner","generation":1},"resolvedAt":2000},{"operationId":"d","logicalStepId":"s4","category":"queryable","tool":{"name":"post","version":"1"},"state":"failed","epoch":1,"dispatchedAt":1000},{"operationId":"e","logicalStepId":"s5","category":"store_idempotent","tool":{"name":"read","version":"1"},"state":"dispatched","epoch":1,"dispatchedAt":1000}]}"#.utf8)).operations
+        XCTAssertEqual(listed.map(\.unverified), [true, true, false, false, false])
+        XCTAssertEqual(listed.map(TeamOperationRules.stateKey), ["teams_ops_state_unreported", "teams_ops_state_unknown", "teams_ops_state_happened", "teams_ops_state_not_happened", "teams_ops_state_repeatable"])
+        XCTAssertEqual(listed[2].resolvedBy, TeamMemberRef(uid: "owner", generation: 1))
+    }
+    func testTheRequesterSeesTheActionsAndOnlyTheMaintainerConfirmsThem() throws {
+        func task(_ state: String) throws -> TeamTask {
+            try JSONDecoder().decode(TeamTask.self, from: Data(#"{"taskId":"task_0001","conversationId":"chat_0001","sharedBotId":"sharedbot_01","requester":{"uid":"member","generation":3},"state":"\#(state)","createdAt":1,"deadline":2,"replyId":null,"artifactId":null}"#.utf8))
+        }
+        let requester = TeamMemberRef(uid: "member", generation: 3), maintainer = TeamMemberRef(uid: "owner", generation: 1), other = TeamMemberRef(uid: "other", generation: 1)
+        let unchecked = try task("needs_reconciliation")
+        XCTAssertTrue(TeamOperationRules.canReview(unchecked, viewer: requester, maintainer: maintainer))
+        XCTAssertTrue(TeamOperationRules.canReview(unchecked, viewer: maintainer, maintainer: maintainer))
+        XCTAssertFalse(TeamOperationRules.canReview(unchecked, viewer: other, maintainer: maintainer))
+        XCTAssertFalse(TeamOperationRules.canReview(unchecked, viewer: TeamMemberRef(uid: "member", generation: 4), maintainer: maintainer), "A member who rejoined is another member")
+        XCTAssertFalse(TeamOperationRules.canReview(try task("failed"), viewer: maintainer, maintainer: maintainer))
+        XCTAssertTrue(TeamOperationRules.canResolve(viewer: maintainer, maintainer: maintainer))
+        XCTAssertFalse(TeamOperationRules.canResolve(viewer: requester, maintainer: maintainer))
+        XCTAssertFalse(TeamOperationRules.canResolve(viewer: requester, maintainer: nil))
+        XCTAssertEqual(TeamOperationRules.errorKey("MAINTAINER_REQUIRED"), "teams_error_ops_maintainer")
+        XCTAssertEqual(TeamOperationRules.errorKey("TASK_RUNNING"), "teams_error_ops_running")
+        XCTAssertEqual(TeamOperationRules.errorKey("OPERATION_CONFLICT"), "teams_error_ops_conflict")
+        XCTAssertEqual(TeamOperationRules.errorKey("MEMBERSHIP_REQUIRED"), TeamsErrors.key("MEMBERSHIP_REQUIRED"))
+    }
     func testRetiredBotAuthorCannotDecode() throws {
         let base = #"{"id":"message_0001","seq":1,"author":{"kind":"bot","uid":"owner","botKey":"bot:o:h:x"},"kind":"text","text":"old","changeSeq":1,"changeId":"change_0001"}"#
         XCTAssertThrowsError(try JSONDecoder().decode(TeamMessage.self, from: Data(base.utf8)))

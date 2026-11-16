@@ -111,6 +111,16 @@ test('shared Chat source: original timestamps are mandatory, same-named authors 
   const human = chatSourceMessage(m.id, { ...m.value, author: { kind: 'user', uid: 'retained_human' } });
   assert.equal(human.author.displayName, 'retained_human'); f.reader.close();
 });
+test('shared Chat source: a Bot question and the human answer to it carry the wait and task ids', () => {
+  const f = fixture(), m = f.messages[0]!;
+  const question = chatSourceMessage(m.id, { ...m.value, author: { kind: 'shared_bot', sharedBotId: 'shared_bot_01', displayName: 'Bot' }, taskId: 'task_0001', waitId: 'wait_0001' });
+  assert.deepEqual([question.sourceTaskId, question.waitId], ['task_0001', 'wait_0001']);
+  const answer = chatSourceMessage(m.id, { ...m.value, sourceTaskId: 'task_0001', waitId: 'wait_0001' });
+  assert.deepEqual([answer.sourceTaskId, answer.waitId], ['task_0001', 'wait_0001']);
+  assert.equal('waitId' in chatSourceMessage(m.id, m.value), false);
+  assert.throws(() => chatSourceMessage(m.id, { ...m.value, waitId: 'short' }), /INVALID_DATA/u);
+  assert.throws(() => chatSourceMessage(m.id, { ...m.value, sourceTaskId: 7 }), /INVALID_DATA/u); f.reader.close();
+});
 test('shared Chat source: independent change watermark returns old edits and blank recalls without consuming future messages', async () => {
   const f = fixture(); f.edit(1, 'Corrected old detail'); f.edit(2, '', true); f.edit(600, 'Future for this task');
   const changed = await f.reader.read({ ...f.scope, mode: 'changes', afterChangeSeq: 650, throughMessageSeq: 300 });
@@ -140,4 +150,16 @@ test('shared Chat source: an edit mixed with later appends still invalidates the
   assert.equal(fresh.messages.length, 450);
   assert.equal(fresh.messages.find(message => message.seq === 210)!.text, 'Corrected while reading');
   f.reader.close();
+});
+
+test('a source message names the files it carries; a recalled one names none, and a file that does not read as one is refused', () => {
+  const value = { seq: 1, changeSeq: 1, changeId: 'change_0001', text: '', author: { kind: 'user', uid: 'human1', displayName: 'Ann' }, createdAt: { toMillis: () => 1000 } };
+  const file = { attachmentId: 'attachment_01', name: 'plan.png', mime: 'image/png', byteLength: 12, sha256: 'a'.repeat(64) };
+  assert.deepEqual(chatSourceMessage('message_0001', { ...value, attachments: [file, { ...file, attachmentId: 'attachment_02', revoked: true }] }).attachments,
+    [file, { ...file, attachmentId: 'attachment_02', revoked: true }]);
+  assert.equal('attachments' in chatSourceMessage('message_0001', value), false);
+  assert.equal('attachments' in chatSourceMessage('message_0001', { ...value, recalled: true, attachments: [file] }), false);
+  for (const wrong of [[], [{ ...file, mime: 'image/gif' }], [{ ...file, byteLength: 0 }], [{ ...file, byteLength: 10 * 1024 * 1024 + 1 }], [{ ...file, sha256: 'A'.repeat(64) }],
+    [{ ...file, name: '' }], [{ ...file, name: 'a\u0000b' }], [{ ...file, attachmentId: 'short' }], [{ ...file, revoked: 'yes' }], Array(6).fill(file), 'plan.png', [null]])
+    assert.throws(() => chatSourceMessage('message_0001', { ...value, attachments: wrong }), /INVALID_DATA/u);
 });

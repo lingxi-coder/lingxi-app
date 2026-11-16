@@ -2,6 +2,7 @@ package com.lingxi.code.teams
 
 import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,12 +20,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material.icons.outlined.Remove
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -81,6 +85,9 @@ internal fun TeamDetailsScreen(
     val privileged = current.role != "member"
     var segment by rememberSaveable { mutableIntStateOf(0) }
     var confirmation by remember { mutableStateOf<TeamConfirmation?>(null) }
+    // The shared list of one Bot of this team; a change of account, team or membership closes it.
+    var listOf by remember(uid, team.id, current.generation) { mutableStateOf<TeamBotCard?>(null) }
+    listOf?.let { bot -> TeamSharedListDialog(bot, workspace.messagingModel, detail?.members.orEmpty()) { listOf = null } }
     val model = workspace.teamsModel
     val busy = teams.busy
 
@@ -111,7 +118,7 @@ internal fun TeamDetailsScreen(
             when (segments[selected]) {
                 R.string.teams_members -> membersSection(detail, current, uid, busy, friendUids, onAddFriend) { confirmation = it }
                 R.string.teams_invites -> invitesSection(detail, current, teams, busy, model, onInviteFriends) { confirmation = it }
-                else -> botsSection(messaging, detail, uid, onMessageBot, workspace)
+                else -> botsSection(messaging, detail, uid, onMessageBot, workspace) { listOf = it }
             }
             item {
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
@@ -153,10 +160,20 @@ private fun androidx.compose.foundation.lazy.LazyListScope.membersSection(
                 }
             }
             if (member.uid != uid && member.role != "owner" && (team.role == "owner" || (team.role == "admin" && member.role == "member"))) {
-                if (team.role == "owner") TextButton(enabled = !busy, onClick = { confirm(TeamConfirmations.changeRole(team, member, name)) }) {
-                    Text(stringResource(if (member.role == "admin") R.string.teams_demote else R.string.teams_promote))
-                }
-                TextButton(enabled = !busy, onClick = { confirm(TeamConfirmations.remove(team, member, name)) }) {
+                // The owner has three things to decide about a member; they are behind one button so the name keeps its room. Each one asks first (U8).
+                if (team.role == "owner") Box {
+                    var menu by remember(member.uid) { mutableStateOf(false) }
+                    IconButton(enabled = !busy, onClick = { menu = true }, modifier = Modifier.testTag(TeamsTags.memberActions(member.uid))) {
+                        Icon(Icons.Outlined.MoreVert, stringResource(R.string.teams_list_item_options_fmt, name))
+                    }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text(stringResource(if (member.role == "admin") R.string.teams_demote else R.string.teams_promote)) },
+                            onClick = { menu = false; confirm(TeamConfirmations.changeRole(team, member, name)) })
+                        // Owning the team is given on its own: Bots stay with their maintainers and chats with their readers.
+                        DropdownMenuItem(text = { Text(stringResource(R.string.teams_make_owner)) }, onClick = { menu = false; confirm(TeamConfirmations.makeOwner(team, member)) })
+                        DropdownMenuItem(text = { Text(stringResource(R.string.teams_remove), color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; confirm(TeamConfirmations.remove(team, member, name)) })
+                    }
+                } else TextButton(enabled = !busy, onClick = { confirm(TeamConfirmations.remove(team, member, name)) }) {
                     Text(stringResource(R.string.teams_remove), color = MaterialTheme.colorScheme.error)
                 }
             }
@@ -239,7 +256,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.invitesSection(
     }
 }
 
-private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(messaging: TeamMessagingState, detail: TeamDetail?, uid: String, onMessageBot: (String) -> Unit, workspace: TeamsWorkspace) {
+private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(messaging: TeamMessagingState, detail: TeamDetail?, uid: String, onMessageBot: (String) -> Unit, workspace: TeamsWorkspace, onOpenList: (TeamBotCard) -> Unit) {
     item { Text(stringResource(R.string.teams_bots_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     when {
         // Loading or unverified: one line of status. Loaded and empty (U9): what is empty, then how a Bot gets here.
@@ -259,6 +276,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(messaging
                 TeamBotCardView(
                     bot, detail?.members?.firstOrNull { it.uid == bot.maintainer.uid }?.displayName ?: bot.maintainer.uid, uid, messaging.cache?.generation ?: 0, !messaging.offline,
                     onMessage = { onMessageBot(bot.sharedBotId) }, onStopSharing = { workspace.messagingModel.pause(bot) },
+                    onList = if (TeamSharedListRules.canOpen(bot, uid, messaging.cache?.generation ?: 0)) ({ onOpenList(bot) }) else null,
                 )
             }
         }

@@ -7,10 +7,10 @@ enum SettingsPage: Hashable {
     case general, customProviders, fusion, permissions, toolsAgent, hooks, plugins, diagnostics, about, archivedChats, projectsTrust
     case providerList(ProviderKindBox)
     case providerEdit(ProviderKindBox, String)
-    case voice, linuxRuntime, knowledge, memory, workflows
+    case voice, linuxRuntime, browser, knowledge, memory, workflows
     case appearance, language, notifications, input, appIntegration, privacy, permissionMode, typescriptLsp
     case skills, skillDetail(String)
-    case pluginDetail(String), pluginsAdvanced
+    case pluginDetail(String), pluginsAdvanced, skillDirectory
     case mcpList, mcpEdit(String)
     case linkedMcp(String, scope: String?), linkedSkill(String, scope: String?), linkedProvider(String, scope: String?)
     case dream
@@ -263,7 +263,7 @@ struct SettingsHost: View {
     private func showsEngineApplyAction(_ page: SettingsPage) -> Bool {
         switch page {
         case .customProviders, .linkedProvider, .permissions, .toolsAgent, .skills, .mcpList, .hooks, .plugins, .pluginDetail,
-             .pluginsAdvanced, .diagnostics, .projectsTrust:
+             .pluginsAdvanced, .skillDirectory, .diagnostics, .projectsTrust:
             true
         case .providerList(let kind): kind.kind == .llm
         default: false
@@ -388,6 +388,7 @@ struct SettingsHost: View {
         case .pluginDetail(let id):
             return DesktopSettingsRepository.shared.pluginCatalog.installed(id)?.displayName ?? String(localized: "plugins_detail_title")
         case .pluginsAdvanced: return String(localized: "plugins_advanced")
+        case .skillDirectory: return String(localized: "skills_browse_store")
         case .diagnostics: return String(localized: "settings_parity_diagnostics")
         case .about: return String(localized: "settings_section_about")
         case .archivedChats: return String(localized: "settings_parity_archived")
@@ -400,6 +401,7 @@ struct SettingsHost: View {
             return store.providers(b.kind).first(where: { $0.id == id })?.name ?? String(localized: "settings_title_edit")
         case .voice: return String(localized: "settings_group_voice")
         case .linuxRuntime: return String(localized: "settings_linux_runtime")
+        case .browser: return String(localized: "settings_browser_title")
         case .knowledge: return String(localized: "settings_knowledge")
         case .memory: return String(localized: "settings_memory")
         case .workflows: return String(localized: "settings_title_workflows")

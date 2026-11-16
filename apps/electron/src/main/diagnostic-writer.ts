@@ -111,9 +111,8 @@ export class DiagnosticFileWriter {
         this.tail.push(...lines);
         if (this.tail.length > this.retainedEntries) this.tail.splice(0, this.tail.length - this.retainedEntries);
       }
-      const retainedTail = this.retainedEntries ? this.tail.join('') : undefined;
       try {
-        await this.persist(lines.join(''), bytes, retainedTail);
+        await this.persist(lines.join(''), bytes);
       } catch {
         // Missing/unwritable/full storage must not stall the desktop or build
         // an unbounded retry queue. The next batch may retry directory setup.
@@ -122,7 +121,7 @@ export class DiagnosticFileWriter {
     }
   }
 
-  private async persist(body: string, bytes: number, retainedTail: string | undefined): Promise<void> {
+  private async persist(body: string, bytes: number): Promise<void> {
     if (!this.directoryReady) {
       await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 });
       this.directoryReady = true;
@@ -133,7 +132,10 @@ export class DiagnosticFileWriter {
     });
     if (size && size + bytes >= FILE_BYTES) {
       await rename(this.filePath, `${this.filePath}.1`);
-      if (retainedTail !== undefined) {
+      if (this.retainedEntries) {
+        // drain is serial and add only changes pending, so this tail still
+        // contains exactly the dequeued batch even after the stat/rename awaits.
+        const retainedTail = this.tail.join('');
         const temporary = `${this.filePath}.tmp`;
         await writeFile(temporary, retainedTail, { mode: 0o600 });
         await rename(temporary, this.filePath);

@@ -13,6 +13,7 @@ struct TeamConversationView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(AppNavigationModel.self) private var navigation
     let conversationID: String
     /// Called when the conversation is gone (the viewer is not in it any more). By default the screen pops itself;
     /// the wide layout's pane clears its selection instead.
@@ -37,6 +38,8 @@ struct TeamConversationView: View {
     @State private var savedText: String?
     @State private var draft = TeamComposerDraft()
     @State private var draftLoaded = false
+    /// The app's voice input, made the first time the microphone is used here. What it hears goes into the box.
+    @State private var voice: VoiceInteractionController?
     @FocusState private var composerFocused: Bool
 
     var body: some View {
@@ -61,7 +64,10 @@ struct TeamConversationView: View {
         }
         .onDisappear {
             if draftLoaded, editing == nil { workspace.setDraft(draft, for: conversationID) }
+            voice?.close()
         }
+        // Another account, another team, or the viewer's membership changed: what was being said is dropped, not moved.
+        .onChange(of: workspace.draftKey(conversationID)) { _, _ in voice?.close() }
         // Without `.contain` the identifier is copied onto every child (composer input, send, rows).
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.conversation.\(conversationID)")
@@ -107,11 +113,17 @@ struct TeamConversationView: View {
         let unread = model.unread(of: conversation)
         let messages = model.cache?.threads[conversation.id]?.messages ?? []
         let participants = TeamsListLogic.conversationParticipants(conversation, members: context.members, bots: context.bots, uid: context.uid, strings: context.strings)
+        let carrying = carriesFiles(context)
         return VStack(spacing: 0) {
             banners(context)
             stream(context, messages: messages)
+            voicePanel
             TeamComposerView(
                 context: context, draft: $draft, editing: editing, replying: replying(context, messages: messages), busy: workspace.messageBusy,
+                files: carrying ? workspace.files(for: conversationID) : [], refusals: carrying ? workspace.refusals(for: conversationID) : [],
+                onChooseFiles: carrying ? { workspace.addFiles($0, to: conversationID) } : nil,
+                onRemoveFile: { workspace.removeFile($0, from: conversationID) }, onDismissRefusals: { workspace.dismissRefusals(for: conversationID) },
+                listening: voice?.capturePhase == .listening, onVoice: toggleVoice,
                 focus: $composerFocused, onSend: { Task { await send(context) } },
                 onCancelEdit: endEdit, onCancelReply: { draft.replyToID = nil })
         }
@@ -225,7 +237,7 @@ struct TeamConversationView: View {
         let newest = messages.last?.seq ?? 0
         let unseen = messages.filter { $0.seq > seenSeq && !context.isMine($0) }.count
         let locked = TeamsComposeLogic.composerLock(
-            uid: context.uid, kind: conversation.kind, participants: conversation.participants,
+            uid: context.uid, kind: conversation.kind, participants: conversation.participants, readers: conversation.readers,
             bots: context.bots, botsLoaded: context.model.botsLoaded, botsUnverified: context.model.botsUnverified) != .none
         let outbox = (context.model.cache?.outbox ?? []).filter { $0.conversationId == conversation.id }
         return ScrollView {
@@ -263,8 +275,8 @@ struct TeamConversationView: View {
                             TeamMessageCell(
                                 message: message, grouped: grouped, context: context, quote: quote(of: message, byID: byID, context: context),
                                 onReply: locked ? nil : { startReply($0) },
-                                onEdit: context.isMine(message) && context.participant ? { beginEdit($0) } : nil,
-                                onRecall: context.isMine(message) && context.participant ? { recalling = $0 } : nil)
+                                onEdit: context.isMine(message) && context.participant && message.decision == nil ? { beginEdit($0) } : nil,
+                                onRecall: context.isMine(message) && context.participant && message.decision == nil ? { recalling = $0 } : nil)
                             .id(row.key)
                         }
                     }
@@ -371,14 +383,66 @@ struct TeamConversationView: View {
         guard let target = byID[replyID] else { return TeamMessageQuote(author: "", text: String(localized: "teams_message_reply")) }
         return TeamMessageQuote(
             author: context.identity(of: target).name,
-            text: target.recalled == true ? String(localized: "teams_message_recalled") : TeamsComposeLogic.snippet(target.text))
+            text: target.recalled == true ? String(localized: "teams_message_recalled") : said(target))
     }
 
     // MARK: Composer actions
 
     private func replying(_ context: TeamConversationContext, messages: [TeamMessage]) -> (author: String, text: String)? {
         guard let id = draft.replyToID, let target = messages.first(where: { $0.id == id }) else { return nil }
-        return (context.identity(of: target).name, target.recalled == true ? String(localized: "teams_message_recalled") : TeamsComposeLogic.snippet(target.text))
+        return (context.identity(of: target).name, target.recalled == true ? String(localized: "teams_message_recalled") : said(target))
+    }
+
+    /// A one-line snippet of a message; one of files alone is said by their names.
+    private func said(_ message: TeamMessage) -> String {
+        TeamsComposeLogic.snippet(TeamAttachments.said(text: message.text, names: message.files.map(\.name)))
+    }
+
+    /// The wait the message being written would answer: it replies to a Bot's question that still waits for the viewer.
+    private func answering(_ context: TeamConversationContext) -> String? {
+        guard editing == nil, let id = draft.replyToID,
+              let question = context.model.cache?.threads[context.conversation.id]?.messages.first(where: { $0.id == id }) else { return nil }
+        return context.answerableWait(of: question)
+    }
+
+    /// Whether the message being written carries the draft's files: a new message does, an edit and an answer to a Bot's question do not.
+    private func carriesFiles(_ context: TeamConversationContext) -> Bool { editing == nil && answering(context) == nil }
+
+    // MARK: Voice
+
+    /// What the voice input shows while it is used (as in a chat): how to set it up when it cannot listen — the
+    /// box stays usable for typing — or what it is hearing.
+    @ViewBuilder
+    private var voicePanel: some View {
+        if let voice {
+            let settings = { navigation.showSettings(.voice, origin: navigation.selectedTab) }
+            if let guidance = AudioSetupGuidance.forPhase(voice.phase, message: voice.statusDetail) {
+                AudioSetupBanner(guidance: guidance, onConfigure: settings, onDismiss: voice.close)
+            } else if voice.isPresented {
+                InlineVoicePanel(controller: voice, onConfigure: settings)
+            }
+        }
+    }
+
+    /// The microphone button: starts listening, or ends it so the words are recognized. The words are added to the
+    /// box of the conversation they were spoken in, for the viewer to read, change and send; they are never sent
+    /// from here, and ones that arrive after the account, the team or the membership changed are dropped.
+    private func toggleVoice() {
+        let controller = voice ?? VoiceInteractionController()
+        voice = controller
+        switch controller.capturePhase {
+        case .idle:
+            let key = workspace.draftKey(conversationID)
+            composerFocused = false
+            controller.startDictation { heard in
+                guard workspace.draftKey(conversationID) == key else { return }
+                draft.text = TeamsComposeLogic.appendingTranscript(heard, to: draft.text)
+            }
+        case .listening:
+            controller.finishListening()
+        case .finishing:
+            break
+        }
     }
 
     private func startReply(_ message: TeamMessage) {
@@ -389,6 +453,8 @@ struct TeamConversationView: View {
 
     /// An edit borrows the box: the draft is set aside and comes back when the edit ends.
     private func beginEdit(_ message: TeamMessage) {
+        // Words still being spoken were for the message set aside, not for the one being changed.
+        voice?.cancelDictation()
         if editing == nil { savedText = draft.text }
         editing = message
         draft.replyToID = nil
@@ -398,6 +464,7 @@ struct TeamConversationView: View {
     }
 
     private func endEdit() {
+        voice?.cancelDictation()
         editing = nil
         draft.text = savedText ?? ""
         savedText = nil
@@ -405,16 +472,23 @@ struct TeamConversationView: View {
 
     private func send(_ context: TeamConversationContext) async {
         let body = draft.text, reply = draft.replyToID, targets = draft.targets, changing = editing
-        guard TeamsComposeLogic.canSendText(body) else { return }
+        // A reply to a Bot's question that still waits for the viewer is its answer: it continues that task and asks no Bot.
+        let waitId = answering(context)
+        // The files are this conversation's draft's, read at the moment of sending: no other conversation's are ever sent here.
+        let files = changing == nil && waitId == nil ? workspace.files(for: conversationID) : []
+        guard TeamAttachments.canSend(text: body, files: files) else { return }
         let sent = await workspace.run {
             let model = context.model
+            if let waitId { try await model.queue(operation: "create", text: body, replyTo: reply, waitId: waitId); return }
             // A Bot the viewer picked may have been revoked since: the draft is never sent with a stale target.
             if changing == nil, targets.contains(where: { key in !model.bots.contains { $0.sharedBotId == key && $0.selectable } }) {
                 throw TeamMessageFailure(code: "BOT_USE_REQUIRED")
             }
-            try await model.queue(operation: changing == nil ? "create" : "edit", text: body, messageId: changing?.id, replyTo: reply, targets: changing == nil ? targets : [])
+            guard model.selected == conversationID else { throw TeamMessageFailure(code: "INVALID_INPUT") }
+            try await model.queue(operation: changing == nil ? "create" : "edit", text: body, messageId: changing?.id, replyTo: reply, targets: changing == nil ? targets : [], files: files)
         }
         guard sent else { return }
+        workspace.filesSent(files.map(\.uploadId), in: conversationID)
         if changing != nil {
             // The set-aside draft comes back (Desktop: `onClearEditing` restores the text kept while editing).
             endEdit()

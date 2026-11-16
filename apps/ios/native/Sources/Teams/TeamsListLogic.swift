@@ -126,9 +126,22 @@ enum TeamsListLogic {
         return people.filter { !$0.isSelf } + robots + people.filter(\.isSelf)
     }
 
-    /// The viewer's own Bot DM with a Bot, if there is one. (A Bot's owner also sees other people's.)
-    static func findBotDm(_ conversations: [TeamMessageConversation], uid: String, sharedBotId: String) -> TeamMessageConversation? {
-        conversations.first { $0.kind == "bot_dm" && $0.participants.contains("shared_bot:\(sharedBotId)") && $0.participants.contains("user:\(uid)") }
+    /// The viewer's own Bot DM with a Bot, if there is one. (A Bot's owner also sees other people's.) With `bots`,
+    /// a DM from before the Bot changed maintainer does not count: the Bot answers in a new one.
+    static func findBotDm(_ conversations: [TeamMessageConversation], uid: String, sharedBotId: String, bots: [TeamBotCard] = []) -> TeamMessageConversation? {
+        conversations.first {
+            $0.kind == "bot_dm" && $0.participants.contains("shared_bot:\(sharedBotId)") && $0.participants.contains("user:\(uid)")
+                && !botDmHandedOver(kind: $0.kind, participants: $0.participants, readers: $0.readers, bots: bots)
+        }
+    }
+
+    /// A Bot DM made before its Bot was handed to another maintainer. It stays as it was for the people who could
+    /// read it, and the Bot takes no new request in it: the new maintainer was never one of its readers. Unknown
+    /// readers say nothing.
+    static func botDmHandedOver(kind: String, participants: [String], readers: [String]?, bots: [TeamBotCard]) -> Bool {
+        guard kind == "bot_dm", let readers,
+              let maintainer = bots.first(where: { participants.contains("shared_bot:\($0.sharedBotId)") })?.maintainer.uid else { return false }
+        return !readers.contains(maintainer) || readers.contains { $0 != maintainer && !participants.contains("user:\($0)") }
     }
 
     /// The viewer's existing two-person DM with someone.

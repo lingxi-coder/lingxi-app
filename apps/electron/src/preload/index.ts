@@ -3,6 +3,7 @@ import { CH_DECISION, CH_DECISION_CHANGED, type DecisionApi } from '../shared/de
 import { DESKTOP_BRIDGE_GLOBAL } from '../shared/desktopBridge.js';
 import { CH_SESSION_RECOVERY, type SessionRecoveryDiagnostic } from '../shared/sessionRecovery.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
+import { CH_SESSION_HISTORY, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
 import type { ProviderAccountsApi } from '../shared/providerAccounts.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
 import { CH_IMAGE_SAVE, type ImageSaveRequest } from '../shared/imageSave.js';
@@ -331,6 +332,7 @@ export interface LingxiApi {
   cancelSessionHandoff(requestId: string): Promise<void>;
   onConversationShown(callback: (snapshot: BootstrapState) => void): Unsubscribe;
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: ConversationSpace, authoringAppId?: string, authoringVersion?: number): Promise<BootstrapState>;
+  loadSessionHistory(sessionId: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage>;
   prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
   releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
   preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;
@@ -404,7 +406,10 @@ const recoveryDocumentId = `${Date.now().toString(36)}-${Math.random().toString(
 let recoverySubscriptionId = 0;
 function reportSessionRecovery(sample: SessionRecoveryDiagnostic): void {
   const fields = Object.fromEntries(Object.entries(sample).filter(([, value]) => value !== undefined));
-  void ipcRenderer.invoke(CH_SESSION_RECOVERY, { ...fields, documentId: recoveryDocumentId }).catch(() => undefined);
+  // No reply is needed, and late shutdown samples must not invoke an IPC
+  // handler that the main process has already removed.
+  try { ipcRenderer.send(CH_SESSION_RECOVERY, { ...fields, documentId: recoveryDocumentId }); }
+  catch { /* The renderer frame may already be closing. */ }
 }
 
 function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelope<ClientEvent>) => void): Unsubscribe {
@@ -526,9 +531,15 @@ const api: LingxiApi = {
     localBots: uid => teamsRequest({ type: 'localBots', uid }),
     publishLocalBot: (uid, input) => teamsRequest({ type: 'publishLocalBot', uid, input }),
     selectSharedFiles: (uid, instanceId) => teamsRequest({ type: 'selectSharedFiles', uid, instanceId }),
+    publishedKnowledge: (uid, teamId, sharedBotId) => teamsRequest({ type: 'publishedKnowledge', uid, teamId, sharedBotId }),
+    hostStatus: uid => teamsRequest({ type: 'hostStatus', uid }),
+    offerSharedBot: (uid, input) => teamsRequest({ type: 'offerSharedBot', uid, input }),
+    acceptSharedBot: (uid, input) => teamsRequest({ type: 'acceptSharedBot', uid, input }),
     list: uid => teamsRequest({ type: 'list', uid }),
     detail: (uid, teamId) => teamsRequest({ type: 'detail', uid, teamId }),
     messages: (uid, command) => teamsRequest({ type: 'messages', uid, command }),
+    services: (uid, command) => teamsRequest({ type: 'services', uid, command }),
+    serviceMessages: (uid, command) => teamsRequest({ type: 'serviceMessages', uid, command }),
     onMessagesChanged: callback => subscribe('lingxi:teams:messages', callback),
     watchMessages: (uid, scope, conversationId, next) => {
       const leaseId = crypto.randomUUID();
@@ -649,6 +660,7 @@ const api: LingxiApi = {
   prepareSessionHandoff: (sourceId, target, requestId, retry) => ipcRenderer.invoke(CH_SESSION_HANDOFF, sourceId, target, requestId, retry) as Promise<{ snapshot: BootstrapState; summary: string; requestId: string } | null>,
   cancelSessionHandoff: (requestId) => ipcRenderer.invoke(CH_SESSION_HANDOFF_CANCEL, requestId) as Promise<void>,
   onConversationShown: (callback) => subscribe(CH_CONVERSATION_SHOWN, callback),
+  loadSessionHistory: (sessionId, before) => ipcRenderer.invoke(CH_SESSION_HISTORY, sessionId, before),
   openSession: (projectPath, sessionId, selection, linkedMode, authoringAppId, authoringVersion) => (authoringAppId !== undefined
     ? ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId, selection, linkedMode, authoringAppId, authoringVersion)
     : linkedMode !== undefined

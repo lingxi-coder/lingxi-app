@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,14 +21,127 @@ import {
   isSafeProviderAccountSnapshot,
   runtimePathsForHome,
   runPackagedCredentialStability,
+  restartPackagedBridgeWhenIdle,
   sanitizePackagedAppEnvironment,
   waitForRendererCommit,
+  waitForPackagedAppExit,
   workspaceTrustFingerprint,
 } from '../scripts/packaged-app-smoke.mjs';
 import { workspaceFingerprint as hostWorkspaceFingerprint } from '../src/main/host-utils.ts';
 import { ConversationSpaceStore } from '../src/main/conversationSpaceStore.ts';
 
 const temporaryDirectories = [];
+
+const RESTART_BUSY_GUARD = 'cancel active turns and pending interactions before restarting the engine';
+
+function restartFixture({ state, restart = () => undefined }) {
+  const calls = { snapshots: 0, restarts: 0, budgets: [] };
+  const page = { send: async (method, params, timeoutMs) => {
+    assert.equal(method, 'Runtime.evaluate');
+    calls.budgets.push(timeoutMs);
+    if (params.expression === 'window.lingxi.bootstrap()') {
+      return { result: { value: state(++calls.snapshots) } };
+    }
+    assert.equal(params.expression, 'window.lingxi.restartBridge("target")', 'the helper must never cancel work or invoke another session');
+    const result = await restart(++calls.restarts);
+    return result ?? { result: { value: undefined } };
+  } };
+  return { page, calls };
+}
+
+function restartSnapshot(otherBusy = false) {
+  const runtime = { sessionId: 'target', projectPath: '/fixture', connection: { status: 'connected' },
+    turnActive: false, pendingInteractions: 0, pendingAskUserQuestions: 0 };
+  return { activeSession: { sessionId: 'target' }, runtimes: [runtime,
+    { ...runtime, sessionId: 'other', turnActive: otherBusy }] };
+}
+
+test('packaged restart waits for busy work in the same project before making any restart request', async () => {
+  const fixture = restartFixture({ state: poll => restartSnapshot(poll === 1), restart: () => {
+    assert.equal(fixture.calls.snapshots, 2, 'busy preflight must not execute restart');
+  } });
+  await restartPackagedBridgeWhenIdle(fixture.page, 'target', { intervalMs: 0 });
+  assert.equal(fixture.calls.restarts, 1);
+});
+
+test('packaged restart retries only denied admission and returns after exactly one successful restart', async () => {
+  let successes = 0;
+  const fixture = restartFixture({ state: () => restartSnapshot(), restart: attempt => {
+    if (attempt < 3) return { exceptionDetails: { text: 'Uncaught (in promise)', exception: {
+      description: `Error invoking remote method 'lingxi:bridge:restart': Error: ${RESTART_BUSY_GUARD}\n    at HostController.assertRestartAllowed`,
+    } } };
+    successes++;
+  } });
+  await restartPackagedBridgeWhenIdle(fixture.page, 'target', { intervalMs: 0 });
+  assert.equal(fixture.calls.snapshots, 3);
+  assert.equal(fixture.calls.restarts, 3);
+  assert.equal(successes, 1);
+});
+
+test('packaged restart propagates other failures immediately instead of retrying them', async () => {
+  const failure = new Error('the requested session is no longer active');
+  const fixture = restartFixture({ state: () => restartSnapshot(), restart: () => { throw failure; } });
+  await assert.rejects(restartPackagedBridgeWhenIdle(fixture.page, 'target'), error => error === failure);
+  assert.equal(fixture.calls.restarts, 1);
+  assert.equal(fixture.calls.snapshots, 1);
+});
+
+test('packaged restart has one bounded deadline while busy and passes its remaining budget to CDP', async t => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const fixture = restartFixture({ state: () => { now += 5; return restartSnapshot(true); } });
+  await assert.rejects(restartPackagedBridgeWhenIdle(fixture.page, 'target', { timeoutMs: 15, intervalMs: 0 }), /did not become idle within 15ms/);
+  assert.equal(fixture.calls.restarts, 0);
+  assert(fixture.calls.snapshots > 0);
+  assert(fixture.calls.budgets.every(budget => budget > 0 && budget <= 15));
+});
+
+test('packaged restart bounds repeated authority-guard rejections and never treats them as success', async t => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const fixture = restartFixture({ state: () => { now += 5; return restartSnapshot(); }, restart: () => { throw new Error(RESTART_BUSY_GUARD); } });
+  await assert.rejects(restartPackagedBridgeWhenIdle(fixture.page, 'target', { timeoutMs: 15, intervalMs: 0 }), /did not become idle within 15ms/);
+  assert(fixture.calls.restarts > 0);
+});
+
+test('packaged exit observes a clean process exit delivered during the quit request', async () => {
+  const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+  await waitForPackagedAppExit(child, async () => { child.exitCode = 0; child.emit('exit', 0, null); });
+  assert.equal(child.listenerCount('exit'), 0);
+});
+
+test('packaged exit waits for the observed slow native profile flush and still requires a real exit', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+  let settled = false;
+  const waiting = waitForPackagedAppExit(child, async () => {});
+  waiting.then(() => { settled = true; }, () => { settled = true; });
+  await Promise.resolve();
+  t.mock.timers.tick(18_334);
+  await Promise.resolve();
+  assert.equal(settled, false, 'the original 10s budget must not interrupt a native flush');
+  child.exitCode = 0; child.emit('exit', 0, null);
+  await waiting;
+  assert.equal(child.listenerCount('exit'), 0);
+});
+
+test('packaged exit rejects a process that stays alive beyond the bounded deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+  const waiting = waitForPackagedAppExit(child, async () => {});
+  const rejected = assert.rejects(waiting, /did not exit.*30000ms/);
+  await Promise.resolve();
+  t.mock.timers.tick(30_001);
+  await rejected;
+  assert.equal(child.listenerCount('exit'), 0);
+});
+
+test('packaged exit rejects crashes and signal termination instead of accepting process disappearance', async () => {
+  for (const state of [{ exitCode: 1, signalCode: null }, { exitCode: null, signalCode: 'SIGTERM' }]) {
+    const child = Object.assign(new EventEmitter(), state);
+    await assert.rejects(waitForPackagedAppExit(child, async () => {}), /must exit/);
+  }
+});
 
 test('packaged profile maps the fixture workspace into the current Code space', () => {
   const home = temporaryDirectory();

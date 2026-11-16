@@ -25,9 +25,11 @@ import {
   pluginDependencyCaveat,
   pluginCredentialCleanupFromOperation,
   publicMarketplacePluginTargetId,
+  publicDirectoryPluginSelection,
 } from '../src/renderer/components/settings/pages/Plugins';
 import { decidePublicMcpDirectoryAction, matchesPublicMcpDirectoryEntry, mcpRuntimeStatusLabel } from '../src/renderer/components/settings/pages/McpServers';
 import { publicExtensionItems } from '../src/shared/publicExtensionDirectory';
+import { isPublicExtensionInstalled } from '../src/shared/publicMarketplace';
 import { adminRecordCommand } from '../src/renderer/components/settings/pages/configurationAdmin';
 import { parseJsonObjectInput } from '../src/renderer/components/settings/jsonInput';
 import { hooksPageModel } from '../src/renderer/components/settings/pages/Hooks';
@@ -46,6 +48,43 @@ function snap(overrides: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
     ...overrides,
   };
 }
+
+test('recommended packages require the verified source before opening an install target', () => {
+  const item = publicExtensionItems.find((entry) => entry.id === 'document-skills')!;
+  const available = [{ id: 'document-skills@anthropic-agent-skills', name: 'document-skills', marketplace: 'anthropic-agent-skills' }];
+  assert.deepEqual(publicDirectoryPluginSelection(item, { available }), {
+    kind: 'marketplace-add', source: 'anthropics/skills', directoryItemId: 'document-skills',
+  });
+  assert.deepEqual(publicDirectoryPluginSelection(item, {
+    available,
+    marketplaces: [{ name: 'anthropic-agent-skills', source_json: JSON.stringify({ source: 'github', repo: 'unrelated/skills' }) }],
+  }), { kind: 'marketplace', name: 'anthropic-agent-skills', sourceConflict: 'anthropics/skills' });
+  const catalog = { available, marketplaces: [{ name: 'anthropic-agent-skills', source_json: JSON.stringify({ source: 'github', repo: 'anthropics/skills' }) }] };
+  assert.deepEqual(publicDirectoryPluginSelection(item, catalog), { kind: 'available', id: available[0]!.id });
+  assert.deepEqual(publicDirectoryPluginSelection(item, { ...catalog, installed: [{ id: available[0]!.id, name: 'document-skills' }] }), { kind: 'plugin', id: available[0]!.id });
+});
+
+test('recommended package navigation follows a registered source alias and its actual catalog', () => {
+  const item = publicExtensionItems.find((entry) => entry.id === 'document-skills')!;
+  const marketplaces = [{ name: 'my-skills', source_json: JSON.stringify({ source: 'github', repo: 'anthropics/skills' }) }];
+  const available = [{ id: 'document-skills@my-skills', name: 'document-skills', marketplace: 'my-skills' }];
+  assert.deepEqual(publicDirectoryPluginSelection(item, { marketplaces, available }), { kind: 'available', id: 'document-skills@my-skills' });
+  assert.deepEqual(publicDirectoryPluginSelection(item, { marketplaces, available: [] }), { kind: 'marketplace', name: 'my-skills' });
+});
+
+test('skill recommendation installed state follows verified source aliases and actual installed packages', () => {
+  const item = publicExtensionItems.find((entry) => entry.id === 'document-skills')!;
+  const catalog = {
+    marketplaces: [{ name: 'my-skills', source_json: JSON.stringify({ source: 'github', repo: 'anthropics/skills' }) }],
+    installed: [{ id: 'document-skills@my-skills' }],
+  };
+  assert.equal(isPublicExtensionInstalled(item, catalog), true);
+  assert.equal(isPublicExtensionInstalled(item, { ...catalog, installed: [] }), false);
+  assert.equal(isPublicExtensionInstalled(item, {
+    marketplaces: [{ name: 'anthropic-agent-skills', source_json: JSON.stringify({ source: 'github', repo: 'unrelated/skills' }) }],
+    installed: [{ id: 'document-skills@anthropic-agent-skills' }],
+  }), false);
+});
 
 // ---------------------------------------------------------------------------
 // Permissions: the four decisions the brief names, plus the ones the code

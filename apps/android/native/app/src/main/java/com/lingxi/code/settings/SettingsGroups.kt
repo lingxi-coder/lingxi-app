@@ -80,6 +80,7 @@ private val allEntries = listOf(
 
     SettingsGroupEntry(SettingsGroup.Phone, SettingsRoutes.LINUX_RUNTIME, "Linux runtime", listOf("terminal", "rootfs")),
     SettingsGroupEntry(SettingsGroup.Phone, SettingsRoutes.COMPUTER_USE, "Computer use", listOf("accessibility")),
+    SettingsGroupEntry(SettingsGroup.Phone, SettingsRoutes.BROWSER, "Browser", listOf("browser", "浏览器", "瀏覽器", "chrome", "chromium", "edge", "brave", "firefox", "samsung", "computer use", "extension", "扩展")),
     SettingsGroupEntry(SettingsGroup.Phone, SettingsRoutes.TYPESCRIPT_LSP, "TypeScript language server", listOf("lsp")),
 
     SettingsGroupEntry(SettingsGroup.General, SettingsRoutes.APPEARANCE, "Appearance", listOf("theme", "dark", "light")),

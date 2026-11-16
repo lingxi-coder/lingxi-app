@@ -3,15 +3,17 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { chmodSync, existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import type { ComputerDevicePolicy, ComputerPermission } from '../shared/computerSettings.js';
+import type { ComputerDevicePolicy, ComputerPermission, ComputerSettingsSnapshot } from '../shared/computerSettings.js';
+import { browserCatalog, browserDefinition, browserSettingsPath, type BrowserId } from '../shared/browserCatalog.js';
 
+// Browser identity is validated here; retain the installed native relay's framing protocol.
 export const BROWSER_PROTOCOL = 'lingxi-browser/1';
 export const BROWSER_EXTENSION_ID = 'nciganheacfkdbpdfdnjnjdkcabfbkmg';
 const NATIVE_HOST = 'com.lingxi.browser';
 const MAX_BODY = 16 * 1024 * 1024;
 const ACTIONS = new Set(['status', 'navigate', 'tabs', 'screenshot', 'click', 'type', 'key', 'history', 'download', 'site_tools', 'cdp']);
 type RecordValue = Record<string, unknown>;
-type BrowserStatus = { connected: boolean; installed: boolean; extensionDirectory: string; error?: string };
+type BrowserStatus = ComputerSettingsSnapshot['browserStatus'];
 interface BrowserOptions {
   policy(): ComputerDevicePolicy;
   descriptorPath: string;
@@ -21,6 +23,7 @@ interface BrowserOptions {
   onChanged?(): void;
   /** Hermetic tests never install browser configuration in the real profile. */
   nativeManifestPath?: string;
+  nativeMessagingRoot?: string;
 }
 interface PendingCommand { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout; revision: string; sessionId?: string }
 interface Approval { fingerprint: string; sessionId: string; revision: string; origin: string; scope: string; expires: number }
@@ -53,7 +56,7 @@ function writePrivate(path: string, value: unknown): void {
   renameSync(temp, path);
 }
 
-/** Native Chrome extension transport; policy and credentials stay in Electron main. */
+/** Selected browser's extension transport; policy and credentials stay in Electron main. */
 export class BrowserIntegration {
   private server?: Server;
   private readonly token = randomBytes(32).toString('hex');
@@ -72,14 +75,44 @@ export class BrowserIntegration {
   private readonly operationControllers = new Set<AbortController>();
   private heartbeatTimer?: NodeJS.Timeout;
   private nativeEnabled: boolean;
-  constructor(private readonly options: BrowserOptions) { this.nativeEnabled = existsSync(this.manifestPath); }
+  private browserId: BrowserId | null;
+  constructor(private readonly options: BrowserOptions) {
+    this.browserId = options.policy().browser.selectedBrowser;
+    this.nativeEnabled = !!this.manifestPath && existsSync(this.manifestPath);
+  }
 
-  private get manifestPath(): string {
-    return this.options.nativeManifestPath ?? join(homedir(), 'Library/Application Support/Google/Chrome/NativeMessagingHosts', `${NATIVE_HOST}.json`);
+  private manifestFor(id: BrowserId | null): string | undefined {
+    const browser = browserDefinition(id);
+    if (!browser?.profileDirectory) return undefined;
+    return this.options.nativeManifestPath ?? join(this.options.nativeMessagingRoot ?? join(homedir(), 'Library/Application Support'), browser.profileDirectory, 'NativeMessagingHosts', `${NATIVE_HOST}.json`);
+  }
+  private get manifestPath(): string | undefined { return this.manifestFor(this.browserId); }
+  private nativePaths(id: BrowserId | null): { host: string; descriptor: string } {
+    // Keep the original Chrome path for existing installations. Every other
+    // adapter gets a distinct descriptor so an old host cannot read a new token.
+    const suffix = id && id !== 'chrome' ? `.${id}` : '';
+    return { host: `${this.options.nativeHostPath}${suffix}`, descriptor: `${this.options.descriptorPath}.native${suffix}` };
+  }
+  private disconnect(): void {
+    this.nativeEnabled = false;
+    this.nativeToken = randomBytes(32).toString('hex');
+    this.lastHeartbeat = 0;
+    this.peerId = undefined;
+    this.queue.length = 0;
+    if (this.poll) { const poll = this.poll; this.poll = undefined; clearTimeout(poll.timer); this.reply(poll.response,{ type:'disconnect' }); }
+  }
+  private unregister(id: BrowserId | null): void {
+    const manifest = this.manifestFor(id);
+    if (!manifest) return;
+    const { host, descriptor } = this.nativePaths(id);
+    for (const path of [manifest,host,descriptor]) {
+      try { unlinkSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
   }
   status(): BrowserStatus {
     const elapsed = Date.now() - this.lastHeartbeat;
-    return { connected: this.nativeEnabled && existsSync(this.manifestPath) && this.lastHeartbeat > 0 && elapsed >= 0 && elapsed < 35_000, installed: existsSync(this.manifestPath), extensionDirectory: this.options.extensionDirectory, ...(this.lastError ? { error: this.lastError } : {}) };
+    const installed = !!this.manifestPath && existsSync(this.manifestPath);
+    return { browserId: this.browserId, connected: this.nativeEnabled && installed && this.lastHeartbeat > 0 && elapsed >= 0 && elapsed < 35_000, installed, extensionDirectory: this.options.extensionDirectory, ...(this.lastError ? { error: this.lastError } : {}) };
   }
   async start(): Promise<{ url: string; token: string }> {
     if (this.endpoint) return { url: this.endpoint, token: this.token };
@@ -90,42 +123,46 @@ export class BrowserIntegration {
     if (!address || typeof address === 'string') throw new Error('Browser host did not open a loopback port');
     this.endpoint = `http://127.0.0.1:${address.port}`;
     writePrivate(this.options.descriptorPath, { url: this.endpoint, token: this.token });
-    writePrivate(`${this.options.descriptorPath}.native`, { url: this.endpoint, token: this.nativeToken });
+    if (this.nativeEnabled) writePrivate(this.nativePaths(this.browserId).descriptor, { url: this.endpoint, token: this.nativeToken });
     this.heartbeatTimer = setInterval(() => this.options.onChanged?.(), 15_000);
     this.heartbeatTimer.unref();
     return { url: this.endpoint, token: this.token };
   }
   async retry(): Promise<BrowserStatus> {
-    try { await this.dispatch({ action:'ping' },this.options.policy().revision); this.lastError = undefined; }
+    try {
+      if (!this.browserId || !this.status().installed) throw new Error(`Choose a browser and set up its extension in ${browserSettingsPath}.`);
+      await this.dispatch({ action:'ping' },this.options.policy().revision); this.lastError = undefined;
+    }
     catch (error) { this.lastError = error instanceof Error ? error.message : 'Browser extension is not connected'; }
     this.options.onChanged?.(); return this.status();
   }
   async install(assertCurrent: () => void = () => {}): Promise<BrowserStatus> {
     assertCurrent();
-    if (process.platform !== 'darwin' && !this.options.nativeManifestPath) throw new Error('Chrome native-host setup is currently supported on macOS');
+    const revision = this.options.policy().revision;
+    const selectedId = this.browserId;
+    const browser = browserDefinition(selectedId);
+    const manifest = this.manifestPath;
+    if (!browser?.profileDirectory || !manifest) throw new Error(`Choose a supported browser in ${browserSettingsPath}.`);
+    if (process.platform !== 'darwin' && !this.options.nativeManifestPath && !this.options.nativeMessagingRoot) throw new Error('Browser native-host setup is currently supported on macOS');
     await this.start();
     assertCurrent();
+    if (this.options.policy().revision !== revision || this.browserId !== selectedId) throw new Error('Browser settings changed. Set up the selected browser again.');
     if (!existsSync(this.options.bridgeExecutable) || !existsSync(join(this.options.extensionDirectory,'manifest.json'))) throw new Error('Browser integration resources are missing from this Desktop installation');
-    writePrivate(`${this.options.descriptorPath}.native`,{ url:this.endpoint,token:this.nativeToken });
-    mkdirSync(dirname(this.options.nativeHostPath), { recursive: true, mode: 0o700 });
-    const script = `#!/bin/sh\nexec ${shellQuote(this.options.bridgeExecutable)} --browser-native-host ${shellQuote(`${this.options.descriptorPath}.native`)} "$@"\n`;
-    writeFileSync(this.options.nativeHostPath,script,{ mode:0o700 }); chmodSync(this.options.nativeHostPath,0o700);
-    writePrivate(this.manifestPath,{ name:NATIVE_HOST, description:'LingXi browser integration', path:this.options.nativeHostPath, type:'stdio', allowed_origins:[`chrome-extension://${BROWSER_EXTENSION_ID}/`] });
+    const { host, descriptor } = this.nativePaths(selectedId);
+    writePrivate(descriptor,{ url:this.endpoint,token:this.nativeToken });
+    mkdirSync(dirname(host), { recursive: true, mode: 0o700 });
+    const script = `#!/bin/sh\nexec ${shellQuote(this.options.bridgeExecutable)} --browser-native-host ${shellQuote(descriptor)} "$@"\n`;
+    writeFileSync(host,script,{ mode:0o700 }); chmodSync(host,0o700);
+    writePrivate(manifest,{ name:NATIVE_HOST, description:'LingXi browser integration', path:host, type:'stdio', allowed_origins:[`chrome-extension://${BROWSER_EXTENSION_ID}/`] });
     this.nativeEnabled = true;
-    this.lastError = this.status().connected ? undefined : 'Load the LingXi Browser extension in Chrome to connect';
+    this.lastError = this.status().connected ? undefined : `Load or reload the LingXi Browser extension in ${browser.name} (${browser.extensionsPage}) to connect.`;
     this.options.onChanged?.(); return this.status();
   }
   async remove(): Promise<BrowserStatus> {
     this.policyChanged();
-    this.nativeEnabled = false;
-    this.nativeToken = randomBytes(32).toString('hex');
-    this.peerId = undefined;
-    this.queue.length = 0;
-    if (this.poll) { const poll = this.poll; this.poll = undefined; clearTimeout(poll.timer); this.reply(poll.response,{ type:'disconnect' }); }
-    for (const path of [this.manifestPath,this.options.nativeHostPath,`${this.options.descriptorPath}.native`]) {
-      try { unlinkSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    }
-    this.lastHeartbeat = 0; this.lastError = undefined; this.options.onChanged?.(); return this.status();
+    this.disconnect();
+    this.unregister(this.browserId);
+    this.lastError = undefined; this.options.onChanged?.(); return this.status();
   }
   policyChanged(): void {
     this.approvals.clear(); this.grants.clear();
@@ -133,7 +170,19 @@ export class BrowserIntegration {
     for (const command of this.pending.values()) { clearTimeout(command.timer); command.reject(new Error('Browser permissions changed; request access again')); }
     this.pending.clear(); this.queue.length = 0;
     let revision: string;
-    try { revision = this.options.policy().revision; } catch { revision = `unavailable-${randomUUID()}`; }
+    try {
+      const policy = this.options.policy();
+      revision = policy.revision;
+      const selected = policy.browser.selectedBrowser;
+      if (selected !== this.browserId) {
+        const previous = this.browserId;
+        this.disconnect();
+        this.browserId = selected;
+        this.lastError = undefined;
+        try { this.unregister(previous); }
+        catch { this.lastError = 'The previous browser registration could not be removed. Its connection has been revoked.'; }
+      }
+    } catch { revision = `unavailable-${randomUUID()}`; }
     this.enqueue({ type:'revoke', revision });
   }
   async close(): Promise<void> {
@@ -144,7 +193,7 @@ export class BrowserIntegration {
     const server = this.server; this.server = undefined; this.endpoint = undefined;
     server?.closeAllConnections();
     if (server) await new Promise<void>(resolve => server.close(() => resolve()));
-    for (const path of [this.options.descriptorPath,`${this.options.descriptorPath}.native`]) try { unlinkSync(path); } catch { /* Already removed. */ }
+    for (const path of [this.options.descriptorPath,...browserCatalog.map(browser => this.nativePaths(browser.id).descriptor)]) try { unlinkSync(path); } catch { /* Already removed. */ }
   }
   private reply(response: ServerResponse, value: unknown, status = 200): void {
     if (response.writableEnded || response.destroyed) return;
@@ -160,7 +209,7 @@ export class BrowserIntegration {
     const supplied = request.headers.authorization?.replace(/^Bearer /,'') ?? '';
     const expected = request.url?.startsWith('/extension/') ? this.nativeToken : this.token;
     if (request.headers.origin || supplied.length !== expected.length || !timingSafeEqual(Buffer.from(supplied),Buffer.from(expected))) { this.reply(response,{ error:'Unauthorized browser transport' },403); return; }
-    if (request.url?.startsWith('/extension/') && (!this.nativeEnabled || !existsSync(this.manifestPath))) { this.reply(response,{ error:'Browser connection was removed' },403); return; }
+    if (request.url?.startsWith('/extension/') && (!this.nativeEnabled || !this.manifestPath || !existsSync(this.manifestPath))) { this.reply(response,{ error:'Browser connection was removed' },403); return; }
     if (request.url === '/extension/poll' && request.method === 'GET') {
       if (!this.peerId || request.headers['x-lingxi-browser-peer'] !== this.peerId) { this.reply(response,{ error:'Browser profile is not paired' },403); return; }
       if (this.poll) { clearTimeout(this.poll.timer); this.reply(this.poll.response,{ type:'ping' }); }
@@ -172,11 +221,12 @@ export class BrowserIntegration {
     }
     if (request.url === '/extension/message' && request.method === 'POST') {
       const message = await this.readBody(request);
-      if (message.protocol !== BROWSER_PROTOCOL || message.extensionId !== BROWSER_EXTENSION_ID) throw new Error('Unsupported browser extension protocol');
+      if (message.protocol !== BROWSER_PROTOCOL || message.extensionId !== BROWSER_EXTENSION_ID || message.browserId === undefined) throw new Error(`Reload the current LingXi Browser extension from ${browserSettingsPath}.`);
+      if (message.browserId !== this.browserId) throw new Error(`This extension is not running in the selected browser. Check ${browserSettingsPath}.`);
       if (typeof message.peerId !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(message.peerId)) throw new Error('Invalid browser profile identity');
       if (message.peerId !== this.peerId && message.type !== 'hello') throw new Error('Browser handshake is required');
-      if (this.peerId && message.peerId !== this.peerId && this.status().connected) throw new Error('Another Chrome profile is already connected');
-      // A new extension instance may belong to a different Chrome profile.
+      if (this.peerId && message.peerId !== this.peerId && this.status().connected) throw new Error('Another browser profile is already connected');
+      // A new extension instance may belong to a different browser profile.
       // No approval or conversation grant can cross that identity boundary.
       if (this.peerId && this.peerId !== message.peerId) this.policyChanged();
       this.peerId = message.peerId;
@@ -226,7 +276,7 @@ export class BrowserIntegration {
   }
   private dispatch(payload: RecordValue, revision: string, signal?: AbortSignal): Promise<unknown> {
     if (signal?.aborted) return Promise.reject(new Error('Browser operation was cancelled'));
-    if (!this.status().connected && payload.action !== 'ping') return Promise.reject(new Error('LingXi Browser extension is not connected. Install or reconnect it in Computer use settings.'));
+    if (!this.status().connected && payload.action !== 'ping') return Promise.reject(new Error(`LingXi Browser extension is not connected. Choose a browser and set up or reconnect its extension in ${browserSettingsPath}.`));
     if (this.pending.size >= 64) return Promise.reject(new Error('Too many browser operations are pending'));
     const id = randomUUID();
     return new Promise((resolve,reject) => {
@@ -252,10 +302,13 @@ export class BrowserIntegration {
     const policy = this.options.policy();
     if (action === 'status') {
       const connected = this.status().connected;
-      return { result: { connected, enabled: policy.enabled,
-        guidance: !policy.enabled ? 'Computer use is turned off. Enable it in Computer use settings to test in the browser.'
-          : !connected ? 'LingXi Browser extension is not connected. Install or reconnect it in Computer use settings. Continue available build checks and report browser validation as untested.'
-          : 'Browser extension is connected. Site permissions still apply; Desktop Local App windows require separate validation.' } };
+      const browser = browserDefinition(this.browserId);
+      return { result: { connected, enabled: policy.enabled, browser: browser ? { id: browser.id, name: browser.name } : null,
+        supportedBrowsers: browserCatalog.filter(browser => browser.profileDirectory).map(({ id, name }) => ({ id, name })), settingsPath: browserSettingsPath,
+        guidance: !policy.enabled ? `Computer use is turned off. Enable it in ${browserSettingsPath}.`
+          : !browser ? `Choose a supported browser and set up its extension in ${browserSettingsPath}. Report browser validation as untested until connected.`
+          : !connected ? `The LingXi Browser extension for ${browser.name} is not connected. Set up or reconnect it in ${browserSettingsPath}. Continue available build checks and report browser validation as untested.`
+          : `${browser.name} is connected. Site permissions still apply; Desktop Local App windows require separate validation.` } };
     }
     if (!policy.enabled) throw new Error('Computer use is turned off');
     if (action === 'site_tools' && !policy.browser.siteTools) throw new Error('Site tools are disabled in Browser settings');

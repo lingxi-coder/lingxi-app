@@ -39,6 +39,21 @@ const APPROVE_COMMAND =
 
 const DENY_COMMAND = '{"type":"deny_computer_access","request_id":42}';
 
+test('trusted takeover and teaching metadata retain optional wire fields without changing legacy frames', () => {
+  const request: ComputerAccessRequestDto = {
+    request_id: 9, reason: 'guided step', apps: [], tier: 'full',
+    clipboard_read: false, clipboard_write: false, system_key_combos: false,
+    interaction: { kind: 'teach_step', explanation: 'Open Notes', next_preview: 'Select a note', anchor_json: '[20,30]' },
+  };
+  assert.deepEqual(JSON.parse(JSON.stringify(request)), request);
+  const response: ComputerAccessResponseDto = { granted_apps: [], clipboard_read: false,
+    clipboard_write: false, system_key_combos: false, interaction_action: 'continue' };
+  const command: ClientCommand = { type: 'approve_computer_access', request_id: 9, response };
+  assert.deepEqual(JSON.parse(JSON.stringify(command)), command);
+  assert.equal(JSON.parse(REQUEST_WITHOUT_TCC).interaction, undefined);
+  assert.equal(JSON.parse(APPROVE_COMMAND).response.interaction_action, undefined);
+});
+
 // ── Structural validators (mirror the TS shapes exactly) ─────────────────────
 
 const isString = (v: unknown): v is string => typeof v === 'string';

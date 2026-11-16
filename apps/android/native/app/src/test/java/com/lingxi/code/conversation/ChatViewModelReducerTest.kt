@@ -736,6 +736,27 @@ class ChatViewModelReducerTest {
         assertEquals(3, buildChatRenderItems(vm.state.value).filterIsInstance<ChatRenderItem.Message>().size)
     }
 
+    @Test fun reconnectReplacesItsDetailsAndClearsWhenOutputResumes() {
+        val vm = newVm()
+        vm.reduce(ReplyEvent.Retry("offline", 1, 5, 1000))
+        assertEquals(AgentRetryState("offline", 1, 5), vm.state.value.agentRun?.retry)
+        vm.reduce(ReplyEvent.Retry("transport error", 2, 5, 2000))
+        assertEquals(AgentRetryState("transport error", 2, 5), vm.state.value.agentRun?.retry)
+        assertTrue(vm.state.value.agentRun?.notices.orEmpty().isEmpty())
+        vm.reduce(ReplyEvent.Delta("recovered"))
+        assertNull(vm.state.value.agentRun?.retry)
+        assertNull(vm.state.value.statusLine)
+    }
+
+    @Test fun reconnectClearsWhenTheTurnEndsOrFails() {
+        for (terminal in listOf(ReplyEvent.End, ReplyEvent.Error("failed"))) {
+            val vm = newVm()
+            vm.reduce(ReplyEvent.Retry("offline", 1, 5, 1000))
+            vm.reduce(terminal)
+            assertNull(vm.state.value.agentRun?.retry)
+        }
+    }
+
     private fun newVm() = ChatViewModel(StubSource())
 
     @Test
@@ -2015,7 +2036,8 @@ class ChatViewModelReducerTest {
         val run = vm.state.value.agentRun!!
         assertEquals(100, run.usage!!.inputTokens)
         assertEquals("$0.0042", run.formattedCost)
-        assertTrue(run.notices.single().text.contains("2/5"))
+        assertEquals(AgentRetryState("rate limited", 2, 5), run.retry)
+        assertTrue(run.notices.isEmpty())
     }
 
     @Test

@@ -101,6 +101,24 @@ interface ConversationSource {
     /** Submit a non-conversation protocol command through this source. */
     suspend fun submitClientCommand(command: ClientCommand) {}
 
+    /** Busy input retains its correlator without replacing the current owner. */
+    suspend fun submitQueuedPrompt(command: ClientCommand.SendPrompt, ownerTurnId: Long,
+                                  tryBeginNative: () -> Boolean, onNotAdmitted: () -> Unit) {
+        if (tryBeginNative()) submitClientCommand(command) else onNotAdmitted()
+    }
+
+    /** Local host proof for a specific buffered executor event, never a raw ID guess. */
+    fun queuedExecutorFor(event: ClientEvent): Long? = null
+    fun queuedRecoveryOwnerFor(event: ClientEvent): Long? = null
+    fun queuedProjectionSessionFor(event: ClientEvent): String? = null
+    fun rawProjectionOwnerFor(event: ClientEvent): Long? = null
+    fun isDurableAttachSnapshot(event: ClientEvent): Boolean = false
+    fun requiresQueuedTranscriptRepair(event: ClientEvent): Boolean = false
+    suspend fun prepareHeadlessUiActivation(activation: ActivatedSession, onOwner: (Long, Boolean) -> Unit): ActivatedSession = activation
+    fun confirmHeadlessUiActivation(activation: ActivatedSession) = Unit
+    suspend fun snapshotForQueuedHandoff(): List<Message>? = null
+    fun hasQueuedTurnRecovery(): Boolean = false
+
     /** Account metadata and commands share the engine that owns inference credentials. */
     val supportsProviderAccountOAuth: Boolean get() = true
     suspend fun providerAccountsSnapshot(): String = error("engine unavailable")

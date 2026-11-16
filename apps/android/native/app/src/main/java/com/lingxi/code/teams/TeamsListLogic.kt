@@ -79,8 +79,20 @@ internal object TeamsListLogic {
         return people.filter { !it.self } + robots + people.filter { it.self }
     }
 
-    fun findBotDm(conversations: List<TeamMessageConversation>, uid: String, sharedBotId: String): TeamMessageConversation? =
-        conversations.firstOrNull { it.kind == "bot_dm" && "shared_bot:$sharedBotId" in it.participants && "user:$uid" in it.participants }
+    /** The viewer's own Bot DM with a Bot. With [bots], a DM from before the Bot changed maintainer does not count: the Bot answers in a new one. */
+    fun findBotDm(conversations: List<TeamMessageConversation>, uid: String, sharedBotId: String, bots: List<TeamBotCard> = emptyList()): TeamMessageConversation? =
+        conversations.firstOrNull { it.kind == "bot_dm" && "shared_bot:$sharedBotId" in it.participants && "user:$uid" in it.participants
+            && !botDmHandedOver(it.kind, it.participants, it.readers, bots) }
+
+    /**
+     * A Bot DM made before its Bot was handed to another maintainer. It stays as it was for the people who could read it, and the Bot
+     * takes no new request in it: the new maintainer was never one of its readers. Unknown readers say nothing.
+     */
+    fun botDmHandedOver(kind: String, participants: List<String>, readers: List<String>?, bots: List<TeamBotCard>): Boolean {
+        if (kind != "bot_dm" || readers == null) return false
+        val maintainer = bots.firstOrNull { "shared_bot:${it.sharedBotId}" in participants }?.maintainer?.uid ?: return false
+        return maintainer !in readers || readers.any { it != maintainer && "user:$it" !in participants }
+    }
 
     fun findDm(conversations: List<TeamMessageConversation>, uid: String, peerUid: String): TeamMessageConversation? =
         conversations.firstOrNull { it.kind == "dm" && it.participants.size == 2 && "user:$uid" in it.participants && "user:$peerUid" in it.participants }

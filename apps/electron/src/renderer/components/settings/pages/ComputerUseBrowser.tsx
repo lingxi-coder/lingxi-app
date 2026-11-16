@@ -4,6 +4,10 @@ import { Icon } from '../../Icon';
 import { Toggle } from '../primitives';
 import type { ComputerPermission, BrowserSitePermission } from '../../../../shared/computerSettings';
 import type { ComputerSettingsController } from './useComputerSettings';
+import { browserCatalog, browserDefinition } from '../../../../shared/browserCatalog';
+
+const supportedBrowsers = browserCatalog.filter(browser => browser.profileDirectory).map(browser => browser.name).join(', ');
+const unsupportedBrowsers = browserCatalog.filter(browser => !browser.profileDirectory).map(browser => browser.name).join(', ');
 
 function PermissionSelect({ label, value, disabled, onChange, history = false }: {
   label: string; value: ComputerPermission; disabled: boolean; onChange(value: ComputerPermission): void; history?: boolean;
@@ -16,12 +20,14 @@ function PermissionSelect({ label, value, disabled, onChange, history = false }:
   </select>;
 }
 
-export function GoogleChromeSettings({ onBack, settings }: { onBack(): void; settings: ComputerSettingsController }) {
+export function BrowserSettings({ onBack, settings }: { onBack(): void; settings: ComputerSettingsController }) {
   const { tr } = useI18n();
   const { state, pending } = settings;
   const browser = state?.browser;
   const status = state?.browserStatus;
   const unavailable = !state?.capabilities.browser || pending;
+  const selectedBrowser = browserDefinition(status?.browserId);
+  const connectionUnavailable = unavailable || !selectedBrowser?.profileDirectory;
   const [addingSite, setAddingSite] = useState(false);
   const addButton = useRef<HTMLButtonElement>(null);
   const restoreAddFocus = useRef(false);
@@ -45,23 +51,35 @@ export function GoogleChromeSettings({ onBack, settings }: { onBack(): void; set
       <nav className="computer-browser-breadcrumb" aria-label={tr('desktop_computer_navigation')}>
         <button type="button" onClick={onBack}>{tr('desktop_computer_title')}</button>
         <Icon name="chevronR" size={15} />
-        <span aria-current="page">Google Chrome</span>
+        <span aria-current="page">{tr('desktop_computer_browser_title')}</span>
       </nav>
 
       <header className="computer-browser-heading computer-use-page-heading">
         <div>
-          <h1 tabIndex={-1} ref={heading}>Google Chrome</h1>
-          <p>{status?.connected ? tr('desktop_computer_browser_connected') : status?.installed ? tr('desktop_computer_browser_waiting') : tr('desktop_computer_browser_not_setup')}</p>
+          <h1 tabIndex={-1} ref={heading}>{tr('desktop_computer_browser_title')}</h1>
+          <p>{selectedBrowser ? `${selectedBrowser.name} · ${status?.connected ? tr('desktop_computer_browser_connected') : status?.installed ? tr('desktop_computer_browser_waiting') : tr('desktop_computer_browser_not_setup')}` : tr('desktop_computer_browser_choose_description')}</p>
         </div>
         <div className="computer-browser-toolbar" aria-label={tr('desktop_computer_browser_actions')}>
-          <button type="button" className="computer-use-manage" disabled={unavailable} onClick={() => void settings.execute({ action: 'retryBrowser' })}>{tr('common_retry')}</button>
-          <button type="button" className="computer-use-manage" disabled={unavailable} onClick={() => void settings.execute({ action: 'installBrowser' })}>{status?.installed ? tr('desktop_computer_repair_connection') : tr('desktop_computer_setup_extension')}</button>
+          <button type="button" className="computer-use-manage" disabled={connectionUnavailable || !status?.installed} onClick={() => void settings.execute({ action: 'retryBrowser' })}>{tr('common_retry')}</button>
+          <button type="button" className="computer-use-manage" disabled={connectionUnavailable} onClick={() => void settings.execute({ action: 'installBrowser' })}>{status?.installed ? tr('desktop_computer_repair_connection') : tr('desktop_computer_setup_extension')}</button>
           <button type="button" className="computer-use-manage computer-browser-remove" disabled={unavailable || !status?.installed} onClick={() => void settings.execute({ action: 'removeBrowser' })}>{tr('desktop_computer_disconnect_extension')}</button>
         </div>
       </header>
+      <div className="computer-browser-choice">
+        <label htmlFor="computer-browser-choice">{tr('desktop_computer_browser_select')}</label>
+        <select id="computer-browser-choice" className="computer-browser-select" aria-label={tr('desktop_computer_browser_select')} value={status?.browserId ?? ''} disabled={unavailable} onChange={(event) => {
+          const next = browserDefinition(event.target.value);
+          if (state && next?.profileDirectory) void settings.execute({ action: 'selectBrowser', revision: state.revision, browserId: next.id });
+        }}>
+          <option value="" disabled>{tr('desktop_computer_browser_choose')}</option>
+          {browserCatalog.map(browser => <option key={browser.id} value={browser.id} disabled={!browser.profileDirectory}>{browser.name}{browser.profileDirectory ? '' : ` — ${tr('desktop_computer_browser_unsupported')}`}</option>)}
+        </select>
+        <p>{tr('desktop_computer_browser_selection_note')}</p>
+        <p>{tr('desktop_computer_browser_unsupported_description', supportedBrowsers, unsupportedBrowsers)}</p>
+      </div>
       <div className="computer-browser-status">
         {status?.error ? <p role="status">{status.error}</p> : null}
-        <p>{status?.connected ? tr('desktop_computer_browser_connected_description') : status?.installed ? tr('desktop_computer_browser_setup_steps') : tr('desktop_computer_browser_setup_description')}</p>
+        <p>{!selectedBrowser ? tr('desktop_computer_browser_choose_description') : status?.connected ? tr('desktop_computer_browser_connected_description', selectedBrowser.name) : status?.installed ? tr('desktop_computer_browser_setup_steps', selectedBrowser.name, selectedBrowser.extensionsPage ?? '') : tr('desktop_computer_browser_setup_description', selectedBrowser.name)}</p>
         {status?.installed ? <button type="button" className="computer-use-manage" disabled={unavailable} onClick={() => void settings.execute({ action: 'showExtension' })}>{tr('desktop_computer_show_extension')}</button> : null}
         {state && !state.enabled ? <p>{tr('desktop_computer_browser_disabled_description')}</p> : null}
       </div>

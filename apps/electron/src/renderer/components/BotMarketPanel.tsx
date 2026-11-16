@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react';
 import type { BotsApi, BotUi, BotSkillUi } from '../../shared/bots';
-import type { BotPackagePreview } from '../../shared/botMarket';
+import type {
+  BotPackagePreview,
+  BotUpgradePlan,
+} from '../../shared/botMarket';
+import { BotUpgradeReview } from './BotUpgradeReview';
 
 /** Publication is an explicit snapshot review, independent of the Bot's private configuration. */
 export function BotMarketPanel({
@@ -22,6 +26,7 @@ export function BotMarketPanel({
     [examples, setExamples] = useState('');
   const [preview, setPreview] = useState<BotPackagePreview>(),
     [confirmed, setConfirmed] = useState(false);
+  const [upgrade, setUpgrade] = useState<BotUpgradePlan>();
   const [summary, setSummary] = useState(bot.description.slice(0, 160)),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
@@ -160,6 +165,64 @@ export function BotMarketPanel({
         >
           Download as another personal Bot
         </button>
+      ) : null}
+      {bot.marketOrigin && !upgrade ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() =>
+            void perform(async () => {
+              const plan = await api.market({
+                action: 'checkUpgrade',
+                botId: bot.botId,
+              });
+              if (plan && 'kind' in plan && plan.kind === 'upgrade')
+                setUpgrade(plan);
+              else setStatus('This Bot is on the newest release.');
+            })
+          }
+        >
+          Check for a new release
+        </button>
+      ) : null}
+      {upgrade ? (
+        <BotUpgradeReview
+          plan={upgrade}
+          busy={busy}
+          onDecline={() => {
+            setUpgrade(undefined);
+            setStatus(
+              `This Bot stays on version ${upgrade.from.version}. Nothing was changed.`,
+            );
+          }}
+          onUpgrade={(choices, approveAccess) =>
+            void perform(async () => {
+              try {
+                const result = await api.market({
+                  action: 'upgrade',
+                  botId: upgrade.botId,
+                  expectedRevision: upgrade.expectedRevision,
+                  releaseId: upgrade.to.releaseId,
+                  plan: upgrade.digest,
+                  choices,
+                  approveAccess,
+                });
+                if (result && 'revision' in result) onInstalled(result);
+                setUpgrade(undefined);
+                setStatus(`Updated to version ${upgrade.to.version}.`);
+              } catch (cause) {
+                // The Bot or the release changed since the review: it is shown again, and nothing was written.
+                if (/BOT_UPGRADE_CHANGED/.test(String(cause))) {
+                  setUpgrade(undefined);
+                  throw new Error(
+                    'This Bot or the release changed after you looked. Check for a new release again.',
+                  );
+                }
+                throw cause;
+              }
+            })
+          }
+        />
       ) : null}
       {bot.marketOrigin ? (
         <p className="bots-hint">

@@ -44,6 +44,15 @@ internal object TeamConfirmations {
         )
     }
 
+    /**
+     * Handing the team over: the member becomes its owner and the sender stays an admin. The catalog has the verb ("Make owner") and one sentence for the
+     * body, but no title that names the member, so the verb is the title and the button. It asks once and, like the other role changes, is not drawn as destructive.
+     */
+    fun makeOwner(team: TeamSummary, member: TeamMember) = TeamConfirmation(
+        R.string.teams_make_owner, null, R.string.teams_confirm_make_owner, R.string.teams_make_owner, false,
+        mapOf("action" to "handOver", "teamId" to team.id, "uid" to member.uid, "generation" to member.generation),
+    )
+
     fun revokeInvite(team: TeamSummary, invite: TeamInvite) = TeamConfirmation(
         R.string.teams_confirm_revoke_title, null, R.string.teams_confirm_revoke_body, R.string.teams_confirm_revoke_button, true,
         mapOf("action" to "revokeInvite", "teamId" to team.id, "inviteId" to invite.id),

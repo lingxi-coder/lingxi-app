@@ -17,6 +17,33 @@ struct TeamConversationContext {
     /// chat itself: a Bot DM on the same pair workspace is an ordinary Bot DM (D22), headed by the Bot.
     let pair: PairTeam?
 
+    /// The signed-in member as commands and tasks name them.
+    var viewer: TeamMemberRef { TeamMemberRef(uid: uid, generation: team.generation) }
+    /// The wait a reply to `message` would answer: `message` is a Bot's question whose task still waits for the viewer.
+    @MainActor
+    func answerableWait(of message: TeamMessage) -> String? {
+        guard let waitId = message.waitId, let taskId = message.taskId, message.author.kind != "user" else { return nil }
+        let pending = Set((model.cache?.outbox ?? []).compactMap(\.waitId))
+        return TeamTaskActions.answerableWait(model.tasks.first { $0.taskId == taskId }, viewer: viewer, pendingWaitIds: pending) == waitId ? waitId : nil
+    }
+    /// Where the Bot's request under `message` stands for the viewer, and the name of the member who decides or decided it.
+    @MainActor
+    func approval(of message: TeamMessage) -> (state: TeamApprovalState, decider: String) {
+        let state = TeamTaskActions.approvalState(waitId: message.waitId ?? "", task: model.tasks.first { $0.taskId == message.taskId }, viewer: viewer,
+                                                  messages: model.cache?.threads[conversation.id]?.messages ?? [])
+        switch state {
+        case .waiting(let uid), .approved(let uid), .declined(let uid): return (state, userName(uid))
+        case .decide, .closed: return (state, "")
+        }
+    }
+    /// What a message says. The service writes an approval request and the reply to it in English; they are shown in the viewer's language.
+    func text(of message: TeamMessage) -> String {
+        if let request = message.approvalRequest { return String(localized: "teams_approval_request \(request.title)") }
+        if message.author.kind == "user", message.waitId != nil, let approved = message.decision?.approved {
+            return String(localized: approved ? "teams_approval_reply_approved" : "teams_approval_reply_declined")
+        }
+        return message.text
+    }
     /// The viewer may send here (a Bot's owner reading someone else's Bot DM only observes).
     var participant: Bool { conversation.participants.isEmpty || conversation.participants.contains("user:\(uid)") }
 
@@ -142,8 +169,8 @@ struct StreamUnreadDivider: View {
 /// message actions (reply, edit and recall for the viewer's own text, copy); nothing on a recalled message.
 ///
 /// The viewer's own messages read "You" and sit on a faint tint of the accent (U3); the rows of one run touch, so a run reads as one
-/// block. For VoiceOver the author, time, quote, text and edit mark are one element with the message actions; the Bot cards stay
-/// elements of their own, so their buttons can be reached.
+/// block. For VoiceOver the author, time, quote, text and edit mark are one element with the message actions; the files and the Bot cards
+/// stay elements of their own, so their buttons can be reached.
 struct TeamMessageCell: View {
     @Environment(\.locale) private var locale
     @ScaledMetric(relativeTo: .body) private var percent: CGFloat = 100
@@ -182,7 +209,7 @@ struct TeamMessageCell: View {
             if !recalled {
                 if let onReply { Button("teams_message_reply", systemImage: "arrowshape.turn.up.left") { onReply(message) } }
                 if let onEdit { Button("teams_message_edit", systemImage: "pencil") { onEdit(message) } }
-                Button("chat_message_copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.text }
+                if !message.text.isEmpty { Button("chat_message_copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.text } }
                 if let onRecall { Button("teams_message_recall", systemImage: "trash", role: .destructive) { onRecall(message) } }
             }
         }
@@ -190,22 +217,47 @@ struct TeamMessageCell: View {
         .accessibilityIdentifier("teams.message.\(message.id)")
     }
 
-    /// The author line, the quote, the text and the edit mark: one element for VoiceOver, with the message actions.
+    private var edited: Bool { message.editedAt != nil && !recalled }
+
+    /// A message of files alone in the middle of a run has nothing to say above its files: no author line, no text.
+    private var wordsAreEmpty: Bool { grouped && quote == nil && !recalled && message.text.isEmpty && !message.files.isEmpty }
+
+    /// What the message carries. The author line, the quote, the text and the edit mark are one element for VoiceOver, with the message
+    /// actions. The files are buttons (open, take back) and what the Bot read is a line of its own, so they stay elements of their own
+    /// beside it, like the Bot cards.
     private func content(_ identity: TeamIdentity, name: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if !wordsAreEmpty { words(identity, name: name) }
+            if !message.files.isEmpty { TeamMessageFilesView(message: message, context: context).padding(.top, 2) }
+            if !recalled, let read = message.readFiles, !read.isEmpty {
+                // What the Bot's model was given, as the service checked it.
+                Label { Text("teams_files_read \(read.map(\.name).joined(separator: ", "))") } icon: { Image(systemName: "paperclip") }
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("teams.message.read.\(message.id)")
+            }
+            if edited {
+                // Under the files, as they are drawn; VoiceOver has it in the words' label.
+                Text("teams_message_edited").font(.caption2).foregroundStyle(.secondary).accessibilityHidden(!wordsAreEmpty)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func words(_ identity: TeamIdentity, name: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             if !grouped { header(identity, name: name) }
             if let quote { quoteLine(quote) }
             if recalled {
                 Text("teams_message_recalled").italic().foregroundStyle(.secondary)
+            } else if message.text.isEmpty && !message.files.isEmpty {
+                // A message of files alone has no text line.
+                EmptyView()
             } else if TeamsBotText.rendersMarkdown(authorKind: message.author.kind, recalled: recalled) {
                 // A shared Bot writes Markdown: the chat's renderer, web links only. Images stay inert.
-                AIText(markdown: message.text)
+                AIText(markdown: context.text(of: message))
                     .teamBotLinkPolicy()
             } else {
-                Text(message.text)
-            }
-            if message.editedAt != nil && !recalled {
-                Text("teams_message_edited").font(.caption2).foregroundStyle(.secondary)
+                Text(context.text(of: message))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -217,15 +269,16 @@ struct TeamMessageCell: View {
 
     /// "Ann, Bot, 10:32, Sam, Hello there, Sure, Edited": author, Bot tag, time, the quote, the text, the edit mark.
     private func spokenLabel(_ identity: TeamIdentity, name: String) -> String {
+        let said = context.text(of: message)
         let text = recalled ? TeamsText.localized("teams_message_recalled")
-            : TeamsBotText.rendersMarkdown(authorKind: message.author.kind, recalled: recalled) ? TeamsBotText.plainText(message.text) : message.text
+            : TeamsBotText.rendersMarkdown(authorKind: message.author.kind, recalled: recalled) ? TeamsBotText.plainText(said) : said
         return TeamsStreamLogic.spokenLine([
             name,
             identity.kind == .bot ? context.strings.bot : nil,
             TeamsStreamLogic.formatClock(atMs: message.createdAtMs, locale: locale),
             quote.map { TeamsStreamLogic.spokenLine([$0.author, $0.text]) },
             text,
-            message.editedAt != nil && !recalled ? TeamsText.localized("teams_message_edited") : nil,
+            edited ? TeamsText.localized("teams_message_edited") : nil,
         ])
     }
 
@@ -265,10 +318,18 @@ struct TeamMessageCell: View {
 
     @ViewBuilder
     private var cards: some View {
+        if let request = message.approvalRequest, let waitId = message.waitId, let taskId = message.taskId {
+            let standing = context.approval(of: message)
+            TeamApprovalCard(approval: request, waitId: waitId, taskId: taskId, state: standing.state, deciderName: standing.decider)
+                .padding(.top, 4)
+        }
         let ids = message.taskId.map { [$0] } ?? message.taskIds ?? []
         ForEach(ids, id: \.self) { taskId in
             if let task = context.model.tasks.first(where: { $0.taskId == taskId }) {
-                TeamTaskCard(task: task, botName: context.bots.first { $0.sharedBotId == task.sharedBotId }?.name ?? context.strings.bot)
+                let bot = context.bots.first { $0.sharedBotId == task.sharedBotId }
+                TeamTaskCard(task: task, botName: bot?.name ?? context.strings.bot, viewer: context.viewer, maintainer: bot?.maintainer,
+                             recipientName: task.wait.map { context.userName($0.recipient.uid) } ?? "",
+                             onReply: context.answerableWait(of: message) == nil ? nil : onReply.map { reply in { reply(message) } })
                     .padding(.top, 4)
             } else {
                 Button {
@@ -307,7 +368,7 @@ private struct MessageActionsAccessibility: ViewModifier {
                 .accessibilityActions {
                     if let onReply { Button("teams_message_reply") { onReply(message) } }
                     if let onEdit { Button("teams_message_edit") { onEdit(message) } }
-                    Button("chat_message_copy") { UIPasteboard.general.string = message.text }
+                    if !message.text.isEmpty { Button("chat_message_copy") { UIPasteboard.general.string = message.text } }
                     if let onRecall { Button("teams_message_recall") { onRecall(message) } }
                 }
         }
@@ -336,7 +397,11 @@ struct TeamOutboxCell: View {
                     switch intent.operation {
                     case "recall": Text("teams_message_recall").foregroundStyle(.secondary)
                     case "edit": Text(String(localized: "teams_message_edit") + ": " + intent.text).foregroundStyle(.secondary)
-                    default: Text(intent.text).foregroundStyle(.secondary)
+                    default:
+                        if !intent.text.isEmpty { Text(intent.text).foregroundStyle(.secondary) }
+                        if let names = intent.attachmentNames, !names.isEmpty {
+                            Label(names.joined(separator: ", "), systemImage: "paperclip").font(.footnote).foregroundStyle(.secondary)
+                        }
                     }
                 }
                 .accessibilityElement(children: .combine)

@@ -3,6 +3,14 @@ package com.lingxi.code.conversation
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material.icons.rounded.ArrowForward
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -25,12 +33,9 @@ import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -42,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -122,7 +128,7 @@ fun AskUserQuestionCard(
     }
 
     Card(
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(24.dp),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
@@ -141,25 +147,26 @@ fun AskUserQuestionCard(
                 )
                 Text(
                     text = androidx.compose.ui.res.stringResource(R.string.chat_ask_user_question_title),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyLarge,
                     modifier = Modifier.weight(1f).padding(start = 10.dp).semantics { heading() },
                 )
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                ) {
-                    Text(
-                        text = androidx.compose.ui.res.stringResource(
-                            R.string.chat_question_answered_progress,
-                            answeredCount,
-                            questions.size,
-                        ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                    )
+                if (questions.size > 1) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    ) {
+                        Text(
+                            text = androidx.compose.ui.res.stringResource(
+                                R.string.chat_question_answered_progress,
+                                answeredCount,
+                                questions.size,
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                        )
+                    }
                 }
                 IconButton(onClick = { onCancel(request.requestId) }) {
                     Icon(
@@ -179,11 +186,11 @@ fun AskUserQuestionCard(
                     AskQuestionAccordionRow(
                         question = question,
                         expanded = expandedQuestion == index,
+                        showDisclosure = questions.size > 1,
                         answer = answer,
                         selected = selections[index].orEmpty(),
-                        freeText = freeTexts[index].orEmpty(),
                         onExpand = {
-                            expandedQuestion = if (expandedQuestion == index) -1 else index
+                            expandedQuestion = if (expandedQuestion == index && questions.size > 1) -1 else index
                         },
                         onToggleOption = { optionIndex ->
                             val next = toggleAskSelection(
@@ -200,17 +207,63 @@ fun AskUserQuestionCard(
                                 } ?: -1
                             }
                         },
-                        onFreeTextChange = { freeTexts[index] = it },
                     )
                 }
             }
 
-            Button(
-                enabled = askAnswersComplete(request, selections, freeTexts),
-                onClick = { onSubmit(request.requestId, assembleAskAnswers(request, selections, freeTexts)) },
-                modifier = Modifier.fillMaxWidth(),
+            val questionInputLabel = androidx.compose.ui.res.stringResource(R.string.chat_ask_other_option)
+            val composerIndex = expandedQuestion.takeIf { it in questions.indices } ?: 0
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface),
+                color = MaterialTheme.colorScheme.surface,
             ) {
-                Text(androidx.compose.ui.res.stringResource(R.string.chat_question_submit))
+                Column(Modifier.fillMaxWidth().padding(8.dp)) {
+                    if (expandedQuestion in questions.indices) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.Edit, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 8.dp).size(20.dp))
+                            BasicTextField(
+                                value = freeTexts[composerIndex].orEmpty(),
+                                onValueChange = { freeTexts[composerIndex] = it },
+                                textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                                cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
+                                maxLines = 4,
+                                modifier = Modifier.weight(1f).defaultMinSize(minHeight = 44.dp)
+                                    .semantics { contentDescription = questionInputLabel },
+                                decorationBox = { inner ->
+                                    Box(contentAlignment = Alignment.CenterStart) {
+                                        if (freeTexts[composerIndex].isNullOrEmpty()) {
+                                            Text(androidx.compose.ui.res.stringResource(R.string.chat_question_other_placeholder),
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                style = MaterialTheme.typography.bodyLarge)
+                                        }
+                                        inner()
+                                    }
+                                },
+                            )
+                        }
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        OutlinedButton(onClick = { onCancel(request.requestId) }) {
+                            Text(androidx.compose.ui.res.stringResource(R.string.chat_question_skip))
+                        }
+                        Button(
+                            enabled = askAnswersComplete(request, selections, freeTexts),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.onSurface,
+                                contentColor = MaterialTheme.colorScheme.surface,
+                            ),
+                            onClick = { onSubmit(request.requestId, assembleAskAnswers(request, selections, freeTexts)) },
+                        ) {
+                            Text(androidx.compose.ui.res.stringResource(R.string.composer_send))
+                        }
+                    }
+                }
             }
         }
     }
@@ -220,12 +273,11 @@ fun AskUserQuestionCard(
 private fun AskQuestionAccordionRow(
     question: AskQuestionDto,
     expanded: Boolean,
+    showDisclosure: Boolean,
     answer: String?,
     selected: List<Int>,
-    freeText: String,
     onExpand: () -> Unit,
     onToggleOption: (Int) -> Unit,
-    onFreeTextChange: (String) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(12.dp)
@@ -260,11 +312,13 @@ private fun AskQuestionAccordionRow(
                     )
                 }
             }
-            Icon(
-                imageVector = if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
-                contentDescription = null,
-                tint = colors.onSurfaceVariant,
-            )
+            if (showDisclosure) {
+                Icon(
+                    imageVector = if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = colors.onSurfaceVariant,
+                )
+            }
         }
 
         AnimatedVisibility(visible = expanded) {
@@ -276,11 +330,7 @@ private fun AskQuestionAccordionRow(
                     val active = optionIndex in selected
                     Surface(
                         shape = shape,
-                        color = if (active) colors.primary.copy(alpha = 0.08f) else colors.surfaceContainerLow,
-                        border = BorderStroke(
-                            width = if (active) 1.5.dp else 1.dp,
-                            color = if (active) colors.primary else colors.outlineVariant,
-                        ),
+                        color = if (active) colors.surfaceContainerHigh else colors.surface,
                         modifier = Modifier
                             .fillMaxWidth()
                             .selectable(
@@ -293,10 +343,16 @@ private fun AskQuestionAccordionRow(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.heightIn(min = 56.dp).padding(horizontal = 12.dp, vertical = 8.dp),
                         ) {
-                            if (question.multiSelect) {
-                                Checkbox(checked = active, onCheckedChange = null)
-                            } else {
-                                RadioButton(selected = active, onClick = null)
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = colors.surfaceContainerHigh,
+                                border = BorderStroke(1.dp, colors.outlineVariant),
+                            ) {
+                                Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
+                                    Text(if (question.multiSelect && active) "✓" else "${optionIndex + 1}",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = colors.onSurfaceVariant)
+                                }
                             }
                             Spacer(Modifier.width(8.dp))
                             Column(verticalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.weight(1f)) {
@@ -314,20 +370,15 @@ private fun AskQuestionAccordionRow(
                                     )
                                 }
                             }
+                            if (active) {
+                                Icon(Icons.Rounded.ArrowForward, contentDescription = null,
+                                    tint = colors.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                            }
                         }
                     }
                 }
 
-                OutlinedTextField(
-                    value = freeText,
-                    onValueChange = onFreeTextChange,
-                    placeholder = { Text(androidx.compose.ui.res.stringResource(R.string.chat_question_other_placeholder)) },
-                    label = { Text(androidx.compose.ui.res.stringResource(R.string.chat_ask_other_option)) },
-                    shape = shape,
-                    minLines = 1,
-                    maxLines = 3,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+
             }
         }
     }

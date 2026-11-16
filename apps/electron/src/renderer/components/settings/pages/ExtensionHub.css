@@ -13,6 +13,43 @@
 .extension-search-field input::placeholder { color: var(--hub-muted); }
 .extension-hub-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 6px 12px; border: 0; border-radius: 7px; background: var(--hub-accent-fill); color: var(--hub-on-accent); font: inherit; font-size: 12.5px; font-weight: 500; line-height: 1.4; white-space: nowrap; cursor: pointer; list-style: none; }
 .extension-hub-primary:hover { opacity: .85; }
+.extension-hub-icon-text { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 6px 10px; border: .5px solid var(--hub-border); border-radius: 7px; background: var(--hub-surface); color: var(--hub-text); font: inherit; font-size: 12.5px; cursor: pointer; }
+.extension-hub-icon-text:hover { background: var(--hub-hover); }
+.extension-hub-icon-text:disabled { opacity: .45; cursor: default; }
+.extension-overview { width: min(100%, 900px); margin-inline: auto; }
+.extension-overview-header { display: flex; align-items: center; gap: 16px; margin: 28px 0; }
+.extension-overview-heading { min-width: 0; flex: 1; }
+.settings-screen .extension-overview-heading h1[tabindex="-1"]:focus { outline: none !important; }
+.extension-overview-heading h1 { margin: 0; outline: none; font-size: 24px; font-weight: 600; line-height: 1.25; letter-spacing: -.025em; }
+.extension-overview-heading p { margin: 7px 0 0; color: var(--hub-muted); font-size: 12.5px; line-height: 1.6; }
+.extension-overview-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
+.extension-overview-status { display: inline-flex; align-items: center; gap: 5px; margin-top: 7px; color: var(--hub-muted); font-size: 12px; }
+.extension-overview-showcase { display: grid; gap: 14px; margin: 26px 0; padding: clamp(20px, 4vw, 40px); border: .5px solid var(--hub-border); border-radius: 18px; background: linear-gradient(125deg, color-mix(in srgb, var(--hub-accent) 17%, var(--hub-surface)), color-mix(in srgb, #ad8be8 19%, var(--hub-surface))); }
+.extension-overview-example-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; color: var(--hub-text-secondary); font-size: 12px; font-weight: 500; }
+.extension-overview-example { display: flex; align-items: center; gap: 20px; width: 100%; min-width: 0; padding: 16px 18px; border: .5px solid var(--hub-border); border-radius: 14px; background: color-mix(in srgb, var(--hub-surface) 88%, transparent); color: var(--hub-text); text-align: left; font: inherit; font-size: 13px; line-height: 1.7; cursor: pointer; }
+.extension-overview-example > span:first-child { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.extension-overview-example strong { color: var(--hub-accent); font-weight: 550; }
+.extension-overview-example-arrow { display: grid; place-items: center; width: 30px; height: 30px; flex-shrink: 0; border-radius: 50%; background: var(--hub-hover); }
+.extension-overview-example:hover { background: var(--hub-surface); }
+.extension-overview-example:active { opacity: .75; }
+.extension-overview-copy-status { min-height: 18px; color: var(--hub-text-secondary); font-size: 11.5px; line-height: 1.5; }
+.extension-overview-description, .extension-overview-requirements { margin: 16px 0; color: var(--hub-text-secondary); font-size: 13px; line-height: 1.75; }
+.extension-overview-requirements { color: var(--hub-muted); font-size: 12px; }
+.extension-overview-section { margin-top: 32px; }
+.extension-overview-section h2 { margin: 0 0 16px; padding-bottom: 12px; border-bottom: .5px solid var(--hub-border); font-size: 14px; font-weight: 550; }
+.extension-overview-section h2 span { margin-left: 5px; color: var(--hub-muted); font-weight: 400; }
+.extension-overview-components { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); }
+.extension-overview-component { display: flex; align-items: center; gap: 12px; min-width: 0; color: var(--hub-text-secondary); font-size: 12.5px; overflow-wrap: anywhere; }
+.extension-overview-information { display: grid; grid-template-columns: minmax(100px, .28fr) minmax(0, 1fr); gap: 16px; margin: 0; font-size: 12.5px; line-height: 1.6; }
+.extension-overview-information dt { color: var(--hub-muted); }
+.extension-overview-information dd { margin: 0; overflow-wrap: anywhere; }
+.extension-overview-information a { color: var(--hub-accent); text-decoration: none; }
+.extension-overview-information a:hover { text-decoration: underline; }
+.extension-remove-confirmation { max-width: 440px; }
+.extension-remove-confirmation h2 { margin: 0; font-size: 16px; font-weight: 550; }
+@media (max-width: 900px) { .extension-overview-header { align-items: flex-start; flex-wrap: wrap; } .extension-overview-actions { width: 100%; justify-content: flex-end; } }
+@media (prefers-reduced-transparency: reduce) { .extension-overview-example { background: var(--hub-surface); } }
+@media (prefers-contrast: more) { .extension-overview-example { border-color: var(--hub-muted); background: var(--hub-surface); } }
 .extension-hub-primary::-webkit-details-marker { display: none; }
 .extension-hub-primary:disabled, .extension-hub-danger:disabled, .extension-hub-icon-button:disabled { opacity: .4; cursor: default; }
 .extension-catalog-tabs { display: flex; align-items: center; flex-wrap: wrap; width: fit-content; max-width: 100%; gap: 2px; padding: 3px; margin-bottom: 20px; border: 0.5px solid var(--hub-border); border-radius: 9px; background: var(--hub-sidebar); }
@@ -41,6 +78,13 @@
 .extension-hub-row-actions { display: flex; align-items: center; gap: 8px; }
 .extension-skill-installed { margin-left: auto; color: var(--hub-subtle); }
 .extension-skills-installed .extension-hub-group-title { margin-bottom: 10px; }
+.extension-recommendations-note { margin: -2px 0 14px; max-width: 64ch; color: var(--hub-muted); font-size: 12.5px; line-height: 1.6; }
+.extension-recommendation-row { align-items: flex-start; }
+.extension-recommendation-row .extension-hub-row-description { white-space: normal; }
+.extension-recommendation-row > .extension-hub-primary { align-self: center; }
+.extension-recommendation-meta { margin-top: 7px; color: var(--hub-muted); font-size: 11.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.extension-recommendation-source { width: fit-content; margin-top: 6px; color: var(--hub-accent); font-size: 11.5px; line-height: 1.5; text-decoration: none; }
+.extension-recommendation-source:hover { text-decoration: underline; }
 .extension-skills-sources .extension-catalog-tabs { margin-bottom: 16px; }
 .extension-see-more { display: flex; align-items: center; gap: 6px; margin: 14px 0 0; padding: 4px 0; border: 0; border-radius: 4px; background: transparent; color: var(--hub-accent); font: inherit; font-size: 12.5px; cursor: pointer; }
 .extension-see-more:hover { color: var(--hub-text); }

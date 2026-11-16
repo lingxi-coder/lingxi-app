@@ -37,8 +37,8 @@ import com.lingxi.code.theme.LingXiTheme
  * permissions, custom prompt, enable / auto-suggest, delete). A dashed "browse"
  * button and a "create" button sit in the footer.
  *
- * Mock-only: the enable toggle mutates the hoisted [SettingsStore]; browse /
- * create / edit-prompt are decorative seams.
+ * The enable toggle mutates the hoisted [SettingsStore]. Browse opens shared
+ * upstream skill recommendations; create / edit-prompt remain prototype seams.
  */
 
 // Sky (official) vs amber (community/me) icon tint — oklch values from iOS.
@@ -72,6 +72,7 @@ fun SkillsPage(
     state: SettingsUiState,
     store: SettingsStore,
     onDetail: (id: String) -> Unit,
+    onBrowse: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
 
@@ -103,7 +104,7 @@ fun SkillsPage(
             }
         }
 
-        DashedAddButton(title = stringResource(R.string.skills_browse_store), modifier = Modifier.padding(bottom = 8.dp))
+        DashedAddButton(title = stringResource(R.string.skills_browse_store), modifier = Modifier.padding(bottom = 8.dp), onClick = onBrowse)
 
         Row(
             verticalAlignment = Alignment.CenterVertically,

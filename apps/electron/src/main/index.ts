@@ -681,10 +681,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         ? resumeModel ?? bots?.modelFor(workspace) ?? configured.model
         : settings.getSessionModel(ref) ?? resumeModel ?? configured.model;
       const startedAt = Date.now();
-      // A chat opens even when its credentials cannot be read. The engine
-      // starts without them, and the first prompt that needs one loads it
-      // again or fails saying why. Every engine starts with the current
-      // Codex access token, whatever its model.
+      // History does not need account credentials. The connected runtime
+      // hydrates them in parallel with replay; prompts await that hydration.
       const phase = async <T>(name: string, load: () => Promise<T>, fallback: T): Promise<T> => {
         const phaseStartedAt = Date.now();
         try {
@@ -708,20 +706,15 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           return fallback;
         }
       };
-      const [pluginSecrets, accountLaunch] = await Promise.all([
-        phase('plugin_secrets', () => resolveSessionLaunchPluginSecrets(credentialBroker), {}),
-        providerAccounts ? providerAccounts.launch() : undefined,
-      ]);
+      const pluginSecrets = await phase('plugin_secrets', () => resolveSessionLaunchPluginSecrets(credentialBroker), {});
       diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_ready', {
         durationMs: Date.now() - startedAt,
         parallel: true,
         model,
         pluginSecretCount: Object.values(pluginSecrets).reduce((count, values) => count + Object.keys(values).length, 0),
         projectPath: workspace,
-        providerAccountCount: accountLaunch?.providerAccounts.accounts.length ?? 0,
-        providerCredentialVersions: Object.entries(accountLaunch?.providerAccountCredentials ?? {})
-          .filter(([id, record]) => /^[a-f0-9-]{36}$/.test(id) && Number.isSafeInteger(record.identity_generation) && Number.isSafeInteger(record.credential_revision))
-          .map(([id, record]) => ({ accountId: id, identityGeneration: record.identity_generation, credentialRevision: record.credential_revision })),
+        providerAccountCount: providerAccounts?.latestSnapshot?.accounts.length ?? 0,
+        providerAccountsDeferred: true,
         sessionId: ref.sessionId,
       }));
       return {
@@ -742,7 +735,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           : remoteControlOn() && (remotePolicy?.allows() ?? true),
         ...(botWorkspace ? { permissionTimeoutSecs: BOT_PERMISSION_TIMEOUT_SECS } : {}),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
-        ...accountLaunch,
+        providerAccountHome: productPaths.brandHome,
+        providerAccountBackend: `desktop-broker:${credentialBroker?.credentialChannel ?? 'development'}`,
         pluginSecrets,
         model,
         apiBaseUrl: configured.apiBaseUrl,
@@ -1021,6 +1015,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           },
           renewModelAccount: renewProviderAccount,
           diagnostics: (event, details) => diagnostics.add('warn', 'host', diagnosticEvent(event, details)),
+          // The switches of the Bots page serve the published Bots too: the Mac stays awake for them, and the login item opens the app that hosts them.
+          keepAwake,
+          background: () => ({ openAtLogin: loginItem.status(), keepAwake: settings.getPublic().botsKeepAwake === true, onBattery: powerMonitor.isOnBatteryPower() }),
           chooseFiles: async () => {
             const parent = [...mainWindows].find(window => !window.isDestroyed());
             const options = { title: 'Choose files to share with Team members', properties: ['openFile', 'multiSelections'] as Array<'openFile' | 'multiSelections'>,
@@ -1030,6 +1027,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           },
         });
         teamsService.attachHost(teamConnector);
+        // Asleep, the Mac answers nobody: the Bots are said to be offline before it sleeps and checked again when it wakes.
+        powerMonitor.on('suspend', () => { void teamConnector?.rest(); });
+        powerMonitor.on('resume', () => { teamConnector?.awake(); });
+        powerMonitor.on('on-ac', () => { teamConnector?.powerChanged(); });
+        powerMonitor.on('on-battery', () => { teamConnector?.powerChanged(); });
       } catch { diagnostics.add('warn', 'host', 'Team Bot host is unavailable'); }
     }
     localApps = new LocalAppHost({
@@ -1175,10 +1177,15 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
-  stopTeams?.(); stopTeams = undefined;
+  // Quitting ends the service, unlike closing the window: the published Bots are said to be offline first, then Teams stops.
+  const currentStopTeams = stopTeams, currentTeamConnector = teamConnector;
+  stopTeams = undefined; teamConnector = undefined;
   desktopUpdates?.dispose();
   desktopUpdates = null;
-  host?.dispose();
+  // Close admission now, but retain the catalog until in-flight credential
+  // publications finish. Host teardown must not poison their durable state.
+  const providerAccountsStopped = disposeProviderAccounts?.() ?? Promise.resolve();
+  host?.dispose(providerAccountsStopped);
   host = null;
   notifier?.dispose();
   notifier = null;
@@ -1207,10 +1214,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   botTasks = null;
   const currentBotRouter = botRouter;
   botRouter = null;
-  // Close provider admission before draining runtimes: event callbacks can still
-  // finish while shutdown is in progress, but cannot acquire a new account lock.
-  const providerAccountsStopped = disposeProviderAccounts?.() ?? Promise.resolve();
   const shutdownPhases: Array<[string, () => Promise<void>]> = [
+    ['teams', async () => { try { await currentTeamConnector?.rest(); } finally { currentStopTeams?.(); } }],
     ['provider_accounts', () => providerAccountsStopped],
     ['bot_router', () => currentBotRouter?.dispose() ?? Promise.resolve()],
     ['browser', () => currentBrowser?.close() ?? Promise.resolve()],
@@ -1230,8 +1235,18 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     try { await dispose(); record('completed'); }
     catch (error) { record('failed'); throw error; }
   })).finally(async () => {
-    await flushConversationSpaces?.();
-    try { await shutdownDiagnostics?.flush(); }
-    finally { app.quit(); }
+    const started = Date.now();
+    const record = (status: string): void => shutdownDiagnostics?.add('info', 'host', JSON.stringify({
+      event: 'shutdown_phase', phase: 'conversation_spaces', status, durationMs: Date.now() - started,
+    }));
+    record('started');
+    try { await flushConversationSpaces?.(); record('completed'); }
+    catch (error) {
+      record('failed');
+      shutdownDiagnostics?.add('error', 'host', `Conversation state flush failed: ${sanitizeDiagnostic(error)}`);
+    } finally {
+      try { await shutdownDiagnostics?.flush(); }
+      finally { app.quit(); }
+    }
   });
   });

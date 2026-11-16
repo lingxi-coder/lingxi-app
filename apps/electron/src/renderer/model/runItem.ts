@@ -66,6 +66,8 @@ export function toolDisplayHeader(item: ToolRunItem): ToolHeaderDto {
 
 /** A prose line — the user's prompt, the assistant's answer, or a notice. */
 export interface NarrationRunItem {
+  /** Host-authored Skill identity preserved across history restoration. */
+  readonly skillName?: string;
   readonly type: 'narration';
   readonly id: string;
   readonly text: string;
@@ -177,6 +179,7 @@ export interface CompactionRunItem {
   readonly type: 'compaction';
   readonly id: string;
   readonly status: 'running' | 'complete' | 'error' | 'cancelled' | 'skipped';
+  readonly automatic?: boolean;
   readonly phase?: string;
   /** High-water mark survives unrecognized future protocol phases. */
   readonly lastKnownPhase?: string;
@@ -430,7 +433,14 @@ export function commandDefaultOpen(item: CommandRunItem): boolean {
  * lie, and `Read`-style calls with an empty result are common.
  */
 export function toolHasBody(item: ToolRunItem): boolean {
-  return Boolean(item.result?.diff) || Boolean(item.result?.body);
+  const result = item.result;
+  if (result?.diff) return true;
+  if (!result?.body) return false;
+  // A one-line result repeated in the summary has no additional detail.
+  const body = result.body.trim();
+  if (!result.body_truncated && !(result.body_lines > 1)
+    && !/[\r\n]/.test(body) && body === result.headline?.trim()) return false;
+  return true;
 }
 
 /**

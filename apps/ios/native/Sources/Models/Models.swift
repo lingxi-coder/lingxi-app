@@ -547,6 +547,8 @@ struct Message: Identifiable, Equatable {
     /// Persisted transcript record identity, shared by all its projected rows.
     var transcriptUUID: UUID? = nil
     var sentAtMs: Int64? = nil
+    /// Host-authored Skill identity; presentation only.
+    var skillName: String? = nil
     let role: Role
     var tag: String? = nil
     let text: String

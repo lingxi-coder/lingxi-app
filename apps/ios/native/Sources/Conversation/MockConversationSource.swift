@@ -248,6 +248,22 @@ final class MockConversationSource: ConversationSource {
             source.model.activeSessionId = "ui-session"
             // Fixture launches start closed; persistence has isolated model tests.
             source.model.expandedToolCalls = []
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_SKILL_INSTRUCTIONS"] == "1" {
+                let body = "# LingXi API guide\n\nSupporting instructions for the current task."
+                let prompt = Message(role: .user, text: "Base directory for this skill: /skills/lingxi-api\nResolve relative references and assets from this directory; use their exact paths instead of searching the application home directory. Use read-only file tools for skill assets; keep project writes in the project directory.\n\n" + body)
+                let skill = ConversationToolTrace(id: "ui-skill", tool: "Skill", status: .completed,
+                    inputSummary: "lingxi-api", elapsedMs: 12, skillBody: body)
+                let reads = [
+                    ConversationToolTrace(id: "ui-skill-read-first", tool: "Read", status: .completed, inputSummary: "first.md"),
+                    ConversationToolTrace(id: "ui-skill-read-second", tool: "Read", status: .running, inputSummary: "second.md"),
+                ]
+                let active = ConversationExecutionRun(id: "ui-skill-run", sessionId: "ui-session", turnId: 2,
+                    status: .running, tools: reads, activities: reads.map { .tool(id: $0.id) })
+                source.model.messages = [user, prompt, assistant]
+                source.model.items = [.message(user), .run(active), .toolCall(skill), .message(prompt), .message(assistant)]
+                source.model.streaming = true
+                return source
+            }
             if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_LOCAL_APP_REQUIRES_CODE"] == "1" {
                 let result = ConversationToolResultDisplay(headline: "Failed", headlineKind: .failed,
                     headlineArgs: [], diff: nil,

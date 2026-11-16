@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ClientEvent } from '@lingxi/bridge-client';
 import { SessionRuntime } from '../src/main/bridge.js';
+import { REPLAY_LIVE_TAIL_LIMIT } from '../src/main/runtimeEventReplay.js';
 
 test('remote and renderer snapshots remain stable across streamed appends, status replacement and replay resets', async t => {
   const sessionId = '11111111-2222-4333-8444-555555555555';
@@ -25,7 +26,8 @@ test('remote and renderer snapshots remain stable across streamed appends, statu
   assert.deepEqual(view.events, capturedEvents, 'an existing remote view must not grow or lose coalesced events');
   assert.deepEqual(renderer, capturedRenderer, 'renderer replay must remain an immutable captured prefix');
   const current = runtime.remoteView();
-  assert.equal(current.events.filter(({ event }) => event.type === 'text_delta').length, 2_001);
+  assert.ok(current.events.filter(({ event }) => event.type === 'text_delta').length <= REPLAY_LIVE_TAIL_LIMIT + 2,
+    'older stream fragments form equivalent spans; only the recent raw tail remains');
   assert.deepEqual(current.events.filter(({ event }) => event.type === 'ui_status').map(({ event }) => event), [
     { type: 'ui_status', plugin: 'two', text: 'second' },
     { type: 'ui_status', plugin: 'one', text: 'replacement' },

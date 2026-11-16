@@ -87,6 +87,18 @@ internal fun submissionOwnerSnapshots(
     }.toMap()
 }
 
+/** Retarget only leases of the exact source whose native admission proved a successor. */
+internal fun queuedExecutorOwnerSnapshots(
+    spec: ConversationRecoverySpec,
+    sessionId: String,
+    turnId: Long,
+    executorActive: Boolean,
+    existing: Map<String, ConversationBackgroundSnapshot?>,
+): Map<String, ConversationBackgroundSnapshot> = existing.mapNotNull { (owner, previous) ->
+    previous?.takeIf { it.recoverySpec?.ownerKey == spec.ownerKey && canonicalSessionId(it.sessionId) == canonicalSessionId(sessionId) }
+        ?.let { owner to it.copy(turnId = turnId, executorActive = executorActive) }
+}.toMap()
+
 /** Flush after staging releases its lock, then validate the still-current owner. */
 internal fun flushConversationRecovery(stage: () -> () -> Boolean, revalidate: () -> Unit) {
     val flush = stage()

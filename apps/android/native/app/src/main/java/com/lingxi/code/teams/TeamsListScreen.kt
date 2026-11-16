@@ -91,6 +91,8 @@ internal fun TeamsListScreen(
     onMessageBot: (String) -> Unit = {},
     onArtifact: (String) -> Unit = {},
     onRefreshTask: (String) -> Unit = {},
+    onCancelTask: (String) -> Unit = {},
+    onReviewTask: (String) -> Unit = {},
     onDiscardCommand: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -173,7 +175,15 @@ internal fun TeamsListScreen(
                     }
                     if (query.isBlank() && messaging.tasks.isNotEmpty()) {
                         item(key = "tasks") { Text(stringResource(R.string.teams_recent_tasks), Modifier.padding(16.dp).semantics { heading() }, style = MaterialTheme.typography.titleSmall) }
-                        items(messaging.tasks, key = { "task-${it.taskId}" }) { task -> TeamTaskCard(task, bots.firstOrNull { it.sharedBotId == task.sharedBotId }?.name ?: strings.bot, onArtifact, onRefreshTask) }
+                        items(messaging.tasks, key = { "task-${it.taskId}" }) { task ->
+                            val bot = bots.firstOrNull { it.sharedBotId == task.sharedBotId }
+                            TeamTaskCard(
+                                task, bot?.name ?: strings.bot, onArtifact, onRefreshTask, viewer = messaging.cache?.let { TeamMemberRef(uid, it.generation) }, maintainer = bot?.maintainer,
+                                recipientName = task.wait?.let { wait -> members.firstOrNull { it.uid == wait.recipient.uid }?.displayName?.takeIf { it.isNotEmpty() } } ?: strings.member, onCancel = onCancelTask, onReview = onReviewTask,
+                                // A card in the list has no message column around it: it takes the list's own 16 dp edge.
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            )
+                        }
                     }
                     items(messaging.cache?.commands.orEmpty().filter { it.has("error") }, key = { "command-${it.getString("commandId")}" }) { command ->
                         Column(Modifier.padding(16.dp)) {

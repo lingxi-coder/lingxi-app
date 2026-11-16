@@ -71,6 +71,26 @@ test('browser permissions use normalized exact origins and preserve independent 
     assert.notEqual(siteOrigin('https://sub.example.com'), siteOrigin('https://example.com'));
   } finally { f.cleanup(); }
 });
+
+test('browser selection persists, invalidates approval revisions and rejects unsupported adapters', async () => {
+  const f = fixture();
+  try {
+    const initial = f.store.policy();
+    assert.equal(initial.browser.selectedBrowser, null);
+    const selected = await f.store.execute({ action: 'selectBrowser', revision: initial.revision, browserId: 'edge' });
+    assert.equal(selected.browser.selectedBrowser, 'edge');
+    assert.notEqual(selected.revision, initial.revision);
+    assert.equal(new ComputerSettingsStore(join(f.store.policyPath, '../..')).policy().browser.selectedBrowser, 'edge');
+    await assert.rejects(f.store.execute({ action: 'selectBrowser', revision: initial.revision, browserId: 'chrome' }), /changed/);
+    await assert.rejects(f.store.execute({ action: 'selectBrowser', revision: selected.revision, browserId: 'safari' }), /adapter/);
+    await assert.rejects(f.store.execute({ action: 'selectBrowser', revision: selected.revision, browserId: 'firefox' }), /adapter/);
+    assert.equal(f.store.policy().browser.selectedBrowser, 'edge');
+    const saved = JSON.parse(readFileSync(f.store.policyPath, 'utf8'));
+    delete saved.browser.selectedBrowser;
+    writeFileSync(f.store.policyPath, JSON.stringify(saved), { mode: 0o600 });
+    assert.equal(new ComputerSettingsStore(join(f.store.policyPath, '../..')).policy().browser.selectedBrowser, 'chrome', 'legacy Chrome selections survive upgrading');
+  } finally { f.cleanup(); }
+});
 test('unreadable settings fail closed without overwriting the original file', async () => {
   const f = fixture();
   try {
@@ -95,7 +115,7 @@ test('disconnecting Browser invalidates the device revision and pending approval
   const f = fixture();
   try {
     const calls: string[] = [];
-    const status = { connected: true, installed: true, extensionDirectory: '/controlled/extension' };
+    const status = { browserId: 'chrome' as const, connected: true, installed: true, extensionDirectory: '/controlled/extension' };
     f.store.attachBrowser({ status: () => status, retry: async () => status, install: async () => status,
       remove: async () => { calls.push('remove'); return status; }, policyChanged: () => { calls.push('revoke'); } });
     const before = f.store.policy().revision;
@@ -110,7 +130,7 @@ test('live source changes replace effective revisions and revoke Browser grants 
   const f = fixture();
   try {
     let revocations = 0;
-    const status = { connected: true, installed: true, extensionDirectory: '/test' };
+    const status = { browserId: 'chrome' as const, connected: true, installed: true, extensionDirectory: '/test' };
     f.store.attachBrowser({ status: () => status, retry: async () => status, install: async () => status,
       remove: async () => status, policyChanged: () => { revocations++; f.store.policy(); } });
     const before = f.store.policy();
@@ -191,7 +211,7 @@ test('existing uninstalled app rules can be reset or removed without resolving a
 test('Browser installation receives a guard for asynchronous commit and unavailable Browser does not disable native settings', async () => {
   const f = fixture();
   try {
-    const status = { connected: false, installed: false, extensionDirectory: '/test' };
+    const status = { browserId: 'chrome' as const, connected: false, installed: false, extensionDirectory: '/test' };
     let trusted = true;
     let installed = false;
     f.store.attachBrowser({ status: () => status, retry: async () => status,

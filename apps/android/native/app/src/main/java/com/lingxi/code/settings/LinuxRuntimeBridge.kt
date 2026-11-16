@@ -223,6 +223,9 @@ object LinuxRuntimeBridge {
             expectedRootfsVersion = config.rootfsVersion,
             expectedArchiveSha = expectedSha,
             expectedManifestAbi = manifestAbiFor(config.abi),
+            expectedBrandProfile = io.lingxi.mobilelinux.BrandRuntimeProfile(
+                config.brandId, config.linuxUser, config.configDirName,
+            ),
             archiveName = archiveName,
             manifestJson = context.assets
                 .open("$assetDir/$ROOTFS_MANIFEST_FILE")

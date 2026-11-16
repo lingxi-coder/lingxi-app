@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { TeamConversationError, conversationRecord } from './team-conversations.mjs';
 import { TeamMessagesStore, TeamMessageError } from './team-messages.mjs';
 import { SharedBotError } from './shared-bots.mjs';
+import { HostedBotServiceError, HostedBotServices, SERVICE_PREFIX } from './hosted-bot-service.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
@@ -20,6 +21,7 @@ const command = z.discriminatedUnion('action', [
   z.object({ action: z.literal('leave'), ...teamId, generation }).strict(),
   z.object({ action: z.literal('remove'), ...teamId, uid, generation }).strict(),
   z.object({ action: z.literal('role'), ...teamId, uid, generation, role: z.enum(['admin', 'member']) }).strict(),
+  z.object({ action: z.literal('handOver'), ...teamId, uid, generation }).strict(),
 
 ]);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -125,6 +127,7 @@ export class TeamsStore {
     const input = command.parse(raw), now = new Date(this.clock());
     if (input.action === 'create') {
       if (input.teamId.startsWith(PAIR_PREFIX)) fail(400, 'PAIR_TEAM');
+      if (input.teamId.startsWith(SERVICE_PREFIX)) fail(400, 'RESERVED_TEAM_ID');
       return this.db.runTransaction(async tx => {
         const ref = this.team(input.teamId), previous = await tx.get(ref);
         if (previous.exists) {
@@ -209,6 +212,20 @@ export class TeamsStore {
       }
       const targetUid = input.action === 'leave' ? user.uid : input.uid;
       const targetRef = ref.collection('members').doc(targetUid), target = targetUid === user.uid ? self : await tx.get(targetRef);
+      if (input.action === 'handOver') {
+        // The owner gives the team to a current member and stays as an admin. Owning the team is a role of its own: every Bot stays
+        // with its maintainer, every Chat with its readers, and nobody's model account or shared files change hands.
+        if (targetUid === user.uid) fail(403, 'ROLE_REQUIRED');
+        if (!target.exists || target.data().generation !== input.generation) fail(409, 'STALE_MEMBERSHIP');
+        // Asked again after a lost answer: that member already owns the team.
+        if (target.data().role === 'owner' && manager(self.data())) return { ok: true };
+        if (role !== 'owner') fail(403, 'OWNER_REQUIRED');
+        tx.update(targetRef, { role: 'owner' }); tx.update(this.index(targetUid, ref.id), { role: 'owner' });
+        tx.update(selfRef, { role: 'admin' }); tx.update(this.index(user.uid, ref.id), { role: 'admin' });
+        tx.update(ref, { updatedAt: now });
+        tx.set(ref.collection('signals').doc('membership'), { updatedAt: FieldValue.serverTimestamp() });
+        return { ok: true };
+      }
       if (input.action !== 'leave' && (!manager(self.data()) || targetUid === user.uid
         || (role !== 'owner' && target.data()?.role !== 'member'))) fail(403, 'ROLE_REQUIRED');
       if (!target.exists) fail(409, 'STALE_MEMBERSHIP');
@@ -254,7 +271,7 @@ export function createTeamsHandler({ store, friends, verifyToken, createCustomTo
       if (friends && path === '/v1/friends/profile' && request.method === 'GET') return reply(await friends.profile(user));
       const detail = /^\/v1\/teams\/([A-Za-z0-9_-]{8,64})$/u.exec(path);
       if (detail && detail[1] !== 'session' && request.method === 'GET') return reply(await store.detail(user.uid, detail[1]));
-      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
+      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', '/v1/services', ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
       const raw = await request.text();
       if (Buffer.byteLength(raw) > (path === '/v1/teams/messages' ? 1048576 : 16384)) fail(413, 'REQUEST_TOO_LARGE');
       let body;
@@ -264,12 +281,15 @@ export function createTeamsHandler({ store, friends, verifyToken, createCustomTo
         return reply({ uid: user.uid, customToken: await createCustomToken(user.uid) });
       }
       if (path === '/v1/teams/messages') return reply(await new TeamMessagesStore(store.db, store.clock).execute(user, body));
+      // Hosted Bot services: the commands about a service itself. Its sessions use /v1/teams/messages with `serviceId`.
+      if (path === '/v1/services') return reply(await new HostedBotServices(store.db, store.clock).execute(user, body));
       if (path === '/v1/friends') return reply(await friends.execute(user, body));
       return reply(await store.execute(user, body));
     } catch (error) {
       if (error instanceof z.ZodError) return reply({ error: { code: 'INVALID_INPUT' } }, 400);
       if (error instanceof TeamMessageError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof SharedBotError) return reply({ error: { code: error.code } }, error.status);
+      if (error instanceof HostedBotServiceError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof TeamsError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof TeamConversationError) return reply({ error: { code: error.code } }, error.status);
       return reply({ error: { code: 'SERVICE_UNAVAILABLE' } }, 503);

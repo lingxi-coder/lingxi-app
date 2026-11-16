@@ -1,4 +1,10 @@
 const rows: Record<string, readonly [string, string, string, string, string]> = {
+  tool_denied: ["操作已被拒绝", "操作已被拒絕", "Command declined", "操作が拒否されました", "작업이 거부됨"],
+  tool_denied_auto_review: ["自动审核拒绝了此操作", "自動審核拒絕了此操作", "Command declined by auto-review", "自動レビューにより操作が拒否されました", "자동 검토에서 작업을 거부함"],
+  tool_denied_reason: ["拒绝原因", "拒絕原因", "Why it was denied", "拒否された理由", "거부된 이유"],
+  tool_denied_no_output: ["无输出", "無輸出", "No output", "出力なし", "출력 없음"],
+  tool_denied_exit_unknown: ["退出码未知", "結束代碼未知", "Exit code unknown", "終了コード不明", "종료 코드 알 수 없음"],
+
   agent_started_working: ['开始工作', '開始工作', 'started working', '作業を開始', '작업 시작'],
   agent_finished: ['已完成', '已完成', 'finished', '完了', '완료'],
   agent_attention_count: ['%1$d 项需关注', '%1$d 項需注意', 'Needs attention: %1$d', '要確認 %1$d 件', '확인 필요 %1$d개'],
@@ -18,6 +24,9 @@ const rows: Record<string, readonly [string, string, string, string, string]> = 
   tool_call_count: ['%1$d 次', '%1$d 次', '%1$d calls', '%1$d 回', '%1$d회'],
   tool_calls_unsuccessful: ['调用未成功', '呼叫未成功', 'Calls unsuccessful', '呼び出しは成功しませんでした', '호출이 성공하지 못함'],
   tool_attempt_unsuccessful: ['本次调用未成功', '本次呼叫未成功', 'Call unsuccessful', 'この呼び出しは成功しませんでした', '이 호출이 성공하지 못함'],
+  tool_result_done: ['成功', '成功', 'Success', '成功', '성공'],
+  tool_result_error: ['未成功', '未成功', 'Unsuccessful', '未成功', '실패'],
+  tool_result_running: ['运行中', '執行中', 'Running', '実行中', '실행 중'],
   tool_call_unsuccessful_one: ['%1$d 次调用未成功', '%1$d 次呼叫未成功', '%1$d unsuccessful call', '%1$d 回の呼び出しが未成功', '%1$d회 호출 실패'],
   tool_call_unsuccessful_count: ['%1$d 次调用未成功', '%1$d 次呼叫未成功', '%1$d unsuccessful calls', '%1$d 回の呼び出しが未成功', '%1$d회 호출 실패'],
   tool_read_running: ['正在读取', '正在讀取', 'Reading', '読み取り中', '읽는 중'],
@@ -61,6 +70,7 @@ const rows: Record<string, readonly [string, string, string, string, string]> = 
   close_command: ['关闭命令结果', '關閉命令結果', 'Close command result', 'コマンド結果を閉じる', '명령 결과 닫기'],
   compact_waiting: ['等待引擎', '等待引擎', 'Waiting for engine', 'エンジンを待機中', '엔진 대기 중'],
   compact_done: ['上下文已压缩', '上下文已壓縮', 'Context compacted', 'コンテキストを圧縮しました', '컨텍스트 압축 완료'],
+  compact_done_automatic: ['上下文已自动压缩', '上下文已自動壓縮', 'Context automatically compacted', 'コンテキストを自動で圧縮しました', '컨텍스트 자동 압축 완료'],
   compact_finished: ['压缩已完成', '壓縮已完成', 'Compaction finished', '圧縮が完了しました', '압축 완료'],
   compact_cancelled: ['已取消压缩', '已取消壓縮', 'Compaction cancelled', '圧縮をキャンセルしました', '압축 취소됨'],
   compact_failed: ['压缩失败', '壓縮失敗', 'Compaction failed', '圧縮に失敗しました', '압축 실패'],

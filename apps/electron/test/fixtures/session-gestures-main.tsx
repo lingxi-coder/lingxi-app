@@ -11,14 +11,17 @@ import { setLanguagePreference } from '../../src/renderer/i18n/useI18n';
 setLanguagePreference('en');
 
 const sessions = ['alpha', 'beta', 'gamma'].map((uuid, index) => ({ uuid, title: uuid, modified_rfc3339: `2026-09-${22 - index}T00:00:00Z`, message_count: 1, mode: 'code' as const, path: `/fixture/${uuid}.jsonl` }));
-const events = { opened: [] as string[], preferences: [] as unknown[], touched: [] as string[], sessions };
+const events = { opened: [] as string[], preferences: [] as unknown[], touched: [] as string[], sessions,
+  setLoading: (_loading: boolean) => {} };
 Object.assign(window, { sessionGesturesFixture: events });
 function Fixture() {
+  const [sessionLoading, setSessionLoading] = useState(false);
+  events.setLoading = setSessionLoading;
   const [sidebar, setSidebar] = useState({ organization: 'project', chatSort: 'updated', manualSessionOrder: {} });
   const [catalogSessions, setCatalogSessions] = useState(sessions);
   events.sessions = catalogSessions;
   const bridge = {
-    sessionLoading: false,
+    sessionLoading, projectCreationOpen: false,
     bootstrap: {
       settings: { projects: ['/fixture'], pinnedSessions: [{ projectPath: '/pinned', sessionId: 'pinned', title: 'pinned' }], activeProject: '/fixture', sidebar },
       workspace: { path: '/fixture' },

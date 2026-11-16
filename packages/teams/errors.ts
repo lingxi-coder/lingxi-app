@@ -7,6 +7,7 @@ const membership: Record<string, [string, string]> = {
   MEMBERSHIP_REQUIRED: ['Your membership has ended. Refresh or join with a new invite.', '你已不在此团队，请刷新或通过新邀请加入。'],
   STALE_MEMBERSHIP: ['Membership changed. Refresh before trying again.', '成员身份已变化，请刷新后重试。'],
   ROLE_REQUIRED: ['Your role cannot perform this action.', '当前角色无权执行此操作。'],
+  OWNER_REQUIRED: ['Only the owner of the team can do this.', '只有团队所有者可以执行此操作。'],
   TEAM_LIMIT: ['You can join up to 20 teams.', '最多可加入 20 个团队。'],
   MEMBER_LIMIT: ['This team has reached 200 members.', '团队已达到 200 人上限。'],
 };
@@ -45,14 +46,113 @@ export function messageErrorText(code: string, zh: boolean): string {
       return t('Some of this team’s data is in an unsupported format and cannot be shown.', '此团队的部分数据格式不受支持，无法显示。');
     case 'REQUEST_QUOTA_EXCEEDED':
       return t('The daily request quota is exhausted. Ask the maintainer to review quotas or try after the UTC day resets.', '每日请求额度已用尽，请联系维护者检查额度或在 UTC 日期切换后重试。');
+    case 'ATTACHMENT_TYPE':
+    case 'UPLOAD_TYPE_MISMATCH':
+      return t('Only PNG and JPEG pictures, PDF documents and plain text files can be sent, and a file must be what its name says.', '只能发送 PNG、JPEG 图片、PDF 文档和纯文本文件，且文件内容须与其名称相符。');
+    case 'ATTACHMENT_EMPTY':
+      return t('This file is empty.', '此文件为空。');
+    case 'ATTACHMENT_TOO_LARGE':
+      return t('A file can be up to 10 MB.', '单个文件最大 10 MB。');
+    case 'ATTACHMENT_COUNT':
+      return t('A message carries up to five files.', '一条消息最多带五个文件。');
+    case 'ATTACHMENT_TOTAL':
+    case 'ATTACHMENT_LIMIT':
+      return t('The files of one message can be up to 20 MB together.', '一条消息的文件合计最大 20 MB。');
+    case 'UPLOAD_QUOTA_EXCEEDED':
+      return t('You have too many unsent files. Send or remove some first.', '未发送的文件过多，请先发送或移除一些。');
+    case 'UPLOAD_EXPIRED':
+      return t('This file waited too long to be sent. Add it again.', '此文件等待发送的时间过长，请重新添加。');
+    case 'UPLOAD_DIGEST_MISMATCH':
+    case 'UPLOAD_INCOMPLETE':
+    case 'UPLOAD_PART_INVALID':
+    case 'UPLOAD_FAILED':
+      return t('The file did not arrive whole. Add it again.', '文件未完整送达，请重新添加。');
+    case 'UPLOAD_REQUIRED':
+    case 'UPLOAD_SEALED':
+    case 'UPLOAD_ID_CONFLICT':
+    case 'ATTACHMENT_REQUIRED':
+      return t('This file can no longer be sent. Add it again.', '此文件已无法发送，请重新添加。');
+    case 'ATTACHMENT_REVOKED':
+      return t('This file was taken back and can no longer be opened.', '此文件已被收回，无法再打开。');
+    case 'ATTACHMENT_DAMAGED':
+      return t('The file could not be read whole. Try again.', '未能完整读取文件，请重试。');
     case 'ARTIFACT_READ_REQUIRED':
       return t('You no longer have access to this document. Ask the maintainer to review its audience.', '你已无权访问此文档，请联系维护者检查受众。');
+    case 'ARTIFACT_REVISION_CONFLICT':
+      return t('This document was changed by someone else. Open it again to see the latest version.', '此文档已被其他人修改，请重新打开查看最新版本。');
+    case 'ARTIFACT_UNCHANGED':
+      return t('There are no changes to save.', '没有需要保存的修改。');
+    case 'ARTIFACT_REVISION_LIMIT':
+      return t('This document has reached its limit of 200 revisions and can no longer be edited.', '此文档已达到 200 个版本的上限，无法继续编辑。');
+    case 'ARTIFACT_REVISION_REQUIRED':
+      return t('That revision is not available.', '该版本不可用。');
+    case 'LIST_REQUIRED':
+      return t('This list is no longer available.', '此清单已不可用。');
+    case 'LIST_REVISION_CONFLICT':
+    case 'LIST_ITEM_REQUIRED':
+      return t('The list was changed in the meantime. Refresh it and try again.', '清单在此期间已被修改，请刷新后重试。');
+    case 'LIST_LIMIT':
+      return t('The list is full. Remove some items before adding more.', '清单已满，请先移除一些条目再添加。');
+    case 'SHARED_LIST_UNSUPPORTED':
+      return t('This Bot’s model cannot keep a shared list. Choose another model for the Bot, or publish it without the list.', '此 Bot 使用的模型不支持共享清单。请为 Bot 更换模型，或不带清单发布。');
+    case 'OPERATION_CONFLICT':
+      return t('This was already decided differently. Reload to see the current state.', '此项已有不同的处理结果，请重新加载查看当前状态。');
+    case 'OPERATION_REQUIRED':
+    case 'OPERATION_READ_FORBIDDEN':
+      return t('These actions are not available to you.', '你无法查看这些操作。');
+    case 'MAINTAINER_REQUIRED':
+      return t('Only the Bot’s maintainer can confirm what happened.', '只有 Bot 维护者可以确认实际结果。');
+    case 'TASK_RUNNING':
+      return t('The task is still running and may report the result itself. Try again after it stops.', '任务仍在运行，可能会自行报告结果。请在任务停止后重试。');
     case 'PUBLICATION_CONFIRMATION_REQUIRED':
       return t('Review and confirm the publication before continuing.', '请检查并确认发布内容后继续。');
     case 'PUBLISHED_INPUT_REQUIRED':
     case 'INPUT_GRANT_REQUIRED':
+    case 'INPUT_REVISION_CONFLICT':
+    case 'SHARED_RESOURCE_REQUIRED':
+      return t('The shared files changed in the meantime. Choose the Bot again and review what it shares.', '共享的资料在此期间已更改。请重新选择 Bot 并检查共享内容。');
+    case 'SHARED_RESOURCE_KIND':
+      return t('A Skill can only be replaced by a SKILL.md file, and a file by another file.', 'Skill 只能用 SKILL.md 替换，文件只能用其他文件替换。');
+    case 'SHARED_FILE_LIMIT':
+      return t('Too much is shared at once. Stop sharing some files or choose smaller ones.', '共享的资料过多。请停止共享部分文件，或选择更小的文件。');
     case 'INPUT_AUDIENCE_NARROWER':
       return t('The selected resources cannot be shared with this audience. Choose authorized resources or a narrower audience.', '选定资料无法向此受众共享，请选择有权共享的资料或缩小受众。');
+    case 'WAIT_KIND_MISMATCH':
+      return t('This request needs a different kind of reply. Refresh and try again.', '此请求需要另一种回复方式，请刷新后重试。');
+    case 'APPROVAL_REQUIRED':
+    case 'APPROVAL_UNSUPPORTED':
+      return t('This change needs an approval it does not have, so it was not made.', '此修改需要批准但尚未获批，因此未执行。');
+    case 'WAIT_CLOSED':
+    case 'WAIT_REQUIRED':
+      return t('This question is no longer waiting for a reply.', '此问题已不再等待回复。');
+    case 'WAIT_RECIPIENT_REQUIRED':
+      return t('Only the person who asked the Bot can answer this question.', '只有向 Bot 提出请求的人才能回答此问题。');
+    case 'TASK_REVOKED':
+      return t('The Bot task lost its authorization, so it cannot continue.', '此 Bot 任务的授权已失效，无法继续。');
+    case 'TASK_CANCEL_FORBIDDEN':
+      return t('Only the person who asked, or the Bot’s maintainer, can cancel this task.', '只有发起请求的人或 Bot 维护者可以取消此任务。');
+    case 'BOT_MAINTAINER_CHANGED':
+      return t('This assistant has a new maintainer. Start a new chat with it from the team’s assistants.', '此助手已更换维护者。请从团队助手中与它开始新的对话。');
+    case 'TRANSFER_PENDING':
+      return t('This assistant is already offered to someone. Take that offer back first.', '此助手已邀请他人接手，请先收回该邀请。');
+    case 'TRANSFER_ENDED':
+    case 'TRANSFER_REQUIRED':
+    case 'TRANSFER_COMPLETED':
+    case 'TRANSFER_PARTY_REQUIRED':
+    case 'TRANSFER_RECIPIENT_REQUIRED':
+      return t('This handover is no longer open. Refresh to see who maintains the assistant.', '此次移交已结束。请刷新以查看助手当前的维护者。');
+    case 'CURRENT_RECIPIENT_REQUIRED':
+      return t('That person is no longer a member of this team. Choose someone else.', '对方已不是此团队的成员，请另选他人。');
+    case 'TRANSFER_PACKAGE_MISMATCH':
+      return t('The assistant’s role and files did not arrive as they were offered, so nothing was taken over. Ask its maintainer to offer it again.', '收到的角色和资料与邀请时不一致，因此未接手。请让维护者重新发出邀请。');
+    case 'TRANSFER_PACKAGE_REQUIRED':
+    case 'TRANSFER_SEALED':
+    case 'TRANSFER_ID_CONFLICT':
+      return t('The offer could not be made. Close this and try again.', '未能发出邀请。请关闭后重试。');
+    case 'SHARED_BOT_REQUIRED':
+      return t('This assistant is published from another computer. Hand it over from there.', '此助手由另一台电脑发布，请在那台电脑上移交。');
+    case 'BOT_PAUSED':
+      return t('This assistant is paused. Publish it again before handing it over.', '此助手已暂停。请重新发布后再移交。');
     case 'BOT_REVISION_CONFLICT':
       return t('Bot settings changed. Refresh before saving again.', 'Bot 设置已变化，请刷新后重试。');
     case 'MESSAGE_RECALLED':

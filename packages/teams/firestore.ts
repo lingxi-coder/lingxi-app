@@ -1,6 +1,7 @@
 import type { DocumentData, Firestore, FirestoreError } from 'firebase/firestore';
+import { ATTACHMENT_TYPES, type MessageAttachment } from './attachments.js';
 import type { BlockEntry, FriendCard, TeamOffer } from './friends.js';
-import type { MessageScope, MessageSnapshot, TeamConversation, TeamMessage } from './messages.js';
+import type { ListApproval, ListApprovalChange, MessageScope, MessageSnapshot, TeamConversation, TeamMessage } from './messages.js';
 
 function timestamp(value: unknown): string | null {
   if (value && typeof value === 'object' && 'toDate' in value && typeof value.toDate === 'function') return value.toDate().toISOString();
@@ -75,7 +76,38 @@ export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
   return { id, seq: value.seq, author: pointerAuthor(value.author), kind: value.kind, text: value.text, changeSeq: value.changeSeq, changeId: value.changeId,
     createdAt: timestamp(value.createdAt), editedAt: timestamp(value.editedAt), ...(value.replyTo ? { replyTo: value.replyTo } : {}),
     ...(value.recalled ? { recalled: true } : {}), ...(value.mentions ? { mentions: value.mentions } : {}),
-    ...(value.taskId ? { taskId: value.taskId } : {}), ...(value.taskIds ? { taskIds: value.taskIds } : {}), ...(value.artifactId ? { artifactId: value.artifactId } : {}) };
+    ...(value.taskId ? { taskId: value.taskId } : {}), ...(value.taskIds ? { taskIds: value.taskIds } : {}), ...(value.artifactId ? { artifactId: value.artifactId } : {}),
+    ...(value.waitId ? { waitId: value.waitId } : {}),
+    ...(approvalOf(value.approval) ? { approval: approvalOf(value.approval)! } : {}),
+    ...(value.decision === 'approve' || value.decision === 'deny' ? { decision: value.decision } : {}),
+    ...(attachmentsOf(value.attachments).length ? { attachments: attachmentsOf(value.attachments) } : {}),
+    ...(readFilesOf(value.readFiles).length ? { readFiles: readFilesOf(value.readFiles) } : {}) };
+}
+function readFilesOf(value: unknown): { attachmentId: string; name: string }[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(item => item && typeof item === 'object' && typeof item.attachmentId === 'string' && typeof item.name === 'string' && item.name
+    ? [{ attachmentId: item.attachmentId, name: item.name }] : []);
+}
+/** The files of a message. An entry that does not read as a file is left out; the others stand. */
+function attachmentsOf(value: unknown): MessageAttachment[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(item => item && typeof item === 'object' && typeof item.attachmentId === 'string' && typeof item.name === 'string'
+    && (ATTACHMENT_TYPES as readonly string[]).includes(item.mime) && Number.isSafeInteger(item.byteLength) && item.byteLength > 0 && typeof item.sha256 === 'string'
+    ? [{ attachmentId: item.attachmentId, name: item.name, mime: item.mime, byteLength: item.byteLength, sha256: item.sha256, ...(item.revoked === true ? { revoked: true } : {}) }] : []);
+}
+/** The approval request on a Bot's message. A request that does not read as one is not shown as one. */
+function approvalOf(value: unknown): ListApproval | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { title, changes } = value as { title?: unknown; changes?: unknown };
+  if (typeof title !== 'string' || !Array.isArray(changes) || !changes.length) return undefined;
+  const read: ListApprovalChange[] = [];
+  for (const change of changes as Array<Record<string, unknown>>) {
+    if (!change || typeof change !== 'object' || !['add', 'update', 'remove'].includes(change.op as string)) return undefined;
+    if (change.op === 'add' && typeof change.text !== 'string') return undefined;
+    read.push({ op: change.op as ListApprovalChange['op'], ...(typeof change.text === 'string' ? { text: change.text } : {}), ...(typeof change.itemId === 'string' ? { itemId: change.itemId } : {}),
+      ...(typeof change.done === 'boolean' ? { done: change.done } : {}), ...(change.op === 'add' ? {} : { item: typeof change.item === 'string' ? change.item : null }) });
+  }
+  return { title, changes: read };
 }
 
 /** SDK snapshots are the only ordinary-message read path, including offline reads. */
@@ -139,7 +171,8 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
           const value = snapshot.data(), lastMessage = firestoreLastMessage(value.lastMessage);
           if (!Array.isArray(value.participants) || !value.participants.every((principal: unknown) => typeof principal === 'string' && /^(user:[A-Za-z0-9_-]{1,128}|shared_bot:[A-Za-z0-9_-]{8,64})$/u.test(principal))) throw invalidData();
           if (value.kind === 'bot_dm' && value.participants.filter((principal: string) => principal.startsWith('shared_bot:')).length !== 1) throw invalidData();
-          return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants, lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(snapshot.id) ?? 0, ...(lastMessage ? { lastMessage } : {}) };
+          const readers = Array.isArray(value.memberUids) && value.memberUids.every((reader: unknown) => typeof reader === 'string') ? { readers: value.memberUids as string[] } : {};
+          return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants, ...readers, lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(snapshot.id) ?? 0, ...(lastMessage ? { lastMessage } : {}) };
         });
       } catch {
         // A conversation that breaks the stored contract is not shown half-parsed; the team's listeners stop with the error.

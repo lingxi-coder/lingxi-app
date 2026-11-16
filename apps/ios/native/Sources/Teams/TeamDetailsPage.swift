@@ -28,7 +28,7 @@ struct TeamDetailsPage: View {
     }
 
     private struct Confirmation: Identifiable {
-        enum Kind { case role, remove, leave, delete, revoke }
+        enum Kind { case role, owner, remove, leave, delete, revoke }
         let id = UUID()
         let kind: Kind
         /// Who or what it is about: the name in the question (the invite has none).
@@ -42,6 +42,7 @@ struct TeamDetailsPage: View {
     @State private var inviteRole = "member"
     @State private var confirmation: Confirmation?
     @State private var stopping: TeamBotCard?
+    @State private var listOf: TeamBotCard?
     @State private var copied = false
     /// The member whose "Add friend" sheet is open (docs/FRIENDS-CLIENTS.md D15).
     @State private var befriending: TeamMember?
@@ -66,6 +67,9 @@ struct TeamDetailsPage: View {
                 tabs.select(.friends)
             }
         }
+        .sheet(item: $listOf) { bot in
+            if let model = workspace.messaging { TeamSharedListSheet(bot: bot, model: model, members: workspace.directory) { listOf = nil } }
+        }
         .sheet(isPresented: $inviting) {
             if let team = workspace.team {
                 InviteFriendsSheet(teamID: team.id, teamName: team.name) { invitedNames = $0 }
@@ -84,7 +88,7 @@ struct TeamDetailsPage: View {
         }
         .hidesTabBarWhenPushed(in: .teams)
         // A change of account or membership invalidates what the person was about to confirm.
-        .onChange(of: workspace.authority) { _, _ in confirmation = nil; stopping = nil }
+        .onChange(of: workspace.authority) { _, _ in confirmation = nil; stopping = nil; listOf = nil }
         .onChange(of: workspace.invitationLink) { _, _ in copied = false }
         // Leaving, deleting or losing the team leaves nothing to show.
         .onChange(of: workspace.team == nil) { _, gone in if gone { onClose() } }
@@ -142,7 +146,7 @@ struct TeamDetailsPage: View {
             Button(confirmKey(pending), role: pending.kind == .role ? nil : .destructive) { confirmNow(pending) }
             Button("common_cancel", role: .cancel) {}
         } message: { pending in
-            Text(body(pending))
+            if let sentence = body(pending) { Text(sentence) } else { Text(verbatim: pending.subject) }
         }
         .confirmationDialog(
             stopping.map { Text("teams_bot_stop_title \($0.name)") } ?? Text(verbatim: ""),
@@ -218,6 +222,12 @@ struct TeamDetailsPage: View {
                                     confirmation = Confirmation(kind: .role, subject: member.displayName, input: [
                                         "action": "role", "teamId": team.id, "uid": member.uid, "generation": member.generation,
                                         "role": member.role == "admin" ? "member" : "admin",
+                                    ])
+                                }
+                                // Owning the team is given on its own: Bots stay with their maintainers and chats with their readers.
+                                Button("teams_make_owner") {
+                                    confirmation = Confirmation(kind: .owner, subject: member.displayName, input: [
+                                        "action": "handOver", "teamId": team.id, "uid": member.uid, "generation": member.generation,
                                     ])
                                 }
                             }
@@ -362,14 +372,15 @@ struct TeamDetailsPage: View {
         }
         Section {
             ForEach(bots) { bot in
-                let existing = workspace.uid.flatMap { TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: $0, sharedBotId: bot.sharedBotId) }
+                let existing = workspace.uid.flatMap { TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: $0, sharedBotId: bot.sharedBotId, bots: bots) }
                 TeamBotCardView(
                     bot: bot, ownerName: userName(bot.maintainer.uid), isOwner: bot.maintainer == TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation),
                     busy: workspace.messageBusy || (offline && existing == nil),
                     onMessage: {
                         Task { if let id = await workspace.openBotDM(bot) { onOpenConversation(id) } }
                     },
-                    onStopSharing: { stopping = bot })
+                    onStopSharing: { stopping = bot },
+                    onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation)) && !offline ? { listOf = bot } : nil)
             }
             if empty {
                 // What is empty, and what to do about it (U9): the hint is the body here, so the footer leaves it out.
@@ -420,6 +431,8 @@ struct TeamDetailsPage: View {
     private func question(_ pending: Confirmation) -> Text {
         switch pending.kind {
         case .role: Text(pending.input["role"] as? String == "admin" ? "teams_confirm_promote_title \(pending.subject)" : "teams_confirm_demote_title \(pending.subject)")
+        // Handing the team over says all of it in its question (what stays, who can undo it), so there is no separate sentence.
+        case .owner: Text("teams_confirm_make_owner")
         case .remove: Text("teams_confirm_remove_title \(pending.subject)")
         case .leave: Text("teams_confirm_leave_title \(pending.subject)")
         case .delete: Text("teams_confirm_delete_title \(pending.subject)")
@@ -427,10 +440,11 @@ struct TeamDetailsPage: View {
         }
     }
 
-    /// What the action does, in a sentence.
-    private func body(_ pending: Confirmation) -> LocalizedStringKey {
+    /// What the action does, in a sentence; `nil` for Make owner, whose question already says it and whose message names the member.
+    private func body(_ pending: Confirmation) -> LocalizedStringKey? {
         switch pending.kind {
         case .role: pending.input["role"] as? String == "admin" ? "teams_confirm_promote_body" : "teams_confirm_demote_body"
+        case .owner: nil
         case .remove: "teams_confirm_remove_body"
         case .leave: "teams_confirm_leave_body"
         case .delete: "teams_confirm_delete_body"
@@ -442,6 +456,7 @@ struct TeamDetailsPage: View {
     private func confirmKey(_ pending: Confirmation) -> LocalizedStringKey {
         switch pending.kind {
         case .role: pending.input["role"] as? String == "admin" ? "teams_confirm_promote_button" : "teams_confirm_demote_button"
+        case .owner: "teams_make_owner"
         case .remove: "teams_confirm_remove_button"
         case .leave: "teams_confirm_leave_button"
         case .delete: "teams_confirm_delete_button"

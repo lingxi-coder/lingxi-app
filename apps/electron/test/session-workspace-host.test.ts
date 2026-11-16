@@ -17,6 +17,7 @@ import type { SessionCatalogScope, SessionOpenSelection } from '../src/shared/se
 import { CH_NATIVE_AUDIO_FLOW_LEASE } from '../src/shared/nativeAudio';
 import { CH_REALTIME_AUDIO_COMMAND } from '../src/shared/realtimeAudio';
 import { audioConfigurationDefaults } from '../src/shared/generatedAudioConfiguration';
+import { CH_SESSION_HISTORY } from '../src/shared/sessionHistory';
 
 const sessionId = '11111111-2222-4333-8444-555555555555';
 const otherId = '22222222-3333-4444-8555-666666666666';
@@ -193,6 +194,32 @@ async function hostFixture(t: TestContext, options: { registered?: boolean } = {
   return { root, source, target, userData, ref, settings, original, runtimes, grants, projectRoots, promptDirectories, calls, bridge, row, catalog, dialogs, host, handlers };
 }
 
+test('history reads the active runtime exact source while work continues and fences late pages', async t => {
+  const f = await hostFixture(t);
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { id: 1, mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  f.host.registerWindow(sender as any, frame.url); f.host.registerIpc();
+  const read = f.handlers.get(CH_SESSION_HISTORY)!, event = { sender, senderFrame: frame };
+  const cursor = { uuid: otherId }, page = { messages: [], before: null };
+  const calls: unknown[][] = [];
+  (f.catalog as any).readHistory = async (...args: unknown[]) => { calls.push(args); return page; };
+  f.original.busy = true;
+  assert.deepEqual(await read(event, sessionId, cursor), page);
+  assert.deepEqual(calls, [[f.source, sessionId, f.original.transcriptPath, cursor]]);
+  await assert.rejects(read(event, otherId, cursor), /no longer active/);
+  await assert.rejects(read(event, sessionId, { ...cursor, path: '/other-source' }), /Invalid history cursor/);
+  await assert.rejects(read({ ...event, senderFrame: { url: 'https://untrusted.example' } }, sessionId, cursor));
+  assert.equal(calls.length, 1);
+  let finish!: (value: unknown) => void;
+  (f.catalog as any).readHistory = () => new Promise(resolve => { finish = resolve; });
+  const pending = read(event, sessionId, cursor);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  f.settings.setActiveSession({ projectPath: f.source, sessionId: otherId });
+  finish(page);
+  await assert.rejects(pending, /no longer active/);
+  assert.equal(f.runtimes.get(sessionId), f.original);
+});
+
 test('opening a pasted uppercase UUID retains the canonical runtime and persisted owner', async t => {
   const f = await hostFixture(t), id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
   await f.settings.conversationSpaces.register({ projectPath: f.source, sessionId: id, projectId: f.source, mode: 'code' });
@@ -346,13 +373,14 @@ test('startup restores the displayed Current alias path in its authoritative wor
   assert.equal((f.host as any).catalogs.get(f.source).sessions[0].workspace_path, undefined);
 });
 
-test('a slow startup restore cannot overwrite a newer queued navigation', async (t) => {
+test('a slow startup catalog does not block or overwrite a newer session selection', async (t) => {
   const f = await hostFixture(t);
   f.runtimes.clear();
   f.settings.addProject(f.target);
   let finish!: (value: { sessions: ProjectSessionCatalogRow[] }) => void;
   f.catalog.list = async () => new Promise(resolve => { finish = resolve; });
   const startup = f.host.restoreProjectSession(f.source);
+  const startupRejected = assert.rejects(startup, /no longer active/);
   await new Promise(resolve => setImmediate(resolve));
   const newer = { projectPath: f.target, sessionId: otherId };
   await f.settings.conversationSpaces.register({ ...newer, projectId: f.target, mode: 'code' });
@@ -360,12 +388,53 @@ test('a slow startup restore cannot overwrite a newer queued navigation', async 
   const navigation = f.host.openSessionAndActivate(newer,
     { scope: 'current', transcriptPath: selected.path });
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(f.calls.open, [], 'a later navigation waits for the admitted startup operation');
-  finish({ sessions: [f.row(f.source)] });
-  await startup;
   await navigation;
-  assert.deepEqual(f.calls.open.map(call => call.ref), [f.ref, newer]);
+  assert.deepEqual(f.calls.open.map(call => call.ref), [newer], 'the new target opens before the startup catalog resolves');
+  finish({ sessions: [f.row(f.source)] });
+  await startupRejected;
+  assert.deepEqual(f.calls.open.map(call => call.ref), [newer]);
   assert.deepEqual(f.settings.getPublic().activeSession, { ...newer, mode: 'code', projectId: f.target });
+});
+
+test('an empty-project startup draft cannot replace a session selected while its engine starts', async t => {
+  const f = await hostFixture(t);
+  f.runtimes.clear();
+  f.catalog.list = async () => ({ sessions: [] });
+  let finish!: (value: SessionRef) => void;
+  let mayActivate!: () => boolean;
+  (f.bridge as any).newSession = async (_project: string, _model: unknown, options: any) => {
+    mayActivate = options.activate;
+    return new Promise<SessionRef>(resolve => { finish = resolve; });
+  };
+  const startup = f.host.restoreProjectSession(f.source);
+  const rejected = assert.rejects(startup, /no longer active/);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(mayActivate(), true);
+  await f.host.openSessionAndActivate(f.ref, { scope: 'current', transcriptPath: f.row(f.source).path });
+  assert.equal(mayActivate(), false);
+  finish({ projectPath: f.source, sessionId: otherId });
+  await rejected;
+  assert.equal(f.settings.getPublic().activeSession?.sessionId, sessionId);
+});
+
+test('competing opens of one UUID remain serialized while only the latest request activates', async t => {
+  const f = await hostFixture(t);
+  let finish!: () => void;
+  let calls = 0;
+  const opened = f.bridge.openSession;
+  f.bridge.openSession = async (...args) => {
+    calls++;
+    if (calls === 1) await new Promise<void>(resolve => { finish = resolve; });
+    return opened(...args);
+  };
+  const first = f.host.openSessionAndActivate(f.ref);
+  await new Promise(resolve => setImmediate(resolve));
+  const second = f.host.openSessionAndActivate(f.ref);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1);
+  finish(); await first; await second;
+  assert.equal(calls, 2);
+  assert.equal(f.calls.activated.length, 1);
 });
 
 test('/cd opens an unsent draft without resuming its computed but unwritten transcript path', async (t) => {

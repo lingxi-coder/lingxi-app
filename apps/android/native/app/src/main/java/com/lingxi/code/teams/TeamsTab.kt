@@ -73,7 +73,13 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     val workspace = workspaceOverride ?: remember(context) { TeamsWorkspace.get(context.applicationContext) }
     val teams by workspace.teams.collectAsStateWithLifecycle()
     val messaging by workspace.messaging.collectAsStateWithLifecycle()
-    messaging.artifact?.let { artifact -> TeamArtifactViewer(artifact, workspace.messagingModel::closeArtifact) }
+    messaging.artifact?.let { artifact -> TeamArtifactViewer(artifact, workspace.messagingModel, teams.detail?.members.orEmpty(), messaging.bots, workspace.messagingModel::closeArtifact) }
+    // The review of a task from the list of recent tasks; a task inside a conversation is reviewed from its own screen.
+    var reviewing by remember { mutableStateOf<String?>(null) }
+    reviewing?.let { taskId ->
+        val viewer = teams.uid?.let { uid -> messaging.cache?.let { TeamMemberRef(uid, it.generation) } }
+        TeamOperationsDialog(taskId, workspace.messagingModel, TeamOperationRules.maintains(taskId, messaging.tasks, messaging.bots, viewer), teams.detail?.members.orEmpty()) { reviewing = null }
+    }
     val collapsed by workspace.collapsed.collectAsStateWithLifecycle()
     val unreadByTeam by workspace.unreadByTeam.collectAsStateWithLifecycle()
     val host = LocalTabHost.current
@@ -132,6 +138,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         Button(onClick = { workspace.teamsModel.clearError(); sheet = "create" }) { Text(stringResource(R.string.teams_create)) }
                         OutlinedButton(onClick = { workspace.teamsModel.clearError(); joinPrefill = ""; sheet = "join" }) { Text(stringResource(R.string.teams_join)) }
+                        TextButton(onClick = { sheet = "services" }, modifier = Modifier.testTag("teams.empty.services")) { Text(stringResource(R.string.services_title)) }
                     }
                 },
             )
@@ -151,6 +158,8 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                         onMessageBot = { id -> messageBot(workspace, messaging, uid, id) { openConversation(it) } },
                         onArtifact = { workspace.messagingModel.openArtifact(it) },
                         onRefreshTask = { workspace.messagingModel.refreshTask(it) },
+                        onCancelTask = { workspace.messagingModel.cancelTask(it) },
+                        onReviewTask = { reviewing = it },
                         onDiscardCommand = { workspace.messagingModel.discardCommand(it) },
                         onReconnect = workspace::reconnect, onDiscardCreation = { workspace.messagingModel.discardCreation() }, modifier = m,
                     )
@@ -193,8 +202,10 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 onSelect = { id -> sheet = ""; setStack(emptyList()); workspace.selectTeam(id) },
                 onCreate = { workspace.teamsModel.clearError(); sheet = "create" },
                 onJoin = { workspace.teamsModel.clearError(); joinPrefill = ""; sheet = "join" },
-                onDetails = { sheet = ""; openDetails() }, onDismiss = dismiss,
+                onDetails = { sheet = ""; openDetails() }, onDismiss = dismiss, onServices = { sheet = "services" },
             )
+            // Keyed by the account: another account's services are never shown.
+            sheet == "services" -> androidx.compose.runtime.key(uid) { HostedServicesScreen(onClose = dismiss) }
             sheet == "create" -> CreateTeamSheet(
                 busy = teams.busy, error = teams.error,
                 onSubmit = { name -> workspace.teamsModel.execute(mapOf("action" to "create", "teamId" to UUID.randomUUID().toString(), "name" to name.trim())) { sheet = ""; setStack(emptyList()) } },
@@ -240,7 +251,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
 
 /** Opens the viewer's Bot DM with the Bot or creates it; the same rule as the Bots list on the Desktop. A friend's chat starts one the same way (D22). */
 internal fun messageBot(workspace: TeamsWorkspace, messaging: TeamMessagingState, uid: String, sharedBotId: String, open: (String) -> Unit) {
-    val existing = TeamsListLogic.findBotDm(messaging.cache?.conversations.orEmpty(), uid, sharedBotId)
+    val existing = TeamsListLogic.findBotDm(messaging.cache?.conversations.orEmpty(), uid, sharedBotId, messaging.bots)
     if (existing != null) { open(existing.id); return }
     val bot = messaging.bots.firstOrNull { it.sharedBotId == sharedBotId } ?: return
     val id = UUID.randomUUID().toString()

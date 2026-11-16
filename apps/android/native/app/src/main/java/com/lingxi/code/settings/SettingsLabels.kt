@@ -6,6 +6,7 @@ import com.lingxi.code.R
 
 @Composable
 internal fun settingsLabel(text: String): String = when (text) {
+    "Browser" -> stringResource(R.string.settings_browser_title)
     "Protocol" -> stringResource(R.string.settings_provider_protocol)
     "Models" -> stringResource(R.string.settings_group_models_hub)
     "Model ID" -> stringResource(R.string.settings_provider_model_id)

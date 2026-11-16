@@ -44,6 +44,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -309,6 +310,21 @@ private fun ConversationBody(
         else -> personName(message.authorUid)
     }
     val copyText = rememberCopyToClipboard(stringResource(R.string.teams_clip_message))
+    val viewer = TeamMemberRef(uid, team.generation)
+    var reviewing by remember(conversation.id) { mutableStateOf<String?>(null) }
+    reviewing?.let { taskId ->
+        TeamOperationsDialog(taskId, workspace.messagingModel, TeamOperationRules.maintains(taskId, messaging.tasks, bots, viewer), members) { reviewing = null }
+    }
+    val pendingWaits = remember(outbox) { TeamTaskActions.pendingWaitIds(outbox) }
+    // The draft's files: a new message carries them, an edit and an answer to a Bot's question do not (the files wait in the draft).
+    val answering = if (editing == null) TeamTaskActions.answerableWait(replyTo, messaging.tasks, viewer, pendingWaits) else null
+    val carriesFiles = editing == null && answering == null
+    val draftFiles by workspace.draftFiles.collectAsState()
+    val fileRefusals by workspace.fileRefusals.collectAsState()
+    val fileKey = workspace.draftKey(conversationId)
+    val files = if (carriesFiles) draftFiles[fileKey].orEmpty() else emptyList()
+    // Small copies of the pictures shown, in memory, for as long as this conversation is open.
+    val pictures = remember(conversationId) { mutableStateMapOf<String, androidx.compose.ui.graphics.ImageBitmap>() }
 
     Column(modifier) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -322,10 +338,11 @@ private fun ConversationBody(
                         is StreamItem.Day -> Text(dayLabelText(item.row.kind, item.row.atMs), Modifier.fillMaxWidth().padding(vertical = 8.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                         StreamItem.NewMessages -> NewMessagesDivider()
                         is StreamItem.Msg -> MessageCell(
-                            item, uid, conversation, bots, members, strings, messaging, tick, byId, ::authorOf,
+                            item, uid, viewer, pendingWaits, ::personName, conversation, bots, members, strings, messaging, tick, byId, ::authorOf, workspace, pictures,
                             onReply = { setDraft(draft.copy(replyToId = it.id)); editingId = null },
                             onEdit = { editingId = it.id; setDraft(draft.copy(replyToId = null)) },
-                            onRecall = onRecall, onCopy = { copyText(it.text) }, onArtifact = { workspace.messagingModel.openArtifact(it) }, onRefreshTask = { workspace.messagingModel.refreshTask(it) },
+                            onRecall = onRecall, onCopy = { copyText(it.text) }, onArtifact = { workspace.messagingModel.openArtifact(it) }, onRefreshTask = { workspace.messagingModel.refreshTask(it) }, onCancelTask = { workspace.messagingModel.cancelTask(it) }, onReviewTask = { reviewing = it },
+                            onDecideWait = { waitId, taskId, approve, ids -> workspace.messagingModel.decideWait(waitId, taskId, approve, ids) },
                         )
                         is StreamItem.Local -> LocalCommandRow(item, tick, onDiscard = {
                             workspace.messagingModel.discard((item.intent.optJSONObject("payload") ?: item.intent).getString("changeId"))
@@ -343,13 +360,23 @@ private fun ConversationBody(
             conversation = conversation, label = label, uid = uid, messaging = messaging, draft = draft,
             replyTo = replyTo, editing = editing, replyAuthor = replyTo?.let(::authorOf).orEmpty(),
             onDraft = ::setDraft, onCancelReply = { setDraft(draft.copy(replyToId = null)) }, onCancelEdit = { editingId = null },
+            voiceTarget = workspace.draftKey(conversationId),
             onSend = { text, targets, done ->
                 val editingMessage = editing
-                workspace.messagingModel.queue(if (editingMessage == null) "create" else "edit", text, editingMessage?.id, if (editingMessage == null) draft.replyToId else null, targets) {
+                // A reply to a Bot's question that still waits for the viewer is its answer: it continues that task and asks no Bot.
+                val waitId = if (editingMessage == null) TeamTaskActions.answerableWait(draft.replyToId?.let { byId[it] }, messaging.tasks, viewer, pendingWaits) else null
+                // The files are this conversation's draft's, read at the moment of sending: no other conversation's are ever sent here.
+                val sending = if (editingMessage == null && waitId == null) workspace.draftFiles.value[workspace.draftKey(conversationId)].orEmpty() else emptyList()
+                workspace.messagingModel.queue(if (editingMessage == null) "create" else "edit", text, editingMessage?.id, if (editingMessage == null) draft.replyToId else null, if (waitId == null) targets else emptyList(), waitId,
+                    files = sending, conversationId = conversationId) {
                     done()
+                    workspace.filesSent(conversationId, sending.map { it.uploadId })
                     if (editingMessage != null) editingId = null else setDraft(ComposerDraft())
                 }
             },
+            files = files, refusals = if (carriesFiles) fileRefusals[fileKey].orEmpty() else emptyList(),
+            onChooseFiles = if (carriesFiles) ({ chosen -> workspace.addFiles(conversationId, chosen) }) else null,
+            onRemoveFile = { workspace.removeFile(conversationId, it) }, onDismissRefusals = { workspace.dismissRefusals(conversationId) },
         )
     }
 }
@@ -381,17 +408,19 @@ private fun NewMessagesDivider() {
 }
 
 /**
- * One message: avatar, name and clock on the first of a run, reply quote, body, edited mark, the question and run cards.
+ * One message: avatar, name and clock on the first of a run, reply quote, body, edited mark, the files, the approval request and the run cards.
  * Own messages (U3) read "You" and carry a faint accent tint on the row, never a bubble; Bot messages carry the Bot tag. The author, time and text are one
- * accessibility element with the message actions as custom actions; the run cards and their buttons stay separate elements beside it. Only the long press
- * is a real gesture, since there is nothing to tap.
+ * accessibility element with the message actions as custom actions; the files, the approval request and the run cards, with their buttons, stay separate
+ * elements beside it. Only the long press is a real gesture, since there is nothing to tap.
  */
 @Composable
 private fun MessageCell(
-    item: StreamItem.Msg, uid: String, conversation: TeamMessageConversation, bots: List<TeamBotCard>, members: List<TeamMember>, strings: TeamsListStrings,
+    item: StreamItem.Msg, uid: String, viewer: TeamMemberRef, pendingWaits: Set<String>, personName: (String) -> String, conversation: TeamMessageConversation, bots: List<TeamBotCard>, members: List<TeamMember>, strings: TeamsListStrings,
     messaging: TeamMessagingState, tick: androidx.compose.runtime.State<Long>, byId: Map<String, TeamMessage>, authorOf: (TeamMessage) -> String,
+    workspace: TeamsWorkspace, pictures: androidx.compose.runtime.snapshots.SnapshotStateMap<String, androidx.compose.ui.graphics.ImageBitmap>,
     onReply: (TeamMessage) -> Unit, onEdit: (TeamMessage) -> Unit, onRecall: (TeamMessage) -> Unit, onCopy: (TeamMessage) -> Unit,
-    onArtifact: (String) -> Unit, onRefreshTask: (String) -> Unit,
+    onArtifact: (String) -> Unit, onRefreshTask: (String) -> Unit, onCancelTask: (String) -> Unit, onReviewTask: (String) -> Unit,
+    onDecideWait: (waitId: String, taskId: String, approve: Boolean, ids: TeamDecisionIds) -> Unit,
 ) {
     val message = item.message
     var menu by remember { mutableStateOf(false) }
@@ -401,7 +430,15 @@ private fun MessageCell(
     val edit = stringResource(R.string.teams_message_edit)
     val recall = stringResource(R.string.teams_message_recall)
     val copy = stringResource(R.string.chat_message_copy)
-    val editable = canAct && own && message.kind == "text"
+    // A decision on a Bot's request is not text to rewrite or take back.
+    val editable = canAct && own && message.kind == "text" && message.decision == null
+    val request = message.approvalRequest
+    // The service writes an approval request and the reply to it in English; they are shown in the viewer's language.
+    val body = when {
+        request != null -> stringResource(R.string.teams_approval_request_fmt, request.title)
+        message.authorKind == "user" && message.waitId != null && message.decision != null -> stringResource(if (message.decision) R.string.teams_approval_reply_approved else R.string.teams_approval_reply_declined)
+        else -> message.text
+    }
     val card = bots.firstOrNull { it.sharedBotId == message.sharedBotId }
     val tint = MaterialTheme.colorScheme.primary.copy(alpha = OWN_MESSAGE_TINT)
     val haptics = LocalHapticFeedback.current
@@ -422,7 +459,7 @@ private fun MessageCell(
                         if (canAct) customActions = buildList {
                             add(CustomAccessibilityAction(reply) { onReply(message); true })
                             if (editable) { add(CustomAccessibilityAction(edit) { onEdit(message); true }); add(CustomAccessibilityAction(recall) { onRecall(message); true }) }
-                            add(CustomAccessibilityAction(copy) { onCopy(message); true })
+                            if (message.text.isNotEmpty()) add(CustomAccessibilityAction(copy) { onCopy(message); true })
                         }
                     },
                     verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -437,20 +474,38 @@ private fun MessageCell(
                         Row(Modifier.height(androidx.compose.foundation.layout.IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Box(Modifier.width(2.dp).fillMaxSize().background(MaterialTheme.colorScheme.outlineVariant))
                             Text(
-                                when { source == null -> stringResource(R.string.teams_message_reply); source.recalled -> stringResource(R.string.teams_message_recalled); else -> TeamsComposeLogic.snippet(source.text) },
+                                when { source == null -> stringResource(R.string.teams_message_reply); source.recalled -> stringResource(R.string.teams_message_recalled); else -> TeamsComposeLogic.snippet(TeamAttachments.said(source.text, source.files.map { it.name })) },
                                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
                     if (message.recalled) Text(stringResource(R.string.teams_message_recalled), style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    else if (TeamsBotText.rendersMarkdown(message.authorKind, message.recalled)) AIText(markdown = message.text, modifier = Modifier.fillMaxWidth().testTag("teams.message.body.${message.id}"), onOpenLink = rememberTeamBotLinkOpener())
-                    else Text(message.text, style = MaterialTheme.typography.bodyLarge)
+                    else if (message.text.isEmpty() && message.files.isNotEmpty()) Unit // A message of files alone has no text line.
+                    else if (TeamsBotText.rendersMarkdown(message.authorKind, message.recalled)) AIText(markdown = body, modifier = Modifier.fillMaxWidth().testTag("teams.message.body.${message.id}"), onOpenLink = rememberTeamBotLinkOpener())
+                    else Text(body, style = MaterialTheme.typography.bodyLarge)
                     if (message.editedAt != null && !message.recalled) Text(stringResource(R.string.teams_message_edited), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                // The files open and can be taken back, the cards have buttons: they stay their own accessibility elements beside the message text.
+                if (message.files.isNotEmpty()) TeamMessageFiles(message, own, workspace, pictures)
+                // What the Bot's model was given, as the service checked it.
+                if (!message.recalled && message.readFiles.isNotEmpty()) Text(stringResource(R.string.teams_files_read_fmt, message.readFiles.joinToString(", ") { it.name }), Modifier.testTag("teams.message.read.${message.id}"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val requestTask = message.taskId
+                if (request != null && message.waitId != null && requestTask != null) {
+                    val state = TeamTaskActions.approvalState(message.waitId, messaging.tasks.firstOrNull { it.taskId == requestTask }, viewer, messaging.cache?.threads?.get(conversation.id)?.messages ?: emptyList())
+                    val decider = when (state) { is TeamApprovalState.Waiting -> personName(state.uid); is TeamApprovalState.Approved -> personName(state.uid); is TeamApprovalState.Declined -> personName(state.uid); else -> "" }
+                    TeamApprovalCard(request, message.waitId, state, decider) { approve, ids -> onDecideWait(message.waitId, requestTask, approve, ids) }
                 }
                 val taskIds = message.taskId?.let { listOf(it) } ?: message.taskIds
                 taskIds.forEach { taskId ->
                     val task = messaging.tasks.firstOrNull { it.taskId == taskId }
-                    if (task != null) TeamTaskCard(task, bots.firstOrNull { it.sharedBotId == task.sharedBotId }?.name ?: strings.bot, onArtifact, onRefreshTask)
+                    if (task != null) {
+                        val bot = bots.firstOrNull { it.sharedBotId == task.sharedBotId }
+                        val answerable = TeamTaskActions.answerableWait(message, messaging.tasks, viewer, pendingWaits) != null
+                        TeamTaskCard(
+                            task, bot?.name ?: strings.bot, onArtifact, onRefreshTask, viewer = viewer, maintainer = bot?.maintainer,
+                            recipientName = task.wait?.let { personName(it.recipient.uid) }.orEmpty(), onCancel = onCancelTask, onReply = if (answerable) ({ onReply(message) }) else null, onReview = onReviewTask,
+                        )
+                    }
                     else TextButton(onClick = { onRefreshTask(taskId) }) { Text(stringResource(R.string.teams_task_view)) }
                 }
                 if (taskIds.isEmpty()) message.artifactId?.let { id -> TextButton(onClick = { onArtifact(id) }) { Text(stringResource(R.string.teams_artifact_open)) } }
@@ -462,7 +517,7 @@ private fun MessageCell(
                 DropdownMenuItem(text = { Text(edit) }, onClick = { menu = false; onEdit(message) })
                 DropdownMenuItem(text = { Text(recall, color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; onRecall(message) })
             }
-            DropdownMenuItem(text = { Text(copy) }, onClick = { menu = false; onCopy(message) })
+            if (message.text.isNotEmpty()) DropdownMenuItem(text = { Text(copy) }, onClick = { menu = false; onCopy(message) })
         }
     }
 }
@@ -483,7 +538,7 @@ private fun LocalCommandRow(item: StreamItem.Local, tick: androidx.compose.runti
     val failed = intent.has("error")
     val attempted = intent.optBoolean("attempted")
     val payload = intent.optJSONObject("payload") ?: intent
-    val body = if (payload.optString("operation") == "recall") stringResource(R.string.teams_message_recall) else payload.getString("text")
+    val body = if (payload.optString("operation") == "recall") stringResource(R.string.teams_message_recall) else TeamAttachments.said(payload.getString("text"), TeamAttachments.names(intent))
     val status = when {
         failed -> stringResource(teamsErrorRes(intent.getString("error")))
         attempted -> stringResource(R.string.teams_message_confirming)
@@ -491,7 +546,7 @@ private fun LocalCommandRow(item: StreamItem.Local, tick: androidx.compose.runti
     }
     val canDiscard = !(attempted && !failed) && intent.optLong("leaseUntil") <= tick.value
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).clip(MaterialTheme.shapes.medium).background(MaterialTheme.colorScheme.surfaceVariant).padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        if (body != null) Text(body, style = MaterialTheme.typography.bodyMedium)
+        if (body.isNotEmpty()) Text(body, style = MaterialTheme.typography.bodyMedium)
         Text(status, style = MaterialTheme.typography.labelSmall, color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
         if (canDiscard) TextButton(onClick = onDiscard) { Text(stringResource(R.string.teams_message_discard)) }
     }

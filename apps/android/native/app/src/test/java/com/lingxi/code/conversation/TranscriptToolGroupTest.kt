@@ -4,18 +4,31 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TranscriptToolGroupTest {
+    @Test fun hostSkillIdentitySurvivesRevisedTextAndMissingAdjacentCall() {
+        val dto = com.lingxi.code.bindings.client.MessageDto(
+            transcriptUuid = "skill-row", role = "user", skillName = "lingxi-api",
+            blocks = listOf(com.lingxi.code.bindings.client.MessageBlockDto.Text(com.lingxi.code.bindings.client.ClientTextDto("# Renamed guide\n\nRevised instructions.".map { it.code.toUShort() }))))
+        val restored = transcriptFromDtos(listOf(dto)).single()
+        assertEquals("lingxi-api", restored.skillName)
+        val row = buildChatRenderItems(state(restored)).single() as ChatRenderItem.SkillInstructions
+        assertEquals("lingxi-api", row.name)
+        assertTrue(buildChatRenderItems(state(restored.copy(skillName = null))).single() is ChatRenderItem.Message)
+    }
+
     @Test fun activityTypesNeverReorderOrMergeAcrossOtherCalls() {
-        val calls = listOf("Read", "Read", "Edit", "Read", "mcp__a__search", "mcp__b__search")
+        val calls = listOf("Read", "Read", "Edit", "Read", "mcp__a__search", "mcp__b__search", "Skill", "skill", "Read", "Skill")
             .mapIndexed { index, name -> ToolCallUi(index.toString(), name) }
-        assertEquals(listOf(listOf("0", "1"), listOf("2"), listOf("3"), listOf("4"), listOf("5")),
+        assertEquals(listOf(listOf("0", "1"), listOf("2"), listOf("3"), listOf("4"), listOf("5"), listOf("6", "7"), listOf("8"), listOf("9")),
             consecutiveToolGroups(calls).map { group -> group.map { it.id } })
         assertEquals(calls, consecutiveToolGroups(calls).flatten())
     }
 
-    @Test fun questionsAndAgentsRemainIndividuallyReachable() {
-        for (name in listOf("Skill", "AskUserQuestion", "PermissionRequest")) {
+    @Test fun questionsAndForkedSkillsRemainIndividuallyReachable() {
+        for (name in listOf("AskUserQuestion", "PermissionRequest")) {
             assertEquals(2, consecutiveToolGroups(listOf(ToolCallUi("a", name), ToolCallUi("b", name))).size)
         }
+        val skill = ToolCallUi("skill", "Skill")
+        assertEquals(2, consecutiveToolGroups(listOf(skill, skill.copy(id = "fork", spawnedAgentId = "child"))).size)
     }
     @Test fun agentLaunchesAndTaskCoordinationFoldOnlyWhenAdjacent() {
         val calls = listOf("Agent", "Task", "Read", "TaskList", "TaskUpdate", "SendMessage", "AskUserQuestion", "TaskOutput")
@@ -28,6 +41,7 @@ class TranscriptToolGroupTest {
         assertEquals(com.lingxi.code.components.LXIconName.ListChecks, toolIconName(null, "TaskList"))
         assertEquals(com.lingxi.code.components.LXIconName.Send, toolIconName(null, "SendMessage"))
         assertEquals(com.lingxi.code.components.LXIconName.Apps, toolIconName(ToolVerbUi.Generic, "LocalApp"))
+        assertEquals(com.lingxi.code.components.LXIconName.Globe, toolIconName(ToolVerbUi.Generic, "browser"))
     }
 
     @Test fun structuredAgentIdentitySupportsBothWireSpellings() {
@@ -93,6 +107,37 @@ class TranscriptToolGroupTest {
         assertEquals("injected", rows.filterIsInstance<ChatRenderItem.SkillInstructions>().single().key)
         val ordinary = buildChatRenderItems(state(message("assistant", MessageContent.Tool(call)), user.copy(text = "Another request")))
         assertTrue(ordinary.last() is ChatRenderItem.Message)
+    }
+
+    @Test fun currentLocalAppTitleMatchesWithoutToolBody() {
+        val call = ToolCallUi("skill", "Skill", status = AgentToolStatus.Completed,
+            header = ToolHeaderUi(ToolVerbUi.Skill, "Skill", primary = "local-app", title = "Skill(local-app)"))
+        for (title in listOf("Local apps", "Desktop Local Apps")) {
+            for (newline in listOf("\n", "\r\n")) {
+                val text = "# $title\n\nCreate an application project.".replace("\n", newline)
+                assertTrue(matchesSkillInstructions(call, text))
+                assertFalse(matchesSkillInstructions(call.copy(header = call.header?.copy(primary = "other")), text))
+                assertFalse(matchesSkillInstructions(call.copy(status = AgentToolStatus.Failed), text))
+            }
+        }
+    }
+
+    @Test fun skillDirectoryPreamblesMatchWithoutFoldingUnrelatedUserText() {
+        val text = "# LingXi API guide\n\nFull instructions."
+        val call = ToolCallUi("skill", "Skill", status = AgentToolStatus.Completed, skillBody = text)
+        val directory = "Base directory for this skill: /skills/lingxi-api\n"
+        val resolution = "Resolve relative references and assets from this directory; use their exact paths instead of searching the application home directory. Use read-only file tools for skill assets; keep project writes in the project directory.\n"
+        for (preamble in listOf("", "$directory\n", "$directory$resolution\n")) {
+            for (newline in listOf("\n", "\r\n")) {
+                val prompt = (preamble + text).replace("\n", newline)
+                assertTrue(matchesSkillInstructions(call, prompt))
+                assertEquals(text, skillInstructionText(prompt))
+                val user = com.lingxi.code.model.Message(com.lingxi.code.model.Role.User, prompt, id = "injected")
+                assertTrue(buildChatRenderItems(state(message("assistant", MessageContent.Tool(call)), user)).last() is ChatRenderItem.SkillInstructions)
+            }
+        }
+        assertFalse(matchesSkillInstructions(call, "$directory$resolution\n# My request"))
+        assertFalse(matchesSkillInstructions(call.copy(status = AgentToolStatus.Failed), text))
     }
 
     @Test fun groupsSpanAssistantEnvelopesButStopAtProseAndUserMessages() {

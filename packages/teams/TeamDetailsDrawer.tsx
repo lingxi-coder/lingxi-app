@@ -175,6 +175,11 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
                   member.role === 'admin' ? t('They will no longer be able to invite people or remove members.', '对方将无法再邀请他人或移除成员。') : t('Admins can invite people and remove members.', '管理员可以邀请他人并移除成员。'),
                   member.role === 'admin' ? t('Make member', '设为成员') : t('Make admin', '设为管理员'), false)}>
                 {member.role === 'admin' ? t('Make member', '设为成员') : t('Make admin', '设为管理员')}</button> : null}
+              {team.role === 'owner' ? <button type="button" disabled={snapshot.busy}
+                onClick={() => ask({ action: 'handOver', teamId: team.id, uid: member.uid, generation: member.generation }, t(`Make ${member.displayName} the owner of ${team.name}?`, `将「${team.name}」的所有者变更为 ${member.displayName}？`),
+                  t('You stay in the team as an admin, and only the new owner can make you the owner again. Each Bot stays with the member who maintains it, and every chat stays with the people in it.', '你将以管理员身份留在团队中，只有新的所有者才能再把你设为所有者。每个 Bot 仍由其维护者维护，每个对话仍只属于其中的成员。'),
+                  t('Make owner', '设为所有者'), false)}>
+                {t('Make owner', '设为所有者')}</button> : null}
               <button type="button" className="tw-danger-btn" disabled={snapshot.busy}
                 onClick={() => ask({ action: 'remove', teamId: team.id, uid: member.uid, generation: member.generation }, t(`Remove ${member.displayName} from the team?`, `将 ${member.displayName} 移出团队？`),
                   t('They lose access to its conversations and shared Bots. They can rejoin with a new invite.', '对方将无法再访问该团队的会话和共享的 Bot，之后可通过新的邀请重新加入。'), t('Remove', '移除'))}>{t('Remove', '移除')}</button>

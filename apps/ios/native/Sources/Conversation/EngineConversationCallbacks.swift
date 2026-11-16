@@ -183,10 +183,31 @@ final class EngineListener: IosEventListener {
             guard let source else { continue }
             switch item {
             case let .event(event):
+                if source.needsQueuedTurnClaim(event) {
+                    // Keep pumpScheduled set while the owner ledger is being
+                    // switched. Later output stays in this FIFO until its
+                    // durable correlator is ready.
+                    Task { @MainActor [self, source] in
+                        if await source.prepareQueuedTurnClaim(event) { source.apply(event) }
+                        drain()
+                    }
+                    return
+                }
                 if case let .permissionRequestResolved(requestId, _) = event {
                     resolvedPermissionIDs.insert(requestId)
                 }
                 source.apply(event)
+                if case .sessionResumed = event {
+                    // Restore persisted queued IDs and query native admission
+                    // before any cold executor output can reach the reducer.
+                    Task { @MainActor [self, source] in
+                        let attempt = await source.waitForQueuedAdmissionRestore()
+                        drain()
+                        await waitUntilIdle()
+                        source.finishQueuedAdmissionRestore(attempt)
+                    }
+                    return
+                }
             case let .permission(request):
                 guard !resolvedPermissionIDs.contains(request.requestId) else { continue }
                 source.enqueuePermission(request)

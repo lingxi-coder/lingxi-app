@@ -2,7 +2,7 @@ import vectors from '../../../packages/teams/contracts/execution-vectors.json';
 import { isMemberExecutionCommand } from '../../../packages/teams/execution-validation';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { executionCommand, sharedBotUsable } from '../../../packages/teams/execution';
+import { executionCommand, sharedBotUsable, type TeamTaskView } from '../../../packages/teams/execution';
 import { TeamMessaging, pendingPayload, projectionKey } from '../../../packages/teams/messages';
 import type { MessageCommand, PendingCommands } from '../../../packages/teams/messages';
 import { FakeTeams, botCard, conversation, memoryStorage, until } from './support/fakeTeams';
@@ -87,4 +87,69 @@ test('IndexedDB upgrade deletes only the retired command store and preserves unr
   Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: factory }); context.after(() => { if (before) Object.defineProperty(globalThis, 'indexedDB', before); else Reflect.deleteProperty(globalThis, 'indexedDB'); });
   assert.equal(await indexedDbCommandStorage().load('account-team-generation'), undefined);
   assert.deepEqual(opened, [['lingxi-team-messages', 3]]); assert.deepEqual(deleted, ['projections']); assert.deepEqual([...stores], ['protected-sentinel', 'commands-v2']);
+});
+test('durable wait member commands are strict and host-only commands are not member commands', () => {
+  const answer = { conversationId: 'chat_0001', waitId: 'wait_0001', messageId: 'message_0002', changeId: 'change_0002', text: 'Lisbon' };
+  assert.deepEqual(executionCommand(scope, 'answerWait', answer, 'command001'), { schemaVersion: 1, commandId: 'command001', ...scope, action: 'answerWait', payload: answer });
+  assert.deepEqual(executionCommand(scope, 'cancelTask', { taskId: 'task_0001' }, 'command002').payload, { taskId: 'task_0001' });
+  assert.throws(() => executionCommand(scope, 'answerWait', { ...answer, text: '' }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'answerWait', { ...answer, text: 'x'.repeat(8193) }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'answerWait', { ...answer, extra: 1 } as never, 'command001'));
+  assert.throws(() => executionCommand(scope, 'cancelTask', { taskId: 'short' }, 'command001'));
+  for (const action of ['pauseTask', 'continueTask', 'startTask', 'completeTask']) {
+    assert.equal(isMemberExecutionCommand({ schemaVersion: 1, commandId: 'command001', ...scope, action, payload: { taskId: 'task_0001' } }), false, action);
+  }
+  const view: TeamTaskView = { taskId: 'task_0001', conversationId: 'chat_0001', sharedBotId: 'sharedbot_01', requester: { uid: 'alice', generation: 1 },
+    state: 'waiting', createdAt: 1, deadline: 2, epoch: 1, activeSpentMs: 1000,
+    wait: { waitId: 'wait_0001', kind: 'human_input', recipient: { uid: 'alice', generation: 1 }, expiresAt: 2, messageId: 'bot_message' } };
+  const cancelled: TeamTaskView = { ...view, state: 'cancelled', cancelRequestedAt: 3, wait: undefined };
+  assert.equal(view.wait?.kind, 'human_input'); assert.equal(cancelled.state, 'cancelled');
+});
+
+test('An answer to a Bot question is a persisted answerWait, never a submit, and a retry after a lost response reuses its ids', async context => {
+  const { fake, storage, model } = fixture(); context.after(() => model.close()); let drop = true; const calls: MessageCommand[] = [];
+  fake.messages = async <T>(command: MessageCommand) => { calls.push(structuredClone(command)); if (drop) throw new Error('SERVICE_UNAVAILABLE'); return {} as T; };
+  await model.start(); await until(() => !model.offline); model.select('test-chat');
+  await model.answer('wait-test', 'Lisbon');
+  await until(() => model.state.outbox[0]?.retryDelay !== undefined); model.close(); drop = false;
+  const saved = structuredClone([...storage.records.values()][0]!); const stored = saved.outbox[0]!.command;
+  assert.equal(stored.action, 'answerWait', 'a Bot DM would otherwise submit its text to the Bot');
+  const future = Date.now() + 5000; context.mock.method(Date, 'now', () => future);
+  const second = new TeamMessaging(fake.api, storage, 'alice', scope); context.after(() => second.close()); await second.start(); await until(() => !second.state.outbox.length && calls.length === 2);
+  assert.deepEqual(calls[1], calls[0]); assert.deepEqual(calls.map(c => c.action), ['answerWait', 'answerWait']);
+  const payload = pendingPayload(saved.outbox[0]!); assert.ok('waitId' in payload && payload.waitId === 'wait-test' && payload.messageId !== payload.changeId);
+});
+test('A refused answer is thrown to the caller and leaves nothing queued; other failures stay queued', async context => {
+  for (const code of ['WAIT_CLOSED', 'WAIT_RECIPIENT_REQUIRED', 'WAIT_REQUIRED', 'TASK_REVOKED']) {
+    const { fake, model } = fixture(); const calls: MessageCommand[] = [];
+    fake.messages = async (command: MessageCommand) => { calls.push(command); throw new Error(code); };
+    await model.start(); model.select('test-chat');
+    await assert.rejects(model.answer('wait-test', 'Lisbon'), new RegExp(code)); assert.equal(model.state.outbox.length, 0, code); assert.equal(calls.length, 1, `${code} is not retried`); model.close();
+  }
+  const { fake, model } = fixture(); context.after(() => model.close()); fake.messages = async () => { throw new Error('MESSAGE_ID_CONFLICT'); };
+  await model.start(); model.select('test-chat'); await model.answer('wait-test', 'Lisbon');
+  assert.equal(model.state.outbox[0]?.error, 'MESSAGE_ID_CONFLICT', 'an id conflict is kept for the person to discard, like any rejected message');
+  await assert.rejects(model.answer('wait-test', '  '), /INVALID_INPUT/);
+});
+test('The message model carries a waitId from Firestore, and the client has the two new commands and errors', async () => {
+  const { firestoreMessage } = await import('../../../packages/teams/firestore');
+  const base = { seq: 2, author: { kind: 'user', uid: 'alice' }, kind: 'text', text: 'Lisbon', changeSeq: 2, changeId: 'change-2', createdAt: null };
+  assert.equal(firestoreMessage('message-2', { ...base, waitId: 'wait-test', replyTo: 'message-1' }).waitId, 'wait-test');
+  assert.equal('waitId' in firestoreMessage('message-2', base), false);
+  const { messageErrorText } = await import('../../../packages/teams/errors');
+  for (const code of ['WAIT_CLOSED', 'WAIT_RECIPIENT_REQUIRED', 'WAIT_REQUIRED', 'TASK_REVOKED', 'TASK_CANCEL_FORBIDDEN']) for (const zh of [false, true]) assert.doesNotMatch(messageErrorText(code, zh), /Could not sync|消息同步未完成/, `${code} has its own text`);
+});
+test('document and operation member commands are strict; ledger writes belong to the host', () => {
+  const document = { title: 'Trip plan', body: '# Trip plan' }, revise = { artifactId: 'artifact_01', expectedRevision: 1, operationId: 'operation_01', document };
+  assert.deepEqual(executionCommand(scope, 'reviseArtifact', revise, 'command001').payload, revise);
+  assert.deepEqual(executionCommand(scope, 'readArtifact', { artifactId: 'artifact_01', revision: 3 }, 'command001').payload, { artifactId: 'artifact_01', revision: 3 });
+  assert.throws(() => executionCommand(scope, 'readArtifact', { artifactId: 'artifact_01', revision: 0 }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'reviseArtifact', { ...revise, expectedRevision: 0 }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'reviseArtifact', { ...revise, document: { title: ' ', body: 'x' } }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'reviseArtifact', { ...revise, document: { title: 'T', body: 'x'.repeat(256 * 1024 + 1) } }, 'command001'));
+  assert.doesNotThrow(() => executionCommand(scope, 'reviseArtifact', { ...revise, document: { title: 'T', body: 'x'.repeat(256 * 1024) } }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'resolveOperation', { taskId: 'task_0001', operationId: 'operation_01', resolution: 'failed' }, 'command001'));
+  assert.throws(() => executionCommand(scope, 'resolveOperation', { taskId: 'task_0001', operationId: 'a'.repeat(64), resolution: 'unknown' as never }, 'command001'));
+  assert.equal(executionCommand(scope, 'listOperations', { taskId: 'task_0001' }, 'command001').action, 'listOperations');
+  for (const action of ['recordOperation', 'settleOperation']) assert.equal(isMemberExecutionCommand({ schemaVersion: 1, commandId: 'command001', ...scope, action, payload: { taskId: 'task_0001' } }), false, action);
 });

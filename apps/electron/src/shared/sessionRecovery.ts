@@ -2,7 +2,7 @@
 export const CH_SESSION_RECOVERY = 'lingxi:sessionRecovery';
 const phases = [
   'preload_subscribe', 'preload_request', 'preload_retry', 'preload_received', 'preload_failed', 'preload_dispose',
-  'renderer_base', 'renderer_connection', 'renderer_bootstrap', 'renderer_commit', 'stage_commit',
+  'renderer_base', 'renderer_connection', 'renderer_bootstrap', 'renderer_commit', 'renderer_visibility', 'stage_commit',
 ] as const;
 export interface SessionRecoveryDiagnostic {
   phase: typeof phases[number];
@@ -23,6 +23,8 @@ export interface SessionRecoveryDiagnostic {
   revision?: number;
   runtimeCount?: number;
   loading?: boolean;
+  visibility?: 'visible' | 'hidden';
+  focused?: boolean;
 }
 const numbers = new Set(['subscriptionId', 'attempt', 'durationMs', 'sequence', 'eventCount', 'messageCount',
   'itemCount', 'previousItemCount', 'rowCount', 'revision', 'runtimeCount']);
@@ -40,7 +42,8 @@ export function parseSessionRecoveryDiagnostic(input: unknown): SessionRecoveryD
     if (identities.has(key) && typeof field === 'string' && /^[a-zA-Z0-9_:-]{0,160}$/.test(field)) continue;
     if (key === 'connection' && connections.has(field as string)) continue;
     if (key === 'eventType' && ['session_started', 'session_resumed', 'session_ended'].includes(field as string)) continue;
-    if (key === 'loading' && typeof field === 'boolean') continue;
+    if ((key === 'loading' || key === 'focused') && typeof field === 'boolean') continue;
+    if (key === 'visibility' && (field === 'visible' || field === 'hidden')) continue;
     return;
   }
   return { ...value } as unknown as SessionRecoveryDiagnostic;

@@ -281,6 +281,34 @@ async function waitFor(predicate, { timeoutMs = 20_000, intervalMs = 100, label 
   }
 }
 
+export async function restartPackagedBridgeWhenIdle(page, sessionId, { timeoutMs = 20_000, intervalMs = 100 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  const busyGuard = 'cancel active turns and pending interactions before restarting the engine';
+  const remaining = () => {
+    const budget = deadline - Date.now();
+    if (budget <= 0) throw new Error(`packaged bridge restart did not become idle within ${timeoutMs}ms`);
+    return budget;
+  };
+  for (;;) {
+    const snapshot = await evaluate(page, 'window.lingxi.bootstrap()', remaining());
+    assert.equal(snapshot.activeSession?.sessionId, sessionId, 'restart must retain the intended active session');
+    const target = snapshot.runtimes.find(runtime => runtime.sessionId === sessionId);
+    const visiblyIdle = target?.connection.status === 'connected'
+      && snapshot.runtimes.filter(runtime => runtime.projectPath === target.projectPath)
+        .every(runtime => !runtime.turnActive && runtime.pendingInteractions === 0 && runtime.pendingAskUserQuestions === 0);
+    if (visiblyIdle) {
+      try {
+        // Only the host knows about pending resume/metadata work. Its admission
+        // guard remains authoritative after the public-state preflight.
+        return await evaluate(page, `window.lingxi.restartBridge(${JSON.stringify(sessionId)})`, remaining());
+      } catch (error) {
+        if (!String(error?.message ?? error).split('\n')[0].endsWith(busyGuard)) throw error;
+      }
+    }
+    await delay(Math.min(intervalMs, remaining()));
+  }
+}
+
 function reserveLoopbackPort() {
   return new Promise((resolvePromise, rejectPromise) => {
     import('node:net').then(({ createServer }) => {
@@ -421,7 +449,7 @@ async function connectToDebugger(port, rendererUrl) {
   }
 }
 
-async function evaluate(page, expression) {
+async function evaluate(page, expression, timeoutMs = 280_000) {
   // Bootstrap can include health, account listing and an OAuth metadata read.
   // Each native helper has a bounded 90s cold-start deadline. Keep CDP alive
   // for that chain; individual UI checks retain their own readiness deadlines.
@@ -429,7 +457,7 @@ async function evaluate(page, expression) {
     expression,
     awaitPromise: true,
     returnByValue: true,
-  }, 280_000);
+  }, timeoutMs);
   if (result.exceptionDetails) {
     throw new Error(`renderer evaluation failed: ${result.exceptionDetails.text ?? 'unknown error'}${result.exceptionDetails.exception?.description ? `: ${result.exceptionDetails.exception.description}` : ''}`);
   }
@@ -561,7 +589,11 @@ function packagedAppBundleId(appPath) {
 }
 
 export async function waitForPackagedAppExit(child, requestQuit) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  const assertCleanExit = () => {
+    assert.equal(child.signalCode, null, 'packaged app must exit without a termination signal');
+    assert.equal(child.exitCode, 0, 'packaged app must exit successfully');
+  };
+  if (child.exitCode !== null || child.signalCode !== null) { assertCleanExit(); return; }
   let onExit;
   let timer;
   const exited = new Promise((resolvePromise) => {
@@ -572,13 +604,17 @@ export async function waitForPackagedAppExit(child, requestQuit) {
     // Subscribe before requesting quit: CDP may close its socket only after
     // the process has already exited. Listening afterwards loses that event.
     await requestQuit();
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (child.exitCode !== null || child.signalCode !== null) { assertCleanExit(); return; }
     await Promise.race([
       exited,
       new Promise((_, rejectPromise) => {
-        timer = setTimeout(() => rejectPromise(new Error('packaged app did not exit after Browser.close')), 10_000);
+        // macOS Chromium can finish its native profile fsync after `quit` and
+        // all application drains. An observed clean exit took 18.3 seconds;
+        // keep a finite deadline without terminating those durable writes.
+        timer = setTimeout(() => rejectPromise(new Error('packaged app did not exit after Browser.close within 30000ms')), 30_000);
       }),
     ]);
+    assertCleanExit();
   } finally {
     clearTimeout(timer);
     child.removeListener('exit', onExit);
@@ -1069,6 +1105,10 @@ async function assertDesktopGit(page, workspace, tempRoot) {
 }
 
 async function assertBottomTerminal(page) {
+  // The sidecar fixture was created through Host IPC, outside the renderer's
+  // navigation transaction. Observe its committed owner before testing scope.
+  await page.send('Page.reload', { ignoreCache: true });
+  await assertRendererContract(page, []);
   const scope = await evaluate(page, `(async () => {
     const state = await window.lingxi.bootstrap();
     return state.activeSession ?? { projectPath: state.workspace.path, sessionId: '__draft__' };
@@ -1343,7 +1383,7 @@ async function createPackagedLocalAppSourceSession(page, creatorSessionId, confi
   return sourceSession;
 }
 
-async function assertColdSessionOpen(page, sessionId) {
+async function assertColdSessionOpen(page, sessionId, activateWindow) {
   const cycles = Number(process.env.LINGXI_COLD_RELOAD_CYCLES ?? 10);
   assert(Number.isSafeInteger(cycles) && cycles >= 10 && cycles <= 100, 'cold reload cycles must be an integer from 10 to 100');
   const evidence = [];
@@ -1428,7 +1468,7 @@ async function assertColdSessionOpen(page, sessionId) {
         assert(!closed.runtimes.some(runtime => runtime.sessionId === sessionId), 'cold cycle must dispose the previous runtime');
         await evaluate(page, `window.lingxi.openSession(${JSON.stringify(before.workspace.path)}, ${JSON.stringify(sessionId)})`);
       } else {
-        await evaluate(page, `window.lingxi.restartBridge(${JSON.stringify(sessionId)})`);
+        await restartPackagedBridgeWhenIdle(page, sessionId);
       }
     }
     const beforeReload = (await page.send('Page.getFrameTree')).frameTree.frame;
@@ -1475,8 +1515,19 @@ async function assertColdSessionOpen(page, sessionId) {
   }
   // State restoration and visible painting are separate assertions. A real
   // foreground viewport must show the reply as well as retaining its DOM row.
+  // CDP focuses WebContents, but cannot raise an occluded native macOS window.
+  // Exercise the app's ordinary second-launch activation before asking a
+  // content-visibility:auto row to paint. Focus emulation is not visibility.
+  await activateWindow();
   await page.send('Page.bringToFront');
-  await waitFor(() => evaluate(page, `document.body.innerText.includes('Custom provider verified.')`), { label: 'cold-open foreground transcript painted' });
+  try {
+    await waitFor(() => evaluate(page, `document.visibilityState === 'visible'`), { label: 'cold-open native window visible' });
+    await waitFor(() => evaluate(page, `document.body.innerText.includes('Custom provider verified.')`), { label: 'cold-open foreground transcript painted' });
+  } catch (error) {
+    evidence.push({ foreground: false, ...await capture() });
+    save();
+    throw error;
+  }
   evidence.push({ foreground: true, ...await capture() });
   save();
   assert.equal(await evaluate(page, `document.body.textContent.includes('This chat is being resumed')`), false,
@@ -1717,7 +1768,7 @@ export async function runPackagedCredentialStability(appPath) {
   const runtime = runtimePathsForHome(home);
   writePackagedProfile(runtime, createAdversarialWorkspace(tempRoot));
   const env = sanitizePackagedAppEnvironment(process.env, {
-    HOME: home, CFFIXED_USER_HOME: home, TMPDIR: temporary, LINGXI_CONFIG_DIR: join(home, '.lingxi'),
+    HOME: home, CFFIXED_USER_HOME: home, __CFPREFERENCES_AVOID_DAEMON: '1', TMPDIR: temporary, LINGXI_CONFIG_DIR: join(home, '.lingxi'),
   });
   const port = await reserveLoopbackPort();
   const probe = await customProviderProbe();
@@ -1851,6 +1902,9 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   const env = sanitizePackagedAppEnvironment(process.env, {
     HOME: tempHome,
     CFFIXED_USER_HOME: tempHome,
+    // A disposable CFFIXED_USER_HOME must not wait on the real user's
+    // cfprefsd domain. Keep native Firebase preferences in this test home.
+    __CFPREFERENCES_AVOID_DAEMON: '1',
     TMPDIR: tempTmp,
     LINGXI_CONFIG_DIR: join(tempHome, ".lingxi"),
   });
@@ -1910,7 +1964,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     coldSession = await prepareCustomProvider(page, customProbe);
     // Provider routes are assembled when the sidecar boots. This turn is now
     // exercised before the full app restart, so first load the saved route.
-    await evaluate(page, `window.lingxi.restartBridge(${JSON.stringify(coldSession)})`);
+    await restartPackagedBridgeWhenIdle(page, coldSession);
     await assertCustomProviderRequest(page, customProbe, coldSession);
     // Commit another foreground session so that only that session is restored
     // at relaunch. The earlier saved UUID must then take the true cold-open path.
@@ -1941,7 +1995,16 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     await monitorRenderer(page);
     await waitFor(() => evaluate(page, 'window.lingxi?.bootstrap().then(b => b.connection?.status === "connected")'), { label: 'restarted custom provider app' });
     await assertScheduledPersistenceAfterRestart(page, scheduledRecords, join(tempHome, '.lingxi-workspaces'));
-    await assertColdSessionOpen(page, coldSession);
+    await assertColdSessionOpen(page, coldSession, async () => {
+      const activation = spawnPackagedApp(copiedAppPath, env, cdpPort, runtimePaths.userDataDir);
+      try {
+        await waitForPackagedAppExit(activation.child, async () => {});
+        assert.equal(activation.child.exitCode, 0, 'second launch must hand off to the existing instance');
+        assert.equal(child.exitCode, null, 'second launch must preserve the original packaged process');
+      } finally {
+        if (activation.child.exitCode === null && activation.child.signalCode === null) activation.child.kill('SIGTERM');
+      }
+    });
     const customSession = await prepareCustomProvider(page, customProbe, true);
     await assertCustomProviderRequest(page, customProbe, customSession);
     await assertPackagedLocalApps(page, customProbe, customSession, cdpPort, join(tempHome, '.lingxi'));
@@ -2024,6 +2087,8 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     if (survivors.length > 0) {
       throw new Error(`tracked packaged processes survived cleanup: ${survivors.join(' | ')}`);
     }
+    assert.doesNotMatch(output.stderr, /No handler registered for ['"]lingxi:sessionRecovery['"]/,
+      'late recovery diagnostics must be harmless after IPC teardown');
   }
 }
 

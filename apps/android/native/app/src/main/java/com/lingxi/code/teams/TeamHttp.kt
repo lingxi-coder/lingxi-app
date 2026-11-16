@@ -26,7 +26,8 @@ internal object TeamHttp {
     private val closing = ThreadPoolExecutor(4, 4, 0, TimeUnit.SECONDS, ArrayBlockingQueue(32), threads)
     private val deadlines = ScheduledThreadPoolExecutor(1, threads).apply { removeOnCancelPolicy = true }
 
-    suspend fun request(url: String, token: String, body: JSONObject?): JSONObject = suspendCancellableCoroutine { continuation ->
+    /** [seconds] bounds the whole request; a part of a file gets longer than a command does. */
+    suspend fun request(url: String, token: String, body: JSONObject?, seconds: Long = 20): JSONObject = suspendCancellableCoroutine { continuation ->
         val finished = AtomicBoolean(false)
         val connection = AtomicReference<HttpURLConnection?>()
         val job = AtomicReference<Future<*>?>()
@@ -42,7 +43,7 @@ internal object TeamHttp {
                 continuation.resumeWithException(TeamMessageFailure("SERVICE_UNAVAILABLE"))
                 cancelTransport()
             }
-        }, 20, TimeUnit.SECONDS)
+        }, seconds, TimeUnit.SECONDS)
         continuation.invokeOnCancellation { finished.set(true); deadline.cancel(false); cancelTransport() }
         try {
             val task = requests.submit {
@@ -52,7 +53,7 @@ internal object TeamHttp {
                     socket = URL(url).openConnection() as HttpURLConnection
                     connection.set(socket)
                     if (finished.get()) return@submit
-                    socket.connectTimeout = 20000; socket.readTimeout = 20000; socket.instanceFollowRedirects = false; socket.useCaches = false
+                    socket.connectTimeout = 20000; socket.readTimeout = (seconds * 1000).toInt(); socket.instanceFollowRedirects = false; socket.useCaches = false
                     socket.setRequestProperty("Authorization", "Bearer $token")
                     if (body != null) {
                         socket.requestMethod = "POST"; socket.doOutput = true; socket.setRequestProperty("Content-Type", "application/json")

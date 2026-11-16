@@ -1,6 +1,8 @@
 export interface SequencedRuntimeEventEnvelope<T = unknown> {
   sessionId: string;
   sequence: number;
+  /** The cached event replaces all stream frames in this inclusive span. */
+  replayFromSequence?: number;
   event: T;
 }
 
@@ -10,8 +12,48 @@ export function mergeRuntimeEventReplay<T>(
   live: readonly SequencedRuntimeEventEnvelope<T>[],
 ): SequencedRuntimeEventEnvelope<T>[] {
   const unique = new Map<string, SequencedRuntimeEventEnvelope<T>>();
-  for (const envelope of [...replay, ...live]) {
-    if (!Number.isSafeInteger(envelope.sequence) || envelope.sequence < 1 || !envelope.sessionId) continue;
+  const covered = new Map<string, Array<readonly [number, number]>>();
+  const valid = (envelope: SequencedRuntimeEventEnvelope<T>): boolean =>
+    Number.isSafeInteger(envelope.sequence) && envelope.sequence >= 1 && Boolean(envelope.sessionId);
+  for (const envelope of replay) {
+    if (!valid(envelope)) continue;
+    const from = envelope.replayFromSequence;
+    if (from !== undefined && Number.isSafeInteger(from) && from >= 1 && from <= envelope.sequence) {
+      const ranges = covered.get(envelope.sessionId) ?? [];
+      ranges.push([from, envelope.sequence]);
+      covered.set(envelope.sessionId, ranges);
+    }
+    unique.set(`${envelope.sessionId}\0${envelope.sequence}`, envelope);
+  }
+  for (const [sessionId, ranges] of covered) {
+    ranges.sort((left, right) => left[0] - right[0]);
+    const merged: Array<readonly [number, number]> = [];
+    for (const range of ranges) {
+      const previous = merged.at(-1);
+      if (previous && range[0] <= previous[1] + 1) merged[merged.length - 1] = [previous[0], Math.max(previous[1], range[1])];
+      else merged.push(range);
+    }
+    covered.set(sessionId, merged);
+  }
+  const isCovered = (sessionId: string, sequence: number): boolean => {
+    const ranges = covered.get(sessionId);
+    if (!ranges) return false;
+    let low = 0;
+    let high = ranges.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      const [from, through] = ranges[middle]!;
+      if (sequence < from) high = middle;
+      else if (sequence > through) low = middle + 1;
+      else return true;
+    }
+    return false;
+  };
+  for (const envelope of live) {
+    if (!valid(envelope)) continue;
+    // The replay span is authoritative even at its final sequence: the live
+    // frame there carries only the last fragment of its accumulated text.
+    if (isCovered(envelope.sessionId, envelope.sequence)) continue;
     unique.set(`${envelope.sessionId}\0${envelope.sequence}`, envelope);
   }
   return [...unique.values()].sort((left, right) => (

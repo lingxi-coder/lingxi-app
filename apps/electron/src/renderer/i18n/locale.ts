@@ -1,23 +1,4 @@
-import { decisionCatalog } from './decisionCatalog';
-import { providerAccountsCatalog } from './providerAccountsCatalog';
-import { localAppWorkspaceCatalog } from './localAppWorkspaceCatalog';
-import { botsCatalog } from './botsCatalog';
-import { chatCatalog } from './chatCatalog';
-import { computerCatalog } from './computerCatalog';
-import { desktopCatalog } from './desktopCatalog';
-import { extensionCatalog } from './extensionCatalog';
-import { flowCatalog } from './flowCatalog';
-import { gitCatalog } from './gitCatalog';
-import { interactionCatalog } from './interactionCatalog';
-import { imageCatalog } from './imageCatalog';
-import { miscCatalog } from './miscCatalog';
-import { navigationCatalog } from './navigationCatalog';
-import { runtimeCatalog } from './runtimeCatalog';
-import { settingsCatalog } from './settingsCatalog';
-import { shellCatalog } from './shellCatalog';
-import { uiCatalog } from './uiCatalog';
-import { voiceSettingsCatalog } from './voiceSettingsCatalog';
-import { updateCatalog } from './updateCatalog';
+import englishExtensions from './generated/en.json';
 import en from '../../../../../resources/translations/en.json';
 
 export const DESKTOP_LOCALES = ['zh-Hans', 'zh-Hant', 'en', 'ja', 'ko'] as const;
@@ -27,6 +8,7 @@ export const LANGUAGE_STORAGE_KEY = 'lingxi.desktop.language';
 type TranslationCatalog = Record<string, unknown>;
 const loadedCatalogs: Partial<Record<Exclude<DesktopLocale, 'en'>, TranslationCatalog>> = {};
 const catalogRequests = new Map<Exclude<DesktopLocale, 'en'>, Promise<void>>();
+const readyCatalog = Promise.resolve();
 let translationRevisionValue = 0;
 
 /** Bumps when a non-English catalog arrives so the existing language-change subscribers repaint. */
@@ -39,12 +21,12 @@ function catalogFromModule(module: unknown): TranslationCatalog {
   return module as TranslationCatalog;
 }
 
-function localeImporter(locale: Exclude<DesktopLocale, 'en'>): Promise<unknown> {
+function localeImporter(locale: Exclude<DesktopLocale, 'en'>): Promise<[unknown, unknown]> {
   switch (locale) {
-    case 'zh-Hans': return import('../../../../../resources/translations/zh-Hans.json');
-    case 'zh-Hant': return import('../../../../../resources/translations/zh-Hant.json');
-    case 'ja': return import('../../../../../resources/translations/ja.json');
-    case 'ko': return import('../../../../../resources/translations/ko.json');
+    case 'zh-Hans': return Promise.all([import('../../../../../resources/translations/zh-Hans.json'), import('./generated/zh-Hans.json')]);
+    case 'zh-Hant': return Promise.all([import('../../../../../resources/translations/zh-Hant.json'), import('./generated/zh-Hant.json')]);
+    case 'ja': return Promise.all([import('../../../../../resources/translations/ja.json'), import('./generated/ja.json')]);
+    case 'ko': return Promise.all([import('../../../../../resources/translations/ko.json'), import('./generated/ko.json')]);
   }
 }
 
@@ -55,15 +37,18 @@ function publishTranslations(): void {
   }
 }
 
-function startLocaleCatalog(locale: DesktopLocale): void {
-  if (locale === 'en' || loadedCatalogs[locale] || catalogRequests.has(locale)) return;
-  const pending = localeImporter(locale).then((module) => {
-    loadedCatalogs[locale] = catalogFromModule(module);
+/** Base and extension copy become visible atomically and share one cached request. */
+export function loadLocaleCatalog(locale: DesktopLocale): Promise<void> {
+  if (locale === 'en' || loadedCatalogs[locale]) return readyCatalog;
+  const existing = catalogRequests.get(locale);
+  if (existing) return existing;
+  const pending = localeImporter(locale).then(([base, extensions]) => {
+    loadedCatalogs[locale] = { ...catalogFromModule(base), ...catalogFromModule(extensions) };
     publishTranslations();
   }).catch(() => { catalogRequests.delete(locale); });
   catalogRequests.set(locale, pending);
+  return pending;
 }
-const extraCatalog = { ...decisionCatalog, ...localAppWorkspaceCatalog, ...providerAccountsCatalog, ...botsCatalog, ...chatCatalog, ...computerCatalog, ...desktopCatalog, ...extensionCatalog, ...flowCatalog, ...gitCatalog, ...imageCatalog, ...interactionCatalog, ...miscCatalog, ...navigationCatalog, ...runtimeCatalog, ...settingsCatalog, ...shellCatalog, ...uiCatalog, ...voiceSettingsCatalog, ...updateCatalog };
 
 export function matchLocale(tag: string): DesktopLocale | null {
   const parts = tag.replace(/_/g, '-').toLowerCase().split('-');
@@ -95,16 +80,15 @@ export function readLanguagePreference(): LanguagePreference {
 }
 export function currentLocale(): DesktopLocale {
   const locale = resolveLocale(readLanguagePreference(), typeof navigator === 'undefined' ? ['en'] : navigator.languages?.length ? navigator.languages : [navigator.language]);
-  startLocaleCatalog(locale);
+  void loadLocaleCatalog(locale);
   return locale;
 }
 
 /** Format both Android positional and iOS catalog placeholders without changing argument content. */
 export function translate(key: string, locale: DesktopLocale, ...args: readonly (string | number)[]): string {
-  startLocaleCatalog(locale);
-  const extra = extraCatalog[key];
-  const localized = locale === 'en' ? en[key as keyof typeof en] : loadedCatalogs[locale]?.[key];
-  const value = extra?.[locale] ?? localized ?? extra?.en ?? en[key as keyof typeof en];
+  void loadLocaleCatalog(locale);
+  const fallback = englishExtensions[key as keyof typeof englishExtensions] ?? en[key as keyof typeof en];
+  const value = locale === 'en' ? fallback : loadedCatalogs[locale]?.[key] ?? fallback;
   let text: string | undefined = typeof value === 'string' ? value : undefined;
   if (!text && value && typeof value === 'object' && 'plural' in value) {
     const forms = (value as { plural?: Record<string, unknown> }).plural;

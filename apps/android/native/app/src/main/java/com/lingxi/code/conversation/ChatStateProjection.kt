@@ -102,32 +102,168 @@ internal fun ChatState.settleTurn(run: AgentRunState?, settling: Message?): Sett
     val shellBacked = shellTools.mapTo(mutableSetOf()) { it.taskId }
     val absorbed = run?.tools.orEmpty().filterNot { it.id in shellBacked }
     val terminalRun = run?.takeUnless { it.active || it.outcome == AgentRunOutcome.Running }
-    val terminalAlreadySettled = terminalRun != null &&
-        agentRunsByMessageId.values.any { it.turnId == terminalRun.turnId }
     if (absorbed.isEmpty() && settling == null) {
         return SettledTurn(messages, run, agentRunsByMessageId)
     }
     // A turn can end with tools or status and no prose at all. Mint a hidden
     // anchor message so the terminal result still has a stable transcript slot.
     val base = settling ?: Message(role = Role.Ai, text = "")
-    val settled = if (absorbed.isEmpty()) base else base.absorbToolCalls(absorbed)
+    val incoming = if (absorbed.isEmpty()) base else base.absorbToolCalls(absorbed)
+    val merged = mergeTranscriptMessage(messages, incoming)
+    val settled = merged.message
     val remainingRun = run?.let { existing ->
         if (absorbed.isEmpty()) existing else existing.copy(
             tools = existing.tools.filter { it.id in shellBacked },
             revision = existing.revision + 1,
         )
     }
+    val retainedRuns = agentRunsByMessageId.filterKeys { it !in merged.removedMessageIds }.toMutableMap()
+    // A replay may join several persisted rows into one assistant bubble. Its
+    // existing terminal result belongs to that same bubble after the join.
+    val aliasedRun = merged.removedMessageIds.mapNotNull(agentRunsByMessageId::get)
+        .firstOrNull { it.outcome != AgentRunOutcome.Finished }
+        ?: merged.removedMessageIds.firstNotNullOfOrNull(agentRunsByMessageId::get)
+    if (aliasedRun != null && (retainedRuns[settled.id] == null ||
+            retainedRuns[settled.id]?.outcome == AgentRunOutcome.Finished)) {
+        retainedRuns[settled.id] = aliasedRun
+    }
+    val terminalAlreadySettled = terminalRun != null &&
+        retainedRuns.values.any { it.turnId == terminalRun.turnId }
     val settledRuns = if (terminalRun != null && !terminalAlreadySettled) {
-        agentRunsByMessageId + (settled.id to (remainingRun ?: terminalRun))
+        retainedRuns +
+            (settled.id to (remainingRun ?: terminalRun))
     } else {
-        agentRunsByMessageId
+        retainedRuns
     }
     return SettledTurn(
-        messages = messages + settled,
+        messages = merged.messages,
         run = remainingRun,
         agentRunsByMessageId = settledRuns,
     )
 }
+
+private data class MergedTranscriptMessage(
+    val messages: List<Message>,
+    val message: Message,
+    val removedMessageIds: Set<String>,
+)
+
+private fun Message.persistedIdentities(): Set<String> =
+    transcriptAliases + listOfNotNull(transcriptUuid)
+
+/** Snapshot and replay overlap by durable identity, never by matching prose. */
+internal fun mergeTranscriptHistory(history: List<Message>, updates: List<Message>): List<Message> =
+    updates.fold(history) { rows, message -> mergeTranscriptMessage(rows, message).messages }
+
+/** A display-only snapshot must not discard rows delivered while it was read. */
+internal fun mergeHeadlessSnapshotMessages(
+    base: List<Message>,
+    live: List<Message>,
+    baseline: List<Message> = emptyList(),
+): List<Message> {
+    val baselineById = baseline.associateBy { it.id }
+    val oldTools = live.flatMap { it.blocks.filterIsInstance<MessageContent.Tool>() }
+        .associate { it.call.id to it.call }
+    val snapshot = base.map { message ->
+        message.copy(blocks = message.blocks.map { block ->
+            if (block !is MessageContent.Tool) block else oldTools[block.call.id]
+                ?.let { MessageContent.Tool(block.call.mergeSnapshotTool(it)) } ?: block
+        })
+    }
+    // A bootstrap row that did not change while the snapshot was read cannot
+    // overwrite the newer disk projection. Keep genuinely new live rows/tails.
+    val updates = live.filterNot { row ->
+        baselineById[row.id] == row && snapshot.any { it.sameTranscriptRow(row) }
+    }
+    val retainedIds = mutableSetOf<String>()
+    return mergeTranscriptHistory(snapshot, updates).map { merged ->
+        // Snapshot decoding mints UI ids. Keep the id of a row already on
+        // screen so its terminal run and optimistic-user bookkeeping survive.
+        val retained = live.firstOrNull { row ->
+            row.id !in retainedIds && row.sameTranscriptRow(merged)
+        }
+        if (retained == null) merged else {
+            retainedIds += retained.id
+            merged.copy(id = retained.id)
+        }
+    }
+}
+
+/** Re-anchor existing terminal results after snapshot rows have joined by UUID. */
+internal fun mergeHeadlessSnapshotAgentRuns(
+    previousMessages: List<Message>,
+    previousRuns: Map<String, AgentRunState>,
+    messages: List<Message>,
+): Map<String, AgentRunState> = reconstructTerminalAgentRuns(messages).toMutableMap().apply {
+    previousMessages.forEach { previous ->
+        val run = previousRuns[previous.id] ?: return@forEach
+        val retained = messages.firstOrNull { it.id == previous.id }
+            ?: messages.firstOrNull { it.sameTranscriptRow(previous) }
+            ?: return@forEach
+        if (run.outcome != AgentRunOutcome.Finished || get(retained.id)?.outcome == AgentRunOutcome.Finished) {
+            put(retained.id, run)
+        }
+    }
+}
+
+private fun Message.sameTranscriptRow(other: Message): Boolean {
+    if (role != other.role) return false
+    if (id == other.id) return true
+    val identities = persistedIdentities()
+    return identities.isNotEmpty() && other.persistedIdentities().any { it in identities }
+}
+
+private fun mergeTranscriptMessage(history: List<Message>, incoming: Message): MergedTranscriptMessage {
+    val identities = incoming.persistedIdentities()
+    val matches = history.withIndex().filter { (_, row) -> row.sameTranscriptRow(incoming) }
+    if (matches.isEmpty()) return MergedTranscriptMessage(history + incoming, incoming, emptySet())
+    val previous = matches.map { it.value }
+    val retained = previous.first()
+    val tools = previous.flatMap { it.blocks.filterIsInstance<MessageContent.Tool>() }
+        .associate { it.call.id to it.call }
+    val seenTools = mutableSetOf<String>()
+    val blocks = incoming.blocks.map { block ->
+        if (block !is MessageContent.Tool) block else {
+            seenTools += block.call.id
+            val old = tools[block.call.id]
+            if (old == null) block else MessageContent.Tool(block.call.mergeSnapshotTool(old))
+        }
+    }
+    val missingTools = tools.filterKeys { it !in seenTools }.values.map { MessageContent.Tool(it) }
+    val combinedBlocks = if (missingTools.isEmpty()) blocks else
+        blocks.ifEmpty { incoming.text.takeIf(String::isNotEmpty)?.let { listOf(MessageContent.Text(it)) }.orEmpty() } + missingTools
+    val merged = incoming.copy(
+        id = retained.id,
+        transcriptUuid = incoming.transcriptUuid ?: retained.transcriptUuid,
+        transcriptAliases = identities + previous.flatMap { it.persistedIdentities() },
+        sentAtMs = incoming.sentAtMs ?: retained.sentAtMs,
+        blocks = combinedBlocks,
+        streamed = incoming.streamed || previous.any { it.streamed },
+    )
+    val indices = matches.mapTo(mutableSetOf()) { it.index }
+    val rows = history.mapIndexedNotNull { index, row ->
+        when {
+            index == matches.first().index -> merged
+            index in indices -> null
+            else -> row
+        }
+    }
+    return MergedTranscriptMessage(rows, merged, previous.drop(1).mapTo(mutableSetOf()) { it.id })
+}
+
+/** Earlier replay cannot turn an already persisted result back into a spinner. */
+private fun ToolCallUi.mergeSnapshotTool(previous: ToolCallUi): ToolCallUi = copy(
+    header = header ?: previous.header,
+    display = display ?: previous.display,
+    status = if (status in setOf(AgentToolStatus.Running, AgentToolStatus.Unknown) &&
+        previous.status in setOf(AgentToolStatus.Completed, AgentToolStatus.Failed, AgentToolStatus.Cancelled)) previous.status else status,
+    syntheticShellCommand = syntheticShellCommand ?: previous.syntheticShellCommand,
+    planMarkdown = planMarkdown ?: previous.planMarkdown,
+    questionAnswers = questionAnswers ?: previous.questionAnswers,
+    localApp = localApp ?: previous.localApp,
+    skillBody = skillBody ?: previous.skillBody,
+    spawnedAgentId = spawnedAgentId ?: previous.spawnedAgentId,
+)
 
 /** Merge [rows] into this message's own tool blocks by id, then append the rest. */
 private fun Message.absorbToolCalls(rows: List<AgentToolRunState>): Message {

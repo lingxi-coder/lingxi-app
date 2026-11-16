@@ -35,6 +35,8 @@ let catalogs = { [projectPath]: { sessions: rows } };
 const eventListeners = new Set<(event: unknown) => void>();
 const shownListeners = new Set<(snapshot: unknown) => void>();
 const opened: Array<{ projectPath: string; sessionId: string; selection?: SessionOpenSelection }> = [];
+let deferOpening = false;
+const pendingOpens = new Map<string, () => void>();
 let bridge: UseBridge;
 let catalogChanges = 0;
 let renders = 0;
@@ -63,6 +65,7 @@ function snapshot() {
   openSession: async (project: string, sessionId: string, selection?: SessionOpenSelection) => {
     if (!rows.some(row => row.uuid === sessionId && row.path === selection?.transcriptPath && row.mode === 'code')) throw new Error('Exact source and mode required');
     opened.push({ projectPath: project, sessionId, selection });
+    if (deferOpening) await new Promise<void>(resolve => pendingOpens.set(sessionId, resolve));
     active = { projectPath, sessionId, mode: 'code' }; revision++;
     return snapshot();
   },
@@ -71,7 +74,13 @@ function snapshot() {
 
 Object.assign(window, { sessionOptimizationFixture: {
   state: () => ({ ready: Boolean(bridge?.connected), renders, catalogChanges, identityReads, opened, duplicateId, chosenPath,
-    title: bridge?.bootstrap?.projectCatalogs[projectPath]?.sessions[0]?.title }),
+    title: bridge?.bootstrap?.projectCatalogs[projectPath]?.sessions[0]?.title,
+    activeSessionId: bridge?.activeSession?.sessionId, sessionLoading: bridge?.sessionLoading, pending: [...pendingOpens.keys()] }),
+  openDeferred: (index: number) => {
+    deferOpening = true;
+    void bridge.openSession(projectPath, id(index), { scope: 'current', transcriptPath: rows[index]!.path });
+  },
+  completeOpen: (index: number) => { pendingOpens.get(id(index))?.(); pendingOpens.delete(id(index)); },
   submit: () => bridge.sendPrompt('Pending catalog title'),
   stream: async (count: number) => {
     for (let index = 0; index < count; index++) {

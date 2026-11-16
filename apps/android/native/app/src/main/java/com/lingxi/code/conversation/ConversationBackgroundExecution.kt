@@ -55,6 +55,11 @@ data class ConversationBackgroundSnapshot(
     val executorActive: Boolean = false,
 )
 
+/** Task completion cannot release a source that still owns a queued successor. */
+internal fun canSettleConversationAfterTaskUpdate(
+    activeTaskIds: Set<String>, mainTurnId: Long?, recoveryStateCount: Long, source: ConversationSource,
+): Boolean = activeTaskIds.isEmpty() && (mainTurnId == null || recoveryStateCount > 0L) && !source.hasQueuedTurnRecovery()
+
 /** The foreground service belongs to all running owners, not the visible UI. */
 internal object ConversationServiceOwners {
     private val owners = linkedMapOf<String, ConversationBackgroundSnapshot?>()
@@ -87,6 +92,10 @@ internal object ConversationServiceOwners {
     }
     @Synchronized fun resolved(snapshot: ConversationBackgroundSnapshot): ConversationBackgroundSnapshot =
         reconcileConversationAction(snapshot, owners)
+    @Synchronized fun adoptQueuedExecutor(spec: ConversationRecoverySpec, sessionId: String, turnId: Long, executorActive: Boolean) {
+        queuedExecutorOwnerSnapshots(spec, sessionId, turnId, executorActive, owners).forEach { (owner, value) -> owners[owner] = value }
+        persist()
+    }
     /** The exact source must reach durable storage before native accepts a turn. */
     fun persistForSubmission(owner: String, snapshot: ConversationBackgroundSnapshot) {
         // An empty commit waits for preceding apply writes without replacing a
@@ -742,6 +751,7 @@ internal object ConversationHeadlessRecovery {
             // The UI joins that owner; it does not take the service lease away
             // before its own projection and lease are attached.
             if (!wasAlreadyUiOwned) {
+                if (serviceOwnsRecovery) source?.requestHeadlessUiSnapshot()
                 uiAttachResumeRequired = shouldResumeUiAttach(
                     hadHeadlessExecutor = hadHeadlessExecutor,
                     wasAlreadyUiOwned = false,
@@ -761,6 +771,7 @@ internal object ConversationHeadlessRecovery {
         @Synchronized fun complete(source: EngineConversationSource?) {
             this.source = source
             if (source != null && claimedByUi.get()) {
+                if (serviceOwnsRecovery) source.requestHeadlessUiSnapshot()
                 source.setUiAttachResumeRequired(uiAttachResumeRequired)
                 source.claimDurableTurnForUi()
             }
@@ -1143,24 +1154,41 @@ internal object ConversationHeadlessRecovery {
         }
         val job = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             val collector = launch(start = CoroutineStart.UNDISPATCHED) {
+                var monitoredSnapshot = snapshot
+                var monitoredTurnId = turnId
+                var actionMinimum = minimumActionStateIndex
+                var terminalAwaitingQueuedWork = false
                 source.clientEvents.collect { event ->
-                    val current = snapshot.copy(
+                    source.queuedOwnerFor(event)?.takeIf { it != monitoredTurnId }?.let { successor ->
+                        monitoredTurnId = successor
+                        monitoredSnapshot = monitoredSnapshot.copy(turnId = successor,
+                            executorActive = source.queuedExecutorFor(event) != null)
+                        recoveryStateCount.set(0L)
+                        terminalAwaitingQueuedWork = false
+                        ConversationServiceOwners.adoptQueuedExecutor(spec, snapshot.sessionId, successor, monitoredSnapshot.executorActive)
+                    }
+                    if (source.queuedExecutorFor(event) != null || source.requiresQueuedTranscriptRepair(event)) actionMinimum = 1L
+                    if (source.isQueuedRejection(event) && terminalAwaitingQueuedWork && !source.hasQueuedTurnRecovery() && activeTaskIds.isEmpty()) {
+                        settle(spec.ownerKey, context)
+                        return@collect
+                    }
+                    val current = monitoredSnapshot.copy(
                         statusText = context.getString(R.string.chat_background_service_text),
                     )
-                    if (event is ClientEvent.TurnRecoveryState && turnId != null) {
+                    if (event is ClientEvent.TurnRecoveryState && monitoredTurnId != null) {
                         val recovery = event.snapshot
-                        if (recovery.turnId.toLong() != turnId) return@collect
+                        if (recovery.turnId.toLong() != monitoredTurnId) return@collect
                         owner.turnAttached.complete(Unit)
                         observedRecoverySignal.set(true)
                         val stateIndex = recoveryStateCount.incrementAndGet()
-                        if (stateIndex >= minimumActionStateIndex) {
+                        if (stateIndex >= actionMinimum) {
                             owner.headlessExecutorActive =
                                 headlessExecutorActiveAfterRecoveryState(
                                     currentActive = owner.headlessExecutorActive,
                                     recoveryState = recovery.state,
                                     resumeSession = resumeSession,
                                     stateIndex = stateIndex,
-                                    minimumActionStateIndex = minimumActionStateIndex,
+                                    minimumActionStateIndex = actionMinimum,
                                 )
                         }
                         when (recovery.state) {
@@ -1191,7 +1219,7 @@ internal object ConversationHeadlessRecovery {
                                 }
                             }
                             TurnRecoveryStateDto.WAITING_FOR_USER ->
-                                if (stateIndex >= minimumActionStateIndex) {
+                                if (stateIndex >= actionMinimum) {
                                     alerts.notifyWaitingForUser(current)
                                     settle(
                                         spec.ownerKey,
@@ -1200,23 +1228,26 @@ internal object ConversationHeadlessRecovery {
                                     )
                                 }
                             TurnRecoveryStateDto.PAUSED_RECOVERABLE ->
-                                if (stateIndex >= minimumActionStateIndex) {
+                                if (stateIndex >= actionMinimum) {
                                     alerts.notifyPausedRecoverable(current)
                                     settle(spec.ownerKey, context)
                                 }
                             TurnRecoveryStateDto.COMPLETED ->
-                                if (stateIndex >= minimumActionStateIndex) {
+                                if (stateIndex >= actionMinimum) {
                                     alerts.finishTurn(current, ConversationTurnOutcome.Completed)
-                                    if (activeTaskIds.isEmpty()) settle(spec.ownerKey, context)
+                                    terminalAwaitingQueuedWork = source.hasQueuedTurnRecovery()
+                                    if (activeTaskIds.isEmpty() && !terminalAwaitingQueuedWork) settle(spec.ownerKey, context)
                                 }
                             TurnRecoveryStateDto.FAILED ->
-                                if (stateIndex >= minimumActionStateIndex) {
+                                if (stateIndex >= actionMinimum) {
                                     alerts.finishTurn(current, ConversationTurnOutcome.Failed)
-                                    if (activeTaskIds.isEmpty()) settle(spec.ownerKey, context)
+                                    terminalAwaitingQueuedWork = source.hasQueuedTurnRecovery()
+                                    if (activeTaskIds.isEmpty() && !terminalAwaitingQueuedWork) settle(spec.ownerKey, context)
                                 }
                             TurnRecoveryStateDto.CANCELLED ->
-                                if (stateIndex >= minimumActionStateIndex && activeTaskIds.isEmpty()) {
-                                    settle(spec.ownerKey, context)
+                                if (stateIndex >= actionMinimum && activeTaskIds.isEmpty()) {
+                                    terminalAwaitingQueuedWork = source.hasQueuedTurnRecovery()
+                                    if (!terminalAwaitingQueuedWork) settle(spec.ownerKey, context)
                                 }
                         }
                         return@collect
@@ -1244,7 +1275,7 @@ internal object ConversationHeadlessRecovery {
                         }
                         TaskStatusDto.CANCELLED -> activeTaskIds.remove(taskStatus.first)
                     }
-                    if (activeTaskIds.isEmpty() && (turnId == null || recoveryStateCount.get() > 0L)) {
+                    if (canSettleConversationAfterTaskUpdate(activeTaskIds, monitoredTurnId, recoveryStateCount.get(), source)) {
                         settle(spec.ownerKey, context)
                     }
                 }

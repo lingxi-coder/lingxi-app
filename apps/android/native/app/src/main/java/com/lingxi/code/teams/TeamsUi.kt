@@ -77,6 +77,11 @@ internal object TeamsTags {
     const val UNREAD_DIVIDER = "teams.unreadDivider"
     const val COMPOSER_LOCK = "teams.composerLock"
     const val ASK_BOT = "teams.askBot"
+    const val ATTACH = "teams.attach"
+    const val VOICE = "teams.voice"
+    const val LISTENING = "teams.listening"
+    const val DRAFT_FILES = "teams.composer.files"
+    const val REFUSED_FILES = "teams.composer.files.refused"
     const val SHEET = "teams.sheet"
     const val INVITE_FRIENDS = "teams.inviteFriends"
     fun section(id: String) = "teams.section.$id"
@@ -84,6 +89,7 @@ internal object TeamsTags {
     fun message(id: String) = "teams.message.$id"
     fun runCard(trigger: String) = "teams.run.$trigger"
     fun addFriend(uid: String) = "teams.addFriend.$uid"
+    fun memberActions(uid: String) = "teams.member.actions.$uid"
 }
 
 /** The words of the conversation list, from resources for the UI language (the two separators are code constants). */
@@ -103,13 +109,35 @@ internal fun rememberTeamsListStrings(): TeamsListStrings {
 /** Error code (HTTP or local) to text (SPEC-mobile-team-bot-ui section 6.7). */
 @StringRes
 internal fun teamsErrorRes(code: String): Int = when {
+    // Files in a message: why one was not taken, could not be uploaded or cannot be opened.
+    code == "ATTACHMENT_TYPE" || code == "UPLOAD_TYPE_MISMATCH" -> R.string.teams_file_error_type
+    code == "ATTACHMENT_EMPTY" -> R.string.teams_file_error_empty
+    code == "ATTACHMENT_TOO_LARGE" -> R.string.teams_file_error_too_large
+    code == "ATTACHMENT_COUNT" -> R.string.teams_file_error_count
+    code == "ATTACHMENT_TOTAL" || code == "ATTACHMENT_LIMIT" -> R.string.teams_file_error_total
+    code == "UPLOAD_QUOTA_EXCEEDED" -> R.string.teams_file_error_quota
+    code == "UPLOAD_EXPIRED" -> R.string.teams_file_error_expired
+    code in setOf("UPLOAD_DIGEST_MISMATCH", "UPLOAD_INCOMPLETE", "UPLOAD_PART_INVALID", "UPLOAD_FAILED") -> R.string.teams_file_error_incomplete
+    code in setOf("UPLOAD_REQUIRED", "UPLOAD_SEALED", "UPLOAD_ID_CONFLICT", "ATTACHMENT_REQUIRED") -> R.string.teams_file_error_unsendable
+    code == "ATTACHMENT_REVOKED" -> R.string.teams_file_error_revoked
+    code == "ATTACHMENT_DAMAGED" -> R.string.teams_file_error_damaged
+    code == "ATTACHMENT_UNREADABLE" -> R.string.teams_file_error_unreadable
     code == "INVALID_DATA" || code == "INVALID_MESSAGE_SNAPSHOT" -> R.string.teams_error_invalid_data
     code in setOf("MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED") -> R.string.teams_stale_error
     code.contains("STORAGE") -> R.string.teams_messages_storage_error
     code in setOf("BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "BOT_SELECTION_STALE", "CONVERSATION_POLICY_REQUIRED", "ARTIFACT_READ_REQUIRED", "GRANT_READ_REQUIRED", "INPUT_GRANT_REQUIRED") -> R.string.teams_error_bot_access_changed
+    code == "BOT_MAINTAINER_CHANGED" -> R.string.teams_composer_lock_bot_handed_over
     code == "REQUEST_QUOTA_EXCEEDED" -> R.string.teams_error_request_quota
     code == "MESSAGE_LISTENER_FAILED" -> R.string.teams_error_sync_failed
-    code in setOf("MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT") -> R.string.teams_message_failed
+    code in setOf("MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT",
+        "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "WAIT_KIND_MISMATCH", "TASK_REVOKED") -> R.string.teams_message_failed
+    code == "LIST_REQUIRED" || code == "SHARED_LIST_UNSUPPORTED" -> R.string.teams_error_list_unavailable
+    code == "LIST_LIMIT" -> R.string.teams_error_list_full
+    code == "LIST_REVISION_CONFLICT" || code == "LIST_ITEM_REQUIRED" -> R.string.teams_list_moved
+    code == "ARTIFACT_REVISION_CONFLICT" -> R.string.teams_error_doc_conflict
+    code == "ARTIFACT_UNCHANGED" -> R.string.teams_error_doc_unchanged
+    code == "ARTIFACT_REVISION_LIMIT" -> R.string.teams_error_doc_limit
+    code == "ARTIFACT_REVISION_REQUIRED" -> R.string.teams_error_doc_revision
     code == "INVITE_UNAVAILABLE" -> R.string.teams_invite_error
     else -> R.string.teams_error
 }

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-10-25",
+  "updatedAt": "2026-11-12",
   "items": [
     {
       "id": "chrome-devtools",
@@ -40,7 +40,23 @@
             "--categoryExperimentalWebmcp=true"
           ]
         }
-      }
+      },
+      "examples": [
+        {
+          "en": "Inspect this page and explain the cause of its slow loading.",
+          "zh-Hans": "检查这个页面，解释加载缓慢的原因。",
+          "zh-Hant": "檢查這個頁面，解釋載入緩慢的原因。",
+          "ja": "ページを調べ、読み込みが遅い原因を説明してください。",
+          "ko": "이 페이지를 검사하고 로딩이 느린 원인을 설명해 주세요."
+        },
+        {
+          "en": "Check this page for console errors and failed network requests.",
+          "zh-Hans": "检查页面的控制台错误和失败的网络请求。",
+          "zh-Hant": "檢查頁面的主控台錯誤和失敗的網路請求。",
+          "ja": "コンソールのエラーと失敗したネットワークリクエストを確認してください。",
+          "ko": "콘솔 오류와 실패한 네트워크 요청을 확인해 주세요."
+        }
+      ]
     },
     {
       "id": "playwright",
@@ -79,7 +95,23 @@
             "@playwright/mcp@0.0.83"
           ]
         }
-      }
+      },
+      "examples": [
+        {
+          "en": "Test the sign-in flow and capture the steps that fail.",
+          "zh-Hans": "测试登录流程，记录失败的步骤。",
+          "zh-Hant": "測試登入流程，記錄失敗的步驟。",
+          "ja": "ログインの流れをテストし、失敗する手順を記録してください。",
+          "ko": "로그인 흐름을 테스트하고 실패한 단계를 기록해 주세요."
+        },
+        {
+          "en": "Verify this form on desktop and mobile viewport sizes.",
+          "zh-Hans": "验证表单在桌面和手机窗口尺寸下的表现。",
+          "zh-Hant": "驗證表單在桌面和手機視窗尺寸下的表現。",
+          "ja": "デスクトップとモバイルの画面幅でフォームを確認してください。",
+          "ko": "데스크톱과 모바일 화면 크기에서 폼을 확인해 주세요."
+        }
+      ]
     },
     {
       "id": "agent-browser",
@@ -121,7 +153,23 @@
             "core,webmcp"
           ]
         }
-      }
+      },
+      "examples": [
+        {
+          "en": "Open the web app and walk through its main workflow.",
+          "zh-Hans": "打开网页应用，检查主要操作流程。",
+          "zh-Hant": "開啟網頁應用程式，檢查主要操作流程。",
+          "ja": "Web アプリを開き、主な操作の流れを確認してください。",
+          "ko": "웹 앱을 열고 주요 작업 흐름을 확인해 주세요."
+        },
+        {
+          "en": "Check which WebMCP tools this page exposes and explain their uses.",
+          "zh-Hans": "检查页面公开的 WebMCP 工具并说明用途。",
+          "zh-Hant": "檢查頁面公開的 WebMCP 工具並說明用途。",
+          "ja": "このページが公開する WebMCP ツールと用途を確認してください。",
+          "ko": "이 페이지가 제공하는 WebMCP 도구와 용도를 확인해 주세요."
+        }
+      ]
     },
     {
       "id": "context7",
@@ -158,7 +206,23 @@
           "type": "http",
           "url": "https://mcp.context7.com/mcp"
         }
-      }
+      },
+      "examples": [
+        {
+          "en": "Find the current documentation for the library used in this project.",
+          "zh-Hans": "查找本项目所用库的最新文档。",
+          "zh-Hant": "查找本專案所用程式庫的最新文件。",
+          "ja": "このプロジェクトで使うライブラリの最新資料を探してください。",
+          "ko": "이 프로젝트에서 사용하는 라이브러리의 최신 문서를 찾아 주세요."
+        },
+        {
+          "en": "Check this API usage against its official examples.",
+          "zh-Hans": "根据官方示例检查这段 API 用法。",
+          "zh-Hant": "根據官方範例檢查這段 API 用法。",
+          "ja": "この API の使い方を公式の例で確認してください。",
+          "ko": "공식 예시를 바탕으로 이 API 사용법을 확인해 주세요."
+        }
+      ]
     },
     {
       "id": "github",
@@ -188,7 +252,23 @@
         "ko": "GitHub 인증이 필요합니다. 제공업체의 설정 안내에 따라 계정을 연결하세요."
       },
       "sourceUrl": "https://github.com/github/github-mcp-server",
-      "documentationUrl": "https://github.com/github/github-mcp-server#remote-github-mcp-server"
+      "documentationUrl": "https://github.com/github/github-mcp-server#remote-github-mcp-server",
+      "examples": [
+        {
+          "en": "Summarize the open issues for this repository.",
+          "zh-Hans": "汇总这个仓库的未解决议题。",
+          "zh-Hant": "彙整這個儲存庫的未解決議題。",
+          "ja": "このリポジトリの未解決の課題をまとめてください。",
+          "ko": "이 저장소의 열린 이슈를 요약해 주세요."
+        },
+        {
+          "en": "Review the changes in this pull request and summarize the risks.",
+          "zh-Hans": "检查这个拉取请求的改动并总结风险。",
+          "zh-Hant": "檢查這個提取要求的變更並總結風險。",
+          "ja": "このプルリクエストの変更とリスクをまとめてください。",
+          "ko": "이 풀 리퀘스트의 변경 사항과 위험을 요약해 주세요."
+        }
+      ]
     },
     {
       "id": "local-app-builder",
@@ -321,6 +401,525 @@
         "source": "anthropics/claude-plugins-official",
         "name": "claude-plugins-official"
       }
+    },
+    {
+      "id": "notion",
+      "kind": "mcp",
+      "name": "Notion",
+      "publisher": "Notion",
+      "category": "productivity",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Search your workspace and work with pages and databases.",
+        "zh-Hans": "搜索工作区，读写页面和数据库。",
+        "zh-Hant": "搜尋工作區，讀寫頁面和資料庫。",
+        "ja": "ワークスペースを検索し、ページやデータベースを操作します。",
+        "ko": "워크스페이스를 검색하고 페이지와 데이터베이스를 관리합니다."
+      },
+      "requirements": {
+        "en": "Sign in to your account after saving the server.",
+        "zh-Hans": "保存服务器后登录并授权账号。",
+        "zh-Hant": "儲存伺服器後登入並授權帳號。",
+        "ja": "サーバーを保存後、アカウントにログインして認証してください。",
+        "ko": "서버를 저장한 후 계정에 로그인하여 인증하세요."
+      },
+      "sourceUrl": "https://developers.notion.com/guides/mcp/get-started-with-mcp",
+      "documentationUrl": "https://developers.notion.com/guides/mcp/get-started-with-mcp",
+      "mcp": {
+        "name": "notion",
+        "config": {
+          "type": "http",
+          "url": "https://mcp.notion.com/mcp"
+        }
+      },
+      "examples": [
+        {
+          "en": "Find the project notes and summarize the decisions and open questions.",
+          "zh-Hans": "查找项目笔记，汇总已定事项和待解决问题。",
+          "zh-Hant": "查找專案筆記，彙整已定事項和待解決問題。",
+          "ja": "プロジェクトのメモから決定事項と未解決の点をまとめてください。",
+          "ko": "프로젝트 노트에서 결정 사항과 미해결 질문을 요약해 주세요."
+        },
+        {
+          "en": "Turn these notes into a well-organized project page.",
+          "zh-Hans": "将这些笔记整理成结构清晰的项目页面。",
+          "zh-Hant": "將這些筆記整理成結構清晰的專案頁面。",
+          "ja": "このメモを整理されたプロジェクトページにしてください。",
+          "ko": "이 노트를 잘 정리된 프로젝트 페이지로 만들어 주세요."
+        }
+      ]
+    },
+    {
+      "id": "linear",
+      "kind": "mcp",
+      "name": "Linear",
+      "publisher": "Linear",
+      "category": "productivity",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Plan projects and manage issues, cycles and milestones.",
+        "zh-Hans": "规划项目，管理议题、迭代和里程碑。",
+        "zh-Hant": "規劃專案，管理議題、迭代和里程碑。",
+        "ja": "プロジェクトを計画し、課題・サイクル・マイルストーンを管理します。",
+        "ko": "프로젝트를 계획하고 이슈, 사이클, 마일스톤을 관리합니다."
+      },
+      "requirements": {
+        "en": "Sign in to your account after saving the server.",
+        "zh-Hans": "保存服务器后登录并授权账号。",
+        "zh-Hant": "儲存伺服器後登入並授權帳號。",
+        "ja": "サーバーを保存後、アカウントにログインして認証してください。",
+        "ko": "서버를 저장한 후 계정에 로그인하여 인증하세요."
+      },
+      "sourceUrl": "https://linear.app/docs/mcp",
+      "documentationUrl": "https://linear.app/docs/mcp",
+      "mcp": {
+        "name": "linear",
+        "config": {
+          "type": "http",
+          "url": "https://mcp.linear.app/mcp"
+        }
+      },
+      "examples": [
+        {
+          "en": "Summarize the issues assigned to me and group them by project.",
+          "zh-Hans": "汇总分配给我的议题，按项目分组。",
+          "zh-Hant": "彙整指派給我的議題，依專案分組。",
+          "ja": "自分に割り当てられた課題をプロジェクト別にまとめてください。",
+          "ko": "나에게 할당된 이슈를 프로젝트별로 요약해 주세요."
+        },
+        {
+          "en": "Draft a clear issue from this bug report.",
+          "zh-Hans": "根据这份缺陷报告起草清晰的议题。",
+          "zh-Hant": "根據這份缺陷報告起草清楚的議題。",
+          "ja": "この不具合報告からわかりやすい課題を作成してください。",
+          "ko": "이 버그 보고서를 명확한 이슈로 작성해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "figma",
+      "kind": "mcp",
+      "name": "Figma",
+      "publisher": "Figma",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Bring design context and components into implementation.",
+        "zh-Hans": "获取设计上下文和组件，辅助实现界面。",
+        "zh-Hant": "取得設計情境和元件，協助實作介面。",
+        "ja": "デザインの情報やコンポーネントを取得し、実装に活用します。",
+        "ko": "디자인 컨텍스트와 컴포넌트를 가져와 UI 구현에 활용합니다."
+      },
+      "requirements": {
+        "en": "Sign in to your account after saving the server.",
+        "zh-Hans": "保存服务器后登录并授权账号。",
+        "zh-Hant": "儲存伺服器後登入並授權帳號。",
+        "ja": "サーバーを保存後、アカウントにログインして認証してください。",
+        "ko": "서버를 저장한 후 계정에 로그인하여 인증하세요."
+      },
+      "sourceUrl": "https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/",
+      "documentationUrl": "https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/",
+      "mcp": {
+        "name": "figma",
+        "config": {
+          "type": "http",
+          "url": "https://mcp.figma.com/mcp"
+        }
+      },
+      "examples": [
+        {
+          "en": "Inspect this design and explain the components and spacing.",
+          "zh-Hans": "查看这份设计，说明组件和间距。",
+          "zh-Hant": "檢視這份設計，說明元件和間距。",
+          "ja": "このデザインのコンポーネントと余白を確認してください。",
+          "ko": "이 디자인의 컴포넌트와 간격을 확인해 주세요."
+        },
+        {
+          "en": "Use this design's context to help implement the interface.",
+          "zh-Hans": "结合这份设计的上下文，协助实现界面。",
+          "zh-Hant": "結合這份設計的情境，協助實作介面。",
+          "ja": "このデザインの情報を使って画面を実装してください。",
+          "ko": "이 디자인의 컨텍스트를 활용해 인터페이스 구현을 도와주세요."
+        }
+      ]
+    },
+    {
+      "id": "supabase",
+      "kind": "mcp",
+      "name": "Supabase",
+      "publisher": "Supabase",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Explore database schemas, query data and inspect project logs.",
+        "zh-Hans": "查看数据库结构、查询数据和项目日志。",
+        "zh-Hant": "檢視資料庫結構、查詢資料和專案日誌。",
+        "ja": "データベース構造を確認し、データやプロジェクトログを調べます。",
+        "ko": "데이터베이스 스키마를 살펴보고 데이터와 프로젝트 로그를 조회합니다."
+      },
+      "requirements": {
+        "en": "Requires Supabase authorization. Starts in read-only mode; optionally scope the URL to a project.",
+        "zh-Hans": "需要 Supabase 授权，默认只读；可在地址中限定项目范围。",
+        "zh-Hant": "需要 Supabase 授權，預設唯讀；可在位址中限定專案範圍。",
+        "ja": "Supabase の認証が必要です。初期設定は読み取り専用で、URL でプロジェクトを限定できます。",
+        "ko": "Supabase 인증이 필요합니다. 기본값은 읽기 전용이며 URL에서 프로젝트 범위를 지정할 수 있습니다."
+      },
+      "sourceUrl": "https://supabase.com/docs/guides/ai-tools/mcp",
+      "documentationUrl": "https://supabase.com/docs/guides/ai-tools/mcp",
+      "mcp": {
+        "name": "supabase",
+        "config": {
+          "type": "http",
+          "url": "https://mcp.supabase.com/mcp?read_only=true"
+        }
+      },
+      "examples": [
+        {
+          "en": "Explain this project's database schema and table relationships.",
+          "zh-Hans": "解释这个项目的数据库结构和表关系。",
+          "zh-Hant": "解釋這個專案的資料庫結構和資料表關係。",
+          "ja": "このプロジェクトのデータベース構造とテーブルの関係を説明してください。",
+          "ko": "이 프로젝트의 데이터베이스 스키마와 테이블 관계를 설명해 주세요."
+        },
+        {
+          "en": "Inspect the project logs and summarize recent errors.",
+          "zh-Hans": "查看项目日志并汇总最近的错误。",
+          "zh-Hant": "檢視專案日誌並彙整最近的錯誤。",
+          "ja": "プロジェクトのログから最近のエラーをまとめてください。",
+          "ko": "프로젝트 로그에서 최근 오류를 요약해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "frontend-design",
+      "kind": "plugin",
+      "name": "Frontend Design",
+      "publisher": "Anthropic",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Create polished web interfaces with considered typography and visual design.",
+        "zh-Hans": "设计精致的网页界面，改进排版和视觉表现。",
+        "zh-Hant": "設計精緻的網頁介面，改善排版和視覺表現。",
+        "ja": "タイポグラフィとビジュアルに配慮した Web インターフェースを作成します。",
+        "ko": "타이포그래피와 시각 디자인을 고려한 웹 인터페이스를 만듭니다."
+      },
+      "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/frontend-design",
+      "documentationUrl": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/frontend-design#readme",
+      "marketplace": {
+        "source": "anthropics/claude-plugins-official",
+        "name": "claude-plugins-official",
+        "plugin": "frontend-design"
+      },
+      "skills": [
+        "frontend-design"
+      ],
+      "examples": [
+        {
+          "en": "Design a settings page with clear hierarchy and accessible controls.",
+          "zh-Hans": "设计一个层次清晰、控件易用的设置页。",
+          "zh-Hant": "設計一個層次清楚、控制項易用的設定頁。",
+          "ja": "情報の階層が明確で使いやすい設定画面をデザインしてください。",
+          "ko": "정보 구조가 명확하고 접근성 있는 설정 화면을 디자인해 주세요."
+        },
+        {
+          "en": "Improve this page's typography, spacing and interaction feedback.",
+          "zh-Hans": "改进这个页面的排版、间距和交互反馈。",
+          "zh-Hant": "改善這個頁面的排版、間距和互動回饋。",
+          "ja": "このページの文字組み、余白、操作のフィードバックを改善してください。",
+          "ko": "이 페이지의 타이포그래피, 간격, 상호작용 피드백을 개선해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "document-skills",
+      "kind": "plugin",
+      "name": "Document Skills",
+      "publisher": "Anthropic",
+      "category": "productivity",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Create and edit Word, Excel, PowerPoint and PDF documents.",
+        "zh-Hans": "创建和编辑 Word、Excel、PowerPoint 和 PDF 文档。",
+        "zh-Hant": "建立和編輯 Word、Excel、PowerPoint 和 PDF 文件。",
+        "ja": "Word・Excel・PowerPoint・PDF の文書を作成・編集します。",
+        "ko": "Word, Excel, PowerPoint, PDF 문서를 만들고 편집합니다."
+      },
+      "sourceUrl": "https://github.com/anthropics/skills",
+      "documentationUrl": "https://github.com/anthropics/skills#readme",
+      "marketplace": {
+        "source": "anthropics/skills",
+        "name": "anthropic-agent-skills",
+        "plugin": "document-skills"
+      },
+      "skills": [
+        "docx",
+        "xlsx",
+        "pptx",
+        "pdf"
+      ],
+      "requirements": {
+        "en": "Adds the complete document skill pack. Some workflows require Python or office utilities.",
+        "zh-Hans": "添加完整文档技能包，部分流程需要 Python 或办公工具。",
+        "zh-Hant": "新增完整文件技能包，部分流程需要 Python 或辦公工具。",
+        "ja": "文書スキルパック全体を追加します。一部の処理には Python や文書用ツールが必要です。",
+        "ko": "전체 문서 스킬 팩을 추가합니다. 일부 작업에는 Python 또는 문서 도구가 필요합니다."
+      },
+      "examples": [
+        {
+          "en": "Turn these notes into a formatted Word document and a PDF.",
+          "zh-Hans": "把这些笔记整理成排版清晰的 Word 文档和 PDF。",
+          "zh-Hant": "把這些筆記整理成排版清楚的 Word 文件和 PDF。",
+          "ja": "このメモを整えた Word 文書と PDF にしてください。",
+          "ko": "이 노트를 서식이 갖춰진 Word 문서와 PDF로 만들어 주세요."
+        },
+        {
+          "en": "Create an Excel summary and a presentation from this data.",
+          "zh-Hans": "根据这份数据制作 Excel 汇总和演示文稿。",
+          "zh-Hant": "根據這份資料製作 Excel 彙整和簡報。",
+          "ja": "このデータから Excel の集計表とプレゼン資料を作成してください。",
+          "ko": "이 데이터로 Excel 요약표와 프레젠테이션을 만들어 주세요."
+        }
+      ]
+    },
+    {
+      "id": "example-skills",
+      "kind": "plugin",
+      "name": "Creative & Development Skills",
+      "publisher": "Anthropic",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Build artifacts, test web apps, create MCP servers and author skills.",
+        "zh-Hans": "构建交互作品、测试网页、开发 MCP 和编写 Skills。",
+        "zh-Hant": "建構互動作品、測試網頁、開發 MCP 和編寫 Skills。",
+        "ja": "対話型コンテンツや MCP を作成し、Web アプリをテストしてスキルを記述します。",
+        "ko": "인터랙티브 결과물과 MCP를 만들고 웹 앱을 테스트하며 스킬을 작성합니다."
+      },
+      "sourceUrl": "https://github.com/anthropics/skills",
+      "documentationUrl": "https://github.com/anthropics/skills#readme",
+      "marketplace": {
+        "source": "anthropics/skills",
+        "name": "anthropic-agent-skills",
+        "plugin": "example-skills"
+      },
+      "skills": [
+        "frontend-design",
+        "webapp-testing",
+        "mcp-builder",
+        "skill-creator",
+        "web-artifacts-builder",
+        "canvas-design",
+        "algorithmic-art",
+        "brand-guidelines",
+        "doc-coauthoring",
+        "internal-comms",
+        "slack-gif-creator",
+        "theme-factory"
+      ],
+      "examples": [
+        {
+          "en": "Build an interactive artifact that explains this idea.",
+          "zh-Hans": "制作一个交互作品来解释这个想法。",
+          "zh-Hant": "製作一個互動作品來解釋這個想法。",
+          "ja": "このアイデアを説明する対話型コンテンツを作成してください。",
+          "ko": "이 아이디어를 설명하는 인터랙티브 결과물을 만들어 주세요."
+        },
+        {
+          "en": "Create a reusable skill for this workflow and test it.",
+          "zh-Hans": "为这个流程编写可复用的 Skill 并进行测试。",
+          "zh-Hant": "為這個流程編寫可重用的 Skill 並進行測試。",
+          "ja": "この手順を再利用できるスキルにしてテストしてください。",
+          "ko": "이 작업 흐름을 재사용 가능한 스킬로 만들고 테스트해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "superpowers",
+      "kind": "plugin",
+      "name": "Superpowers",
+      "publisher": "Jesse Vincent",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Use structured planning, systematic debugging and test-driven development.",
+        "zh-Hans": "使用结构化规划、系统化调试和测试驱动开发。",
+        "zh-Hant": "使用結構化規劃、系統化偵錯和測試驅動開發。",
+        "ja": "構造化された計画・体系的なデバッグ・テスト駆動開発を活用します。",
+        "ko": "체계적인 계획, 디버깅, 테스트 주도 개발을 활용합니다."
+      },
+      "sourceUrl": "https://github.com/obra/superpowers",
+      "documentationUrl": "https://github.com/obra/superpowers#readme",
+      "marketplace": {
+        "source": "anthropics/claude-plugins-official",
+        "name": "claude-plugins-official",
+        "plugin": "superpowers"
+      },
+      "skills": [
+        "brainstorming",
+        "writing-plans",
+        "systematic-debugging",
+        "test-driven-development"
+      ],
+      "examples": [
+        {
+          "en": "Investigate this bug systematically and verify the root cause.",
+          "zh-Hans": "系统排查这个缺陷并验证根因。",
+          "zh-Hant": "系統排查這個缺陷並驗證根因。",
+          "ja": "この不具合を体系的に調べ、根本原因を検証してください。",
+          "ko": "이 버그를 체계적으로 조사하고 근본 원인을 검증해 주세요."
+        },
+        {
+          "en": "Plan this feature, then implement it with test-driven development.",
+          "zh-Hans": "先规划这个功能，再以测试驱动的方式实现。",
+          "zh-Hant": "先規劃這個功能，再以測試驅動的方式實作。",
+          "ja": "機能を計画し、テスト駆動で実装してください。",
+          "ko": "이 기능을 계획한 다음 테스트 주도 방식으로 구현해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "code-review",
+      "kind": "plugin",
+      "name": "Code Review",
+      "publisher": "Anthropic",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Review pull requests for bugs and actionable improvements.",
+        "zh-Hans": "审查拉取请求，发现问题并给出可执行的改进建议。",
+        "zh-Hant": "審查提取要求，發現問題並提供可執行的改善建議。",
+        "ja": "プルリクエストをレビューし、不具合や改善点を見つけます。",
+        "ko": "풀 리퀘스트를 검토하여 버그와 개선 사항을 찾습니다."
+      },
+      "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/code-review",
+      "documentationUrl": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/code-review#readme",
+      "marketplace": {
+        "source": "anthropics/claude-plugins-official",
+        "name": "claude-plugins-official",
+        "plugin": "code-review"
+      },
+      "requirements": {
+        "en": "Requires GitHub CLI access to the repository being reviewed.",
+        "zh-Hans": "需要通过 GitHub CLI 访问待审查的仓库。",
+        "zh-Hant": "需要透過 GitHub CLI 存取待審查的儲存庫。",
+        "ja": "レビュー対象のリポジトリに GitHub CLI でアクセスできる必要があります。",
+        "ko": "검토할 저장소에 GitHub CLI로 접근할 수 있어야 합니다."
+      },
+      "examples": [
+        {
+          "en": "Review this pull request and report actionable problems.",
+          "zh-Hans": "审查这个拉取请求，报告可执行修复的问题。",
+          "zh-Hant": "審查這個提取要求，回報可執行修復的問題。",
+          "ja": "このプルリクエストをレビューし、修正可能な問題を報告してください。",
+          "ko": "이 풀 리퀘스트를 검토하고 해결 가능한 문제를 보고해 주세요."
+        },
+        {
+          "en": "Check this change for bugs and missing regression coverage.",
+          "zh-Hans": "检查这次改动的缺陷和回归测试遗漏。",
+          "zh-Hant": "檢查這次變更的缺陷和迴歸測試遺漏。",
+          "ja": "この変更の不具合と回帰テストの不足を確認してください。",
+          "ko": "이 변경의 버그와 회귀 테스트 누락을 확인해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "feature-dev",
+      "kind": "plugin",
+      "name": "Feature Development",
+      "publisher": "Anthropic",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Explore a codebase, design a solution and review the implementation.",
+        "zh-Hans": "探索代码库、设计方案并审查功能实现。",
+        "zh-Hant": "探索程式碼庫、設計方案並審查功能實作。",
+        "ja": "コードベースを調査し、設計から実装レビューまで進めます。",
+        "ko": "코드베이스를 탐색하고 설계부터 구현 검토까지 진행합니다."
+      },
+      "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/feature-dev",
+      "documentationUrl": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/feature-dev#readme",
+      "marketplace": {
+        "source": "anthropics/claude-plugins-official",
+        "name": "claude-plugins-official",
+        "plugin": "feature-dev"
+      },
+      "examples": [
+        {
+          "en": "Explore the codebase and propose a design for this feature.",
+          "zh-Hans": "探索代码库并提出这个功能的实现方案。",
+          "zh-Hant": "探索程式碼庫並提出這個功能的實作方案。",
+          "ja": "コードベースを調べ、この機能の実装方針を提案してください。",
+          "ko": "코드베이스를 탐색하고 이 기능의 설계를 제안해 주세요."
+        },
+        {
+          "en": "Implement the agreed feature and review the result.",
+          "zh-Hans": "实现已确定的功能方案并审查结果。",
+          "zh-Hant": "實作已確定的功能方案並審查結果。",
+          "ja": "合意した機能を実装し、結果をレビューしてください。",
+          "ko": "합의한 기능을 구현하고 결과를 검토해 주세요."
+        }
+      ]
     }
   ]
 }

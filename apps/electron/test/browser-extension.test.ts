@@ -4,6 +4,21 @@ import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import vm from 'node:vm';
+import { browserIdentity } from '../browser-extension/browserIdentity.js';
+
+test('extension identity distinguishes supported browsers and never assumes Chrome for an unknown host', () => {
+  const brands = (...names: string[]) => ({ userAgentData: { brands: names.map(brand => ({ brand })) } });
+  assert.equal(browserIdentity(brands('Chromium', 'Google Chrome')), 'chrome');
+  assert.equal(browserIdentity(brands('Chromium', 'Microsoft Edge')), 'edge');
+  assert.equal(browserIdentity(brands('Chromium', 'Brave')), 'brave');
+  assert.equal(browserIdentity({ brave: { isBrave: () => true } }), 'brave');
+  assert.equal(browserIdentity(brands('Not A Brand', 'Chromium')), 'chromium');
+  assert.equal(browserIdentity({ userAgent: 'Chrome/150 Edg/150' }), 'edge');
+  assert.equal(browserIdentity({ userAgent: 'Safari/605' }), null);
+  assert.equal(browserIdentity({ userAgent: 'Firefox/150' }), null);
+  assert.equal(browserIdentity({ ...brands('Chromium'), userAgent: 'Chrome/150 OPR/100' }), null);
+  assert.equal(browserIdentity({}), null);
+});
 import { originOf, permitsNavigation, permittedCdpMethod, keyDescription } from '../browser-extension/policy.js';
 
 function event() { const listeners: Function[] = []; return { listeners,addListener:(listener:Function) => listeners.push(listener),emit:(...args:unknown[]) => listeners.forEach(listener => listener(...args)) }; }
@@ -59,8 +74,8 @@ function worker() {
       },
     },
   };
-  const source = readFileSync(new URL('../browser-extension/worker.js',import.meta.url),'utf8').replace(/^import[^\n]*\n/,'');
-  vm.runInNewContext(source,{ chrome,crypto:{ randomUUID },URL,setTimeout,clearTimeout,originOf,permitsNavigation,permittedCdpMethod,keyDescription,console });
+  const source = readFileSync(new URL('../browser-extension/worker.js',import.meta.url),'utf8').replace(/^import[^\n]*\n/gm,'');
+  vm.runInNewContext(source,{ browserIdentity,navigator:{ userAgentData:{ brands:[{ brand:'Google Chrome' }] } },chrome,crypto:{ randomUUID },URL,setTimeout,clearTimeout,originOf,permitsNavigation,permittedCdpMethod,keyDescription,console });
   const command = (payload:any,revision = 'one') => {
     const id = randomUUID(); const result = new Promise<any>(resolve => replies.set(id,resolve));
     incoming.emit({ type:'command',id,revision,payload }); return result;

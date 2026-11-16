@@ -52,7 +52,7 @@ def fetch(output):
                 temporary.unlink(missing_ok=True)
         for source in evidence.glob("*.json"):
             shutil.copy2(source, destination / source.name)
-        subprocess.run([sys.executable, str(sdk / "scripts/rootfs/verify-evidence.py"),
+        subprocess.run([sys.executable, str(config.parent / "verify_sdk_rootfs.py"), "--sdk-root", str(sdk),
                         "--evidence-dir", str(destination), "--archive", str(archive)], check=True)
     print(f"Verified locked SDK release rootfs: {output}")
 

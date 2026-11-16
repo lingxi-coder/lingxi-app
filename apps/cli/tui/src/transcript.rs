@@ -169,9 +169,9 @@ impl Transcript {
     }
 
     /// Apply the live activity fold rules to restored history without changing
-    /// durable row identities. Visible prose/questions/tools seal the group.
+    /// durable row identities. Visible prose and interactive tools seal the group.
     fn push_replayed_message(&mut self, message: RenderedMessage) {
-        use crate::history_cell::tool::{activity_fold_key, ActivityEntry, ActivityFoldCell};
+        use crate::history_cell::tool::{transcript_activity_key, ActivityEntry, ActivityFoldCell};
         if let RenderedMessage::IdentifiedTranscriptRow {
             message,
             request_id,
@@ -185,22 +185,53 @@ impl Transcript {
             }
             return;
         }
+        if let RenderedMessage::AssistantThinking { thinking, .. } = &message {
+            if !thinking.trim().is_empty() {
+                let same = self
+                    .active
+                    .as_ref()
+                    .is_some_and(|cell| cell.as_any().is::<ActivityFoldCell>());
+                if !same {
+                    self.flush_active();
+                    self.set_active(Box::new(ActivityFoldCell {
+                        key: "activity",
+                        reasoning: String::new(),
+                        thinking: false,
+                        sealed: true,
+                        entries: Vec::new(),
+                    }));
+                }
+                self.mutate_active(|cell| {
+                    if let Some(fold) = cell.as_any_mut().downcast_mut::<ActivityFoldCell>() {
+                        if !fold.reasoning.is_empty() {
+                            fold.reasoning.push_str("\n\n");
+                        }
+                        fold.reasoning.push_str(thinking);
+                    }
+                });
+                return;
+            }
+        }
         if let RenderedMessage::AssistantToolUse { id, tool, input } = &message {
-            if let Some(key) = activity_fold_key(tool, input) {
+            if let Some(key) = transcript_activity_key(tool, input) {
                 let same = self
                     .active
                     .as_ref()
                     .and_then(|cell| cell.as_any().downcast_ref::<ActivityFoldCell>())
-                    .is_some_and(|fold| fold.key == key);
+                    .is_some_and(|fold| fold.entries.is_empty() || fold.key == key);
                 if !same {
                     self.flush_active();
                     self.set_active(Box::new(ActivityFoldCell {
+                        reasoning: String::new(),
+                        thinking: false,
+                        sealed: true,
                         key,
                         entries: Vec::new(),
                     }));
                 }
                 self.mutate_active(|cell| {
                     if let Some(fold) = cell.as_any_mut().downcast_mut::<ActivityFoldCell>() {
+                        fold.key = key;
                         fold.entries.push(ActivityEntry {
                             id: id.to_string(),
                             tool: tool.clone(),
@@ -1000,6 +1031,68 @@ mod tests {
     }
 
     #[test]
+    fn restored_thinking_and_mixed_tools_share_one_sealed_activity() {
+        use crate::history_cell::tool::ActivityFoldCell;
+        let mut messages = vec![RenderedMessage::AssistantThinking {
+            thinking: "Inspect the layout".into(),
+            expanded: false,
+        }];
+        for tool in ["Read", "Bash"] {
+            let id = lingxi_core::types::ToolUseId::from(tool.to_owned());
+            messages.push(RenderedMessage::IdentifiedTranscriptRow {
+                request_id: format!("call-{tool}"),
+                message: Box::new(RenderedMessage::AssistantToolUse {
+                    id: id.clone(),
+                    tool: tool.into(),
+                    input: serde_json::json!({}),
+                }),
+            });
+            messages.push(RenderedMessage::UserToolResult {
+                id,
+                tool: tool.into(),
+                result: serde_json::json!("retained result"),
+                input: None,
+                old_string: None,
+                new_string: None,
+                file_path: None,
+            });
+        }
+        messages.push(system("Visible boundary"));
+        let transcript = Transcript::from_messages(messages);
+        assert_eq!(transcript.committed.len(), 2);
+        let fold = transcript.committed[0]
+            .as_any()
+            .downcast_ref::<ActivityFoldCell>()
+            .unwrap();
+        assert!(fold.sealed);
+        assert_eq!(fold.entries.len(), 2);
+        assert_eq!(fold.reasoning, "Inspect the layout");
+        assert_eq!(transcript.row_uuids[&0], ["call-Read", "call-Bash"]);
+        for width in [20, 80] {
+            assert_eq!(
+                fold.display_lines(width, &Theme::dark(), RenderMode::default())
+                    .len(),
+                1
+            );
+        }
+        let details = fold
+            .display_lines(
+                80,
+                &Theme::dark(),
+                RenderMode {
+                    verbose: true,
+                    ..Default::default()
+                },
+            )
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(details.contains("Inspect the layout"));
+        assert!(details.contains("retained result"));
+    }
+
+    #[test]
     fn deeplink_uuid_anchor_survives_repeated_unicode_resize_and_new_tail() {
         let mut transcript = Transcript::new();
         let theme = Theme::dark();
@@ -1540,7 +1633,10 @@ mod tests {
             .flush_to_native_scrollback(&mut terminal, 80, &Theme::dark())
             .unwrap();
         let out = raw_string(&raw);
-        assert!(out.contains("ctrl+o to expand"), "collapsed:\n{out}");
+        assert!(
+            !out.contains("Thinking"),
+            "reasoning has no separate collapsed row:\n{out}"
+        );
         assert!(!out.contains("hidden reasoning body"), "collapsed:\n{out}");
 
         // Verbose: the body commits.

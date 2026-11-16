@@ -1,0 +1,31 @@
+.transcript-api-retry {
+  min-width: 0;
+  color: var(--retry-text);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.transcript-api-retry > .transcript-api-retry-trigger {
+  min-height: 28px;
+  gap: 8px;
+  color: inherit;
+}
+.transcript-api-retry-icon { flex: none; }
+.transcript-api-retry-trigger > .transcript-disclosure-chevron {
+  display: inline-flex;
+  opacity: 1;
+}
+.transcript-api-retry-trigger:active { opacity: .65; }
+.transcript-api-retry-trigger:focus-visible {
+  outline: 2px solid var(--retry-focus);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+.transcript-api-retry-message {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (pointer: coarse) {
+  .transcript-api-retry > .transcript-api-retry-trigger { min-height: 44px; }
+}

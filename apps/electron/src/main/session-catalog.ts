@@ -5,6 +5,8 @@ import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, isAbsolute } from 'node:path';
 import type { SessionRowDto } from '@lingxi/bridge-client';
+import { validateClientEvent } from '@lingxi/bridge-client';
+import { historyCursor, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
 
 import { buildBridgeArguments, buildBridgeEnvironment } from './host-utils.js';
 import { resolveServerBin } from './bridgeDiscovery.js';
@@ -17,7 +19,7 @@ const MAX_SESSIONS = 200;
 const DEFAULT_CACHE_TTL_MS = 15_000;
 const MAX_CATALOG_CHILDREN = 2;
 const MAX_QUEUED_CATALOG_OPERATIONS = 512;
-const MAX_WORKER_FRAME_BYTES = MAX_OUTPUT_BYTES * 2 + 4_096;
+const MAX_WORKER_HEADER_BYTES = 4_096;
 const MAX_WORKER_REQUEST_BYTES = 64 * 1024;
 const DEFAULT_WORKER_IDLE_MS = 30_000;
 const CHILD_TERMINATION_RETRY_MS = 100;
@@ -194,14 +196,16 @@ interface CatalogWorkerQuery {
   sessionId?: string;
   scope?: SessionCatalogScope;
   transcriptPath?: string;
+  historyBefore?: TranscriptHistoryCursor;
 }
 
 /** One request at a time bounds worker IO; catalog callers retain their own deduplication. */
 class CatalogWorker {
   private nextId = 0;
   private current?: { id: number; resolve(output: string): void; reject(error: Error): void; timeout: ReturnType<typeof setTimeout> };
-  private parts: Buffer[] = [];
-  private bytes = 0;
+  private readonly header = Buffer.alloc(MAX_WORKER_HEADER_BYTES);
+  private headerBytes = 0;
+  private response?: { body: Buffer; bytes: number; kind: 'output' | 'error' };
   private stderr = Buffer.alloc(0);
   private idleTimer?: ReturnType<typeof setTimeout>;
   private alive = true;
@@ -246,7 +250,7 @@ class CatalogWorker {
       const timeout = setTimeout(() => this.fail(new Error('session catalog timed out')), this.timeoutMs);
       timeout.unref();
       this.current = { id, resolve, reject, timeout };
-      const frame = `${JSON.stringify({ version: 1, id, ...query })}\n`;
+      const frame = `${JSON.stringify({ version: 2, id, ...query })}\n`;
       if (Buffer.byteLength(frame, 'utf8') > MAX_WORKER_REQUEST_BYTES) { this.fail(new Error('session catalog request is too large')); return; }
       try { this.child.stdin!.write(frame); }
       catch { this.fail(new Error('session catalog worker input failed')); }
@@ -268,8 +272,8 @@ class CatalogWorker {
   private fail(error: Error): void {
     const current = this.current;
     this.current = undefined;
-    this.parts = [];
-    this.bytes = 0;
+    this.headerBytes = 0;
+    this.response = undefined;
     if (current) { clearTimeout(current.timeout); current.reject(error); }
     this.stop();
   }
@@ -278,39 +282,71 @@ class CatalogWorker {
     if (!this.available && !this.current) return;
     let start = 0;
     while (start < chunk.length) {
-      const newline = chunk.indexOf(10, start);
-      const end = newline < 0 ? chunk.length : newline;
-      const part = chunk.subarray(start, end);
-      this.bytes += part.length;
-      if (this.bytes > MAX_WORKER_FRAME_BYTES) { this.fail(new Error('session catalog output is too large')); return; }
-      this.parts.push(part);
-      if (newline < 0) return;
-      const frame = Buffer.concat(this.parts, this.bytes).toString('utf8');
-      this.parts = []; this.bytes = 0;
-      let value: { version?: unknown; id?: unknown; output?: unknown; error?: unknown };
-      try { value = JSON.parse(frame); }
-      catch { this.fail(new Error('session catalog returned invalid worker JSON')); return; }
-      const current = this.current;
-      if (!current || value?.version !== 1 || value.id !== current.id
-        || (typeof value.output !== 'string' && typeof value.error !== 'string')) {
-        this.fail(new Error('session catalog returned an invalid worker response')); return;
+      if (!this.response) {
+        const newline = chunk.indexOf(10, start);
+        const end = newline < 0 ? chunk.length : newline;
+        const length = end - start;
+        if (this.headerBytes + length > MAX_WORKER_HEADER_BYTES) {
+          this.fail(new Error('session catalog worker header is too large')); return;
+        }
+        chunk.copy(this.header, this.headerBytes, start, end);
+        this.headerBytes += length;
+        if (newline < 0) return;
+        let value: { version?: unknown; id?: unknown; bytes?: unknown; kind?: unknown };
+        try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(this.header.subarray(0, this.headerBytes))); }
+        catch { this.fail(new Error('session catalog returned invalid worker JSON')); return; }
+        this.headerBytes = 0;
+        if (!this.current || !value || typeof value !== 'object' || Array.isArray(value)
+          || Object.keys(value).some(key => !['version', 'id', 'bytes', 'kind'].includes(key))
+          || value.version !== 2 || !Number.isSafeInteger(value.id) || value.id !== this.current.id
+          || typeof value.bytes !== 'number' || !Number.isSafeInteger(value.bytes) || value.bytes < 1
+          || value.bytes > MAX_OUTPUT_BYTES || (value.kind !== 'output' && value.kind !== 'error')) {
+          this.fail(new Error('session catalog returned an invalid worker response')); return;
+        }
+        // The bounded length is known before allocation. A single destination
+        // also bounds bookkeeping when the pipe fragments the body byte by byte.
+        this.response = { body: Buffer.allocUnsafe(value.bytes), bytes: 0, kind: value.kind };
+        start = newline + 1;
+        continue;
       }
+      const response = this.response;
+      const length = Math.min(response.body.length - response.bytes, chunk.length - start);
+      chunk.copy(response.body, response.bytes, start, start + length);
+      response.bytes += length;
+      start += length;
+      if (response.bytes < response.body.length || start === chunk.length) return;
+      if (chunk[start] !== 10) { this.fail(new Error('session catalog returned an invalid worker frame')); return; }
+      start++;
+      this.response = undefined;
+      let output: string;
+      try { output = new TextDecoder('utf-8', { fatal: true }).decode(response.body); }
+      catch { this.fail(new Error('session catalog returned invalid worker UTF-8')); return; }
+      const current = this.current!;
       this.current = undefined;
       clearTimeout(current.timeout);
-      if (typeof value.error === 'string') current.reject(new Error(value.error));
-      else {
-        try { current.resolve(boundedOutput(value.output as string)); }
-        catch (error) { current.reject(error instanceof Error ? error : new Error(String(error))); this.retiring = true; }
-      }
+      if (response.kind === 'error') {
+        let error: unknown;
+        try { error = JSON.parse(output); } catch { /* Checked below. */ }
+        if (typeof error !== 'string') {
+          current.reject(new Error('session catalog returned an invalid worker error'));
+          this.retiring = true;
+        } else current.reject(new Error(error));
+      } else current.resolve(output);
       if (this.retiring) this.stop();
       else {
         this.idleTimer = setTimeout(() => this.retire(), this.idleMs);
         this.idleTimer.unref();
         catalogChildren.markIdle(this.release, () => this.retire());
       }
-      start = newline + 1;
     }
   }
+}
+
+interface CatalogWorkerLane {
+  worker?: CatalogWorker;
+  key?: string;
+  pending?: Promise<CatalogWorker>;
+  tail: Promise<void>;
 }
 
 function boundedOutput(value: string): string {
@@ -383,12 +419,11 @@ export class ProjectSessionCatalog {
   private readonly cache = new Map<string, CatalogCacheEntry>();
   private readonly pending = new Map<string, Promise<ProjectSessionCatalogResult>>();
   private readonly pendingSessions = new Map<string, Promise<ProjectSessionCatalogResult>>();
+  private readonly pendingHistory = new Map<string, Promise<TranscriptHistoryPage>>();
   private nativeProductPaths?: Promise<ProductPaths>;
   private generation = 0;
-  private worker?: CatalogWorker;
-  private workerKey?: string;
-  private workerPending?: Promise<CatalogWorker>;
-  private catalogTail: Promise<void> = Promise.resolve();
+  private readonly foregroundLane: CatalogWorkerLane = { tail: Promise.resolve() };
+  private readonly historyLane: CatalogWorkerLane = { tail: Promise.resolve() };
   private catalogQueued = 0;
   private disposed = false;
 
@@ -577,6 +612,36 @@ export class ProjectSessionCatalog {
     return row ? { ...row } : undefined;
   }
 
+  async readHistory(projectPath: string, sessionId: string, transcriptPath: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage> {
+    if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')
+      || basename(transcriptPath).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`) throw new Error('Invalid history source.');
+    const query = { cwd: realpathSync.native(projectPath), sessionId: sessionId.toLowerCase(), transcriptPath, historyBefore: historyCursor(before) };
+    const key = JSON.stringify(query);
+    const existing = this.pendingHistory.get(key);
+    if (existing) return existing;
+    const operation = this.loadHistory(query).finally(() => {
+      if (this.pendingHistory.get(key) === operation) this.pendingHistory.delete(key);
+    });
+    this.pendingHistory.set(key, operation);
+    return operation;
+  }
+
+  private async loadHistory(query: CatalogWorkerQuery & { sessionId: string; historyBefore: TranscriptHistoryCursor }): Promise<TranscriptHistoryPage> {
+    const output = await this.runWorker(query, this.historyLane);
+    const page = JSON.parse(output) as TranscriptHistoryPage;
+    if (!page || typeof page !== 'object' || Array.isArray(page)
+      || Object.keys(page).some(key => !['messages', 'before'].includes(key)) || !Array.isArray(page.messages)) throw new Error('Invalid history page');
+    const sessionId = query.sessionId, before = query.historyBefore;
+    const event = validateClientEvent({ type: 'session_resumed', mode: 'code', session_id: sessionId, messages: page.messages });
+    if (event.type !== 'session_resumed') throw new Error('Invalid history page');
+    const next = page.before == null ? null : historyCursor(page.before);
+    // Compaction can persist the same UUID at multiple physical positions.
+    // A bound cursor advances by byte offset in the same file, not by UUID.
+    if (next && (next.offset == null || (before.offset != null
+      && (next.offset >= before.offset || next.identity !== before.identity)))) throw new Error('History cursor did not advance');
+    return { messages: event.messages, before: next };
+  }
+
   /** Invalidate after a durable transcript/metadata mutation. */
   invalidate(projectPath?: string): void {
     this.generation++;
@@ -585,11 +650,14 @@ export class ProjectSessionCatalog {
     this.cache.clear();
     this.pending.clear();
     this.pendingSessions.clear();
+    this.pendingHistory.clear();
     // Retire after the current captured response; a mutation must never reuse
     // projections from before its durable revision/generation boundary.
-    this.worker?.retire();
-    this.worker = undefined;
-    this.workerKey = undefined;
+    for (const lane of [this.foregroundLane, this.historyLane]) {
+      lane.worker?.retire();
+      lane.worker = undefined;
+      lane.key = undefined;
+    }
     void projectPath;
   }
 
@@ -634,22 +702,8 @@ export class ProjectSessionCatalog {
   private run(canonical: string, sessionId?: string, scope?: SessionCatalogScope, transcriptPath?: string): Promise<ProjectSessionCatalogResult> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
     if (this.options.catalogWorker !== false) {
-      if (this.catalogQueued >= MAX_QUEUED_CATALOG_OPERATIONS) return Promise.reject(new Error('session catalog is busy; try again shortly'));
-      this.catalogQueued++;
-      const operation = this.catalogTail.then(async () => {
-        if (this.disposed) throw new Error('session catalog is disposed');
-        const worker = await this.getWorker(canonical);
-        try {
-          return parseCatalog(await worker.request({ cwd: canonical, ...(sessionId ? { sessionId } : {}),
-            ...(scope ? { scope } : {}), ...(transcriptPath ? { transcriptPath } : {}) }));
-        } catch (error) {
-          worker.retire();
-          if (this.worker === worker) this.worker = undefined;
-          throw error;
-        }
-      });
-      this.catalogTail = operation.then(() => undefined, () => undefined);
-      return operation.finally(() => { this.catalogQueued--; });
+      return this.runWorker({ cwd: canonical, ...(sessionId ? { sessionId } : {}),
+        ...(scope ? { scope } : {}), ...(transcriptPath ? { transcriptPath } : {}) }).then(parseCatalog);
     }
     const args = buildBridgeArguments({
       workspace: canonical,
@@ -663,16 +717,35 @@ export class ProjectSessionCatalog {
     return this.runOutput(canonical, args).then((output) => parseCatalog(output));
   }
 
-  private getWorker(canonical: string): Promise<CatalogWorker> {
+  private runWorker(query: CatalogWorkerQuery, lane = this.foregroundLane): Promise<string> {
+    if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
+    if (this.catalogQueued >= MAX_QUEUED_CATALOG_OPERATIONS) return Promise.reject(new Error('session catalog is busy; try again shortly'));
+    this.catalogQueued++;
+    const operation = lane.tail.then(async () => {
+      if (this.disposed) throw new Error('session catalog is disposed');
+      const worker = await this.getWorker(query.cwd, lane);
+      try {
+        return await worker.request(query);
+      } catch (error) {
+        worker.retire();
+        if (lane.worker === worker) lane.worker = undefined;
+        throw error;
+      }
+    });
+    lane.tail = operation.then(() => undefined, () => undefined);
+    return operation.finally(() => { this.catalogQueued--; });
+  }
+
+  private getWorker(canonical: string, lane: CatalogWorkerLane): Promise<CatalogWorker> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
     const bin = resolveServerBin({ serverBin: this.options.serverBin, isPackaged: this.options.isPackaged,
       resourcesPath: this.options.resourcesPath } as Omit<BridgeManagerOptions, 'launchConfig'>);
     const env = { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) };
     const key = JSON.stringify([bin, Object.entries(env).sort(([left], [right]) => left.localeCompare(right))]);
-    if (this.worker?.available && this.workerKey === key) return Promise.resolve(this.worker);
-    if (this.workerPending) return this.workerPending;
-    this.worker?.retire();
-    this.worker = undefined;
+    if (lane.worker?.available && lane.key === key) return Promise.resolve(lane.worker);
+    if (lane.pending) return lane.pending;
+    lane.worker?.retire();
+    lane.worker = undefined;
     let generation = this.generation;
     const operation: Promise<CatalogWorker> = catalogChildren.start((release) => {
       if (this.disposed) { release(); throw new Error('session catalog is disposed'); }
@@ -684,14 +757,14 @@ export class ProjectSessionCatalog {
     }, this.options.timeoutMs).then((worker) => {
       if (generation !== this.generation) {
         worker.retire();
-        if (this.workerPending === operation) this.workerPending = undefined;
-        return this.getWorker(canonical);
+        if (lane.pending === operation) lane.pending = undefined;
+        return this.getWorker(canonical, lane);
       }
-      this.worker = worker;
-      this.workerKey = key;
+      lane.worker = worker;
+      lane.key = key;
       return worker;
-    }).finally(() => { if (this.workerPending === operation) this.workerPending = undefined; });
-    this.workerPending = operation;
+    }).finally(() => { if (lane.pending === operation) lane.pending = undefined; });
+    lane.pending = operation;
     return operation;
   }
 

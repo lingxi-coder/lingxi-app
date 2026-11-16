@@ -50,19 +50,27 @@ class TeamBotComponentsUiTest {
     private val events = mutableListOf<String>()
     private fun text(id: Int, vararg args: Any): String = rule.activity.getString(id, *args)
 
-    private fun task(
-        state: String, usage: TeamTaskUsage? = null, artifactId: String? = null,
-    ) = TeamTask("task1", "c1", "sharedbot_helper", TeamMemberRef("u1", 1), state, 0L, 0L, null, artifactId, usage)
+    private val me = TeamMemberRef("u1", 1)
 
-    /** The card for the task in [current]; the number format is pinned to en-US, the words come from the device's own resources. */
-    private fun showCard(first: TeamTask) {
+    private fun task(
+        state: String, usage: TeamTaskUsage? = null, artifactId: String? = null, wait: TeamTaskWait? = null,
+    ) = TeamTask("task1", "c1", "sharedbot_helper", me, state, 0L, 0L, null, artifactId, usage, wait = wait)
+
+    /**
+     * The card for the task in [current]; the number format is pinned to en-US, the words come from the device's own resources. [viewer] is who looks
+     * at it (nobody by default, so no member action is offered) and [onReply] is set where the card is the Bot's question.
+     */
+    private fun showCard(first: TeamTask, viewer: TeamMemberRef? = null, onReply: (() -> Unit)? = null) {
         var current by mutableStateOf(first)
         rule.setContent {
             val config = Configuration(LocalConfiguration.current).apply { setLocale(Locale.US) }
             CompositionLocalProvider(LocalConfiguration provides config) {
                 LingXiTheme(darkTheme = false) {
                     Column {
-                        TeamTaskCard(current, "Helper", onArtifact = { events += "artifact:$it" }, onRefresh = { events += "refresh:$it" })
+                        TeamTaskCard(
+                            current, "Helper", onArtifact = { events += "artifact:$it" }, onRefresh = { events += "refresh:$it" },
+                            viewer = viewer, recipientName = "Mia", onCancel = { events += "cancel:$it" }, onReply = onReply,
+                        )
                     }
                 }
             }
@@ -103,6 +111,35 @@ class TeamBotComponentsUiTest {
                 rule.onNode(hasText(text(button)) and hasClickAction()).assertIsDisplayed()
             }
         }
+    }
+
+    // --- Teams M2: the states and actions main added ------------------------------------------------------------------
+
+    @Test fun aCancelledRunReadsCancelledHasNoButtonAndShowsUsageOnlyWhenTheBotGotAsFarAsAModelCall() {
+        showCard(task("cancelled"))
+        rule.onNode(hasText(text(R.string.teams_task_cancelled)) and hasText("Helper")).assertIsDisplayed()
+        buttonsOfCard().assertCountEquals(0)
+        usageLine().assertDoesNotExist()
+        stateOfCard(task("cancelled", TeamTaskUsage("complete", 10, 5, null, null)))
+        usageLine().assert(hasText(text(R.string.teams_usage_tokens_total_fmt, "15") + " · " + text(R.string.teams_usage_cost_unknown)))
+    }
+
+    @Test fun aTaskThatNeedsCheckingSaysSoInItsOwnWordsAndOffersRefreshOnly() {
+        showCard(task("needs_reconciliation"))
+        rule.onNode(hasText(text(R.string.teams_task_needs_checking)) and hasText("Helper") and hasText(text(R.string.teams_task_needs_checking_hint))).assertIsDisplayed()
+        buttonsOfCard().assertCountEquals(1)
+        rule.onNode(hasText(text(R.string.teams_run_refresh)) and hasClickAction()).assertIsDisplayed()
+    }
+
+    @Test fun aWaitingTaskSaysWhoItWaitsForAndTheMemberCanAnswerCancelOrRefreshIt() {
+        val waiting = task("waiting", wait = TeamTaskWait("wait1", "human_input", me, System.currentTimeMillis() + 4 * 60_000L, "m1"))
+        showCard(waiting, viewer = me, onReply = { events += "reply" })
+        rule.onNode(hasText(text(R.string.teams_task_waiting)) and hasText("Helper")).assertIsDisplayed()
+        rule.onNodeWithTag("teams.task.wait.task1", useUnmergedTree = true).assertIsDisplayed()
+        buttonsOfCard().assertCountEquals(3)
+        rule.onNode(hasText(text(R.string.teams_message_reply)) and hasClickAction()).performClick()
+        rule.onNode(hasText(text(R.string.teams_task_cancel)) and hasClickAction()).performClick()
+        assertEquals(listOf("reply", "cancel:task1"), events)
     }
 
     @Test fun aStateThisAppDoesNotKnowReadsUnknownWithoutADetailOrAButton() {

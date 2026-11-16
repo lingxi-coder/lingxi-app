@@ -1116,11 +1116,11 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "ko": "Bot이 작업하는 동안 이 Mac을 깨워 두기"
   },
   "bots_keep_awake_hint": {
-    "zh-Hans": "Bot 的例行任务执行前的 10 分钟内，也会保持唤醒。合上盖子时 Mac 仍会进入睡眠。",
-    "zh-Hant": "Bot 的例行任務執行前的 10 分鐘內，也會保持喚醒。闔上螢幕時 Mac 仍會進入睡眠。",
-    "en": "Also stays awake for the ten minutes before a Bot's routine is due. Closing the lid still puts the Mac to sleep.",
-    "ja": "Bot のルーティンの実行時刻の 10 分前からも、スリープしません。ふたを閉じると Mac はスリープします。",
-    "ko": "Bot의 루틴 실행 시각 10분 전부터도 깨어 있습니다. 덮개를 닫으면 Mac은 여전히 잠자기 상태가 됩니다."
+    "zh-Hans": "Bot 的例行任务执行前的 10 分钟内，也会保持唤醒；接通电源时，只要你共享给团队或好友的 Bot 在线，也会保持唤醒。合上盖子时 Mac 仍会进入睡眠。",
+    "zh-Hant": "Bot 的例行任務執行前的 10 分鐘內，也會保持喚醒；接上電源時，只要你分享給團隊或好友的 Bot 在線，也會保持喚醒。闔上螢幕時 Mac 仍會進入睡眠。",
+    "en": "Also stays awake for the ten minutes before a Bot's routine is due and, while plugged in, for as long as a Bot you share with a team or a friend is online. Closing the lid still puts the Mac to sleep.",
+    "ja": "Bot のルーティンの実行時刻の 10 分前からも、スリープしません。電源に接続している間は、チームや友だちと共有している Bot がオンラインである限りスリープしません。ふたを閉じると Mac はスリープします。",
+    "ko": "Bot의 루틴 실행 시각 10분 전부터도 깨어 있습니다. 전원에 연결된 동안에는 팀이나 친구와 공유한 Bot이 온라인인 한 계속 깨어 있습니다. 덮개를 닫으면 Mac은 여전히 잠자기 상태가 됩니다."
   },
   "bots_login_item": {
     "zh-Hans": "登录时在后台打开灵犀",

@@ -146,7 +146,7 @@ export function App() {
     seenBotScopes.current = botScopes;
     if (before !== undefined && before !== botScopes) refreshScheduledScopes();
   }, [botScopes, refreshScheduledScopes]);
-  const sessionNavigationBlocked = useCallback(() => localAppBridge.current.sessionLoading || localAppBridge.current.projectCreationOpen, []);
+  const sessionNavigationBlocked = useCallback(() => localAppBridge.current.projectCreationOpen, []);
   const openLocalAppChat = useCallback((app?: LocalAppEditRequest) => {
     if (sessionNavigationBlocked()) return;
     const nonce = ++localAppNavigation.current;
@@ -257,7 +257,7 @@ export function App() {
   const botSessions = useBotSessions(botsApi);
   // Teams: one workspace for the window, which the sidebar, the page and the rail's unread count all read.
   const zh = locale.startsWith('zh');
-  const teams = useTeams();
+  const teams = useTeams({}, bridge.setBotsKeepAwake);
   const friends = useFriends();
   const teamsDrawer = useTeamsDrawer({
     savedWidth: bridge.bootstrap?.settings.sidebar?.teamsDrawerWidth,
@@ -291,6 +291,10 @@ export function App() {
   }, [bots.available, botChat, appChat, leaveBots, openPage, page, sessionNavigationBlocked, setSidebarMode]);
   /** Bring Teams forward when its sidebar is shown beside a utility page. */
   const showTeams = useCallback(() => { if (page !== 'teams') openPage('teams'); }, [openPage, page]);
+  // Bot services (Bots offered outside Teams) take the place of the Team's conversation in the Teams page.
+  const [botServices, setBotServices] = useState(false);
+  const openBotServices = useCallback(() => setBotServices(true), []);
+  const closeBotServices = useCallback(() => setBotServices(false), []);
   /** Likewise Friends. */
   const showFriends = useCallback(() => { if (page !== 'friends') openPage('friends'); }, [openPage, page]);
   // A link to the requests or to a friend's chat is carried out as soon as there is a workspace to carry it out in.
@@ -662,7 +666,7 @@ export function App() {
               ? <FriendsPanel friends={friends} zh={zh} locale={locale} initialCode={friendTarget?.kind === 'add' ? friendTarget.code : undefined}
                   onCodeHandled={handledFriendCode} onShowFriends={showFriends} />
               : <TeamsSidebar teams={teams} zh={zh} query={search} initialInvite={teamInvite} onInviteHandled={handledTeamInvite}
-                  onShowTeams={showTeams} onOpenSettings={openTeamDetails} />}
+                  onShowTeams={showTeams} onOpenSettings={openTeamDetails} onOpenServices={openBotServices} onCloseServices={closeBotServices} />}
             sidebarCollapsed={sidebarCollapsed}
             onSidebarCollapsedChange={setSidebarCollapsed}
             scheduled={page === 'scheduled'}
@@ -696,7 +700,7 @@ export function App() {
           {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
           <ErrorBanner bridge={{ error: localAppNavigationError, clearError: clearLocalAppNavigationError }} presentation={localAppNavigationPresentation} />
           <ErrorBanner bridge={bridge} />
-          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} zh={zh} locale={locale} drawer={teamsDrawer} /></Suspense>}
+          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} zh={zh} locale={locale} drawer={teamsDrawer} services={botServices} onCloseServices={closeBotServices} /></Suspense>}
           {page === 'friends' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('friends_loading')}</p>}><FriendsPage friends={friends} zh={zh} locale={locale} /></Suspense>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps sidebarTarget={pageSidebar} visible={page === 'apps'} onCreate={() => openLocalAppChat()} onDevelopmentBlocked={() => setLocalAppNavigationError(tr('local_app_development_requires_code'))} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
@@ -716,6 +720,8 @@ export function App() {
             <div className="desktop-message-list-view">
                 {/* The transcript keeps all remaining height; Todos live in Summary. */}
                 <BotProposalAction.Provider value={botsAvailable ? reviewBotProposal : undefined}><Stage
+                  history={bridge.sessionLoading ? undefined : bridge.history}
+                  onLoadMoreHistory={bridge.loadMoreHistory}
                   messageTarget={!bridge.sessionLoading && (!messageRequest || bridge.conversation.sessionKey === messageRequest.sessionId) ? messageTarget : null}
                   onMessageLocated={onMessageLocated}
                   activityView={activityView}
@@ -739,6 +745,13 @@ export function App() {
                   foldedItemIds={bridge.sessionLoading ? [] : bridge.conversation.foldedItemIds}
                   onVisualizationFollowup={bridge.offerVisualizationFollowup}
                 /></BotProposalAction.Provider>
+                {/* Approval surfaces belong above the composer, never below the input. */}
+                <ComputerAccessPrompt
+                  request={bridge.pendingComputerAccess}
+                  onSubmit={(requestId, response) => { void bridge.approveComputerAccess(requestId, response).catch(() => undefined); }}
+                  onDeny={(requestId) => { void bridge.denyComputerAccess(requestId).catch(() => undefined); }}
+                  onOpenSystemSettings={(pane) => { void bridge.openSystemSettings(pane).catch(() => undefined); }}
+                />
                 <PermissionPrompt
                   request={bridge.pendingPermission}
                   onApprove={(requestId, response) => { void bridge.approve(requestId, response).catch(() => undefined); }}
@@ -806,13 +819,6 @@ export function App() {
           </div>
 
           </div>
-
-          <ComputerAccessPrompt
-            request={bridge.pendingComputerAccess}
-            onSubmit={(requestId, response) => { void bridge.approveComputerAccess(requestId, response).catch(() => undefined); }}
-            onDeny={(requestId) => { void bridge.denyComputerAccess(requestId).catch(() => undefined); }}
-            onOpenSystemSettings={(pane) => { void bridge.openSystemSettings(pane).catch(() => undefined); }}
-          />
 
           </main>
           {page === 'chat' && !bridge.sessionLoading && <>

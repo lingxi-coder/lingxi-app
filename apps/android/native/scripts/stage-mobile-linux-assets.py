@@ -81,7 +81,8 @@ def stage(source, output, sdk, runtime, native):
     for abi in ABIS:
         manifest, archive = inspect_release(sdk, source, abi, version, pins)
         subprocess.run([
-            sys.executable, str(sdk / "scripts/rootfs/verify-evidence.py"),
+            sys.executable, str(Path(__file__).resolve().parents[4] / "scripts/lib/verify_sdk_rootfs.py"),
+            "--sdk-root", str(sdk),
             "--evidence-dir", str(source / abi), "--archive", str(archive),
         ], check=True)
         releases[abi] = (manifest, archive)

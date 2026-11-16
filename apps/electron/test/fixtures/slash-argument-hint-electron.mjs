@@ -37,6 +37,8 @@ async function main() {
     await until(`Boolean(${shown})`);
     assert.equal(await hintText(), reviewHint);
     assert.equal(await js(`${prompt}.textContent`), '/code-review ');
+    assert.equal(await js(`getComputedStyle(document.querySelector('.composer-command-slash')).visibility`), 'hidden');
+    assert.equal(await js(`document.querySelector('.composer-command-prefix').textContent.trim()`), '/code-review');
     const geometry = await js(`(() => {
       const editor = ${prompt}, hint = ${shown};
       const end = document.createRange(); end.selectNodeContents(editor.firstChild); end.collapse(false);

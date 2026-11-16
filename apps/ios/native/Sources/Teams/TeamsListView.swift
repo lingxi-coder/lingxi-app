@@ -75,7 +75,9 @@ struct TeamsListView: View {
                 if let model, !model.tasks.isEmpty {
                     Section("teams_recent_tasks") {
                         ForEach(model.tasks) { task in
-                            TeamTaskCard(task: task, botName: bots.first { $0.sharedBotId == task.sharedBotId }?.name ?? strings.bot)
+                            TeamTaskCard(task: task, botName: bots.first { $0.sharedBotId == task.sharedBotId }?.name ?? strings.bot, viewer: TeamMemberRef(uid: uid, generation: team.generation),
+                                         maintainer: bots.first { $0.sharedBotId == task.sharedBotId }?.maintainer,
+                                         recipientName: task.wait.flatMap { wait in members.first { $0.uid == wait.recipient.uid }?.displayName } ?? strings.member)
                         }
                     }
                 }
@@ -118,7 +120,7 @@ struct TeamsListView: View {
             }
         }
         .sheet(item: Binding(get: { workspace.messaging?.artifact }, set: { if $0 == nil { workspace.messaging?.closeArtifact() } })) { artifact in
-            TeamArtifactViewer(artifact: artifact) { workspace.messaging?.closeArtifact() }
+            TeamArtifactViewer(artifact: artifact, model: workspace.messaging, members: workspace.directory) { workspace.messaging?.closeArtifact() }
         }
         .navigationTitle("teams_title")
         .navigationBarTitleDisplayMode(.large)

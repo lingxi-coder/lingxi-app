@@ -40,6 +40,12 @@ internal data class DurableConversationTurnRecord(
     val scope: String,
     val sessionId: String,
     val turnId: Long,
+    val queuedOwner: Boolean = false,
+)
+
+internal data class DurableConversationTurnState(
+    val active: DurableConversationTurnRecord?,
+    val queuedTurnIds: List<Long>,
 )
 
 internal fun recordHandledProcessExit(preferences: SharedPreferences, timestamp: Long, userRequested: Boolean) {
@@ -89,6 +95,8 @@ internal class DurableConversationTurnClientStore(
             scope.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(it.toInt() and 255) } + "."
         private fun key(scope: String, sessionId: String, turnId: Long): String =
             prefix(scope) + canonicalSessionId(sessionId) + "." + turnId
+        private fun queuedKey(scope: String, sessionId: String) = prefix(scope) + canonicalSessionId(sessionId) + ".queued"
+        private fun queuedOwnerKey(scope: String, sessionId: String) = prefix(scope) + canonicalSessionId(sessionId) + ".queuedOwner"
 
         fun ownerModeForSession(context: Context, workspaceKey: String, sessionId: String?): SessionMode? {
             val prefs = context.applicationContext.getSharedPreferences("durable_conversation_turn", Context.MODE_PRIVATE)
@@ -100,7 +108,10 @@ internal class DurableConversationTurnClientStore(
             val id = canonicalSessionId(sessionId)
             val matches = SessionMode.entries.filter { mode ->
                 val scope = "$workspaceKey#${mode.wireValue}"
-                prefs.all.keys.any { it.startsWith(prefix(scope) + id + ".") }
+                val ownerPrefix = prefix(scope) + id + "."
+                prefs.all.keys.any { key ->
+                    key.startsWith(ownerPrefix) && key.removePrefix(ownerPrefix).toLongOrNull() != null
+                } || !prefs.getString(queuedKey(scope, id), "").isNullOrBlank()
             }
             check(matches.size <= 1) { "Conflicting recovery modes for session $id" }
             matches.singleOrNull()
@@ -140,7 +151,9 @@ internal class DurableConversationTurnClientStore(
             candidate.startsWith(ownerPrefix) &&
                 candidate.removePrefix(ownerPrefix).substringBeforeLast('.', "") == ownerSessionId
         }.forEach(editor::remove)
-        check(editor.putLong(key(scope, sessionId, turnId), turnId).commit())
+        check(editor.putLong(key(scope, sessionId, turnId), turnId)
+            .putString(queuedKey(scope, sessionId), queued(sessionId).filterNot { it == turnId }.joinToString(","))
+            .remove(queuedOwnerKey(scope, sessionId)).commit())
     }
 
     fun load(): DurableConversationTurnRecord? = synchronized(lock) {
@@ -152,7 +165,8 @@ internal class DurableConversationTurnClientStore(
                 val id = suffix.substring(0, separator)
                 val turn = suffix.substring(separator + 1).toLongOrNull()
                 if (turn == null || owner != id) null
-                else DurableConversationTurnRecord(scope, id, turn)
+                else DurableConversationTurnRecord(scope, id, turn,
+                    preferences.getLong(queuedOwnerKey(scope, id), Long.MIN_VALUE) == turn)
             }
         }
         candidates.singleOrNull()
@@ -165,7 +179,9 @@ internal class DurableConversationTurnClientStore(
 
     fun clear(sessionId: String, turnId: Long) = synchronized(lock) {
         if (ownerSessionId != canonicalSessionId(sessionId)) return@synchronized
-        preferences.edit().remove(key(scope, sessionId, turnId)).commit()
+        check(preferences.edit().remove(key(scope, sessionId, turnId))
+            .also { if (preferences.getLong(queuedOwnerKey(scope, sessionId), Long.MIN_VALUE) == turnId) it.remove(queuedOwnerKey(scope, sessionId)) }
+            .putString(queuedKey(scope, sessionId), queued(sessionId).filterNot { it == turnId }.joinToString(",")).commit())
     }
 
     /** Clear only the checkpoint proven not admitted by this session's Send. */
@@ -173,6 +189,42 @@ internal class DurableConversationTurnClientStore(
         if (ownerSessionId != canonicalSessionId(sessionId)) return@synchronized false
         val recordKey = key(scope, sessionId, turnId)
         !preferences.contains(recordKey) || preferences.edit().remove(recordKey).commit()
+    }
+
+    fun selectSession(sessionId: String) = synchronized(lock) { ownerSessionId = canonicalSessionId(sessionId) }
+
+    private fun queued(sessionId: String): List<Long> = preferences.getString(queuedKey(scope, sessionId), "").orEmpty()
+        .takeIf { it.isNotEmpty() }?.split(',')?.map { checkNotNull(it.toLongOrNull()) { "Invalid queued conversation identity" } }
+        ?.distinct().orEmpty()
+
+    fun state(sessionId: String): DurableConversationTurnState = synchronized(lock) {
+        if (ownerSessionId == null) ownerSessionId = canonicalSessionId(sessionId)
+        if (ownerSessionId != canonicalSessionId(sessionId)) return@synchronized DurableConversationTurnState(null, emptyList())
+        DurableConversationTurnState(load(), queued(sessionId))
+    }
+
+    fun enqueue(sessionId: String, ownerTurnId: Long, turnId: Long) = synchronized(lock) {
+        check(ownerSessionId == canonicalSessionId(sessionId) && load()?.turnId == ownerTurnId) { "Conversation owner changed before queued submission" }
+        val ids = queued(sessionId)
+        check(preferences.edit().putString(queuedKey(scope, sessionId), (ids + turnId).distinct().joinToString(",")).commit())
+    }
+
+    fun removeQueued(sessionId: String, turnId: Long) = synchronized(lock) {
+        check(ownerSessionId == canonicalSessionId(sessionId)) { "Conversation owner changed" }
+        check(preferences.edit().putString(queuedKey(scope, sessionId), queued(sessionId).filterNot { it == turnId }.joinToString(",")).commit())
+    }
+
+    /** Native proof may name the executor of a retained coalesced member. */
+    fun adoptQueuedOwner(sessionId: String, memberTurnId: Long, ownerTurnId: Long, deferPrevious: Boolean = false) = synchronized(lock) {
+        val state = state(sessionId)
+        check(memberTurnId in state.queuedTurnIds || state.active?.turnId == ownerTurnId) { "Queued executor has no retained admission" }
+        var ids = state.queuedTurnIds.filterNot { it == ownerTurnId }
+        if (deferPrevious) state.active?.turnId?.takeIf { it != ownerTurnId }?.let { ids = (listOf(it) + ids).distinct() }
+        val editor = preferences.edit()
+        state.active?.let { editor.remove(key(scope, sessionId, it.turnId)) }
+        check(editor.putLong(key(scope, sessionId, ownerTurnId), ownerTurnId)
+            .putLong(queuedOwnerKey(scope, sessionId), ownerTurnId)
+            .putString(queuedKey(scope, sessionId), ids.joinToString(",")).commit())
     }
 }
 
@@ -474,6 +526,24 @@ internal class RecoveringConversationSource(
         val delegate = pendingSource.await()
         if (delegate == null) onSubscribed() else delegate.collectClientEvents(onSubscribed, onEvent)
     }
+
+    override suspend fun submitQueuedPrompt(command: ClientCommand.SendPrompt, ownerTurnId: Long,
+                                           tryBeginNative: () -> Boolean, onNotAdmitted: () -> Unit) {
+        val delegate = pendingSource.await() ?: error("engine is not connected")
+        delegate.submitQueuedPrompt(command, ownerTurnId, tryBeginNative, onNotAdmitted)
+    }
+
+    override fun queuedExecutorFor(event: ClientEvent): Long? = retainedSource?.queuedExecutorFor(event)
+    override fun queuedRecoveryOwnerFor(event: ClientEvent): Long? = retainedSource?.queuedRecoveryOwnerFor(event)
+    override fun queuedProjectionSessionFor(event: ClientEvent): String? = retainedSource?.queuedProjectionSessionFor(event)
+    override fun rawProjectionOwnerFor(event: ClientEvent): Long? = retainedSource?.rawProjectionOwnerFor(event)
+    override fun isDurableAttachSnapshot(event: ClientEvent): Boolean = retainedSource?.isDurableAttachSnapshot(event) == true
+    override fun requiresQueuedTranscriptRepair(event: ClientEvent): Boolean = retainedSource?.requiresQueuedTranscriptRepair(event) == true
+    override suspend fun prepareHeadlessUiActivation(activation: ActivatedSession, onOwner: (Long, Boolean) -> Unit): ActivatedSession =
+        (pendingSource.await() ?: error("engine is not connected")).prepareHeadlessUiActivation(activation, onOwner)
+    override fun confirmHeadlessUiActivation(activation: ActivatedSession) { retainedSource?.confirmHeadlessUiActivation(activation) }
+    override suspend fun snapshotForQueuedHandoff(): List<Message>? = retainedSource?.snapshotForQueuedHandoff()
+    override fun hasQueuedTurnRecovery(): Boolean = retainedSource?.hasQueuedTurnRecovery() == true
 
     override val workflowProgress: Flow<WorkflowProgressUpdate> = flow {
         pendingSource.await()?.workflowProgress?.let { emitAll(it) }

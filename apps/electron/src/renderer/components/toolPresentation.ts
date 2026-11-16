@@ -22,9 +22,9 @@ export function isTaskWorkflowTool(item: ToolRunItem): boolean {
 
 /** Only adjacent calls with the same meaning share a disclosure. */
 export function transcriptToolKey(item: ToolRunItem): string | undefined {
-  if (item.agentId || /^(Agent|Task|Skill|spawn_agent|fork_agent|AskUserQuestion|ExitPlanMode|EnterPlanMode|SubmitPlan)$/i.test(item.tool)
-    || /permission/i.test(`${item.tool} ${item.view.label}`)
-    || item.view.verb === 'skill') return undefined;
+  if (item.agentId || /^(Agent|Task|spawn_agent|fork_agent|AskUserQuestion|ExitPlanMode|EnterPlanMode|SubmitPlan)$/i.test(item.tool)
+    || /permission/i.test(`${item.tool} ${item.view.label}`)) return undefined;
+  if (/^Skill$/i.test(item.tool) || item.view.verb === 'skill') return 'skill';
   if (isTaskWorkflowTool(item)) return 'task-workflow';
   if (['task', 'todo'].includes(item.view.verb)) return undefined;
   if (/^(?:mcp__|mcp[.:/])/i.test(item.tool)) return item.tool;

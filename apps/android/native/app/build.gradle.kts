@@ -238,6 +238,7 @@ listOf("play", "direct").forEach { distribution ->
                 rootProject.file("../../../Cargo.toml"),
                 rootProject.file("../../../Cargo.lock"),
                 rootProject.file("../../../scripts/lib/mobile_linux_source.py"),
+                rootProject.file("../../../scripts/lib/verify_sdk_rootfs.py"),
                 rootProject.file("../../../scripts/lib/runtime_source.py"),
                 rootProject.file("../../../scripts/lib/mobile-linux-packages.json"),
                 rootProject.file("scripts/stage-mobile-linux-assets.sh"),

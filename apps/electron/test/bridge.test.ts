@@ -2588,12 +2588,18 @@ test('account-only bridge launch writes the canonical private envelope even with
   const id = '11111111-1111-4111-8111-111111111111';
   const snapshot = { storeScope: 'mock-broker-development', configRevision: 1, accounts: [{ accountId: id, providerId: 'openai', executionBindingId: 'openai', authKind: 'api_key', displayName: 'Mock account', credentialRef: { storeScope: 'mock-broker-development', secretRef: `acct.${id}` }, enabled: true, userPriority: 0, configRevision: 1, identityGeneration: 1 }], health: [], modelEntitlements: [], modelAvailability: [] };
   const credentials = { [id]: { credential_revision: 1, identity_generation: 1, kind: { kind: 'api_key', key: 'synthetic-account-key' } } };
-  const child = (runtime as any).spawnServer({ workspace: directory, trusted: true, configHome: '/different/session-config', providerAccountHome: '/canonical/account-home', providerAccounts: snapshot, providerAccountCredentials: credentials }, directory);
-  let output = '';
-  child.stdout.setEncoding('utf8'); child.stdout.on('data', (chunk: string) => { output += chunk; });
-  await new Promise<void>((resolve, reject) => { child.once('error', reject); child.once('close', (code: number) => code === 0 ? resolve() : reject(new Error(`mock bridge exited ${code}`))); });
-  const result = JSON.parse(output);
+  const capture = async (accounts: Record<string, unknown>) => {
+    const child = (runtime as any).spawnServer({ workspace: directory, trusted: true, configHome: '/different/session-config', ...accounts }, directory);
+    let output = '';
+    child.stdout.setEncoding('utf8'); child.stdout.on('data', (chunk: string) => { output += chunk; });
+    await new Promise<void>((resolve, reject) => { child.once('error', reject); child.once('close', (code: number) => code === 0 ? resolve() : reject(new Error(`mock bridge exited ${code}`))); });
+    return JSON.parse(output);
+  };
+  const result = await capture({ providerAccountHome: '/canonical/account-home', providerAccounts: snapshot, providerAccountCredentials: credentials });
   assert.ok(result.args.includes('--credential-stdin'));
   assert.equal(result.args.some((value: string) => value.includes('synthetic-account-key')), false);
   assert.deepEqual(result.input, { provider_accounts: snapshot, provider_account_credentials: credentials, provider_account_home: '/canonical/account-home', plugin_secrets: {} });
+  const deferred = await capture({ providerAccountHome: '/canonical/account-home', providerAccountBackend: 'desktop-broker:development' });
+  assert.ok(deferred.args.includes('--credential-stdin'));
+  assert.deepEqual(deferred.input, { provider_account_home: '/canonical/account-home', provider_account_backend: 'desktop-broker:development', plugin_secrets: {} });
 });

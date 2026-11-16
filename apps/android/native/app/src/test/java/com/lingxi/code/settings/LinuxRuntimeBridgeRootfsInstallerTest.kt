@@ -1,5 +1,6 @@
 package com.lingxi.code.settings
 
+import io.lingxi.mobilelinux.BrandRuntimeProfile
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream
@@ -32,6 +33,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
     )
 
     private companion object {
+        val brandProfile = BrandRuntimeProfile("lingxi", "lingxi", ".lingxi")
         const val manifestFileName = "rootfs-manifest.json"
         const val sbomFileName = "rootfs.spdx.json"
         const val sourcePinsFileName = "mobile-linux-pins.json"
@@ -70,6 +72,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
                 expectedRootfsVersion = "3.21.3",
                 expectedArchiveSha = sha256(archiveBytes),
                 expectedManifestAbi = "arm64",
+                expectedBrandProfile = brandProfile,
                 archiveName = archiveName,
                 manifestJson = manifestJson,
                 sbomJson = sbomJson("busybox"),
@@ -111,6 +114,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
                     expectedRootfsVersion = "3.21.3",
                     expectedArchiveSha = sha256(archiveBytes),
                     expectedManifestAbi = "arm64",
+                    expectedBrandProfile = brandProfile,
                     archiveName = archiveName,
                     manifestJson = manifestJson(
                         archiveName = archiveName,
@@ -172,6 +176,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
                     expectedRootfsVersion = "3.21.3",
                     expectedArchiveSha = sha256(archiveBytes),
                     expectedManifestAbi = "arm64",
+                    expectedBrandProfile = brandProfile,
                     archiveName = archiveName,
                     manifestJson = manifestJson,
                     sbomJson = sbomJson("busybox"),
@@ -220,6 +225,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
                     expectedRootfsVersion = "3.21.3",
                     expectedArchiveSha = sha256(archiveBytes),
                     expectedManifestAbi = "arm64",
+                    expectedBrandProfile = brandProfile,
                     archiveName = archiveName,
                     manifestJson = manifestJson,
                     sbomJson = sbomJson("busybox"),
@@ -255,6 +261,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
                     expectedRootfsVersion = "3.21.3",
                     expectedArchiveSha = sha256(archiveBytes),
                     expectedManifestAbi = "arm64",
+                    expectedBrandProfile = brandProfile,
                     archiveName = archiveName,
                     manifestJson = manifestJson(
                         archiveName = archiveName,

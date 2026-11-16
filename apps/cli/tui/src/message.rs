@@ -170,7 +170,13 @@ pub fn render_message(
         RenderedMessage::Attachment { attachment } => attachment_lines(attachment, theme),
         RenderedMessage::Advisor { kind, verbose } => advisor_lines(kind, *verbose, theme),
         RenderedMessage::PlanApproval { kind } => plan_approval_lines(kind, theme),
-        RenderedMessage::AssistantRedactedThinking => redacted_thinking_lines(theme),
+        RenderedMessage::AssistantRedactedThinking => {
+            if verbose {
+                redacted_thinking_lines(theme)
+            } else {
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -219,7 +225,8 @@ mod tests {
     #[test]
     fn redacted_thinking_renders_dim_marker() {
         let m = RenderedMessage::AssistantRedactedThinking;
-        let lines = render_message(&m, 80, &Theme::dark(), false);
+        assert!(render_message(&m, 80, &Theme::dark(), false).is_empty());
+        let lines = render_message(&m, 80, &Theme::dark(), true);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].plain_text().contains("Thinking"));
         assert_eq!(lines[0].spans[0].style.fg, Theme::dark().dim);
@@ -333,14 +340,13 @@ mod tests {
 
     #[test]
     fn verbose_expands_thinking_tooluse_and_groups() {
-        // Thinking: collapsed shows a hint; verbose shows the body.
+        // Reasoning is part of activity details; verbose shows its body.
         let think = RenderedMessage::AssistantThinking {
             thinking: "step one\nstep two".to_string(),
             expanded: false,
         };
         let collapsed = render_message(&think, 80, &Theme::dark(), false);
-        assert_eq!(collapsed.len(), 1);
-        assert!(collapsed[0].plain_text().contains("ctrl+o"));
+        assert!(collapsed.is_empty());
         let expanded = render_message(&think, 80, &Theme::dark(), true);
         let text = expanded
             .iter()
@@ -632,7 +638,9 @@ mod tests {
                     expanded: false,
                 },
                 false,
-                Expect::Visible(&["ctrl+o"]),
+                Expect::Hidden(
+                    "reasoning belongs to the activity disclosure; Ctrl-O reveals its body",
+                ),
             ),
             (
                 "AssistantThinking(verbose)",
@@ -647,7 +655,9 @@ mod tests {
                 "AssistantRedactedThinking",
                 RenderedMessage::AssistantRedactedThinking,
                 false,
-                Expect::Visible(&["Thinking"]),
+                Expect::Hidden(
+                    "redacted reasoning has no standalone collapsed row; Ctrl-O reveals its marker",
+                ),
             ),
             (
                 "GroupedToolUse",

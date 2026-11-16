@@ -264,7 +264,14 @@ async function main() {
     await focusForInput('click after cancellation');
     await click('gamma');
     assert.equal((await opened()).length, opensBeforeClick + 1, 'new click works after cancellation');
-    process.stdout.write(`${JSON.stringify({ passed: true })}\n`);
+    await run('window.sessionGesturesFixture.setLoading(true)');
+    await delay(40);
+    assert.equal(await run('document.querySelector(".desktop-sidebar").inert'), false);
+    assert.equal(await run('document.querySelector(".desktop-nav-rail").inert'), false);
+    const beforeLoadingClick = (await opened()).length;
+    await click('beta');
+    assert.equal((await opened()).length, beforeLoadingClick + 1, 'native clicks can open another session while loading');
+    process.stdout.write(`${JSON.stringify({ passed: true, loadingNavigation: true })}\n`);
   } finally { window.destroy(); app.quit(); }
 }
 main().catch(error => { process.stderr.write(`${error.stack ?? error}\n`); app.exit(1); });

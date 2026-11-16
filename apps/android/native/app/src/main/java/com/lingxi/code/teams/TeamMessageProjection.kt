@@ -14,7 +14,9 @@ import java.security.MessageDigest
  */
 internal data class TeamLastMessage(val id: String, val seq: Long, val atMs: Long?, val authorKind: String, val authorUid: String, val authorSharedBotId: String?, val preview: String, val recalled: Boolean = false)
 
-internal data class TeamMessageConversation(val id: String, val kind: String, val title: String, val participants: List<String>, val lastSeq: Long, val lastChangeSeq: Long, val lastReadSeq: Long, val sharedBotIds: List<String> = emptyList(), val lastMessage: TeamLastMessage? = null) {
+internal data class TeamMessageConversation(val id: String, val kind: String, val title: String, val participants: List<String>, val lastSeq: Long, val lastChangeSeq: Long, val lastReadSeq: Long, val sharedBotIds: List<String> = emptyList(), val lastMessage: TeamLastMessage? = null,
+    /** Who can read it, as written when it was made: its people and the maintainers its Bots had then. Null when the source does not say. */
+    val readers: List<String>? = null) {
     fun merging(old: TeamMessageConversation?) = copy(lastSeq = maxOf(old?.lastSeq ?: 0, lastSeq), lastChangeSeq = maxOf(old?.lastChangeSeq ?: 0, lastChangeSeq), lastReadSeq = maxOf(old?.lastReadSeq ?: 0, lastReadSeq))
     val unread get() = (lastSeq - lastReadSeq).coerceAtLeast(0)
     /** The raw SharedBot ID carried by the Chat's explicit `shared_bot:` participant. */
@@ -29,13 +31,56 @@ internal data class TeamMessageConversation(val id: String, val kind: String, va
             val participants = (data["participants"] as? List<*>)?.map { it as? String ?: throw TeamMessageFailure("INVALID_DATA") } ?: throw TeamMessageFailure("INVALID_DATA")
             fun long(key: String) = (data[key] as? Number)?.toLong() ?: throw TeamMessageFailure("INVALID_DATA")
             return TeamMessageConversation(id, data["kind"] as? String ?: throw TeamMessageFailure("INVALID_DATA"), data["title"] as? String ?: throw TeamMessageFailure("INVALID_DATA"), participants,
-                long("lastSeq"), long("lastChangeSeq"), lastReadSeq, participants.filter { it.startsWith("shared_bot:") }.map { it.removePrefix("shared_bot:") }, TeamsPointerParser.parseLastMessage(data.containsKey("lastMessage"), data["lastMessage"], millis))
+                long("lastSeq"), long("lastChangeSeq"), lastReadSeq, participants.filter { it.startsWith("shared_bot:") }.map { it.removePrefix("shared_bot:") }, TeamsPointerParser.parseLastMessage(data.containsKey("lastMessage"), data["lastMessage"], millis),
+                (data["memberUids"] as? List<*>)?.takeIf { uids -> uids.all { it is String } }?.map { it as String })
+        }
+    }
+}
+/** One change a Bot asks to make to its list. [item] is the item as it read when the Bot asked: null for an added item, and for one that was already gone. */
+internal data class TeamListApprovalChange(val op: String, val text: String? = null, val done: Boolean? = null, val item: String? = null)
+/** A Bot's request to change its list: the list and exactly the changes the approval is for. */
+internal data class TeamListApproval(val title: String, val changes: List<TeamListApprovalChange>) {
+    companion object {
+        /** Never throws: one unreadable request must not hide the conversation it is in. It is then not shown as a request. */
+        fun parse(value: Any?): TeamListApproval? {
+            val request = value as? JSONObject ?: return null
+            val title = request.opt("title") as? String ?: return null
+            val list = request.optJSONArray("changes")?.takeIf { it.length() > 0 } ?: return null
+            val changes = (0 until list.length()).map { index ->
+                val change = list.optJSONObject(index) ?: return null
+                val op = change.opt("op") as? String
+                val text = change.opt("text").takeIf { change.has("text") && !change.isNull("text") }
+                val done = change.opt("done").takeIf { change.has("done") && !change.isNull("done") }
+                if ((text != null && text !is String) || (done != null && done !is Boolean)) return null
+                when (op) {
+                    "add" -> if (text == null) return null
+                    "update" -> if (text == null && done == null) return null
+                    "remove" -> Unit
+                    else -> return null
+                }
+                TeamListApprovalChange(op!!, text as String?, done as Boolean?, if (op == "add") null else change.opt("item") as? String)
+            }
+            return TeamListApproval(title, changes)
         }
     }
 }
 internal data class TeamMessage(val id: String, val seq: Long, val authorUid: String, val authorKind: String, val text: String,
     val changeSeq: Long, val changeId: String, val recalled: Boolean, val replyTo: String?, val editedAt: String?, val kind: String = "text",
-    val sharedBotId: String? = null, val taskId: String? = null, val artifactId: String? = null, val targets: List<String> = emptyList(), val createdAt: String? = null, val taskIds: List<String> = emptyList(), val authorDisplayName: String? = null) {
+    val sharedBotId: String? = null, val taskId: String? = null, val artifactId: String? = null, val targets: List<String> = emptyList(), val createdAt: String? = null, val taskIds: List<String> = emptyList(), val authorDisplayName: String? = null,
+    /** On a Bot's question and on the answer to it: the wait they belong to. */
+    val waitId: String? = null,
+    /** On a Bot's request to approve a list change. */
+    val approval: TeamListApproval? = null,
+    /** On the requester's reply to such a request: approved or declined. */
+    val decision: Boolean? = null,
+    /** Files the message carries, in the order they were added. */
+    val attachments: List<TeamMessageAttachment> = emptyList(),
+    /** On a Bot's reply: the files of this conversation its model was given. */
+    val readFiles: List<TeamReadFile> = emptyList()) {
+    /** The files to show: none on a recalled message. */
+    val files: List<TeamMessageAttachment> get() = if (recalled) emptyList() else attachments
+    /** The request to show under this message, if it is one a Bot made. */
+    val approvalRequest: TeamListApproval? get() = approval.takeIf { authorKind != "user" && !recalled && waitId != null }
     val createdAtMs: Long? get() = createdAt?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrNull() }
     companion object { fun parse(v: JSONObject): TeamMessage {
         val author = v.getJSONObject("author"); val authorKind = author.getString("kind")
@@ -43,7 +88,10 @@ internal data class TeamMessage(val id: String, val seq: Long, val authorUid: St
         return TeamMessage(v.getString("id"), v.getLong("seq"), if (authorKind == "user") author.getString("uid") else "", authorKind,
             v.getString("text"), v.getLong("changeSeq"), v.getString("changeId"), v.optBoolean("recalled"), v.stringOrNull("replyTo"),
             v.stringOrNull("editedAt"), v.getString("kind"), if (authorKind == "shared_bot") author.getString("sharedBotId") else null,
-            v.stringOrNull("taskId"), v.stringOrNull("artifactId"), v.optJSONArray("targets")?.strings() ?: emptyList(), v.stringOrNull("createdAt"), v.optJSONArray("taskIds")?.strings() ?: emptyList(), author.stringOrNull("displayName"))
+            v.stringOrNull("taskId"), v.stringOrNull("artifactId"), v.optJSONArray("targets")?.strings() ?: emptyList(), v.stringOrNull("createdAt"), v.optJSONArray("taskIds")?.strings() ?: emptyList(), author.stringOrNull("displayName"), v.stringOrNull("waitId"),
+            TeamListApproval.parse(v.opt("approval")), when (v.opt("decision")) { "approve" -> true; "deny" -> false; else -> null },
+            if (v.has("attachments") && !v.isNull("attachments")) TeamMessageAttachment.list(v.optJSONArray("attachments") ?: throw TeamMessageFailure("INVALID_DATA")) else emptyList(),
+            TeamReadFile.list(v.optJSONArray("readFiles")))
     } }
 }
 internal data class TeamMessageThread(val messages: List<TeamMessage> = emptyList())

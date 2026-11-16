@@ -1,19 +1,35 @@
 import { isMemberExecutionCommand } from './execution-validation.js';
 import { executionCommand, type MemberExecutionCommand } from './execution.js';
+import { ATTACHMENT_MESSAGE_FILES, type MessageAttachment } from './attachments.js';
 export type MessageAuthor = { kind: 'user'; uid: string; displayName?: string } | { kind: 'shared_bot'; sharedBotId: string; displayName: string };
 export const authorIdentity = (a: MessageAuthor) => a.kind === 'user' ? `user:${a.uid}` : `shared_bot:${a.sharedBotId}`;
 export interface TeamConversation {
   id: string; kind: 'dm' | 'group' | 'channel' | 'bot_dm'; title: string; participants: string[];
+  /** Who can read it, as written when it was made: its people and the maintainers its Bots had then. Absent when the source does not say. */
+  readers?: string[];
   lastSeq: number; lastChangeSeq: number; lastReadSeq: number;
   /** Newest message for conversation lists. Absent until the conversation has a message; then always the full pointer. */
   lastMessage?: { id: string; seq: number; at: string | null; author: MessageAuthor; preview: string; recalled?: true };
 }
+/** One change a Bot asks to make to its list. `item` is the text of the item it touches as it read when the Bot asked, `null` if it was gone. */
+export interface ListApprovalChange { op: 'add' | 'update' | 'remove'; text?: string; itemId?: string; done?: boolean; item?: string | null }
+export interface ListApproval { title: string; changes: ListApprovalChange[] }
 export interface TeamMessage {
   id: string; seq: number; author: MessageAuthor;
   kind: string; text: string; replyTo?: string; createdAt: string | null; editedAt?: string | null;
   recalled?: boolean; changeSeq: number; changeId: string;
   taskId?: string; taskIds?: string[]; artifactId?: string;
+  /** Set on a Bot's question and on the human answer to it. */
+  waitId?: string;
+  /** On a Bot's request to approve a list change: the list and exactly the changes the approval is for. */
+  approval?: ListApproval;
+  /** On the requester's reply to such a request. */
+  decision?: 'approve' | 'deny';
   mentions?: string[];
+  /** Files the message carries, in the order they were added. */
+  attachments?: MessageAttachment[];
+  /** On a Bot's reply: the files of this conversation its model was given, as the service checked them. */
+  readFiles?: { attachmentId: string; name: string }[];
 }
 export interface MessageScope { teamId: string; generation: number }
 export type MessageMutation = MessageScope & { action: 'mutate'; conversationId: string; messageId: string; changeId: string;
@@ -36,7 +52,7 @@ export type MessageSnapshot = MessageScope & { uid: string; fromCache: boolean }
 );
 interface CommandMetadata { error?: string; leaseUntil?: number; attempted?: boolean; retryDelay?: number }
 type CreationCommand = Extract<MessageCommand, { action: 'create' | 'createConversation' }>;
-type OutboxCommand = MessageMutation | Extract<MemberExecutionCommand, { action: 'submit' }>;
+type OutboxCommand = MessageMutation | Extract<MemberExecutionCommand, { action: 'submit' | 'answerWait' }>;
 export interface PendingCommand<C> extends CommandMetadata { command: C }
 export interface PendingCommands {
   version: 2; uid: string; teamId: string; generation: number;
@@ -72,7 +88,8 @@ export function mergeConversation(old: TeamConversation | undefined, value: Team
   if (old && old.kind === merged.kind && old.title === merged.title
     && old.lastSeq === merged.lastSeq && old.lastChangeSeq === merged.lastChangeSeq && old.lastReadSeq === merged.lastReadSeq
     && sameLastMessage(old.lastMessage, merged.lastMessage)
-    && old.participants.length === merged.participants.length && old.participants.every((value, index) => value === merged.participants[index])) return old;
+    && old.participants.length === merged.participants.length && old.participants.every((value, index) => value === merged.participants[index])
+    && (old.readers ?? []).join('\n') === (merged.readers ?? []).join('\n')) return old;
   return merged;
 }
 export function mergeDirectory(state: MessageProjection, incoming: TeamConversation[], replace: boolean): MessageProjection {
@@ -101,8 +118,10 @@ function failedCommand<T extends CommandMetadata>(intent: T, error: unknown, per
   const retryDelay = Math.min(30000, Math.max(500, intent.retryDelay ?? 500) * 2);
   return { ...intent, leaseUntil: Date.now() + retryDelay, retryDelay };
 }
+/** Server verdicts that end an answer to a Bot's question for good: the wait is over, is not the viewer's, or the task lost its authority. */
+export const ANSWER_REFUSED = ['WAIT_CLOSED', 'WAIT_RECIPIENT_REQUIRED', 'WAIT_REQUIRED', 'TASK_REVOKED'];
 const isRevokedAccessError = (error: unknown) => error instanceof Error && ['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED', 'CONVERSATION_REQUIRED'].includes(error.message);
-const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'HOST_UNAVAILABLE', 'REQUEST_QUOTA_EXCEEDED', 'CONVERSATION_POLICY_REQUIRED', 'INPUT_GRANT_REQUIRED', 'BOT_RETIRED', 'COMMAND_ID_CONFLICT'].includes(error.message);
+const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'HOST_UNAVAILABLE', 'REQUEST_QUOTA_EXCEEDED', 'CONVERSATION_POLICY_REQUIRED', 'INPUT_GRANT_REQUIRED', 'BOT_RETIRED', 'COMMAND_ID_CONFLICT', ...ANSWER_REFUSED].includes(error.message);
 /** Persist command identities before transport; Firestore owns message history. */
 export class TeamMessaging {
   state: MessageProjection;
@@ -144,7 +163,7 @@ export class TeamMessaging {
     const command = value.command;
     if (command.teamId !== this.scope.teamId || command.generation !== this.scope.generation) return false;
     if ('schemaVersion' in command) return isMemberExecutionCommand(command)
-      && (kind === 'creation' ? command.action === 'createConversation' : command.action === 'submit');
+      && (kind === 'creation' ? command.action === 'createConversation' : command.action === 'submit' || command.action === 'answerWait');
     // Human-message commands retain the existing transport; no execution targets are accepted here.
     const fields = kind === 'creation' ? ['action', 'teamId', 'generation', 'conversationId', 'kind', 'title', 'participantUids']
       : ['action', 'teamId', 'generation', 'conversationId', 'messageId', 'changeId', 'operation', 'text', 'replyTo'];
@@ -218,19 +237,37 @@ export class TeamMessaging {
     await this.commit(old => { if (old.creation) throw new Error('CREATION_PENDING'); return { ...old, creation: { command } }; });
     this.select(conversationId); await this.refresh();
   }
-  async queue(operation: MessageMutation['operation'], text: string, messageId: string = crypto.randomUUID(), replyTo?: string, targets: string[] = []) {
-    if (this.closed || !this.selected || (operation !== 'recall' && (!text.trim() || new TextEncoder().encode(text).length > 8192))) throw new Error('INVALID_INPUT');
-    if (operation !== 'create' && targets.length) throw new Error('INVALID_BOT_TARGET');
+  /** `attachments`: checked uploads of this sender for the open conversation. A new message may be files alone. */
+  async queue(operation: MessageMutation['operation'], text: string, messageId: string = crypto.randomUUID(), replyTo?: string, targets: string[] = [], attachments: string[] = []) {
+    if (this.closed || !this.selected || (operation !== 'recall' && ((!text.trim() && !attachments.length) || new TextEncoder().encode(text).length > 8192))) throw new Error('INVALID_INPUT');
+    if (operation !== 'create' && (targets.length || attachments.length)) throw new Error('INVALID_BOT_TARGET');
+    if (attachments.length > ATTACHMENT_MESSAGE_FILES || new Set(attachments).size !== attachments.length) throw new Error('ATTACHMENT_LIMIT');
     if (targets.length > 8 || new Set(targets).size !== targets.length) throw new Error('INVALID_BOT_TARGET');
     const conversation = this.state.conversations.find(value => value.id === this.selected);
     const selectedTargets = targets.length ? targets : operation === 'create' && conversation?.kind === 'bot_dm'
       ? conversation.participants.filter(value => value.startsWith('shared_bot:')).map(value => value.slice(11)) : [];
     const changeId = crypto.randomUUID();
-    const command: OutboxCommand = operation === 'create' && selectedTargets.length
-      ? executionCommand(this.scope, 'submit', { conversationId: this.selected, messageId, changeId, text, targets: [...selectedTargets], ...(replyTo ? { replyTo } : {}) })
+    // Files alone carry no text: surrounding spaces are not a message.
+    const command: OutboxCommand = operation === 'create' && (selectedTargets.length || attachments.length)
+      ? executionCommand(this.scope, 'submit', { conversationId: this.selected, messageId, changeId, text: text.trim() ? text : '', targets: [...selectedTargets],
+        ...(replyTo ? { replyTo } : {}), ...(attachments.length ? { attachments: [...attachments] } : {}) })
       : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...(replyTo ? { replyTo } : {}) };
     await this.commit(old => ({ ...old, outbox: [...old.outbox, { command }] }));
     void this.refresh();
+  }
+  /**
+   * Answer a Bot's question. The command (with its fresh message and change ids) is stored before it is sent, so a retry after a
+   * lost response repeats the same ids. A refused answer is dropped from the queue and thrown, so the caller keeps the text;
+   * any other failure stays queued and is retried like a message.
+   */
+  async answer(waitId: string, text: string) {
+    if (this.closed || !this.selected || !text.trim() || new TextEncoder().encode(text).length > 8192) throw new Error('INVALID_INPUT');
+    const changeId = crypto.randomUUID();
+    const command = executionCommand(this.scope, 'answerWait', { conversationId: this.selected, waitId, messageId: crypto.randomUUID(), changeId, text });
+    await this.commit(old => ({ ...old, outbox: [...old.outbox, { command }] }));
+    await this.refresh();
+    const refused = this.state.outbox.find(item => pendingPayload(item).changeId === changeId)?.error;
+    if (refused && ANSWER_REFUSED.includes(refused)) { await this.discard(changeId); throw new Error(refused); }
   }
   async discard(changeId: string) { await this.commit(old => { if (old.outbox.some(item => pendingPayload(item).changeId === changeId && ((item.attempted && !item.error) || (item.leaseUntil ?? 0) > Date.now()))) throw new Error('MESSAGE_IN_FLIGHT'); return { ...old, outbox: old.outbox.filter(item => pendingPayload(item).changeId !== changeId) }; }); }
   /** Retry an explicit host-unavailable verdict with the original idempotent command. */

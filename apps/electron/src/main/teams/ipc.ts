@@ -44,6 +44,21 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
           if (typeof command.instanceId !== 'string') throw new Error('INVALID_INPUT');
           value = await service.selectSharedFiles(command.uid, command.instanceId);
           break;
+        case 'offerSharedBot':
+          if (!command.input || typeof command.input !== 'object') throw new Error('INVALID_INPUT');
+          value = await service.offerSharedBot(command.uid, command.input as Parameters<TeamsService['offerSharedBot']>[1]);
+          break;
+        case 'acceptSharedBot':
+          if (!command.input || typeof command.input !== 'object') throw new Error('INVALID_INPUT');
+          value = await service.acceptSharedBot(command.uid, command.input as Parameters<TeamsService['acceptSharedBot']>[1]);
+          break;
+        case 'hostStatus':
+          value = await service.hostStatus(command.uid);
+          break;
+        case 'publishedKnowledge':
+          if (typeof command.teamId !== 'string' || typeof command.sharedBotId !== 'string') throw new Error('INVALID_INPUT');
+          value = await service.publishedKnowledge(command.uid, command.teamId, command.sharedBotId);
+          break;
         case 'detail':
           if (typeof command.teamId !== 'string') throw new Error('INVALID_INPUT');
           value = await service.detail(command.teamId, command.uid);
@@ -51,6 +66,13 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
         case 'messages':
           if (!command.command || typeof command.command !== 'object') throw new Error('INVALID_INPUT');
           value = await service.messages(command.command as Parameters<TeamsService['messages']>[0], command.uid);
+          break;
+        case 'services':
+          if (!command.command || typeof command.command !== 'object') throw new Error('INVALID_INPUT');
+          value = await service.services(command.command as Parameters<TeamsService['services']>[0], command.uid);
+          break;
+        case 'serviceMessages':
+          value = await service.serviceMessages(command.command, command.uid);
           break;
         case 'execute':
           if (!command.command || typeof command.command !== 'object') throw new Error('INVALID_INPUT');

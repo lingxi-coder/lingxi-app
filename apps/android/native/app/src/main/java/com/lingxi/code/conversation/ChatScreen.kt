@@ -473,6 +473,9 @@ fun ChatScreen(
             if (modelSetupRequired) {
                 ModelSetupBanner(onOpenModelSettings = onOpenModelSettings, availabilityNotice = modelAvailabilityNotice)
             }
+            state.agentRun?.takeIf { it.active }?.let { run ->
+                run.retry?.let { ReconnectNotice(it, run.turnId, Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) }
+            }
             // Match iOS: one runtime footer, with execution details in summary sheets.
             state.compaction?.let { CompactionProgressRow(it) }
                 ?: state.error?.takeUnless { modelSetupRequired }?.let {
@@ -616,6 +619,7 @@ data class ComputerUseSetupStatus(
     val accessibilityEnabled: Boolean,
     val browserAuthorized: Boolean,
     val sessionActive: Boolean,
+    val sessionStarting: Boolean = false,
 ) {
     val ready: Boolean
         get() = accessibilityEnabled && browserAuthorized && sessionActive
@@ -640,7 +644,11 @@ data class ComputerUseSetupStatus(
                 add(strings.resolve(R.string.chat_computer_use_missing_browser, "授权浏览器"))
             }
             if (!sessionActive) {
-                add(strings.resolve(R.string.settings_cu_start_session, "启动控制会话"))
+                add(if (sessionStarting) {
+                    strings.resolve(R.string.settings_cu_state_starting, "启动中")
+                } else {
+                    strings.resolve(R.string.settings_cu_start_session, "启动控制会话")
+                })
             }
         }.joinToString("、")
 }

@@ -80,6 +80,7 @@ internal class PermissionIngress(
  */
 internal class LosslessEventRelay<T>(
     scope: CoroutineScope,
+    private val beforeEmit: suspend (T) -> Boolean = { true },
 ) {
     private val queue = Channel<T>(capacity = Channel.UNLIMITED)
     private val shared = MutableSharedFlow<T>(extraBufferCapacity = 64)
@@ -87,7 +88,7 @@ internal class LosslessEventRelay<T>(
 
     init {
         scope.launch {
-            for (event in queue) shared.emit(event)
+            for (event in queue) if (beforeEmit(event)) shared.emit(event)
         }
     }
 

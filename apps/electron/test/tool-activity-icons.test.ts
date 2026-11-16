@@ -19,6 +19,8 @@ const examples = [
   ['Task', 'task', 'tasks'],
   ['TodoWrite', 'todo', 'tasks'],
   ['WebFetch', 'fetch', 'globe'],
+  ['browser', 'generic', 'globe'],
+  ['computer', 'generic', 'computer'],
   ['Skill', 'skill', 'spark'],
   ['TaskOutput', 'output', 'output'],
   ['TaskStop', 'kill', 'stop'],
@@ -44,6 +46,10 @@ test('single and collapsed tool rows share semantic artwork in both themes', () 
 });
 
 test('generic tool recognition preserves unknown fallback and explicit verbs', () => {
+  assert.equal(toolIconName('generic', 'browser', 'wrench'), 'globe');
+  assert.equal(toolIconName('generic', 'computer', 'wrench'), 'computer');
+  assert.equal(toolIconName('Computer'), 'computer');
+  assert.equal(toolIconName('Browser'), 'globe');
   assert.equal(toolIconName('generic', 'mcp__unknown__call'), 'mcp-fallback');
   assert.equal(toolIconName('generic', 'mcp__image_server__unrelated'), 'mcp-fallback');
   assert.equal(toolIconName('update', 'image'), 'compose');

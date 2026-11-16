@@ -16,6 +16,8 @@ struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
     let usePolicy: TeamUsePolicy
     let quotas: TeamRequestQuotas
     let instanceId: String?
+    /// The list this Bot shares with the people who may use it, when it shares one.
+    var sharedList: TeamBotListInfo? = nil
     var id: String { sharedBotId }
     var selectable: Bool { state == "published" && permitted }
     var avatarId: String { sharedBotId }
@@ -29,6 +31,14 @@ struct TeamTaskUsage: Decodable, Equatable, Sendable {
     var costMicros: Double? = nil
     var currency: String? = nil
 }
+/// The answer a waiting task is blocked on; present only while `state` is `waiting`. `messageId` is the Bot's question.
+struct TeamTaskWait: Decodable, Equatable, Sendable {
+    let waitId: String
+    let kind: String
+    let recipient: TeamMemberRef
+    let expiresAt: Double
+    let messageId: String
+}
 struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
     let taskId: String
     let conversationId: String
@@ -36,12 +46,65 @@ struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
     let requester: TeamMemberRef
     let state: String
     let createdAt: Double
+    /// Ends the current phase: the pick-up limit while queued, the running budget while running, the wait's expiry while waiting.
     let deadline: Double
     let replyId: String?
     let artifactId: String?
     var usage: TeamTaskUsage? = nil
+    var cancelRequestedAt: Double? = nil
+    var wait: TeamTaskWait? = nil
     var id: String { taskId }
-    var terminal: Bool { state != "queued" && state != "running" }
+    var terminal: Bool { !["queued", "running", "waiting"].contains(state) }
+    /// A worker has it or is about to: its state changes within seconds. A waiting task changes only with its answer or its expiry.
+    var busy: Bool { state == "queued" || state == "running" }
+    /// Cancellation was asked while the Bot was working; the task ends at the worker's next check.
+    var cancelling: Bool { state == "running" && cancelRequestedAt != nil }
+}
+/// The identity of one decision on a request. Made once and sent again unchanged on a retry.
+struct TeamDecisionIds: Equatable, Sendable {
+    var commandId = UUID().uuidString
+    var messageId = UUID().uuidString
+    var changeId = UUID().uuidString
+}
+/// Where a Bot's request to change its list stands for the viewer (Desktop `ApprovalCard`).
+enum TeamApprovalState: Equatable, Sendable {
+    /// The task waits for the viewer's decision.
+    case decide
+    /// The task waits for this member's decision.
+    case waiting(uid: String)
+    case approved(uid: String)
+    case declined(uid: String)
+    /// It ended without a decision: it expired, or its task was cancelled or lost its authorization.
+    case closed
+}
+/// What the viewer may do with a task (Desktop `BotRun`).
+enum TeamTaskActions {
+    enum ExpiryUnit: Equatable, Sendable { case minutes, hours, days }
+    /// The requester and the Bot's maintainer may stop a task that has not ended.
+    static func canCancel(_ task: TeamTask, viewer: TeamMemberRef, maintainer: TeamMemberRef?) -> Bool {
+        !task.terminal && !task.cancelling && (task.requester == viewer || maintainer == viewer)
+    }
+    /// The wait an answer from the viewer would resolve: the task waits for exactly this viewer and no answer to it is already on its way.
+    static func answerableWait(_ task: TeamTask?, viewer: TeamMemberRef, pendingWaitIds: Set<String>) -> String? {
+        // A proposed change is approved or declined on its own card, never answered in words.
+        guard let task, task.state == "waiting", let wait = task.wait, wait.kind == "human_input", wait.recipient == viewer, !pendingWaitIds.contains(wait.waitId) else { return nil }
+        return wait.waitId
+    }
+    /// Where the request `waitId` stands: open while its task waits on it, then decided by the reply that carries the decision, else closed.
+    static func approvalState(waitId: String, task: TeamTask?, viewer: TeamMemberRef, messages: [TeamMessage]) -> TeamApprovalState {
+        if let task, task.state == "waiting", let wait = task.wait, wait.waitId == waitId, wait.kind == "tool_approval" {
+            return wait.recipient == viewer ? .decide : .waiting(uid: wait.recipient.uid)
+        }
+        guard let reply = messages.first(where: { $0.waitId == waitId && $0.author.kind == "user" && $0.decision?.approved != nil }) else { return .closed }
+        return reply.decision?.approved == true ? .approved(uid: reply.author.uid) : .declined(uid: reply.author.uid)
+    }
+    /// How long until `at` (both in milliseconds), rounded up to whole minutes, hours (under 48) or days; never less than one minute.
+    static func expiry(at: Double, now: Double) -> (value: Int, unit: ExpiryUnit) {
+        let minutes = max(1, Int(((at - now) / 60_000).rounded(.up)))
+        if minutes < 60 { return (minutes, .minutes) }
+        let hours = Int((Double(minutes) / 60).rounded(.up))
+        return hours < 48 ? (hours, .hours) : (Int((Double(hours) / 24).rounded(.up)), .days)
+    }
 }
 struct TeamArtifact: Decodable, Equatable, Identifiable, Sendable {
     struct Document: Decodable, Equatable, Sendable { let title: String; let body: String }
@@ -49,7 +112,10 @@ struct TeamArtifact: Decodable, Equatable, Identifiable, Sendable {
     let revision: Int
     let digest: String
     let document: Document
+    /// The latest revision of this document; `revision` is older when an entry of the history is shown.
+    let currentRevision: Int
     var id: String { artifactId }
+    var old: Bool { revision < currentRevision }
 }
 /// IDs are raw SharedBot IDs in commands and explicit shared_bot principals in Chat participants.
 enum TeamBotSelection {
@@ -70,6 +136,27 @@ enum TeamBotSelection {
 /// Member commands are validated independently of storage/execution versions.
 /// Unknown fields and retired actions cannot enter the transport through a journal replay.
 enum TeamExecutionContract {
+    /// The largest shared document body the service stores, in UTF-8 bytes.
+    static let documentBytes = 256 * 1024
+    /// The longest text of one shared-list item, in UTF-8 bytes, and the most changes one write carries.
+    static let listItemBytes = 500, listChanges = 20
+    /// One change of a shared-list write exactly as the service accepts it.
+    private static func listChange(_ change: [String: Any]) -> Bool {
+        func text(_ value: Any?) -> Bool {
+            guard let text = value as? String else { return false }
+            return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && text.utf8.count <= listItemBytes && !text.contains("\0")
+        }
+        func flag(_ value: Any?) -> Bool { (value as? NSNumber).map { CFGetTypeID($0) == CFBooleanGetTypeID() } ?? false }
+        let keys = Set(change.keys)
+        switch change["op"] as? String {
+        case "add": return keys == ["op", "text"] && text(change["text"])
+        case "update":
+            return keys.isSubset(of: ["op", "itemId", "text", "done"]) && identifier(change["itemId"]) && (change["text"] != nil || change["done"] != nil)
+                && (change["text"] == nil || text(change["text"])) && (change["done"] == nil || flag(change["done"]))
+        case "remove": return keys == ["op", "itemId"] && identifier(change["itemId"])
+        default: return false
+        }
+    }
     static func validate(_ value: [String: Any]) throws {
         func fail() throws -> Never { throw TeamMessageFailure(code: "INVALID_INPUT") }
         guard Set(value.keys) == ["schemaVersion", "commandId", "teamId", "generation", "action", "payload"],
@@ -88,7 +175,38 @@ enum TeamExecutionContract {
         switch action {
         case "listSharedBots": try shape([])
         case "getTask": try shape(["taskId"]); try id("taskId")
-        case "readArtifact": try shape(["artifactId"]); try id("artifactId")
+        case "readArtifact":
+            try shape(["artifactId"], ["revision"]); try id("artifactId")
+            if payload["revision"] != nil { guard integer(payload["revision"], minimum: 1) != nil else { try fail() } }
+        case "listArtifactRevisions": try shape(["artifactId"]); try id("artifactId")
+        case "reviseArtifact":
+            try shape(["artifactId", "expectedRevision", "operationId", "document"]); try id("artifactId"); try id("operationId")
+            guard integer(payload["expectedRevision"], minimum: 1) != nil, let document = payload["document"] as? [String: Any],
+                  Set(document.keys) == ["title", "body"], let title = document["title"] as? String, let body = document["body"] as? String,
+                  case let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty, trimmed.utf16.count <= 120,
+                  !body.isEmpty, body.utf8.count <= documentBytes else { try fail() }
+        case "listOperations": try shape(["taskId"]); try id("taskId")
+        case "readList": try shape(["sharedBotId"]); try id("sharedBotId")
+        case "listHistory":
+            try shape(["sharedBotId"], ["beforeRevision"]); try id("sharedBotId")
+            if payload["beforeRevision"] != nil { guard integer(payload["beforeRevision"], minimum: 1) != nil else { try fail() } }
+        case "writeList":
+            try shape(["sharedBotId", "operationId", "expectedDataRevision", "changes"]); try id("sharedBotId"); try id("operationId")
+            guard integer(payload["expectedDataRevision"], minimum: 0) != nil, let changes = payload["changes"] as? [[String: Any]],
+                  (1...listChanges).contains(changes.count), changes.allSatisfy(listChange) else { try fail() }
+        case "resolveOperation":
+            try shape(["taskId", "operationId", "resolution"]); try id("taskId")
+            guard let operation = payload["operationId"] as? String, operation.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+                  let resolution = payload["resolution"] as? String, ["succeeded", "failed"].contains(resolution) else { try fail() }
+        case "cancelTask": try shape(["taskId"]); try id("taskId")
+        case "answerWait":
+            try shape(["conversationId", "waitId", "messageId", "changeId", "text"])
+            for key in ["conversationId", "waitId", "messageId", "changeId"] { try id(key) }
+            guard let text = payload["text"] as? String, !text.isEmpty, text.utf8.count <= 8192 else { try fail() }
+        case "decideWait":
+            try shape(["conversationId", "waitId", "messageId", "changeId", "decision"])
+            for key in ["conversationId", "waitId", "messageId", "changeId"] { try id(key) }
+            guard let decision = payload["decision"] as? String, ["approve", "deny"].contains(decision) else { try fail() }
         case "listTasks":
             try shape([], ["conversationId", "after"])
             for key in payload.keys { try id(key) }
@@ -99,10 +217,30 @@ enum TeamExecutionContract {
             try shape(["conversationId", "expectedRevision", "targets"]); try id("conversationId"); try ids("targets", minimum: 0)
             guard integer(payload["expectedRevision"], minimum: 0) != nil else { try fail() }
         case "submit":
-            try shape(["conversationId", "messageId", "changeId", "text", "targets"], ["replyTo"])
-            for key in ["conversationId", "messageId", "changeId"] { try id(key) }; try ids("targets")
+            // A message that asks Bots, carries files, or both.
+            try shape(["conversationId", "messageId", "changeId", "text", "targets"], ["replyTo", "attachments"])
+            for key in ["conversationId", "messageId", "changeId"] { try id(key) }
+            let files = payload["attachments"] != nil
+            try ids("targets", minimum: files ? 0 : 1)
+            if files { try ids("attachments", maximum: TeamAttachments.messageFiles) }
             if payload["replyTo"] != nil { try id("replyTo") }
-            guard let text = payload["text"] as? String, !text.isEmpty, text.utf8.count <= 8192 else { try fail() }
+            guard let text = payload["text"] as? String, files || !text.isEmpty, text.utf8.count <= 8192 else { try fail() }
+        case "createUpload":
+            try shape(["conversationId", "uploadId", "name", "mime", "byteLength", "sha256"]); try id("conversationId"); try id("uploadId")
+            guard let name = payload["name"] as? String, name == TeamAttachments.name(name),
+                  let mime = payload["mime"] as? String, TeamAttachments.types.contains(mime),
+                  let length = integer(payload["byteLength"], minimum: 1), length <= Double(TeamAttachments.fileBytes),
+                  let digest = payload["sha256"] as? String, digest.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else { try fail() }
+        case "putUploadPart":
+            try shape(["uploadId", "index", "data"]); try id("uploadId")
+            guard let index = integer(payload["index"], minimum: 0), index <= Double((TeamAttachments.fileBytes - 1) / TeamAttachments.partBytes),
+                  let data = payload["data"] as? String, data.utf8.count >= 4, data.utf8.count <= 4 * ((TeamAttachments.partBytes + 2) / 3),
+                  data.range(of: "^[A-Za-z0-9+/]+={0,2}$", options: .regularExpression) != nil else { try fail() }
+        case "finalizeUpload", "cancelUpload": try shape(["uploadId"]); try id("uploadId")
+        case "readAttachmentPart":
+            try shape(["attachmentId", "index"]); try id("attachmentId")
+            guard let index = integer(payload["index"], minimum: 0), index <= Double((TeamAttachments.fileBytes - 1) / TeamAttachments.partBytes) else { try fail() }
+        case "revokeAttachment": try shape(["attachmentId", "changeId"]); try id("attachmentId"); try id("changeId")
         case "createConversation":
             try shape(["conversationId", "kind", "title", "participantUids", "sharedBotIds"]); try id("conversationId"); try ids("sharedBotIds")
             guard let kind = payload["kind"] as? String, ["bot_dm", "group", "channel"].contains(kind),

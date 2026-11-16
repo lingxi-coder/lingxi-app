@@ -1,29 +1,34 @@
 package com.lingxi.code.teams
 
 import android.icu.text.CompactDecimalFormat
+import android.icu.text.RelativeDateTimeFormatter
+import android.icu.util.ULocale
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.FactCheck
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material.icons.outlined.Block
+import androidx.compose.material.icons.outlined.Cancel
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.HourglassEmpty
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.PauseCircle
+import androidx.compose.material.icons.outlined.Pending
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.TimerOff
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Surface
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -47,7 +52,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
-import com.lingxi.code.conversation.AIText
 import com.lingxi.code.theme.BotAvatar
 import com.lingxi.code.theme.ConfirmDialog
 import com.lingxi.code.theme.LingXiTheme
@@ -83,33 +87,86 @@ internal fun rememberTeamBotLinkOpener(): (String) -> Unit {
     return remember(handler) { { link: String -> if (TeamsBotText.allowsLink(link)) runCatching { handler.openUri(link.trim()) } } }
 }
 
-/**
- * What one Bot request looks like in a conversation (U4): the state as a glyph and a word, the Bot's name, one line of detail (the usage once the run has
- * completed, what to do or what is going on before that) and at most one button. The text block is one accessibility element, "Bot, state, detail", with the
- * token split as its value; the button stays reachable beside it.
- */
+/** "in 4 minutes" in the UI language, for a wait's expiry. */
 @Composable
-internal fun TeamTaskCard(task: TeamTask, botName: String, onArtifact: (String) -> Unit, onRefresh: (String) -> Unit = {}) {
+internal fun teamWaitExpiryText(expiresAt: Long): String {
+    val locale = LocalConfiguration.current.locales[0]
+    val (value, unit) = TeamTaskActions.expiry(expiresAt, System.currentTimeMillis())
+    return remember(locale, value, unit) {
+        RelativeDateTimeFormatter.getInstance(ULocale.forLocale(locale)).format(value.toDouble(), RelativeDateTimeFormatter.Direction.NEXT, when (unit) {
+            TeamTaskActions.ExpiryUnit.MINUTES -> RelativeDateTimeFormatter.RelativeUnit.MINUTES
+            TeamTaskActions.ExpiryUnit.HOURS -> RelativeDateTimeFormatter.RelativeUnit.HOURS
+            TeamTaskActions.ExpiryUnit.DAYS -> RelativeDateTimeFormatter.RelativeUnit.DAYS
+        })
+    }
+}
+
+/** The one line under the Bot's name on a run card, and the test tag it is found by. */
+private class RunDetail(val text: String, val tag: String)
+
+/**
+ * What one Bot request looks like in a conversation (U4): the state as a glyph and a word, the Bot's name, one line of detail and the actions. The line is the
+ * usage once the run is over (a run cancelled before any model call has nothing to report), who a waiting task waits for, what a task that needs checking needs,
+ * and for every other state what to do or what is going on. The text block is one accessibility element, "state, Bot, detail", with the token split as its
+ * value; the buttons stay reachable beside it.
+ *
+ * Actions: Refresh status while the run is going and Open document once it has completed with one, as before; and the member's own: [onReply] answers the
+ * Bot's question (set only on the question itself, while the viewer can still answer it), [onCancel] stops a task that has not ended, [onReview] opens the
+ * review of an action of unknown outcome. [viewer] is the signed-in member and [maintainer] the Bot's maintainer when its card is known: they decide who may
+ * cancel and review. [recipientName] names the member a waiting task waits for (not needed when that is the viewer).
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun TeamTaskCard(
+    task: TeamTask, botName: String, onArtifact: (String) -> Unit, onRefresh: (String) -> Unit = {}, viewer: TeamMemberRef? = null, maintainer: TeamMemberRef? = null,
+    recipientName: String = "", onCancel: (String) -> Unit = {}, onReply: (() -> Unit)? = null, onReview: ((String) -> Unit)? = null, modifier: Modifier = Modifier,
+) {
+    var cancelAsked by remember(task.taskId, task.state, task.cancelRequestedAt) { mutableStateOf(false) }
     val run = TeamsBotText.runState(task.state)
     val words = rememberTeamUsageStrings()
     val completed = task.state == "completed"
-    val state = stringResource(run.label)
-    val detail = if (completed) TeamsBotText.usageLine(task.usage, words) else run.detail?.let { stringResource(it) }
-    val split = if (completed) TeamsBotText.tokenSplit(task.usage, words) else null
-    Column(Modifier.fillMaxWidth().padding(top = 4.dp).testTag("teams.task.${task.taskId}"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    val canCancel = TeamTaskActions.canCancel(task, viewer, maintainer)
+    val resolves = TeamOperationRules.canResolve(viewer, maintainer)
+    val review = onReview?.takeIf { TeamOperationRules.canReview(task, viewer, maintainer) }
+    val state = stringResource(TeamsBotText.stateLabel(task))
+    val usageShown = completed || (task.state == "cancelled" && task.usage != null)
+    val wait = task.wait?.takeIf { task.state == "waiting" }
+    val detail: RunDetail? = when {
+        usageShown -> RunDetail(TeamsBotText.usageLine(task.usage, words), "teams.task.usage.${task.taskId}")
+        wait != null -> {
+            val expires = teamWaitExpiryText(wait.expiresAt)
+            RunDetail(
+                if (wait.recipient == viewer) stringResource(R.string.teams_task_waiting_you_fmt, expires) else stringResource(R.string.teams_task_waiting_member_fmt, recipientName, expires),
+                "teams.task.wait.${task.taskId}",
+            )
+        }
+        // An outside action of unknown outcome: the maintainer confirms it where the review screen is.
+        task.state == "needs_reconciliation" ->
+            RunDetail(stringResource(if (resolves) R.string.teams_task_needs_checking_maintainer else R.string.teams_task_needs_checking_hint), "teams.task.checking.${task.taskId}")
+        else -> run.detail?.let { RunDetail(stringResource(it), "teams.task.usage.${task.taskId}") }
+    }
+    val split = if (usageShown) TeamsBotText.tokenSplit(task.usage, words) else null
+    val artifactId = task.artifactId?.takeIf { completed }
+    Column(modifier.fillMaxWidth().padding(top = 4.dp).testTag("teams.task.${task.taskId}"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Column(Modifier.semantics(mergeDescendants = true) { split?.let { stateDescription = it } }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 RunGlyphIcon(run)
                 Text(state, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
             }
             Text(botName, style = MaterialTheme.typography.titleSmall)
-            detail?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.task.usage.${task.taskId}")) }
+            detail?.let { Text(it.text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag(it.tag)) }
         }
-        // At most one button: Refresh status while the run is going, Open document once it has completed with one. The other states say what to do.
-        val artifactId = task.artifactId
-        when {
-            run.active -> TextButton(onClick = { onRefresh(task.taskId) }) { Text(stringResource(R.string.teams_run_refresh)) }
-            completed && artifactId != null -> TextButton(onClick = { onArtifact(artifactId) }) { Text(stringResource(R.string.teams_artifact_open)) }
+        if (onReply != null || review != null || canCancel || run.active || artifactId != null) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (onReply != null) Button(onClick = onReply, modifier = Modifier.testTag("teams.task.reply.${task.taskId}")) { Text(stringResource(R.string.teams_message_reply)) }
+            if (review != null) OutlinedButton(onClick = { review(task.taskId) }, modifier = Modifier.testTag("teams.task.review.${task.taskId}")) {
+                Text(stringResource(if (resolves) R.string.teams_ops_review else R.string.teams_ops_view))
+            }
+            if (canCancel) OutlinedButton(onClick = { cancelAsked = true; onCancel(task.taskId) }, enabled = !cancelAsked, modifier = Modifier.testTag("teams.task.cancel.${task.taskId}")) {
+                Text(stringResource(R.string.teams_task_cancel), color = MaterialTheme.colorScheme.error)
+            }
+            // The other states say what to do; Refresh status is for the ones that are still going.
+            if (run.active) TextButton(onClick = { onRefresh(task.taskId) }) { Text(stringResource(R.string.teams_run_refresh)) }
+            if (artifactId != null) TextButton(onClick = { onArtifact(artifactId) }) { Text(stringResource(R.string.teams_artifact_open)) }
         }
     }
 }
@@ -143,25 +200,71 @@ private fun runGlyphVector(glyph: RunGlyph, reduceMotion: Boolean): ImageVector 
     RunGlyph.Paused -> Icons.Outlined.PauseCircle
     RunGlyph.Locked -> Icons.Outlined.Lock
     RunGlyph.Blocked -> Icons.Outlined.Block
+    RunGlyph.Waiting -> Icons.Outlined.Pending
+    RunGlyph.Cancelled -> Icons.Outlined.Cancel
+    RunGlyph.Checking -> Icons.AutoMirrored.Outlined.FactCheck
     RunGlyph.Unknown -> Icons.AutoMirrored.Outlined.HelpOutline
 }
 
+/** One proposed change in words. An item that was gone when the Bot asked has no text to show. */
 @Composable
-internal fun TeamArtifactViewer(artifact: TeamArtifact, onClose: () -> Unit) {
-    androidx.compose.ui.window.Dialog(onDismissRequest = onClose, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
-            Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(artifact.title, style = MaterialTheme.typography.headlineSmall)
-                androidx.compose.foundation.text.selection.SelectionContainer(Modifier.weight(1f).verticalScroll(rememberScrollState())) { AIText(markdown = artifact.body, modifier = Modifier.fillMaxWidth().testTag("teams.artifact.body"), onOpenLink = rememberTeamBotLinkOpener()) }
-                Text(stringResource(R.string.apps_version_fmt, artifact.revision), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                TextButton(onClick = onClose) { Text(stringResource(R.string.common_close)) }
-            }
-        }
+internal fun teamApprovalChangeText(change: TeamListApprovalChange): String {
+    val item = change.item?.let { "“$it”" } ?: stringResource(R.string.teams_approval_missing_item)
+    val text = "“${change.text.orEmpty()}”"
+    return when {
+        change.op == "add" -> stringResource(R.string.teams_approval_add_fmt, text)
+        change.op == "remove" -> stringResource(R.string.teams_approval_remove_fmt, item)
+        change.text != null && change.done == true -> stringResource(R.string.teams_approval_change_done_fmt, item, text)
+        change.text != null && change.done == false -> stringResource(R.string.teams_approval_change_undone_fmt, item, text)
+        change.text != null -> stringResource(R.string.teams_approval_change_fmt, item, text)
+        change.done == false -> stringResource(R.string.teams_approval_undone_fmt, item)
+        else -> stringResource(R.string.teams_approval_done_fmt, item)
     }
 }
 
+/**
+ * A Bot's request to change its list, under the message that carries it: each change in words, and Approve and Decline for the
+ * member the Bot works for while the task waits. Afterwards it says how the request ended. [deciderName] names the member who
+ * decides or decided. Nothing is saved to the list before an approval.
+ */
 @Composable
-internal fun TeamBotCardView(bot: TeamBotCard, ownerName: String, uid: String, generation: Long, enabled: Boolean, onMessage: () -> Unit, onStopSharing: () -> Unit, modifier: Modifier = Modifier) {
+internal fun TeamApprovalCard(approval: TeamListApproval, waitId: String, state: TeamApprovalState, deciderName: String, onDecide: (Boolean, TeamDecisionIds) -> Unit) {
+    // One identity per decision, kept across retries so a lost answer cannot post the reply twice.
+    val ids = remember(waitId) { mutableMapOf<Boolean, TeamDecisionIds>() }
+    var asked by remember(waitId, state) { mutableStateOf(false) }
+    // A decision that did not get through can be sent again after a moment.
+    androidx.compose.runtime.LaunchedEffect(asked) { if (asked) { kotlinx.coroutines.delay(8000); asked = false } }
+    // It sits flush with the message text, like the run card under it.
+    Column(Modifier.fillMaxWidth().padding(top = 4.dp).testTag("teams.approval.$waitId"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(stringResource(R.string.teams_approval_title_fmt, approval.title), style = MaterialTheme.typography.titleSmall)
+        approval.changes.forEach { change -> Text("• ${teamApprovalChangeText(change)}", style = MaterialTheme.typography.bodyMedium) }
+        if (state == TeamApprovalState.Decide) {
+            Text(stringResource(R.string.teams_approval_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { asked = true; onDecide(true, ids.getOrPut(true) { TeamDecisionIds() }) }, enabled = !asked, modifier = Modifier.testTag("teams.approval.approve.$waitId")) { Text(stringResource(R.string.teams_approval_approve)) }
+                OutlinedButton(onClick = { asked = true; onDecide(false, ids.getOrPut(false) { TeamDecisionIds() }) }, enabled = !asked, modifier = Modifier.testTag("teams.approval.decline.$waitId")) {
+                    Text(stringResource(R.string.teams_approval_decline), color = MaterialTheme.colorScheme.error)
+                }
+            }
+        } else Text(
+            when (state) {
+                is TeamApprovalState.Waiting -> stringResource(R.string.teams_approval_waiting_member_fmt, deciderName)
+                is TeamApprovalState.Approved -> stringResource(R.string.teams_approval_approved_by_fmt, deciderName)
+                is TeamApprovalState.Declined -> stringResource(R.string.teams_approval_declined_by_fmt, deciderName)
+                else -> stringResource(R.string.teams_approval_closed)
+            },
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.approval.status.$waitId"),
+        )
+    }
+}
+
+/** [onStopSharing] is the maintainer's Stop sharing (confirmed first); [onList], when set, opens the Bot's shared list. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun TeamBotCardView(
+    bot: TeamBotCard, ownerName: String, uid: String, generation: Long, enabled: Boolean, onMessage: () -> Unit, onStopSharing: () -> Unit,
+    modifier: Modifier = Modifier, onList: (() -> Unit)? = null,
+) {
     var confirm by remember(bot.sharedBotId, bot.revision, bot.state) { mutableStateOf(false) }
     Column(modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -171,8 +274,10 @@ internal fun TeamBotCardView(bot: TeamBotCard, ownerName: String, uid: String, g
                 if (bot.description.isNotBlank()) Text(bot.description, style = MaterialTheme.typography.bodyMedium)
                 Text("${botAvailabilityText(bot)} · ${stringResource(R.string.teams_bot_owner_fmt, ownerName)}", style = MaterialTheme.typography.bodySmall)
                 Text(stringResource(if (bot.usePolicy.getString("mode") == "all") R.string.teams_bot_use_all else R.string.teams_bot_use_listed), style = MaterialTheme.typography.bodySmall)
-                Row {
+                // Up to three actions: they wrap under each other rather than run out of the card at a large font size.
+                FlowRow {
                     TextButton(enabled = enabled && bot.selectable, onClick = onMessage) { Text(stringResource(R.string.teams_bot_message)) }
+                    if (onList != null) TextButton(enabled = enabled, onClick = onList, modifier = Modifier.testTag("teams.bot.list.${bot.sharedBotId}")) { Text(stringResource(R.string.teams_list_open)) }
                     if (bot.canPause(uid, generation)) TextButton(enabled = enabled, onClick = { confirm = true }) { Text(stringResource(R.string.friends_share_bot_stop)) }
                 }
             }

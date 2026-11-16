@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { executionCommand, type ExecutionScope, type TeamTaskView } from './execution.js';
 import type { TeamsApi } from './index.js';
 
@@ -6,6 +6,9 @@ import type { TeamsApi } from './index.js';
 export function useTeamTasks(api: TeamsApi, scope: ExecutionScope, conversationId?: string, enabled = true) {
   const [value, setValue] = useState<{ key: string; tasks: TeamTaskView[]; error: string }>({ key: '', tasks: [], error: '' });
   const key = `${scope.teamId}:${scope.generation}:${conversationId ?? ''}`;
+  const again = useRef<() => void>();
+  /** Fetch the tasks now, after a command that changes one. */
+  const refresh = useCallback(() => again.current?.(), []);
   useEffect(() => {
     if (!enabled) return;
     let closed = false, running = false;
@@ -21,12 +24,13 @@ export function useTeamTasks(api: TeamsApi, scope: ExecutionScope, conversationI
         if (!closed) setValue(old => ({ key, tasks: !revoked && old.key === key ? old.tasks : [], error: code }));
       } finally { running = false; }
     };
+    again.current = () => void refresh();
     void refresh();
     const timer = setInterval(() => void refresh(), 1000);
     const stop = api.onMessagesChanged(() => void refresh());
     const visible = () => void refresh();
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', visible);
-    return () => { closed = true; clearInterval(timer); stop(); if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', visible); };
+    return () => { closed = true; again.current = undefined; clearInterval(timer); stop(); if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', visible); };
   }, [api, key, enabled]);
-  return value.key === key ? value : { tasks: [] as TeamTaskView[], error: '' };
+  return { ...(value.key === key ? value : { tasks: [] as TeamTaskView[], error: '' }), refresh };
 }

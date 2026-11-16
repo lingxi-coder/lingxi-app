@@ -63,6 +63,17 @@ class TeamConfirmationsTest {
         assertEquals("member", demote.command["role"])
     }
 
+    @Test fun handingTheTeamOverAsksOnceWithItsOwnVerbAndSendsTheHandOverCommand() {
+        val c = TeamConfirmations.makeOwner(team, member)
+        assertEquals(R.string.teams_make_owner, c.title)
+        assertNull(c.subject)
+        assertEquals(R.string.teams_confirm_make_owner, c.body)
+        assertEquals(R.string.teams_make_owner, c.button)
+        assertFalse(c.destructive)
+        assertFalse(c.closesDetails)
+        assertEquals(mapOf("action" to "handOver", "teamId" to "t1", "uid" to "u2", "generation" to 5L), c.command)
+    }
+
     @Test fun revokingAnInviteHasATitleWithNoNameInIt() {
         val c = TeamConfirmations.revokeInvite(team, invite)
         assertEquals(R.string.teams_confirm_revoke_title, c.title)
@@ -77,7 +88,8 @@ class TeamConfirmationsTest {
     @Test fun noConfirmationIsTitleOnlyOrSaysConfirm() {
         val all = listOf(
             TeamConfirmations.leave(team), TeamConfirmations.delete(team), TeamConfirmations.remove(team, member, "Mia"),
-            TeamConfirmations.changeRole(team, member, "Mia"), TeamConfirmations.changeRole(team, admin, "Mia"), TeamConfirmations.revokeInvite(team, invite),
+            TeamConfirmations.changeRole(team, member, "Mia"), TeamConfirmations.changeRole(team, admin, "Mia"), TeamConfirmations.makeOwner(team, member),
+            TeamConfirmations.revokeInvite(team, invite),
         )
         val retired = setOf(R.string.teams_confirm, R.string.teams_confirm_change, R.string.teams_confirm_leave, R.string.teams_confirm_delete)
         for (c in all) {

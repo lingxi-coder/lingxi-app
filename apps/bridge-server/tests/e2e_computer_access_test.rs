@@ -302,6 +302,8 @@ async fn computer_access_request_event_then_approve_resolves_resolver() {
                 clipboard_read: false,
                 clipboard_write: false,
                 system_key_combos: false,
+                interaction_action: None,
+                preferred_mode: None,
             },
         },
     )

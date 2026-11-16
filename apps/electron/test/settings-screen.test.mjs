@@ -88,6 +88,38 @@ test('all settings pages fit macOS windows and name their switches', async () =>
   }
 });
 
+test('recommended skills search, add their source and follow the chosen package before installation', async () => {
+  for (const theme of ['light', 'dark']) {
+    const result = await runScenario('extension-recommendations', theme);
+    assert.equal(result.initial.count, 4);
+    assert.equal(result.initial.overflow, false);
+    assert.equal(result.search, true);
+    assert.equal(result.installed, true);
+    assert.equal(result.narrow, true);
+    assert.equal(result.mcpTemplate, true);
+    assert.deepEqual(result.details, { examples: 2, skills: 4, noMutations: true });
+    assert.equal(result.copied, true);
+    assert.equal(result.beforeUninstall, 2);
+    assert.equal(result.cancelUninstall, true);
+    assert.equal(result.credentialCleanup, true);
+    assert.equal(result.uninstall.revision, 'b'.repeat(64));
+    assert.deepEqual(JSON.parse(result.uninstall.payload_json), { action: 'uninstall', plugin: 'document-skills@anthropic-agent-skills', scope: 'user', confirmed: true });
+    assert.equal(result.cancelMcp, true);
+    assert.equal(result.removeMcp.scope, 'project');
+    assert.equal(result.removeMcp.revision, 'p'.repeat(64));
+    assert.deepEqual(JSON.parse(result.removeMcp.payload_json), { scope: 'project', name: 'notion' });
+    assert(result.beforePreview.every(({ command }) => command.action === 'get_catalog'));
+    assert.equal(result.beforeConfirmation.filter(({ command }) => command.action === 'apply_operation').length, 0);
+    assert.equal(result.selectedPackage.filter(({ command }) => command.action === 'apply_operation').length, 1);
+    const applied = result.completed.filter(({ command }) => command.action === 'apply_operation');
+    assert.deepEqual(applied.map(({ command }) => JSON.parse(command.payload_json)), [
+      { action: 'marketplace_add', source: 'anthropics/skills', scope: 'user', confirmed: true },
+      { action: 'install', plugin: 'document-skills@anthropic-agent-skills', scope: 'user', confirmed: true },
+    ]);
+    assert.equal(applied[1].command.revision, 'b'.repeat(64));
+  }
+});
+
 test('settings controls expose focus, scope, saving and accessibility preferences', async () => {
   for (const theme of ['light', 'dark']) {
     const state = await runScenario('macos-controls', theme);
@@ -100,6 +132,11 @@ test('settings controls expose focus, scope, saving and accessibility preference
     assert.equal(state.accessibility.border, state.accessibility.text);
     assert.equal(state.accessibility.selectedNavOutline, 'solid');
   }
+});
+
+test('recommendation badges verify source aliases and late catalogs preserve manual drafts', async () => {
+  const result = await runScenario('recommendation-catalog-safety');
+  assert.deepEqual(result, { aliasInstalled: true, refreshed: true, differentSourceNotInstalled: true, retainedManualDraft: true });
 });
 
 test('expanded settings editors fit a narrow macOS window', async () => {

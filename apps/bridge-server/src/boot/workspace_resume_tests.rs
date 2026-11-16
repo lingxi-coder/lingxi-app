@@ -340,7 +340,7 @@ async fn fork_source_real_runtime_publishes_and_mounts_exact_target() {
     let target = loop {
         match next_frame(&mut socket).await {
             Frame::Event(ClientEvent::SessionForked { session_id, .. }) => {
-                break uuid::Uuid::parse_str(&session_id).unwrap()
+                break uuid::Uuid::parse_str(&session_id).unwrap();
             }
             Frame::Event(ClientEvent::Error { message, .. }) => {
                 panic!(
@@ -485,18 +485,27 @@ async fn private_resume_owns_foreground_adapter_approval_without_a_chat_turn() {
 }
 
 #[tokio::test]
-async fn private_resume_cancel_and_disconnect_deny_parked_and_later_tools() {
-    use client::protocol::commands::ClientCommand;
-    use client::protocol::permission::PermissionResponseDto;
-    use lingxi_core::types::{ContentBlock, ConversationMessage};
+async fn public_resume_asks_before_executing_and_publishes_committed_failures() {
+    use client::protocol::{
+        commands::ClientCommand, listings::SessionModeDto, permission::PermissionResponseDto,
+    };
     let _serial = crate::driver::LOOP_KA_TEST_SERIAL
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    for disconnect in [false, true] {
+    for failure in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().canonicalize().unwrap();
-        let (cfg, selected, markers) = pending_bash_config(&cwd, 2);
-        let id = cfg.session_id_override.clone().unwrap();
+        let (mut cfg, _selected, markers) = pending_bash_config(&cwd, 1);
+        let target = cfg.session_id_override.clone().unwrap();
+        cfg.session_id_override = Some(uuid::Uuid::new_v4().to_string());
+        cfg.session_transcript_path = None;
+        if failure {
+            std::fs::write(
+                cfg.lingxi_home.join("deferred-tool-replay"),
+                b"not a directory",
+            )
+            .unwrap();
+        }
         let bound = Box::pin(assemble(cfg)).await.unwrap();
         let runtime = bound.runtime.clone();
         let lifecycle = bound.session_lifecycle();
@@ -504,8 +513,193 @@ async fn private_resume_cancel_and_disconnect_deny_parked_and_later_tools() {
         send(
             &mut socket,
             2,
-            "resume_selected_session",
-            projection(serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"})),
+            "command",
+            client_command(ClientCommand::ResumeSession {
+                session_id: target.clone(),
+                cwd: None,
+                expected_mode: SessionModeDto::Code,
+            }),
+        )
+        .await;
+        let mut permissions = 0;
+        let mut resumed = false;
+        let mut status_matches = false;
+        loop {
+            match next_frame(&mut socket).await {
+                Frame::PermissionRequest(request) => {
+                    assert!(!failure);
+                    permissions += 1;
+                    assert_eq!(
+                        request
+                            .owner
+                            .as_ref()
+                            .and_then(|owner| owner.session_id.as_deref()),
+                        Some(target.as_str())
+                    );
+                    assert!(!markers[0].exists());
+                    send(
+                        &mut socket,
+                        3,
+                        "command",
+                        client_command(ClientCommand::ApprovePermission {
+                            request_id: request.request_id,
+                            response: PermissionResponseDto::AllowOnce,
+                        }),
+                    )
+                    .await;
+                }
+                Frame::Event(ClientEvent::SessionResumed { session_id, .. }) => {
+                    assert_eq!(session_id, target);
+                    resumed = true;
+                }
+                Frame::Event(ClientEvent::StatusSnapshot { snapshot }) => {
+                    status_matches = snapshot.session_id.trim_start_matches("sess:") == target;
+                }
+                Frame::Event(ClientEvent::SystemNotice {
+                    message,
+                    is_error: true,
+                }) if failure => {
+                    assert!(
+                        resumed && status_matches,
+                        "committed identity and baseline must precede failure: {message:?}"
+                    );
+                    break;
+                }
+                Frame::Event(ClientEvent::FastModeChanged { .. }) if resumed && !failure => break,
+                Frame::Event(ClientEvent::Error { message, .. }) => {
+                    panic!("unexpected rejection: {message:?}")
+                }
+                Frame::Event(ClientEvent::TurnStarted { .. } | ClientEvent::TurnEnded { .. }) => {
+                    panic!("resume is not a chat turn")
+                }
+                _ => {}
+            }
+        }
+        assert!(resumed && status_matches);
+        assert_eq!(
+            runtime
+                .orchestrator
+                .current_session_id()
+                .await
+                .as_uuid()
+                .to_string(),
+            target
+        );
+        if failure {
+            assert_eq!(permissions, 0);
+            assert!(!markers[0].exists());
+        } else {
+            assert_eq!(permissions, 1);
+            assert_eq!(std::fs::read_to_string(&markers[0]).unwrap(), "x");
+        }
+        socket.close(None).await.unwrap();
+        endpoint.shutdown().await;
+        let report = lifecycle.shutdown_and_drain().await;
+        assert!(report.complete, "{:?}", report.errors);
+    }
+}
+
+#[tokio::test]
+async fn committed_private_resume_keeps_the_new_physical_source_and_acknowledges_the_mount() {
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let (cfg, old, markers) = pending_bash_config(&cwd, 1);
+    let id = cfg.session_id_override.clone().unwrap();
+    let copy_workspace = cwd.join("copy-workspace");
+    std::fs::create_dir_all(&copy_workspace).unwrap();
+    let selected =
+        session::jsonl::session_path(&cfg.lingxi_home, &copy_workspace.to_string_lossy(), &id);
+    std::fs::create_dir_all(selected.parent().unwrap()).unwrap();
+    std::fs::copy(&old, &selected).unwrap();
+    std::fs::write(
+        cfg.lingxi_home.join("deferred-tool-replay"),
+        b"not a directory",
+    )
+    .unwrap();
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let runtime = bound.runtime.clone();
+    let lifecycle = bound.session_lifecycle();
+    let before = std::fs::read(&old).unwrap();
+    let (endpoint, mut socket) = connect(bound.connection).await;
+    let (events, response) = call(
+        &mut socket,
+        2,
+        "resume_selected_session",
+        projection(
+            serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"}),
+        ),
+    )
+    .await;
+    assert!(response.error.is_none(), "{response:?}");
+    let resumed = events
+        .iter()
+        .position(|event| matches!(event, ClientEvent::SessionResumed { .. }))
+        .unwrap();
+    let notice = events
+        .iter()
+        .position(|event| matches!(event, ClientEvent::SystemNotice { is_error: true, .. }))
+        .unwrap();
+    assert!(resumed < notice);
+    assert!(events[..notice]
+        .iter()
+        .any(|event| matches!(event, ClientEvent::StatusSnapshot { .. })));
+    assert_eq!(
+        runtime
+            .orchestrator
+            .session_transcript_writer()
+            .unwrap()
+            .active_transcript_authority()
+            .unwrap()
+            .path(),
+        selected
+    );
+    runtime
+        .orchestrator
+        .append_external_history_message(lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "after committed resume".into(),
+        ))
+        .await;
+    assert_eq!(std::fs::read(&old).unwrap(), before);
+    assert!(std::fs::read_to_string(&selected)
+        .unwrap()
+        .contains("after committed resume"));
+    assert!(!markers[0].exists());
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
+}
+
+#[tokio::test]
+async fn public_and_private_resume_cancel_and_disconnect_deny_parked_and_later_tools() {
+    use client::protocol::commands::ClientCommand;
+    use client::protocol::permission::PermissionResponseDto;
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for (public, disconnect) in [(false, false), (false, true), (true, false), (true, true)] {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().canonicalize().unwrap();
+        let (mut cfg, selected, markers) = pending_bash_config(&cwd, 2);
+        let id = cfg.session_id_override.clone().unwrap();
+        if public {
+            cfg.session_id_override = Some(uuid::Uuid::new_v4().to_string());
+            cfg.session_transcript_path = None;
+        }
+        let bound = Box::pin(assemble(cfg)).await.unwrap();
+        let runtime = bound.runtime.clone();
+        let lifecycle = bound.session_lifecycle();
+        let (endpoint, mut socket) = connect(bound.connection).await;
+        send(
+            &mut socket,
+            2,
+            if public { "command" } else { "resume_selected_session" },
+            if public { client_command(ClientCommand::ResumeSession { session_id:id.clone(),cwd:None,expected_mode:client::protocol::listings::SessionModeDto::Code }) } else { projection(serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"})) },
         )
         .await;
         let (_, permission) = wait_for_permission(&mut socket).await;
@@ -519,14 +713,39 @@ async fn private_resume_cancel_and_disconnect_deny_parked_and_later_tools() {
                 client_command(ClientCommand::Cancel { turn_id: None }),
             )
             .await;
-            let (events, response) =
-                tokio::time::timeout(Duration::from_secs(3), settle(&mut socket, 2))
-                    .await
-                    .expect("cancel must unblock a parked resume");
-            assert!(response.error.is_some());
-            assert!(!events
-                .iter()
-                .any(|event| matches!(event, ClientEvent::SessionResumed { .. })));
+            // The reply follows durable recording of both denied results.
+            // Match next_frame's debug-build deadline rather than timing disk I/O.
+            if public {
+                let mut baseline = false;
+                loop {
+                    match next_frame(&mut socket).await {
+                        Frame::Event(ClientEvent::SessionResumed { session_id, .. }) => {
+                            assert_eq!(session_id, id);
+                            baseline = true;
+                        }
+                        Frame::Event(ClientEvent::Error { message, .. }) => {
+                            assert!(
+                                baseline,
+                                "the mounted target baseline must precede cancellation"
+                            );
+                            assert!(
+                                String::from_utf16_lossy(&message.code_units).contains("cancelled")
+                            );
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                let (events, response) =
+                    tokio::time::timeout(Duration::from_secs(15), settle(&mut socket, 2))
+                        .await
+                        .expect("cancel must unblock a parked resume");
+                assert!(response.error.is_some());
+                assert!(!events
+                    .iter()
+                    .any(|event| matches!(event, ClientEvent::SessionResumed { .. })));
+            }
             send(
                 &mut socket,
                 4,
@@ -599,7 +818,7 @@ fn assert_structured_result(events: &[ClientEvent]) {
             _ => None,
         })
         .expect("deferred card result is in the settled transcript");
-    assert_eq!(result.string_at("/id"), Some("deferred-plot"));
+    assert_eq!(result.string_at("/id"), Some("deferred-plot"), "{result:?}");
     assert_eq!(result.string_at("/title"), Some("deferred-result"));
 }
 
@@ -756,7 +975,9 @@ async fn cold_selected_boot_confirmation_keeps_live_state_and_is_consumed_once()
         .unwrap()
         .contains("deferred-result"));
     assert_structured_result(&events);
-    assert_eq!(std::fs::read_to_string(&dispatches).unwrap(), "xx");
+    // Another source copy still describes the same completed logical call.
+    // Restore its checkpoint payload without repeating its side effect.
+    assert_eq!(std::fs::read_to_string(&dispatches).unwrap(), "x");
     assert_eq!(
         runtime
             .orchestrator
@@ -1125,6 +1346,157 @@ async fn cold_resume_reports_fixed_mode_in_lifecycle_and_manifest() {
             break;
         }
     }
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
+}
+
+#[tokio::test]
+async fn committed_transcript_checkpoint_is_read_only_recent_and_owner_fenced() {
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let home = cwd.join("config");
+    let id = uuid::Uuid::new_v4();
+    let ids = (0..5).map(|_| uuid::Uuid::new_v4()).collect::<Vec<_>>();
+    let selected = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
+    let mut rows = vec![
+        serde_json::json!({"type":"fixed-session-mode","sessionId":id,"sessionMode":"code","instructionEpoch":0}),
+    ];
+    for (index, uuid) in ids.iter().enumerate() {
+        let mut row = serde_json::json!({"uuid":uuid,"sessionId":id,"cwd":cwd,"timestamp":"2026-11-12T00:00:00Z","isSidechain":false,
+            "parentUuid":if index == 2 || index == 4 { Some(ids[index-1]) } else { None }});
+        let content = if index == 1 || index == 3 {
+            serde_json::json!({"type":"system","subtype":"compact_boundary","content":format!("summary {index}"),"compactMetadata":{}})
+        } else {
+            serde_json::json!({"type":"user","message":{"role":"user","content":format!("visible source {index}")}})
+        };
+        row.as_object_mut()
+            .unwrap()
+            .extend(content.as_object().unwrap().clone());
+        rows.push(row);
+    }
+    std::fs::create_dir_all(selected.parent().unwrap()).unwrap();
+    std::fs::write(
+        &selected,
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let mut cfg = isolated_config(&cwd, &home);
+    cfg.session_id_override = Some(id.to_string());
+    cfg.session_transcript_path = Some(selected.clone());
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let runtime = bound.runtime.orchestrator.clone();
+    let lifecycle = bound.session_lifecycle();
+    let (endpoint, mut socket) = connect(bound.connection).await;
+    let before = std::fs::read(&selected).unwrap();
+    let model_before = runtime.session().lock().await.history.clone();
+    for request in 2..5 {
+        let (events, response) = call(
+            &mut socket,
+            request,
+            "desktop_transcript_checkpoint",
+            projection(serde_json::json!({"session_id":id})),
+        )
+        .await;
+        assert!(response.error.is_none(), "{response:?}");
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                ClientEvent::SessionResumed { .. }
+                    | ClientEvent::TurnStarted { .. }
+                    | ClientEvent::ToolUseStarted { .. }
+            )),
+            "a checkpoint returns a baseline only in its correlated response"
+        );
+        let result = response.result.unwrap();
+        assert_eq!(result.string_at("/type"), Some("session_resumed"));
+        assert_eq!(
+            result.string_at("/session_id"),
+            Some(id.to_string().as_str())
+        );
+        assert_eq!(result.string_at("/mode"), Some("code"));
+        assert_eq!(result.array_len("/messages"), Some(2));
+        assert_eq!(
+            result.string_at("/messages/0/transcript_uuid"),
+            Some(ids[3].to_string().as_str())
+        );
+        assert_eq!(
+            result.string_at("/messages/1/transcript_uuid"),
+            Some(ids[4].to_string().as_str())
+        );
+        assert_eq!(
+            result.string_at("/messages/1/blocks/0/text"),
+            Some("visible source 4")
+        );
+    }
+    let (_, wrong_owner) = call(
+        &mut socket,
+        5,
+        "desktop_transcript_checkpoint",
+        projection(serde_json::json!({"session_id":uuid::Uuid::new_v4()})),
+    )
+    .await;
+    assert!(wrong_owner.error.is_some());
+    let (_, malformed) = call(
+        &mut socket,
+        6,
+        "desktop_transcript_checkpoint",
+        projection(serde_json::json!({"session_id":id,"unexpected":true})),
+    )
+    .await;
+    assert!(malformed.error.is_some());
+    assert_eq!(
+        std::fs::read(&selected).unwrap(),
+        before,
+        "checkpoint must never append or replay tools"
+    );
+    assert_eq!(
+        runtime.session().lock().await.history,
+        model_before,
+        "display checkpoint cannot replace model history"
+    );
+    socket.close(None).await.unwrap();
+    endpoint.shutdown().await;
+    let report = lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "{:?}", report.errors);
+}
+
+#[tokio::test]
+async fn transcript_checkpoint_does_not_execute_deferred_tools() {
+    let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().canonicalize().unwrap();
+    let (cfg, selected, markers) = pending_bash_config(&cwd, 1);
+    let id = cfg.session_id_override.clone().unwrap();
+    let bound = Box::pin(assemble(cfg)).await.unwrap();
+    let lifecycle = bound.session_lifecycle();
+    let (endpoint, mut socket) = connect(bound.connection).await;
+    let before = std::fs::read(&selected).unwrap();
+    let (events, response) = call(
+        &mut socket,
+        2,
+        "desktop_transcript_checkpoint",
+        projection(serde_json::json!({"session_id":id})),
+    )
+    .await;
+    assert!(response.error.is_none(), "{response:?}");
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::ToolUseStarted { .. } | ClientEvent::ToolUseResult { .. }
+    )));
+    assert!(
+        markers.iter().all(|path| !path.exists()),
+        "read-only capture cannot dispatch pending tools"
+    );
+    assert_eq!(std::fs::read(&selected).unwrap(), before);
     socket.close(None).await.unwrap();
     endpoint.shutdown().await;
     let report = lifecycle.shutdown_and_drain().await;

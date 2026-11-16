@@ -10,6 +10,7 @@ import { parseJsonObjectInput } from '../jsonInput';
 import { publicExtensionItems, publicExtensionText, type PublicExtensionItem } from '../../../../shared/publicExtensionDirectory';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
 import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, useExtensionHubNavigation } from './ExtensionHub';
+import { ExtensionDetails, ExtensionRemovalConfirmation } from './ExtensionDetails';
 import {
   adminRecordCommand,
   asRecord,
@@ -175,7 +176,7 @@ interface McpEntry {
   revision_sha256: string;
 }
 
-type Selection = { kind: 'list' } | { kind: 'server'; id: string } | { kind: 'create'; scope: WritableScopeDto; directoryItemId?: string };
+type Selection = { kind: 'list' } | { kind: 'directory'; id: string } | { kind: 'server'; id: string } | { kind: 'create'; scope: WritableScopeDto; directoryItemId?: string };
 
 function callMcpAdmin(bridge: PageContentProps['bridge'], command: unknown) {
   const admin = (bridge as { mcpAdmin?: (payload: unknown) => Promise<unknown> }).mcpAdmin;
@@ -280,6 +281,8 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
   const [pageError, setPageError] = useState<string | null>(null);
   const [pendingSelection, setPendingSelection] = useState<Selection | null>(null);
   const [pendingHubPage, setPendingHubPage] = useState<{ pageId: string; pluginId?: string } | null>(null);
+  const [removingEntry, setRemovingEntry] = useState<McpEntry | null>(null);
+  const [removing, setRemoving] = useState(false);
 
   useEffect(() => {
     if (adminAvailable) void callMcpAdmin(bridge, adminRecordCommand('get_snapshot'));
@@ -344,7 +347,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
     setDraftName(asString(payload.name));
     setDraftConfigText(prettyJson(asRecord(payload.config ?? payload.server ?? payload)));
   }, [selection, linkRequest]);
-  const dirty = selection.kind !== 'list' && (selected
+  const dirty = (selection.kind === 'server' || selection.kind === 'create') && (selected
     ? draftConfigText !== prettyJson(selected.config)
     : draftName.trim() !== initialCreateName || draftConfigText !== initialCreateConfigText);
   const closePrompt = useSettingsDraftGuard({ onClose, onNavigate, onRegisterCloseRequest }, dirty);
@@ -495,16 +498,18 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
     })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_mcp_save_failed')));
   };
 
-  const remove = () => {
-    if (!selected) return;
+  const removeServer = (entry: McpEntry) => {
+    if (removing) return;
     setPageError(null);
+    setRemoving(true);
     void callMcpAdmin(bridge, adminRecordCommand('remove_server', {
       operation_id: nextConfigurationOperationId(),
-      scope: selected.scope,
-      revision: selected.revision_sha256,
-      payload_json: JSON.stringify({ scope: selected.scope, name: selected.name }),
-    })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_mcp_remove_failed')));
+      scope: entry.scope,
+      revision: entry.revision_sha256,
+      payload_json: JSON.stringify({ scope: entry.scope, name: entry.name }),
+    })).then(() => setRemovingEntry(null)).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_mcp_remove_failed'))).finally(() => setRemoving(false));
   };
+  const remove = () => { if (selected) setRemovingEntry(selected); };
 
   const setApproval = (name: string, decision: 'approve' | 'reject' | 'clear' | 'approve_all') => {
     if (!approval.revision_sha256 || !name) return;
@@ -517,9 +522,21 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
     })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_approval_failed')));
   };
 
+  const directoryItem = selection.kind === 'directory' ? publicMcpItems.find((item) => item.id === selection.id) : undefined;
+  const removalDialog = removingEntry && <ExtensionRemovalConfirmation name={`${removingEntry.name} · ${mcpScopeLabel(removingEntry.scope)}`} busy={removing} error={pageError} onCancel={() => setRemovingEntry(null)} onConfirm={() => removeServer(removingEntry)} />;
+  if (directoryItem) {
+    const action = decidePublicMcpDirectoryAction(directoryItem, entries, draftScope);
+    const configured = action.kind === 'configured' ? action.entry : undefined;
+    return <ExtensionHubLayout>{closePrompt}<ExtensionDetails item={directoryItem} breadcrumb={tr('settings_mcp_servers')} onBack={() => requestSelection({ kind: 'list' })} status={configured ? `${tr('desktop_extension_configured')} · ${mcpScopeLabel(configured.scope)}` : undefined} actions={<>
+      {action.kind !== 'documentation' && <button type="button" className="extension-hub-primary" disabled={!adminAvailable || removing} onClick={() => requestSelection(configured ? { kind: 'server', id: configured.id } : { kind: 'create', scope: draftScope, directoryItemId: directoryItem.id })}><ExtensionGlyph name={configured ? 'cog' : 'plus'} size={16} />{tr(configured ? 'desktop_extension_configuration' : 'workspace_confirm_add')}</button>}
+      {configured && <button type="button" className="extension-hub-danger" disabled={!adminAvailable || removing} onClick={() => setRemovingEntry(configured)}><ExtensionGlyph name="trash" size={16} />{tr('desktop_extension_remove')}</button>}
+    </>}><DomainOperationBanner t={t} operation={operation} fallbackDomainLabel="MCP" />{pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}{navigationPrompt}</ExtensionDetails>{removalDialog}</ExtensionHubLayout>;
+  }
+
   return (
     <ExtensionHubLayout>
       {closePrompt}
+      {removalDialog}
       {pageError && selection.kind === 'list' && <div role="alert">{pageError}</div>}
       {linkRequest?.payload && selection.kind === 'create' && <p role="status">{tr('desktop_extension_mcp_import')}</p>}
         <ExtensionHubHeader title={tr('settings_mcp_servers')} description={tr('desktop_extension_mcp_description')} search={search} onSearch={setSearch} actions={<>
@@ -556,11 +573,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
                       <button
                         type="button"
                         className="extension-hub-row-copy extension-hub-row-open"
-                        onClick={() => {
-                          if (configured) requestSelection({ kind: 'server', id: configured.id });
-                          else if (action.kind === 'configure') requestSelection({ kind: 'create', scope: draftScope, directoryItemId: item.id });
-                        }}
-                        disabled={action.kind === 'documentation'}
+                        onClick={() => requestSelection({ kind: 'directory', id: item.id })}
                       >
                         <span className="extension-hub-row-title">{item.name}</span>
                         <span className="extension-hub-row-description">{localizedDirectoryText(item.description)}</span>

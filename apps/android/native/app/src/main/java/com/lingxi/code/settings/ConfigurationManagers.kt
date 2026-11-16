@@ -127,7 +127,7 @@ internal fun McpConfigurationPage(
 }
 
 @Composable
-internal fun SkillManager(bridge: SettingsEngineBridge, initialId: String? = null) {
+internal fun SkillManager(bridge: SettingsEngineBridge, initialId: String? = null, onBrowseSkills: (() -> Unit)? = null) {
     val state by bridge.state.collectAsState()
     val coroutine = rememberCoroutineScope()
     var selected by remember(state.generation, initialId) { mutableStateOf(initialId) }
@@ -145,15 +145,24 @@ internal fun SkillManager(bridge: SettingsEngineBridge, initialId: String? = nul
     var loadedDocumentId by remember(state.generation) { mutableStateOf<String?>(null) }
     var documentRevision by remember(state.generation) { mutableStateOf<String?>(null) }
     var baselineMarkdown by remember(state.generation) { mutableStateOf("") }
+    var confirmBrowse by remember(state.generation) { mutableStateOf(false) }
     LaunchedEffect(state.catalogs["document"], selected) {
         if (loaded && (loadedDocumentId != selected || markdown == baselineMarkdown || markdown == document.optString("markdown"))) {
             name = document.optString("name"); markdown = document.optString("markdown")
             baselineMarkdown = markdown; loadedDocumentId = selected; documentRevision = document.optString("revision")
         }
     }
-    ReportSettingsDraft("skill-document",if (selected == null) name.isNotBlank() || markdown.isNotBlank() else loaded && (markdown != baselineMarkdown || name != document.optString("name")))
+    val hasSkillChanges = if (selected == null) name.isNotBlank() || markdown.isNotBlank() else loaded && (markdown != baselineMarkdown || name != document.optString("name"))
+    ReportSettingsDraft("skill-document", hasSkillChanges)
+    fun discardAndBrowse() {
+        name = if (loaded) document.optString("name") else ""
+        markdown = if (loaded) baselineMarkdown else ""
+        confirmBrowse = false
+        onBrowseSkills?.invoke()
+    }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(settingsLabel("Skill documents"))
+        if (onBrowseSkills != null) TextButton(onClick = { if (hasSkillChanges) confirmBrowse = true else onBrowseSkills() }) { Text(stringResource(R.string.skills_browse_store)) }
         TextButton(onClick = { coroutine.launch { runCatching { bridge.admin("skills", "get_catalog") } } }) { Text(settingsLabel("Refresh catalog")) }
         catalog.optJSONArray("entries")?.records().orEmpty().forEach { entry ->
             TextButton(onClick = { selected = entry.optString("id"); coroutine.launch { runCatching { bridge.admin("skills", "get_document", target = selected) }.onFailure { error = it.message } } }) {
@@ -191,6 +200,12 @@ internal fun SkillManager(bridge: SettingsEngineBridge, initialId: String? = nul
         }
         error?.let { Text(settingsLabel(it), color = MaterialTheme.colorScheme.error) }
     }
+    if (confirmBrowse) AlertDialog(
+        onDismissRequest = { confirmBrowse = false },
+        title = { Text(stringResource(R.string.cron_discard_title)) },
+        confirmButton = { TextButton(onClick = ::discardAndBrowse) { Text(stringResource(R.string.cron_discard)) } },
+        dismissButton = { TextButton(onClick = { confirmBrowse = false }) { Text(stringResource(R.string.common_cancel)) } },
+    )
 }
 
 @Composable

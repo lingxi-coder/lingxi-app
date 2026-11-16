@@ -9,10 +9,10 @@ import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
 import { SettingsStore } from '../src/main/settings';
 import type { ClientCommand } from '@lingxi/bridge-client';
 const defaultRef = { projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555' };
-function runtime(store: SettingsStore, ref = defaultRef) {
+function runtime(store: SettingsStore, ref = defaultRef, resolveProviderAccounts?: () => Promise<undefined>) {
   const commands: ClientCommand[] = [];
   const observed: string[] = [];
-  const client = Object.assign(new EventEmitter(), { sendCommand: (command: ClientCommand) => {
+  const client = Object.assign(new EventEmitter(), { cancel: () => undefined, sendCommand: (command: ClientCommand) => {
     // Audio context refreshes are independent of model persistence.
     if (command.type !== 'get_audio_session_context') commands.push(command);
   } });
@@ -23,6 +23,7 @@ function runtime(store: SettingsStore, ref = defaultRef) {
     onModelSelected: model => store.setSessionModel(ref, model),
     getSavedModel: () => store.getSessionModel(ref),
     onModelChanged: model => observed.push(model),
+    resolveProviderAccounts,
   });
   Object.assign(instance, { client, activeWorkspace: '/workspace', activeWorkspaceTrusted: true });
   (instance as any).wireClient(client, 0);
@@ -34,6 +35,98 @@ function modelPreferenceCommands(commands: ClientCommand[]): ClientCommand[] {
   // runtime concern; these tests assert model preference effects only.
   return commands.filter(command => command.type !== 'get_audio_session_context');
 }
+
+test('model confirmation gives the full ACK budget after waiting for credentials', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-credential-budget-'));
+  let release!: () => void;
+  const credential = new Promise<void>(resolve => { release = resolve; });
+  const store = new SettingsStore(dir); store.setLastModel('old-model');
+  const { instance, client, commands } = runtime(store, defaultRef, async () => undefined);
+  instance.refreshProviderAccounts = () => credential;
+  let outcome = 'pending';
+  const selection = instance.dispatchCommand({ type: 'set_model', model: 'new-model' });
+  const settled = selection.then(() => { outcome = 'confirmed'; }, () => { outcome = 'failed'; });
+  try {
+    t.mock.timers.tick(10_001);
+    await tick();
+    assert.equal(outcome, 'pending', 'credential preparation must not consume the model ACK timeout');
+    assert.deepEqual(modelPreferenceCommands(commands), []);
+    assert.equal(store.getPublic().model, 'old-model');
+    release();
+    await tick();
+    assert.deepEqual(modelPreferenceCommands(commands), [{ type: 'set_model', model: 'new-model' }]);
+    t.mock.timers.tick(9_999);
+    await tick();
+    client.emit('event', { type: 'model_changed', model: 'another-model' });
+    await tick();
+    assert.equal(outcome, 'pending', 'only the requested model can acknowledge the switch');
+    client.emit('event', { type: 'model_changed', model: 'new-model' });
+    await selection;
+    assert.equal(store.getPublic().model, 'new-model');
+  } finally {
+    release();
+    instance.cancelTurn(undefined);
+    await settled;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('model confirmation still times out after dispatch and ignores a late ACK', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-ack-deadline-'));
+  const store = new SettingsStore(dir); store.setLastModel('old-model');
+  const { instance, client, commands } = runtime(store, defaultRef, async () => undefined);
+  instance.refreshProviderAccounts = async () => undefined;
+  try {
+    const selection = instance.dispatchCommand({ type: 'set_model', model: 'new-model' });
+    const rejected = assert.rejects(selection, /Model switch confirmation timed out/);
+    await tick();
+    assert.deepEqual(modelPreferenceCommands(commands), [{ type: 'set_model', model: 'new-model' }]);
+    t.mock.timers.tick(10_000);
+    await rejected;
+    client.emit('event', { type: 'model_changed', model: 'new-model' });
+    assert.equal(store.getPublic().model, 'old-model', 'late ACK must not save a failed selection');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('cancelling a slow credential wait permits a fresh switch without sending the stale selection', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-cancel-credential-'));
+  let release!: () => void;
+  const credential = new Promise<void>(resolve => { release = resolve; });
+  const store = new SettingsStore(dir); store.setLastModel('old-model');
+  const { instance, client, commands } = runtime(store, defaultRef, async () => undefined);
+  instance.refreshProviderAccounts = () => credential;
+  const first = instance.dispatchCommand({ type: 'set_model', model: 'cancelled-model' });
+  const firstOutcome = Promise.allSettled([first]);
+  let secondOutcome: Promise<PromiseSettledResult<void>[]> | undefined;
+  try {
+    t.mock.timers.tick(10_001);
+    await tick();
+    instance.cancelTurn(undefined);
+    const [cancelled] = await firstOutcome;
+    assert.equal(cancelled.status, 'rejected');
+    if (cancelled.status === 'rejected') assert.match(String(cancelled.reason), /Model switch was cancelled/);
+    instance.refreshProviderAccounts = async () => undefined;
+    const second = instance.dispatchCommand({ type: 'set_model', model: 'fresh-model' });
+    secondOutcome = Promise.allSettled([second]);
+    release();
+    await tick();
+    assert.deepEqual(modelPreferenceCommands(commands), [{ type: 'set_model', model: 'fresh-model' }]);
+    client.emit('event', { type: 'model_changed', model: 'cancelled-model' });
+    assert.equal(store.getPublic().model, 'old-model');
+    client.emit('event', { type: 'model_changed', model: 'fresh-model' });
+    assert.equal((await secondOutcome)[0].status, 'fulfilled');
+    assert.equal(store.getPublic().model, 'fresh-model');
+  } finally {
+    release();
+    instance.cancelTurn(undefined);
+    await firstOutcome;
+    await secondOutcome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 test('only confirmed user model selections replace the restart default; history still updates observers', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-preference-'));
   try {

@@ -76,7 +76,7 @@ internal fun projectDisplayName(directory: String): String =
 private fun isProjectScopedLayer(layer: String): Boolean = layer == "project" || layer == "local"
 
 @Composable
-internal fun EngineSettingsPage(route: String, bridge: SettingsEngineBridge, onReconnect: (() -> Unit)? = null) {
+internal fun EngineSettingsPage(route: String, bridge: SettingsEngineBridge, onReconnect: (() -> Unit)? = null, onBrowseSkills: (() -> Unit)? = null) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val configDirName = remember(context) {
         MobileUserStorage.directories(context.applicationContext).configDirName
@@ -184,7 +184,7 @@ internal fun EngineSettingsPage(route: String, bridge: SettingsEngineBridge, onR
             }
         }
         if (route == SettingsRoutes.HOOKS) HookManager(bridge, layer)
-        if (route == SettingsRoutes.ENGINE_SKILLS) SkillManager(bridge)
+        if (route == SettingsRoutes.ENGINE_SKILLS) SkillManager(bridge, onBrowseSkills = onBrowseSkills)
         if (route == SettingsRoutes.PLUGINS) PluginManager(bridge, layer, onReconnect)
     }
 }

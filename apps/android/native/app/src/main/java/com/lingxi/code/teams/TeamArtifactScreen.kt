@@ -19,7 +19,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -40,13 +39,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lingxi.code.R
 import com.lingxi.code.conversation.AIText
+import com.lingxi.code.theme.ConfirmDialog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.time.ZoneId
@@ -112,11 +116,11 @@ internal fun TeamArtifactViewer(artifact: TeamArtifact, model: TeamMessagingMode
             Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
                 val text = draft
                 val rows = history
-                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (text == null && rows == null) IconButton(onClick = onClose) { Icon(Icons.Outlined.Close, stringResource(R.string.common_close)) }
                     else IconButton(onClick = ::back) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(if (text != null && newer != null) R.string.teams_doc_discard_mine else R.string.remote_back)) }
                     Text(stringResource(when { text != null -> R.string.teams_doc_edit_title; rows != null -> R.string.teams_doc_history_title; else -> R.string.teams_artifact_title }),
-                        Modifier.weight(1f), style = MaterialTheme.typography.titleLarge, maxLines = 1)
+                        Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge, maxLines = 1)
                     if (text != null) Button(enabled = !busy && changed && text.valid, onClick = ::save, modifier = Modifier.padding(end = 12.dp).testTag("teams.artifact.save")) {
                         Text(when { busy -> stringResource(R.string.teams_doc_saving); newer != null -> stringResource(R.string.teams_doc_save_over_fmt, base.revision); else -> stringResource(R.string.common_save) })
                     }
@@ -140,20 +144,22 @@ internal fun TeamArtifactViewer(artifact: TeamArtifact, model: TeamMessagingMode
             }
         }
     }
-    if (leaving) AlertDialog(onDismissRequest = { leaving = false }, text = { Text(stringResource(R.string.teams_doc_unsaved)) },
-        confirmButton = { TextButton(onClick = ::stopEditing, modifier = Modifier.testTag("teams.artifact.discard")) { Text(stringResource(R.string.teams_doc_discard), color = MaterialTheme.colorScheme.error) } },
-        dismissButton = { TextButton(onClick = { leaving = false }) { Text(stringResource(R.string.teams_doc_keep_editing)) } })
+    // "You have unsaved changes." is the whole question, so it is the title; the way to stay is Keep editing, the Cancel of this one.
+    if (leaving) ConfirmDialog(
+        title = stringResource(R.string.teams_doc_unsaved), confirm = stringResource(R.string.teams_doc_discard), destructive = true, confirmTag = "teams.artifact.discard",
+        cancel = stringResource(R.string.teams_doc_keep_editing), onConfirm = ::stopEditing, onDismiss = { leaving = false },
+    )
 }
 
 @Composable
 private fun DocumentFailure(error: String) {
-    if (error.isNotEmpty()) Text(stringResource(teamsErrorRes(error)), Modifier.testTag("teams.artifact.error"), color = MaterialTheme.colorScheme.error)
+    if (error.isNotEmpty()) Text(stringResource(teamsErrorRes(error)), Modifier.testTag("teams.artifact.error").semantics { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.error)
 }
 
 @Composable
 private fun DocumentReader(shown: TeamArtifact, error: String, modifier: Modifier) {
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(shown.title, style = MaterialTheme.typography.headlineSmall)
+        Text(shown.title, Modifier.semantics { heading() }, style = MaterialTheme.typography.headlineSmall)
         Text(if (shown.old) stringResource(R.string.teams_doc_revision_old_fmt, shown.revision, shown.currentRevision) else stringResource(R.string.teams_doc_revision_fmt, shown.revision),
             Modifier.testTag("teams.artifact.revision"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         SelectionContainer { AIText(markdown = shown.body, modifier = Modifier.fillMaxWidth().testTag("teams.artifact.body"), onOpenLink = rememberTeamBotLinkOpener()) }
@@ -171,8 +177,8 @@ private fun DocumentEditor(draft: TeamDocumentDraft, newer: TeamArtifact?, error
         if (draft.tooLong) Text(stringResource(R.string.teams_doc_too_long), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         DocumentFailure(error)
         if (newer != null) {
-            Text(stringResource(R.string.teams_doc_conflict_fmt, newer.revision), Modifier.testTag("teams.artifact.conflict"), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary)
-            Text(stringResource(R.string.teams_doc_newer), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(stringResource(R.string.teams_doc_conflict_fmt, newer.revision), Modifier.testTag("teams.artifact.conflict").semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary)
+            Text(stringResource(R.string.teams_doc_newer), Modifier.semantics { heading() }, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(newer.title, style = MaterialTheme.typography.titleMedium)
             SelectionContainer { AIText(markdown = newer.body, modifier = Modifier.fillMaxWidth(), onOpenLink = rememberTeamBotLinkOpener()) }
         }

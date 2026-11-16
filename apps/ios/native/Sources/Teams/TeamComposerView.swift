@@ -240,7 +240,7 @@ struct TeamComposerView: View {
                 .accessibilityIdentifier("teams.composer.input")
                 .onChange(of: draft.text) { _, _ in dismissedMention = -1 }
             Button(action: onVoice) {
-                Image(systemName: listening ? "stop.fill" : "mic").font(.system(size: 18, weight: .medium)).frame(width: 32, height: 32)
+                Image(systemName: listening ? "stop.fill" : "mic").font(.title3.weight(.medium)).minimumHitTarget()
             }
             .accessibilityLabel(Text(LocalizedStringKey(listening ? "composer_stop_recording" : "composer_record")))
             .accessibilityIdentifier("teams.composer.voice")

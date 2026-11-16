@@ -65,7 +65,7 @@ private struct HostedServiceRow: View {
     let service: HostedServiceView
     var body: some View {
         HStack(spacing: 12) {
-            AgentAvatar(agentID: AvatarIdentity.teamBotAvatarId(service.sharedBotId), size: 36)
+            AgentAvatar(agentID: AvatarIdentity.teamBotAvatarId(service.sharedBotId), size: 40)
             VStack(alignment: .leading, spacing: 2) {
                 Text(service.name).font(.body.weight(.semibold)).foregroundStyle(.primary).lineLimit(1)
                 Text("services_offered_by \(service.publisherName)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -73,7 +73,7 @@ private struct HostedServiceRow: View {
                     .foregroundStyle(service.available ? Color.green : Color.secondary)
             }
             Spacer(minLength: 8)
-            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary).accessibilityHidden(true)
         }
         .contentShape(Rectangle())
     }
@@ -92,7 +92,7 @@ private struct HostedServiceTermsSheet: View {
             List {
                 Section {
                     HStack(spacing: 12) {
-                        AgentAvatar(agentID: AvatarIdentity.teamBotAvatarId(service.sharedBotId), size: 44)
+                        AgentAvatar(agentID: AvatarIdentity.teamBotAvatarId(service.sharedBotId), size: 56)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(service.name).font(.headline)
                             Text(LocalizedStringKey(HostedService.availabilityKey(service.availability))).font(.caption).foregroundStyle(.secondary)
@@ -131,6 +131,9 @@ private struct HostedServiceTermsSheet: View {
 
 /// An open service: its sessions, the open one's messages and requests, and the box to ask or answer.
 private struct HostedServiceSessionView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The scale of the avatars, so that the lines under the messages stay under their text.
+    @ScaledMetric(relativeTo: .body) private var percent: CGFloat = 100
     @Bindable var model: HostedServicesModel
     @State private var text = ""
     @State private var reporting = false
@@ -153,14 +156,16 @@ private struct HostedServiceSessionView: View {
                             }
                             .font(.footnote).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.vertical, 8)
                             if model.messages.isEmpty && model.tasks.isEmpty {
-                                Text("services_empty").font(.subheadline).foregroundStyle(.secondary).padding(16)
+                                // Nothing here yet: the box below is the action (U9).
+                                TeamsStateView(systemImage: "bubble.left.and.bubble.right", title: "teams_preview_none", message: "services_empty")
+                                    .frame(maxWidth: .infinity).padding(.vertical, 24)
                             }
                             ForEach(model.messages) { message in HostedServiceMessageCell(message: message, service: service, uid: model.viewer) }
                             ForEach(model.tasks.filter { $0.state != "completed" }) { task in taskLine(task) }
                             Color.clear.frame(height: 1).id("end")
                         }
                     }
-                    .onChange(of: model.messages.count + model.tasks.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
+                    .onChange(of: model.messages.count + model.tasks.count) { _, _ in withAnimation(.lxMotion(reduceMotion)) { proxy.scrollTo("end", anchor: .bottom) } }
                 }
                 if !model.error.isEmpty {
                     Text(LocalizedStringKey(HostedService.errorKey(model.error))).font(.footnote).foregroundStyle(.red)
@@ -187,6 +192,7 @@ private struct HostedServiceSessionView: View {
                         Button("services_report", systemImage: "flag") { reporting = true }
                         Button("services_leave", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { leaving = true }
                     } label: { Image(systemName: "ellipsis.circle") }
+                    .accessibilityLabel(Text("teams_conversation_menu"))
                     .accessibilityIdentifier("services.menu")
                 }
             }
@@ -201,26 +207,43 @@ private struct HostedServiceSessionView: View {
     @ViewBuilder
     private func taskLine(_ task: TeamTask) -> some View {
         if let key = HostedService.taskKey(task) {
+            let approving = model.approval?.taskId == task.taskId
             VStack(alignment: .leading, spacing: 6) {
                 Label { Text(LocalizedStringKey(key)) } icon: {
-                    if task.busy { ProgressView().controlSize(.mini) } else { Image(systemName: task.terminal ? "exclamationmark.circle" : "questionmark.bubble") }
+                    // The glyph is decorative: the words are the state. Processing is a spinner, and a still glyph under Reduce Motion (U4, U10).
+                    Group {
+                        if task.busy && !reduceMotion { ProgressView().controlSize(.mini) }
+                        else { Image(systemName: task.busy ? "ellipsis.circle" : task.terminal ? "exclamationmark.circle" : "questionmark.bubble") }
+                    }
+                    .accessibilityHidden(true)
                 }
                 .font(.footnote).foregroundStyle(.secondary)
-                HStack(spacing: 12) {
-                    if model.approval?.taskId == task.taskId {
-                        Button("teams_approval_approve") { Task { await model.decide(approve: true) } }.buttonStyle(.borderedProminent)
-                        Button("teams_approval_decline") { Task { await model.decide(approve: false) } }.buttonStyle(.bordered)
+                if approving || !task.terminal {
+                    // Up to three buttons at 44 pt stack under a large text size (U6).
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 10) { taskActions(task, approving: approving) }
+                        VStack(alignment: .leading, spacing: 0) { taskActions(task, approving: approving) }
                     }
-                    if !task.terminal {
-                        Button("services_task_cancel") { Task { await model.cancel(task.taskId) } }
-                            .buttonStyle(.borderless).disabled(task.cancelling)
-                    }
+                    .disabled(model.busy)
                 }
-                .controlSize(.small).disabled(model.busy)
             }
-            .padding(.horizontal, 58).padding(.vertical, 6)
+            .padding(.leading, 16 + AvatarScale.side(32, percent: percent) + 10).padding(.trailing, 16).padding(.vertical, 6)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("services.task.\(task.taskId)")
+        }
+    }
+
+    @ViewBuilder
+    private func taskActions(_ task: TeamTask, approving: Bool) -> some View {
+        if approving {
+            Button { Task { await model.decide(approve: true) } } label: { Text("teams_approval_approve").minimumHitTarget(minWidth: 0) }
+                .buttonStyle(.borderedProminent)
+            Button { Task { await model.decide(approve: false) } } label: { Text("teams_approval_decline").minimumHitTarget(minWidth: 0) }
+                .buttonStyle(.bordered)
+        }
+        if !task.terminal {
+            Button { Task { await model.cancel(task.taskId) } } label: { Text("services_task_cancel").minimumHitTarget(minWidth: 0) }
+                .buttonStyle(.borderless).disabled(task.cancelling)
         }
     }
 
@@ -230,13 +253,13 @@ private struct HostedServiceSessionView: View {
                 .lineLimit(1...6)
                 .focused($focused)
                 .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18))
+                .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .disabled(service.withdrawn)
                 .accessibilityIdentifier("services.composer")
             Button {
                 let sent = text
                 Task { if await model.send(sent), text == sent { text = "" } }
-            } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }
+            } label: { Image(systemName: "arrow.up.circle.fill").font(.title).minimumHitTarget() }
             .disabled(model.busy || service.withdrawn || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                       || TeamsComposeLogic.byteLength(text) > TeamsComposeLogic.messageBytes)
             .accessibilityLabel(Text("teams_message_send"))
@@ -255,16 +278,18 @@ private struct HostedServiceMessageCell: View {
 
     var body: some View {
         let bot = message.author.kind != "user", recalled = message.recalled == true
+        let clock = TeamsStreamLogic.formatClock(atMs: message.createdAt.flatMap(Self.milliseconds), locale: locale)
+        let name = bot ? service.name : TeamsText.you
+        let question = bot && message.waitId != nil
         HStack(alignment: .top, spacing: 10) {
             if bot { AgentAvatar(agentID: AvatarIdentity.teamBotAvatarId(service.sharedBotId), size: 32) } else { PersonAvatar(id: uid, name: "", size: 32) }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    if bot { Text(service.name).font(.subheadline.weight(.semibold)).lineLimit(1) } else { Text("teams_preview_you").font(.subheadline.weight(.semibold)) }
-                    if bot && message.waitId != nil {
+                    Text(verbatim: name).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    if question {
                         Text("services_question").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                             .padding(.horizontal, 5).padding(.vertical, 1).background(Color(uiColor: .tertiarySystemFill), in: Capsule())
                     }
-                    let clock = TeamsStreamLogic.formatClock(atMs: message.createdAt.flatMap(Self.milliseconds), locale: locale)
                     if !clock.isEmpty { Text(clock).font(.caption).foregroundStyle(.secondary) }
                 }
                 if recalled {
@@ -277,10 +302,27 @@ private struct HostedServiceMessageCell: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // One element for VoiceOver, as in a Team's stream: author, tag, time and text, with Copy among its actions.
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(Text(verbatim: spokenLabel(name: name, question: question, clock: clock, recalled: recalled)))
+            .accessibilityActions {
+                if !recalled && !message.text.isEmpty { Button("chat_message_copy") { UIPasteboard.general.string = message.text } }
+            }
         }
         .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 1)
+        // The viewer's own words sit on the faint tint of the accent; the Bot's never do (U3).
+        .background { if !bot { Color.accentColor.opacity(0.06) } }
+        .contentShape(Rectangle())
         .contextMenu { if !recalled && !message.text.isEmpty { Button("chat_message_copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.text } } }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("services.message.\(message.id)")
+    }
+
+    /// "Ann, Question, 10:32, Hello there": author, tag, time, text.
+    private func spokenLabel(name: String, question: Bool, clock: String, recalled: Bool) -> String {
+        let text = recalled ? TeamsText.localized("teams_message_recalled")
+            : TeamsBotText.rendersMarkdown(authorKind: message.author.kind, recalled: recalled) ? TeamsBotText.plainText(message.text) : message.text
+        return TeamsStreamLogic.spokenLine([name, question ? TeamsText.localized("services_question") : nil, clock, text])
     }
 
     private static func milliseconds(_ iso: String) -> Int64? {

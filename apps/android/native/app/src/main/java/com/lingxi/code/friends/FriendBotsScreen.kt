@@ -2,6 +2,8 @@ package com.lingxi.code.friends
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -100,8 +102,10 @@ private fun ownerName(bot: TeamBotCard, members: List<TeamMember>, uid: String):
 
 /**
  * One Bot of the friendship: the Teams Bot card without its audience and quota lines, which a friendship does not have (D21). Message needs a
- * usable Bot and a connection; Stop sharing is the person's own published Bot only, and asks first (D23).
+ * usable Bot and a connection; Stop sharing is the person's own published Bot only, and asks first (D23). The (up to three) actions wrap under each
+ * other rather than run out of the row at a large font size.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FriendBotRow(bot: TeamBotCard, owner: String, uid: String, generation: Long, online: Boolean, onMessage: () -> Unit, onStop: () -> Unit, onList: (() -> Unit)? = null) {
     var confirm by remember(bot.sharedBotId, bot.revision, bot.state) { mutableStateOf(false) }
@@ -112,7 +116,7 @@ private fun FriendBotRow(bot: TeamBotCard, owner: String, uid: String, generatio
             if (bot.description.isNotBlank()) Text(bot.description, style = MaterialTheme.typography.bodyMedium)
             Text("${botAvailabilityText(bot)} · ${stringResource(R.string.teams_bot_owner_fmt, owner)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (!bot.permitted) Text(stringResource(R.string.teams_bot_not_permitted), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Row {
+            FlowRow {
                 TextButton(enabled = online && bot.selectable, onClick = onMessage, modifier = Modifier.testTag(FriendsTags.botMessage(bot.sharedBotId))) { Text(stringResource(R.string.teams_bot_message)) }
                 if (onList != null) TextButton(enabled = online, onClick = onList, modifier = Modifier.testTag("teams.bot.list.${bot.sharedBotId}")) { Text(stringResource(R.string.teams_list_open)) }
                 if (bot.canPause(uid, generation)) {

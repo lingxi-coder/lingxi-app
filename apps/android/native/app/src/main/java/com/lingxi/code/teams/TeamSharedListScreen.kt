@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -41,7 +42,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.ImeAction
@@ -122,9 +126,9 @@ internal fun TeamSharedListDialog(bot: TeamBotCard, model: TeamMessagingModel, m
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize().testTag("teams.list.${bot.sharedBotId}"), color = MaterialTheme.colorScheme.surface) {
             Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onClose) { Icon(Icons.Outlined.Close, stringResource(R.string.common_close)) }
-                    Text(list?.title ?: bot.sharedList?.title.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.titleLarge, maxLines = 1)
+                    Text(list?.title ?: bot.sharedList?.title.orEmpty(), Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge, maxLines = 1)
                     IconButton(enabled = !busy, onClick = { attempt { moved = false; read(); if (history != null) page(null) } }, modifier = Modifier.testTag("teams.list.refresh")) {
                         Icon(Icons.Outlined.Refresh, stringResource(R.string.teams_list_refresh))
                     }
@@ -136,7 +140,7 @@ internal fun TeamSharedListDialog(bot: TeamBotCard, model: TeamMessagingModel, m
                         if (error.isEmpty()) item("loading") { Text(stringResource(R.string.teams_list_loading), color = MaterialTheme.colorScheme.onSurfaceVariant) }
                     } else {
                         item("hint") { Text(stringResource(R.string.teams_list_hint_fmt, bot.name), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                        if (moved) item("moved") { Text(stringResource(R.string.teams_list_moved), Modifier.testTag("teams.list.moved"), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary) }
+                        if (moved) item("moved") { Text(stringResource(R.string.teams_list_moved), Modifier.testTag("teams.list.moved").semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.tertiary) }
                         if (shown.items.isEmpty()) item("empty") { Text(stringResource(R.string.teams_list_empty), color = MaterialTheme.colorScheme.onSurfaceVariant) }
                         items(shown.items, key = { it.itemId }) { item ->
                             val edit = editing?.takeIf { it.first == item.itemId }
@@ -146,10 +150,11 @@ internal fun TeamSharedListDialog(bot: TeamBotCard, model: TeamMessagingModel, m
                                 onRemove = { write(listOf(TeamSharedListChange.Remove(item.itemId))) })
                         }
                     }
-                    if (error.isNotEmpty()) item("error") { Text(stringResource(teamsErrorRes(error)), Modifier.testTag("teams.list.error"), color = MaterialTheme.colorScheme.error) }
+                    if (error.isNotEmpty()) item("error") { Text(stringResource(teamsErrorRes(error)), Modifier.testTag("teams.list.error").semantics { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.error) }
                     if (shown != null) {
                         item("history") {
-                            TextButton(onClick = { historyOpen = !historyOpen }, modifier = Modifier.testTag("teams.list.history")) { Text(stringResource(R.string.teams_list_history)) }
+                            val historyState = stringResource(if (historyOpen) R.string.teams_section_expanded else R.string.teams_section_collapsed)
+                            TextButton(onClick = { historyOpen = !historyOpen }, modifier = Modifier.testTag("teams.list.history").semantics { stateDescription = historyState }) { Text(stringResource(R.string.teams_list_history)) }
                         }
                         if (historyOpen) {
                             val loaded = history
@@ -163,7 +168,7 @@ internal fun TeamSharedListDialog(bot: TeamBotCard, model: TeamMessagingModel, m
                                     }
                                 }
                             }
-                            if (historyError.isNotEmpty()) item("history-error") { Text(stringResource(teamsErrorRes(historyError)), color = MaterialTheme.colorScheme.error) }
+                            if (historyError.isNotEmpty()) item("history-error") { Text(stringResource(teamsErrorRes(historyError)), Modifier.semantics { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.error) }
                             item("history-kept") { Text(stringResource(R.string.teams_list_history_kept), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                         }
                     }
@@ -215,7 +220,7 @@ private fun ListItemRow(item: TeamSharedListItem, enabled: Boolean, onDone: (Boo
     val state = stringResource(if (item.done) R.string.teams_list_done else R.string.teams_list_not_done)
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         // The whole text toggles the item; the checkbox itself is decoration so the row is one control for a screen reader.
-        Row(Modifier.weight(1f).toggleable(item.done, enabled = enabled, role = Role.Checkbox, onValueChange = onDone).semantics { stateDescription = state }.testTag("teams.list.item.${item.itemId}"),
+        Row(Modifier.weight(1f).heightIn(min = 48.dp).toggleable(item.done, enabled = enabled, role = Role.Checkbox, onValueChange = onDone).semantics { stateDescription = state }.testTag("teams.list.item.${item.itemId}"),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Checkbox(item.done, onCheckedChange = null, enabled = enabled)
             Text(item.text, Modifier.padding(vertical = 12.dp), textDecoration = if (item.done) TextDecoration.LineThrough else null,

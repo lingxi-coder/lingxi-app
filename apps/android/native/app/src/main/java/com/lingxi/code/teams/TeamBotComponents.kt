@@ -225,8 +225,10 @@ internal fun teamApprovalChangeText(change: TeamListApprovalChange): String {
 /**
  * A Bot's request to change its list, under the message that carries it: each change in words, and Approve and Decline for the
  * member the Bot works for while the task waits. Afterwards it says how the request ended. [deciderName] names the member who
- * decides or decided. Nothing is saved to the list before an approval.
+ * decides or decided. Nothing is saved to the list before an approval. The request reads as one element for a screen reader; the buttons stay their own,
+ * and wrap under each other when the font scale leaves no room for them side by side.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun TeamApprovalCard(approval: TeamListApproval, waitId: String, state: TeamApprovalState, deciderName: String, onDecide: (Boolean, TeamDecisionIds) -> Unit) {
     // One identity per decision, kept across retries so a lost answer cannot post the reply twice.
@@ -236,11 +238,13 @@ internal fun TeamApprovalCard(approval: TeamListApproval, waitId: String, state:
     androidx.compose.runtime.LaunchedEffect(asked) { if (asked) { kotlinx.coroutines.delay(8000); asked = false } }
     // It sits flush with the message text, like the run card under it.
     Column(Modifier.fillMaxWidth().padding(top = 4.dp).testTag("teams.approval.$waitId"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(stringResource(R.string.teams_approval_title_fmt, approval.title), style = MaterialTheme.typography.titleSmall)
-        approval.changes.forEach { change -> Text("• ${teamApprovalChangeText(change)}", style = MaterialTheme.typography.bodyMedium) }
+        Column(Modifier.semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(stringResource(R.string.teams_approval_title_fmt, approval.title), style = MaterialTheme.typography.titleSmall)
+            approval.changes.forEach { change -> Text("• ${teamApprovalChangeText(change)}", style = MaterialTheme.typography.bodyMedium) }
+            if (state == TeamApprovalState.Decide) Text(stringResource(R.string.teams_approval_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         if (state == TeamApprovalState.Decide) {
-            Text(stringResource(R.string.teams_approval_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { asked = true; onDecide(true, ids.getOrPut(true) { TeamDecisionIds() }) }, enabled = !asked, modifier = Modifier.testTag("teams.approval.approve.$waitId")) { Text(stringResource(R.string.teams_approval_approve)) }
                 OutlinedButton(onClick = { asked = true; onDecide(false, ids.getOrPut(false) { TeamDecisionIds() }) }, enabled = !asked, modifier = Modifier.testTag("teams.approval.decline.$waitId")) {
                     Text(stringResource(R.string.teams_approval_decline), color = MaterialTheme.colorScheme.error)

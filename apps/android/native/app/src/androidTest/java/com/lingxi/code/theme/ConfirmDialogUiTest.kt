@@ -66,6 +66,21 @@ class ConfirmDialogUiTest {
         assertEquals(listOf("confirm"), events)
     }
 
+    @Test fun aCancelThatNamesWhatStaysTakesTheWordCancelsPlaceAndStillDismisses() {
+        rule.setContent {
+            LingXiTheme(darkTheme = false) {
+                ConfirmDialog(
+                    title = "You have unsaved changes.", confirm = "Discard", destructive = true, cancel = "Keep editing", dialogTag = "dialog",
+                    onConfirm = { events += "confirm" }, onDismiss = { events += "dismiss" },
+                )
+            }
+        }
+        rule.onNodeWithTag("dialog").assertIsDisplayed()
+        rule.onNode(inDialog(cancel())).assertDoesNotExist()
+        rule.onNode(inDialog("Keep editing") and hasClickAction()).assertIsDisplayed().performClick()
+        assertEquals(listOf("dismiss"), events)
+    }
+
     @Test fun aBusyActionDisablesTheVerbButNotTheCancel() {
         show(enabled = false)
         rule.onNodeWithTag("confirm").assertIsNotEnabled()

@@ -211,7 +211,7 @@ struct TeamsTab: View {
                 Button("teams_join") { joinPrefill = ""; sheet = .joinTeam }
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("teams.empty.join")
-                Button("services_title") { sheet = .services }
+                Button { sheet = .services } label: { Text("services_title").minimumHitTarget(minWidth: 0) }
                     .buttonStyle(.borderless)
                     .accessibilityIdentifier("teams.empty.services")
             }

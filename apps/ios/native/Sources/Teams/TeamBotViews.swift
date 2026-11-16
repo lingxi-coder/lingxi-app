@@ -289,22 +289,28 @@ struct TeamApprovalCard: View {
                     .accessibilityIdentifier("teams.approval.status.\(waitId)")
             } else {
                 Text("teams_approval_hint").font(.caption).foregroundStyle(.secondary)
-                HStack(spacing: 10) {
-                    Button { decide(true) } label: { Text("teams_approval_approve").minimumHitTarget(minWidth: 0) }
-                        .buttonStyle(.borderedProminent)
-                        .accessibilityIdentifier("teams.approval.approve.\(waitId)")
-                    Button(role: .destructive) { decide(false) } label: { Text("teams_approval_decline").minimumHitTarget(minWidth: 0) }
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("teams.approval.decline.\(waitId)")
+                // The two buttons stack under a large text size, as the buttons of the run card do.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) { decisionButtons }
+                    VStack(alignment: .leading, spacing: 0) { decisionButtons }
                 }
                 .disabled(sending)
             }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.approval.\(waitId)")
+    }
+
+    @ViewBuilder private var decisionButtons: some View {
+        Button { decide(true) } label: { Text("teams_approval_approve").minimumHitTarget(minWidth: 0) }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("teams.approval.approve.\(waitId)")
+        Button(role: .destructive) { decide(false) } label: { Text("teams_approval_decline").minimumHitTarget(minWidth: 0) }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("teams.approval.decline.\(waitId)")
     }
 }
 

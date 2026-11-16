@@ -10,6 +10,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+lingxi-exact-text.workspace = true
 core = { workspace = true }
 tool-api = { workspace = true }
 client = { workspace = true, features = ["presentation"] }

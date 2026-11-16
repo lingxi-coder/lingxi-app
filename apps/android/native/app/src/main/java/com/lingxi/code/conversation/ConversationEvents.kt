@@ -287,7 +287,9 @@ fun clientEventToReply(
     strings: ConversationStrings = DefaultConversationStrings,
 ): ReplyEvent? = when (event) {
     is ClientEvent.TurnStarted -> ReplyEvent.Thinking
-    is ClientEvent.TextDelta -> ReplyEvent.Delta(event.text.displayText())
+    // Kotlin strings retain exact UTF-16. Decode only after assembling the
+    // live text; a surrogate pair can span two engine events.
+    is ClientEvent.TextDelta -> ReplyEvent.Delta(event.text.sourceText())
     is ClientEvent.VisualizationBlock ->
         ReplyEvent.Visualization(event.status.toUi(), event.reference?.toUi())
     is ClientEvent.ThinkingDelta -> ReplyEvent.ReasoningDelta(event.thinking)

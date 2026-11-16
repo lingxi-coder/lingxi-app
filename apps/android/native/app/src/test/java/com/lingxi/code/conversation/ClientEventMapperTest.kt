@@ -1,6 +1,7 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.CodeSegmentDto
 import com.lingxi.code.bindings.client.CostDto
 import com.lingxi.code.bindings.client.DiffLineKindDto
@@ -105,6 +106,30 @@ class ClientEventMapperTest {
     @Test
     fun textDelta_emptyString_stillDelta() {
         assertEquals(ReplyEvent.Delta(""), clientEventToReply(ClientEvent.TextDelta("".toClientTextDto())))
+    }
+
+    @Test
+    fun textDelta_preservesSplitPairsUntilTheDisplaySink() {
+        val units = listOf(listOf(0x4E2D, 0xD83D), listOf(0xDE00, 0xD800), listOf(0x61, 0xDC00))
+        val deltas = units.map { fragment ->
+            val event = ClientEvent.TextDelta(ClientTextDto(codeUnits = fragment.map { it.toUShort() }))
+            (clientEventToReply(event) as ReplyEvent.Delta).text
+        }
+        val source = deltas.joinToString("")
+        assertEquals("中😀\uD800a\uDC00", source)
+        assertEquals("中😀�a�", source.toClientTextDto().displayText())
+        val complete = clientEventToReply(ClientEvent.MessageComplete(
+            stopReason = "end_turn",
+            message = MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(
+                MessageBlockDto.Text(source.toClientTextDto()),
+            )),
+        )) as ReplyEvent.MessageComplete
+        assertEquals("中😀�a�", complete.message!!.text)
+        // Live and retained fragments must also have the same dedup identity.
+        assertEquals(
+            clientEventToReply(ClientEvent.TextDelta(ClientTextDto(codeUnits = listOf(0xD83D.toUShort())))),
+            retainedTurnEventToReply("""{"type":"text_delta","text":"\ud83d"}"""),
+        )
     }
 
     @Test

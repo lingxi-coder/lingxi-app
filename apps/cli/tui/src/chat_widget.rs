@@ -358,6 +358,8 @@ fn is_live_turn_event(event: &TurnEvent) -> bool {
     matches!(
         event,
         TurnEvent::TextDelta(_)
+            | TurnEvent::TextDeltaUtf16(_)
+            | TurnEvent::TextBoundary
             | TurnEvent::MessageIdentity(_)
             | TurnEvent::MessageRetracted(_)
             | TurnEvent::TranscriptRowIdentity { .. }
@@ -388,6 +390,7 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
     match event {
         TurnEvent::AgentStatusSnapshot { .. } => FocusRefreshKind::AgentsOnly,
         TurnEvent::TextDelta(delta) => FocusRefreshKind::AppendText(delta.clone()),
+        TurnEvent::TextDeltaUtf16(_) => FocusRefreshKind::Full,
         TurnEvent::Attachment { .. }
         | TurnEvent::SystemNotice { .. }
         | TurnEvent::UiLog { .. }
@@ -411,7 +414,9 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::ToolUseStart { .. }
         | TurnEvent::ToolUseResult { .. }
         | TurnEvent::ServerFallbackQueryModelChange { .. } => FocusRefreshKind::ResetAssistantTail,
-        TurnEvent::RateLimit { .. } | TurnEvent::SubagentActivity { .. } => FocusRefreshKind::None,
+        TurnEvent::RateLimit { .. }
+        | TurnEvent::SubagentActivity { .. }
+        | TurnEvent::TextBoundary => FocusRefreshKind::None,
         TurnEvent::PermissionRequest { .. }
         | TurnEvent::ModelChanged { .. }
         | TurnEvent::PermissionModeChanged(_)
@@ -1556,6 +1561,14 @@ impl ChatWidget {
         }
     }
 
+    fn finish_assistant_fragment(&mut self) {
+        self.transcript.mutate_active(|cell| {
+            if let Some(assistant) = cell.as_any_mut().downcast_mut::<AssistantTextCell>() {
+                assistant.finish_text_fragment();
+            }
+        });
+    }
+
     /// Fold one streaming event from the orchestrator bridge into the
     /// transcript: `TurnStarted` opens an empty active assistant cell,
     /// `TextDelta` mutates it in place, `ToolUseStart`/`ToolUseResult` render
@@ -1826,7 +1839,11 @@ impl ChatWidget {
                 self.pending_refusal_continuation = Some((salvage_text, display_salvage_text));
                 self.active_assistant_block_key = None;
             }
+            TurnEvent::TextBoundary => {
+                self.finish_assistant_fragment();
+            }
             TurnEvent::MessageIdentity(id) => {
+                self.finish_assistant_fragment();
                 if self.activity_fold.is_none() {
                     self.flush_or_discard_active();
                 }
@@ -1866,6 +1883,41 @@ impl ChatWidget {
                     self.transcript
                         .set_active(Box::new(AssistantTextCell::new(delta)));
                 }
+            }
+            TurnEvent::TextDeltaUtf16(units) => {
+                self.finalize_collapse_group();
+                self.api_retry = None;
+                let mut update = None;
+                let appended = self
+                    .transcript
+                    .mutate_active(|cell| {
+                        if let Some(assistant) =
+                            cell.as_any_mut().downcast_mut::<AssistantTextCell>()
+                        {
+                            let edit = assistant.append_utf16(&units);
+                            update = Some((edit.remove_scalars, edit.append.to_owned()));
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !appended {
+                    self.transcript.flush_active();
+                    let mut cell = AssistantTextCell::new(String::new());
+                    let edit = cell.append_utf16(&units);
+                    update = Some((edit.remove_scalars, edit.append.to_owned()));
+                    self.transcript.set_active(Box::new(cell));
+                }
+                let (remove, suffix) = update.expect("active assistant text was updated");
+                for _ in 0..remove {
+                    self.partial_assistant_text.pop();
+                }
+                self.partial_assistant_text.push_str(&suffix);
+                self.response_chars = self
+                    .response_chars
+                    .saturating_sub(remove as u64)
+                    .saturating_add(suffix.chars().count() as u64);
             }
             TurnEvent::ThinkingDelta(delta) => {
                 self.response_chars = self

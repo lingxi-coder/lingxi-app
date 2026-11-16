@@ -73,6 +73,61 @@ import Combine
             XCTAssertTrue(source.model.streaming)
         }
 
+        func testSplitUtf16ReplyPreservesTheLiveRow() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 910)
+            source.applyForTesting(.turnStarted(turnId: 910))
+            source.applyForTesting(.textDelta(text: ClientTextDto(codeUnits: [0x4e2d, 0xd83d])))
+            let row = source.model.messages.last!.id
+            XCTAssertEqual(source.model.messages.last?.text, "中�")
+            source.applyForTesting(.textDelta(text: ClientTextDto(codeUnits: [0xde00])))
+            XCTAssertEqual(source.model.messages.last?.id, row)
+            XCTAssertEqual(source.model.messages.last?.text, "中😀")
+        }
+
+        func testCompleteSnapshotReplacesAndRetiresTheLiveUtf16Tail() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 914)
+            source.applyForTesting(.turnStarted(turnId: 914))
+            source.applyForTesting(.textDelta(text: ClientTextDto(codeUnits: [0xd83d])))
+            source.applyForTesting(.messageComplete(stopReason: "max_tokens", message: MessageDto(
+                transcriptUuid: nil, role: "assistant", blocks: [
+                    .text(text: ClientTextDto(codeUnits: [0x4e2d, 0xd83d, 0xde00, 0xd83d])),
+                ])))
+            source.applyForTesting(.textDelta(text: ClientTextDto(codeUnits: [0xde00])))
+            XCTAssertEqual(source.model.messages.filter { $0.role == .ai }.map(\.text), ["中😀�", "�"])
+        }
+
+        func testCancelledUtf16TailCannotJoinTheNextTurn() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 911)
+            source.applyForTesting(.turnStarted(turnId: 911))
+            source.applyForTesting(.textDelta(text: ClientTextDto(codeUnits: [0xd83d])))
+            let row = source.model.messages.last!.id
+            source.applyForTesting(.turnEnded(outcome: .cancelled, stopReason: nil, cost: zeroCost))
+            source.beginTurnForTesting(turnId: 912)
+            source.applyForTesting(.turnStarted(turnId: 912))
+            source.applyForTesting(.textDelta(text: ClientTextDto(codeUnits: [0xde00])))
+            XCTAssertNotEqual(source.model.messages.last?.id, row)
+            XCTAssertEqual(source.model.messages.last?.text, "�")
+        }
+
+        func testRetractingAnotherResponsePreservesTheLiveUtf16Tail() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 913)
+            source.applyForTesting(.turnStarted(turnId: 913))
+            source.applyForTesting(.textDelta(text: "old".clientTextDto))
+            source.applyForTesting(.messageIdentity(messageId: "old-response"))
+            source.applyForTesting(.messageComplete(stopReason: "max_tokens", message: MessageDto(
+                transcriptUuid: nil, role: "assistant", blocks: [.text(text: "old".clientTextDto)])))
+            source.applyForTesting(.textDelta(text: ClientTextDto(codeUnits: [0xd83d])))
+            let row = source.model.messages.last!.id
+            source.applyForTesting(.messageRetracted(messageId: "old-response"))
+            source.applyForTesting(.textDelta(text: ClientTextDto(codeUnits: [0xde00])))
+            XCTAssertEqual(source.model.messages.last?.id, row)
+            XCTAssertEqual(source.model.messages.last?.text, "😀")
+        }
+
         func testManualCompactDuringTurnIsRejectedBeforeSubmission() async throws {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 32, sessionId: "compact-refusal")
@@ -164,8 +219,13 @@ import Combine
             source.model.activeSessionId = "test-session"
             let accepted = await source.send("same")
             let first = try XCTUnwrap(accepted)
+            source.applyForTesting(.turnStarted(turnId: first.clientTurnId))
+            source.applyForTesting(.textDelta(text: ClientTextDto(codeUnits: [0xd83d])))
+            let liveRow = source.model.messages.last!.id
             let queuedToken = await source.send("same")
             XCTAssertNotNil(queuedToken)
+            source.applyForTesting(.textDelta(text: ClientTextDto(codeUnits: [0xde00])))
+            XCTAssertEqual(source.model.messages.first { $0.id == liveRow }?.text, "😀")
             for _ in 0..<10 { await Task.yield() }
             let turnIDs = commands.compactMap { command -> UInt64? in
                 if case let .sendPrompt(_, _, _, turnID, _) = command { return turnID }
@@ -1422,10 +1482,10 @@ import Combine
                             firstSequence: 1, lastSequence: 2, safeToResume: true, reason: nil
                         )))
                         source.applyForTesting(.turnEventReplay(sessionId: "session-a", turnId: id,
-                            sequence: 1, eventJson: #"{"type":"text_delta","text":"retained "}"#))
+                            sequence: 1, eventJson: #"{"type":"text_delta","text":"retained \ud83d"}"#))
                         let prefixRowID = source.model.messages.last?.id
                         source.applyForTesting(.turnEventReplay(sessionId: "session-a", turnId: id,
-                            sequence: 2, eventJson: #"{"type":"text_delta","text":"prefix"}"#))
+                            sequence: 2, eventJson: #"{"type":"text_delta","text":"\ude00 prefix"}"#))
                         source.applyForTesting(.turnEventReplay(sessionId: "session-a", turnId: id,
                             sequence: 2, eventJson: #"{"type":"text_delta","text":"duplicate prefix"}"#))
                         source.applyForTesting(.turnEventReplay(sessionId: "session-a", turnId: id,
@@ -1442,7 +1502,7 @@ import Combine
                         XCTAssertTrue(source.model.hasInactiveDurableRecovery)
                         XCTAssertFalse(source.model.requiresBackgroundExecution, "restored text must not acquire a live execution lease")
                         XCTAssertTrue(speechUpdates.isEmpty, "retained history must not be spoken as live output")
-                        XCTAssertEqual(source.model.messages.map(\.text), ["run", "retained prefix"])
+                        XCTAssertEqual(source.model.messages.map(\.text), ["run", "retained 😀 prefix"])
                         let replayCursor = try await source.durableAttachCursorForTesting()
                         XCTAssertEqual(replayCursor, 2, "retained replay must finish before Resume")
                         source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
@@ -1462,7 +1522,7 @@ import Combine
                 ]))
                 await source.waitForDurableRecoveryForTesting()
                 XCTAssertEqual(recoveryCommands, ["attach", "resume"])
-                XCTAssertEqual(source.model.messages.map(\.text), ["run", "retained prefix", "live suffix"])
+                XCTAssertEqual(source.model.messages.map(\.text), ["run", "retained 😀 prefix", "live suffix"])
                 XCTAssertEqual(source.model.messages.first?.transcriptUUID, userUUID)
                 XCTAssertTrue(source.model.streaming)
                 XCTAssertTrue(source.model.requiresBackgroundExecution)

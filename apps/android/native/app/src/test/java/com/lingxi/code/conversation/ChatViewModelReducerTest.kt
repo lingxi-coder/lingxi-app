@@ -66,6 +66,23 @@ import org.junit.Test
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatViewModelReducerTest {
+    @Test fun splitUtf16ReplyUsesOneLiveRowAndResetsAfterTurnEnd() {
+        val vm = newVm()
+        fun delta(vararg units: Int) = clientEventToReply(ClientEvent.TextDelta(
+            ClientTextDto(codeUnits = units.map { it.toUShort() }),
+        ))!!
+        vm.reduce(delta(0x4E2D, 0xD83D))
+        val row = vm.state.value.streamingMessage!!.id
+        vm.reduce(delta(0xDE00))
+        assertEquals(row, vm.state.value.streamingMessage!!.id)
+        assertEquals("中😀", vm.state.value.streamingMessage!!.text)
+        vm.reduce(delta(0xD83D))
+        vm.reduce(ReplyEvent.End)
+        vm.reduce(delta(0xDE00))
+        assertEquals("\uDE00", vm.state.value.streamingMessage!!.text)
+        assertFalse(row == vm.state.value.streamingMessage!!.id)
+    }
+
     private open class ControlledNativePromptSource(
         initialIdentity: NativePromptIdentity?,
         private val store: DurableConversationTurnClientStore? = null,
@@ -1107,7 +1124,7 @@ class ChatViewModelReducerTest {
             turnId = 88u,
             state = TurnRecoveryStateDto.RUNNING,
             firstSequence = 1u,
-            lastSequence = 1u,
+            lastSequence = 2u,
             safeToResume = true,
             reason = null,
         )
@@ -1118,9 +1135,13 @@ class ChatViewModelReducerTest {
                 sessionId = "session-a",
                 turnId = 88u,
                 sequence = 1u,
-                eventJson = """{"type":"text_delta","text":"history"}""",
+                eventJson = """{"type":"text_delta","text":"history \ud83d"}""",
             ),
         )
+        vm.reduceClientEvent(ClientEvent.TurnEventReplay(
+            sessionId = "session-a", turnId = 88u, sequence = 2u,
+            eventJson = """{"type":"text_delta","text":"\ude00"}""",
+        ))
         // ResumeTurn emits its own state and closes the attach replay window.
         vm.reduceClientEvent(ClientEvent.TurnRecoveryState(running))
         vm.reduceClientEvent(ClientEvent.TextDelta("live".toClientTextDto()))
@@ -1128,13 +1149,13 @@ class ChatViewModelReducerTest {
             ClientEvent.TurnEventReplay(
                 sessionId = "session-a",
                 turnId = 88u,
-                sequence = 2u,
+                sequence = 3u,
                 eventJson = """{"type":"text_delta","text":"live"}""",
             ),
         )
 
         assertEquals(listOf(0L), source.attachRequests)
-        assertEquals("historylive", vm.state.value.streamingMessage?.text)
+        assertEquals("history 😀live", vm.state.value.streamingMessage?.text)
     }
 
     @Test
@@ -2174,12 +2195,17 @@ class ChatViewModelReducerTest {
         val prompt = String(charArrayOf('x', 0xD800.toChar(), 0xD83D.toChar(), 0xDE03.toChar()))
 
         vm.send("first")
+        vm.reduce(clientEventToReply(ClientEvent.TextDelta(ClientTextDto(codeUnits = listOf(0xD83D.toUShort()))))!!)
+        val row = vm.state.value.streamingMessage!!.id
         vm.send(prompt)
         runCurrent()
+        vm.reduce(clientEventToReply(ClientEvent.TextDelta(ClientTextDto(codeUnits = listOf(0xDE00.toUShort()))))!!)
 
         val command = source.commands.filterIsInstance<ClientCommand.SendPrompt>().single()
         assertEquals(prompt.map { it.code.toUShort() }, command.text.codeUnits)
         assertEquals(prompt.map { it.code.toUShort() }, source.pending.single())
+        assertEquals(row, vm.state.value.streamingMessage!!.id)
+        assertEquals("😀", vm.state.value.streamingMessage!!.text)
     }
 
     @Test

@@ -557,7 +557,7 @@ impl StyledCell for UserTextCell {
 /// streaming cell: deltas [`Self::append`] to the body in place.
 #[derive(Debug)]
 pub struct AssistantTextCell {
-    body: String,
+    body: lingxi_exact_text::ExactText,
 }
 
 impl AssistantTextCell {
@@ -565,18 +565,31 @@ impl AssistantTextCell {
     /// still renders the bare 1-row marker).
     #[must_use]
     pub fn new(body: String) -> Self {
-        Self { body }
+        Self {
+            body: lingxi_exact_text::ExactText::from_text(body),
+        }
     }
 
     /// The assistant body text (markdown source).
     #[must_use]
     pub fn body(&self) -> &str {
-        &self.body
+        self.body.display()
     }
 
     /// Append a streaming text delta to the body in place.
     pub fn append(&mut self, delta: &str) {
         self.body.push_str(delta);
+    }
+
+    /// Reuse the common constructor's incremental display correction.
+    pub fn append_utf16(&mut self, units: &[u16]) -> lingxi_exact_text::DisplayEdit<'_> {
+        self.body.push_units_with_edit(units)
+    }
+
+    /// Keep the displayed body while retiring a completed response's units.
+    pub fn finish_text_fragment(&mut self) {
+        let (display, _) = std::mem::take(&mut self.body).into_parts();
+        self.body = lingxi_exact_text::ExactText::from_text(display);
     }
 }
 
@@ -587,10 +600,10 @@ impl StyledCell for AssistantTextCell {
         // tail row here is the stray marker `flush_or_discard_active` guards
         // against, and it prematurely grows the viewport by a row. Once a delta
         // arrives the body is non-empty and the `● …` reply renders normally.
-        if self.body.is_empty() {
+        if self.body.display().is_empty() {
             return Vec::new();
         }
-        assistant_lines(&self.body, width, theme)
+        assistant_lines(self.body.display(), width, theme)
     }
 
     fn styled_lines_for_scrollback(
@@ -603,10 +616,10 @@ impl StyledCell for AssistantTextCell {
     ) -> Vec<StyledLine> {
         // Keep the empty streaming placeholder invisible in native scrollback,
         // just as in the normal cell-grid renderer.
-        if self.body.is_empty() {
+        if self.body.display().is_empty() {
             return Vec::new();
         }
-        assistant_lines_for_scrollback(&self.body, width, theme, hyperlinks_enabled)
+        assistant_lines_for_scrollback(self.body.display(), width, theme, hyperlinks_enabled)
     }
 }
 

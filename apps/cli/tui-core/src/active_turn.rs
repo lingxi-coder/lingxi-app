@@ -30,6 +30,8 @@ pub struct ActiveTurn {
     /// text → tool → text sequence yields separate blocks (and a new turn
     /// never appends to the previous turn's final message).
     text_idx: Option<usize>,
+    /// Exact construction exists only when a fragment carries isolated units.
+    exact_text: Option<lingxi_exact_text::ExactText>,
     /// Tool ids started but not yet resulted, in start order.
     running_tools: Vec<lingxi_core::types::ToolUseId>,
     /// Latest heartbeat age for each running tool. Kept outside the transcript
@@ -96,6 +98,7 @@ impl ActiveTurn {
             TurnEvent::TurnStarted | TurnEvent::TurnStartedWithCancel(_) => {
                 self.streaming = true;
                 self.text_idx = None;
+                self.exact_text = None;
                 self.running_tools.clear();
                 self.tool_inputs.clear();
                 self.tool_heartbeats.clear();
@@ -104,8 +107,12 @@ impl ActiveTurn {
                 if let Some(RenderedMessage::AssistantText { body, .. }) =
                     self.text_idx.and_then(|i| messages.get_mut(i))
                 {
+                    if let Some(exact) = &mut self.exact_text {
+                        exact.push_str(&delta);
+                    }
                     body.push_str(&delta);
                 } else {
+                    self.exact_text = None;
                     messages.push(RenderedMessage::AssistantText {
                         body: delta,
                         timestamp: 0,
@@ -113,8 +120,45 @@ impl ActiveTurn {
                     self.text_idx = Some(messages.len() - 1);
                 }
             }
+            TurnEvent::TextDeltaUtf16(units) => {
+                let index = match self.text_idx.filter(|&index| {
+                    matches!(
+                        messages.get(index),
+                        Some(RenderedMessage::AssistantText { .. })
+                    )
+                }) {
+                    Some(index) => index,
+                    None => {
+                        self.exact_text = None;
+                        messages.push(RenderedMessage::AssistantText {
+                            body: String::new(),
+                            timestamp: 0,
+                        });
+                        let index = messages.len() - 1;
+                        self.text_idx = Some(index);
+                        index
+                    }
+                };
+                let RenderedMessage::AssistantText { body, .. } = &mut messages[index] else {
+                    unreachable!()
+                };
+                let exact = self
+                    .exact_text
+                    .get_or_insert_with(|| lingxi_exact_text::ExactText::from_text(body.clone()));
+                let edit = exact.push_units_with_edit(&units);
+                for _ in 0..edit.remove_scalars {
+                    body.pop();
+                }
+                body.push_str(edit.append);
+            }
+            TurnEvent::TextBoundary | TurnEvent::MessageIdentity(_) => {
+                // Grouping belongs to the renderer, but exact fragments may
+                // never complete a surrogate from a different response.
+                self.exact_text = None;
+            }
             TurnEvent::ThinkingDelta(thinking) => {
                 self.text_idx = None;
+                self.exact_text = None;
                 messages.push(RenderedMessage::AssistantThinking {
                     thinking,
                     expanded: false,
@@ -122,6 +166,7 @@ impl ActiveTurn {
             }
             TurnEvent::ToolUseStart { id, tool, input } => {
                 self.text_idx = None;
+                self.exact_text = None;
                 self.tool_inputs.insert(id.clone(), input.clone());
                 self.running_tools.push(id.clone());
                 messages.push(RenderedMessage::AssistantToolUse { id, tool, input });
@@ -145,6 +190,7 @@ impl ActiveTurn {
             }
             TurnEvent::ToolUseResult { id, tool, result } => {
                 self.text_idx = None;
+                self.exact_text = None;
                 self.running_tools.retain(|r| r != &id);
                 self.tool_heartbeats.remove(&id);
                 let call_input = self.tool_inputs.remove(&id);
@@ -181,6 +227,7 @@ impl ActiveTurn {
             TurnEvent::TurnEnded(_) => {
                 self.streaming = false;
                 self.text_idx = None;
+                self.exact_text = None;
                 self.running_tools.clear();
                 self.tool_inputs.clear();
                 self.tool_heartbeats.clear();
@@ -222,6 +269,37 @@ mod tests {
             RenderedMessage::AssistantText { body, .. } => assert_eq!(body, "Hello"),
             other => panic!("expected AssistantText, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn exact_text_tail_resets_at_cancel_and_tool_boundaries() {
+        let mut active = ActiveTurn::new();
+        let mut messages = Vec::new();
+        active.apply(TurnEvent::TurnStarted, &mut messages);
+        active.apply(TurnEvent::TextDeltaUtf16(vec![0xd83d]), &mut messages);
+        active.apply(TurnEvent::TextDeltaUtf16(vec![0xde00]), &mut messages);
+        active.apply(TurnEvent::TextDelta(" 中文".into()), &mut messages);
+        active.apply(TurnEvent::TextDeltaUtf16(vec![0xd83d]), &mut messages);
+        active.apply(TurnEvent::TurnEnded(TurnOutcome::Cancelled), &mut messages);
+        active.apply(TurnEvent::TurnStarted, &mut messages);
+        active.apply(TurnEvent::TextDeltaUtf16(vec![0xde00]), &mut messages);
+        active.apply(
+            TurnEvent::ToolUseStart {
+                id: "tool".into(),
+                tool: "Read".into(),
+                input: serde_json::json!({}),
+            },
+            &mut messages,
+        );
+        active.apply(TurnEvent::TextDeltaUtf16(vec![0xd83d]), &mut messages);
+        let text: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                RenderedMessage::AssistantText { body, .. } => Some(body.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, ["😀 中文�", "�", "�"]);
     }
 
     #[test]

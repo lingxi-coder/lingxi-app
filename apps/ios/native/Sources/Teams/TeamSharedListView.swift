@@ -142,7 +142,7 @@ struct TeamSharedListSheet: View {
         guard !busy else { return }
         busy = true; error = ""
         Task { @MainActor in
-            do { try await work() } catch let failure as TeamMessageFailure { error = failure.code } catch { error = "SERVICE_UNAVAILABLE" }
+            do { try await work() } catch let failure as TeamMessageFailure { self.error = failure.code } catch { self.error = "SERVICE_UNAVAILABLE" }
             busy = false
         }
     }

@@ -100,7 +100,10 @@ final class EngineConversationSource: ConversationSource {
     private var providerCatalogWaiters: [CheckedContinuation<[ProviderCatalogEntry], Error>] = []
     /// Index into `model.messages` of the assistant message currently being
     /// streamed (deltas append into it). `nil` between turns.
-    private var streamingIndex: Int?
+    private var streamingIndex: Int? {
+        didSet { if streamingIndex == nil { streamingTextBuffer = nil } }
+    }
+    private var streamingTextBuffer: (row: UUID, text: ClientTextBuffer)?
     /// The matching render-list slot for the in-flight assistant message.
     private var streamingItemIndex: Int?
     /// Narrative rows opened during the current assistant API response. A
@@ -1116,7 +1119,9 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
-    private func replaceStreamingMessage(_ message: Message, detail: ConversationMessageDetail? = nil) {
+    private func replaceStreamingMessage(_ message: Message, detail: ConversationMessageDetail? = nil,
+                                         preservingTextBuffer: Bool = false) {
+        if !preservingTextBuffer { streamingTextBuffer = nil }
         guard let streamingIndex,
               model.messages.indices.contains(streamingIndex)
         else {
@@ -4684,7 +4689,7 @@ final class EngineConversationSource: ConversationSource {
         case let .textDelta(text):
             guard acceptTurnEvent(event) else { return }
             let displayText = text.displayText
-            if let messageID = appendDelta(displayText) {
+            if let messageID = appendDelta(text) {
                 appendTextBoundaryActivity(messageID: messageID)
             }
             let activity = displayText
@@ -6080,21 +6085,27 @@ final class EngineConversationSource: ConversationSource {
     /// PR-4 item 1 guard: only append when a turn is actually in flight. After
     /// a cancel/turn-end we drop `streaming`/`streamingIndex`, so a late delta
     /// arriving from the engine must NOT resurrect or corrupt a message.
-    private func appendDelta(_ delta: String, allowInactiveReplay: Bool = false) -> UUID? {
+    private func appendDelta(_ delta: ClientTextDto, allowInactiveReplay: Bool = false) -> UUID? {
         guard model.streaming || allowInactiveReplay else { return nil }
         if let i = streamingIndex,
            model.messages.indices.contains(i),
            activeRunEndsWithBoundary(for: model.messages[i].id) {
+            let row = model.messages[i].id
+            let buffer = streamingTextBuffer.flatMap { $0.row == row ? $0.text : nil }
+                ?? ClientTextBuffer(model.messages[i].text)
+            streamingTextBuffer = (row, buffer)
             let updated = Message(role: .ai,
                                   tag: model.messages[i].tag,
-                                  text: model.messages[i].text + delta)
-            replaceStreamingMessage(updated)
+                                  text: buffer.append(delta.codeUnits))
+            replaceStreamingMessage(updated, preservingTextBuffer: true)
             return model.messages[i].id
         } else {
-            var opened = Message(role: .ai, text: delta)
+            let buffer = ClientTextBuffer()
+            var opened = Message(role: .ai, text: buffer.append(delta.codeUnits))
             opened.streamed = true
             appendMessage(opened)
             streamingIndex = model.messages.count - 1
+            streamingTextBuffer = (opened.id, buffer)
             streamingItemIndex = model.items.count - 1
             currentResponseMessageIDs.append(opened.id)
             if let blockKey = currentAssistantBlockKey { assistantRowsByBlock[blockKey, default: []].insert(opened.id) }
@@ -7489,23 +7500,24 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func applyRetainedTurnEvent(_ eventJSON: String, turnID: UInt64) {
-        guard
-            currentTurnId == turnID,
-            let data = eventJSON.data(using: .utf8),
-            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let type = object["type"] as? String
-        else { return }
-        switch type {
-        case "text_delta":
-            if let text = object["text"] as? String, !text.isEmpty {
-                // Retained text is a projection of the inactive owner, not a
-                // live stream or speech delta. Preserve its row boundaries
-                // without acquiring an execution lease for a new run.
+        guard currentTurnId == turnID else { return }
+        // Foundation rejects JSON strings containing isolated UTF-16 units.
+        // Reuse the protocol's exact parser before entering display-only JSON.
+        if let text = retainedTextDelta(eventJson: eventJSON) {
+            if !text.codeUnits.isEmpty {
                 _ = ensureActiveRun(status: .restored)
                 if let messageID = appendDelta(text, allowInactiveReplay: true) {
                     appendTextBoundaryActivity(messageID: messageID)
                 }
             }
+            return
+        }
+        guard
+            let data = eventJSON.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let type = object["type"] as? String
+        else { return }
+        switch type {
         case "tool_use_started":
             if let id = object["id"] as? String,
                let tool = object["tool"] as? String,

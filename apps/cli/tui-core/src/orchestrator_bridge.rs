@@ -262,6 +262,10 @@ pub enum TurnEvent {
     },
     /// Streaming text chunk from the assistant.
     TextDelta(String),
+    /// Exact units for a fragment that cannot yet form a Rust string.
+    TextDeltaUtf16(Vec<u16>),
+    /// End exact display construction without changing transcript grouping.
+    TextBoundary,
     /// A completed assistant thinking block (M5 live streaming). The
     /// orchestrator's `emit_thinking` fires once per COMPLETED block (not
     /// per-delta — see `lingxi_core::host::OutputStream::emit_thinking`), so one event
@@ -627,14 +631,24 @@ impl OutputStream for BridgeOutputStream {
         let _ = self.tx.send(TurnEvent::MessageRetracted(*message_id));
     }
 
+    async fn emit_message_boundary(&self, _stop_reason: Option<&str>, _request_id: Option<&str>) {
+        let _ = self.tx.send(TurnEvent::TextBoundary);
+    }
+
     async fn emit_turn_started(&self) {
         let _ = self.tx.send(TurnEvent::TurnStarted);
     }
 
     async fn emit_text(&self, text: &Utf16JsonProjection) {
-        let _ = self.tx.send(TurnEvent::TextDelta(
-            text.string_at("").unwrap_or_default().to_owned(),
-        ));
+        let units = text
+            .at_pointer("")
+            .and_then(|value| value.code_units())
+            .expect("assistant text is a root string");
+        let event = match String::from_utf16(units) {
+            Ok(text) => TurnEvent::TextDelta(text),
+            Err(_) => TurnEvent::TextDeltaUtf16(units.to_vec()),
+        };
+        let _ = self.tx.send(event);
     }
 
     async fn emit_system_notice(
@@ -1150,6 +1164,32 @@ mod tests {
         bridge.emit_text(&Utf16JsonProjection::from("hello")).await;
         let ev = rx.recv().await.unwrap();
         assert!(matches!(ev, TurnEvent::TextDelta(ref s) if s == "hello"));
+    }
+
+    #[tokio::test]
+    async fn exact_text_fragments_reach_the_reducer_without_crossing_response_boundaries() {
+        for boundary in [false, true] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let bridge = BridgeOutputStream::new(tx);
+            let mut active = crate::active_turn::ActiveTurn::new();
+            let mut messages = Vec::new();
+            active.apply(TurnEvent::TurnStarted, &mut messages);
+            for (index, fragment) in [r#""\ud83d""#, r#""\ude00""#].into_iter().enumerate() {
+                if boundary && index == 1 {
+                    bridge.emit_message_boundary(None, None).await;
+                    active.apply(rx.recv().await.unwrap(), &mut messages);
+                }
+                bridge
+                    .emit_text(&Utf16JsonProjection::parse(fragment).unwrap())
+                    .await;
+                active.apply(rx.recv().await.unwrap(), &mut messages);
+            }
+            assert_eq!(messages.len(), 1, "display grouping stays unchanged");
+            let expected = if boundary { "��" } else { "😀" };
+            assert!(
+                matches!(&messages[0], crate::message::RenderedMessage::AssistantText { body, .. } if body == expected)
+            );
+        }
     }
 
     #[tokio::test]

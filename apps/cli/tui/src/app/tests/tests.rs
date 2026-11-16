@@ -447,6 +447,51 @@ fn streaming_deltas_grow_reply_and_turn_ended_clears_token() {
 }
 
 #[test]
+fn exact_text_boundary_keeps_display_grouping_without_joining_responses() {
+    let mut app = test_app(Vec::new());
+    typ(&mut app, "go");
+    app.on_key(press(KeyCode::Enter));
+    app.apply_turn_event(TurnEvent::TurnStarted);
+    app.apply_turn_event(TurnEvent::TextDelta("中文 ".into()));
+    app.apply_turn_event(TurnEvent::TextDeltaUtf16(vec![0xd83d]));
+    let count = cells(&app).len();
+    app.apply_turn_event(TurnEvent::TextBoundary);
+    app.apply_turn_event(TurnEvent::TextDeltaUtf16(vec![0xde00]));
+    assert_eq!(cells(&app).len(), count);
+    assert_eq!(cell::<AssistantTextCell>(&app, 1).body(), "中文 ��");
+}
+
+#[test]
+fn exact_utf16_deltas_update_the_real_streaming_cell_and_cancel_scope() {
+    let mut app = test_app(Vec::new());
+    typ(&mut app, "first");
+    app.on_key(press(KeyCode::Enter));
+    app.apply_turn_event(TurnEvent::TurnStarted);
+    app.apply_turn_event(TurnEvent::TextDelta("中文 ".into()));
+    app.apply_turn_event(TurnEvent::TextDeltaUtf16(vec![0xd83d]));
+    assert_eq!(cell::<AssistantTextCell>(&app, 1).body(), "中文 �");
+    app.apply_turn_event(TurnEvent::TextDeltaUtf16(vec![0xde00]));
+    assert_eq!(cell::<AssistantTextCell>(&app, 1).body(), "中文 😀");
+    app.apply_turn_event(TurnEvent::TextDeltaUtf16(vec![0xd83d]));
+    app.apply_turn_event(TurnEvent::TurnEnded(
+        lingxi_core::host::TurnOutcome::Cancelled,
+    ));
+    typ(&mut app, "continue");
+    app.on_key(press(KeyCode::Enter));
+    app.apply_turn_event(TurnEvent::TurnStarted);
+    app.apply_turn_event(TurnEvent::TextDeltaUtf16(vec![0xde00]));
+    let bodies: Vec<_> = cells(&app)
+        .into_iter()
+        .filter_map(|cell| {
+            cell.as_any()
+                .downcast_ref::<AssistantTextCell>()
+                .map(|cell| cell.body().to_owned())
+        })
+        .collect();
+    assert_eq!(bodies, ["中文 😀�", "�"]);
+}
+
+#[test]
 fn ctrl_c_keeps_turn_owned_until_terminal_then_needs_two_presses_to_quit() {
     let mut app = test_app(Vec::new());
     app.on_key(press(KeyCode::Char('x')));

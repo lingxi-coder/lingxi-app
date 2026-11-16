@@ -445,6 +445,7 @@ export class SessionRuntime {
     let resolve!: () => void;
     let reject!: (error: Error) => void;
     const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (error?: Error): void => {
       if (this.pendingModelSwitch !== pending) return;
       clearTimeout(timer);
@@ -464,7 +465,6 @@ export class SessionRuntime {
       },
       fail: (error: Error) => finish(error),
     };
-    const timer = setTimeout(() => finish(new Error('Model switch confirmation timed out.')), 10_000);
     this.pendingModelSwitch = pending;
     this.notifyActivityChanged();
     void (async () => {
@@ -477,6 +477,9 @@ export class SessionRuntime {
         if (slashCommand) this.assertModeReadyForSlashCommand();
         authorize?.();
         pending.sent = true;
+        // Credential hydration has its own I/O budget. Start the model ACK
+        // budget only once dispatch is admitted, before any synchronous reply.
+        timer = setTimeout(() => finish(new Error('Model switch confirmation timed out.')), 10_000);
         if (slashCommand) this.sendTrackedSlashCommand(client, slashCommand);
         else client.sendCommand({ type: 'set_model', model });
       } catch (error) {

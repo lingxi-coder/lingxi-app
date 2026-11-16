@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { constants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -566,9 +566,39 @@ function copyPackagedApp(appPath, tempRoot) {
   return destination;
 }
 
-function spawnPackagedApp(appPath, env, cdpPort, userDataDir) {
+/** One isolated platform-account slot for every process in this diagnostic run. */
+export function createPackagedAppLauncher(appPath, env, {
+  credentialChannel,
+  accountScope,
+  spawnProcess = spawn,
+} = {}) {
+  assert.ok(['development', 'production'].includes(credentialChannel), 'invalid packaged credential channel');
+  let scope;
+  if (credentialChannel === 'development') {
+    const candidate = accountScope === undefined ? randomUUID() : accountScope;
+    assert.equal(typeof candidate, 'string', 'invalid packaged account diagnostic scope');
+    assert.ok((candidate.length === 32 || candidate.length === 36)
+      && /^(?:[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i.test(candidate),
+      'invalid packaged account diagnostic scope');
+    scope = candidate.replaceAll('-', '').toLowerCase();
+  } else {
+    assert.ok(accountScope === undefined, 'production launches cannot select a diagnostic account scope');
+  }
+  const diagnosticArgs = Object.freeze(scope === undefined ? [] : [
+    '--lingxi-host-diagnostics',
+    `--lingxi-account-session-scope=${scope}`,
+  ]);
+  return Object.freeze({
+    scope,
+    launch(cdpPort, userDataDir) {
+      return spawnPackagedApp(appPath, env, cdpPort, userDataDir, diagnosticArgs, spawnProcess);
+    },
+  });
+}
+
+function spawnPackagedApp(appPath, env, cdpPort, userDataDir, diagnosticArgs = [], spawnProcess = spawn) {
   const executable = join(appPath, 'Contents', 'MacOS', APP_NAME);
-  const child = spawn(executable, [`--user-data-dir=${userDataDir}`, `--remote-debugging-port=${cdpPort}`], {
+  const child = spawnProcess(executable, [`--user-data-dir=${userDataDir}`, `--remote-debugging-port=${cdpPort}`, ...diagnosticArgs], {
     cwd: dirname(appPath),
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -578,6 +608,43 @@ function spawnPackagedApp(appPath, env, cdpPort, userDataDir) {
   child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
   child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
   return { child, executable, output: { get stdout() { return stdout; }, get stderr() { return stderr; } } };
+}
+
+/** Ask the actual main-process AccountService; retain only non-identifying assertions. */
+export async function assertPackagedAnonymousAccount(page, timeoutMs = 280_000) {
+  assert.ok(Number.isFinite(timeoutMs) && timeoutMs > 0, 'invalid platform account readiness budget');
+  const deadline = Date.now() + timeoutMs;
+  const remaining = () => Math.max(1, deadline - Date.now());
+  await waitFor(() => evaluate(page, "typeof window.lingxi?.account?.request === 'function'", remaining()),
+    { timeoutMs, label: 'platform account API' });
+  const result = await evaluate(page, `(async () => {
+    if (typeof window.lingxi?.account?.request !== 'function') throw new Error('Platform account API is unavailable');
+    const state = await window.lingxi.account.request({ type: 'status' });
+    if (!state || typeof state.busy !== 'boolean' || !['secure', 'session'].includes(state.persistence)) {
+      throw new Error('Platform account returned an invalid status');
+    }
+    return { anonymous: state.user === null, errorFree: state.error === null,
+      sessionExpired: state.sessionExpired === true, busy: state.busy, secure: state.persistence === 'secure' };
+  })()`, remaining());
+  const fields = ['anonymous', 'errorFree', 'sessionExpired', 'busy', 'secure'];
+  assert.ok(result && fields.every(key => typeof result[key] === 'boolean'), 'invalid isolated platform account status');
+  const status = Object.fromEntries(fields.map(key => [key, result[key]]));
+  assert.deepEqual(status, { anonymous: true, errorFree: true, sessionExpired: false, busy: false, secure: true },
+    'isolated platform account must be anonymous, healthy and stored through the real Broker');
+  return status;
+}
+
+/** Optional artifacts must never prevent the owned app/Broker teardown. */
+export function retainPackagedSmokeEvidence(directory, accountIsolation, diagnosticsPath) {
+  if (!directory) return;
+  try {
+    mkdirSync(directory, { recursive: true });
+    writeJson(join(directory, 'packaged-account-isolation.json'), accountIsolation);
+    if (existsSync(diagnosticsPath)) cpSync(diagnosticsPath, join(directory, 'packaged-runtime-diagnostics.jsonl'));
+  } catch (error) {
+    const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,40}$/.test(error.code) ? error.code : 'UNKNOWN';
+    log(`optional smoke evidence could not be retained: ${code}`);
+  }
 }
 
 function packagedAppBundleId(appPath) {
@@ -1908,6 +1975,18 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     TMPDIR: tempTmp,
     LINGXI_CONFIG_DIR: join(tempHome, ".lingxi"),
   });
+  const appLauncher = createPackagedAppLauncher(copiedAppPath, env, { credentialChannel: brokerManifest.channel });
+  const accountVerificationMode = appLauncher.scope === undefined
+    ? 'existing-production-account-path'
+    : 'isolated-development-platform-account';
+  log(`platform account verification: ${JSON.stringify({ mode: accountVerificationMode, scope: appLauncher.scope })}`);
+  const accountChecks = [];
+  const checkAnonymousAccount = async (target, phase) => {
+    if (appLauncher.scope === undefined) return;
+    const status = await assertPackagedAnonymousAccount(target);
+    accountChecks.push({ phase, ...status });
+    log(`platform account diagnostic: ${JSON.stringify({ scope: appLauncher.scope, phase, ...status })}`);
+  };
 
   const leakPatterns = [
     /LINGXI_SECRET_CANARY_DO_NOT_PACKAGE/,
@@ -1939,7 +2018,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     assert.equal(logErrors.length, 0, `renderer log errors detected: ${JSON.stringify(logErrors)}`);
   };
   try {
-    const launch = spawnPackagedApp(copiedAppPath, env, cdpPort, runtimePaths.userDataDir);
+    const launch = appLauncher.launch(cdpPort, runtimePaths.userDataDir);
     child = launch.child;
     output = launch.output;
     const debuggerConnection = await connectToDebugger(cdpPort, rendererUrl);
@@ -1948,6 +2027,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
 
     await monitorRenderer(page);
 
+    await checkAnonymousAccount(page, 'initial-launch');
     log('checking renderer bootstrap');
     await assertRendererContract(page, leakPatterns);
     log('checking renderer security');
@@ -1988,15 +2068,16 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
 
     // Relaunch the same signed app and isolated settings home, then prove both
     // encrypted persistence and real request credential resolution end to end.
-    const relaunch = spawnPackagedApp(copiedAppPath, env, cdpPort, runtimePaths.userDataDir);
+    const relaunch = appLauncher.launch(cdpPort, runtimePaths.userDataDir);
     child = relaunch.child;
     output = relaunch.output;
     ({ browser, page } = await connectToDebugger(cdpPort, rendererUrl));
     await monitorRenderer(page);
+    await checkAnonymousAccount(page, 'relaunch');
     await waitFor(() => evaluate(page, 'window.lingxi?.bootstrap().then(b => b.connection?.status === "connected")'), { label: 'restarted custom provider app' });
     await assertScheduledPersistenceAfterRestart(page, scheduledRecords, join(tempHome, '.lingxi-workspaces'));
     await assertColdSessionOpen(page, coldSession, async () => {
-      const activation = spawnPackagedApp(copiedAppPath, env, cdpPort, runtimePaths.userDataDir);
+      const activation = appLauncher.launch(cdpPort, runtimePaths.userDataDir);
       try {
         await waitForPackagedAppExit(activation.child, async () => {});
         assert.equal(activation.child.exitCode, 0, 'second launch must hand off to the existing instance');
@@ -2009,6 +2090,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     await assertCustomProviderRequest(page, customProbe, customSession);
     await assertPackagedLocalApps(page, customProbe, customSession, cdpPort, join(tempHome, '.lingxi'));
     await removeCustomProviderAccount(page, customProbe);
+    await checkAnonymousAccount(page, 'completed');
     assertNoRendererErrors();
     await waitForTemporaryCredentialBroker(tempHome, brokerManifest.channel, protectedBrokerProcessIds);
     await closePackagedApp(browser, child, copiedAppBundleId);
@@ -2024,21 +2106,21 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
       appPath: copiedAppPath,
       cdpPort,
       runtimePaths,
+      accountIsolation: { mode: accountVerificationMode, scope: appLauncher.scope, checks: accountChecks },
       notes: [
         'Automated: bundled renderer and sidecar, custom Provider Keychain persistence across app restart, authenticated localhost model request, credential deletion, live permission modes, security checks, and exact temp cleanup.',
         'Manual-only: Gatekeeper transfer prompts, ad-hoc signature approval on a different Mac, full Developer ID notarization/stapling, and native workspace-trust dialog text on physical user interaction.',
       ],
     };
   } finally {
+    retainPackagedSmokeEvidence(process.env.LINGXI_LOCAL_APP_EVIDENCE, {
+      mode: accountVerificationMode, scope: appLauncher.scope, checks: accountChecks,
+    }, runtimePaths.diagnosticsPath);
     if (consoleErrors.length) log(`renderer console errors: ${JSON.stringify(consoleErrors.slice(-3))}`);
     if (runtimeExceptions.length) log(`renderer exceptions: ${JSON.stringify(runtimeExceptions.slice(-3))}`);
     if (logErrors.length) log(`renderer log errors: ${JSON.stringify(logErrors.slice(-3))}`);
     if (existsSync(runtimePaths.diagnosticsPath)) {
       const diagnosticLines = readFileSync(runtimePaths.diagnosticsPath, 'utf8').split('\n');
-      if (process.env.LINGXI_LOCAL_APP_EVIDENCE) {
-        mkdirSync(process.env.LINGXI_LOCAL_APP_EVIDENCE, { recursive: true });
-        cpSync(runtimePaths.diagnosticsPath, join(process.env.LINGXI_LOCAL_APP_EVIDENCE, 'packaged-runtime-diagnostics.jsonl'));
-      }
       const shutdownPhases = diagnosticLines.flatMap(line => {
         try {
           const event = JSON.parse(JSON.parse(line).message);

@@ -170,6 +170,7 @@ internal fun TeamConversationScreen(
         conversation = conversation, label = label, members = members, bots = bots, uid = uid, strings = strings,
         unread = if (messaging.readsReady) TeamsListLogic.unreadCount(conversation) else 0, online = online,
         onMarkRead = { workspace.messagingModel.markRead(conversation.id, conversation.lastSeq) }, onDismiss = { showDetails = false },
+        onAutoReply = { targets -> workspace.messagingModel.setConversationAutoReply(conversation.id, conversation.autoReply?.revision ?: 0, targets) },
     )
     recalling?.let { message ->
         AlertDialog(

@@ -31,6 +31,14 @@ export function messageErrorText(code: string, zh: boolean): string {
     case 'BOT_PARTICIPANT_REQUIRED':
     case 'INVALID_BOT_TARGET':
       return t('Bot access changed. Sync and check the selected Bots before sending again.', 'Bot 权限已变化，请同步并检查所选 Bot 后重试。');
+    case 'AUTO_REPLY_REVISION_CONFLICT':
+      return t('Someone changed this setting a moment ago. Check it and try again.', '刚有人修改了此设置，请检查后重试。');
+    case 'AUTO_REPLY_UNAVAILABLE':
+      return t('This Bot no longer answers on its own. Its maintainer can turn it back on when publishing it.', '此 Bot 已不再支持自主回复，可由其维护者在发布时重新开启。');
+    case 'AUTO_REPLY_UNSUPPORTED':
+      return t('A hosted Bot service cannot answer on its own.', '托管的 Bot 服务不支持自主回复。');
+    case 'DECISION_REQUIRED':
+      return t('Set up Decision on this Desktop first: Settings → Models & Services → Decision.', '请先在此 Desktop 配置判断服务：设置 → 模型与服务 → Decision。');
     case 'TEAM_MODEL_UNSUPPORTED':
       return t('This model configuration cannot be used for Team Bots. Check the provider settings on Desktop or choose another model.', '当前模型配置不能用于团队 Bot，请检查 Desktop 的供应商配置或选择其他模型。');
     case 'TEAM_MODEL_UNAVAILABLE':

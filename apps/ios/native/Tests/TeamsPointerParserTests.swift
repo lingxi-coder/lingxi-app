@@ -108,6 +108,14 @@ final class TeamsPointerParserTests: XCTestCase {
         XCTAssertEqual(try TeamsPointerParser.parseConversation(id: "c1", data: document(["memberUids": ["u1", "owner"]]), lastReadSeq: 0, millis: millis).readers, ["u1", "owner"])
     }
 
+    /// Which Bots answer on their own: read when well formed, off when unreadable, never a reason to hide the conversation.
+    func testTheAutoReplySettingIsReadAndAnUnreadableOneIsOff() throws {
+        let on = try TeamsPointerParser.parseConversation(id: "c1", data: document(["autoReply": ["revision": 2, "targets": ["sharedbot_helper"]]]), lastReadSeq: 0, millis: millis)
+        XCTAssertEqual(on.autoReply, TeamConversationAutoReply(revision: 2, targets: ["sharedbot_helper"]))
+        XCTAssertNil(try TeamsPointerParser.parseConversation(id: "c1", data: document(["autoReply": ["revision": "2", "targets": ["sharedbot_helper"]]]), lastReadSeq: 0, millis: millis).autoReply)
+        XCTAssertNil(try TeamsPointerParser.parseConversation(id: "c1", data: document(), lastReadSeq: 0, millis: millis).autoReply)
+    }
+
     func testAWholeDocumentBecomesTheAppConversation() throws {
         let value = try TeamsPointerParser.parseConversation(id: "c1", data: document(), lastReadSeq: 2, millis: millis)
         XCTAssertEqual(value, TeamMessageConversation(

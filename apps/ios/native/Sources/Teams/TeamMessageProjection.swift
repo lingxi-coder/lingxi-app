@@ -18,6 +18,7 @@ struct TeamLastMessage: Equatable, Sendable {
     let recalled: Bool
 }
 
+struct TeamConversationAutoReply: Equatable, Sendable { let revision: Int; let targets: [String] }
 struct TeamMessageConversation: Equatable, Identifiable, Sendable {
     let id: String
     let kind: String
@@ -32,6 +33,8 @@ struct TeamMessageConversation: Equatable, Identifiable, Sendable {
     var lastMessage: TeamLastMessage? = nil
     /// Who can read it, as written when it was made: its people and the maintainers its Bots had then. `nil` when the source does not say.
     var readers: [String]? = nil
+    /// The Bots of this Chat that judge for themselves whether to answer its messages. `nil` until someone first sets it.
+    var autoReply: TeamConversationAutoReply? = nil
     func merging(_ old: TeamMessageConversation?) -> TeamMessageConversation {
         var value = self; value.lastReadSeq = max(old?.lastReadSeq ?? 0, lastReadSeq); value.lastSeq = max(old?.lastSeq ?? 0, lastSeq); value.lastChangeSeq = max(old?.lastChangeSeq ?? 0, lastChangeSeq); return value
     }

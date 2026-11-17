@@ -2969,6 +2969,11 @@
     <string name="settings_browser_saved">已保存，等待下次启动控制会话</string>
     <string name="settings_browser_manage_session">管理控制会话</string>
     <string name="teams_task_needs_checking">需要核实</string>
+    <string name="teams_task_declined">未回复</string>
+    <string name="teams_auto_reply_title">自主回复的 Bot</string>
+    <string name="teams_auto_reply_note">在此开启的 Bot 会读取此会话的每条新消息，并在判断需要时主动回复，无需被点名。</string>
+    <string name="teams_auto_reply_disclosure_fmt">开启后，此会话的新消息会发送给 %1$s 为 %2$s 配置的判断服务和模型。它每天最多自主回复 %3$d 次。</string>
+    <string name="teams_auto_reply_unavailable_fmt">%1$s 已不再支持自主回复，可在此关闭。</string>
     <string name="teams_task_needs_checking_hint">会话之外的某个操作可能已执行，也可能没有，需要 Bot 维护者确认。</string>
     <string name="teams_list_open">共享清单</string>
     <string name="teams_list_hint_fmt">所有可以使用 %1$s 的人都能查看并修改此清单，%1$s 也可以读取和修改它。</string>

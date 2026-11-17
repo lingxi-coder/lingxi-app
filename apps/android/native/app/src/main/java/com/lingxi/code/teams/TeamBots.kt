@@ -5,9 +5,11 @@ import org.json.JSONObject
 internal data class TeamMemberRef(val uid: String, val generation: Long) {
     companion object { fun parse(v: JSONObject) = TeamMemberRef(v.getString("uid"), v.getLong("generation")) }
 }
+/** Present on a card when the maintainer published the Bot to judge for itself whether to answer: [daily] caps those answers per UTC day. */
+internal data class TeamBotAutoReply(val daily: Int)
 internal data class TeamBotCard(val sharedBotId: String, val name: String, val description: String, val maintainer: TeamMemberRef,
     val revision: Long, val state: String, val permitted: Boolean, val ready: Boolean, val onlineUntil: Long, val usePolicy: JSONObject,
-    val quotas: JSONObject, val instanceId: String?, val sharedList: TeamBotListInfo? = null) {
+    val quotas: JSONObject, val instanceId: String?, val sharedList: TeamBotListInfo? = null, val autoReply: TeamBotAutoReply? = null) {
     val selectable get() = state == "published" && permitted
     val avatarId get() = sharedBotId
     fun canPause(uid: String, generation: Long) = state == "published" && maintainer == TeamMemberRef(uid, generation)
@@ -15,8 +17,23 @@ internal data class TeamBotCard(val sharedBotId: String, val name: String, val d
         fun parse(v: JSONObject) = TeamBotCard(v.getString("sharedBotId"), v.getString("name"), v.getString("description"),
             TeamMemberRef.parse(v.getJSONObject("maintainer")), v.getLong("revision"), v.getString("state"), v.getBoolean("permitted"),
             v.getBoolean("ready"), v.getLong("onlineUntil"), v.getJSONObject("usePolicy"), v.getJSONObject("quotas"), v.stringOrNull("instanceId"),
-            v.optJSONObject("sharedList")?.let(TeamBotListInfo::parse))
+            v.optJSONObject("sharedList")?.let(TeamBotListInfo::parse), v.optJSONObject("autoReply")?.let { TeamBotAutoReply(it.getInt("daily")) })
     }
+}
+/** Which Bots of a Chat judge for themselves whether to answer its messages. Any person in a group, channel or Bot DM may change it. */
+internal object TeamAutoReply {
+    private val kinds = setOf("group", "channel", "bot_dm")
+    data class Choice(val bots: List<TeamBotCard>, val on: List<String>)
+    /** The Bots that can be switched on (published to answer on their own), and those already on, which can always be switched off. */
+    fun bots(conversation: TeamMessageConversation, cards: List<TeamBotCard>, uid: String): Choice {
+        if (conversation.kind !in kinds || "user:$uid" !in conversation.participants) return Choice(emptyList(), emptyList())
+        val on = conversation.autoReply?.targets.orEmpty()
+        val bots = cards.filter { "shared_bot:${it.sharedBotId}" in conversation.participants && (it.sharedBotId in on || available(it)) }
+        return Choice(bots, on.filter { id -> bots.any { it.sharedBotId == id } })
+    }
+    fun available(card: TeamBotCard) = card.state == "published" && card.autoReply != null
+    /** The setting after one Bot is switched, in the Chat's Bot order. */
+    fun targets(choice: Choice, switching: String, enabled: Boolean) = choice.bots.map { it.sharedBotId }.filter { if (it == switching) enabled else it in choice.on }
 }
 /** What a Bot run cost, as the host reports it: `missing` carries no figures; the cost only when the host could price it (`costMicros` is millionths of `currency`). */
 internal data class TeamTaskUsage(val status: String, val inputTokens: Long = 0, val outputTokens: Long = 0, val costMicros: Double? = null, val currency: String? = null) {
@@ -181,7 +198,7 @@ internal object TeamExecutionContract {
             }
             "listTasks" -> { shape(emptySet(), setOf("conversationId", "after")); p.keysSet().forEach(::requireId) }
             "pauseSharedBot" -> { shape(setOf("sharedBotId", "expectedRevision")); requireId("sharedBotId"); if (!integer(p.opt("expectedRevision"), 1)) fail() }
-            "setConversationPolicy" -> { shape(setOf("conversationId", "expectedRevision", "targets")); requireId("conversationId"); ids("targets", 0); if (!integer(p.opt("expectedRevision"), 0)) fail() }
+            "setConversationPolicy", "setConversationAutoReply" -> { shape(setOf("conversationId", "expectedRevision", "targets")); requireId("conversationId"); ids("targets", 0); if (!integer(p.opt("expectedRevision"), 0)) fail() }
             "submit" -> {
                 // A message that asks Bots, carries files, or both.
                 shape(setOf("conversationId", "messageId", "changeId", "text", "targets"), setOf("replyTo", "attachments"))

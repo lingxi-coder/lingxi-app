@@ -215,4 +215,25 @@ final class TeamBotTests: XCTestCase {
         XCTAssertTrue(TeamBotSelection.unavailable([sharedBotId], cards: [card], participants: ["shared_bot:\(sharedBotId)"]).isEmpty)
         XCTAssertEqual(TeamBotSelection.unavailable([sharedBotId], cards: [card], participants: [sharedBotId]), [sharedBotId])
     }
+
+    func testAutoReplyOffersPublishedBotsOfTheChatToItsPeopleAndAlwaysLetsOneBeSwitchedOff() throws {
+        func card(_ id: String, state: String = "published", daily: Int? = 5) throws -> TeamBotCard {
+            var row: [String: Any] = ["sharedBotId": id, "name": id, "description": "", "maintainer": ["uid": "owner", "generation": 1], "revision": 1, "state": state,
+                                      "permitted": true, "ready": true, "onlineUntil": 0, "usePolicy": ["mode": "all"], "quotas": ["team": 1, "member": 1, "bot": 1]]
+            if let daily { row["autoReply"] = ["daily": daily] }
+            return try JSONDecoder().decode(TeamBotCard.self, from: JSONSerialization.data(withJSONObject: row))
+        }
+        let cards = [try card("sharedbot_a"), try card("sharedbot_b", daily: nil), try card("sharedbot_c", state: "paused"), try card("sharedbot_d")]
+        XCTAssertEqual(cards[0].autoReply, TeamBotAutoReply(daily: 5))
+        var chat = TeamMessageConversation(id: "chat_0001", kind: "group", title: "Trip", participants: ["user:alice", "shared_bot:sharedbot_a", "shared_bot:sharedbot_b", "shared_bot:sharedbot_c"],
+                                           lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0, autoReply: TeamConversationAutoReply(revision: 3, targets: ["sharedbot_c"]))
+        let offered = TeamAutoReply.bots(chat, cards: cards, uid: "alice")
+        XCTAssertEqual(offered.bots.map(\.sharedBotId), ["sharedbot_a", "sharedbot_c"], "a Bot not in the Chat or not published for it is not offered; one already on is")
+        XCTAssertEqual(offered.on, ["sharedbot_c"])
+        XCTAssertEqual(TeamAutoReply.targets(offered.bots, on: offered.on, switching: "sharedbot_a", to: true), ["sharedbot_a", "sharedbot_c"])
+        XCTAssertEqual(TeamAutoReply.targets(offered.bots, on: offered.on, switching: "sharedbot_c", to: false), [])
+        XCTAssertTrue(TeamAutoReply.bots(chat, cards: cards, uid: "bob").bots.isEmpty, "only the Chat's people change it")
+        chat = TeamMessageConversation(id: "chat_0002", kind: "dm", title: "", participants: ["user:alice", "shared_bot:sharedbot_a"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
+        XCTAssertTrue(TeamAutoReply.bots(chat, cards: cards, uid: "alice").bots.isEmpty)
+    }
 }

@@ -35,6 +35,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -272,6 +273,8 @@ private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(messaging
 internal fun ConversationDetailsSheet(
     conversation: TeamMessageConversation, label: String, members: List<TeamMember>, bots: List<TeamBotCard>, uid: String, strings: TeamsListStrings,
     unread: Int, online: Boolean, onMarkRead: () -> Unit, onDismiss: () -> Unit,
+    /** Sends the Bots of this Chat that answer on their own. */
+    onAutoReply: (List<String>) -> Unit = {}, busy: Boolean = false,
 ) {
     TeamsSheet(label, onDismiss) {
         TeamsListLogic.conversationParticipants(conversation, members, bots, uid, strings).forEach { person ->
@@ -290,6 +293,24 @@ internal fun ConversationDetailsSheet(
             }
         }
         if (conversation.kind == "bot_dm") Text(stringResource(R.string.teams_composer_note_bot_dm), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        val auto = TeamAutoReply.bots(conversation, bots, uid)
+        if (auto.bots.isNotEmpty()) {
+            Text(stringResource(R.string.teams_auto_reply_title), style = MaterialTheme.typography.titleSmall)
+            Text(stringResource(R.string.teams_auto_reply_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            auto.bots.forEach { card ->
+                val on = card.sharedBotId in auto.on
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(card.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Switch(checked = on, enabled = online && !busy && (on || TeamAutoReply.available(card)), onCheckedChange = { onAutoReply(TeamAutoReply.targets(auto, card.sharedBotId, it)) },
+                        modifier = Modifier.testTag("teams.conversation.details.autoreply.${card.sharedBotId}"))
+                }
+                // Said before it is switched on: where this Chat's messages go.
+                val limit = card.autoReply
+                val owner = if (card.maintainer.uid == uid) strings.you else members.firstOrNull { it.uid == card.maintainer.uid }?.displayName ?: card.maintainer.uid
+                Text(if (limit != null && TeamAutoReply.available(card)) stringResource(R.string.teams_auto_reply_disclosure_fmt, owner, card.name, limit.daily)
+                    else stringResource(R.string.teams_auto_reply_unavailable_fmt, card.name), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
         if (unread > 0 && online) TextButton(onClick = { onMarkRead(); onDismiss() }) { Text(stringResource(R.string.teams_mark_read)) }
         Spacer(Modifier.height(8.dp))
     }

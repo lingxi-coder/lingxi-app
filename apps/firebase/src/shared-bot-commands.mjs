@@ -7,6 +7,8 @@ const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const cursor = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 const text = z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 8192);
+/** A run's reply. A Bot that chose not to answer has none. */
+const replyText = z.string().refine(value => Buffer.byteLength(value, 'utf8') <= 8192);
 /** One part of a file or of a handover package: at most 700 KiB of bytes, which with its record stays under Firestore's 1 MiB per document. */
 const base64Part = z.string().min(4).max(4 * Math.ceil(attachmentLimits.partBytes / 3)).regex(/^[A-Za-z0-9+/]+={0,2}$/u);
 const partIndex = z.number().int().min(0).max(Math.ceil(attachmentLimits.fileBytes / attachmentLimits.partBytes) - 1);
@@ -66,6 +68,9 @@ const payloads = {
     quotas: z.object({ team: quota, member: quota, bot: quota }).strict(),
     // The Bot keeps one list for the Team. Publishing again keeps its items; leaving this out stops sharing it.
     sharedList: sharedList.optional(),
+    // The Bot may answer messages nobody asked it about, in Chats whose members turned that on, at most `daily` runs a day.
+    // Leaving it out turns it off.
+    autoReply: z.object({ daily: quota }).strict().optional(),
   }).strict().refine(value => value.inputs.filter(input => input.kind === 'persona').length === 1, 'Exactly one published persona required'),
   // Handover of a Bot to another member (detailed design 18). The package is the published role and files, in parts of at most 700 KiB.
   putTransferPart: z.object({ transferId: executionId, sharedBotId: executionId, index: z.number().int().min(0).max(7),
@@ -105,7 +110,8 @@ const payloads = {
   prepareTask: z.object({ ...host, ...task }).strict(),
   validateTask: z.object({ ...host, ...task, permitId: executionId, expectedLastChangeSeq: cursor }).strict(),
   completeTask: z.object({ ...host, ...task, permitId: executionId,
-    outcome: z.enum(['completed', 'failed']), text, finishedAt: cursor,
+    // `declined`: the Bot of an optional task chose not to answer. Nothing is posted, so there is no text or document.
+    outcome: z.enum(['completed', 'failed', 'declined']), text: replyText, finishedAt: cursor,
     inputGrantIds: grantIds, outputAudience,
     document: artifactDocument.optional(),
     // The files of Chat messages the model was given as input. Kept only where each is a checked file of the task's conversation.
@@ -117,7 +123,12 @@ const payloads = {
       z.object({ status: z.enum(['partial', 'complete']), inputTokens: cursor, outputTokens: cursor,
         costMicros: cursor.optional(), currency: z.string().length(3).optional() }).strict(),
     ]),
-  }).strict().refine(value => !value.revises || value.document, 'A revision needs its document'),
+  }).strict().refine(value => !value.revises || value.document, 'A revision needs its document')
+    .refine(value => value.outcome === 'declined' ? value.text === '' && !value.document && !value.readFiles : value.text.length > 0,
+      'Only a declined run has no reply'),
+  // The host leaves an optional task unanswered before any model runs: its triage said no, or a later message of the
+  // same Chat superseded it.
+  declineTask: z.object({ ...host, ...task, reason: z.enum(['triage', 'superseded']) }).strict(),
   // A question for the requester, or (M2 Q05) one exact list write the requester is asked to approve.
   pauseTask: z.discriminatedUnion('kind', [
     z.object({ ...pause, kind: z.literal('human_input'),
@@ -154,6 +165,9 @@ const payloads = {
   // A member's edit of a shared document. `expectedRevision` is the revision the edit was made from.
   reviseArtifact: z.object({ artifactId: executionId, expectedRevision: positive, operationId: executionId, document: artifactDocument }).strict(),
   setConversationPolicy: z.object({ ...thread, expectedRevision: cursor,
+    targets: z.array(executionId).max(8).refine(unique) }).strict(),
+  // The Bots of this Chat that may answer messages nobody asked them about. Each must allow it itself.
+  setConversationAutoReply: z.object({ ...thread, expectedRevision: cursor,
     targets: z.array(executionId).max(8).refine(unique) }).strict(),
 };
 export const sharedBotCommand = z.discriminatedUnion('action', Object.entries(payloads).map(([action, payload]) => z.object({

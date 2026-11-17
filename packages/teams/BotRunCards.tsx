@@ -87,7 +87,7 @@ export function BotRun({ task, api, scope, zh, renderMarkdown, snapshot, onReply
 }) {
   const [cancelling, setCancelling] = useState(false), [error, setError] = useState(''), [reviewing, setReviewing] = useState(false);
   const labels: Record<TeamTaskView['state'], [string, string]> = {
-    queued: ['Queued', '已排队'], running: ['Processing', '处理中'], completed: ['Completed', '已完成'], failed: ['Failed', '失败'], expired: ['Expired', '已过期'], interrupted: ['Interrupted', '已中断'], authorization_required: ['Authorization required', '需要授权'], revoked: ['Access revoked', '授权已撤销'], waiting: ['Waiting for a reply', '等待回复'], cancelled: ['Cancelled', '已取消'], needs_reconciliation: ['Needs checking', '需要核实'],
+    queued: ['Queued', '已排队'], running: ['Processing', '处理中'], completed: ['Completed', '已完成'], failed: ['Failed', '失败'], expired: ['Expired', '已过期'], interrupted: ['Interrupted', '已中断'], authorization_required: ['Authorization required', '需要授权'], revoked: ['Access revoked', '授权已撤销'], waiting: ['Waiting for a reply', '等待回复'], cancelled: ['Cancelled', '已取消'], needs_reconciliation: ['Needs checking', '需要核实'], declined: ['Did not reply', '未回复'],
   };
   const t = (en: string, cn: string) => zh ? cn : en;
   const nameOf = (uid: string) => snapshot.directory.find(member => member.uid === uid)?.displayName || t('Member', '成员');
@@ -101,6 +101,8 @@ export function BotRun({ task, api, scope, zh, renderMarkdown, snapshot, onReply
   // An approval is decided on the request itself, never by a typed reply.
   const canReply = !!wait && wait.kind === 'human_input' && !!onReply && isMember(wait.recipient)
     && !snapshot.pending.some(item => { const payload = pendingPayload(item); return 'waitId' in payload && payload.waitId === wait.waitId; });
+  // A Bot nobody asked that chose not to answer: one quiet line, nothing to act on.
+  if (task.state === 'declined') return <p className="teams-hint team-bot-run-declined" role="status">{labels.declined[zh ? 1 : 0]}</p>;
   const cancel = async () => {
     if (cancelling) return; setCancelling(true); setError('');
     try { await api.messages(executionCommand(scope, 'cancelTask', { taskId: task.taskId })); }

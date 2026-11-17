@@ -1150,3 +1150,61 @@ test('the Desktop service sends a page\'s service commands only when they are a 
  await assert.rejects(service.serviceMessages({action:'list',...scope},'other'),/INVALID_SESSION/);
  await assert.rejects(service.services({action:'deleteEverything'} as any,'owner'),/INVALID_INPUT/);assert.equal(sent.length,2);
 });
+
+// ---- Auto-reply: unasked (optional) tasks are judged before they run ----
+async function waitFor(check:()=>boolean,ms=8000){const end=Date.now()+ms;while(Date.now()<end){if(check())return;await new Promise(r=>setTimeout(r,20));}assert.ok(check(),'condition reached');}
+const decisionOf=(probability:number|undefined,configured=true)=>({configured:async()=>configured,evaluate:async()=>{if(probability===undefined)throw new Error('Decision service is busy');return {state_revision:0,answers:{reply:{type:'binary' as const,probability}},usage:{input_tokens:1,output_tokens:1},actual_model:null,elapsed_ms:1};}});
+/** A fixture whose service knows the Chat kind and settles a declined task. */
+function autoFixture(t:any,{decision,kind='group',result}:{decision?:ReturnType<typeof decisionOf>;kind?:string;result?:(o:TeamHostProcessOptions)=>TeamHostResult}={}){
+ const bootstraps:any[]=[];
+ const f=fixture(t,async o=>{bootstraps.push(o.bootstrap);return o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:result?.(o)??{status:'completed',cursor,text:'Done',finishedAt:Date.now()};},decision?{decision}:{});
+ const original=f.mock.service.hostMessages.bind(f.mock.service);
+ f.mock.service.hostMessages=async(c,command)=>{
+  if(command.action==='declineTask'){f.mock.commands.push(command);const task=f.mock.tasks.find(v=>v.taskId===(command.payload as any).taskId);if(task)task.state='declined';return {taskId:task?.taskId,state:'declined'} as any;}
+  const value:any=await original(c,command);return command.action==='prepareTask'?{...value,conversationKind:kind}:value;};
+ // The triage read: the messages before `beforeSeq`, as the service answers it.
+ const read=f.mock.service.hostReadChat.bind(f.mock.service);
+ f.mock.service.hostReadChat=async(c,request:any)=>request.mode!=='before'?read(c,request):read(c,{mode:'range',fromSeqExclusive:Math.max(0,request.beforeSeq-1-request.limit),toSeqInclusive:request.beforeSeq-1} as any);
+ const task=(n:number)=>({taskId:`task0000${n}`,conversationId,sharedBotId,requester:{uid:'member',generation:1},state:'queued',messageId:`message00000${n}`,messageSeq:n,createdAt:Date.now(),deadline:Date.now()+300000,optional:true});
+ const sent=(action:string)=>f.mock.commands.filter(c=>c.action===action);
+ return {...f,bootstraps,task,sent,runs:()=>bootstraps.filter(b=>b.type==='run')};
+}
+test('auto-reply: an unasked task the Decision service rules out is declined before any model runs',async t=>{
+ const f=autoFixture(t,{decision:decisionOf(0.1)});await f.connector.publishLocalBot('owner',f.input);
+ f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>f.sent('declineTask').length===1);
+ assert.deepEqual({...f.sent('declineTask')[0].payload},{deploymentId:f.sent('declineTask')[0].payload.deploymentId,hostId:f.privateStore.hostId,accountEpoch:f.sent('declineTask')[0].payload.accountEpoch,taskId:'task00001',reason:'triage'});
+ assert.equal(f.sent('startTask').length,0);assert.equal(f.runs().length,0);
+});
+test('auto-reply: an unsure verdict offers the no-reply tool, and the silence is completed as declined with no text',async t=>{
+ const f=autoFixture(t,{decision:decisionOf(0.5),result:o=>({status:'declined',cursor,text:'',finishedAt:Date.now(),usage:{status:'missing'}})});await f.connector.publishLocalBot('owner',f.input);
+ f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>f.sent('completeTask').length===1);
+ assert.equal(f.runs()[0].mayDecline,true);assert.equal(f.runs()[0].askRequester,undefined,'nobody in a group asked, so the Bot asks nobody back');
+ const done=f.sent('completeTask')[0].payload;assert.equal(done.outcome,'declined');assert.equal(done.text,'');assert.equal(done.document,undefined);
+});
+test('auto-reply: a sure verdict runs without the tool; with no verdict a group task is declined and a DM task runs',async t=>{
+ const sure=autoFixture(t,{decision:decisionOf(0.9)});await sure.connector.publishLocalBot('owner',sure.input);
+ sure.mock.tasks.push(sure.task(1));sure.mock.wake();await waitFor(()=>sure.sent('completeTask').length===1);
+ assert.equal(sure.runs()[0].mayDecline,undefined);assert.equal(sure.sent('completeTask')[0].payload.outcome,'completed');
+ const group=autoFixture(t,{decision:decisionOf(undefined)});await group.connector.publishLocalBot('owner',group.input);
+ group.mock.tasks.push(group.task(1));group.mock.wake();await waitFor(()=>group.sent('declineTask').length===1);
+ assert.equal(group.sent('declineTask')[0].payload.reason,'triage');assert.equal(group.runs().length,0);
+ const dm=autoFixture(t,{kind:'bot_dm'});await dm.connector.publishLocalBot('owner',dm.input);
+ dm.mock.tasks.push(dm.task(1));dm.mock.wake();await waitFor(()=>dm.sent('completeTask').length===1);
+ assert.equal(dm.sent('declineTask').length,0);assert.equal(dm.runs()[0].mayDecline,undefined);
+});
+test('auto-reply: an unasked task with a later message of its Chat behind it is superseded, and only the latest is judged',async t=>{
+ const f=autoFixture(t,{decision:decisionOf(0.9)});await f.connector.publishLocalBot('owner',f.input);
+ f.mock.tasks.push(f.task(1),f.task(2));f.mock.wake();await waitFor(()=>f.sent('completeTask').length===1);
+ assert.deepEqual(f.sent('declineTask').map(c=>[c.payload.taskId,c.payload.reason]),[['task00001','superseded']]);
+ assert.deepEqual(f.sent('startTask').map(c=>c.payload.taskId),['task00002']);
+});
+test('auto-reply: a Bot is published to answer unasked only from a Desktop with a Decision service',async t=>{
+ const none=autoFixture(t);
+ await assert.rejects(none.connector.publishLocalBot('owner',{...none.input,autoReply:{daily:20}}),/DECISION_REQUIRED/);
+ await assert.rejects(none.connector.publishLocalBot('owner',{...none.input,autoReply:{daily:0}}),/INVALID_INPUT/);
+ const f=autoFixture(t,{decision:decisionOf(0.5)});
+ await f.connector.publishLocalBot('owner',{...f.input,autoReply:{daily:20}});
+ assert.deepEqual(f.sent('publishSharedBot').at(-1).payload.autoReply,{daily:20});
+ assert.equal((await f.connector.status('owner')).decisionConfigured,true);
+ assert.equal((await none.connector.status('owner')).decisionConfigured,false);
+});

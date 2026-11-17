@@ -574,6 +574,32 @@ A page's commands are checked before they leave: Desktop main and the Web API se
 - A session is polled, not pushed: an answer shows up to 2 s late, and a new request reaches the publisher's computer up to 5 s late.
 - The screen's text is in the component (English and Chinese), like the other Teams screens, not in the translation files.
 
+## Bots that answer on their own (auto-reply)
+
+A Bot can judge for itself whether to answer a Chat message nobody asked it about. It takes two switches, both off by default: the
+maintainer publishes the Bot with `autoReply: { daily }` (Desktop only, refused with `DECISION_REQUIRED` when that Desktop has no
+Decision service; hosted services are refused with `AUTO_REPLY_UNSUPPORTED`), and any person in a group, channel or Bot DM turns it on
+for that Chat with the member command `setConversationAutoReply { conversationId, expectedRevision, targets }`.
+
+- Service (`shared-bots.mjs`, `team-messages.mjs`): an ordinary message (`mutate` create, or `submit` that does not name the Bot) admits
+  an `optional: true` task for each switched-on Bot in the same transaction, after the same checks as an asked task (published, author
+  permitted, maintainer current, deployment online, grants). It writes no `taskIds`/`mentions` and charges no request quota; a group or
+  channel task is charged at `startTask` against the Bot's own daily `auto` quota (over it: `declined`, `declineReason: 'quota'`). In a
+  Bot DM the task is the usual one, charged as usual, with `optional` added. New host command `declineTask { reason: 'triage' |
+  'superseded' }` (queued optional tasks only); `completeTask` takes `outcome: 'declined'` (optional tasks only, empty text, nothing
+  posted). An unasked task that fails or is refused posts nothing, and members' `listTasks` hides unasked tasks without a reply.
+- Desktop host (`teams/replyTriage.ts`, `teams/connector.ts`): an optional task waits 2.5 s so a burst is judged once; earlier queued
+  optional tasks of the same Bot and Chat are declined as `superseded`. Before `startTask`: a reply to the Bot or its name means run;
+  otherwise the Decision service answers one binary question from the Bot's name and description and the last 12 messages (never its
+  role). p < 0.3 → `declineTask`, 0.3–0.75 → run with `mayDecline` (the runtime offers `TeamNoReply`), ≥ 0.75 → run. No verdict →
+  decline in a group or channel, run in a Bot DM. The Bot does not ask the requester questions in an unasked group task.
+- Runtime (H `team_process/decline_tool.rs`): bootstrap `mayDecline`, result status `declined`; the choice survives a killed worker.
+- Clients: Web/Desktop publish wizard switch and daily limit, a header dialog per Chat that first says where messages go, a declined
+  run shown as "Did not reply"; iOS and Android the same switch per Bot in the conversation details, and the `declined` state text.
+- Tests: `shared-bots.emulator.test.mjs` (Auto-reply), `apps/electron/test/teams-reply-triage.test.ts`, `teams-host.test.ts`
+  (`auto-reply:`), `apps/web/test/teams-bots-ui.test.ts` (`Auto-reply:`), vectors in `contracts/execution-vectors.json`, iOS
+  `TeamBotTests`/`TeamsPointerParserTests`, Android `TeamBotsTest`.
+
 ## Current integration status, 2026-11-05
 
 The sections below record earlier increments and their failures; this table supersedes their pending source-work statements. M0/M1 release acceptance remains open.

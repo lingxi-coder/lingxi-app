@@ -1019,6 +1019,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           // The switches of the Bots page serve the published Bots too: the Mac stays awake for them, and the login item opens the app that hosts them.
           keepAwake,
           background: () => ({ openAtLogin: loginItem.status(), keepAwake: settings.getPublic().botsKeepAwake === true, onBattery: powerMonitor.isOnBatteryPower() }),
+          // Whether a published Bot answers a message nobody asked it about is judged by this Desktop's Decision service.
+          decision: { configured: () => decisionHost.isConfigured(), evaluate: (input, signal, timeoutMs) => decisionHost.evaluateTool(input, signal, timeoutMs) },
           chooseFiles: async () => {
             const parent = [...mainWindows].find(window => !window.isDestroyed());
             const options = { title: 'Choose files to share with Team members', properties: ['openFile', 'multiSelections'] as Array<'openFile' | 'multiSelections'>,

@@ -8,6 +8,7 @@ private struct TeamBotList: Decodable { let bots: [TeamBotCard] }
 private struct TeamBotAck: Decodable {}
 private struct TeamTaskList: Decodable, Sendable { let tasks: [TeamTask]; let next: String? }
 private struct TeamTaskCancellation: Decodable, Sendable { let taskId: String; let state: String }
+private struct TeamAutoReplyAck: Decodable, Sendable { let revision: Int }
 private struct TeamMessageAck: Decodable, Sendable { let lastReadSeq: Int?; let conversationId: String? }
 final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
@@ -15,7 +16,7 @@ final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchec
 
 @MainActor @Observable
 final class TeamMessagingModel {
-    static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "sharedBotId"]
+    static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "sharedBotId", "autoReply"]
     private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision"]
     private(set) var cache: TeamMessageProjection?
     private(set) var offline = true
@@ -381,6 +382,10 @@ final class TeamMessagingModel {
         let result: TeamTask = try await execute("getTask", payload: ["taskId": taskId], life: lifecycle)
         guard selected == selection else { return }
         if let index = tasks.firstIndex(where: { $0.taskId == taskId }) { tasks[index] = result } else { tasks.append(result) }
+    }
+    /// Sets which Bots of a Chat judge for themselves whether to answer it. The listener brings the new setting.
+    func setConversationAutoReply(_ conversationId: String, expectedRevision: Int, targets: [String]) async throws {
+        let _: TeamAutoReplyAck = try await execute("setConversationAutoReply", payload: ["conversationId": conversationId, "expectedRevision": expectedRevision, "targets": targets], life: lifecycle)
     }
     /// Stops a task: at once while it is queued or waiting, at the worker's next check while the Bot is working. A task that has already ended stays as it is.
     func cancelTask(_ taskId: String) async throws {

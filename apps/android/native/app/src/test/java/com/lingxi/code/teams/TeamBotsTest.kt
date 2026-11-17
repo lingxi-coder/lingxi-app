@@ -1,5 +1,6 @@
 package com.lingxi.code.teams
 
+import com.lingxi.code.R
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -204,5 +205,24 @@ class TeamBotsTest {
         assertEquals(setOf("sharedbot_01"), composerStaleTargets(setOf("sharedbot_01"), listOf(groupBot(permitted = false)), member))
         val other = groupConversation(listOf("user:alice"), emptyList())
         assertEquals(setOf("sharedbot_01"), composerStaleTargets(setOf("sharedbot_01"), listOf(groupBot()), other))
+    }
+
+    @Test fun autoReplyOffersPublishedBotsOfTheChatToItsPeopleAndAlwaysLetsOneBeSwitchedOff() {
+        fun bot(id: String, state: String = "published", daily: Int? = 5) = TeamBotCard.parse(JSONObject("""{"sharedBotId":"$id","name":"$id","description":"","maintainer":{"uid":"owner","generation":1},"revision":1,"state":"$state","permitted":true,"ready":true,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":1,"member":1,"bot":1}""" + (daily?.let { ""","autoReply":{"daily":$it}""" } ?: "") + "}"))
+        val cards = listOf(bot("sharedbot_a"), bot("sharedbot_b", daily = null), bot("sharedbot_c", state = "paused"), bot("sharedbot_d"))
+        assertEquals(TeamBotAutoReply(5), cards[0].autoReply); assertNull(cards[1].autoReply)
+        val chat = TeamMessageConversation.fromDocument("chat_0001", mapOf("kind" to "group", "title" to "Trip", "participants" to listOf("user:alice", "shared_bot:sharedbot_a", "shared_bot:sharedbot_b", "shared_bot:sharedbot_c"),
+            "lastSeq" to 0L, "lastChangeSeq" to 0L, "lastMessage" to null, "autoReply" to mapOf("revision" to 3L, "targets" to listOf("sharedbot_c"))), 0) { null }
+        assertEquals(TeamConversationAutoReply(3, listOf("sharedbot_c")), chat.autoReply)
+        val offered = TeamAutoReply.bots(chat, cards, "alice")
+        assertEquals(listOf("sharedbot_a", "sharedbot_c"), offered.bots.map { it.sharedBotId })
+        assertEquals(listOf("sharedbot_c"), offered.on)
+        assertEquals(listOf("sharedbot_a", "sharedbot_c"), TeamAutoReply.targets(offered, "sharedbot_a", true))
+        assertEquals(emptyList<String>(), TeamAutoReply.targets(offered, "sharedbot_c", false))
+        assertTrue("only the Chat's people change it", TeamAutoReply.bots(chat, cards, "bob").bots.isEmpty())
+        val unreadable = TeamMessageConversation.fromDocument("chat_0002", mapOf("kind" to "group", "title" to "Trip", "participants" to listOf("user:alice"), "lastSeq" to 0L, "lastChangeSeq" to 0L, "lastMessage" to null,
+            "autoReply" to mapOf("revision" to "3", "targets" to listOf("sharedbot_c"))), 0) { null }
+        assertNull(unreadable.autoReply)
+        assertEquals(R.string.teams_task_declined, teamTaskStateRes("declined"))
     }
 }

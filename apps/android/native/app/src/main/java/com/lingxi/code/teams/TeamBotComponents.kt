@@ -40,6 +40,7 @@ internal fun teamTaskStateRes(state: String): Int = when (state) {
     "waiting" -> R.string.teams_task_waiting
     "cancelled" -> R.string.teams_task_cancelled
     "needs_reconciliation" -> R.string.teams_task_needs_checking
+    "declined" -> R.string.teams_task_declined
     else -> R.string.chat_status_unknown
 }
 

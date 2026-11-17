@@ -71,6 +71,7 @@ struct TeamConversationDetailsSheet: View {
         let people = participants(context)
         let unread = model.unread(of: conversation)
         let participantsForLead = TeamsListLogic.conversationParticipants(conversation, members: context.members, bots: context.bots, uid: context.uid, strings: context.strings)
+        let auto = TeamAutoReply.bots(conversation, cards: context.bots, uid: context.uid)
         return List {
             Section {
                 HStack(spacing: 14) {
@@ -95,6 +96,34 @@ struct TeamConversationDetailsSheet: View {
                     }
                 } header: {
                     Text("teams_members")
+                }
+            }
+            if !auto.bots.isEmpty {
+                Section {
+                    ForEach(auto.bots) { card in
+                        let on = auto.on.contains(card.sharedBotId)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle(card.name, isOn: Binding(get: { on }, set: { enabled in
+                                let targets = TeamAutoReply.targets(auto.bots, on: auto.on, switching: card.sharedBotId, to: enabled)
+                                Task { await workspace.run { try await model.setConversationAutoReply(conversation.id, expectedRevision: conversation.autoReply?.revision ?? 0, targets: targets) } }
+                            }))
+                            .disabled(model.offline || workspace.messageBusy || !on && !TeamAutoReply.available(card))
+                            .accessibilityIdentifier("teams.conversation.details.autoreply.\(card.sharedBotId)")
+                            // Said before it is switched on: where this Chat's messages go.
+                            Group {
+                                if let limit = card.autoReply, TeamAutoReply.available(card) {
+                                    Text("teams_auto_reply_disclosure \(context.userName(card.maintainer.uid)) \(card.name) \(limit.daily)")
+                                } else {
+                                    Text("teams_auto_reply_unavailable \(card.name)")
+                                }
+                            }
+                            .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("teams_auto_reply_title")
+                } footer: {
+                    Text("teams_auto_reply_note")
                 }
             }
             if unread > 0 {

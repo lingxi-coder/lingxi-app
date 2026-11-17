@@ -10,6 +10,8 @@ export interface TeamConversation {
   lastSeq: number; lastChangeSeq: number; lastReadSeq: number;
   /** Newest message for conversation lists. Absent until the conversation has a message; then always the full pointer. */
   lastMessage?: { id: string; seq: number; at: string | null; author: MessageAuthor; preview: string; recalled?: true };
+  /** The Bots that judge for themselves whether to answer this Chat's messages. Absent until a member first sets it. */
+  autoReply?: { revision: number; targets: string[] };
 }
 /** One change a Bot asks to make to its list. `item` is the text of the item it touches as it read when the Bot asked, `null` if it was gone. */
 export interface ListApprovalChange { op: 'add' | 'update' | 'remove'; text?: string; itemId?: string; done?: boolean; item?: string | null }
@@ -89,7 +91,8 @@ export function mergeConversation(old: TeamConversation | undefined, value: Team
     && old.lastSeq === merged.lastSeq && old.lastChangeSeq === merged.lastChangeSeq && old.lastReadSeq === merged.lastReadSeq
     && sameLastMessage(old.lastMessage, merged.lastMessage)
     && old.participants.length === merged.participants.length && old.participants.every((value, index) => value === merged.participants[index])
-    && (old.readers ?? []).join('\n') === (merged.readers ?? []).join('\n')) return old;
+    && (old.readers ?? []).join('\n') === (merged.readers ?? []).join('\n')
+    && old.autoReply?.revision === merged.autoReply?.revision && (old.autoReply?.targets ?? []).join('\n') === (merged.autoReply?.targets ?? []).join('\n')) return old;
   return merged;
 }
 export function mergeDirectory(state: MessageProjection, incoming: TeamConversation[], replace: boolean): MessageProjection {

@@ -11,6 +11,7 @@ import type { MessageAttachment } from './attachments.js';
 import { executionCommand } from './execution.js';
 import { pendingPayload, type TeamConversation, type TeamMessage } from './messages.js';
 import { ArtifactButton, BotRun } from './BotRunCards';
+import { AutoReplyDialog, autoReplyBots } from './AutoReplyDialog';
 import { buildStreamRows, formatClock, placeTasks, visibleStart, WINDOW_SIZE } from './stream.js';
 import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useDocumentShown, useIsoLayoutEffect, type RenderAvatar, type RenderMarkdown } from './ui';
 import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
@@ -111,6 +112,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
   const [startId, setStartId] = useState<string>();
   const [editing, setEditing] = useState<TeamMessage>(), [reply, setReply] = useState<TeamMessage>(), [recall, setRecall] = useState<TeamMessage>();
   const [takeBack, setTakeBack] = useState<MessageAttachment>();
+  const [autoReplyOpen, setAutoReplyOpen] = useState(false);
   const [answerWait, setAnswerWait] = useState<string>();
   const [focusToken, setFocusToken] = useState(0);
   const [pinned, setPinned] = useState(true);
@@ -245,6 +247,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
     if (await workspace.run(() => workspace.api.messages(executionCommand(scope, 'revokeAttachment', { attachmentId: target.attachmentId, changeId: crypto.randomUUID() })))) setTakeBack(undefined);
   };
   const subtitle = conversationSubtitle(conversation, snapshot, zh);
+  const auto = friend ? { bots: [], on: [] } : autoReplyBots(conversation, snapshot);
 
   return <section className="tw-scope tw-conv" aria-label={label}>
     <header className="tw-conv-head">
@@ -259,6 +262,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
       {/* A friend chat reads itself (D13), so it has no manual mark, as on Android. */}
       {unread > 0 && !friend ? <button type="button" disabled={snapshot.messageBusy || snapshot.offline} onClick={() => void workspace.markRead()}>{t('Mark as read', '标为已读')}</button> : null}
       {friend?.actions}
+      {auto.bots.length ? <button type="button" className="tw-icon-btn" aria-pressed={auto.on.length > 0} aria-label={t('Bots that answer on their own', '自主回复的 Bot')} title={t('Bots that answer on their own', '自主回复的 Bot')} onClick={() => setAutoReplyOpen(true)}><Icon name="bot" /></button> : null}
       {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t('Team details', '团队详情')} title={t('Team details', '团队详情')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
     </header>
     {snapshot.messagingError
@@ -334,6 +338,7 @@ function ConversationPane({ workspace, snapshot, zh, conversation, model, team, 
       onClearAnswering={() => setAnswerWait(undefined)} onAnswered={runs.refresh}
       onClearEditing={() => setEditing(undefined)} onClearReply={() => setReply(undefined)} onEditLast={() => { if (lastOwn && participant) edit(lastOwn); }} />
 
+    {autoReplyOpen ? <AutoReplyDialog workspace={workspace} snapshot={snapshot} conversation={conversation} scope={scope} zh={zh} onClose={() => setAutoReplyOpen(false)} /> : null}
     {takeBack ? <Dialog role="alertdialog" title={t(`Take back ${takeBack.name}?`, `收回 ${takeBack.name}？`)} onClose={() => setTakeBack(undefined)}>
       <div className="tw-form">
         <p className="tw-hint">{t('Nobody will be able to open or save it from this conversation any more, and an assistant will not read it again. Copies people already saved stay with them. This cannot be undone.', '此后任何人都无法再从此会话打开或保存它，助手也不会再读取它。他人已保存的副本仍在其设备上。此操作无法撤销。')}</p>

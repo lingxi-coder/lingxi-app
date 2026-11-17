@@ -6,6 +6,8 @@ import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { TeamsStore, createTeamsHandler } from '../src/teams.mjs';
 import { SharedBotsStore } from '../src/shared-bots.mjs';
 import { onTeamMessageCreated } from '../src/team-message-push.mjs';
+import { TeamMessagesStore } from '../src/team-messages.mjs';
+import { admissionId } from '../src/team-execution-contract.mjs';
 
 const options = { skip: !process.env.FIRESTORE_EMULATOR_HOST, timeout: 60000 };
 const projectId = 'demo-lingxi-teams-execution', teamId = 'team_execution', conversationId = 'chat_execution';
@@ -1170,3 +1172,144 @@ test('knowledge: a task that began with a revoked source cannot go on or publish
   assert.deepEqual(next.inputs.map(grant => grant.resourceId), ['persona_01']);
   assert.equal((await execute('completeTask', result(next))).state, 'completed');
 });
+
+// ---- Auto-reply: optional tasks a Bot may leave unanswered ----
+const autoChat = 'chat_auto01', autoChatRef = () => db.doc(`teams/${teamId}/conversations/${autoChat}`);
+/** Publish the Bot again with auto-reply allowed (or not), and bring its host back online. */
+async function publishAutoReply(autoReply) {
+  const current = (await db.doc(`teams/${teamId}/sharedBots/sharedbot_01`).get()).data().identity.revision;
+  const deployment = (await db.doc(`teams/${teamId}/deployments/${host.deploymentId}`).get()).data();
+  const base = publish();
+  await execute('publishSharedBot', { ...base, expectedRevision: current, deployment: { ...base.deployment, revision: deployment.revision + 1 },
+    ...(autoReply ? { autoReply } : {}) });
+  await heartbeat();
+}
+async function autoGroup({ daily = 5 } = {}) {
+  await publishAutoReply({ daily });
+  await execute('createConversation', { conversationId: autoChat, kind: 'group', title: 'Trip', participantUids: [member.uid, other.uid],
+    sharedBotIds: ['sharedbot_01'] }, member);
+  await execute('setConversationAutoReply', { conversationId: autoChat, expectedRevision: 0, targets: ['sharedbot_01'] }, member);
+}
+const say = (actor, n, text = 'Does anyone know a quiet hotel near the station?') => new TeamMessagesStore(db, () => now).execute(actor,
+  { action: 'mutate', teamId, generation: 1, conversationId: autoChat, messageId: `auto_msg_${n}`, changeId: `auto_chg_${n}`, operation: 'create', text });
+const autoTask = n => admissionId(`auto_msg_${n}`, 'sharedbot_01');
+const autoWatermark = async () => (await autoChatRef().get()).data().lastChangeSeq;
+const startAuto = async n => execute('startTask', { ...host, taskId: autoTask(n), expectedLastChangeSeq: await autoWatermark() });
+const declined = started => ({ ...host, taskId: started.task.taskId, permitId: started.permitId, outcome: 'declined', text: '', finishedAt: now,
+  inputGrantIds: started.inputs.map(g => g.grantId), outputAudience: { mode: 'published_inputs' }, usage: { status: 'missing' } });
+
+test('auto-reply: the Chat switch needs a Bot that allows it, and a member message then admits one free optional task', options, async () => {
+  await execute('createConversation', { conversationId: autoChat, kind: 'group', title: 'Trip', participantUids: [member.uid, other.uid],
+    sharedBotIds: ['sharedbot_01'] }, member);
+  await assert.rejects(execute('setConversationAutoReply', { conversationId: autoChat, expectedRevision: 0, targets: ['sharedbot_01'] }, member),
+    { code: 'AUTO_REPLY_UNAVAILABLE' });
+  await say(member, 0);
+  assert.equal((await taskData(autoTask(0))), undefined, 'no task while the Bot does not allow auto-reply');
+
+  await publishAutoReply({ daily: 5 });
+  assert.deepEqual((await execute('listSharedBots', {}, member)).bots[0].autoReply, { daily: 5 });
+  const { revision } = await execute('setConversationAutoReply', { conversationId: autoChat, expectedRevision: 0, targets: ['sharedbot_01'] }, other);
+  assert.equal(revision, 1);
+  await assert.rejects(execute('setConversationAutoReply', { conversationId: autoChat, expectedRevision: 0, targets: [] }, member),
+    { code: 'AUTO_REPLY_REVISION_CONFLICT' });
+  await say(member, 1);
+  const task = await taskData(autoTask(1));
+  assert.equal(task.optional, true); assert.equal(task.state, 'queued'); assert.deepEqual(task.requester, { uid: member.uid, generation: 1 });
+  const message = (await autoChatRef().collection('messages').doc('auto_msg_1').get()).data();
+  assert.equal(message.taskIds, undefined); assert.equal(message.mentions, undefined);
+  assert.equal((await db.collection(`teams/${teamId}/requestQuotas`).get()).size, 0, 'admission charges nothing');
+  const listed = await execute('listHostTasks', host);
+  assert.deepEqual(listed.tasks.map(t => [t.taskId, t.optional]), [[autoTask(1), true]]);
+  assert.equal((await execute('prepareTask', { ...host, taskId: autoTask(1) })).conversationKind, 'group');
+  // Members do not see a run nobody asked for until it answers.
+  assert.deepEqual((await execute('listTasks', { conversationId: autoChat }, member)).tasks, []);
+
+  // Turning the Chat switch off revokes the queued task and admits no more.
+  await execute('setConversationAutoReply', { conversationId: autoChat, expectedRevision: 1, targets: [] }, member);
+  await assert.rejects(execute('prepareTask', { ...host, taskId: autoTask(1) }), { code: 'TASK_REVOKED' });
+  await say(member, 2);
+  assert.equal(await taskData(autoTask(2)), undefined);
+});
+test('auto-reply: asked Bots, offline hosts and edits admit no optional task', options, async () => {
+  await autoGroup();
+  const asked = await execute('submit', { conversationId: autoChat, messageId: 'auto_msg_1', changeId: 'auto_chg_1', text: 'Hotel?',
+    targets: ['sharedbot_01'] }, member);
+  assert.equal(asked.tasks.length, 1);
+  assert.equal((await taskData(autoTask(1))).optional, undefined);
+  await new TeamMessagesStore(db, () => now).execute(member, { action: 'mutate', teamId, generation: 1, conversationId: autoChat,
+    messageId: 'auto_msg_1', changeId: 'auto_chg_1e', operation: 'edit', text: 'Hotel, anyone?' });
+  assert.equal((await db.collection(`teams/${teamId}/tasks`).get()).size, 1);
+  await execute('heartbeatDeployment', { ...host, ready: false });
+  await say(other, 2);
+  assert.equal(await taskData(autoTask(2)), undefined, 'an offline host gets no optional task, and the message is still sent');
+  assert.ok((await autoChatRef().collection('messages').doc('auto_msg_2').get()).exists);
+});
+test('auto-reply: the host declines a queued optional task once, and never an asked one', options, async () => {
+  await autoGroup();
+  await say(member, 1);
+  const decline = { ...host, taskId: autoTask(1), reason: 'triage' };
+  assert.deepEqual(await execute('declineTask', decline), { taskId: autoTask(1), state: 'declined' });
+  assert.deepEqual(await execute('declineTask', decline), { taskId: autoTask(1), state: 'declined' }, 'a new command id finds it declined');
+  assert.equal((await startAuto(1)).execute, false);
+  assert.equal((await taskData(autoTask(1))).declineReason, 'triage');
+  const asked = await execute('submit', { conversationId: autoChat, messageId: 'asked_msg_1', changeId: 'asked_chg_1', text: 'Hotel?',
+    targets: ['sharedbot_01'] }, member);
+  await assert.rejects(execute('declineTask', { ...host, taskId: asked.tasks[0].taskId, reason: 'triage' }), { code: 'TASK_NOT_OPTIONAL' });
+  await assert.rejects(execute('declineTask', decline, member), { code: 'DEPLOYMENT_REQUIRED' });
+});
+test('auto-reply: a run that stays silent posts nothing and counts against the Bot daily limit', options, async () => {
+  await autoGroup({ daily: 1 });
+  await say(member, 1);
+  const started = await startAuto(1);
+  assert.equal(started.execute, true); assert.equal(started.task.optional, true);
+  await assert.rejects(execute('completeTask', { ...declined(started), text: 'I would rather not.' }));
+  const settled = await execute('completeTask', declined(started));
+  assert.deepEqual(settled, { taskId: autoTask(1), state: 'declined', replyId: null, artifactId: null });
+  assert.deepEqual(await execute('completeTask', declined(started)), settled);
+  assert.equal((await autoChatRef().collection('messages').get()).size, 1);
+  assert.equal((await lockRefFor(autoChat).get()).exists, false);
+  // The second unasked run of the day is over the Bot's limit: it ends declined before any model runs.
+  await say(other, 2);
+  assert.deepEqual(await startAuto(2), { execute: false, taskId: autoTask(2), state: 'declined' });
+  assert.equal((await taskData(autoTask(2))).declineReason, 'quota');
+  const quotas = (await db.collection(`teams/${teamId}/requestQuotas`).get()).docs.map(doc => doc.data());
+  assert.deepEqual(quotas.map(q => [q.used, q.limit]), [[1, 1]]);
+});
+test('auto-reply: a failed unasked run in a group is silent, an answer is posted and listed', options, async () => {
+  await autoGroup();
+  await say(member, 1);
+  const failed = await startAuto(1);
+  const outcome = await execute('completeTask', result(failed, { outcome: 'failed', text: 'The model is unavailable.', document: undefined }));
+  assert.equal(outcome.state, 'failed'); assert.equal(outcome.replyId, null);
+  assert.equal((await autoChatRef().collection('messages').get()).size, 1);
+  await say(other, 2);
+  const answered = await startAuto(2);
+  const reply = await execute('completeTask', result(answered, { text: 'The Station Inn is quiet.', document: undefined }));
+  assert.equal(reply.state, 'completed');
+  assert.equal((await autoChatRef().collection('messages').doc(reply.replyId).get()).data().text, 'The Station Inn is quiet.');
+  assert.deepEqual((await execute('listTasks', { conversationId: autoChat }, member)).tasks.map(t => t.taskId), [autoTask(2)]);
+});
+test('auto-reply: in a Bot DM every message is still a charged request, and only there may it end declined', options, async () => {
+  await publishAutoReply({ daily: 5 });
+  await execute('setConversationAutoReply', { conversationId, expectedRevision: 0, targets: ['sharedbot_01'] }, member);
+  const payload = submit(), receipt = await execute('submit', payload, member), taskId = receipt.tasks[0].taskId;
+  assert.equal((await taskData(taskId)).optional, true);
+  assert.deepEqual((await chatRef().collection('messages').doc(payload.messageId).get()).data().taskIds, [taskId]);
+  assert.ok((await db.collection(`teams/${teamId}/requestQuotas`).get()).docs.every(doc => doc.data().used === 1));
+  const started = await execute('startTask', { ...host, taskId });
+  assert.equal((await execute('completeTask', declined(started))).state, 'declined');
+  assert.equal(await messageCount(), 1);
+  // A failed DM run still tells the member, as before.
+  const failing = await start();
+  assert.equal((await execute('completeTask', result(failing, { outcome: 'failed', text: 'Failed.', document: undefined }))).state, 'failed');
+  assert.equal(await messageCount(), 3);
+  await execute('setConversationAutoReply', { conversationId, expectedRevision: 1, targets: [] }, member);
+  const asked = await start();
+  assert.equal(asked.task.optional, undefined);
+  await assert.rejects(execute('completeTask', declined(asked)), { code: 'TASK_NOT_OPTIONAL' });
+});
+test('auto-reply: a hosted Bot service cannot allow auto-reply', options, async () => {
+  await assert.rejects(store.execute(owner, { schemaVersion: 1, commandId: 'command_service_auto', serviceId: 'service_0001', generation: 1,
+    action: 'publishSharedBot', payload: publish({ autoReply: { daily: 5 } }) }));
+});
+

@@ -79,7 +79,7 @@ scenario('Publishing a Bot again shows what it is shared with now: each file is 
 });
 scenario('On Desktop a maintainer sees how this Mac serves their Bots, what stops it, and turns on what keeps it serving; nobody else is shown it (M3-2)', async context => {
   const changes: unknown[] = []; let opened = 0, reads = 0;
-  let host: import('../../../packages/teams/execution').SharedHostStatus = { bots: [{ teamId: 'team-test', sharedBotId: 'assistant-fixture', state: 'ready', running: 1 }], openAtLogin: { available: true, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false };
+  let host: import('../../../packages/teams/execution').SharedHostStatus = { bots: [{ teamId: 'team-test', sharedBotId: 'assistant-fixture', state: 'ready', running: 1 }], openAtLogin: { available: true, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false, decisionConfigured: false };
   const { fake, workspace } = await open(context, { hostStatus: async () => { reads += 1; return host; }, openLoginItems: async () => { opened += 1; },
     // The system answers a request to open at login by asking the owner to allow it.
     setHostBackground: async change => { changes.push(change); host = { ...host, ...(change.openAtLogin ? { openAtLogin: { available: true, enabled: false, needsApproval: true } } : {}), ...(change.keepAwake === undefined ? {} : { keepAwake: change.keepAwake }) }; } });
@@ -723,4 +723,48 @@ scenario('A chat with an assistant from before it changed maintainer stays reada
   await page.click(buttons('Start a new chat')[0]); await until(() => sent.some(c => c.action === 'createConversation'), 'a new chat');
   const created = sent.find(c => c.action === 'createConversation');
   assert.ok(created && 'payload' in created && created.action === 'createConversation' && created.payload.conversationId !== 'test-chat' && created.payload.kind === 'bot_dm');
+});
+scenario('Auto-reply: the wizard offers it only with Decision set up on this Desktop, and the review and publication carry the daily limit', async context => {
+  const published: Record<string, unknown>[] = []; let decisionConfigured = false;
+  const status = (): import('../../../packages/teams/execution').SharedHostStatus => ({ bots: [], openAtLogin: { available: false, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false, decisionConfigured });
+  const { workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-new', name: 'Travel', description: '', model: 'Configured model' }], selectSharedFiles: async () => [], hostStatus: async () => status(),
+    publishLocalBot: async input => { published.push(input as unknown as Record<string, unknown>); return { sharedBotId: input.sharedBotId, revision: 1 }; } });
+  const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
+  const autoBox = () => page.find(n => n.type === 'input' && n.props.type === 'checkbox' && textOf(n.parent) === 'Let the assistant decide when to answer')[0];
+  await page.click(page.button('Load local Bots'));
+  assert.equal(autoBox().props.disabled, true); assert.match(page.text(), /set up Decision on this Desktop first: Settings → Models & Services → Decision/);
+  decisionConfigured = true; await page.click(page.button('Load local Bots'));
+  assert.equal(autoBox().props.disabled, false);
+  await page.type(page.find(n => n.type === 'select')[0], 'local-new'); await page.type(page.find(n => n.type === 'textarea')[0], 'Help with trips.');
+  await page.check(autoBox()); assert.match(page.text(), /This Desktop’s Decision service and the assistant’s model see those messages, and you pay for both/);
+  await page.type(page.find(n => n.type === 'input' && n.props.type === 'number').at(-1), '5');
+  await page.submit(); assert.match(page.text(), /Answers on its own in chats that turn it on, at most 5 a day/);
+  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
+  assert.equal(published.length, 1); assert.deepEqual(published[0]!.autoReply, { daily: 5 });
+});
+scenario('Auto-reply: a person in a Chat turns a Bot on after being told where the messages go; a declined run is one quiet line', async context => {
+  const { fake, workspace } = await open(context); const calls: MessageCommand[] = [];
+  fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, autoReply: { daily: 7 } })]; await workspace.refreshBots(); await until(() => !!workspace.getSnapshot().bots[0]?.autoReply, 'the Bot');
+  fake.conversations.set('team-test', [conversation('test-chat', { kind: 'group', participants: ['user:alice', 'user:bob', 'shared_bot:assistant-fixture'] })]);
+  await workspace.refresh(); workspace.selectConversation('test-chat'); await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat', 'selection');
+  fake.messages = async <T>(command: MessageCommand) => { calls.push(command);
+    if (command.action === 'listTasks') return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'bob', generation: 1 }, state: 'declined', optional: true, createdAt: 1, deadline: 2 }] } as T;
+    return { bots: fake.bots } as T; };
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount());
+  await until(() => /Did not reply/.test(page.text()), 'the declined run'); assert.doesNotMatch(page.text(), /Cancel task|Failed/);
+  const button = page.oneByLabel('Bots that answer on their own'); assert.equal(button.props['aria-pressed'], false);
+  await page.click(button);
+  assert.match(page.text(), /New messages in this chat are sent to the Decision service and model that you set up for Fixture Bot\. It answers on its own at most 7 times a day\./);
+  assert.equal(page.button('Save').props.disabled, true, 'nothing changed yet');
+  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox' && textOf(n.parent) === 'Fixture Bot')[0]); await page.click(page.button('Save'));
+  const sent = calls.find(command => command.action === 'setConversationAutoReply') as Extract<MessageCommand, { action: 'setConversationAutoReply' }> | undefined;
+  assert.deepEqual(sent?.payload, { conversationId: 'test-chat', expectedRevision: 0, targets: ['assistant-fixture'] });
+});
+scenario('Auto-reply: a Chat whose Bots cannot answer on their own shows no switch', async context => {
+  const { fake, workspace } = await open(context);
+  fake.conversations.set('team-test', [conversation('test-chat', { kind: 'group', participants: ['user:alice', 'shared_bot:assistant-fixture'] })]);
+  await workspace.refresh(); workspace.selectConversation('test-chat'); await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat', 'selection');
+  fake.messages = async <T>(command: MessageCommand) => (command.action === 'listTasks' ? { tasks: [] } : { bots: fake.bots }) as T;
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount());
+  await until(() => /test-chat/.test(page.text()), 'the chat'); assert.equal(page.byLabel('Bots that answer on their own').length, 0);
 });

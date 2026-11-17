@@ -37,6 +37,7 @@ function conversation(snapshot, read, generation) {
   const value = snapshot.data();
   return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants,
     lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq,
+    ...(value.autoReply ? { autoReply: { revision: value.autoReply.revision, targets: value.autoReply.targets } } : {}),
     lastReadSeq: read?.generation === generation ? read.lastReadSeq : 0 };
 }
 
@@ -114,10 +115,14 @@ export class TeamMessagesStore {
       if (input.operation !== 'create' && (!m || m.author.kind !== 'user' || m.author.uid !== user.uid)) fail(403, 'MESSAGE_AUTHOR_REQUIRED');
       if (m?.recalled) fail(409, 'MESSAGE_RECALLED');
       if (input.replyTo && !(await tx.get(ref.collection('messages').doc(input.replyTo))).exists) fail(400, 'REPLY_REQUIRED');
-      const releaseFiles = input.operation === 'recall' ? await recallAttachments(tx, teamRef, m, this.clock()) : () => {};
+      const clock = this.clock();
+      const releaseFiles = input.operation === 'recall' ? await recallAttachments(tx, teamRef, m, clock) : () => {};
+      // A new message also goes to the Chat's Bots that answer unasked; each one's host decides whether it does.
+      const unasked = input.operation === 'create' ? await new SharedBotsStore(this.db, this.clock).optionalTasks(tx, teamRef, c,
+        input, { uid: user.uid, generation: input.generation }, [], clock) : { write() {} };
       const changeSeq = c.lastChangeSeq + 1, seq = input.operation === 'create' ? c.lastSeq + 1 : m.seq;
       if (!Number.isSafeInteger(changeSeq) || !Number.isSafeInteger(seq)) fail(409, 'CURSOR_LIMIT');
-      const now = new Date(this.clock());
+      const now = new Date(clock);
       const change = { seq: changeSeq, messageId: input.messageId, operation: input.operation,
         actorUid: user.uid, generation: input.generation, textDigest, at: now };
       const update = { lastChangeSeq: changeSeq, lastChange: { id: input.changeId, seq: changeSeq } };
@@ -127,6 +132,7 @@ export class TeamMessagesStore {
         Object.assign(update, { lastSeq: seq, lastMessage: { id: input.messageId, seq, at: now, author, preview: messagePreview(input.text) } });
         tx.create(msgRef, { seq, author, kind: 'text', text: input.text,
           ...(input.replyTo ? { replyTo: input.replyTo } : {}), createdAt: now, changeSeq, changeId: input.changeId });
+        unasked.write(seq);
       } else {
         tx.update(msgRef, { text: input.text, editedAt: now, changeSeq, changeId: input.changeId,
           ...(input.operation === 'recall' ? { recalled: true } : {}) });

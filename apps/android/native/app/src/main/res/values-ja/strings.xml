@@ -2969,6 +2969,11 @@
     <string name="settings_browser_saved">次回の操作セッション用に保存済み</string>
     <string name="settings_browser_manage_session">操作セッションを管理</string>
     <string name="teams_task_needs_checking">確認が必要</string>
+    <string name="teams_task_declined">返信なし</string>
+    <string name="teams_auto_reply_title">自分で返信する Bot</string>
+    <string name="teams_auto_reply_note">ここでオンにした Bot は、このチャットの新しいメッセージをすべて読み、返信が必要と判断したときに呼ばれなくても返信します。</string>
+    <string name="teams_auto_reply_disclosure_fmt">オンにすると、このチャットの新しいメッセージは %1$s が %2$s 用に設定した判断サービスとモデルに送られます。自分での返信は 1 日最大 %3$d 回です。</string>
+    <string name="teams_auto_reply_unavailable_fmt">%1$s は自分で返信しなくなりました。ここでオフにしてください。</string>
     <string name="teams_task_needs_checking_hint">チャット外の操作が実行されたかどうか確認できていません。Bot の管理者による確認が必要です。</string>
     <string name="teams_list_open">共有リスト</string>
     <string name="teams_list_hint_fmt">%1$s を使えるメンバー全員がこのリストを表示・変更できます。%1$s も読み取りと変更ができます。</string>

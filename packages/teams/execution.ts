@@ -10,12 +10,15 @@ export interface SharedBotCard {
   quotas: RequestQuotas; instanceId?: string;
   /** The Bot keeps a list its members and its runs change together. With `approval`, a run only proposes a change and the member who asked decides. */
   sharedList?: { title: string; approval?: 'requester' };
+  /** The Bot may answer messages nobody asked it about, in Chats that turn this on, at most `daily` times a day. */
+  autoReply?: { daily: number };
   /** The maintainer offered the Bot to another member and it is not settled yet. Only those two are told. */
   transfer?: BotTransfer;
 }
 /** A Bot being handed to another member: `offered` until that member accepts, `accepted` while their computer takes it over. It ends by itself at `expiresAt`. */
 export interface BotTransfer { transferId: string; from: MemberRef; to: MemberRef; state: 'offered' | 'accepted'; expiresAt: number }
-export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'expired' | 'interrupted' | 'authorization_required' | 'revoked' | 'cancelled' | 'needs_reconciliation';
+/** `declined`: a Bot nobody asked chose not to answer; nothing was posted. */
+export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'expired' | 'interrupted' | 'authorization_required' | 'revoked' | 'cancelled' | 'needs_reconciliation' | 'declined';
 export type TaskUsage = { status: 'missing' } | { status: 'partial' | 'complete'; inputTokens: number; outputTokens: number; costMicros?: number; currency?: string };
 /** What a waiting task is blocked on: a question to `recipient`, or (`tool_approval`) a list change only they can approve. Present only while `state` is `waiting`. */
 export interface TaskWait { waitId: string; kind: 'human_input' | 'tool_approval'; recipient: MemberRef; expiresAt: number; messageId: string }
@@ -26,6 +29,8 @@ export interface TeamTaskView {
   /** Outside actions whose outcome nobody has confirmed yet; absent when there are none. */
   unverifiedOperations?: number;
   wait?: TaskWait; replyId?: string; artifactId?: string; usage?: TaskUsage;
+  /** Nobody asked the Bot: it was given the message because auto-reply is on, and may leave it unanswered. */
+  optional?: true;
 }
 export interface TeamDocument { title: string; body: string }
 /** One revision of a shared document. `currentRevision` is the newest one, so `revision < currentRevision` is history. */
@@ -91,6 +96,8 @@ export interface MemberExecutionPayloads {
   writeList: SharedListWrite & { sharedBotId: string; operationId: string };
   listHistory: { sharedBotId: string; beforeRevision?: number };
   setConversationPolicy: { conversationId: string; expectedRevision: number; targets: string[] };
+  /** The Bots of this Chat that judge for themselves whether to answer its messages: each must be in the Chat and published to do so. */
+  setConversationAutoReply: { conversationId: string; expectedRevision: number; targets: string[] };
   /** The maintainer takes an offered Bot back, or the member it was offered to declines it. */
   endTransfer: { transferId: string };
 }
@@ -113,7 +120,9 @@ export interface SelectedSharedFile { token: string; kind: 'file' | 'skill'; nam
  */
 export interface SharedHostBot { teamId: string; sharedBotId: string; state: 'checking' | 'ready' | 'not_ready' | 'unreachable' | 'stopped'; reason?: 'bot' | 'runtime' | 'model'; /** Requests being answered now. */ running: number }
 /** A Desktop as the host of the Bots it publishes, and what keeps it serving while its owner is away. The system owns `openAtLogin`. */
-export interface SharedHostStatus { bots: SharedHostBot[]; openAtLogin: { available: boolean; enabled: boolean; needsApproval: boolean }; keepAwake: boolean; onBattery: boolean }
+export interface SharedHostStatus { bots: SharedHostBot[]; openAtLogin: { available: boolean; enabled: boolean; needsApproval: boolean }; keepAwake: boolean; onBattery: boolean;
+  /** A Decision service is set up on this Desktop: its Bots can be published with auto-reply. */
+  decisionConfigured: boolean }
 /** One read-only file or Skill a Bot is published with. Its text stays on the maintainer's Desktop. */
 export interface PublishedKnowledgeDocument { resourceId: string; revision: number; kind: 'file' | 'skill'; name: string; sha256: string; bytes: number }
 /** What a Bot is published with, as its maintainer's Desktop holds it: the role and the shared files of publication `revision`. */
@@ -131,5 +140,7 @@ export interface PublishLocalBotInput extends ExecutionScope {
   replacedResources?: Record<string, string>;
   /** Give the Bot a shared list: its title, and what the Bot is told the list is for. With `approval: 'requester'` the Bot asks the member it works for before each change. */
   sharedList?: { title: string; description: string; approval?: 'none' | 'requester' };
+  /** Let the Bot answer messages nobody asked it about, at most `daily` runs a day. Needs a Decision service on this Desktop. */
+  autoReply?: { daily: number };
 }
 export const sharedBotUsable = (card: SharedBotCard): boolean => card.state === 'published' && card.permitted;

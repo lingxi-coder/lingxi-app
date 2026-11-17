@@ -89,8 +89,18 @@ function taskView(task, now) {
     ...(state === 'waiting' ? { wait: { waitId: task.currentWaitId, kind: task.currentWaitKind ?? 'human_input', recipient: task.requester,
       expiresAt: task.deadline, messageId: questionIds(task.taskId, task.currentWaitId).messageId } } : {}),
     ...(task.replyId ? { replyId: task.replyId } : {}), ...(task.artifactId ? { artifactId: task.artifactId } : {}),
-    ...(task.usage ? { usage: task.usage } : {}) };
+    ...(task.usage ? { usage: task.usage } : {}), ...(task.optional ? { optional: true } : {}) };
 }
+/** A queued task for one Bot, admitted in the transaction that writes its trigger message. */
+function queuedTask({ sharedBotId, taskId, conversationId, messageId, changeId, seq, requester, bot, lockUntil, now, optional }) {
+  return { schemaVersion: 1, executionVersion: 2, sharedBotId, taskId, conversationId, messageId, changeId, messageSeq: seq,
+    requester, botRevision: bot.identity.revision, deploymentId: bot.identity.activeDeploymentId, maintainer: bot.identity.maintainer,
+    state: 'queued', createdAt: now, deadline: Math.max(now, lockUntil) + queueMs, inputGrantIds: bot.grants.map(g => g.grantId),
+    epoch: 0, attemptStartedAt: 0, activeBudgetMs: 300000, activeSpentMs: 0, physicalDispatchesSpent: 0,
+    rootTaskId: taskId, operationCount: 0, unverifiedOperations: 0, ...(optional ? { optional: true } : {}) };
+}
+/** An optional task in a group or channel: nobody there asked its Bot, so what the Bot does not say is not shown. */
+const unasked = (task, conversation) => task.optional === true && conversation?.kind !== 'bot_dm';
 
 /** Execution 2 only. This store reuses the Team membership and message database;
  * all admission/receipt/quota changes commit with their human message. It never
@@ -166,6 +176,8 @@ export class SharedBotsStore {
       else if (action === 'listArtifactRevisions') response = await this.artifactRevisions(context);
       else if (action === 'reviseArtifact') response = await this.reviseArtifact(context);
       else if (action === 'setConversationPolicy') response = await this.conversationPolicy(context);
+      else if (action === 'setConversationAutoReply') response = await this.conversationAutoReply(context);
+      else if (action === 'declineTask') response = await this.decline(context);
       else if (action === 'createUpload') response = await createUpload(this, context);
       else if (action === 'putUploadPart') response = await putUploadPart(this, context);
       else if (action === 'finalizeUpload') response = await finalizeUpload(this, context);
@@ -186,6 +198,8 @@ export class SharedBotsStore {
     }, { maxAttempts: 20 });
   }
   async publish({ tx, team, identity, command: { payload: p }, now, service }) {
+    // A service's callers do not share Chats with each other: there is nothing to answer unasked.
+    if (service && p.autoReply) deny(400, 'AUTO_REPLY_UNSUPPORTED');
     const ref = team.collection('sharedBots').doc(p.sharedBotId), existing = (await tx.get(ref)).data();
     if (existing && !ownerOf(existing, identity)) deny(403, 'MAINTAINER_REQUIRED');
     if ((existing?.identity.revision ?? 0) !== p.expectedRevision) deny(409, 'BOT_REVISION_CONFLICT');
@@ -224,7 +238,7 @@ export class SharedBotsStore {
     // One data identity per Bot: publishing again never replaces the items.
     const listRef = team.collection('lists').doc(p.sharedBotId), newList = !!p.sharedList && !(await tx.get(listRef)).exists;
     tx.set(ref, { identity: identityRecord, name: p.name, description: p.description, grants, quotas: p.quotas,
-      sharedList: p.sharedList ?? null, publishedAt: now });
+      sharedList: p.sharedList ?? null, autoReply: p.autoReply ?? null, publishedAt: now });
     if (newList) tx.create(listRef, { schemaVersion: 1, listId: p.sharedBotId, dataRevision: 0, items: [], nextItem: 1, updatedAt: now });
     handover.end('cancelled', now, 'republished');
     tx.set(deploymentRef, { ...d, ready: false, onlineUntil: 0 });
@@ -248,6 +262,7 @@ export class SharedBotsStore {
         permitted: activeOwner && identityPermitted(b, identity), ready: activeOwner && b.identity.state === 'published' && !!d?.ready && d.enabled && d.onlineUntil > now,
         maintainer: b.identity.maintainer, usePolicy: b.identity.usePolicy, state: b.identity.state,
         onlineUntil: d?.onlineUntil ?? 0, quotas: b.quotas, ...(b.sharedList ? { sharedList: { title: b.sharedList.title, ...(b.sharedList.approval === 'requester' ? { approval: 'requester' } : {}) } } : {}),
+        ...(b.autoReply ? { autoReply: { daily: b.autoReply.daily } } : {}),
         ...(activeOwner && handovers.has(doc.id) ? { transfer: handovers.get(doc.id) } : {}),
         ...(ownerOf(b, identity) && d ? { instanceId: d.instanceId } : {}) }];
     }) };
@@ -477,6 +492,9 @@ export class SharedBotsStore {
     // A request queued behind a live lock (running or waiting) must outlive it.
     const locks = await all(p.targets.map(id => team.collection('chatExecutionLocks').doc(hash([id, p.conversationId]))));
     for (const [i, snapshot] of quotas.entries()) if ((snapshot.data()?.used ?? 0) + increments[i] > limits[i]) deny(429, 'REQUEST_QUOTA_EXCEEDED');
+    // In a Bot DM every message asks the Bot; with auto-reply on there, the Bot may still decide that one needs no answer.
+    const dmOptional = c.kind === 'bot_dm' && !!c.autoReply?.targets.includes(c.sharedBotId) && !!bots[0]?.data().autoReply;
+    const unaskedTasks = await this.optionalTasks(tx, team, c, p, identity, p.targets, now);
     const seq = c.lastSeq + 1, changeSeq = c.lastChangeSeq + 1;
     if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) deny(409, 'CURSOR_LIMIT');
     const tasks = p.targets.map(sharedBotId => ({ sharedBotId, taskId: admissionId(p.messageId, sharedBotId) }));
@@ -493,16 +511,42 @@ export class SharedBotsStore {
       // A message of files alone is listed by their names.
       lastMessage: { id: p.messageId, seq, at, author, preview: messagePreview(p.text || files.attachments.map(file => file.name).join(', ')) } });
     for (const [i, target] of tasks.entries()) {
-      const b = bots[i].data();
-      tx.create(team.collection('tasks').doc(target.taskId), { schemaVersion: 1, executionVersion: 2, ...target,
-        conversationId: p.conversationId, messageId: p.messageId, changeId: p.changeId, messageSeq: seq,
-        requester: identity, botRevision: b.identity.revision, deploymentId: b.identity.activeDeploymentId, maintainer: b.identity.maintainer,
-        state: 'queued', createdAt: now, deadline: Math.max(now, locks[i].data()?.until ?? 0) + queueMs, inputGrantIds: b.grants.map(g => g.grantId),
-        epoch: 0, attemptStartedAt: 0, activeBudgetMs: 300000, activeSpentMs: 0, physicalDispatchesSpent: 0,
-        rootTaskId: target.taskId, operationCount: 0, unverifiedOperations: 0 });
+      tx.create(team.collection('tasks').doc(target.taskId), queuedTask({ ...target, conversationId: p.conversationId, messageId: p.messageId,
+        changeId: p.changeId, seq, requester: identity, bot: bots[i].data(), lockUntil: locks[i].data()?.until ?? 0, now, optional: dmOptional }));
     }
+    unaskedTasks.write(seq);
     for (const [i, quotaRef] of quotaRefs.entries()) tx.set(quotaRef, { day, used: (quotas[i].data()?.used ?? 0) + increments[i], limit: limits[i] });
     return response;
+  }
+  /**
+   * A member's new message in a group or channel also goes to each Bot of the Chat with auto-reply on that it did not
+   * ask: as an optional task, whose host decides whether the Bot answers. It is checked like an asked task, but a Bot that
+   * fails a check is left out instead of refusing the message. Nothing is charged here; a run is charged when it starts.
+   * Reads only, so it runs before the message is written; `write` creates the tasks in the same transaction.
+   */
+  async optionalTasks(tx, team, c, { conversationId, messageId, changeId }, identity, asked, now) {
+    const ids = ['group', 'channel'].includes(c.kind) ? (c.autoReply?.targets ?? []).filter(id => !asked.includes(id)
+      && c.participants.includes(`shared_bot:${id}`) && (!c.executionPolicy || c.executionPolicy.targets.includes(id))) : [];
+    if (!ids.length) return { write() {} };
+    const all = refs => tx.getAll(...refs);
+    const bots = await all(ids.map(id => team.collection('sharedBots').doc(id)));
+    const owners = await all(bots.map(doc => team.collection('members').doc(doc.data()?.identity.maintainer.uid ?? '_missing')));
+    const deployments = await all(bots.map(doc => team.collection('deployments').doc(doc.data()?.identity.activeDeploymentId ?? '_missing')));
+    const locks = await all(ids.map(id => team.collection('chatExecutionLocks').doc(hash([id, conversationId]))));
+    const admitted = ids.filter((_, i) => {
+      const bot = bots[i].data(), d = deployments[i].data();
+      return !!bot?.autoReply && bot.identity.state === 'published' && identityPermitted(bot, identity)
+        && owners[i].data()?.generation === bot.identity.maintainer.generation && c.memberUids.includes(bot.identity.maintainer.uid)
+        && !!d?.enabled && d.ready && d.onlineUntil > now && bot.grants.every(grant => this.grantPermits(grant, identity));
+    });
+    return { write: seq => {
+      for (const sharedBotId of admitted) {
+        const i = ids.indexOf(sharedBotId), taskId = admissionId(messageId, sharedBotId);
+        tx.create(team.collection('tasks').doc(taskId), queuedTask({ sharedBotId, taskId, conversationId, messageId, changeId, seq,
+          requester: identity, bot: bots[i].data(), lockUntil: locks[i].data()?.until ?? 0, now, optional: true }));
+        tx.set(team.collection('signals').doc(sharedBotId), { updatedAt: new Date(now) });
+      }
+    } };
   }
   grantPermits(grant, identity) {
     // all-current-member grants remain usable after unrelated new members join,
@@ -534,7 +578,7 @@ export class SharedBotsStore {
     const conversation = await this.validateTask(tx, team, task);
     if (action === 'validateTask' && !await this.sourceWatermarkCurrent(tx, conversation, task, p.expectedLastChangeSeq)) deny(409, 'SOURCE_CHANGED');
     return { task: taskView(task, now), messageId: task.messageId, messageSeq: task.messageSeq,
-      inputs: bot.grants, deployment, sourceLastChangeSeq: conversation.data().lastChangeSeq };
+      inputs: bot.grants, deployment, sourceLastChangeSeq: conversation.data().lastChangeSeq, conversationKind: conversation.data().kind };
   }
   async sourceWatermarkCurrent(tx, conversation, task, watermark) {
     const current = conversation.data().lastChangeSeq;
@@ -560,6 +604,8 @@ export class SharedBotsStore {
     if (member.data()?.generation !== task.requester.generation || !conversation.data()?.memberUids.includes(task.requester.uid)
       || !conversation.data().participants.includes(`shared_bot:${task.sharedBotId}`)
       || (conversation.data().executionPolicy && !conversation.data().executionPolicy.targets.includes(task.sharedBotId))
+      // An optional task stands only while the Chat still lets its Bot answer unasked.
+      || (task.optional && !conversation.data().autoReply?.targets.includes(task.sharedBotId))
       || message.data()?.recalled || message.data()?.changeId !== task.changeId) deny(403, 'TASK_REVOKED');
     return conversation;
   }
@@ -579,7 +625,7 @@ export class SharedBotsStore {
       .where('conversationId', '==', task.conversationId).where('state', '==', 'queued')
       .where('deadline', '>', now).where('messageSeq', '<', task.messageSeq).limit(1));
     const free = !(lock && lock.until > now && lock.taskId !== task.taskId) && earlier.empty;
-    return { lockRef, lock, free };
+    return { lockRef, lock, free, conversation };
   }
   async start({ tx, team, identity, command: { payload: p }, now }) {
     const { deployment, bot } = await this.checkHost(tx, team, identity, p);
@@ -588,9 +634,22 @@ export class SharedBotsStore {
     if (task.state !== 'queued' || task.epoch >= 1) return { execute: false, taskId: p.taskId };
     if (task.deadline <= now) { tx.update(ref, { state: 'expired' }); return { execute: false, taskId: p.taskId }; }
     if (task.botRevision !== bot.identity.revision) deny(403, 'TASK_REVOKED');
-    const { lockRef, free } = await this.admitRun(tx, team, task, bot, deployment, p.expectedLastChangeSeq, now);
+    const { lockRef, free, conversation } = await this.admitRun(tx, team, task, bot, deployment, p.expectedLastChangeSeq, now);
     if (!free) return { execute: false, taskId: p.taskId };
+    // Unasked runs in groups and channels count against the Bot's own daily limit, not anyone's request quota.
+    let charge = () => {};
+    if (unasked(task, conversation.data())) {
+      const day = nowDay(now), quotaRef = team.collection('requestQuotas').doc(hash([day, 'auto', task.sharedBotId]));
+      const used = (await tx.get(quotaRef)).data()?.used ?? 0, limit = bot.autoReply?.daily ?? 0;
+      if (used + 1 > limit) {
+        tx.update(ref, { state: 'declined', declineReason: 'quota', finishedAt: now });
+        tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
+        return { execute: false, taskId: p.taskId, state: 'declined' };
+      }
+      charge = () => tx.set(quotaRef, { day, used: used + 1, limit });
+    }
     const permitId = randomId(), deadline = now + task.activeBudgetMs;
+    charge();
     tx.set(lockRef, { taskId: p.taskId, until: deadline });
     const started = { state: 'running', startedAt: now, attemptStartedAt: now, epoch: 1, deadline, permitDigest: hash(permitId),
       hostId: p.hostId, accountEpoch: p.accountEpoch, inputLastChangeSeq: p.expectedLastChangeSeq };
@@ -702,6 +761,15 @@ export class SharedBotsStore {
       if (lock?.taskId === p.taskId) tx.delete(lockRef);
       return { taskId: task.taskId, state: 'cancelled', replyId: null, artifactId: null };
     }
+    if (p.outcome === 'declined') {
+      if (!task.optional) deny(400, 'TASK_NOT_OPTIONAL');
+      // The Bot chose silence: usage is recorded and nothing is posted.
+      const state = task.unverifiedOperations > 0 ? 'needs_reconciliation' : 'declined';
+      tx.update(ref, { state, resultDigest, replyId: null, artifactId: null, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now,
+        declineReason: 'model', ...(state === 'declined' ? {} : { reconciledState: 'declined' }) });
+      if (lock?.taskId === p.taskId) tx.delete(lockRef);
+      return { taskId: task.taskId, state, replyId: null, artifactId: null };
+    }
     const gate = await this.outputGate(tx, team, task, bot, p), { readers, sourceCurrent } = gate;
     const replyId = botId([p.taskId, 'reply']), changeId = botId([p.taskId, 'reply-change']);
     // A revision is saved only onto the revision the Bot read, of a document of this Bot in this Chat whose readers are
@@ -711,10 +779,12 @@ export class SharedBotsStore {
       || base.botRevision !== task.botRevision || !same(byUid(base.readers), byUid(readers)) || base.revision !== p.revises.expectedRevision
       || base.revision >= revisionLimit || base.digest === hash(p.document));
     const allowed = gate.allowed && !stale;
+    // Nobody asked an unasked run: a failure or a refusal is recorded on the task and not posted.
+    const silent = unasked(task, gate.c) && !(allowed && p.outcome === 'completed');
     // Shown on the reply as its sources, and kept on the task as the record of what the model was given.
     const read = allowed && p.outcome === 'completed' ? await taskFiles(tx, team, task, p.readFiles) : [];
-    const artifactId = !allowed || !p.document ? null : p.revises ? p.revises.artifactId : hash([p.taskId, 'document']);
-    this.botMessage(tx, gate, task, bot, identity, now, { messageId: replyId, changeId,
+    const artifactId = silent || !allowed || !p.document ? null : p.revises ? p.revises.artifactId : hash([p.taskId, 'document']);
+    if (!silent) this.botMessage(tx, gate, task, bot, identity, now, { messageId: replyId, changeId,
       text: allowed ? p.text : stale ? '文档已被修改或不可用，本次修改未保存。请重新提问。' : gate.refusal,
       fields: { deliveryId: hash([task.taskId, 'delivery']), ...(artifactId ? { artifactId } : {}),
         ...(read.length ? { readFiles: read.map(({ attachmentId, name }) => ({ attachmentId, name })) } : {}) } });
@@ -732,11 +802,11 @@ export class SharedBotsStore {
     // A run that ends while an operation's outcome is unknown is not finished: a person has to check it first.
     const state = task.unverifiedOperations > 0 ? 'needs_reconciliation' : settled;
     // No restricted body, document or diagnostic trace is persisted in shared projections/receipts.
-    tx.update(ref, { state, resultDigest, replyId, artifactId, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now,
+    tx.update(ref, { state, resultDigest, replyId: silent ? null : replyId, artifactId, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now,
       ...(read.length ? { readFiles: read.map(({ attachmentId, sha256 }) => ({ attachmentId, sha256 })) } : {}),
       ...(state === settled ? {} : { reconciledState: settled }) });
     if (lock?.taskId === p.taskId) tx.delete(lockRef);
-    return { taskId: task.taskId, state, replyId, artifactId };
+    return { taskId: task.taskId, state, replyId: silent ? null : replyId, artifactId };
   }
   async pauseForWait({ tx, team, identity, command: { payload: p }, now }) {
     const { deployment, bot } = await this.checkHost(tx, team, identity, p);
@@ -1060,7 +1130,10 @@ export class SharedBotsStore {
     const page = await tx.get(query), visible = [];
     const docs = page.docs.slice(0, 100);
     const chats = docs.length ? await tx.getAll(...docs.map(doc => team.collection('conversations').doc(doc.data().conversationId))) : [];
-    for (const [i, doc] of docs.entries()) if (chats[i].data()?.memberUids.includes(identity.uid)) visible.push(taskView(doc.data(), now));
+    for (const [i, doc] of docs.entries()) {
+      // An unasked run is shown once it has answered; until then, and when it stays silent, nobody asked to see it.
+      if (chats[i].data()?.memberUids.includes(identity.uid) && !(unasked(doc.data(), chats[i].data()) && !doc.data().replyId)) visible.push(taskView(doc.data(), now));
+    }
     return { tasks: visible, next: page.size > 100 ? docs.at(-1).id : null };
   }
   /** A member reads a shared document only while they are one of its readers, still read its Chat, and may see every input of the Bot. */
@@ -1111,6 +1184,29 @@ export class SharedBotsStore {
     tx.create(operationRef, { schemaVersion: 1, operationId: p.operationId, revision, digest, expectedRevision: p.expectedRevision, author: identity, createdAt: now });
     tx.set(team.collection('signals').doc(artifact.sharedBotId), { updatedAt: new Date(now) });
     return { artifactId: p.artifactId, revision, digest };
+  }
+  /** The host leaves an optional task unanswered before it starts. The same decline again is answered from its receipt. */
+  async decline({ tx, team, identity, command: { payload: p }, now }) {
+    await this.checkHost(tx, team, identity, p);
+    const ref = team.collection('tasks').doc(p.taskId), task = (await tx.get(ref)).data();
+    if (!task || task.deploymentId !== p.deploymentId) deny(404, 'TASK_REQUIRED');
+    if (!task.optional) deny(409, 'TASK_NOT_OPTIONAL');
+    if (task.state === 'declined') return { taskId: p.taskId, state: 'declined' };
+    if (task.state !== 'queued' || task.epoch !== 0) deny(409, 'TASK_ALREADY_STARTED');
+    tx.update(ref, { state: 'declined', declineReason: p.reason, finishedAt: now });
+    tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
+    return { taskId: p.taskId, state: 'declined' };
+  }
+  /** Any member taking part in the Chat chooses which of its Bots may answer unasked; each Bot must allow it itself. */
+  async conversationAutoReply({ tx, team, identity, command: { payload: p } }) {
+    const { ref, value } = await this.conversation(tx, team, p.conversationId, identity, true);
+    if ((value.autoReply?.revision ?? 0) !== p.expectedRevision) deny(409, 'AUTO_REPLY_REVISION_CONFLICT');
+    if (p.targets.some(id => !value.participants.includes(`shared_bot:${id}`))) deny(403, 'BOT_PARTICIPANT_REQUIRED');
+    const bots = p.targets.length ? await tx.getAll(...p.targets.map(id => team.collection('sharedBots').doc(id))) : [];
+    if (bots.some(doc => !doc.data()?.autoReply || doc.data().identity.state !== 'published')) deny(409, 'AUTO_REPLY_UNAVAILABLE');
+    const revision = p.expectedRevision + 1;
+    tx.update(ref, { autoReply: { revision, targets: p.targets } });
+    return { revision };
   }
   async conversationPolicy({ tx, team, self, identity, command: { payload: p } }) {
     if (!['owner', 'admin'].includes(self.role)) deny(403, 'MANAGER_REQUIRED');

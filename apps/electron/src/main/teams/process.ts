@@ -20,6 +20,8 @@ export interface TeamHostBootstrap {
   /** Offer the Bot its shared list (`run` and `continue`): the title, and what the Bot is told the list is for.
    * With `approval: 'requester'` the Bot can only propose a change and the task waits for the requester's decision; this needs `askRequester`. */
   sharedList?: { title: string; description: string; approval?: 'requester' };
+  /** Nobody asked the Bot for this task (`run` and `continue`): offer it the tool that leaves the message unanswered. */
+  mayDecline?: boolean;
   knowledge?: Array<{ id: string; title: string; text: string }>;
   deadlineAt?: number; model?: Omit<TeamModelRoute, 'credential_id'>; credentials?: ProviderAccountEnvelope;
   limits?: { max_turns: number; context_window_tokens: number; output_tokens_per_request: number; physical_dispatches: number };
@@ -27,7 +29,8 @@ export interface TeamHostBootstrap {
 /** What a paused task is blocked on, as the runtime's durable checkpoint names it: a question, or (`tool_approval`) a proposed list change, whose `question` is that change as JSON. */
 export interface TeamTaskWait { waitId: string; kind: 'human_input' | 'tool_approval'; logicalStepId: string; question: string; requestDigest: string }
 export interface TeamRunResult {
-  status: 'inspected' | 'not_found' | 'completed' | 'failed' | 'waiting'; cursor: BotChatCursor; text?: string; finishedAt?: number;
+  /** `declined`: the Bot chose not to answer; `text` is empty and there is no document. */
+  status: 'inspected' | 'not_found' | 'completed' | 'failed' | 'waiting' | 'declined'; cursor: BotChatCursor; text?: string; finishedAt?: number;
   document?: { operationId: string; deliveryId: string; title: string; markdown: string; sha256: string };
   /** `dispatchedRequests` counts every attempt of the task, `attemptDispatchedRequests` this process only. */
   dispatchedRequests?: number; attemptDispatchedRequests?: number; deniedTools?: number; usage?: TaskUsage;
@@ -151,8 +154,8 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
         })();
         requests.add(request); void request.catch(() => finish(new Error('TEAM_HOST_PROTOCOL'))).finally(() => requests.delete(request));
       } else if (value.type === 'result') {
-        const kind = options.bootstrap.type, allowed = kind === 'inspect_scope' ? ['inspected'] : kind === 'inspect_result' ? ['not_found','completed','failed'] : kind === 'inspect_task' ? ['task_checkpoint']
-          : options.bootstrap.askRequester === true ? ['completed','failed','waiting'] : ['completed','failed'];
+        const kind = options.bootstrap.type, allowed = kind === 'inspect_scope' ? ['inspected'] : kind === 'inspect_result' ? ['not_found','completed','failed','declined'] : kind === 'inspect_task' ? ['task_checkpoint']
+          : [...(options.bootstrap.askRequester === true ? ['completed','failed','waiting'] : ['completed','failed']), ...(options.bootstrap.mayDecline === true ? ['declined'] : [])];
         if (typeof value.status !== 'string' || !allowed.includes(value.status)) throw new Error('TEAM_HOST_PROTOCOL');
         if (value.status === 'task_checkpoint') {
           exact(value,['version','type','status','taskId','phase','cursor','attempts','dispatchesObserved','pendingToolCalls','continuable','checkpointDigest'],['reason','wait']);
@@ -171,7 +174,8 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
         // A result recorded by an earlier runtime has no per-attempt count.
         else exact(value,['version','type','status','cursor','text','finishedAt','dispatchedRequests','deniedTools','usage'],['document','attemptDispatchedRequests']);
         if (!cursor(value.cursor)
-          || (['completed','failed'].includes(value.status) && (typeof value.text !== 'string' || Buffer.byteLength(value.text) > 8192 || !Number.isSafeInteger(value.finishedAt)))
+          || (['completed','failed','declined'].includes(value.status) && (typeof value.text !== 'string' || Buffer.byteLength(value.text) > 8192 || !Number.isSafeInteger(value.finishedAt)))
+          || (value.status === 'declined' && (value.text !== '' || value.document !== undefined))
           || (value.document !== undefined && (!object(value.document) || typeof value.document.markdown !== 'string' || Buffer.byteLength(value.document.markdown) > 256 * 1024))) throw new Error('TEAM_HOST_PROTOCOL');
         if (value.cursor.sessionRevision === 0 ? value.cursor.scope !== null : JSON.stringify(value.cursor.scope) !== JSON.stringify(options.bootstrap.scope)) throw new Error('TEAM_HOST_PROTOCOL');
         if (value.document !== undefined) {

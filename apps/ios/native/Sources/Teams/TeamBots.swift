@@ -3,6 +3,7 @@ import Foundation
 struct TeamMemberRef: Codable, Equatable, Sendable { let uid: String; let generation: Int }
 struct TeamUsePolicy: Codable, Equatable, Sendable { let mode: String; var members: [TeamMemberRef]? }
 struct TeamRequestQuotas: Codable, Equatable, Sendable { let team: Int; let member: Int; let bot: Int }
+struct TeamBotAutoReply: Decodable, Equatable, Sendable { let daily: Int }
 struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
     let sharedBotId: String
     let name: String
@@ -18,6 +19,8 @@ struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
     let instanceId: String?
     /// The list this Bot shares with the people who may use it, when it shares one.
     var sharedList: TeamBotListInfo? = nil
+    /// Present when the maintainer published the Bot to judge for itself whether to answer: `daily` caps those answers per UTC day.
+    var autoReply: TeamBotAutoReply? = nil
     var id: String { sharedBotId }
     var selectable: Bool { state == "published" && permitted }
     var avatarId: String { sharedBotId }
@@ -213,7 +216,7 @@ enum TeamExecutionContract {
         case "pauseSharedBot":
             try shape(["sharedBotId", "expectedRevision"]); try id("sharedBotId")
             guard integer(payload["expectedRevision"], minimum: 1) != nil else { try fail() }
-        case "setConversationPolicy":
+        case "setConversationPolicy", "setConversationAutoReply":
             try shape(["conversationId", "expectedRevision", "targets"]); try id("conversationId"); try ids("targets", minimum: 0)
             guard integer(payload["expectedRevision"], minimum: 0) != nil else { try fail() }
         case "submit":
@@ -258,5 +261,22 @@ enum TeamExecutionContract {
         guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
         let value = number.doubleValue
         return value.isFinite && value.rounded(.towardZero) == value && value >= minimum && value <= 9_007_199_254_740_991 ? value : nil
+    }
+}
+
+/// Which Bots of a Chat judge for themselves whether to answer its messages. Any person in a group, channel or Bot DM may change it.
+enum TeamAutoReply {
+    static let kinds: Set<String> = ["group", "channel", "bot_dm"]
+    /// The Bots that can be switched on (published to answer on their own), and those already on, which can always be switched off.
+    static func bots(_ conversation: TeamMessageConversation, cards: [TeamBotCard], uid: String) -> (bots: [TeamBotCard], on: [String]) {
+        guard kinds.contains(conversation.kind), conversation.participants.contains("user:" + uid) else { return ([], []) }
+        let on = conversation.autoReply?.targets ?? []
+        let bots = cards.filter { card in conversation.participants.contains("shared_bot:" + card.sharedBotId) && (on.contains(card.sharedBotId) || available(card)) }
+        return (bots, on.filter { id in bots.contains { $0.sharedBotId == id } })
+    }
+    static func available(_ card: TeamBotCard) -> Bool { card.state == "published" && card.autoReply != nil }
+    /// The setting after one Bot is switched, in the Chat's Bot order.
+    static func targets(_ bots: [TeamBotCard], on: [String], switching id: String, to enabled: Bool) -> [String] {
+        bots.map(\.sharedBotId).filter { $0 == id ? enabled : on.contains($0) }
     }
 }

@@ -83,8 +83,13 @@ enum TeamsPointerParser {
         default: throw invalid()
         }
         let last = try parseLastMessage(present: data.keys.contains("lastMessage"), value: data["lastMessage"], millis: millis)
+        // An unreadable setting reads as off: it must not hide the conversation.
+        let auto = (data["autoReply"] as? [String: Any]).flatMap { value -> TeamConversationAutoReply? in
+            guard let revision = safeInteger(value["revision"]), let targets = value["targets"] as? [String] else { return nil }
+            return TeamConversationAutoReply(revision: revision, targets: targets)
+        }
         return TeamMessageConversation(id: id, kind: kind, title: title, participants: participants, lastSeq: lastSeq, lastChangeSeq: lastChangeSeq,
-                                       lastReadSeq: lastReadSeq, sharedBotId: sharedBotId, lastMessage: last, readers: data["memberUids"] as? [String])
+                                       lastReadSeq: lastReadSeq, sharedBotId: sharedBotId, lastMessage: last, readers: data["memberUids"] as? [String], autoReply: auto)
     }
 
     /// An integer in the JavaScript safe range. A Firestore double with an integral value is accepted; a

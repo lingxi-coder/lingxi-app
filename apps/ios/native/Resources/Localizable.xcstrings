@@ -95282,6 +95282,210 @@
         }
       }
     },
+    "teams_auto_reply_disclosure %@ %@ %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开启后，此会话的新消息会发送给 %@ 为 %@ 配置的判断服务和模型。它每天最多自主回复 %lld 次。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "開啟後，此會話的新訊息會傳送給 %@ 為 %@ 設定的判斷服務和模型。它每天最多自主回覆 %lld 次。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New messages in this chat are sent to the Decision service and model that %@ set up for %@. It answers on its own at most %lld times a day."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "オンにすると、このチャットの新しいメッセージは %@ が %@ 用に設定した判断サービスとモデルに送られます。自分での返信は 1 日最大 %lld 回です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "켜면 이 채팅의 새 메시지가 %@ 님이 %@ 용으로 설정한 판단 서비스와 모델로 전송됩니다. 스스로 답장은 하루 최대 %lld회입니다."
+          }
+        }
+      }
+    },
+    "teams_auto_reply_disclosure_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开启后，此会话的新消息会发送给 %1$s 为 %2$s 配置的判断服务和模型。它每天最多自主回复 %3$d 次。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "開啟後，此會話的新訊息會傳送給 %1$s 為 %2$s 設定的判斷服務和模型。它每天最多自主回覆 %3$d 次。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New messages in this chat are sent to the Decision service and model that %1$s set up for %2$s. It answers on its own at most %3$d times a day."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "オンにすると、このチャットの新しいメッセージは %1$s が %2$s 用に設定した判断サービスとモデルに送られます。自分での返信は 1 日最大 %3$d 回です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "켜면 이 채팅의 새 메시지가 %1$s 님이 %2$s 용으로 설정한 판단 서비스와 모델로 전송됩니다. 스스로 답장은 하루 최대 %3$d회입니다."
+          }
+        }
+      }
+    },
+    "teams_auto_reply_note": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在此开启的 Bot 会读取此会话的每条新消息，并在判断需要时主动回复，无需被点名。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在此開啟的 Bot 會讀取此會話的每則新訊息，並在判斷需要時主動回覆，無需被點名。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A Bot turned on here reads every new message in this chat and answers when it judges a reply is wanted, without being asked."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ここでオンにした Bot は、このチャットの新しいメッセージをすべて読み、返信が必要と判断したときに呼ばれなくても返信します。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "여기서 켠 Bot은 이 채팅의 새 메시지를 모두 읽고, 답장이 필요하다고 판단하면 요청 없이도 답장합니다."
+          }
+        }
+      }
+    },
+    "teams_auto_reply_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自主回复的 Bot"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自主回覆的 Bot"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bots that answer on their own"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自分で返信する Bot"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "스스로 답장하는 Bot"
+          }
+        }
+      }
+    },
+    "teams_auto_reply_unavailable %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 已不再支持自主回复，可在此关闭。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 已不再支援自主回覆，可在此關閉。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ no longer answers on its own. Turn it off here."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ は自分で返信しなくなりました。ここでオフにしてください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@은(는) 더 이상 스스로 답장하지 않습니다. 여기서 끄세요."
+          }
+        }
+      }
+    },
+    "teams_auto_reply_unavailable_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s 已不再支持自主回复，可在此关闭。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s 已不再支援自主回覆，可在此關閉。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s no longer answers on its own. Turn it off here."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s は自分で返信しなくなりました。ここでオフにしてください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s은(는) 더 이상 스스로 답장하지 않습니다. 여기서 끄세요."
+          }
+        }
+      }
+    },
     "teams_bot_disabled": {
       "localizations": {
         "zh-Hans": {
@@ -105966,6 +106170,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "취소 중…"
+          }
+        }
+      }
+    },
+    "teams_task_declined": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未回复"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未回覆"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Did not reply"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "返信なし"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "답장 안 함"
           }
         }
       }

@@ -165,6 +165,78 @@
       }
     },
     {
+      "name": "valid-setConversationAutoReply",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 0,
+          "targets": [
+            "sharedbot_01"
+          ]
+        }
+      }
+    },
+    {
+      "name": "valid-setConversationAutoReply-off",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": []
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationAutoReply-duplicate",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 0,
+          "targets": [
+            "sharedbot_01",
+            "sharedbot_01"
+          ]
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationAutoReply-unknown-payload",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 0,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "daily": 5
+        }
+      }
+    },
+    {
       "name": "reject-old-action",
       "valid": false,
       "input": {

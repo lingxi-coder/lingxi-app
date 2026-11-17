@@ -143,7 +143,21 @@ test('all Bots read the service data session, including current ACL and account 
 });
 test('public message boundary rejects retired execution and private host commands',async()=>{
  const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'',onChanged:()=>()=>{}},{});
- for(const action of ['bindBot','claimBot','startBot','finishBot','botQueue','prepareTask','startTask','heartbeatDeployment'])await assert.rejects(service.messages({teamId,generation:1,action} as any,'owner'),/INVALID_INPUT/);service.close();
+ for(const action of ['bindBot','claimBot','startBot','finishBot','botQueue','publishSharedBot','prepareTask','validateTask','startTask','completeTask','pauseTask','continueTask','heartbeatDeployment','activateDeployment','listHostTasks',
+  'readTaskList','recordOperation','writeTaskList','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer'])await assert.rejects(service.messages({schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{}} as any,'owner'),/INVALID_INPUT/);service.close();
+});
+test('the real private TeamsService forwards every connector command while rejecting unknown actions and stale accounts',async t=>{
+ let uid='owner',epoch=0,notify=()=>{},requests=0;const service=new TeamsService({snapshot:()=>({user:{uid}}),sessionEpoch:()=>epoch,getIdToken:async()=>'synthetic-token',onChanged:cb=>{notify=cb;return()=>{};}},{});t.after(()=>service.close());
+ (service as any).connect=async()=>({db:{}});(service as any).sdk={collection:()=>({}),onSnapshot:()=>()=>{}};
+ const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});let sent:any,moveAccount=false;
+ globalThis.fetch=(async(_url,init)=>{requests++;sent=JSON.parse(String(init?.body));if(moveAccount){uid='other';epoch++;notify();}return new Response(JSON.stringify({forwarded:true}),{status:200});}) as typeof fetch;
+ const context=service.hostContext()!,actions=['listSharedBots','publishSharedBot','heartbeatDeployment','activateDeployment','listHostTasks','prepareTask','validateTask','startTask','completeTask','pauseTask','continueTask','getTask',
+  'readTaskList','recordOperation','writeTaskList','readAttachmentPart','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer'];
+ for(const action of actions){const command={schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{synthetic:'preserved'}};assert.deepEqual(await service.hostMessages(context,command),{forwarded:true},action);assert.deepEqual(sent,command);}
+ assert.equal(requests,actions.length);for(const action of ['submit','answerWait','decideWait','cancelTask','writeList','setCustomClaim','unknown'])await assert.rejects(service.hostMessages(context,{schemaVersion:1,action}),/INVALID_INPUT/);
+ await assert.rejects(service.hostMessages(context,{schemaVersion:2,action:'readTaskList'}),/INVALID_INPUT/);assert.equal(requests,actions.length);
+ moveAccount=true;await assert.rejects(service.hostMessages(context,{schemaVersion:1,commandId:'command002',teamId,generation:1,action:'readTaskList',payload:{}}),/INVALID_SESSION/);
+ const before=requests;await assert.rejects(service.hostMessages(context,{schemaVersion:1,action:'readTaskList'}),/INVALID_SESSION/);assert.equal(requests,before);
 });
 test('scheduler is bounded at four and serializes the same Bot Chat',async t=>{
  const runs:TeamHostProcessOptions[]=[];const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};runs.push(o);return new Promise<TeamHostResult>((_resolve,reject)=>o.signal.addEventListener('abort',()=>reject(Error('abort')),{once:true}));});
@@ -1006,6 +1020,19 @@ function conversing(request:unknown,result:unknown,answered=true){const child=ne
  child.stdin.on('data',(data:Buffer)=>{for(const line of data.toString().split('\n').filter(Boolean))written.push(JSON.parse(line));
   if(written.length===1)setImmediate(()=>{emit(request);if(!answered)setTimeout(end,20);});else if(written.length===2)setImmediate(end);});
  return {spawn:()=>child,written};}
+test('a worker list read crosses the real TeamsService boundary and returns its actual API result',async t=>{
+ const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'synthetic-token',onChanged:()=>()=>{}},{});t.after(()=>service.close());
+ (service as any).connect=async()=>({db:{}});(service as any).sdk={};const context=service.hostContext()!,actions:string[]=[];
+ const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});const list={dataRevision:1,items:[milk]};
+ globalThis.fetch=(async(_url,init)=>{const command=JSON.parse(String(init?.body));actions.push(command.action);return new Response(JSON.stringify(command.action==='readTaskList'?list:{}),{status:200});}) as typeof fetch;
+ const scope={teamId,sharedBotId,conversationId,sessionEpoch:1},live={scope,sessionRevision:1,lastMessageSeq:2,lastChangeSeq:2,bootstrapFromSeq:0};
+ const result={version:3,type:'result',status:'completed',cursor:live,text:'Done',finishedAt:1,dispatchedRequests:1,deniedTools:0,usage:{status:'missing'}};
+ const process=conversing({version:3,type:'operation',id:'operation-1',tool:'list_read',arguments:{}},result),command=(action:string)=>service.hostMessages<any>(context,{schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{}});
+ const output=await runTeamHost({executable:'/mock',home:'/private-home',tmp:'/private-tmp',signal:new AbortController().signal,assertCurrent:()=>service.assertHostContext(context),spawnProcess:process.spawn,
+  bootstrap:{version:3,type:'run',storageRoot:'/private-root',workerExecutable:'/worker',scope,taskId:'task00001',sharedList:groceries},authorize:async()=>{await command('validateTask');},
+  operate:async()=>({established:true,succeeded:true,result:await command('readTaskList')})});
+ assert.equal(output.status,'completed');assert.deepEqual(actions,['validateTask','readTaskList']);assert.deepEqual(process.written[1],{version:3,type:'operation_result',id:'operation-1',established:true,succeeded:true,result:list});
+});
 test('the private process serves list operations only to a run that was offered the list, and says when an outcome is not established',async()=>{
  const scope={teamId,sharedBotId,conversationId,sessionEpoch:1},live={scope,sessionRevision:1,lastMessageSeq:2,lastChangeSeq:2,bootstrapFromSeq:0};
  const result={version:3,type:'result',status:'completed',cursor:live,text:'Done',finishedAt:1,dispatchedRequests:2,attemptDispatchedRequests:1,deniedTools:0,usage:{status:'missing'}};

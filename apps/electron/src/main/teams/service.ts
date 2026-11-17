@@ -264,7 +264,12 @@ export class TeamsService {
   }
   async hostMessages<T>(context: TeamAccountContext, command: Record<string, unknown>): Promise<T> {
     this.assertHostContext(context);
-    if (command.schemaVersion !== 1 || !['listSharedBots', 'publishSharedBot', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks', 'prepareTask', 'validateTask', 'startTask', 'completeTask', 'pauseTask', 'continueTask'].includes(command.action as string)) throw new Error('INVALID_INPUT');
+    if (command.schemaVersion !== 1 || ![
+      'listSharedBots', 'publishSharedBot', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks',
+      'prepareTask', 'validateTask', 'startTask', 'completeTask', 'pauseTask', 'continueTask', 'getTask',
+      'readTaskList', 'recordOperation', 'writeTaskList', 'readAttachmentPart',
+      'putTransferPart', 'offerTransfer', 'acceptTransfer', 'readTransferPart', 'completeTransfer',
+    ].includes(command.action as string)) throw new Error('INVALID_INPUT');
     const session = await this.connect(context.uid); this.assertHostContext(context);
     const { collection, onSnapshot } = this.sdk!;
     if (command.action === 'listHostTasks' && typeof command.teamId === 'string') {

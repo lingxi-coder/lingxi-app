@@ -35,6 +35,7 @@ export function buildTeamRuntime() {
     cwd: productRoot, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024,
   }));
   if (source.revision !== pinnedRevision() || (source.development && process.env.LINGXI_TEAM_RUNTIME_VALIDATION !== '1')) throw new Error('Team runtime requires the authoritative pinned Harness source');
+  if (process.env.LINGXI_TEAM_RUNTIME_REUSE === '1') return resolvePackagedTeamBinaries();
   // The product bridge and both private executables resolve the same immutable
   // Git SDK and share one target directory, feature graph and portable flags.
   const binaries = process.env.LINGXI_BRIDGE_SERVER_BIN ? TEAM_BINARIES : ['bridge-server', ...TEAM_BINARIES];

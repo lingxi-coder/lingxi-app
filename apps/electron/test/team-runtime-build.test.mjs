@@ -16,13 +16,14 @@ test('product builds share one locked graph and reject stale Team binary provena
     copyFileSync(join(product, file), join(fixture, file));
   }
   const revision = /harness-runtime\s*=\s*\{[^\n]*rev\s*=\s*"([a-f0-9]{40})"/u.exec(readFileSync(join(fixture, 'Cargo.toml'), 'utf8'))[1];
-  const variables = ['CARGO_TARGET_DIR', 'LINGXI_BRIDGE_SERVER_BIN', 'LINGXI_TEAM_RUNTIME_VALIDATION', 'PYTHON'];
+  const variables = ['CARGO_TARGET_DIR', 'LINGXI_BRIDGE_SERVER_BIN', 'LINGXI_TEAM_RUNTIME_VALIDATION', 'LINGXI_TEAM_RUNTIME_REUSE', 'PYTHON'];
   const previous = Object.fromEntries(variables.map(name => [name, process.env[name]]));
   context.after(() => { for (const name of variables) { if (previous[name] === undefined) delete process.env[name]; else process.env[name] = previous[name]; } });
   const output = join(fixture, 'isolated-target');
   process.env.CARGO_TARGET_DIR = output;
   delete process.env.LINGXI_BRIDGE_SERVER_BIN;
   delete process.env.LINGXI_TEAM_RUNTIME_VALIDATION;
+  delete process.env.LINGXI_TEAM_RUNTIME_REUSE;
   let source = { revision, development: false };
   const builds = [];
   context.mock.method(childProcess, 'execFileSync', (file, args, options) => {
@@ -54,4 +55,69 @@ test('product builds share one locked graph and reject stale Team binary provena
   runtime.buildTeamRuntime();
   delete process.env.LINGXI_TEAM_RUNTIME_VALIDATION;
   assert.throws(runtime.resolvePackagedTeamBinaries, /provenance/u);
+});
+
+test('explicit Team runtime reuse validates exact artifacts and never falls back to Cargo', async context => {
+  const product = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+  const fixture = realpathSync(mkdtempSync(join(tmpdir(), 'team-runtime-reuse-')));
+  context.after(() => rmSync(fixture, { recursive: true, force: true }));
+  for (const file of ['Cargo.toml', 'Cargo.lock', 'apps/bridge-server/Cargo.toml', 'apps/bridge-server/src/bin/team_host.rs', 'apps/bridge-server/src/bin/team_worker.rs', 'apps/electron/scripts/team-runtime.mjs']) {
+    mkdirSync(dirname(join(fixture, file)), { recursive: true });
+    copyFileSync(join(product, file), join(fixture, file));
+  }
+  const revision = /harness-runtime\s*=\s*\{[^\n]*rev\s*=\s*"([a-f0-9]{40})"/u.exec(readFileSync(join(fixture, 'Cargo.toml'), 'utf8'))[1];
+  const variables = ['CARGO_TARGET_DIR', 'LINGXI_TEAM_RUNTIME_VALIDATION', 'LINGXI_TEAM_RUNTIME_REUSE'];
+  const previous = Object.fromEntries(variables.map(name => [name, process.env[name]]));
+  context.after(() => { for (const name of variables) { if (previous[name] === undefined) delete process.env[name]; else process.env[name] = previous[name]; } });
+  const output = join(fixture, 'isolated-target');
+  process.env.CARGO_TARGET_DIR = output;
+  delete process.env.LINGXI_TEAM_RUNTIME_VALIDATION;
+  delete process.env.LINGXI_TEAM_RUNTIME_REUSE;
+  let source = { revision, development: false };
+  let builds = 0;
+  context.mock.method(childProcess, 'execFileSync', (file, args, options) => {
+    assert.equal(options.cwd, fixture);
+    if (file !== 'cargo') return JSON.stringify(source);
+    assert.notEqual(process.env.LINGXI_TEAM_RUNTIME_REUSE, '1', 'reuse must never invoke Cargo, including on validation failure');
+    builds++;
+    mkdirSync(join(output, 'release'), { recursive: true });
+    for (const name of ['harness-team-host', 'harness-team-worker']) writeFileSync(join(output, 'release', name), `synthetic ${name}`);
+  });
+  syncBuiltinESMExports();
+  context.after(() => { context.mock.restoreAll(); syncBuiltinESMExports(); });
+  const runtime = await import(pathToFileURL(join(fixture, 'apps/electron/scripts/team-runtime.mjs')).href);
+  runtime.buildTeamRuntime();
+  assert.equal(builds, 1);
+  process.env.LINGXI_TEAM_RUNTIME_REUSE = '1';
+  assert.deepEqual(runtime.buildTeamRuntime(), runtime.resolvePackagedTeamBinaries());
+  const provenanceFile = join(output, 'team-runtime-provenance.json');
+  const provenance = readFileSync(provenanceFile);
+  for (const change of [{ version: 1 }, { inputs: 'stale' }, { revision: '0'.repeat(40) }, { development: true }]) {
+    writeFileSync(provenanceFile, JSON.stringify({ ...JSON.parse(provenance), ...change }));
+    assert.throws(runtime.buildTeamRuntime, /provenance/u);
+  }
+  writeFileSync(provenanceFile, provenance);
+  const input = join(fixture, 'apps/bridge-server/src/bin/team_worker.rs'), originalInput = readFileSync(input);
+  writeFileSync(input, `${originalInput}\n// source changed\n`);
+  assert.throws(runtime.buildTeamRuntime, /provenance/u);
+  writeFileSync(input, originalInput);
+  for (const name of runtime.TEAM_BINARIES) {
+    const binary = join(output, 'release', name), original = readFileSync(binary);
+    writeFileSync(binary, 'tampered');
+    assert.throws(runtime.buildTeamRuntime, /changed/u);
+    rmSync(binary);
+    assert.throws(runtime.buildTeamRuntime, /changed/u);
+    writeFileSync(binary, original);
+  }
+  rmSync(provenanceFile);
+  assert.throws(runtime.buildTeamRuntime, /ENOENT/u);
+  writeFileSync(provenanceFile, provenance);
+  source = { revision: '0'.repeat(40), development: false };
+  assert.throws(runtime.buildTeamRuntime, /authoritative/u);
+  source = { revision, development: true };
+  assert.throws(runtime.buildTeamRuntime, /authoritative/u);
+  process.env.LINGXI_TEAM_RUNTIME_VALIDATION = '1';
+  writeFileSync(provenanceFile, JSON.stringify({ ...JSON.parse(provenance), development: true }));
+  assert.deepEqual(runtime.buildTeamRuntime(), runtime.resolvePackagedTeamBinaries());
+  assert.equal(builds, 1);
 });

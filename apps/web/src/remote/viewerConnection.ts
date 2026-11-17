@@ -905,8 +905,12 @@ export class ViewerConnection {
   private receive(a: Attempt, method: string, params: unknown): void {
     if (method === 'auth.approved') {
       const host = (params as { host?: RemoteHostInfo } | null)?.host;
-      if (host !== undefined && host !== null && typeof host.name === 'string') a.approval.resolve(host);
-      else a.approval.reject(new AttemptError({ kind: 'protocol', detail: 'auth.approved without host', auto: false }));
+      if (host !== undefined && host !== null && typeof host.name === 'string') {
+        // Approved from here on: what the desktop sends next (it may follow in the same delivery, before the handshake resumes)
+        // is held for the ready connection instead of being dropped as pre-approval traffic.
+        if (!a.disposed) a.ready = true;
+        a.approval.resolve(host);
+      } else a.approval.reject(new AttemptError({ kind: 'protocol', detail: 'auth.approved without host', auto: false }));
       return;
     }
     if (method === 'auth.denied') {

@@ -203,7 +203,7 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
                 color = if (service.available) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Box {
-            IconButton(onClick = { menu = true }, modifier = Modifier.testTag("services.menu")) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.teams_conversation_menu)) }
+            IconButton(onClick = { menu = true }, modifier = Modifier.testTag("services.menu")) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.services_menu)) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 if (state.sessions.isNotEmpty()) DropdownMenuItem(text = { Text(stringResource(R.string.services_sessions)) }, onClick = { menu = false; choosing = true })
                 DropdownMenuItem(text = { Text(stringResource(R.string.services_new_session)) }, enabled = !state.busy, onClick = {

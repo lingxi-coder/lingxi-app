@@ -192,7 +192,7 @@ private struct HostedServiceSessionView: View {
                         Button("services_report", systemImage: "flag") { reporting = true }
                         Button("services_leave", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { leaving = true }
                     } label: { Image(systemName: "ellipsis.circle") }
-                    .accessibilityLabel(Text("teams_conversation_menu"))
+                    .accessibilityLabel(Text("services_menu"))
                     .accessibilityIdentifier("services.menu")
                 }
             }

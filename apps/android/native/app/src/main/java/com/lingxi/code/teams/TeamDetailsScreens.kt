@@ -170,7 +170,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.membersSection(
                         DropdownMenuItem(text = { Text(stringResource(if (member.role == "admin") R.string.teams_demote else R.string.teams_promote)) },
                             onClick = { menu = false; confirm(TeamConfirmations.changeRole(team, member, name)) })
                         // Owning the team is given on its own: Bots stay with their maintainers and chats with their readers.
-                        DropdownMenuItem(text = { Text(stringResource(R.string.teams_make_owner)) }, onClick = { menu = false; confirm(TeamConfirmations.makeOwner(team, member)) })
+                        DropdownMenuItem(text = { Text(stringResource(R.string.teams_make_owner)) }, onClick = { menu = false; confirm(TeamConfirmations.makeOwner(team, member, name)) })
                         DropdownMenuItem(text = { Text(stringResource(R.string.teams_remove), color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; confirm(TeamConfirmations.remove(team, member, name)) })
                     }
                 } else TextButton(enabled = !busy, onClick = { confirm(TeamConfirmations.remove(team, member, name)) }) {

@@ -64,9 +64,9 @@ class TeamConfirmationsTest {
     }
 
     @Test fun handingTheTeamOverAsksOnceWithItsOwnVerbAndSendsTheHandOverCommand() {
-        val c = TeamConfirmations.makeOwner(team, member)
-        assertEquals(R.string.teams_make_owner, c.title)
-        assertNull(c.subject)
+        val c = TeamConfirmations.makeOwner(team, member, "Mia")
+        assertEquals(R.string.teams_confirm_make_owner_title_fmt, c.title)
+        assertEquals("Mia", c.subject)
         assertEquals(R.string.teams_confirm_make_owner, c.body)
         assertEquals(R.string.teams_make_owner, c.button)
         assertFalse(c.destructive)
@@ -88,7 +88,7 @@ class TeamConfirmationsTest {
     @Test fun noConfirmationIsTitleOnlyOrSaysConfirm() {
         val all = listOf(
             TeamConfirmations.leave(team), TeamConfirmations.delete(team), TeamConfirmations.remove(team, member, "Mia"),
-            TeamConfirmations.changeRole(team, member, "Mia"), TeamConfirmations.changeRole(team, admin, "Mia"), TeamConfirmations.makeOwner(team, member),
+            TeamConfirmations.changeRole(team, member, "Mia"), TeamConfirmations.changeRole(team, admin, "Mia"), TeamConfirmations.makeOwner(team, member, "Mia"),
             TeamConfirmations.revokeInvite(team, invite),
         )
         // The retired "Confirm" strings are gone from the catalog, so a title or a button cannot name them; what is left to hold is the body.

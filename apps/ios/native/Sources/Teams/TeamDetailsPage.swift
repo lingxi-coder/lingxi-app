@@ -431,8 +431,7 @@ struct TeamDetailsPage: View {
     private func question(_ pending: Confirmation) -> Text {
         switch pending.kind {
         case .role: Text(pending.input["role"] as? String == "admin" ? "teams_confirm_promote_title \(pending.subject)" : "teams_confirm_demote_title \(pending.subject)")
-        // Handing the team over says all of it in its question (what stays, who can undo it), so there is no separate sentence.
-        case .owner: Text("teams_confirm_make_owner")
+        case .owner: Text("teams_confirm_make_owner_title \(pending.subject)")
         case .remove: Text("teams_confirm_remove_title \(pending.subject)")
         case .leave: Text("teams_confirm_leave_title \(pending.subject)")
         case .delete: Text("teams_confirm_delete_title \(pending.subject)")
@@ -440,11 +439,11 @@ struct TeamDetailsPage: View {
         }
     }
 
-    /// What the action does, in a sentence; `nil` for Make owner, whose question already says it and whose message names the member.
+    /// What the action does, in a sentence. Make owner's says what stays (the asker stays an admin, Bots and chats stay where they are).
     private func body(_ pending: Confirmation) -> LocalizedStringKey? {
         switch pending.kind {
         case .role: pending.input["role"] as? String == "admin" ? "teams_confirm_promote_body" : "teams_confirm_demote_body"
-        case .owner: nil
+        case .owner: "teams_confirm_make_owner"
         case .remove: "teams_confirm_remove_body"
         case .leave: "teams_confirm_leave_body"
         case .delete: "teams_confirm_delete_body"

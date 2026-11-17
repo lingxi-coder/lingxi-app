@@ -300,4 +300,14 @@ class TeamsBotTextTest {
         assertEquals("a b", TeamsBotText.plainText("| a | b |\n| :--- | ---: |"))
         assertEquals("run ls | grep x", TeamsBotText.plainText("run `ls | grep x`"))
     }
+
+    @Test fun plainTextCollapsesUnicodeWhitespaceOnJvmAndAndroid() {
+        val whitespace = listOf('\t', '\n', '\u000B', '\u000C', '\r', ' ', '\u0085', '\u00A0', '\u1680') +
+            ('\u2000'..'\u200A') + listOf('\u2028', '\u2029', '\u202F', '\u205F', '\u3000')
+        for (space in whitespace) {
+            assertEquals("U+${space.code.toString(16)}", "a b", TeamsBotText.plainText("${space}a${space}${space}b${space}"))
+        }
+        assertEquals("a b c", TeamsBotText.plainText("a\u00A0\t\u3000b\r\n\u0085c"))
+        assertEquals("a\u200Bb\uFEFFc", TeamsBotText.plainText("a\u200Bb\uFEFFc"))
+    }
 }

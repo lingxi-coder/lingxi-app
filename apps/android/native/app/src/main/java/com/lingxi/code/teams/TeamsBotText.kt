@@ -161,7 +161,8 @@ internal object TeamsBotText {
     private val LINK_OR_IMAGE = Regex("""!?\[([^\]]*)]\([^)]*\)""")
     private val SINGLE_STAR = Regex("""(?<![A-Za-z0-9_*])\*(?=\S)([^*]*?\S)\*(?![A-Za-z0-9_*])""")
     private val SINGLE_UNDERSCORE = Regex("""(?<![A-Za-z0-9_])_(?=\S)([^_]*?\S)_(?![A-Za-z0-9_])""")
-    private val WHITESPACE = Regex("""(?U)\s+""")
+    // Unicode White_Space without Java's (?U) flag, which Android's ICU rejects.
+    private val WHITESPACE = Regex("""[\p{Z}\u0009-\u000D\u0085]+""")
 
     /** Links in Bot output may only leave the app as web pages. */
     fun allowsLink(link: String): Boolean = runCatching {

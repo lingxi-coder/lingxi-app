@@ -5,6 +5,7 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { TeamsStore, createTeamsHandler } from '../src/teams.mjs';
 import { TeamMessagesStore } from '../src/team-messages.mjs';
 import { HostedBotServices } from '../src/hosted-bot-service.mjs';
+import { deriveGrantPermit } from '../src/shared-bots.mjs';
 
 const options = { skip: !process.env.FIRESTORE_EMULATOR_HOST, timeout: 60000 };
 const projectId = 'demo-lingxi-hosted-service', serviceId = 's_travel_0001', sharedBotId = 'sharedbot_01';
@@ -82,6 +83,20 @@ test('service: a new service is off; a caller is told why it cannot answer, and 
   assert.equal((await service('getService', {}, alice)).availability, 'host_offline');
   const generation = await enter(alice);
   await assert.rejects(ledger('submit', ask('session_alice'), alice, generation), { code: 'HOST_UNAVAILABLE' });
+});
+
+test('grant recovery: a service grant nonce uses the service scope and never replays a permit or authorizes a Team-domain candidate', options, async () => {
+  await online(); await enter(alice);
+  const receipt = await ledger('submit', ask('session_alice'), alice), taskId = receipt.tasks[0].taskId, permitNonce = '71'.repeat(32);
+  const payload = { ...host, taskId, expectedLastChangeSeq: receipt.changeSeq, permitNonce }, commandId = 'service_nonce_grant_01';
+  await ledger('startTask', payload, publisher, 1, commandId);
+  assert.deepEqual(await ledger('startTask', payload, publisher, 1, commandId), { execute: false, taskId });
+  const permitId = deriveGrantPermit('service', serviceId, host.deploymentId, taskId, 1, permitNonce);
+  const context = await ledger('validateTask', { ...host, taskId, permitId, expectedLastChangeSeq: receipt.changeSeq }, publisher);
+  assert.equal(context.task.epoch, 1); assert.equal(context.physicalDispatchesSpent, 0); assert.equal(context.permitId, undefined);
+  await assert.rejects(ledger('validateTask', { ...host, taskId, expectedLastChangeSeq: receipt.changeSeq,
+    permitId: deriveGrantPermit('team', serviceId, host.deploymentId, taskId, 1, permitNonce) }, publisher), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  await assert.rejects(ledger('validateTask', { ...host, taskId, permitId, expectedLastChangeSeq: receipt.changeSeq }, bob), { code: 'SERVICE_ENTRY_REQUIRED' });
 });
 
 test('service: a caller enters by agreeing, asks in a session of their own, and gets the answer; nobody else but the publisher reads it', options, async () => {

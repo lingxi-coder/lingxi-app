@@ -12,6 +12,12 @@ const canonical = value => Array.isArray(value) ? value.map(canonical) : value !
 const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 const same = (left, right) => hash(left) === hash(right);
 const randomId = () => randomBytes(24).toString('base64url');
+/** Fixed host/backend contract: epoch separation prevents an old worker's permit from becoming valid again. */
+export const deriveGrantPermit = (scopeKind, scopeId, deploymentId, taskId, targetEpoch, nonce) =>
+  hash(['lingxi-team-grant-permit-v1', scopeKind, scopeId, deploymentId, taskId, targetEpoch, nonce]);
+const grantPermit = (command, targetEpoch) => command.payload.permitNonce === undefined ? randomId()
+  : deriveGrantPermit(command.teamId === undefined ? 'service' : 'team', command.teamId ?? command.serviceId,
+    command.payload.deploymentId, command.payload.taskId, targetEpoch, command.payload.permitNonce);
 const nowDay = now => new Date(now).toISOString().slice(0, 10);
 const memberIdentity = (uid, member) => ({ uid, generation: member.generation });
 const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations', 'readTaskList', 'readList', 'listHistory', 'getTransfer', 'readTransferPart', 'readAttachmentPart']);
@@ -220,10 +226,10 @@ export class SharedBotsStore {
     if (grants.some(grant => audience.some(member => !this.grantPermits(grant, member)))) deny(403, 'INPUT_AUDIENCE_NARROWER');
     const identityRecord = { schemaVersion: 1, sharedBotId: p.sharedBotId, teamId: team.id, maintainer: identity,
       revision: p.expectedRevision + 1, state: 'published', usePolicy: p.usePolicy, activeDeploymentId: d.deploymentId };
-    if (Buffer.byteLength(JSON.stringify({ identity: identityRecord, name: p.name, description: p.description, grants })) > 750000) deny(400, 'PUBLICATION_TOO_LARGE');
+    if (Buffer.byteLength(JSON.stringify({ identity: identityRecord, name: p.name, description: p.description, examples: p.examples ?? [], grants })) > 750000) deny(400, 'PUBLICATION_TOO_LARGE');
     // One data identity per Bot: publishing again never replaces the items.
     const listRef = team.collection('lists').doc(p.sharedBotId), newList = !!p.sharedList && !(await tx.get(listRef)).exists;
-    tx.set(ref, { identity: identityRecord, name: p.name, description: p.description, grants, quotas: p.quotas,
+    tx.set(ref, { identity: identityRecord, name: p.name, description: p.description, examples: p.examples ?? [], grants, quotas: p.quotas,
       sharedList: p.sharedList ?? null, publishedAt: now });
     if (newList) tx.create(listRef, { schemaVersion: 1, listId: p.sharedBotId, dataRevision: 0, items: [], nextItem: 1, updatedAt: now });
     handover.end('cancelled', now, 'republished');
@@ -235,6 +241,12 @@ export class SharedBotsStore {
     const bots = await tx.get(team.collection('sharedBots').orderBy('__name__').limit(200));
     const deployments = bots.empty ? [] : await tx.getAll(...bots.docs.map(doc => team.collection('deployments').doc(doc.data().identity.activeDeploymentId)));
     const maintainers = bots.empty ? [] : await tx.getAll(...bots.docs.map(doc => team.collection('members').doc(doc.data().identity.maintainer.uid)));
+    // Match submit's actual counters, never their cached limit. Only this membership's counter is read or projected.
+    const day = nowDay(now), quotaIds = bots.empty ? [] : [hash([day, 'team']), hash([day, 'member', identity.uid, identity.generation]),
+      ...bots.docs.map(doc => hash([day, 'bot', doc.id]))];
+    const counters = quotaIds.length ? await tx.getAll(...quotaIds.map(id => team.collection('requestQuotas').doc(id))) : [];
+    const used = index => counters[index]?.data()?.used ?? 0;
+    const quotaResetsAt = Date.parse(`${day}T00:00:00.000Z`) + 86400000;
     // An open handover is shown to its two parties only, and only while the member it was offered to is still that member.
     const offered = bots.docs.filter(doc => { const t = doc.data().transfer; return t && t.expiresAt > now && (ownerOf(doc.data(), identity) || same(t.to, identity)); });
     const recipients = offered.length ? await tx.getAll(...offered.map(doc => team.collection('members').doc(doc.data().transfer.to.uid))) : [];
@@ -242,10 +254,28 @@ export class SharedBotsStore {
       return recipients[index].data()?.generation === t.to.generation ? [[doc.id, { transferId: t.transferId, from: doc.data().identity.maintainer, to: t.to, state: t.state, expiresAt: t.expiresAt }]] : []; }));
     return { bots: bots.docs.flatMap((doc, index) => {
       const b = doc.data(), d = deployments[index].data();
-      if (!identityPermitted(b, identity) && !ownerOf(b, identity)) return [];
+      // Pausing stops admission, not discovery by the same audience. Drafts and retired Bots remain maintainer-only.
+      const audience = b.identity.usePolicy.mode === 'all' || b.identity.usePolicy.members.some(value => same(value, identity));
+      if (!ownerOf(b, identity) && (!audience || !['published', 'paused'].includes(b.identity.state))) return [];
       const activeOwner = maintainers[index].data()?.generation === b.identity.maintainer.generation;
+      const activeDeployment = !!d?.enabled && d.executionVersion === 2 && d.sharedBotId === doc.id && same(d.owner, b.identity.maintainer);
+      const dailyRemaining = Math.max(0, Math.min(b.quotas.team - used(0), b.quotas.member - used(1), b.quotas.bot - used(index + 2)));
+      const freshHealth = Number.isSafeInteger(d?.checkedAt) && d.checkedAt <= now && d?.healthUntil > now;
+      // Preserve the existing execution gate. Projection is advisory; submit's transaction is the admission authority.
+      const ready = activeOwner && b.identity.state === 'published' && activeDeployment && !!d.ready && d.onlineUntil > now;
+      const availability = !activeOwner ? 'offline' : b.identity.state === 'paused' ? 'paused' : b.identity.state !== 'published' ? 'offline'
+        : !activeDeployment ? 'offline' : freshHealth && !d.ready && ['bot', 'runtime', 'model'].includes(d.healthReason) ? 'maintenance'
+        : !(d.onlineUntil > now) ? 'offline' : !freshHealth ? 'unverified'
+        : dailyRemaining === 0 ? 'quota_exhausted' : 'ready';
+      // A member must refresh even if a host stops reporting while unhealthy. Expose only the safe expiry, not its cause.
+      const statusExpiresAt = availability === 'maintenance' ? d.healthUntil
+        : ['ready', 'quota_exhausted', 'unverified'].includes(availability)
+          ? Math.min(d.onlineUntil, quotaResetsAt, ...(freshHealth ? [d.healthUntil] : [])) : undefined;
       return [{ sharedBotId: doc.id, name: b.name, description: b.description, revision: b.identity.revision,
-        permitted: activeOwner && identityPermitted(b, identity), ready: activeOwner && b.identity.state === 'published' && !!d?.ready && d.enabled && d.onlineUntil > now,
+        permitted: activeOwner && identityPermitted(b, identity), ready, availability, dailyRemaining, quotaResetsAt, examples: b.examples ?? [],
+        ...(statusExpiresAt === undefined ? {} : { statusExpiresAt }),
+        ...(activeDeployment && typeof d.capabilities?.durableWait === 'boolean' && typeof d.capabilities?.writeOperations === 'boolean'
+          ? { capabilities: { durableWait: d.capabilities.durableWait, writeOperations: d.capabilities.writeOperations } } : {}),
         maintainer: b.identity.maintainer, usePolicy: b.identity.usePolicy, state: b.identity.state,
         onlineUntil: d?.onlineUntil ?? 0, quotas: b.quotas, ...(b.sharedList ? { sharedList: { title: b.sharedList.title, ...(b.sharedList.approval === 'requester' ? { approval: 'requester' } : {}) } } : {}),
         ...(activeOwner && handovers.has(doc.id) ? { transfer: handovers.get(doc.id) } : {}),
@@ -423,13 +453,15 @@ export class SharedBotsStore {
   }
   async heartbeat({ tx, team, identity, command: { payload: p }, now }) {
     const { ref, deployment } = await this.checkHost(tx, team, identity, p);
-    tx.update(ref, { ready: p.ready, onlineUntil: p.ready ? now + 90000 : 0 });
+    tx.update(ref, { ready: p.ready, onlineUntil: p.ready ? now + 90000 : 0, checkedAt: now, healthUntil: now + 90000,
+      healthReason: p.healthReason ?? FieldValue.delete() });
     tx.set(team.collection('signals').doc(deployment.sharedBotId), { updatedAt: new Date(now) });
     return { onlineUntil: p.ready ? now + 90000 : 0 };
   }
   async activate({ tx, team, identity, command: { payload: p }, now }) {
     const { ref, deployment } = await this.checkHost(tx, team, identity, { ...p, accountEpoch: p.expectedAccountEpoch });
-    tx.update(ref, { accountEpoch: p.newAccountEpoch, ready: false, onlineUntil: 0 });
+    tx.update(ref, { accountEpoch: p.newAccountEpoch, ready: false, onlineUntil: 0,
+      checkedAt: FieldValue.delete(), healthUntil: FieldValue.delete(), healthReason: FieldValue.delete() });
     tx.set(team.collection('signals').doc(deployment.sharedBotId), { updatedAt: new Date(now) });
     return { accountEpoch: p.newAccountEpoch };
   }
@@ -532,9 +564,14 @@ export class SharedBotsStore {
     if (task.deadline <= now) deny(409, 'TASK_EXPIRED');
     if (!this.requesterAuthorized(bot, task)) deny(403, 'TASK_REVOKED');
     const conversation = await this.validateTask(tx, team, task);
-    if (action === 'validateTask' && !await this.sourceWatermarkCurrent(tx, conversation, task, p.expectedLastChangeSeq)) deny(409, 'SOURCE_CHANGED');
+    if (action === 'validateTask') {
+      if (p.expectedLastChangeSeq > conversation.data().lastChangeSeq) deny(409, 'INVALID_CHANGE_CURSOR');
+      // A newer caller watermark cannot erase an edit/recall after the input actually admitted for this task.
+      if (!await this.sourceWatermarkCurrent(tx, conversation, task, Math.min(task.inputLastChangeSeq, p.expectedLastChangeSeq))) deny(409, 'SOURCE_CHANGED');
+    }
     return { task: taskView(task, now), messageId: task.messageId, messageSeq: task.messageSeq,
-      inputs: bot.grants, deployment, sourceLastChangeSeq: conversation.data().lastChangeSeq };
+      inputs: bot.grants, deployment, sourceLastChangeSeq: conversation.data().lastChangeSeq,
+      physicalDispatchesSpent: task.physicalDispatchesSpent, ...this.listOffer(bot, deployment) };
   }
   async sourceWatermarkCurrent(tx, conversation, task, watermark) {
     const current = conversation.data().lastChangeSeq;
@@ -581,7 +618,8 @@ export class SharedBotsStore {
     const free = !(lock && lock.until > now && lock.taskId !== task.taskId) && earlier.empty;
     return { lockRef, lock, free };
   }
-  async start({ tx, team, identity, command: { payload: p }, now }) {
+  async start({ tx, team, identity, command, now }) {
+    const p = command.payload;
     const { deployment, bot } = await this.checkHost(tx, team, identity, p);
     const ref = team.collection('tasks').doc(p.taskId), snapshot = await tx.get(ref), task = snapshot.data();
     if (!task || task.deploymentId !== p.deploymentId) deny(404, 'TASK_REQUIRED');
@@ -590,7 +628,7 @@ export class SharedBotsStore {
     if (task.botRevision !== bot.identity.revision) deny(403, 'TASK_REVOKED');
     const { lockRef, free } = await this.admitRun(tx, team, task, bot, deployment, p.expectedLastChangeSeq, now);
     if (!free) return { execute: false, taskId: p.taskId };
-    const permitId = randomId(), deadline = now + task.activeBudgetMs;
+    const permitId = grantPermit(command, 1), deadline = now + task.activeBudgetMs;
     tx.set(lockRef, { taskId: p.taskId, until: deadline });
     const started = { state: 'running', startedAt: now, attemptStartedAt: now, epoch: 1, deadline, permitDigest: hash(permitId),
       hostId: p.hostId, accountEpoch: p.accountEpoch, inputLastChangeSeq: p.expectedLastChangeSeq };
@@ -599,12 +637,14 @@ export class SharedBotsStore {
     return { execute: true, permitId, task: taskView({ ...task, ...started }, now), deployment,
       inputs: bot.grants, messageId: task.messageId, messageSeq: task.messageSeq, ...this.listOffer(bot, deployment) };
   }
-  async continueRun({ tx, team, identity, command: { payload: p }, now }) {
+  async continueRun({ tx, team, identity, command, now }) {
+    const p = command.payload;
     const { deployment, bot } = await this.checkHost(tx, team, identity, p);
     const ref = team.collection('tasks').doc(p.taskId), task = (await tx.get(ref)).data();
     if (!task || task.deploymentId !== p.deploymentId) deny(404, 'TASK_REQUIRED');
     const refused = { execute: false, taskId: p.taskId }, answer = p.reason === 'answer';
     if (p.expectedEpoch !== task.epoch || task.cancelRequestedAt) return refused;
+    if (!Number.isSafeInteger(task.epoch + 1)) deny(409, 'TASK_EPOCH_EXHAUSTED');
     if (answer ? task.state !== 'queued' || !task.resume : task.state !== 'running' || task.hostId !== p.hostId) return refused;
     if (task.deadline <= now) {
       // A queued task past its pick-up limit is expired; a running one stays derived-interrupted.
@@ -642,7 +682,7 @@ export class SharedBotsStore {
       tx.set(signals, { updatedAt: new Date(now) });
       return { ...refused, state: 'failed' };
     }
-    const permitId = randomId(), deadline = now + remaining, epoch = task.epoch + 1;
+    const epoch = task.epoch + 1, permitId = grantPermit(command, epoch), deadline = now + remaining;
     const physicalDispatchesSpent = Math.max(task.physicalDispatchesSpent, p.dispatchedRequests);
     const wait = answer ? { waitId: task.resume.waitId, answerMessageId: task.resume.answerMessageId, answerSeq: task.resume.answerSeq,
       ...(task.resume.decision ? { decision: task.resume.decision } : {}) } : undefined;

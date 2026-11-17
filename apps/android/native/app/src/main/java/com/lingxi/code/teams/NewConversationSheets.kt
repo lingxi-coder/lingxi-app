@@ -258,12 +258,8 @@ private fun NewBotList(
     }
 }
 
-/** Online / offline (requests are queued) / disabled, from the Bot card. */
+/** The additive, sanitized member status; missing projections remain unverified. */
 @Composable
-internal fun botAvailabilityText(bot: TeamBotCard): String = stringResource(
-    when {
-        bot.state != "published" -> R.string.teams_bot_disabled
-        bot.ready -> R.string.remote_online
-        else -> R.string.teams_bot_offline_queued
-    },
+internal fun botAvailabilityText(bot: TeamBotCard): String = TeamBotEntry.availability(
+    bot, androidx.compose.ui.platform.LocalConfiguration.current.locales[0].language == "zh",
 )

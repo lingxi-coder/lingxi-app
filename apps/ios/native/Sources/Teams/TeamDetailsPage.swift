@@ -384,7 +384,10 @@ struct TeamDetailsPage: View {
                         Task { if let id = await workspace.openBotDM(bot) { onOpenConversation(id) } }
                     },
                     onPause: { pausing = bot },
-                    onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation)) && !offline ? { listOf = bot } : nil)
+                    onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation)) && !offline ? { listOf = bot } : nil,
+                    onExample: { example in
+                        Task { if let id = await workspace.openBotDM(bot, example: example) { onOpenConversation(id) } }
+                    }, unverified: model?.botsUnverified == true)
             }
             if bots.isEmpty && status == nil {
                 Text("teams_bots_none").font(.footnote).foregroundStyle(.secondary)

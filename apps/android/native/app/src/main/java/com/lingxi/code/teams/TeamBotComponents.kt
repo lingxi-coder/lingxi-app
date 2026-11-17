@@ -172,7 +172,7 @@ internal fun TeamApprovalCard(approval: TeamListApproval, waitId: String, state:
 }
 
 @Composable
-internal fun TeamBotCardView(bot: TeamBotCard, ownerName: String, uid: String, generation: Long, enabled: Boolean, onMessage: () -> Unit, onPause: () -> Unit, modifier: Modifier = Modifier, onList: (() -> Unit)? = null) {
+internal fun TeamBotCardView(bot: TeamBotCard, ownerName: String, uid: String, generation: Long, enabled: Boolean, onMessage: () -> Unit, onPause: () -> Unit, modifier: Modifier = Modifier, onList: (() -> Unit)? = null, onExample: ((String) -> Unit)? = null) {
     var confirm by remember(bot.sharedBotId, bot.revision, bot.state) { mutableStateOf(false) }
     Column(modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -182,6 +182,7 @@ internal fun TeamBotCardView(bot: TeamBotCard, ownerName: String, uid: String, g
                 if (bot.description.isNotBlank()) Text(bot.description, style = MaterialTheme.typography.bodyMedium)
                 Text("${botAvailabilityText(bot)} · ${stringResource(R.string.teams_bot_owner_fmt, ownerName)}", style = MaterialTheme.typography.bodySmall)
                 Text(stringResource(if (bot.usePolicy.getString("mode") == "all") R.string.teams_bot_use_all else R.string.teams_bot_use_listed), style = MaterialTheme.typography.bodySmall)
+                TeamBotMemberInfo(bot, enabled, onExample)
                 Row {
                     TextButton(enabled = enabled && bot.selectable, onClick = onMessage) { Text(stringResource(R.string.teams_bot_message)) }
                     if (onList != null) TextButton(enabled = enabled, onClick = onList, modifier = Modifier.testTag("teams.bot.list.${bot.sharedBotId}")) { Text(stringResource(R.string.teams_list_open)) }
@@ -193,4 +194,19 @@ internal fun TeamBotCardView(bot: TeamBotCard, ownerName: String, uid: String, g
     if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text(bot.name) }, text = { Text(stringResource(R.string.teams_bot_pause)) },
         confirmButton = { TextButton(onClick = { confirm = false; onPause() }) { Text(stringResource(R.string.teams_bot_pause)) } },
         dismissButton = { TextButton(onClick = { confirm = false }) { Text(stringResource(R.string.common_cancel)) } })
+}
+
+/** Member-safe projection only: never render host reasons, credentials or configured quota limits. */
+@Composable
+internal fun TeamBotMemberInfo(bot: TeamBotCard, enabled: Boolean, onExample: ((String) -> Unit)? = null, modifier: Modifier = Modifier) {
+    val chinese = LocalConfiguration.current.locales[0].language == "zh"
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(TeamBotEntry.capabilities(bot, chinese), style = MaterialTheme.typography.bodySmall)
+        Text(TeamBotEntry.quota(bot, chinese), style = MaterialTheme.typography.bodySmall)
+        if (onExample != null) bot.examples.forEachIndexed { index, example ->
+            TextButton(enabled = enabled && bot.selectable, onClick = { onExample(example) }, modifier = Modifier.testTag("teams.bot.example.${bot.sharedBotId}.$index")) {
+                Text(example, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            }
+        }
+    }
 }

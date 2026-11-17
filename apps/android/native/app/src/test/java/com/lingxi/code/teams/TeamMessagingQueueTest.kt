@@ -249,6 +249,66 @@ class TeamMessagingQueueTest {
         }
     }
 
+    @Test fun expiredUnavailableProjectionNeverJournalsNewSubmitWhileRefreshIsPendingOrFails() = runBlocking {
+        for (status in listOf("maintenance", "quota_exhausted")) Harness(bot = true).use { h ->
+            h.botProjection = botCard().put("availability", status).put("statusExpiresAt", System.currentTimeMillis() + 1_000)
+            h.start()
+            h.listBotsDelayMs = 400
+            h.fail["listSharedBots"] = "SERVICE_UNAVAILABLE"
+            eventually { h.model.state.value.bots.singleOrNull()?.admissionBlockedPendingRefresh == true }
+            suspend fun rejectedWithoutJournal() {
+                var accepted = false
+                withContext(h.dispatcher) { h.model.queue("create", "Keep this draft") { accepted = true } }
+                eventually { !h.model.state.value.submitting }
+                assertEquals("BOT_STATUS_UNVERIFIED", h.model.state.value.error)
+                assertFalse(accepted)
+                assertTrue(h.storage.load(MEMBER, TEAM, GENERATION).outbox.isEmpty())
+                assertTrue(h.sent.isEmpty())
+                val projection = h.model.state.value.bots.single()
+                assertTrue(projection.permitted)
+                assertEquals("unverified", projection.availability)
+            }
+            rejectedWithoutJournal() // The slow reread has not resolved yet.
+            eventually { h.model.state.value.botsFailed }
+            rejectedWithoutJournal() // A failed reread must not lift the local block.
+            h.fail.clear(); h.listBotsDelayMs = 0
+            h.botProjection = botCard().put("ready", true).put("availability", "ready").put("statusExpiresAt", System.currentTimeMillis() + 90_000)
+            withContext(h.dispatcher) { h.model.reconnect() }
+            eventually { h.model.state.value.bots.singleOrNull()?.availability == "ready" }
+            assertFalse(h.model.state.value.bots.single().admissionBlockedPendingRefresh)
+            h.send("A fresh available snapshot permits this request")
+            h.awaitDelivery()
+            assertEquals("submit", h.sent.single().getString("action"))
+        }
+    }
+
+    @Test fun retainedUnknownAdmissionBlockStillAllowsWaitRepliesEditsCancellationAndHumanOnlyMessages() = runBlocking {
+        Harness(bot = true).use { h ->
+            h.botProjection = botCard().put("availability", "quota_exhausted").put("statusExpiresAt", System.currentTimeMillis() - 1)
+            h.start()
+            assertTrue(h.model.state.value.bots.single().admissionBlockedPendingRefresh)
+            withContext(h.dispatcher) { h.model.queue("create", "Blue", waitId = WAIT) }
+            h.awaitDelivery()
+            assertEquals("answerWait", h.sent.single().getString("action"))
+            withContext(h.dispatcher) { h.model.queue("edit", "Revised message", messageId = "message_0001") }
+            eventually { h.sent.size == 2 && h.storage.load(MEMBER, TEAM, GENERATION).outbox.isEmpty() }
+            assertEquals("mutate", h.sent.last().getString("action"))
+            assertEquals("edit", h.sent.last().getString("operation"))
+            withContext(h.dispatcher) { h.model.cancelTask(TASK) }
+            eventually { h.asked.any { it.getString("action") == "cancelTask" } }
+        }
+        Harness(bot = true).use { h ->
+            h.conversationKind = "group"
+            h.botProjection = botCard().put("availability", "maintenance").put("statusExpiresAt", System.currentTimeMillis() - 1)
+            h.start()
+            assertTrue(h.model.state.value.bots.single().admissionBlockedPendingRefresh)
+            h.send("Human-only group message")
+            h.awaitDelivery()
+            assertEquals("mutate", h.sent.single().getString("action"))
+            assertFalse(h.sent.single().has("targets"))
+        }
+    }
+
     private class Harness(private val bot: Boolean = false) : AutoCloseable {
         val directory = Files.createTempDirectory("team-public-queue-").toFile()
         val storage = TeamCommandStorage(directory)
@@ -262,6 +322,9 @@ class TeamMessagingQueueTest {
         private lateinit var memberListener: EventListener<DocumentSnapshot>
         private lateinit var directoryListener: EventListener<QuerySnapshot>
         private lateinit var messageListener: EventListener<QuerySnapshot>
+        var conversationKind: String? = null
+        @Volatile var botProjection: JSONObject? = null
+        @Volatile var listBotsDelayMs: Long = 0
         val sent = CopyOnWriteArrayList<JSONObject>()
         /** The task commands the model sent, in order, and every request the server refused. */
         val asked = CopyOnWriteArrayList<JSONObject>()
@@ -307,12 +370,13 @@ class TeamMessagingQueueTest {
                     if (header.startsWith("Content-Length:", ignoreCase = true)) length = header.substringAfter(':').trim().toInt()
                 }
                 val input = JSONObject(String(stream.readNBytes(length), Charsets.UTF_8))
+                if (input.getString("action") == "listSharedBots" && listBotsDelayMs > 0) Thread.sleep(listBotsDelayMs)
                 val waits = busy[input.getString("action")] ?: 0
                 if (waits > 0) busy[input.getString("action")] = waits - 1
                 val refusal = if (waits > 0) "SERVICE_UNAVAILABLE" else fail[input.getString("action")]
                 if (refusal != null) refused += input
                 val result = if (refusal != null) JSONObject().put("error", JSONObject().put("code", refusal)) else when (input.getString("action")) {
-                    "listSharedBots" -> JSONObject().put("bots", JSONArray().also { if (bot) it.put(botCard()) })
+                    "listSharedBots" -> JSONObject().put("bots", JSONArray().also { if (bot) it.put(botProjection ?: botCard()) })
                     "listTasks" -> JSONObject().put("tasks", JSONArray()).put("next", JSONObject.NULL)
                     "cancelTask" -> { asked += input; JSONObject().put("taskId", TASK).put("state", "cancelled") }
                     "getTask" -> { asked += input; JSONObject("""{"taskId":"$TASK","conversationId":"$CHAT","sharedBotId":"$BOT","requester":{"uid":"$MEMBER","generation":$GENERATION},"state":"cancelled","createdAt":1,"deadline":2,"replyId":null,"artifactId":null}""") }
@@ -356,7 +420,7 @@ class TeamMessagingQueueTest {
                 memberListener.onEvent(member, null)
                 val row = mock(DocumentSnapshot::class.java, RETURNS_DEEP_STUBS)
                 doReturn(CHAT).`when`(row).id
-                doReturn(mapOf("kind" to if (bot) "bot_dm" else "dm", "title" to "Queue regression",
+                doReturn(mapOf("kind" to (conversationKind ?: if (bot) "bot_dm" else "dm"), "title" to "Queue regression",
                     "participants" to if (bot) listOf("user:$MEMBER", "shared_bot:$BOT") else listOf("user:$MEMBER", "user:owner_test"),
                     "lastSeq" to 0L, "lastChangeSeq" to 0L, "lastMessage" to null)).`when`(row).data
                 val snapshot = mock(QuerySnapshot::class.java, RETURNS_DEEP_STUBS)

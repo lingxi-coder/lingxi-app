@@ -133,6 +133,12 @@
 .tw-dialog-panel { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
 .tw-dialog-title { font-size: 16px; line-height: 1.4; }
 .tw-form { display: flex; flex-direction: column; gap: 12px; }
+/* Publication review keeps full resource digests within the dialog's available width. */
+.tw-dialog .tw-form:has(> blockquote),
+.tw-dialog .tw-form:has(> blockquote) > * {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
 .tw-form label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .tw-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .tw-scope input:not([type='checkbox']):not([type='radio']), .tw-scope select, .tw-scope textarea, .tw-dialog input:not([type='checkbox']):not([type='radio']), .tw-dialog select {
@@ -429,3 +435,13 @@
 .hosted-service-composer { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px 16px 16px; }
 .hosted-service-composer textarea { flex: 1; min-height: 44px; max-height: 200px; resize: vertical; }
 .tw-sidebar-services { flex: none; margin: 4px 12px 10px; padding: 6px 8px; text-align: start; }
+
+/* Member projections and draft-only examples share the existing cards and composer. */
+.tw-bot-member-details { min-inline-size: 0; }
+.tw-bot-member-details ul { display: grid; gap: .4rem; padding-inline-start: 1.25rem; }
+.tw-bot-member-details button { white-space: normal; overflow-wrap: anywhere; text-align: start; min-block-size: 2rem; }
+.tw-task-export { padding-block: .5rem 1rem; }
+.tw-task-export a { display: inline-block; padding-block: .4rem; }
+@media (pointer: coarse) {
+  .tw-bot-member-details button, .tw-task-export button, .tw-task-export a { min-block-size: 3rem; }
+}

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "provenance": "template-not-evidence",
+  "studyId": "REPLACE_STUDY_ID",
+  "periodStartUtc": null,
+  "periodEndUtc": null,
+  "participantAlias": "participant-01",
+  "scopeAlias": "qa-family",
+  "authorizedTaskScopeRef": null,
+  "firstSetup": { "taskIds": [], "activeMinutes": null, "evidenceRef": null },
+  "maintenanceEntries": [
+    { "taskId": "REPLACE_ACTUAL_TASK_ID", "atUtc": null, "kind": "maintenance", "activeMinutes": null, "waitMinutes": null, "evidenceRef": null }
+  ],
+  "taskOutcomes": [
+    {
+      "taskId": "REPLACE_ACTUAL_TASK_ID", "caseId": "F01", "sourceRef": null,
+      "outcome": "unobserved", "completionFraction": null, "takeoverFraction": null,
+      "baselineManualMinutes": null, "actualActiveMinutes": null, "humanTakeoverMinutes": null,
+      "savedMinutes": null, "usageStatus": "missing", "inputTokens": null, "outputTokens": null,
+      "costMicros": null, "currency": null, "missingReason": "template"
+    }
+  ],
+  "rules": {
+    "outcomes": ["completed", "partial", "failed", "cancelled", "unobserved"],
+    "maintenanceKinds": ["first_setup", "maintenance", "check", "human_takeover"],
+    "savedMinutesFormula": "baselineManualMinutes - actualActiveMinutes - humanTakeoverMinutes; do not double count takeover in actualActiveMinutes",
+    "allAdmittedTasksRemainInDenominator": true,
+    "excludeMessageAndFileBodies": true,
+    "unknownValuesRemainNull": true
+  }
+}

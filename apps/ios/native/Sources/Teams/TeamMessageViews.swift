@@ -75,20 +75,23 @@ struct TeamConversationContext {
 
     func isMine(_ message: TeamMessage) -> Bool { message.author.kind == "user" && message.author.uid == uid }
 
-    /// Whether a Bot can be reached now: `teams_bot_disabled`, `remote_online` or `teams_bot_offline_queued`.
-    func presenceKey(_ card: TeamBotCard) -> String {
-        card.state != "published" ? "teams_bot_disabled" : card.ready ? "remote_online" : "teams_bot_offline_queued"
+    /// The same member-safe, freshness-aware status shown by the assistant directory.
+    @MainActor
+    func presenceText(_ card: TeamBotCard) -> String {
+        TeamBotMemberText.availability(model.botsUnverified ? .unverified : card.memberAvailability,
+            chinese: TeamsListStrings.isChinese(languageTag: Bundle._lxCurrentLanguageID.withLock { $0 }))
     }
 
     /// The second line of the header (Desktop `conversationSubtitle`): a Bot DM says whether the Bot is reachable
     /// and whose it is, a dm says what it is, a group or channel how many are in it; a friend's chat names their `@username`.
     /// `nil` when there is nothing to say.
+    @MainActor
     var subtitle: String? {
         if let pair { return pair.handle.map { "@" + $0 } }
         switch conversation.kind {
         case "bot_dm":
             guard let card = card(forKey: conversation.effectiveSharedBotId) else { return nil }
-            return String(localized: String.LocalizationValue(presenceKey(card))) + " · " + String(localized: "teams_bot_owner \(userName(card.maintainer.uid))")
+            return presenceText(card) + " · " + String(localized: "teams_bot_owner \(userName(card.maintainer.uid))")
         case "dm":
             return strings.directMessage
         default:

@@ -39,9 +39,6 @@ internal class TeamsPrefs(private val store: DataStore<Preferences>) {
     }
 }
 
-/** Unsent text of one conversation: kept in memory by the workspace only (Desktop parity), never on disk. */
-internal data class ComposerDraft(val text: String = "", val replyToId: String? = null, val editingId: String? = null, val targets: Set<String> = emptySet())
-
 /** The one team of a friend chat (docs/FRIENDS-CLIENTS.md D9): the signed-in account and the pair team's synthesized summary. */
 internal data class PairTeam(val uid: String, val summary: TeamSummary)
 
@@ -62,7 +59,7 @@ internal data class PairTeam(val uid: String, val summary: TeamSummary)
 internal class TeamsWorkspace(
     context: Context,
     private val scope: CoroutineScope,
-    auth: FirebaseAuth,
+    private val auth: FirebaseAuth,
     private val db: FirebaseFirestore,
     private val prefs: TeamsPrefs,
     apiRoot: String = TEAMS_API_ROOT,
@@ -99,7 +96,8 @@ internal class TeamsWorkspace(
     private var autoSelecting = false
     private var wasRevoked = false
     private var lastSelectedUnread: Pair<String, Int>? = null
-    private val drafts = mutableMapOf<String, ComposerDraft>()
+    private val drafts = androidx.compose.runtime.mutableStateMapOf<String, ComposerDraft>()
+    private var botEntryEpoch = 0L
     private val mutableDraftFiles = MutableStateFlow<Map<String, List<TeamDraftFile>>>(emptyMap())
     private val mutableFileRefusals = MutableStateFlow<Map<String, List<TeamFileRefusal>>>(emptyMap())
     /**
@@ -133,10 +131,11 @@ internal class TeamsWorkspace(
         val selected = state.teams.firstOrNull { it.id == state.selectedId }
         val running = startedTeam
         if (selected == null) {
-            if (running != null) { rememberUnread(running); endUploads(); messagingModel.reset(); startedTeam = null; mutableCollapsed.value = emptySet() }
+            if (running != null) { botEntryEpoch++; rememberUnread(running); endUploads(); messagingModel.reset(); startedTeam = null; mutableCollapsed.value = emptySet() }
         } else if (running?.id != selected.id || running.generation != selected.generation) {
             if (running != null) rememberUnread(running)
             endUploads()
+            botEntryEpoch++
             messagingModel.start(uid, selected)
             startedTeam = selected
         }
@@ -170,6 +169,7 @@ internal class TeamsWorkspace(
     }
 
     private fun accountChanged(uid: String?) {
+        botEntryEpoch++
         currentUid = uid; startedTeam = null; persistedSelection = null; autoSelecting = false; wasRevoked = false; lastSelectedUnread = null
         endUploads()
         messagingModel.reset()
@@ -202,7 +202,7 @@ internal class TeamsWorkspace(
     // --- what the screens call -----------------------------------------------------------------------
 
     /** Ends a friend chat's workspace: its listeners and its coroutines. The process workspace is never closed. */
-    fun close() { endUploads(); messagingModel.reset(); scope.cancel() }
+    fun close() { botEntryEpoch++; endUploads(); messagingModel.reset(); scope.cancel() }
 
     fun selectTeam(teamId: String) { if (teamsModel.state.value.selectedId != teamId) teamsModel.select(teamId) }
 
@@ -232,6 +232,21 @@ internal class TeamsWorkspace(
     fun draftKey(conversationId: String) = "${currentUid}:${teamsModel.state.value.selectedId}:${startedTeam?.generation ?: 0}:$conversationId"
     fun draft(conversationId: String): ComposerDraft = drafts[draftKey(conversationId)] ?: ComposerDraft()
     fun setDraft(conversationId: String, draft: ComposerDraft) { if (draft == ComposerDraft()) drafts.remove(draftKey(conversationId)) else drafts[draftKey(conversationId)] = draft }
+
+    /** Freeze the identity before asynchronous conversation creation; changing away and back invalidates it too. */
+    fun botEntryContext(uid: String): TeamBotEntryContext? {
+        val state = teamsModel.state.value
+        val team = startedTeam ?: return null
+        if (uid != currentUid || state.uid != uid || state.selectedId != team.id || auth.currentUser?.uid != uid) return null
+        return TeamBotEntryContext(uid, team.id, team.generation, botEntryEpoch)
+    }
+
+    fun seedBotExample(context: TeamBotEntryContext, conversationId: String, example: String) {
+        if (botEntryContext(context.uid) != context) return
+        val draft = draft(conversationId)
+        if (TeamBotEntry.canSeed(draft, mutableDraftFiles.value[draftKey(conversationId)].orEmpty().isNotEmpty(), example))
+            setDraft(conversationId, draft.copy(text = example))
+    }
 
     // --- files of an unsent message --------------------------------------------------------------------
 

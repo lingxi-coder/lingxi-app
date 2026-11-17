@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type ReactElement, type
 import { useTeamTasks } from './bot-runs.js';
 import type { TeamTaskView } from './execution.js';
 import { MemberHome } from './MemberHome';
+import { botAvailabilityText } from './BotMemberDetails';
 import { snippet } from './compose.js';
 import { Composer, composerLock } from './Composer';
 import { messageErrorText } from './errors.js';
@@ -51,7 +52,7 @@ export function conversationSubtitle(conversation: TeamConversation, snapshot: P
     const card = snapshot.bots.find(bot => conversation.participants.includes(`shared_bot:${bot.sharedBotId}`));
     if (!card) return '';
     const owner = snapshot.directory.find(member => member.uid === card.maintainer.uid)?.displayName || (card.maintainer.uid === snapshot.uid ? t('You', '你') : t('Member', '成员'));
-    const presence = card.state !== 'published' ? t('Disabled', '已停用') : card.ready ? t('Online', '在线') : t('Host unavailable', '宿主不可用');
+    const presence = botAvailabilityText(card, zh);
     return `${presence} · ${t('Owner', '所有者')}: ${owner}`;
   }
   if (conversation.kind === 'dm') return t('Direct message', '私信');

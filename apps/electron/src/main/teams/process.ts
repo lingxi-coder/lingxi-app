@@ -37,6 +37,7 @@ export interface TeamRunResult {
 /** `inspect_task`: what the durable session says about one task. Always inspect again before the next attempt. */
 export interface TeamTaskCheckpoint {
   status: 'task_checkpoint'; taskId: string; phase: 'absent' | 'admitted' | 'in_flight' | 'result_recorded';
+  cursor: { sessionRevision: number; lastMessageSeq: number; lastChangeSeq: number };
   attempts: number; dispatchesObserved: number; continuable: boolean; reason?: string; wait?: TeamTaskWait; checkpointDigest: string;
 }
 export type TeamHostResult = TeamRunResult | TeamTaskCheckpoint;
@@ -156,10 +157,12 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
         if (typeof value.status !== 'string' || !allowed.includes(value.status)) throw new Error('TEAM_HOST_PROTOCOL');
         if (value.status === 'task_checkpoint') {
           exact(value,['version','type','status','taskId','phase','cursor','attempts','dispatchesObserved','pendingToolCalls','continuable','checkpointDigest'],['reason','wait']);
+          if(!object(value.cursor)||Object.keys(value.cursor).sort().join(',')!=='lastChangeSeq,lastMessageSeq,sessionRevision'
+            ||!Object.values(value.cursor).every(count))throw new Error('TEAM_HOST_PROTOCOL');
           if (value.taskId !== options.bootstrap.taskId || !['absent','admitted','in_flight','result_recorded'].includes(value.phase as string) || !count(value.attempts) || !count(value.dispatchesObserved)
             || typeof value.continuable !== 'boolean' || typeof value.checkpointDigest !== 'string' || !DIGEST.test(value.checkpointDigest) || !Array.isArray(value.pendingToolCalls) || !object(value.cursor)
             || value.reason !== undefined && (typeof value.reason !== 'string' || !/^[a-z_]{3,60}$/u.test(value.reason)) || value.wait !== undefined && !wait(value.wait)) throw new Error('TEAM_HOST_PROTOCOL');
-          result = { status: 'task_checkpoint', taskId: value.taskId as string, phase: value.phase as TeamTaskCheckpoint['phase'], attempts: value.attempts, dispatchesObserved: value.dispatchesObserved, continuable: value.continuable,
+          result = { status: 'task_checkpoint', taskId: value.taskId as string, phase: value.phase as TeamTaskCheckpoint['phase'], cursor:value.cursor as TeamTaskCheckpoint['cursor'], attempts: value.attempts, dispatchesObserved: value.dispatchesObserved, continuable: value.continuable,
             checkpointDigest: value.checkpointDigest, ...(value.reason !== undefined ? { reason: value.reason as string } : {}), ...(value.wait !== undefined ? { wait: value.wait as TeamTaskWait } : {}) };
           return;
         }

@@ -120,6 +120,8 @@ internal fun teamsErrorRes(code: String): Int = when {
     code.contains("STORAGE") -> R.string.teams_messages_storage_error
     code in setOf("BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "BOT_SELECTION_STALE", "CONVERSATION_POLICY_REQUIRED", "ARTIFACT_READ_REQUIRED", "GRANT_READ_REQUIRED", "INPUT_GRANT_REQUIRED") -> R.string.teams_error_bot_access_changed
     code == "BOT_MAINTAINER_CHANGED" -> R.string.teams_composer_lock_bot_handed_over
+    code == "BOT_STATUS_UNVERIFIED" -> R.string.teams_composer_lock_bot_unverified
+    code == "HOST_UNAVAILABLE" -> R.string.services_error_host_unavailable
     code == "REQUEST_QUOTA_EXCEEDED" -> R.string.teams_error_request_quota
     code == "MESSAGE_LISTENER_FAILED" -> R.string.teams_error_sync_failed
     code in setOf("MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT",

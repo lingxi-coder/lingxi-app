@@ -23,6 +23,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -100,6 +101,10 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     fun openConversation(id: String) = setStack(if (wide) stack.filterNot { it.startsWith("c:") } + "c:$id" else stack + "c:$id")
     fun openDetails() = setStack(if ("details" in stack) stack else stack + "details")
 
+    val entryLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    val botEntryLease = remember(teams.uid, teams.selectedId, stackText) { TeamBotEntryLease() }
+    DisposableEffect(botEntryLease) { onDispose { botEntryLease.active = false } }
+    val entryIsCurrent = { botEntryLease.active && entryLifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED) }
     val uid = teams.uid
     LaunchedEffect(joinCode, uid) {
         if (joinCode != null && uid != null) { joinPrefill = joinCode; sheet = "join"; onJoinCodeHandled() }
@@ -148,7 +153,8 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                         onOpenConversation = ::openConversation, onSwitchTeam = { sheet = "switcher" }, onNew = { sheet = it },
                         onToggleSection = workspace::toggleSection,
                         onMarkRead = { workspace.messagingModel.markRead(it.id, it.lastSeq) },
-                        onMessageBot = { id -> messageBot(workspace, messaging, uid, id) { openConversation(it) } },
+                        onMessageBot = { id -> messageBot(workspace, messaging, uid, id, isCurrent = entryIsCurrent) { openConversation(it) } },
+                        onBotExample = { id, example -> messageBot(workspace, messaging, uid, id, example, entryIsCurrent) { openConversation(it) } },
                         onArtifact = { workspace.messagingModel.openArtifact(it) },
                         onRefreshTask = { workspace.messagingModel.refreshTask(it) },
                         onCancelTask = { workspace.messagingModel.cancelTask(it) },
@@ -168,7 +174,8 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                         workspace = workspace, uid = uid, team = team, teams = teams, messaging = messaging, showBack = !wide,
                         friendUids = friendUids, onAddFriend = { member -> friends.member.lookup(FriendProof.Team(team.id, member.uid)); sheet = "addFriend" },
                         onInviteFriends = { sheet = "inviteFriends" }, onClose = { setStack(stack.filterNot { it == "details" }) },
-                        onMessageBot = { key -> messageBot(workspace, messaging, uid, key) { openConversation(it) } }, modifier = m,
+                        onMessageBot = { key -> messageBot(workspace, messaging, uid, key, isCurrent = entryIsCurrent) { openConversation(it) } },
+                        onBotExample = { key, example -> messageBot(workspace, messaging, uid, key, example, entryIsCurrent) { openConversation(it) } }, modifier = m,
                     )
                 }
                 if (wide) {
@@ -241,12 +248,20 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
 }
 
 /** Opens the viewer's Bot DM with the Bot or creates it; the same rule as the Bots list on the Desktop. A friend's chat starts one the same way (D22). */
-internal fun messageBot(workspace: TeamsWorkspace, messaging: TeamMessagingState, uid: String, sharedBotId: String, open: (String) -> Unit) {
+internal fun messageBot(workspace: TeamsWorkspace, messaging: TeamMessagingState, uid: String, sharedBotId: String,
+                        example: String? = null, isCurrent: () -> Boolean = { true }, open: (String) -> Unit) {
+    val context = workspace.botEntryContext(uid) ?: return
+    val bot = messaging.bots.firstOrNull { it.sharedBotId == sharedBotId && it.selectable } ?: return
+    if (example != null && example !in bot.examples) return
+    fun opened(id: String) {
+        if (!TeamBotEntry.canOpen(context, workspace.botEntryContext(uid), isCurrent())) return
+        if (example != null) workspace.seedBotExample(context, id, example)
+        open(id)
+    }
     val existing = TeamsListLogic.findBotDm(messaging.cache?.conversations.orEmpty(), uid, sharedBotId, messaging.bots)
-    if (existing != null) { open(existing.id); return }
-    val bot = messaging.bots.firstOrNull { it.sharedBotId == sharedBotId } ?: return
+    if (existing != null) { opened(existing.id); return }
     val id = UUID.randomUUID().toString()
-    workspace.messagingModel.create("bot_dm", bot.name, emptyList(), id, listOf(sharedBotId)) { open(id) }
+    workspace.messagingModel.create("bot_dm", bot.name, emptyList(), id, listOf(sharedBotId), shouldOpen = { TeamBotEntry.canOpen(context, workspace.botEntryContext(uid), isCurrent()) }) { opened(id) }
 }
 
 @Composable

@@ -225,7 +225,10 @@ export interface TeamsSnapshot {
   readonly messagingError: string;
   /** Files of the open conversation's unsent message, in the order they were added. */
   readonly draftFiles: DraftFile[];
+  readonly draftText: string;
   readonly bots: SharedBotCard[];
+  /** A known refusal stays blocked through status expiry/network failure until a fresh Ready projection. */
+  readonly blockedBotIds: readonly string[];
   /** The Bot list has been fetched at least once for this team. */
   readonly botsLoaded: boolean;
   /** The Bot list could not be fetched, so Bot availability is unknown. */
@@ -271,7 +274,15 @@ class BotCards {
   private running = false;
   private again = false;
   private deadline: ReturnType<typeof setTimeout> | undefined;
-  constructor(private readonly api: TeamsApi, private readonly scope: MessageScope, private readonly apply: (bots: SharedBotCard[] | undefined, error?: string) => void) {}
+  private cards: SharedBotCard[] = [];
+  private readonly blocked = new Set<string>();
+  private expiresAt = (bot: SharedBotCard): number | undefined => bot.statusExpiresAt ?? (bot.ready ? bot.onlineUntil : undefined);
+  private expire = (): void => {
+    const now = Date.now();
+    this.cards = this.cards.map(bot => { const at = this.expiresAt(bot); return at !== undefined && at <= now ? { ...bot, ready: false, availability: 'unverified' } : bot; });
+    this.apply(this.cards, '', [...this.blocked]);
+  };
+  constructor(private readonly api: TeamsApi, private readonly scope: MessageScope, private readonly apply: (bots: SharedBotCard[] | undefined, error?: string, blocked?: readonly string[]) => void) {}
   readonly refresh = async (): Promise<void> => {
     if (this.closed) return;
     if (this.running) { this.again = true; return; }
@@ -279,11 +290,27 @@ class BotCards {
     try {
       const result = await this.api.messages<{ bots: SharedBotCard[] }>(executionCommand(this.scope, 'listSharedBots', {}));
       if (!this.closed) {
-        this.apply(result.bots); clearTimeout(this.deadline);
-        const expirations = result.bots.filter(bot => bot.ready && bot.onlineUntil && bot.onlineUntil > Date.now()).map(bot => bot.onlineUntil!);
-        if (expirations.length) this.deadline = setTimeout(() => void this.refresh(), Math.max(1, Math.min(...expirations) - Date.now()));
+        for (const bot of result.bots) {
+          if (bot.state === 'paused' || ['paused', 'offline', 'maintenance', 'quota_exhausted'].includes(bot.availability ?? '')) this.blocked.add(bot.sharedBotId);
+          else if (bot.availability === 'ready' && bot.ready && sharedBotUsable(bot) && (this.expiresAt(bot) ?? Infinity) > Date.now()) this.blocked.delete(bot.sharedBotId);
+        }
+        this.cards = result.bots; this.expire(); clearTimeout(this.deadline);
+        const expirations = result.bots.map(this.expiresAt).filter((at): at is number => at !== undefined && Number.isFinite(at) && at > Date.now());
+        if (expirations.length) this.deadline = setTimeout(() => { this.expire(); void this.refresh(); }, Math.max(1, Math.min(...expirations) - Date.now()));
       }
-    } catch (error) { if (!this.closed) this.apply(undefined, codeOf(error)); }
+    } catch (error) {
+      if (!this.closed) {
+        // Keep only previously blocked cards on a transient read failure. Their status is unknown,
+        // but forgetting the known refusal would enable new submissions. Authorization verdicts purge cards.
+        if (isVerdict(error)) {
+          this.cards = []; this.blocked.clear(); this.again = false;
+          clearTimeout(this.deadline); this.deadline = undefined;
+        } else {
+          this.cards = this.cards.filter(bot => this.blocked.has(bot.sharedBotId)).map(bot => ({ ...bot, ready: false, availability: 'unverified' as const }));
+        }
+        this.apply(this.cards.length ? this.cards : undefined, codeOf(error), [...this.blocked]);
+      }
+    }
     finally { this.running = false; if (this.again && !this.closed) { this.again = false; void this.refresh(); } }
   };
   close(): void { this.closed = true; clearTimeout(this.deadline); }
@@ -335,6 +362,7 @@ export class TeamsWorkspace {
   private releaseMessaging: (() => void) | undefined;
   private botCards: BotCards | undefined;
   private bots: SharedBotCard[] = EMPTY_BOTS;
+  private blockedBotIds: readonly string[] = [];
   private botsLoaded = false;
   private botsUnverified = false;
   private botsError = '';
@@ -383,7 +411,19 @@ export class TeamsWorkspace {
     const key = this.draftKey(conversationId);
     if (text) this.drafts.set(key, text); else this.drafts.delete(key);
   };
-  private draftKey(conversationId: string): string { return `${this.selection}:${conversationId}`; }
+  private draftKey(conversationId: string): string { return `${this.uid}:${this.selection}:${this.messagingTeam?.generation ?? 0}:${conversationId}`; }
+
+  /** A delayed export or draft fill must still belong to this live membership. */
+  isCurrentScope = (scope: MessageScope, authority: number): boolean => !this.closed && this.authority === authority
+    && this.selection === scope.teamId && this.messagingTeam?.generation === scope.generation;
+
+  /** Adds an example to the existing draft; never submits a message or overwrites unsent work. */
+  fillExample = (conversationId: string, example: string): void => {
+    if (this.closed || this.messaging?.selected !== conversationId || !example.trim()) return;
+    const old = this.draft(conversationId);
+    this.setDraft(conversationId, old ? `${old}\n\n${example}` : example);
+    this.publish();
+  };
 
   /**
    * Add chosen files to a conversation's unsent message and start uploading them. Resolves with the files that were not taken and why.
@@ -541,16 +581,25 @@ export class TeamsWorkspace {
     if (botParties.some(key => !this.bots.some(bot => bot.sharedBotId === key && sharedBotUsable(bot)))) throw new Error('BOT_USE_REQUIRED');
     await model.create(kind, title.trim(), [this.uid, ...parties], botParties);
   });
-  /** Open the viewer's Bot DM, creating it when `fresh` or when there is none. Throws when the Bot is not usable; wrap it in `attempt`. */
-  startBotDm = async (bot: SharedBotCard, fresh = false): Promise<void> => {
+  private botDmTarget = async (bot: SharedBotCard, fresh = false): Promise<string | undefined> => {
     const model = this.messaging;
     if (!model) return;
     if (!sharedBotUsable(bot)) throw new Error('BOT_USE_REQUIRED');
     const existing = fresh ? undefined : findBotDm(model.state.conversations, this.uid, bot.sharedBotId, this.bots);
-    if (existing) model.select(existing.id);
-    else await model.create('bot_dm', bot.name, [this.uid], [bot.sharedBotId]);
+    if (existing) { model.select(existing.id); return existing.id; }
+    return model.create('bot_dm', bot.name, [this.uid], [bot.sharedBotId]);
   };
+  /** Open the viewer's Bot DM, creating it when `fresh` or when there is none. Throws when the Bot is not usable; wrap it in `attempt`. */
+  startBotDm = async (bot: SharedBotCard, fresh = false): Promise<void> => { await this.botDmTarget(bot, fresh); };
   openBotDm = (bot: SharedBotCard, fresh = false): Promise<boolean> => this.run(() => this.startBotDm(bot, fresh));
+  openBotExample = (bot: SharedBotCard, example: string): Promise<boolean> => this.run(async () => {
+    const model = this.messaging, authority = this.authority;
+    if (!model) return;
+    const target = await this.botDmTarget(bot);
+    if (!target || model.selected !== target || this.messaging !== model || !this.isCurrentScope(model.scope, authority)) return;
+    // The ID comes from the same DM-opening path, so a slow directory listener cannot lose the draft.
+    this.fillExample(target, example);
+  });
   /** Open the viewer's DM with a person, creating it when there is none. */
   openDm = (peerUid: string): Promise<boolean> => this.run(async () => {
     const model = this.messaging;
@@ -634,12 +683,12 @@ export class TeamsWorkspace {
     const focus = () => { void messaging.refresh(); if (this.error) void this.refresh(); };
     this.environment?.addEventListener('online', online); this.environment?.addEventListener('focus', focus);
     this.releaseMessaging = () => { stop(); messaging.close(); this.environment?.removeEventListener('online', online); this.environment?.removeEventListener('focus', focus); };
-    const botCards = new BotCards(this.api, scope, (bots, error = '') => {
+    const botCards = new BotCards(this.api, scope, (bots, error = '', blocked = []) => {
       if (this.botCards !== botCards) return;
-      this.bots = bots ?? EMPTY_BOTS; this.botsUnverified = !bots; this.botsError = bots ? '' : error; this.botsLoaded = this.botsLoaded || !!bots; this.publish();
+      this.bots = bots ?? EMPTY_BOTS; this.blockedBotIds = blocked; this.botsUnverified = !bots || !!error; this.botsError = error; this.botsLoaded = this.botsLoaded || !!bots; this.publish();
     });
     this.messaging = messaging; this.messagingTeam = team; this.botCards = botCards;
-    this.bots = EMPTY_BOTS; this.botsLoaded = false; this.botsUnverified = false; this.botsError = ''; this.actionError = '';
+    this.bots = EMPTY_BOTS; this.blockedBotIds = []; this.botsLoaded = false; this.botsUnverified = false; this.botsError = ''; this.actionError = '';
     void messaging.start().catch(() => { if (this.messaging === messaging) { this.actionError = 'STORAGE_FAILED'; this.publish(); } });
     const remembered = this.conversationByTeam.get(team.id);
     if (remembered) messaging.select(remembered);
@@ -655,7 +704,7 @@ export class TeamsWorkspace {
     this.releaseMessaging?.();
     this.botCards?.close();
     this.releaseMessaging = undefined; this.botCards = undefined; this.messaging = undefined; this.messagingTeam = undefined;
-    this.bots = EMPTY_BOTS; this.botsLoaded = false; this.botsUnverified = false; this.botsError = '';
+    this.bots = EMPTY_BOTS; this.blockedBotIds = []; this.botsLoaded = false; this.botsUnverified = false; this.botsError = '';
   }
 
   /** Keep one directory-only listener per other team, up to the limit; the selected team uses its controller. */
@@ -722,7 +771,8 @@ export class TeamsWorkspace {
       pending: this.outboxFor.value, creation: model?.state.creation, offline: model?.offline ?? false,
       messagingConnecting: model?.connecting ?? !!this.selection, messagingError: model?.error ?? '',
       draftFiles: this.draftFileLists.get(this.draftKey(selected)) ?? EMPTY_FILES,
-      bots: this.bots, botsLoaded: this.botsLoaded, botsUnverified: this.botsUnverified, botsError: this.botsError,
+      draftText: this.draft(selected),
+      bots: this.bots, blockedBotIds: this.blockedBotIds, botsLoaded: this.botsLoaded, botsUnverified: this.botsUnverified, botsError: this.botsError,
       unreadByTeam, totalUnread: Object.values(unreadByTeam).reduce((sum, value) => sum + value, 0),
     };
   }

@@ -599,7 +599,7 @@ scenario('An open list shows what others save without Refresh, and its history s
 });
 scenario('Publication offers a shared list, names it in the review, and carries an existing list into the next publication', async context => {
   const published: any[] = [];
-  const { fake, workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-new', name: 'Travel', description: '' }, { instanceId: 'local-fixture', name: 'Fixture', description: '' }], selectSharedFiles: async () => [],
+  const { fake, workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-new', name: 'Travel', description: '', capabilities: { durableWait: true, writeOperations: true } }, { instanceId: 'local-fixture', name: 'Fixture', description: '', capabilities: { durableWait: true, writeOperations: true } }], selectSharedFiles: async () => [],
     publishLocalBot: async input => { published.push(input); return { sharedBotId: input.sharedBotId, revision: input.expectedRevision + 1 }; } });
   const inner = fake.messages;
   fake.messages = async <T>(command: MessageCommand) => 'schemaVersion' in command && command.action === 'readList'

@@ -30,11 +30,18 @@ struct TeamsListView: View {
         func unread(_ conversation: TeamMessageConversation) -> Int { model?.unread(of: conversation) ?? 0 }
     }
 
+    private func open(_ bot: TeamBotCard, example: String? = nil) {
+        Task {
+            if let id = await workspace.openBotDM(bot, example: example) { onOpen(id) }
+        }
+    }
+
     var body: some View {
         let model = workspace.messaging
         let strings = TeamsListStrings.current
         let members = workspace.directory
         let bots = model?.bots ?? []
+        let memberBots = TeamBotMemberRules.directory(bots)
         let all = model?.cache?.conversations ?? []
         let labels = Dictionary(all.map { ($0.id, TeamsListLogic.conversationLabel($0, members: members, uid: uid, bots: bots, strings: strings)) }, uniquingKeysWith: { first, _ in first })
         let context = Context(model: model, strings: strings, members: members, bots: bots, labels: labels, online: model.map { !$0.offline } ?? false)
@@ -47,25 +54,32 @@ struct TeamsListView: View {
                     .listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear)
                     .id(Self.topID)
                     .accessibilityHidden(true)
-                if !bots.isEmpty {
+                if !memberBots.isEmpty {
                     Section("teams_assistants") {
-                        ForEach(bots.filter(\.selectable)) { bot in
-                            Button {
-                                let id = UUID().uuidString
-                                Task {
-                                    let done = await workspace.run { try await model?.create(kind: "bot_dm", title: bot.name, uids: [], sharedBotIds: [bot.sharedBotId], id: id) }
-                                    if done { onOpen(id) }
-                                }
-                            } label: {
-                                HStack {
-                                    AgentAvatar(agentID: bot.sharedBotId, size: 32)
-                                    VStack(alignment: .leading) {
+                        ForEach(memberBots) { bot in
+                            VStack(alignment: .leading, spacing: 8) {
+                                let history = TeamsListLogic.findBotDm(all, uid: uid, sharedBotId: bot.sharedBotId, bots: bots)
+                                Button {
+                                    if bot.selectable { open(bot) } else if let history { onOpen(history.id) }
+                                } label: {
+                                    HStack {
+                                        AgentAvatar(agentID: bot.sharedBotId, size: 32)
                                         Text(bot.name).font(.body.weight(.semibold))
-                                        Text(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued")).font(.caption).foregroundStyle(.secondary)
                                     }
                                 }
+                                .buttonStyle(.borderless)
+                                .disabled(workspace.messageBusy || (!bot.selectable && history == nil))
+                                .accessibilityIdentifier("teams.assistant.\(bot.sharedBotId)")
+                                TeamBotMemberInfo(bot: bot, unverified: model?.botsUnverified == true)
+                                ForEach(bot.memberExamples, id: \.self) { example in
+                                    Button { open(bot, example: example) } label: {
+                                        Label(example, systemImage: "text.bubble").font(.subheadline)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .disabled(workspace.messageBusy || !bot.selectable)
+                                    .accessibilityIdentifier("teams.assistant.example.\(bot.sharedBotId)")
+                                }
                             }
-                            .accessibilityIdentifier("teams.assistant.\(bot.sharedBotId)")
                         }
                     }
                 }

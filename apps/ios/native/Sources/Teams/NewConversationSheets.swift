@@ -363,12 +363,20 @@ struct NewConversationSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(bot.name).font(.body.weight(.semibold))
                     HStack(spacing: 6) {
-                        Text(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued"))
-                        Text("·")
                         Text("teams_bot_owner \(owner(bot.maintainer.uid))")
                     }
                     .font(.caption).foregroundStyle(.secondary)
                 }
+            }
+            TeamBotMemberInfo(bot: bot, unverified: model?.botsUnverified == true)
+            ForEach(bot.memberExamples, id: \.self) { example in
+                Button {
+                    Task {
+                        tried = true
+                        if let id = await workspace.openBotDM(bot, example: example) { onOpen(id) }
+                    }
+                } label: { Label(example, systemImage: "text.bubble").font(.subheadline) }
+                    .buttonStyle(.borderless).disabled(workspace.messageBusy || offline)
             }
             HStack(spacing: 10) {
                 Button(LocalizedStringKey(existing != nil ? "teams_new_bot_open" : "teams_new_bot_start")) {

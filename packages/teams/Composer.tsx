@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactElement } from 'react';
 import { ATTACHMENT_ACCEPT, type FileRefusal } from './attachments.js';
 import { DraftFiles } from './MessageFiles';
+import { BotMemberDetails, botAvailabilityText } from './BotMemberDetails';
 import { messageErrorText } from './errors.js';
 import { sharedBotUsable, type SharedBotCard } from './execution.js';
 import { botDmHandedOver, byteLength, canSendText, mentionAt, mentionCandidates, MESSAGE_BYTES, sendsOnEnter, snippet, withoutMention } from './compose.js';
@@ -89,8 +90,18 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
   const open = candidates.length > 0;
   const choice = Math.min(active, Math.max(0, candidates.length - 1));
   const askable = asks && snapshot.bots.some(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`));
+  const dmBot = conversation.kind === 'bot_dm' ? snapshot.bots.find(bot => conversation.participants.includes(`shared_bot:${bot.sharedBotId}`)) : undefined;
+  const contextBots = dmBot ? [dmBot] : snapshot.bots.filter(bot => targets.includes(bot.sharedBotId));
+  const requestedBots = dmBot ? [dmBot.sharedBotId] : targets;
+  const unavailable = !editing && !answering && (requestedBots.some(id => snapshot.blockedBotIds.includes(id)) || snapshot.bots.some(bot => requestedBots.includes(bot.sharedBotId) && (bot.state === 'paused' || ['paused', 'offline', 'maintenance', 'quota_exhausted'].includes(bot.availability ?? ''))));
   const bytes = byteLength(text);
   const botName = (key: string) => snapshot.bots.find(bot => bot.sharedBotId === key)?.name ?? 'Bot';
+
+  // A member-home example may arrive just after the DM mounted. Read the scoped draft again.
+  useEffect(() => {
+    const draft = workspace.draft(conversation.id);
+    if (!editing && !answering && draft !== latest.current) { setText(draft); caretTo.current = draft.length; input.current?.focus(); }
+  }, [workspace, conversation.id, snapshot.draftText, editing?.id, answering?.waitId]);
 
   // An edit borrows the box: the draft is set aside and comes back when the edit ends.
   useEffect(() => {
@@ -151,7 +162,7 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
   const sendable = (canSendText(text) || (ready.length > 0 && !text.trim())) && filesSettled && byteLength(text) <= MESSAGE_BYTES;
 
   const send = async () => {
-    if (lock || !sendable || snapshot.messageBusy) return;
+    if (lock || unavailable || !sendable || snapshot.messageBusy) return;
     const body = text, replied = reply?.message, changing = editing, answered = answering?.waitId, carried = ready;
     const ok = await workspace.run(async () => {
       const model = snapshot.messaging;
@@ -192,6 +203,7 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
   if (lock) return <div className="tw-composer tw-composer-locked"><p className="tw-readonly" role="status">{lock}</p>
     {moved ? <button type="button" disabled={snapshot.messageBusy} onClick={() => void workspace.openBotDm(moved)}>{t('Start a new chat', '开始新的对话')}</button> : null}</div>;
   return <form className="tw-composer" onSubmit={event => { event.preventDefault(); void send(); }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={drop}>
+    {contextBots.map(bot => <div key={bot.sharedBotId}>{!dmBot ? <b>{bot.name}</b> : null}<BotMemberDetails bot={bot} zh={zh} busy={snapshot.messageBusy || !!editing || !!answering} onExample={dmBot ? example => workspace.fillExample(conversation.id, example) : undefined} /></div>)}
     {editing ? <div className="tw-context"><Icon name="edit" /><span>{t('Editing message', '正在编辑消息')}</span><button type="button" className="tw-link" onClick={onClearEditing}>{t('Cancel', '取消')}</button></div> : null}
     {reply ? <div className="tw-context"><Icon name="reply" /><span className="tw-context-text">{t('Replying to', '回复')} <b>{reply.author}</b>: {snippet(reply.message.recalled ? t('Recalled message', '已撤回消息') : reply.message.text)}</span>
       <button type="button" className="tw-icon-btn" aria-label={t('Cancel reply', '取消回复')} onClick={onClearReply}><Icon name="x" /></button></div> : null}
@@ -211,7 +223,7 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
         {candidates.map((bot, index) => <li key={bot.sharedBotId} id={`${listId}-${index}`} role="option" aria-selected={index === choice} className="tw-mention"
           onMouseDown={event => { event.preventDefault(); pick(bot); }}>
           <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={20} render={renderAvatar} />
-          <b>{bot.name}</b><small>{bot.ready ? t('Online', '在线') : t('Host unavailable', '宿主不可用')}</small>
+          <b>{bot.name}</b><small>{botAvailabilityText(bot, zh)}</small>
         </li>)}
       </ul> : null}
       <textarea ref={input} rows={1} value={text} onChange={change} onPaste={paste} onSelect={event => setCaret(event.currentTarget.selectionStart)} onKeyDown={keys}
@@ -227,12 +239,13 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
         {asks ? <button type="button" className="tw-icon-btn" aria-label={t('Ask a Bot (@)', '请求 Bot (@)')} title={t('Ask a Bot (@)', '请求 Bot (@)')} disabled={!askable || targets.length >= MAX_TARGETS} onClick={insertAt}><Icon name="at" /></button> : null}
         {bytes > MESSAGE_BYTES * 0.9 ? <span className="tw-count" data-over={bytes > MESSAGE_BYTES} role="status">{bytes.toLocaleString(zh ? 'zh-CN' : 'en-US')} / {MESSAGE_BYTES.toLocaleString(zh ? 'zh-CN' : 'en-US')}</span> : null}
         {editing ? <button type="button" onClick={onClearEditing}>{t('Cancel', '取消')}</button> : null}
-        <button type="submit" className="tw-primary tw-send" disabled={snapshot.messageBusy || !sendable} aria-label={editing ? t('Save edit', '保存修改') : t('Send', '发送')}>
+        <button type="submit" className="tw-primary tw-send" disabled={snapshot.messageBusy || unavailable || !sendable} aria-label={editing ? t('Save edit', '保存修改') : t('Send', '发送')}>
           {editing ? t('Save', '保存') : <Icon name="send" />}
         </button>
       </div>
     </div>
     <p className="tw-hint">
+      {unavailable ? `${t('This assistant cannot accept a new request now. Your draft is kept.', '此助手目前无法接受新请求，你的草稿会保留。')} ` : ''}
       {files.length && !filesSettled ? `${files.some(file => file.state === 'failed') ? t('Remove the file that could not be uploaded to send.', '移除未能上传的文件后即可发送。') : t('You can send once the files have uploaded.', '文件上传完成后即可发送。')} ` : ''}
       {answering ? t('Your reply goes to the Bot, which then continues its task.', '你的回复会发给 Bot，由它继续完成任务。')
         : conversation.kind === 'bot_dm' ? t('Messages ask this Bot automatically. Its owner can read this conversation.', '发送消息会请求此 Bot。其所有者可阅读此会话。')

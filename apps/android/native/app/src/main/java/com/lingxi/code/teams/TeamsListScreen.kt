@@ -84,6 +84,7 @@ internal fun TeamsListScreen(
     onReconnect: () -> Unit,
     onDiscardCreation: () -> Unit,
     onMessageBot: (String) -> Unit = {},
+    onBotExample: (String, String) -> Unit = { _, _ -> },
     onArtifact: (String) -> Unit = {},
     onRefreshTask: (String) -> Unit = {},
     onCancelTask: (String) -> Unit = {},
@@ -96,6 +97,7 @@ internal fun TeamsListScreen(
     val strings = rememberTeamsListStrings()
     val conversations = messaging.cache?.conversations.orEmpty()
     val bots = messaging.bots
+    val memberBots = TeamBotEntry.memberDirectory(bots)
     val now = rememberNowMs()
     var searching by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
@@ -160,11 +162,15 @@ internal fun TeamsListScreen(
                 )
                 visible.isEmpty() && query.isNotBlank() -> TeamsMessageState(stringResource(R.string.teams_no_matches), Modifier.testTag(TeamsTags.NO_MATCHES))
                 else -> LazyColumn(Modifier.fillMaxSize(), state = listState) {
-                    if (query.isBlank() && bots.any { it.selectable }) {
+                    if (query.isBlank() && memberBots.isNotEmpty()) {
                         item(key = "assistants") { Text(stringResource(R.string.teams_assistants), Modifier.padding(16.dp), style = MaterialTheme.typography.titleSmall) }
-                        items(bots.filter { it.selectable }, key = { "assistant-${it.sharedBotId}" }) { bot ->
-                            TextButton(onClick = { onMessageBot(bot.sharedBotId) }, modifier = Modifier.fillMaxWidth().testTag("teams.assistant.${bot.sharedBotId}")) {
-                                Text(bot.name + " · " + botAvailabilityText(bot))
+                        items(memberBots, key = { "assistant-${it.sharedBotId}" }) { bot ->
+                            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                                TextButton(enabled = bot.selectable, onClick = { onMessageBot(bot.sharedBotId) }, modifier = Modifier.fillMaxWidth().testTag("teams.assistant.${bot.sharedBotId}")) {
+                                    Text(bot.name + " · " + botAvailabilityText(bot))
+                                }
+                                if (bot.description.isNotBlank()) Text(bot.description, style = MaterialTheme.typography.bodyMedium)
+                                TeamBotMemberInfo(bot, enabled = !messaging.submitting && messaging.cache?.creation == null, onExample = { onBotExample(bot.sharedBotId, it) })
                             }
                         }
                     }

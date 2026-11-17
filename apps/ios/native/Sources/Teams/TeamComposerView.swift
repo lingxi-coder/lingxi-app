@@ -9,6 +9,7 @@ struct TeamComposerView: View {
     let context: TeamConversationContext
     @Binding var draft: TeamComposerDraft
     let editing: TeamMessage?
+    var answeringWait = false
     /// The message being answered and who wrote it.
     let replying: (author: String, text: String)?
     let busy: Bool
@@ -36,9 +37,15 @@ struct TeamComposerView: View {
     private var model: TeamMessagingModel { context.model }
     private var conversation: TeamMessageConversation { context.conversation }
     private var lock: ComposerLock {
-        TeamsComposeLogic.composerLock(
+        let value = TeamsComposeLogic.composerLock(
             uid: context.uid, kind: conversation.kind, participants: conversation.participants, readers: conversation.readers,
             bots: context.bots, botsLoaded: model.botsLoaded, botsUnverified: model.botsUnverified)
+        if (editing != nil || answeringWait), [.botUnavailable, .botChecking, .botUnverified].contains(value) { return .none }
+        return value
+    }
+    private var availabilityBlock: TeamBotAvailability? {
+        TeamBotMemberRules.blockedAvailability(targets: TeamBotSelection.targets(in: conversation, selected: Set(draft.targets)), cards: context.bots,
+            operation: editing == nil ? "create" : "edit", answeringWait: answeringWait)
     }
     private var asks: Bool { editing == nil && (conversation.kind == "group" || conversation.kind == "channel") }
     private var askable: Bool { asks && context.bots.contains { $0.selectable && conversation.participants.contains("shared_bot:\($0.sharedBotId)") } }
@@ -172,7 +179,7 @@ struct TeamComposerView: View {
                             AgentAvatar(agentID: bot.avatarId, size: 24)
                             Text(bot.name).font(.body.weight(.semibold)).foregroundStyle(.primary).lineLimit(1)
                             Spacer()
-                            Text(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued")).font(.caption).foregroundStyle(.secondary)
+                            Text(TeamBotMemberText.availability(bot.memberAvailability, chinese: TeamsListStrings.isChinese(languageTag: Bundle._lxCurrentLanguageID.withLock { $0 }))).font(.caption).foregroundStyle(.secondary)
                         }
                         .padding(.horizontal, 12).padding(.vertical, 8)
                         .contentShape(Rectangle())
@@ -242,7 +249,7 @@ struct TeamComposerView: View {
             Button(action: onSend) {
                 Image(systemName: editing != nil ? "checkmark.circle.fill" : "arrow.up.circle.fill").font(.system(size: 30))
             }
-            .disabled(busy || !TeamAttachments.canSend(text: draft.text, files: files))
+            .disabled(busy || availabilityBlock != nil || !TeamAttachments.canSend(text: draft.text, files: files))
             .accessibilityLabel(Text(LocalizedStringKey(editing != nil ? "teams_message_save" : "teams_message_send")))
             .accessibilityIdentifier("teams.composer.send")
         }
@@ -250,6 +257,11 @@ struct TeamComposerView: View {
 
     @ViewBuilder
     private var footer: some View {
+        if let availabilityBlock {
+            let status = model.botsUnverified || context.bots.contains { $0.newRequestBlock == availabilityBlock && $0.memberAvailability == .unverified } ? TeamBotAvailability.unverified : availabilityBlock
+            Text(TeamBotMemberText.availability(status, chinese: TeamsListStrings.isChinese(languageTag: Bundle._lxCurrentLanguageID.withLock { $0 })))
+                .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("teams.composer.availability")
+        }
         if tooLong {
             Text("teams_composer_too_long").font(.caption).foregroundStyle(.red)
         } else if bytes > Int(Double(TeamsComposeLogic.messageBytes) * 0.9) {

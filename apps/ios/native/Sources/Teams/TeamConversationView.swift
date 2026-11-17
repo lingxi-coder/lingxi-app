@@ -37,6 +37,7 @@ struct TeamConversationView: View {
     @State private var savedText: String?
     @State private var draft = TeamComposerDraft()
     @State private var draftLoaded = false
+    @State private var ownedDraftKey = ""
     /// The app's voice input, made the first time the microphone is used here. What it hears goes into the box.
     @State private var voice: VoiceInteractionController?
     @FocusState private var composerFocused: Bool
@@ -54,22 +55,35 @@ struct TeamConversationView: View {
         // The model is replaced when the team or its membership generation changes; the new one must open this thread.
         .task(id: workspace.messaging.map(ObjectIdentifier.init)) { workspace.openConversation(conversationID) }
         .onAppear {
-            if !draftLoaded { draft = workspace.draft(for: conversationID); draftLoaded = true }
+            if !draftLoaded || ownedDraftKey != workspace.draftKey(conversationID) { loadDraft() }
             showNotice = workspace.pair == nil && !workspace.platformNoticeShown
             workspace.markPlatformNoticeShown()
         }
         .onChange(of: draft) { _, value in
-            if draftLoaded, editing == nil { workspace.setDraft(value, for: conversationID) }
+            if draftLoaded, editing == nil, ownedDraftKey == workspace.draftKey(conversationID) { workspace.setDraft(value, for: conversationID) }
         }
         .onDisappear {
-            if draftLoaded, editing == nil { workspace.setDraft(draft, for: conversationID) }
+            if draftLoaded, editing == nil, ownedDraftKey == workspace.draftKey(conversationID) { workspace.setDraft(draft, for: conversationID) }
             voice?.close()
         }
         // Another account, another team, or the viewer's membership changed: what was being said is dropped, not moved.
-        .onChange(of: workspace.draftKey(conversationID)) { _, _ in voice?.close() }
+        .onChange(of: workspace.draftKey(conversationID)) { _, _ in
+            voice?.close()
+            editing = nil; savedText = nil
+            loadDraft()
+        }
+        .onChange(of: workspace.draft(for: conversationID)) { _, value in
+            if ownedDraftKey == workspace.draftKey(conversationID), editing == nil, draft != value { draft = value }
+        }
         // Without `.contain` the identifier is copied onto every child (composer input, send, rows).
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.conversation.\(conversationID)")
+    }
+
+    private func loadDraft() {
+        ownedDraftKey = workspace.draftKey(conversationID)
+        draft = workspace.draft(for: conversationID)
+        draftLoaded = true
     }
 
     // MARK: Not there (yet)
@@ -113,10 +127,13 @@ struct TeamConversationView: View {
         let carrying = carriesFiles(context)
         return VStack(spacing: 0) {
             banners(context)
+            if conversation.kind == "bot_dm", let bot = context.bots.first(where: { conversation.participants.contains("shared_bot:\($0.sharedBotId)") }) {
+                TeamBotMemberInfo(bot: bot, unverified: model.botsUnverified).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal).padding(.vertical, 6)
+            }
             stream(context, messages: messages)
             voicePanel
             TeamComposerView(
-                context: context, draft: $draft, editing: editing, replying: replying(context, messages: messages), busy: workspace.messageBusy,
+                context: context, draft: $draft, editing: editing, answeringWait: answering(context) != nil, replying: replying(context, messages: messages), busy: workspace.messageBusy,
                 files: carrying ? workspace.files(for: conversationID) : [], refusals: carrying ? workspace.refusals(for: conversationID) : [],
                 onChooseFiles: carrying ? { workspace.addFiles($0, to: conversationID) } : nil,
                 onRemoveFile: { workspace.removeFile($0, from: conversationID) }, onDismissRefusals: { workspace.dismissRefusals(for: conversationID) },
@@ -459,6 +476,8 @@ struct TeamConversationView: View {
     }
 
     private func send(_ context: TeamConversationContext) async {
+        let ownerKey = workspace.draftKey(conversationID)
+        guard ownedDraftKey == ownerKey else { return }
         let body = draft.text, reply = draft.replyToID, targets = draft.targets, changing = editing
         // A reply to a Bot's question that still waits for the viewer is its answer: it continues that task and asks no Bot.
         let waitId = answering(context)
@@ -475,7 +494,7 @@ struct TeamConversationView: View {
             guard model.selected == conversationID else { throw TeamMessageFailure(code: "INVALID_INPUT") }
             try await model.queue(operation: changing == nil ? "create" : "edit", text: body, messageId: changing?.id, replyTo: reply, targets: changing == nil ? targets : [], files: files)
         }
-        guard sent else { return }
+        guard sent, ownedDraftKey == ownerKey, workspace.draftKey(conversationID) == ownerKey, workspace.messaging === context.model else { return }
         workspace.filesSent(files.map(\.uploadId), in: conversationID)
         if changing != nil {
             // The set-aside draft comes back (Desktop: `onClearEditing` restores the text kept while editing).

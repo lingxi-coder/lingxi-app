@@ -14,6 +14,16 @@ struct TeamComposerDraft: Equatable, Sendable {
     /// Bot keys chosen with `@`, in the order they were chosen.
     var targets: [String] = []
     var isEmpty: Bool { text.isEmpty && replyToID == nil && targets.isEmpty }
+    static func key(uid: String, teamID: String, generation: Int, conversationID: String) -> String {
+        "\(uid):\(teamID):\(generation):\(conversationID)"
+    }
+    /// An example fills an untouched composer; it never replaces words, a reply, or chosen targets.
+    func fillingExample(_ example: String, hasFiles: Bool) -> Self {
+        guard isEmpty, !hasFiles, !example.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return self }
+        var result = self
+        result.text = example
+        return result
+    }
 }
 
 /// The app-level Teams data layer (spec §6.6, D10; the port of Desktop `packages/teams/workspace.ts`):
@@ -102,7 +112,7 @@ final class TeamsWorkspace {
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var watchers: [String: TeamsUnreadWatcher] = [:]
     @ObservationIgnored private var conversationByTeam: [String: String] = [:]
-    @ObservationIgnored private var drafts: [String: TeamComposerDraft] = [:]
+    private var drafts: [String: TeamComposerDraft] = [:]
     /// The files of unsent messages and what was last refused when files were chosen, by the same key as `drafts`. Observed:
     /// an upload moves on while its conversation is closed, and the composer shows where it stands when it is opened again.
     private var draftFiles: [String: [TeamDraftFile]] = [:]
@@ -499,7 +509,9 @@ final class TeamsWorkspace {
 
     /// What an unsent message belongs to: the account, the team as the viewer is in it now, and the conversation.
     /// Anything that started under one key (an upload, words being spoken) is dropped when the key is another.
-    func draftKey(_ conversationID: String) -> String { "\(uid ?? ""):\(selectedTeamID):\(team?.generation ?? 0):\(conversationID)" }
+    func draftKey(_ conversationID: String) -> String {
+        TeamComposerDraft.key(uid: uid ?? "", teamID: selectedTeamID, generation: team?.generation ?? 0, conversationID: conversationID)
+    }
 
     // MARK: Files of an unsent message
 
@@ -605,20 +617,30 @@ final class TeamsWorkspace {
 
     /// Opens the viewer's Bot DM with a Bot, creating it when `fresh` or when there is none. Returns the
     /// conversation to show. Throws nothing: a Bot that is not usable fails with `BOT_USE_REQUIRED` in `actionError`.
-    func openBotDM(_ bot: TeamBotCard, fresh: Bool = false) async -> String? {
+    func openBotDM(_ bot: TeamBotCard, fresh: Bool = false, example: String? = nil) async -> String? {
+        guard let model = messaging, let uid else { return nil }
+        let life = lifecycle, scope = draftKey("")
         var opened: String?
         let done = await run {
-            guard let model = self.messaging, let uid = self.uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
-            guard bot.selectable else { throw TeamMessageFailure(code: "BOT_USE_REQUIRED") }
-            if !fresh, let existing = TeamsListLogic.findBotDm(model.cache?.conversations ?? [], uid: uid, sharedBotId: bot.sharedBotId, bots: model.bots) {
+            guard self.messaging === model, self.uid == uid,
+                  let current = model.bots.first(where: { $0.sharedBotId == bot.sharedBotId }), current.selectable else {
+                throw TeamMessageFailure(code: "BOT_USE_REQUIRED")
+            }
+            if !fresh, let existing = TeamsListLogic.findBotDm(model.cache?.conversations ?? [], uid: uid, sharedBotId: current.sharedBotId, bots: model.bots) {
                 opened = existing.id
                 return
             }
             let id = UUID().uuidString
-            try await model.create(kind: "bot_dm", title: bot.name, uids: [], sharedBotIds: [bot.sharedBotId], id: id)
+            try await model.create(kind: "bot_dm", title: current.name, uids: [], sharedBotIds: [current.sharedBotId], id: id)
             opened = id
         }
-        return done ? opened : nil
+        // A delayed create must never navigate or seed the next account/team's composer.
+        guard done, started, lifecycle == life, self.uid == uid, messaging === model,
+              draftKey("") == scope, let opened else { return nil }
+        if let example, model.bots.first(where: { $0.sharedBotId == bot.sharedBotId })?.memberExamples.contains(example) == true {
+            setDraft(draft(for: opened).fillingExample(example, hasFiles: !files(for: opened).isEmpty), for: opened)
+        }
+        return opened
     }
 
     /// Opens the viewer's DM with a person, creating it when there is none. Returns the conversation to show.

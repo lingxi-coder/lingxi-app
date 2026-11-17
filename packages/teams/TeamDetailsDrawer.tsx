@@ -149,7 +149,7 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
       return <div className="tw-embed">
         <BotDirectory key={`${uid}:${team.id}:${team.generation}:${snapshot.authority}`} api={workspace.api} uid={uid} team={team} members={snapshot.directory} bots={snapshot.bots} zh={zh} busy={snapshot.messageBusy}
           status={snapshot.botsUnverified ? t('Bot availability could not be verified.', '未能确认 Bot 可用状态。') : !snapshot.botsLoaded ? t('Loading Bots…', '正在加载 Bot…') : ''}
-          attempt={workspace.attempt} onOpen={bot => workspace.startBotDm(bot)} onChanged={() => workspace.refreshBots()} />
+          attempt={workspace.attempt} onExample={(bot, example) => { void workspace.openBotExample(bot, example); }} onOpen={bot => workspace.startBotDm(bot)} onChanged={() => workspace.refreshBots()} />
         {snapshot.actionError ? <p role="alert" className="tw-error">{messageErrorText(snapshot.actionError, zh)}</p> : null}
       </div>;
     }

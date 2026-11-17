@@ -15,6 +15,7 @@ import { hostNode, reactTestRenderer, scenario, settle, textOf, withDom } from '
 const require = createRequire(import.meta.url);
 const { FriendsWorkspaceView } = loadTeamsModule<typeof import('../src/friends/FriendsWorkspaceView')>(new URL('../src/friends/FriendsWorkspaceView', import.meta.url).pathname);
 const { SignInCard } = loadTeamsModule<typeof import('../src/teams/SignInCard')>(new URL('../src/teams/SignInCard', import.meta.url).pathname);
+const i18n = loadTeamsModule<typeof import('../../../packages/teams/i18n')>('i18n');
 const code = 'aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-', intentKey = 'lingxi.friends.addIntent.1';
 const store = () => { const values = new Map<string, string>(); return { values, getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: (key: string) => { values.delete(key); } }; };
 
@@ -29,6 +30,7 @@ function pageFixture() {
     '../app/firebase': { auth }, '../teams/firestore': { teamsDatabase: () => ({}) }, '../friends/add-intent': intent,
     '../friends/api': { webFriendsApi: () => ({ ...friends.api, close() {} }) }, '../teams/api': { webTeamsApi: () => ({ ...teams.api, close() {} }) },
     '../friends/FriendsWorkspaceView': { FriendsWorkspaceView }, '../teams/SignInCard': { SignInCard },
+    '../../../../packages/teams/i18n': i18n,
   };
   new Function('require', 'module', 'exports', compiled.outputText)((id: string) => id in mocks ? mocks[id] : require(id), module, module.exports);
   return { Page: module.exports.default, friends, teams, signIn() { const user = { uid, email: 'fixture@example.invalid' } as User; listeners.forEach(next => next(user)); } };

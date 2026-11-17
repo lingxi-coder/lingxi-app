@@ -24,7 +24,7 @@ withDom({ after } as unknown as TestContext);
 
 const NOW = new Date(2026, 10, 3, 12).getTime();
 const view = (workspace: FriendsWorkspace, component: unknown, more: Record<string, unknown> = {}) => (snapshot: FriendsSnapshot) =>
-  createElement(component as never, { workspace, snapshot, zh: false, locale: 'en-US', now: NOW, ...more } as never);
+  createElement(component as never, { workspace, snapshot, locale: 'en-US', now: NOW, ...more } as never);
 const ready = (snapshot: () => FriendsSnapshot) => until(() => !snapshot().loading && !snapshot().blocksLoading && !!snapshot().profile, 'the lists and the profile');
 const at = (day: number, hour = 10) => new Date(2026, 10, day, hour).toISOString();
 const dialogs = (page: { find(match: (node: any) => boolean): any[] }) => page.find(node => node.type === 'dialog');
@@ -88,8 +88,8 @@ scenario('requests: Accept, Decline and Cancel act on their row only, a failure 
   const row = (name: string) => received().findAll((node: any) => node.type === 'li').find((node: any) => textOf(node).includes(name))!;
   fake.fail('accept', 'FRIEND_LIMIT');
   await page.click(row('U24').findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === 'Accept'));
-  assert.ok(textOf(row('U24')).includes(friendsErrorText('FRIEND_LIMIT', false)), 'the error is under the row that failed');
-  assert.ok(!textOf(row('U23')).includes(friendsErrorText('FRIEND_LIMIT', false)));
+  assert.ok(textOf(row('U24')).includes(friendsErrorText('FRIEND_LIMIT', 'en')), 'the error is under the row that failed');
+  assert.ok(!textOf(row('U23')).includes(friendsErrorText('FRIEND_LIMIT', 'en')));
   await page.click(row('U23').findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === 'Decline'));
   await page.click(page.oneByLabel('Sent').findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === 'Cancel request'));
   assert.deepEqual(fake.commands.map(command => [command.action, (command as { otherUid: string }).otherUid]), [['accept', 'u24'], ['decline', 'u23'], ['cancel', 'sent1']]);
@@ -246,7 +246,7 @@ scenario('the main area with nothing open says what Friends is and offers the on
   assert.equal(textOf(filled.find(node => node.type === 'h2')[0]), 'Friends', 'with friends it is not "No friends yet"');
   await filled.click(filled.button('Add friend')); assert.equal(some.snapshot().page, 'add');
   some.workspace.show('home');
-  const zh = await mount(some.workspace, view(some.workspace, FriendsMain, { zh: true, locale: 'zh-CN' })); context.after(() => zh.unmount());
+  const zh = await mount(some.workspace, view(some.workspace, FriendsMain, { locale: 'zh-CN' })); context.after(() => zh.unmount());
   assert.equal(textOf(zh.find(node => node.type === 'h2')[0]), '好友'); assert.ok(zh.text().includes('添加好友'));
 });
 
@@ -323,9 +323,9 @@ scenario('a friend link adds without a note; a lookup that finds nothing says so
 
   fake.fail('lookup', 'NOT_FOUND', 404);
   await page.type(field(), '@nobody'); await page.submit(page.find(node => node.type === 'form')[0]);
-  assert.ok(page.text().includes(friendsErrorText('NOT_FOUND', false)));
+  assert.ok(page.text().includes(friendsErrorText('NOT_FOUND', 'en')));
   await page.type(field(), '@nobody2');
-  assert.ok(!page.text().includes(friendsErrorText('NOT_FOUND', false)), 'a new query starts clean');
+  assert.ok(!page.text().includes(friendsErrorText('NOT_FOUND', 'en')), 'a new query starts clean');
 });
 
 scenario('a failed confirmation is told on the card, which stays, and retrying an unknown outcome reuses the request id', async context => {
@@ -334,13 +334,13 @@ scenario('a failed confirmation is told on the card, which stays, and retrying a
   await page.type(field(), '@sam'); await page.submit(page.find(node => node.type === 'form')[0]);
   fake.fail('request', 'SERVICE_UNAVAILABLE', 503);
   await page.click(page.button('Add friend'));
-  assert.ok(textOf(page.oneByLabel('Sam')).includes(friendsErrorText('SERVICE_UNAVAILABLE', false)));
+  assert.ok(textOf(page.oneByLabel('Sam')).includes(friendsErrorText('SERVICE_UNAVAILABLE', 'en')));
   await page.click(page.button('Add friend'));
   const [first, second] = fake.executed('request') as { requestId: string }[];
   assert.equal(first!.requestId, second!.requestId);
   fake.fail('request', 'REQUEST_LIMIT');
   await page.click(page.button('Add friend'));
-  assert.ok(textOf(page.oneByLabel('Sam')).includes(friendsErrorText('REQUEST_LIMIT', false)));
+  assert.ok(textOf(page.oneByLabel('Sam')).includes(friendsErrorText('REQUEST_LIMIT', 'en')));
 });
 
 scenario('my friend link: shown with copy, reset and turn off behind confirmations, and created again when off', async context => {
@@ -369,7 +369,7 @@ scenario('opening Add friend reads the profile again, and a profile that cannot 
   const reads = fake.profileCalls;
   const page = await mount(workspace, view(workspace, AddFriendView)); context.after(() => page.unmount());
   await until(() => fake.profileCalls > reads, 'the page to read the profile'); await page.during(() => undefined);
-  assert.ok(page.text().includes(friendsErrorText('SERVICE_UNAVAILABLE', false)));
+  assert.ok(page.text().includes(friendsErrorText('SERVICE_UNAVAILABLE', 'en')));
   fake.profileError = undefined;
   await page.click(page.button('Retry'));
   assert.ok(page.text().includes('My friend link')); assert.ok(page.find(node => node.props.title === profile().friendCode!.link).length === 1);
@@ -397,7 +397,7 @@ scenario('profile settings send only what changed, keep an unset username as it 
   fake.fail('profile', 'HANDLE_TAKEN');
   await page.submit();
   assert.deepEqual(fake.commands, [{ action: 'profile', displayName: 'Ally', handle: 'ally_w', findByEmail: true }]);
-  assert.ok(page.find(node => node.props.role === 'alert' && textOf(node) === friendsErrorText('HANDLE_TAKEN', false)).length === 1, 'told next to the username');
+  assert.ok(page.find(node => node.props.role === 'alert' && textOf(node) === friendsErrorText('HANDLE_TAKEN', 'en')).length === 1, 'told next to the username');
   fake.replies.delete('profile'); fake.profile = profile({ displayName: 'Ally', handle: 'ally_w', findByEmail: true });
   await page.submit();
   assert.equal(fake.commands.length, 2); assert.equal(snapshot().profile?.displayName, 'Ally');
@@ -415,7 +415,7 @@ scenario('blocked people: newest first with Unblock, the list follows the listen
   fake.fail('unblock', 'SERVICE_UNAVAILABLE', 503);
   const unblock = () => page.find(node => node.type === 'button' && textOf(node) === 'Unblock')[0]!;
   await page.click(unblock());
-  assert.ok(page.text().includes(friendsErrorText('SERVICE_UNAVAILABLE', false)));
+  assert.ok(page.text().includes(friendsErrorText('SERVICE_UNAVAILABLE', 'en')));
   fake.replies.delete('unblock');
   await page.click(unblock());
   assert.deepEqual(fake.executed('unblock').map(command => (command as { otherUid: string }).otherUid), ['new', 'new']);
@@ -479,7 +479,7 @@ scenario('the friend menu: View profile, Remove friend and Block, the last two b
   assert.equal(fake.executed('remove').length, 0, 'asking is not doing'); assert.ok(textOf(dialogs(page)[0]).includes('the chat is deleted for both of you'));
   fake.fail('remove', 'SERVICE_UNAVAILABLE', 503);
   await page.click(dialogs(page)[0].findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === 'Remove friend'));
-  assert.ok(textOf(dialogs(page)[0]).includes(friendsErrorText('SERVICE_UNAVAILABLE', false))); assert.equal(snapshot().page, 'chat');
+  assert.ok(textOf(dialogs(page)[0]).includes(friendsErrorText('SERVICE_UNAVAILABLE', 'en'))); assert.equal(snapshot().page, 'chat');
   fake.replies.delete('remove');
   await page.click(dialogs(page)[0].findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === 'Remove friend'));
   assert.equal(snapshot().page, 'home'); assert.equal(fake.executed('remove').length, 2);
@@ -559,13 +559,13 @@ scenario('a Team member can be added as a friend from their row, with the proof 
   context.after(() => workspace.close());
   await until(() => workspace.getSnapshot().detail?.members.length === 3, 'the team');
   const added: TeamMember[] = [];
-  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, zh: false, tab: 'members', onTabChange() {}, onClose() {}, onAddFriend: (member: TeamMember) => added.push(member) } as never));
+  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, locale: 'en', tab: 'members', onTabChange() {}, onClose() {}, onAddFriend: (member: TeamMember) => added.push(member) } as never));
   context.after(() => page.unmount());
   const buttons = page.find(node => node.type === 'button' && textOf(node) === 'Add friend');
   assert.equal(buttons.length, 2, 'every member but me');
   await page.click(buttons[0]!);
   assert.deepEqual(added.map(member => member.uid), ['bob']);
-  const without = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, zh: false, tab: 'members', onTabChange() {}, onClose() {} } as never));
+  const without = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, locale: 'en', tab: 'members', onTabChange() {}, onClose() {} } as never));
   context.after(() => without.unmount());
   assert.equal(without.find(node => node.type === 'button' && textOf(node) === 'Add friend').length, 0, 'a host that has no Friends offers nothing');
 });
@@ -631,8 +631,8 @@ scenario('Join says so once and leaves the row to the listener; a failure is tol
 
   fake.fail('acceptOffer', 'TEAM_LIMIT');
   await page.click(buttonOf(row('Alpha'), 'Join'));
-  assert.ok(textOf(row('Alpha')).includes(offerErrorText('acceptOffer', 'TEAM_LIMIT', false)), 'told under the row that failed');
-  assert.ok(!textOf(row('Beta')).includes(offerErrorText('acceptOffer', 'TEAM_LIMIT', false)));
+  assert.ok(textOf(row('Alpha')).includes(offerErrorText('acceptOffer', 'TEAM_LIMIT', 'en')), 'told under the row that failed');
+  assert.ok(!textOf(row('Beta')).includes(offerErrorText('acceptOffer', 'TEAM_LIMIT', 'en')));
   assert.equal(buttonOf(row('Alpha'), 'Join').props.disabled, false, 'the offer is kept: Join stays available');
   assert.ok(!page.text().includes('You joined'));
   fake.fail('acceptOffer', 'OFFER_UNAVAILABLE');
@@ -714,9 +714,9 @@ scenario('the Bots action opens the friendship\'s Bots over the chat: Teams card
   await page.click(opener());
   assert.equal(opener().props['aria-expanded'], true);
   const text = textOf(panel());
-  for (const expected of ['Shared Bots', 'Bob Helper', 'Answers about trips', 'Maintainer: Bob', 'Ready', 'Message assistant',
+  for (const expected of ['Shared Bots', 'Bob Helper', 'Answers about trips', 'Maintainer: Bob', 'Ready', 'Message Bot',
     'A Bot runs on its maintainer’s Desktop. The maintainer can read every conversation with it.', 'To share one of your Bots with this friend, open LingXi Desktop.']) assert.ok(text.includes(expected), expected);
-  for (const absent of ['Daily requests', 'All current and future members', 'Find Bots in the market', 'Team assistants', 'Publish a Desktop assistant', 'Stop sharing', 'Pause']) assert.ok(!text.includes(absent), absent);
+  for (const absent of ['Daily requests', 'All current and future members', 'Find Bots in the market', 'Team Bots', 'Publish a Desktop Bot', 'Stop sharing', 'Pause']) assert.ok(!text.includes(absent), absent);
   assert.equal(teams.commands.filter(command => command.action === 'listSharedBots').length, 1, 'the cards came from the chat\'s own workspace');
   await page.click(page.byLabel('Close').find(node => node.type === 'button')!);
   assert.equal(page.byClass('tw-friends-bots').length, 0);
@@ -740,7 +740,7 @@ scenario('Message opens a Bot DM in the plain Teams view with a way back; the fr
   await until(() => pair().getSnapshot().botsLoaded, 'the Bot cards');
   assert.equal(page.byLabel('Back').length, 0, 'the friend chat has no Back'); assert.equal(page.byLabel('More').length, 1);
   await page.click(page.oneByLabel('Shared Bots'));
-  await page.click(page.button('Message assistant'));
+  await page.click(page.button('Message Bot'));
   await until(() => pair().getSnapshot().conversation?.kind === 'bot_dm', 'the Bot DM'); await page.during(() => undefined);
   const created = teams.commands.find(command => command.action === 'createConversation')!;
   assert.ok(created.action === 'createConversation' && created.teamId === pairTeamId('bob') && created.payload.kind === 'bot_dm' && created.payload.sharedBotIds[0] === 'assistant-fixture');
@@ -753,7 +753,7 @@ scenario('Message opens a Bot DM in the plain Teams view with a way back; the fr
   assert.equal(pair().getSnapshot().selectedConversationId, 'friend_chat');
   assert.ok(page.text().includes('@bobby')); assert.equal(page.byLabel('Back').length, 0);
   // Message again finds the Bot DM that is there and creates no second one.
-  await page.click(page.oneByLabel('Shared Bots')); await page.click(page.button('Message assistant'));
+  await page.click(page.oneByLabel('Shared Bots')); await page.click(page.button('Message Bot'));
   await until(() => pair().getSnapshot().conversation?.kind === 'bot_dm', 'the same Bot DM');
   assert.equal(teams.commands.filter(command => command.action === 'createConversation').length, 1);
 });
@@ -766,7 +766,7 @@ scenario('a Bot DM that is being created shows its banner with a way back instea
     t.messages = async <U>(command: MessageCommand) => { if (command.action === 'createConversation') { attempts++; throw new Error('CONVERSATION_REJECTED'); } return base<U>(command); };
   });
   await until(() => pair().getSnapshot().botsLoaded, 'the Bot cards');
-  await page.click(page.oneByLabel('Shared Bots')); await page.click(page.button('Message assistant'));
+  await page.click(page.oneByLabel('Shared Bots')); await page.click(page.button('Message Bot'));
   await until(() => !!pair().getSnapshot().creation?.error, 'the rejected creation'); await page.during(() => undefined);
   assert.ok(!page.text().includes('This chat is no longer available.')); assert.ok(page.text().includes('Creating conversation…'));
   assert.equal(attempts, 1);
@@ -781,7 +781,7 @@ scenario('every Bot command that finds the friendship over ends the whole friend
     await page.click(page.oneByLabel('Shared Bots'));
     assert.equal(page.byClass('tw-friends-bots').length, 1);
     teams.messages = async () => { throw new Error(code); };
-    await page.click(page.button('Message assistant'));
+    await page.click(page.button('Message Bot'));
     await until(() => page.text().includes('This chat is no longer available.'), `the end (${code})`);
     assert.equal(page.byClass('tw-friends-bots').length, 0, 'the panel is gone with the chat'); assert.equal(page.byLabel('Shared Bots').length, 0);
     await page.click(page.button('Back'));
@@ -894,16 +894,16 @@ scenario('a failed Invite is told under its row and can be tried again; an unkno
   const { fake, page, row } = await invitePage(context);
   fake.fail('offerTeam', 'OFFER_LIMIT');
   await page.click(buttonOf(row('Carol'), 'Invite'));
-  assert.ok(textOf(row('Carol')).includes(offerErrorText('offerTeam', 'OFFER_LIMIT', false))); assert.ok(!textOf(row('Dave')).includes('20 invitations'));
+  assert.ok(textOf(row('Carol')).includes(offerErrorText('offerTeam', 'OFFER_LIMIT', 'en'))); assert.ok(!textOf(row('Dave')).includes('20 invitations'));
   assert.deepEqual(buttonsOf(row('Carol')), ['Invite'], 'not invited');
   fake.fail('offerTeam', 'SERVICE_UNAVAILABLE', 503);
   await page.click(buttonOf(row('Dave'), 'Invite')); await page.click(buttonOf(row('Dave'), 'Invite'));
   const [, first, second] = fake.executed('offerTeam') as { requestId: string }[];
   assert.equal(first!.requestId, second!.requestId);
-  assert.ok(textOf(row('Dave')).includes(offerErrorText('offerTeam', 'SERVICE_UNAVAILABLE', false)));
+  assert.ok(textOf(row('Dave')).includes(offerErrorText('offerTeam', 'SERVICE_UNAVAILABLE', 'en')));
   fake.replies.delete('offerTeam');
   await page.click(buttonOf(row('Dave'), 'Invite'));
-  assert.deepEqual(buttonsOf(row('Dave')), ['Invited']); assert.ok(!textOf(row('Dave')).includes(offerErrorText('offerTeam', 'SERVICE_UNAVAILABLE', false)));
+  assert.deepEqual(buttonsOf(row('Dave')), ['Invited']); assert.ok(!textOf(row('Dave')).includes(offerErrorText('offerTeam', 'SERVICE_UNAVAILABLE', 'en')));
 });
 
 scenario('ALREADY_MEMBER drops the row and has the host refresh its members; FRIEND_REQUIRED leaves the list through the cards listener; both are still told', async context => {
@@ -935,12 +935,12 @@ scenario('the notice after the picker names who was invited, in the person\'s la
   context.mock.timers.enable({ apis: ['setTimeout'] });
   let done = 0, tree: any;
   const invited = ['Carol', 'Dave'];
-  const notice = (zh: boolean, onDone: () => void) => createElement(InviteNotice as never, { names: invited, zh, onDone } as never);
-  await act(() => { tree = create(notice(false, () => { done++; })); });
+  const notice = (locale: string, onDone: () => void) => createElement(InviteNotice as never, { names: invited, locale, onDone } as never);
+  await act(() => { tree = create(notice('en', () => { done++; })); });
   const text = () => textOf({ children: [].concat(tree.toJSON()).map(function walk(node: any): any { return typeof node === 'string' ? node : { children: (node.children ?? []).map(walk) }; }) });
   assert.equal(text(), 'Invitation sent to Carol, Dave');
   context.mock.timers.tick(3000);
-  await act(() => { tree.update(notice(true, () => { done += 10; })); });
+  await act(() => { tree.update(notice('zh-Hans', () => { done += 10; })); });
   assert.equal(text(), '已向 Carol、Dave 发送邀请');
   context.mock.timers.tick(2999); assert.equal(done, 0, 'a new callback does not restart the six seconds');
   context.mock.timers.tick(1); assert.equal(done, 10, 'and the newest callback is the one called');
@@ -956,7 +956,7 @@ scenario('the Invites tab has the Invite friends button for an owner or an admin
     context.after(() => workspace.close());
     await until(() => workspace.getSnapshot().detail?.members.length === 3, 'the team');
     let invited = 0;
-    const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, zh: false, tab: 'invites', onTabChange() {}, onClose() {}, onInviteFriends: () => { invited++; } } as never));
+    const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, locale: 'en', tab: 'invites', onTabChange() {}, onClose() {}, onInviteFriends: () => { invited++; } } as never));
     context.after(() => page.unmount());
     const button = page.find(node => node.type === 'button' && textOf(node) === 'Invite friends');
     assert.equal(button.length, offered ? 1 : 0, role);
@@ -964,7 +964,7 @@ scenario('the Invites tab has the Invite friends button for an owner or an admin
       assert.ok(page.text().indexOf('Invite friends') < page.text().indexOf('Create invite link'), 'above Create invite link');
       await page.click(button[0]!); assert.equal(invited, 1);
     }
-    const without = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, zh: false, tab: 'invites', onTabChange() {}, onClose() {} } as never));
+    const without = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, locale: 'en', tab: 'invites', onTabChange() {}, onClose() {} } as never));
     context.after(() => without.unmount());
     assert.equal(without.find(node => node.type === 'button' && textOf(node) === 'Invite friends').length, 0, `${role}: a host that has no Friends offers nothing`);
   }

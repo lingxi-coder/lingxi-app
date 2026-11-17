@@ -8,7 +8,7 @@ import { noteStyle, TeamsSignIn } from './TeamsSignIn';
 
 export interface TeamsSidebarProps {
   teams: UseTeams;
-  zh: boolean;
+  locale: string;
   /** What the sidebar's search box holds, trimmed and in lower case. */
   query: string;
   /** An invitation from a link, to be reviewed in the join dialog. */
@@ -24,14 +24,14 @@ export interface TeamsSidebarProps {
 }
 
 /** The sidebar in Teams mode: the workspace's own sidebar, or a way to sign in when there is no account to open it for. */
-export function TeamsSidebar({ teams, zh, query, initialInvite, onInviteHandled, onShowTeams, onOpenSettings, onOpenServices, onCloseServices }: TeamsSidebarProps) {
+export function TeamsSidebar({ teams, locale, query, initialInvite, onInviteHandled, onShowTeams, onOpenSettings, onOpenServices, onCloseServices }: TeamsSidebarProps) {
   const { workspace, snapshot, signedIn } = teams;
   if (!signedIn) return <nav className="no-drag teams-sidebar desktop-sidebar-list" aria-label={tr('teams_title')} style={listStyle}><TeamsSignIn compact /></nav>;
   if (!workspace || !snapshot) return <div className="no-drag teams-sidebar" style={listStyle}><p role="status" style={noteStyle}>{tr('desktop_teams_loading')}</p></div>;
   return (
     // The capture sees the press before the control does, so the page is already the Teams page when the control opens a dialog or the panel.
     <div className="no-drag teams-sidebar" style={hostStyle} onClickCapture={onShowTeams}>
-      <TeamSidebar workspace={workspace} snapshot={snapshot} zh={zh} query={query} renderAvatar={renderTeamAvatar}
+      <TeamSidebar workspace={workspace} snapshot={snapshot} locale={locale} query={query} renderAvatar={renderTeamAvatar}
         initialInvite={initialInvite} onInviteHandled={onInviteHandled} onOpenSettings={onOpenSettings}
         onOpenServices={workspace.api.services && workspace.api.serviceMessages ? onOpenServices : undefined} onConversationSelected={onCloseServices} />
     </div>

@@ -91,12 +91,8 @@ class TeamConfirmationsTest {
             TeamConfirmations.changeRole(team, member, "Mia"), TeamConfirmations.changeRole(team, admin, "Mia"), TeamConfirmations.makeOwner(team, member),
             TeamConfirmations.revokeInvite(team, invite),
         )
-        val retired = setOf(R.string.teams_confirm, R.string.teams_confirm_change, R.string.teams_confirm_leave, R.string.teams_confirm_delete)
-        for (c in all) {
-            assertTrue(c.title !in retired)
-            assertTrue(c.button !in retired)
-            assertTrue(c.body != 0)
-        }
+        // The retired "Confirm" strings are gone from the catalog, so a title or a button cannot name them; what is left to hold is the body.
+        for (c in all) assertTrue(c.body != 0)
         // Each verb is its own: the button says what it does.
         assertEquals(all.size, all.map { it.button }.toSet().size)
     }

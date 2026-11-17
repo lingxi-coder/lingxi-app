@@ -130,7 +130,7 @@ async function openGroup(context: Parameters<Parameters<typeof scenario>[1]>[0],
   const workspace = new TeamsWorkspace(fake.api, 'alice', { storage: memoryStorage, environment: new EventTarget() }); context.after(() => workspace.close());
   await workspace.refresh(); workspace.selectConversation('test-chat');
   await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat' && workspace.getSnapshot().messages.length === thread.length && workspace.getSnapshot().botsLoaded, 'the chat');
-  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount());
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); context.after(() => page.unmount());
   const choose = (...files: ReturnType<typeof picked>[]) => page.during(() => page.find(n => n.type === 'input' && n.props.type === 'file')[0].props.onChange({ target: { files, value: 'x' } }));
   const chips = () => page.find(n => n.type === 'li' && classes(n).includes('tw-file')).map(n => textOf(n));
   const sendButton = () => page.oneByLabel('Send');
@@ -256,7 +256,7 @@ scenario('Saving a file reads it through the service each time it is needed, and
   const read = reader(stored, calls), api = { messages: async <T>(command: MessageCommand) => await read(command) as T };
   const store = { subscribe: () => () => {}, getSnapshot: () => 0 };
   const other = { ...file, attachmentId: 'file-other-1', name: 'other.pdf' };
-  const page = await mount(store, () => createElement(MessageFiles, { api, scope: { teamId: 'team-save', generation: 1 }, files: [file, other], zh: false, save: (target, value) => { saved.push([target.name, sha(value)]); } }));
+  const page = await mount(store, () => createElement(MessageFiles, { api, scope: { teamId: 'team-save', generation: 1 }, files: [file, other], locale: 'en', save: (target, value) => { saved.push([target.name, sha(value)]); } }));
   context.after(() => page.unmount());
   assert.deepEqual(calls, [], 'nothing is read before it is asked for');
   await page.click(page.oneByLabel('Save tickets.pdf')); await until(() => saved.length === 1, 'the save');

@@ -2,6 +2,7 @@ import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type Key
 import type { TeamConversation } from './messages.js';
 import { rovingIndex } from './roving.js';
 import { conversationParticipants, type Identity, type TeamsSnapshot } from './workspace.js';
+import { teamsText, useTeamsText } from './i18n.js';
 
 export { rovingIndex };
 
@@ -91,15 +92,16 @@ export function AvatarStack({ identities, size, render, max = 3, more }: { ident
  * The picture for a conversation: `#` for a channel, the other person for a dm, the Bot for a Bot dm,
  * and a short stack of members for a group. `label` is the name used when no participant is known.
  */
-export function ConversationLead({ conversation, label, snapshot, zh, size = 40, render }: {
-  conversation: TeamConversation; label: string; snapshot: Pick<TeamsSnapshot, 'directory' | 'bots' | 'uid'>; zh: boolean; size?: number; render?: RenderAvatar;
+export function ConversationLead({ conversation, label, snapshot, locale, size = 40, render }: {
+  conversation: TeamConversation; label: string; snapshot: Pick<TeamsSnapshot, 'directory' | 'bots' | 'uid'>; locale: string; size?: number; render?: RenderAvatar;
 }): ReactElement {
+  const t = useTeamsText(locale);
   if (conversation.kind === 'channel') return <span className="tw-chan" aria-hidden="true" style={{ width: size, height: size, fontSize: Math.round(size * 0.55) }}>#</span>;
-  const people = conversationParticipants(conversation, snapshot.directory, snapshot.bots, snapshot.uid, zh);
+  const people = conversationParticipants(conversation, snapshot.directory, snapshot.bots, snapshot.uid, locale);
   const others = people.filter(person => !person.self);
   const fallback: Identity = { kind: conversation.kind === 'bot_dm' ? 'bot' : 'user', id: conversation.id, name: label };
   if (conversation.kind === 'group') {
-    return <AvatarStack identities={others.length ? others : people.length ? people : [fallback]} size={stackedSize(size)} max={2} render={render} more={count => zh ? `另外 ${count} 人` : `${count} more`} />;
+    return <AvatarStack identities={others.length ? others : people.length ? people : [fallback]} size={stackedSize(size)} max={2} render={render} more={count => t('tw_more_fmt', count)} />;
   }
   const lead = conversation.kind === 'bot_dm' ? people.find(person => person.kind === 'bot') : others[0] ?? people[0];
   return <Avatar identity={lead ?? fallback} size={size} render={render} />;
@@ -148,9 +150,10 @@ export function Icon({ name, size = 16, className }: { name: IconName; size?: nu
 }
 
 /** Numeric unread badge. The label is the accessible name; the digits are only decoration. */
-export function UnreadBadge({ count, zh }: { count: number; zh: boolean }): ReactElement | null {
+export function UnreadBadge({ count, locale }: { count: number; locale: string }): ReactElement | null {
+  const t = useTeamsText(locale);
   if (count <= 0) return null;
-  return <span className="tw-badge" role="img" aria-label={zh ? `${count} 条未读` : `${count} unread`}>{count > 99 ? '99+' : count}</span>;
+  return <span className="tw-badge" role="img" aria-label={t('tw_unread_fmt', count)}>{count > 99 ? '99+' : count}</span>;
 }
 
 // ─── Dialog ─────────────────────────────────────────────────────────────────
@@ -280,7 +283,12 @@ export function rovingKeys(event: KeyboardEvent<HTMLElement>, selector = '[data-
 export type DrawerTab = 'members' | 'invites' | 'bots';
 
 /** Who can read Team data. Shown wherever a person creates, joins or opens a team, and on the conversation header and the details panel. */
-export const platformNotice = (zh: boolean): string => zh
-  ? '团队资料与消息平台可读。与 Bot 的对话对该 Bot 的维护者可见。'
-  : 'Team data and messages are readable by the platform. A Bot’s maintainer can read conversations with their Bot.';
-export const platformChip = (zh: boolean): string => zh ? '平台可读' : 'Platform readable';
+export const platformNotice = (locale: string): string => teamsText(locale)('teams_disclosure');
+export const platformChip = (locale: string): string => teamsText(locale)('tw_team_platform_readable');
+
+/** Stands where markup goes in a translated sentence: `withSlot(t('teams_replying_to_fmt', SLOT), <b>{name}</b>)` puts the node where the language says the name. */
+export const SLOT = '\uE000';
+export function withSlot(sentence: string, node: ReactNode): ReactElement {
+  const [before = '', after = ''] = sentence.split(SLOT);
+  return <>{before}{node}{after}</>;
+}

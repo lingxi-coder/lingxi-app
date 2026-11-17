@@ -5,8 +5,9 @@ import { messageErrorText } from './errors.js';
 import { sharedBotUsable, type SharedBotCard } from './execution.js';
 import { botDmHandedOver, byteLength, canSendText, mentionAt, mentionCandidates, MESSAGE_BYTES, sendsOnEnter, snippet, withoutMention } from './compose.js';
 import { ANSWER_REFUSED, type TeamConversation, type TeamMessage } from './messages.js';
-import { Avatar, Icon, useIsoLayoutEffect, type RenderAvatar } from './ui';
+import { Avatar, Icon, SLOT, useIsoLayoutEffect, withSlot, type RenderAvatar } from './ui';
 import type { PickedFile, TeamsSnapshot, TeamsWorkspace } from './workspace.js';
+import { intlTag, teamsText, useTeamsText } from './i18n.js';
 
 /** Bots one message can ask. The server accepts at most this many targets. */
 export const MAX_TARGETS = 8;
@@ -16,19 +17,19 @@ export const MAX_TARGETS = 8;
  * who is not a participant only observes. A Bot dm needs its Bot to be usable: until the Bot list
  * is known (or when it could not be fetched) sending waits rather than guessing.
  */
-export function composerLock(input: { uid: string; conversation: Pick<TeamConversation, 'kind' | 'participants' | 'readers'>; bots: readonly SharedBotCard[]; botsLoaded: boolean; botsUnverified: boolean }, zh: boolean): string {
-  const t = (en: string, cn: string) => zh ? cn : en;
+export function composerLock(input: { uid: string; conversation: Pick<TeamConversation, 'kind' | 'participants' | 'readers'>; bots: readonly SharedBotCard[]; botsLoaded: boolean; botsUnverified: boolean }, locale: string): string {
+  const t = teamsText(locale);
   const { conversation } = input;
   if (conversation.participants.length && !conversation.participants.includes(`user:${input.uid}`)) {
-    return t('You can read this conversation because you own its Bot, but only participants can send messages.', '你因拥有其中的 Bot 而可阅读此会话，但只有参与者可以发送消息。');
+    return t('teams_composer_lock_owner_reading');
   }
   if (botDmHandedOver(conversation, input.bots)) {
-    return t('This assistant has a new maintainer and no longer answers in this chat. What was said here stays as it is.', '此助手已更换维护者，不再在此对话中作答。这里的内容保持不变。');
+    return t('tw_composer_handed_over');
   }
   if (conversation.kind === 'bot_dm' && !input.bots.some(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`))) {
-    if (input.botsUnverified) return t('Bot availability could not be verified. Reconnect to check.', '未能确认 Bot 可用状态，请联网后重试。');
-    if (!input.botsLoaded) return t('Checking whether this Bot is available…', '正在确认此 Bot 是否可用…');
-    return t('This Bot is not available to you right now.', '此 Bot 目前对你不可用。');
+    if (input.botsUnverified) return t('teams_composer_lock_bot_unverified');
+    if (!input.botsLoaded) return t('teams_composer_lock_bot_checking');
+    return t('teams_composer_lock_bot_unavailable');
   }
   return '';
 }
@@ -39,7 +40,7 @@ export interface ComposerProps {
   conversation: TeamConversation;
   /** What to call the conversation, for the placeholder. */
   label: string;
-  zh: boolean;
+  locale: string;
   renderAvatar?: RenderAvatar;
   /** The message being edited; its text is in the box until the edit is saved or cancelled. */
   editing?: TeamMessage;
@@ -66,8 +67,8 @@ export interface ComposerProps {
  * Files are added with the paperclip, by pasting or by dropping them on the box. Each starts uploading at once for this
  * conversation and shows as a chip; the message can be sent once every file has arrived, and may be files alone.
  */
-export function Composer({ workspace, snapshot, conversation, label, zh, renderAvatar, editing, reply, answering, focusToken, onClearEditing, onClearReply, onClearAnswering, onAnswered, onEditLast }: ComposerProps): ReactElement {
-  const t = (en: string, cn: string) => zh ? cn : en;
+export function Composer({ workspace, snapshot, conversation, label, locale, renderAvatar, editing, reply, answering, focusToken, onClearEditing, onClearReply, onClearAnswering, onAnswered, onEditLast }: ComposerProps): ReactElement {
+  const t = useTeamsText(locale);
   const listId = useId();
   const input = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState(() => workspace.draft(conversation.id));
@@ -82,7 +83,7 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
   const caretTo = useRef<number>();
   const latest = useRef(text);
   latest.current = text;
-  const lock = composerLock({ uid: snapshot.uid, conversation, bots: snapshot.bots, botsLoaded: snapshot.botsLoaded, botsUnverified: snapshot.botsUnverified }, zh);
+  const lock = composerLock({ uid: snapshot.uid, conversation, bots: snapshot.bots, botsLoaded: snapshot.botsLoaded, botsUnverified: snapshot.botsUnverified }, locale);
   const asks = !editing && !answering && (conversation.kind === 'group' || conversation.kind === 'channel');
   const mention = asks ? mentionAt(text, caret) : null;
   const candidates = mention && mention.start !== dismissed && targets.length < MAX_TARGETS ? mentionCandidates(snapshot.bots, conversation, targets, mention.query) : [];
@@ -90,7 +91,7 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
   const choice = Math.min(active, Math.max(0, candidates.length - 1));
   const askable = asks && snapshot.bots.some(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`));
   const bytes = byteLength(text);
-  const botName = (key: string) => snapshot.bots.find(bot => bot.sharedBotId === key)?.name ?? 'Bot';
+  const botName = (key: string) => snapshot.bots.find(bot => bot.sharedBotId === key)?.name ?? t('teams_bot_tag');
 
   // An edit borrows the box: the draft is set aside and comes back when the edit ends.
   useEffect(() => {
@@ -190,56 +191,56 @@ export function Composer({ workspace, snapshot, conversation, label, zh, renderA
   // After a handover the Bot answers in a new chat, which its new maintainer can read: one step from here.
   const moved = botDmHandedOver(conversation, snapshot.bots) ? snapshot.bots.find(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`)) : undefined;
   if (lock) return <div className="tw-composer tw-composer-locked"><p className="tw-readonly" role="status">{lock}</p>
-    {moved ? <button type="button" disabled={snapshot.messageBusy} onClick={() => void workspace.openBotDm(moved)}>{t('Start a new chat', '开始新的对话')}</button> : null}</div>;
+    {moved ? <button type="button" disabled={snapshot.messageBusy} onClick={() => void workspace.openBotDm(moved)}>{t('tw_composer_new_chat')}</button> : null}</div>;
   return <form className="tw-composer" onSubmit={event => { event.preventDefault(); void send(); }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={drop}>
-    {editing ? <div className="tw-context"><Icon name="edit" /><span>{t('Editing message', '正在编辑消息')}</span><button type="button" className="tw-link" onClick={onClearEditing}>{t('Cancel', '取消')}</button></div> : null}
-    {reply ? <div className="tw-context"><Icon name="reply" /><span className="tw-context-text">{t('Replying to', '回复')} <b>{reply.author}</b>: {snippet(reply.message.recalled ? t('Recalled message', '已撤回消息') : reply.message.text)}</span>
-      <button type="button" className="tw-icon-btn" aria-label={t('Cancel reply', '取消回复')} onClick={onClearReply}><Icon name="x" /></button></div> : null}
-    {answering ? <div className="tw-context"><Icon name="reply" /><span className="tw-context-text">{t('Replying to', '回复')} <b>{answering.author}</b>{t('’s question', ' 的问题')}{answering.question ? <>: {snippet(answering.question.text)}</> : null}</span>
-      <button type="button" className="tw-icon-btn" aria-label={t('Cancel reply', '取消回复')} onClick={onClearAnswering}><Icon name="x" /></button></div> : null}
-    {targets.length && !answering ? <ul className="tw-targets" aria-label={t('Bots that will be asked', '将请求的 Bot')}>
+    {editing ? <div className="tw-context"><Icon name="edit" /><span>{t('teams_editing_message')}</span><button type="button" className="tw-link" onClick={onClearEditing}>{t('common_cancel')}</button></div> : null}
+    {reply ? <div className="tw-context"><Icon name="reply" /><span className="tw-context-text">{withSlot(t('teams_replying_to_fmt', SLOT), <b>{reply.author}</b>)}: {snippet(reply.message.recalled ? t('tw_composer_recalled') : reply.message.text)}</span>
+      <button type="button" className="tw-icon-btn" aria-label={t('teams_cancel_reply')} onClick={onClearReply}><Icon name="x" /></button></div> : null}
+    {answering ? <div className="tw-context"><Icon name="reply" /><span className="tw-context-text">{withSlot(t('tw_composer_answering_fmt', SLOT), <b>{answering.author}</b>)}{answering.question ? <>: {snippet(answering.question.text)}</> : null}</span>
+      <button type="button" className="tw-icon-btn" aria-label={t('teams_cancel_reply')} onClick={onClearAnswering}><Icon name="x" /></button></div> : null}
+    {targets.length && !answering ? <ul className="tw-targets" aria-label={t('teams_composer_bots_asked')}>
       {targets.map(key => <li key={key} className="tw-target">@{botName(key)}
-        <button type="button" className="tw-icon-btn" aria-label={t(`Do not ask ${botName(key)}`, `不再请求 ${botName(key)}`)} onClick={() => setTargets(old => old.filter(value => value !== key))}><Icon name="x" size={12} /></button></li>)}
+        <button type="button" className="tw-icon-btn" aria-label={t('teams_composer_remove_bot_fmt', botName(key))} onClick={() => setTargets(old => old.filter(value => value !== key))}><Icon name="x" size={12} /></button></li>)}
     </ul> : null}
-    <DraftFiles files={files} zh={zh} onRemove={uploadId => workspace.removeFile(conversation.id, uploadId)} />
+    <DraftFiles files={files} locale={locale} onRemove={uploadId => workspace.removeFile(conversation.id, uploadId)} />
     {refused.length ? <ul className="tw-file-refusals" role="alert">
-      {refused.map((item, index) => <li key={`${item.name}:${index}`}><b>{item.name}</b>: {messageErrorText(item.code, zh)}</li>)}
-      <li><button type="button" className="tw-link" onClick={() => setRefused([])}>{t('Dismiss', '知道了')}</button></li>
+      {refused.map((item, index) => <li key={`${item.name}:${index}`}><b>{item.name}</b>: {messageErrorText(item.code, locale)}</li>)}
+      <li><button type="button" className="tw-link" onClick={() => setRefused([])}>{t('tw_dismiss')}</button></li>
     </ul> : null}
     <div className="tw-compose-box">
-      {open ? <ul id={listId} role="listbox" className="tw-mentions" aria-label={t('Bots you can ask', '可请求的 Bot')}>
+      {open ? <ul id={listId} role="listbox" className="tw-mentions" aria-label={t('teams_composer_bots_can_ask')}>
         {candidates.map((bot, index) => <li key={bot.sharedBotId} id={`${listId}-${index}`} role="option" aria-selected={index === choice} className="tw-mention"
           onMouseDown={event => { event.preventDefault(); pick(bot); }}>
           <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={24} render={renderAvatar} />
-          <b>{bot.name}</b><small>{bot.ready ? t('Online', '在线') : t('Host unavailable', '宿主不可用')}</small>
+          <b>{bot.name}</b><small>{bot.ready ? t('remote_online') : t('tw_host_unavailable')}</small>
         </li>)}
       </ul> : null}
       <textarea ref={input} rows={1} value={text} onChange={change} onPaste={paste} onSelect={event => setCaret(event.currentTarget.selectionStart)} onKeyDown={keys}
-        aria-label={t('Message', '消息')} aria-haspopup={asks ? 'listbox' : undefined} aria-controls={open ? listId : undefined}
+        aria-label={t('tw_composer_message')} aria-haspopup={asks ? 'listbox' : undefined} aria-controls={open ? listId : undefined}
         aria-activedescendant={open ? `${listId}-${choice}` : undefined} aria-autocomplete={asks ? 'list' : undefined}
-        placeholder={editing ? t('Edit your message', '修改你的消息') : answering ? t(`Reply to ${answering.author}`, `回复 ${answering.author}`) : t(`Message ${conversation.kind === 'channel' ? '#' : ''}${label}`, `发送给 ${conversation.kind === 'channel' ? '#' : ''}${label}`)} />
+        placeholder={editing ? t('teams_composer_edit_hint') : answering ? t('tw_composer_reply_to_fmt', answering.author) : t('teams_composer_hint_fmt', `${conversation.kind === 'channel' ? '#' : ''}${label}`)} />
       <div className="tw-compose-tools">
         {!editing && !answering ? <>
           <input ref={picker} type="file" multiple hidden accept={ATTACHMENT_ACCEPT} aria-hidden="true" tabIndex={-1}
             onChange={event => { add([...(event.target.files ?? [])]); event.target.value = ''; }} />
-          <button type="button" className="tw-icon-btn" aria-label={t('Add files', '添加文件')} title={t('Add pictures, PDFs or text files (up to 5, 10 MB each)', '添加图片、PDF 或文本文件（最多 5 个，每个不超过 10 MB）')} onClick={() => picker.current?.click()}><Icon name="clip" /></button>
+          <button type="button" className="tw-icon-btn" aria-label={t('teams_file_add')} title={t('tw_composer_attach')} onClick={() => picker.current?.click()}><Icon name="clip" /></button>
         </> : null}
-        {asks ? <button type="button" className="tw-icon-btn" aria-label={t('Ask a Bot (@)', '请求 Bot (@)')} title={t('Ask a Bot (@)', '请求 Bot (@)')} disabled={!askable || targets.length >= MAX_TARGETS} onClick={insertAt}><Icon name="at" /></button> : null}
-        {bytes > MESSAGE_BYTES * 0.9 ? <span className="tw-count" data-over={bytes > MESSAGE_BYTES} role="status">{bytes.toLocaleString(zh ? 'zh-CN' : 'en-US')} / {MESSAGE_BYTES.toLocaleString(zh ? 'zh-CN' : 'en-US')}</span> : null}
-        {editing ? <button type="button" onClick={onClearEditing}>{t('Cancel', '取消')}</button> : null}
-        <button type="submit" className="tw-primary tw-send" disabled={snapshot.messageBusy || !sendable} aria-label={editing ? t('Save edit', '保存修改') : t('Send', '发送')}>
-          {editing ? t('Save', '保存') : <Icon name="send" />}
+        {asks ? <button type="button" className="tw-icon-btn" aria-label={t('teams_composer_ask_bot')} title={t('teams_composer_ask_bot')} disabled={!askable || targets.length >= MAX_TARGETS} onClick={insertAt}><Icon name="at" /></button> : null}
+        {bytes > MESSAGE_BYTES * 0.9 ? <span className="tw-count" data-over={bytes > MESSAGE_BYTES} role="status">{bytes.toLocaleString(intlTag(locale))} / {MESSAGE_BYTES.toLocaleString(intlTag(locale))}</span> : null}
+        {editing ? <button type="button" onClick={onClearEditing}>{t('common_cancel')}</button> : null}
+        <button type="submit" className="tw-primary tw-send" disabled={snapshot.messageBusy || !sendable} aria-label={editing ? t('teams_message_save') : t('teams_message_send')}>
+          {editing ? t('common_save') : <Icon name="send" />}
         </button>
       </div>
     </div>
     <p className="tw-hint">
-      {files.length && !filesSettled ? `${files.some(file => file.state === 'failed') ? t('Remove the file that could not be uploaded to send.', '移除未能上传的文件后即可发送。') : t('You can send once the files have uploaded.', '文件上传完成后即可发送。')} ` : ''}
-      {answering ? t('Your reply goes to the Bot, which then continues its task.', '你的回复会发给 Bot，由它继续完成任务。')
-        : conversation.kind === 'bot_dm' ? t('Messages ask this Bot automatically. Its owner can read this conversation.', '发送消息会请求此 Bot。其所有者可阅读此会话。')
-        : askable && !editing ? t('Type @ to ask a Bot. Only Bots chosen from the list run.', '输入 @ 请求 Bot。仅从列表中选择的 Bot 会执行。')
-        : t('Enter to send, Shift+Enter for a new line.', '按 Enter 发送，Shift+Enter 换行。')}
-      {snapshot.messagingConnecting ? ` ${t('Connecting: messages will send after server confirmation.', '正在连接：服务器确认后发送消息。')}`
-        : snapshot.offline ? ` ${t('Offline: messages are saved and sent when you reconnect.', '当前离线：消息将保存并在联网后发送。')}` : ''}
+      {files.length && !filesSettled ? `${files.some(file => file.state === 'failed') ? t('teams_file_note_failed') : t('teams_file_note_uploading')} ` : ''}
+      {answering ? t('tw_composer_reply_note')
+        : conversation.kind === 'bot_dm' ? t('teams_composer_note_bot_dm')
+        : askable && !editing ? t('teams_composer_note_group')
+        : t('tw_composer_keys_hint')}
+      {snapshot.messagingConnecting ? ` ${t('tw_composer_connecting')}`
+        : snapshot.offline ? ` ${t('teams_composer_note_offline')}` : ''}
     </p>
   </form>;
 }

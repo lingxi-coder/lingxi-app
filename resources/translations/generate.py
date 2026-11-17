@@ -22,6 +22,23 @@ ANDROID_VALUES_DIRS = {
     "ko": "values-ko",
 }
 
+# The Desktop and Web Teams UI (packages/teams and the hosts that render it) reads its text from the same catalog, through
+# packages/teams/i18n.generated.ts: a map of just the keys those sources reference, in every locale.
+TEAMS_TEXT_FILE = Path("packages") / "teams" / "i18n.generated.ts"
+# `tw_` keys are text only Desktop and Web need: the bundle carries them, the iOS and Android outputs do not.
+DESKTOP_WEB_ONLY_PREFIX = "tw_"
+TEAMS_TEXT_LOCALES = ["en", "zh-Hans", "zh-Hant", "ja", "ko"]
+# packages/teams is scanned whole. A host file (a Web page, an Electron component) is scanned when it imports packages/teams/i18n.
+TEAMS_TEXT_ROOTS = ["packages/teams", "apps/web/src", "apps/electron/src/renderer"]
+TEAMS_TEXT_OWN_ROOT = "packages/teams"
+_TEAMS_TEXT_IMPORT = re.compile(r"""from\s+['"][^'"]*packages/teams/i18n(?:\.js)?['"]""")
+# A key is referenced as the first argument of t(...) or tk(...), or as any string literal in one of the families packages/teams owns.
+# Only plain identifiers can be referenced: a parameterised string is its `_fmt` sibling, whose value has positional %1$s / %1$d.
+_TEAMS_CALL_KEY = re.compile(r"""(?<![\w.$])(?:t|tk)\(\s*(['"])([a-z][a-z0-9_]*)\1""")
+_TEAMS_FAMILY_KEY = re.compile(r"""(['"])((?:teams|friends|services|tw)_[a-z0-9_]+)\1""")
+# iOS placeholders (%@, %lld) belong to the iOS key; the plain key a web view references uses %1$s and %1$d.
+_TEAMS_IOS_PLACEHOLDER = re.compile(r"%(?:\d+\$)?(?:ll|@)")
+
 # Android format placeholder: %[<arg>$][flags][width][.precision]<conversion>
 _ANDROID_PLACEHOLDER = re.compile(r"%%|%(\d+\$)?[-+#0,]*\d*(\.\d+)?[a-zA-Z]")
 
@@ -163,6 +180,8 @@ def write_ios(locales: dict[str, dict], out_dir: Path | str) -> None:
     strings = {}
     info_strings = {}
     for key in base:
+        if key.startswith(DESKTOP_WEB_ONLY_PREFIX):
+            continue
         if key == "__info_plist__":
             info = base["__info_plist__"]
             if not isinstance(info, dict):
@@ -235,7 +254,7 @@ def write_android(locales: dict[str, dict], out_dir: Path | str) -> None:
     out_dir = Path(out_dir)
     _mkdir(out_dir)
     base = locales.get(BASE_LOCALE, {})
-    keys = [k for k in base if k != "__info_plist__" and _ANDROID_NAME.match(k)]
+    keys = [k for k in base if k != "__info_plist__" and not k.startswith(DESKTOP_WEB_ONLY_PREFIX) and _ANDROID_NAME.match(k)]
     for locale in LOCALES:
         source = locales.get(locale, {})
         values = {}
@@ -256,6 +275,96 @@ def write_android(locales: dict[str, dict], out_dir: Path | str) -> None:
             lines.append(f'    <string name="{key}">{_android_escape(value)}</string>')
         lines.append("</resources>")
         _write_text(target / "strings.xml", "\n".join(lines) + "\n")
+
+
+def _teams_text_sources(repo_root: Path) -> list[Path]:
+    """The TypeScript files whose references decide which keys the Teams text bundle carries."""
+    files: list[Path] = []
+    for root_name in TEAMS_TEXT_ROOTS:
+        root = repo_root / root_name
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if path.suffix not in (".ts", ".tsx") or "node_modules" in path.parts:
+                continue
+            if path.name.endswith((".test.ts", ".test.tsx", ".d.ts")) or path.name == TEAMS_TEXT_FILE.name:
+                continue
+            if root_name == TEAMS_TEXT_OWN_ROOT or _TEAMS_TEXT_IMPORT.search(path.read_text(encoding="utf-8")):
+                files.append(path)
+    return files
+
+
+def scan_teams_keys(repo_root: Path | str) -> dict[str, list[str]]:
+    """Catalog key -> where it is referenced (`file:line`), over the Teams UI sources."""
+    repo_root = Path(repo_root)
+    refs: dict[str, list[str]] = {}
+    for path in _teams_text_sources(repo_root):
+        text = path.read_text(encoding="utf-8")
+        for pattern in (_TEAMS_CALL_KEY, _TEAMS_FAMILY_KEY):
+            for match in pattern.finditer(text):
+                where = f"{path.relative_to(repo_root).as_posix()}:{text.count(chr(10), 0, match.start()) + 1}"
+                found = refs.setdefault(match.group(2), [])
+                if where not in found:
+                    found.append(where)
+    return refs
+
+
+def _ts_string(value: str) -> str:
+    escaped = (
+        value.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
+        .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    )
+    return f"'{escaped}'"
+
+
+def render_teams_text(locales: dict[str, dict], refs: dict[str, list[str]]) -> str:
+    """packages/teams/i18n.generated.ts: every referenced key in every locale. Raises when a reference has no complete entry."""
+    problems = []
+    for key in sorted(refs):
+        where = ", ".join(refs[key][:3]) + (", ..." if len(refs[key]) > 3 else "")
+        if not isinstance(locales.get("en", {}).get(key), str):
+            problems.append(f"{key} ({where}) is not in en.json")
+            continue
+        for locale in TEAMS_TEXT_LOCALES:
+            value = locales.get(locale, {}).get(key)
+            if not isinstance(value, str) or not value:
+                problems.append(f"{key} ({where}) has no plain text in {locale}.json")
+            elif _TEAMS_IOS_PLACEHOLDER.search(value):
+                problems.append(f"{key} ({where}) uses an iOS placeholder in {locale}.json; reference the `_fmt` key, whose value has %1$s")
+    if problems:
+        raise ValueError("error: the Teams UI references catalog keys that cannot be bundled: " + "; ".join(problems))
+    lines = [
+        "// Generated by resources/translations/generate.py. Do not edit: change resources/translations/*.json and run it again.",
+        "// It holds only the catalog keys that packages/teams (and the hosts that import ./i18n) reference, in every locale.",
+        "",
+        "export type TeamsLocale = " + " | ".join(_ts_string(locale) for locale in TEAMS_TEXT_LOCALES) + ";",
+        "",
+    ]
+    keys = sorted(refs)
+    if keys:
+        lines.append("export type TeamsKey =")
+        lines.extend(f"  | {_ts_string(key)}" for key in keys)
+        lines[-1] += ";"
+    else:
+        lines.append("export type TeamsKey = never;")
+    lines += ["", "export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocale, string>>>> = {"]
+    for key in keys:
+        entry = ", ".join(
+            f"{locale if locale.isalpha() else _ts_string(locale)}: {_ts_string(locales[locale][key])}" for locale in TEAMS_TEXT_LOCALES
+        )
+        lines.append(f"  {key}: {{ {entry} }},")
+    lines += ["};", ""]
+    return "\n".join(lines)
+
+
+def write_teams_text(locales: dict[str, dict], out_path: Path | str, repo_root: Path | str) -> int:
+    """Write the Teams text bundle; returns how many keys it holds."""
+    out_path = Path(out_path)
+    refs = scan_teams_keys(repo_root)
+    text = render_teams_text(locales, refs)
+    _mkdir(out_path.parent)
+    _write_text(out_path, text)
+    return len(refs)
 
 
 # Hand-maintained Android resource files that intentionally live alongside
@@ -294,7 +403,7 @@ def _generator_produced_files(out_dir: Path, kind: str) -> list[Path]:
     return produced
 
 
-def stale_problems(locales: dict[str, dict], ios_out: Path, android_out: Path) -> list:
+def stale_problems(locales: dict[str, dict], ios_out: Path, android_out: Path, teams_out: Path | None = None, repo_root: Path | None = None) -> list:
     """Regenerate into a temp dir and byte-diff against the committed outputs."""
     problems = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -324,6 +433,13 @@ def stale_problems(locales: dict[str, dict], ios_out: Path, android_out: Path) -
         for rel in _generator_produced_files(android_out, "android"):
             if rel not in generated_android:
                 problems.append(f"error: unexpected file (orphaned?): {android_out / rel}; run generate.py")
+        if teams_out is not None:
+            generated_teams = tmp_dir / "teams" / TEAMS_TEXT_FILE.name
+            write_teams_text(locales, generated_teams, repo_root if repo_root is not None else Path(__file__).resolve().parent.parent.parent)
+            if not teams_out.exists():
+                problems.append(f"error: missing generated file {teams_out}; run generate.py")
+            elif generated_teams.read_bytes() != teams_out.read_bytes():
+                problems.append(f"error: {teams_out} is out of date; run generate.py")
     return problems
 
 
@@ -331,6 +447,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Generate iOS/Android localization resources.")
     parser.add_argument("--ios-out", metavar="DIR", help="output directory for iOS Localizable.xcstrings")
     parser.add_argument("--android-out", metavar="DIR", help="output directory for Android strings.xml variants")
+    parser.add_argument("--teams-out", metavar="FILE", help="output file for the Teams text bundle (default: packages/teams/i18n.generated.ts)")
     parser.add_argument("--check", action="store_true", help="validate consistency only; write nothing")
     args = parser.parse_args(argv)
 
@@ -355,20 +472,24 @@ def main(argv=None):
         Path(args.android_out) if args.android_out else repo_root / "apps" / "android" / "native" / "app" / "src" / "main" / "res"
     )
 
-    if args.check and (args.ios_out or args.android_out):
-        print("error: --check cannot be combined with --ios-out or --android-out", file=sys.stderr)
+    if args.check and (args.ios_out or args.android_out or args.teams_out):
+        print("error: --check cannot be combined with --ios-out, --android-out or --teams-out", file=sys.stderr)
         return 1
+
+    # A run into custom directories (the tests) leaves the committed bundle alone unless --teams-out names where it goes.
+    teams_out = Path(args.teams_out) if args.teams_out else (None if (args.ios_out or args.android_out) else repo_root / TEAMS_TEXT_FILE)
 
     try:
         if args.check:
-            if not args.ios_out and not args.android_out:
-                problems = stale_problems(locales, ios_out, android_out)
-                if problems:
-                    print("\n".join(problems), file=sys.stderr)
-                    return 1
+            problems = stale_problems(locales, ios_out, android_out, repo_root / TEAMS_TEXT_FILE, repo_root)
+            if problems:
+                print("\n".join(problems), file=sys.stderr)
+                return 1
         else:
             write_ios(locales, ios_out)
             write_android(locales, android_out)
+            if teams_out is not None:
+                write_teams_text(locales, teams_out, repo_root)
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 1

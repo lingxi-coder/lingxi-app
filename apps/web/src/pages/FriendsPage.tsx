@@ -7,6 +7,7 @@ import { FriendsWorkspaceView } from '../friends/FriendsWorkspaceView';
 import { SignInCard } from '../teams/SignInCard';
 import { teamsDatabase } from '../teams/firestore';
 import { webTeamsApi } from '../teams/api';
+import { useTeamsText } from '../../../../packages/teams/i18n';
 import type { Locale } from '../utils/locale';
 
 const intentStorage = {
@@ -17,14 +18,14 @@ const intentStorage = {
 
 type Page = { route: '/friends' | '/friends/add'; badge: string | null; onBadge(text: string | null): void };
 
-function SignedIn({ user, zh, route, chat, code, onCodeHandled, onBadge }: { user: User; zh: boolean; chat?: string; code: string; onCodeHandled(): void } & Pick<Page, 'route' | 'onBadge'>) {
+function SignedIn({ user, locale, route, chat, code, onCodeHandled, onBadge }: { user: User; locale: string; chat?: string; code: string; onCodeHandled(): void } & Pick<Page, 'route' | 'onBadge'>) {
   const [apis, setApis] = useState<{ friends: ReturnType<typeof webFriendsApi>; teams: ReturnType<typeof webTeamsApi> }>();
   useEffect(() => {
     const db = teamsDatabase(auth.app), current = { friends: webFriendsApi(user, db), teams: webTeamsApi(user, db) };
     setApis(current);
     return () => { current.friends.close(); current.teams.close(); };
   }, [user]);
-  return apis ? <FriendsWorkspaceView friends={apis.friends} teams={apis.teams} uid={user.uid} zh={zh} route={route} chat={chat} code={code} onCodeHandled={onCodeHandled} onBadge={onBadge} /> : null;
+  return apis ? <FriendsWorkspaceView friends={apis.friends} teams={apis.teams} uid={user.uid} locale={locale} route={route} chat={chat} code={code} onCodeHandled={onCodeHandled} onBadge={onBadge} /> : null;
 }
 
 /** A friend to open from `/friends?chat=<uid>`; the same shape the deep link allows. */
@@ -34,7 +35,7 @@ const chatParameter = (): string | undefined => {
 };
 
 export default function FriendsPage({ locale, route, badge, onBadge }: { locale: Locale } & Page) {
-  const zh = locale === 'zh';
+  const t = useTeamsText(locale);
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [code, setCode] = useState(() => readAddIntent(`https://lingxios.net${location.pathname}${location.search}${location.hash}`, intentStorage));
   const handled = useRef(code), chat = useRef(chatParameter());
@@ -52,9 +53,9 @@ export default function FriendsPage({ locale, route, badge, onBadge }: { locale:
     finally { setBusy(false); }
   };
   const done = () => { clearAddIntent(intentStorage, handled.current); setCode(''); };
-  return <main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><h1>{zh ? '好友' : 'Friends'}{badge ? <b className="teams-web-badge" role="img" aria-label={zh ? `${badge} 条未读` : `${badge} unread`}>{badge}</b> : null}</h1><a href="/teams">{zh ? '团队' : 'Teams'}</a><a href="/remote">{zh ? '远控' : 'Remote'}</a><span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{zh ? '退出登录' : 'Sign out'}</button> : null}</header>
-    {user === undefined ? <p role="status" className="teams-web-note">{zh ? '正在加载…' : 'Loading…'}</p> : user
-      ? <SignedIn key={user.uid} user={user} zh={zh} route={route} chat={chat.current} code={code} onCodeHandled={done} onBadge={onBadge} />
-      : <SignInCard auth={auth} zh={zh} note={zh ? '请登录灵犀账号以添加好友并聊天。' : 'Sign in to your LingXi account to add friends and chat.'} />}
+  return <main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><h1>{t('friends_title')}{badge ? <b className="teams-web-badge" role="img" aria-label={t('tw_unread_fmt', badge)}>{badge}</b> : null}</h1><a href="/teams">{t('teams_title')}</a><a href="/remote">{t('tw_nav_remote')}</a><span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{t('tw_sign_out')}</button> : null}</header>
+    {user === undefined ? <p role="status" className="teams-web-note">{t('teams_loading')}</p> : user
+      ? <SignedIn key={user.uid} user={user} locale={locale} route={route} chat={chat.current} code={code} onCodeHandled={done} onBadge={onBadge} />
+      : <SignInCard auth={auth} locale={locale} note={t('friends_signin')} />}
   </main>;
 }

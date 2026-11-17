@@ -1,5 +1,6 @@
 import { TeamsApiError, type TeamRole } from './index.js';
 import type { TeamConversation } from './messages.js';
+import type { TeamsKey } from './i18n.js';
 
 // ─── Wire and card types (docs/FRIENDS-CLIENTS.md, appendix A) ──────────────
 
@@ -255,34 +256,34 @@ export const relationAction = (relation: Relation): 'add' | 'accept' | 'sent' | 
 
 // ─── Errors (D18) ───────────────────────────────────────────────────────────
 
-const ERROR_KEYS = new Map([
+const ERROR_KEYS = new Map<string, TeamsKey>([
   ['NOT_FOUND', 'friends_error_not_found'], ['RATE_LIMITED', 'friends_error_rate_limited'], ['FRIEND_LIMIT', 'friends_error_friend_limit'],
   ['REQUEST_LIMIT', 'friends_error_request_limit'], ['HANDLE_TAKEN', 'friends_error_handle_taken'], ['REQUEST_UNAVAILABLE', 'friends_error_request_unavailable'],
   ['STALE_REQUEST', 'friends_error_stale_request'], ['SIGN_IN_REQUIRED', 'friends_error_session'], ['INVALID_SESSION', 'friends_error_session'],
   ['SERVICE_UNAVAILABLE', 'friends_error_network'], ['INVALID_INPUT', 'friends_error_invalid_input'], ['INVALID_JSON', 'friends_error_invalid_input'],
   ['MEMBERSHIP_REQUIRED', 'friends_chat_unavailable'], ['STALE_MEMBERSHIP', 'friends_chat_unavailable'], ['CONVERSATION_REQUIRED', 'friends_chat_unavailable'],
 ]);
-export const friendsErrorKey = (code: string): string => ERROR_KEYS.get(code) ?? 'friends_error_generic';
+export const friendsErrorKey = (code: string): TeamsKey => ERROR_KEYS.get(code) ?? 'friends_error_generic';
 export type OfferAction = 'offerTeam' | 'acceptOffer' | 'declineOffer';
 // D30: the action's own codes first, then the codes every offer action shares. `friendsErrorKey` would read MEMBERSHIP_REQUIRED and
 // STALE_MEMBERSHIP as an ended chat, which they are not here.
-const OFFER_KEYS: Record<OfferAction, Map<string, string>> = {
-  offerTeam: new Map([
+const OFFER_KEYS: Record<OfferAction, Map<string, TeamsKey>> = {
+  offerTeam: new Map<string, TeamsKey>([
     ['FRIEND_REQUIRED', 'friends_error_friend_required'], ['ALREADY_MEMBER', 'friends_error_already_member'], ['OFFER_LIMIT', 'friends_error_offer_limit'],
     ['MEMBER_LIMIT', 'friends_error_member_limit'], ['ROLE_REQUIRED', 'friends_error_offer_role'], ['MEMBERSHIP_REQUIRED', 'friends_error_offer_team_gone'],
     ['RATE_LIMITED', 'friends_error_rate_limited'],
   ]),
-  acceptOffer: new Map([
+  acceptOffer: new Map<string, TeamsKey>([
     ['MEMBER_LIMIT', 'friends_error_member_limit'], ['OFFER_UNAVAILABLE', 'friends_error_offer_unavailable'], ['STALE_MEMBERSHIP', 'friends_error_offer_unavailable'],
     ['TEAM_LIMIT', 'friends_error_team_limit'],
   ]),
-  declineOffer: new Map(),
+  declineOffer: new Map<string, TeamsKey>(),
 };
-const OFFER_COMMON = new Map([
+const OFFER_COMMON = new Map<string, TeamsKey>([
   ['SIGN_IN_REQUIRED', 'friends_error_session'], ['INVALID_SESSION', 'friends_error_session'], ['SERVICE_UNAVAILABLE', 'friends_error_network'],
   ['INVALID_INPUT', 'friends_error_invalid_input'], ['INVALID_JSON', 'friends_error_invalid_input'],
 ]);
-export const offerErrorKey = (action: OfferAction, code: string): string => OFFER_KEYS[action].get(code) ?? OFFER_COMMON.get(code) ?? 'friends_error_generic';
+export const offerErrorKey = (action: OfferAction, code: string): TeamsKey => OFFER_KEYS[action].get(code) ?? OFFER_COMMON.get(code) ?? 'friends_error_generic';
 /** The chat's ended-friendship codes (D9). */
 export const chatEnded = (code: string): boolean => friendsErrorKey(code) === 'friends_chat_unavailable';
 /** A request is retried with the same id only when its outcome is unknown: no answer, a timeout, or SERVICE_UNAVAILABLE. */

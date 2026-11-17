@@ -6,7 +6,9 @@ build against. Nothing under `apps/ios/native/Resources/Localizable.xcstrings`,
 `apps/ios/native/Resources/InfoPlist.xcstrings`, or
 `apps/android/native/app/src/main/res/values*/strings.xml` is hand-edited — those
 are generated output, committed for a readable diff, and overwritten on every
-`generate.py` run.
+`generate.py` run. So is `packages/teams/i18n.generated.ts`, the slice of the
+catalog that the Desktop and Web Teams views read (see "Desktop and Web Teams
+text").
 
 ## Layout
 
@@ -18,7 +20,8 @@ resources/translations/
   en.json           English
   ja.json           日本語
   ko.json           한국어
-  generate.py       reads the *.json files, writes iOS + Android output
+  generate.py       reads the *.json files, writes iOS + Android output and
+                    the Teams text bundle (packages/teams/i18n.generated.ts)
   test_generate.py  generator's own test suite (run with pytest or
                     `python3 test_generate.py -v`)
 ```
@@ -117,6 +120,45 @@ use it only on an iOS key (one with a space, like `"chat_asked_questions %lld"`)
 and only in the locales that need it — the others keep a plain string. Android
 plurals are not generated: they live in the hand-written
 `values*/ask_question.xml` `<plurals>` resources.
+
+## Desktop and Web Teams text
+
+The Team, Friend and hosted-service views (`packages/teams`, with the Web files
+under `apps/web/src/{teams,friends,pages}` and the Electron `Teams*`/`Friends*`
+components that render them) take every word from this catalog, in all five
+locales, through `useTeamsText(locale)` in `packages/teams/i18n.ts`. They carry
+no inline `zh ? … : …` choice and no `t(English, Chinese)` pair; that is pinned
+by `apps/web/test/teams-strings.test.ts`, which also checks that Traditional
+Chinese, Japanese and Korean are translated and that the Team glossary holds
+(a Bot is never an "assistant"; direct messages are 私信, not 私聊; the owner of
+a Bot is its "Maintainer").
+
+`generate.py` writes the bundle those views import, `packages/teams/i18n.generated.ts`
+(`--teams-out FILE` writes it elsewhere; a run with `--ios-out` or `--android-out`
+leaves the committed one alone). It holds only the keys the views name: the first
+argument of a `t('key')` or `tk('key')` call, or any string literal that starts
+`teams_`, `friends_`, `services_` or `tw_`, in all of `packages/teams` and in the
+Web and Electron files that import `packages/teams/i18n`. A referenced key must be
+plain text in every one of the five files; otherwise `generate.py` exits 1 and names
+the key and the `file:line` that references it. `generate.py --check` also fails
+when the bundle is stale.
+
+- Reuse the mobile key when the text is the same (`teams_*`, `friends_*`,
+  `services_*`, `account_*`). A string only Desktop and Web need takes the prefix
+  `tw_<area>_<what>` (Teams Web). The generator leaves `tw_` keys out of the iOS
+  and Android outputs; only the Teams text bundle carries them.
+- Text with a value takes a `_fmt` key with positional placeholders (`%1$s`,
+  `%1$d`), the Android convention above. An iOS key (one with `%@` or `%lld`
+  in its name) cannot be named from TypeScript, and the generator rejects the
+  reference; reference its `_fmt` sibling instead, which `scripts/checks/check_i18n_pairing.py`
+  requires for every new `%@` key.
+- A count that changes the words takes two keys, `<name>_one` and `<name>_other`.
+- A table of keys (labels, run states) lists them with `tk('key')`, so the
+  scan and the compiler see each one; `useTeamsText` belongs in components and
+  `teamsText(locale)` in helpers that are not components.
+- `locale` is a code or a BCP 47 tag (`en`, `zh-Hans`, `zh-TW`, `ja`, `ko`);
+  `teamsLocale` maps it to one of the five, anything unknown reads English, and
+  `intlTag` gives `Intl` the language the person chose.
 
 ## Adding a language
 

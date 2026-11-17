@@ -122,7 +122,7 @@ text, never Markdown or links).
    `friends_link_copy` copies it and answers `friends_link_copied`. `friends_link_share` opens the native share sheet
    with `friends_link_share_message` + space + link (mobile; Web only when `navigator.share` exists; Desktop has none).
    `friends_link_reset` (`rotateCode`) and `friends_link_off` (`revokeCode`) each ask first
-   (`friends_link_reset_confirm`, `friends_link_off_confirm`). With `friendCode == null` show `friends_link_is_off`
+   (`friends_link_reset_title` / `_body`, `friends_link_off_title` / `_body`). With `friendCode == null` show `friends_link_is_off`
    and `friends_link_create` (`rotateCode`, no confirmation). `friends_link_disclosure` always sits under the card.
 2. *Find someone* (`friends_search_title`): one text field (`friends_search_placeholder`; no autocapitalisation or
    autocorrect; Return looks up) and `friends_search_action`. The text is classified by D7; `invalid` shows
@@ -203,7 +203,7 @@ enabled only when the form changed and is valid; it sends one `profile` action w
 `HANDLE_TAKEN` appears under the Username field; every other error in a form-level line (D18).
 
 **D12 Blocked people.** Rows from `users/{uid}/blocks`, newest `at` first: the name, `@handle` when the entry has one,
-and `friends_unblock` (`unblock`, no confirmation). Footer `friends_unblock_footer`; empty `friends_blocked_empty`. The
+and `friends_unblock` (`unblock`, no confirmation). Footer `friends_unblock_footer`; empty `friends_blocked_empty_title` / `_body`. The
 name is the entry's `displayName`, which the backend writes when the block is made (a snapshot, like card names); if it
 is missing or empty show `Member` (the existing `teams_member` string). Nothing is remembered on the device.
 
@@ -347,7 +347,7 @@ and stopping (D23), the Desktop host (D24) and the end of the friendship (D25).
   Choosing the same local Bot again prefills its publication and publishes the next revision, which also restores a Bot
   that was stopped.
 - **Stop sharing** (every client, on the viewer's own `published` Bot): `friends_share_bot_stop`, with a confirmation
-  (title `friends_share_bot_stop`, message `teams_bot_unbind_detail`, destructive `friends_share_bot_stop`,
+  (title `friends_share_bot_stop`, message `teams_bot_stop_detail`, destructive `friends_share_bot_stop`,
   `common_cancel`), then the Teams `pauseSharedBot {sharedBotId, expectedRevision: bot.revision}` (iOS
   `TeamMessagingModel.pause`, Android `TeamMessagingModel.pause`; Desktop's service already stops the binding). It is a
   pause: the friend's list drops the Bot and a send is 403 `BOT_USE_REQUIRED` (shown as the Teams text), the history stays
@@ -689,7 +689,7 @@ Android `_fmt` sibling), so the Friends keys are 115 entries in all.
   `friends_share_bot_stop`; pair `friends_share_bot_with %@` (the friend's name).
 - Reused without change: `friends_filter_placeholder`, `friends_filter_empty`, `friends_show_all %lld`, `friends_request_decline`,
   the general `friends_error_*` (session, network, invalid input, rate limit, generic), `common_cancel`, and from Teams
-  `teams_bot_unbind_detail`, `teams_bots_loading`, `teams_bots_unverified`, `teams_bot_owner %@`, `teams_bot_message`,
+  `teams_bot_stop_detail`, `teams_bots_loading`, `teams_bots_unverified`, `teams_bot_owner %@`, `teams_bot_message`,
   `teams_bot_not_permitted`.
 - zh-Hant equals zh-Hans for five more keys (`friends_offer_join`, `friends_offer_dismiss`, `friends_bots_title`,
   `friends_bots_none`, `friends_share_bot_stop`) and for the pair `friends_offer_expires`; all seven entries are in

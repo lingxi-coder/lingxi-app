@@ -123,7 +123,7 @@ scenario('Teams page: a Bot DM and the Bot\'s messages wear the Bot\'s avatar, a
   context.after(() => workspace.close());
   const snapshot = (): TeamsSnapshot => workspace.getSnapshot();
   await until(() => snapshot().conversations.length === 3 && snapshot().botsLoaded, 'the team to load');
-  const page = await mount(workspace, current => createElement(TeamsWorkspaceLayout, { teams: { workspace, snapshot: current, signedIn: true }, zh: false } as never)); context.after(() => page.unmount());
+  const page = await mount(workspace, current => createElement(TeamsWorkspaceLayout, { teams: { workspace, snapshot: current, signedIn: true }, locale: 'en' } as never)); context.after(() => page.unmount());
   const index = String(agentAvatarIndex('assistant-fixture'));
 
   // The sidebar: the Bot DM leads with the Bot, the direct message with the person.
@@ -160,7 +160,7 @@ scenario('Friends page: a Bot in a friend\'s chat wears the Bot\'s avatar, the f
   teams.threads.set('friend_chat', [message(1, { text: 'Hi Alice' })]);
   teams.threads.set('bot-chat', [message(1, { text: 'Hello from the Bot', author: { ...helper, displayName: 'Bob Helper' } })]);
   const page = await mount({ subscribe: () => () => undefined, getSnapshot: () => 0 }, () => createElement(FriendsWorkspaceView, {
-    friends: friends.api, teams: teams.api, uid, zh: false, route: '/friends', chat: 'bob', code: '', onCodeHandled() {}, onBadge() {},
+    friends: friends.api, teams: teams.api, uid, locale: 'en', route: '/friends', chat: 'bob', code: '', onCodeHandled() {}, onBadge() {},
   } as never));
   context.after(() => page.unmount());
   await until(() => page.byLabel('Shared Bots').length > 0, 'the friend chat'); await page.during(() => undefined);
@@ -170,9 +170,9 @@ scenario('Friends page: a Bot in a friend\'s chat wears the Bot\'s avatar, the f
   assert.ok(drawn.people.length >= 2);
   assert.ok(drawn.people.every(node => !classes(node).includes('tw-avatar-custom')));
 
-  // Message assistant opens the Bot DM that is there, in the friend chat's own Teams view.
+  // Message Bot opens the Bot DM that is there, in the friend chat's own Teams view.
   await page.click(page.oneByLabel('Shared Bots'));
-  await page.click(page.button('Message assistant'));
+  await page.click(page.button('Message Bot'));
   await until(() => page.text().includes('Hello from the Bot'), 'the Bot DM'); await page.during(() => undefined);
   drawn = avatars(page);
   assert.ok(drawn.bots.length >= 1, 'the Bot\'s message has its avatar');

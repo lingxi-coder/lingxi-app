@@ -90,7 +90,7 @@ try {
     ['Bob: Ship it', 'Bob: Mockups are in the folder', 'You: Lunch?', 'Done: the summary is ready']);
   assert.equal(await run(`Boolean(document.querySelector('${row('chan-general')}').closest('.tw-row').querySelector('[role="img"][aria-label="4 unread"]'))`), true, 'the unread count of the row');
   assert.equal(await run(`Boolean(document.querySelector('${row('bot-chat')} .tw-avatar-custom img'))`), true, 'a Bot wears its avatar');
-  assert.match(await run(`document.querySelector('.teams-page').textContent`), /Team assistants/);
+  assert.match(await run(`document.querySelector('.teams-page').textContent`), /Team Bots/);
   assert.equal(await run(`Boolean(document.querySelector('.sidebar-new-chat'))`), false, 'the projects are Home\'s');
   assert.deepEqual((await writes()).at(-1), ['updateSettings', { sidebar: { mode: 'teams' } }]);
   // No conversation is open, so there is no header and no header button: the team menu of the sidebar is the way into the details panel.

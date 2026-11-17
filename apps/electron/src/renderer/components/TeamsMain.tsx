@@ -3,6 +3,7 @@ import type { TeamMember } from '../../../../../packages/teams';
 import { InviteFriendsDialog, InviteNotice, MemberFriendDialog } from '../../../../../packages/teams/friend-dialogs';
 import { HostedServices } from '../../../../../packages/teams/HostedServices';
 import { serviceLink, type HostedServicesApi } from '../../../../../packages/teams/hosted-service';
+import { useTeamsText } from '../../../../../packages/teams/i18n';
 import { TeamConversationView } from '../../../../../packages/teams/TeamConversationView';
 import { TeamDetailsDrawer } from '../../../../../packages/teams/TeamDetailsDrawer';
 import type { UseFriends } from '../../../../../packages/teams/useFriendsWorkspace';
@@ -29,8 +30,9 @@ export const renderTeamMarkdown: RenderMarkdown = text => <MarkdownContent text=
  * A member of the team can be added as a friend (D15) and, by a manager, friends can be invited to it (D26) once the window has a
  * Friends workspace. `locale` orders the friends of the picker as the Friends list is ordered (D5).
  */
-export function TeamsMain({ teams, friends, zh, locale, drawer, services, onCloseServices }: { teams: UseTeams; friends: UseFriends; zh: boolean; locale: string; drawer: TeamsDrawer;
+export function TeamsMain({ teams, friends, locale, drawer, services, onCloseServices }: { teams: UseTeams; friends: UseFriends; locale: string; drawer: TeamsDrawer;
   /** Bot services are shown in place of the Team. */ services: boolean; onCloseServices(): void }) {
+  const t = useTeamsText(locale);
   const { workspace, snapshot, signedIn } = teams;
   const [adding, setAdding] = useState<TeamMember>();
   const [inviting, setInviting] = useState(false);
@@ -45,9 +47,9 @@ export function TeamsMain({ teams, friends, zh, locale, drawer, services, onClos
   if (services && servicesApi) return (
     <div className="teams-page">
       <div className="teams-conversation" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        <button type="button" className="tw-link" style={{ alignSelf: 'flex-start', margin: '10px 20px 0' }} onClick={onCloseServices}>{zh ? '‹ 返回团队' : '‹ Back to the Team'}</button>
+        <button type="button" className="tw-link" style={{ alignSelf: 'flex-start', margin: '10px 20px 0' }} onClick={onCloseServices}>{t('tw_back_team')}</button>
         <div style={{ flex: 1, minHeight: 0 }}>
-          <HostedServices key={snapshot.uid} api={servicesApi} uid={snapshot.uid} zh={zh}
+          <HostedServices key={snapshot.uid} api={servicesApi} uid={snapshot.uid} locale={locale}
             renderMarkdown={renderTeamMarkdown} link={id => serviceLink('https://lingxios.net', id)} />
         </div>
       </div>
@@ -56,16 +58,16 @@ export function TeamsMain({ teams, friends, zh, locale, drawer, services, onClos
   return (
     <div className="teams-page">
       <div className="teams-conversation">
-        {invited ? <InviteNotice names={invited} zh={zh} onDone={() => setInvited(undefined)} /> : null}
-        <TeamConversationView workspace={workspace} snapshot={snapshot} zh={zh} renderAvatar={renderTeamAvatar} renderMarkdown={renderTeamMarkdown}
+        {invited ? <InviteNotice names={invited} locale={locale} onDone={() => setInvited(undefined)} /> : null}
+        <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderTeamMarkdown}
           detailsOpen={drawer.open} onToggleDetails={drawer.toggle} />
       </div>
-      {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} zh={zh} renderAvatar={renderTeamAvatar}
+      {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar}
         tab={drawer.tab} onTabChange={drawer.setTab} width={drawer.width} onWidthChange={drawer.setWidth} onClose={drawer.close}
         onAddFriend={friends.workspace ? setAdding : undefined} onInviteFriends={friends.workspace ? () => setInviting(true) : undefined} /> : null}
-      {adding && friends.workspace && snapshot.team ? <MemberFriendDialog workspace={friends.workspace} zh={zh} teamId={snapshot.team.id} member={adding}
+      {adding && friends.workspace && snapshot.team ? <MemberFriendDialog workspace={friends.workspace} locale={locale} teamId={snapshot.team.id} member={adding}
         renderAvatar={renderTeamAvatar} onClose={() => setAdding(undefined)} /> : null}
-      {inviting && friends.workspace && snapshot.team ? <InviteFriendsDialog workspace={friends.workspace} zh={zh} locale={locale} team={snapshot.team} members={snapshot.directory}
+      {inviting && friends.workspace && snapshot.team ? <InviteFriendsDialog workspace={friends.workspace} locale={locale} team={snapshot.team} members={snapshot.directory}
         renderAvatar={renderTeamAvatar} refreshMembers={() => void workspace.refresh()} onClose={names => { setInviting(false); setInvited(names.length ? names : undefined); }} /> : null}
     </div>
   );

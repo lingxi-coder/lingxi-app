@@ -4,6 +4,7 @@ import { indexedDbCommandStorage } from './command-storage.js';
 import { inviteLink, type TeamCommand, type TeamDetail, type TeamMember, type TeamSummary, type TeamsApi } from './index.js';
 import { TeamMessaging, pendingPayload, type CommandStorage, type MessageScope, type PendingCommands, type TeamConversation, type TeamMessage } from './messages.js';
 import { admitFiles, uploadAttachment, type AttachmentType, type DraftFile, type FileRefusal } from './attachments.js';
+import { teamsText } from './i18n.js';
 
 // ─── Pure helpers ───────────────────────────────────────────────────────────
 
@@ -49,10 +50,11 @@ const userIds = (conversation: TeamConversation): string[] => conversation.parti
 const sharedBotIdOf = (conversation: TeamConversation): string | undefined => conversation.participants.find(value => value.startsWith('shared_bot:'))?.slice(11);
 const cardFor = (key: string | undefined, bots: readonly SharedBotCard[]) => key ? bots.find(bot => bot.sharedBotId === key) : undefined;
 
-export interface LabelOptions { bots?: readonly SharedBotCard[]; zh?: boolean }
+export interface LabelOptions { bots?: readonly SharedBotCard[]; locale?: string }
 /** A person's display name, falling back to "You" / "Member" for people the directory does not list. */
-function memberName(id: string, members: readonly TeamMember[], uid: string, zh: boolean): string {
-  return members.find(member => member.uid === id)?.displayName || (id === uid ? (zh ? '你' : 'You') : (zh ? '成员' : 'Member'));
+function memberName(id: string, members: readonly TeamMember[], uid: string, locale: string): string {
+  const t = teamsText(locale);
+  return members.find(member => member.uid === id)?.displayName || (id === uid ? (t('teams_you')) : (t('teams_member')));
 }
 /** Titles made of the participants' own names are generated defaults, not names a person chose. */
 function isGeneratedTitle(title: string, names: string[]): boolean {
@@ -72,27 +74,27 @@ function isGeneratedTitle(title: string, names: string[]): boolean {
  * followed by the person for the Bot's owner reading someone else's DM.
  */
 export function conversationLabel(conversation: TeamConversation, members: readonly TeamMember[], uid: string, options: LabelOptions = {}): string {
-  const zh = options.zh ?? false, title = conversation.title.trim();
+  const locale = options.locale ?? 'en', t = teamsText(locale), title = conversation.title.trim();
   const people = userIds(conversation);
-  if (conversation.kind === 'channel') return title || (zh ? '频道' : 'Channel');
+  if (conversation.kind === 'channel') return title || (t('teams_conversation_channel'));
   if (conversation.kind === 'bot_dm') {
-    const bot = cardFor(sharedBotIdOf(conversation), options.bots ?? [])?.name || title || 'Bot';
+    const bot = cardFor(sharedBotIdOf(conversation), options.bots ?? [])?.name || title || t('teams_bot_tag');
     const others = people.filter(id => id !== uid);
-    return people.includes(uid) || !others.length ? bot : `${bot} · ${others.map(id => memberName(id, members, uid, zh)).join(zh ? '、' : ', ')}`;
+    return people.includes(uid) || !others.length ? bot : `${bot} · ${others.map(id => memberName(id, members, uid, locale)).join(t('tw_list_separator'))}`;
   }
-  const names = people.map(id => memberName(id, members, uid, zh));
+  const names = people.map(id => memberName(id, members, uid, locale));
   if (title && !isGeneratedTitle(title, names)) return title;
-  const others = people.filter(id => id !== uid).map(id => memberName(id, members, uid, zh));
-  return others.join(zh ? '、' : ', ') || title || (conversation.kind === 'dm' ? (zh ? '私信' : 'Direct message') : (zh ? '群聊' : 'Group'));
+  const others = people.filter(id => id !== uid).map(id => memberName(id, members, uid, locale));
+  return others.join(t('tw_list_separator')) || title || (conversation.kind === 'dm' ? (t('teams_label_direct')) : (t('teams_conversation_group')));
 }
 
 /** Everyone in a conversation as avatar identities: other people, then Bots, then the viewer. */
-export function conversationParticipants(conversation: TeamConversation, members: readonly TeamMember[], bots: readonly SharedBotCard[], uid: string, zh = false): (Identity & { self: boolean })[] {
-  const people = userIds(conversation).map(id => ({ kind: 'user' as const, id, name: memberName(id, members, uid, zh), self: id === uid }));
+export function conversationParticipants(conversation: TeamConversation, members: readonly TeamMember[], bots: readonly SharedBotCard[], uid: string, locale = 'en'): (Identity & { self: boolean })[] {
+  const people = userIds(conversation).map(id => ({ kind: 'user' as const, id, name: memberName(id, members, uid, locale), self: id === uid }));
   const robots = conversation.participants.filter(value => value.startsWith('shared_bot:')).map(principal => {
     const key = principal.slice(11);
     const card = cardFor(key, bots);
-    return { kind: 'bot' as const, id: card?.sharedBotId ?? key, name: card?.name || 'Bot', self: false };
+    return { kind: 'bot' as const, id: card?.sharedBotId ?? key, name: card?.name || teamsText(locale)('teams_bot_tag'), self: false };
   });
   return [...people.filter(person => !person.self), ...robots, ...people.filter(person => person.self)];
 }
@@ -114,7 +116,7 @@ export function findDm(conversations: readonly TeamConversation[], uid: string, 
  * `conversationLabel` recognizes it and shows only the other people. Cut at `limit` characters.
  */
 export function defaultConversationTitle(uids: readonly string[], members: readonly TeamMember[], uid: string, limit = 120): string {
-  const names = [uid, ...uids.filter(id => id !== uid)].map(id => memberName(id, members, uid, false));
+  const names = [uid, ...uids.filter(id => id !== uid)].map(id => memberName(id, members, uid, 'en'));
   let title = '';
   for (const name of names) {
     const next = title ? `${title}, ${name}` : name;
@@ -128,20 +130,23 @@ export function defaultConversationTitle(uids: readonly string[], members: reado
  * One line of a conversation's newest message. `lastMessage` absent: no messages yet. Recalled and non-text
  * messages get a label. "You: " prefixes the viewer's own message; `author` names the sender in groups and channels.
  */
-export function conversationPreview(conversation: TeamConversation, uid: string, zh: boolean, author?: (message: NonNullable<TeamConversation['lastMessage']>) => string): string {
+export function conversationPreview(conversation: TeamConversation, uid: string, locale: string, author?: (message: NonNullable<TeamConversation['lastMessage']>) => string): string {
+  const t = teamsText(locale);
   const last = conversation.lastMessage;
-  if (!last) return zh ? '暂无消息' : 'No messages yet';
-  return pointerPreview(last, uid, zh, conversation.kind === 'group' || conversation.kind === 'channel' ? author : undefined);
+  if (!last) return t('teams_preview_none');
+  return pointerPreview(last, uid, locale, conversation.kind === 'group' || conversation.kind === 'channel' ? author : undefined);
 }
 
 /** The message part of {@link conversationPreview}: a Friends row prints the same text from the card's `lastMessage`. */
-export function pointerPreview(last: NonNullable<TeamConversation['lastMessage']>, uid: string, zh: boolean, author?: (message: NonNullable<TeamConversation['lastMessage']>) => string): string {
+export function pointerPreview(last: NonNullable<TeamConversation['lastMessage']>, uid: string, locale: string, author?: (message: NonNullable<TeamConversation['lastMessage']>) => string): string {
+  const t = teamsText(locale);
   const mine = last.author.kind === 'user' && last.author.uid === uid;
-  const prefix = mine ? (zh ? '你：' : 'You: ') : author ? `${author(last)}${zh ? '：' : ': '}` : '';
-  if (last.recalled) return `${prefix}${zh ? '消息已撤回' : 'Message recalled'}`;
+  const who = mine ? t('teams_you') : author?.(last);
+  const line = (text: string) => who ? t('tw_preview_fmt', who, text) : text;
+  if (last.recalled) return line(t('teams_message_recalled'));
   // A shared Bot's text is Markdown (the conversation renders it); a person's is plain text and stays as stored.
   const text = last.author.kind === 'shared_bot' ? markdownPlainText(last.preview) : last.preview;
-  return `${prefix}${text || (zh ? '[非文本消息]' : '[Non-text message]')}`;
+  return line(text || t('teams_preview_non_text'));
 }
 
 /** Markdown reduced to one plain line for a sidebar row: block markers and emphasis marks dropped, links and images kept as their text. */

@@ -131,8 +131,8 @@ test('errors: the code -> key map, which are definitive, and the English and Chi
   for (const row of vectors.errors) {
     assert.equal(friendsErrorKey(row.code), row.key, row.code);
     assert.equal(definitive(row.code), row.definitive, row.code);
-    assert.equal(friendsErrorText(row.code, false), en[row.key], row.code);
-    assert.equal(friendsErrorText(row.code, true), zh[row.key], row.code);
+    assert.equal(friendsErrorText(row.code, 'en'), en[row.key], row.code);
+    assert.equal(friendsErrorText(row.code, 'zh-Hans'), zh[row.key], row.code);
     assert.equal(chatEnded(row.code), row.key === 'friends_chat_unavailable', row.code);
   }
 });
@@ -212,8 +212,8 @@ test('offers.errors: the action\'s key, else the common one, else generic; the E
     const label = `${row.action} ${row.code}`;
     assert.equal(offerErrorKey(row.action as OfferAction, row.code), row.key, label);
     assert.equal(definitive(row.code), row.definitive, label);
-    assert.equal(offerErrorText(row.action as OfferAction, row.code, false), en[row.key], label);
-    assert.equal(offerErrorText(row.action as OfferAction, row.code, true), zh[row.key], label);
+    assert.equal(offerErrorText(row.action as OfferAction, row.code, 'en'), en[row.key], label);
+    assert.equal(offerErrorText(row.action as OfferAction, row.code, 'zh-Hans'), zh[row.key], label);
   }
   // D30: the chat's ended-friendship reading must not leak into the offer actions.
   assert.equal(friendsErrorKey('MEMBERSHIP_REQUIRED'), 'friends_chat_unavailable');

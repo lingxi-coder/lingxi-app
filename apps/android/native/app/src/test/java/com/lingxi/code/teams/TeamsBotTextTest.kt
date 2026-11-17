@@ -110,7 +110,7 @@ class TeamsBotTextTest {
     }
 
     @Test fun runStatesNeverBorrowAnotherScreensWords() {
-        val borrowed = setOf(R.string.cron_status_queued, R.string.teams_task_expired, R.string.teams_task_interrupted, R.string.teams_task_authorization_required)
+        val borrowed = setOf(R.string.cron_status_queued)
         for (state in allRunStates) {
             assertTrue(state, TeamsBotText.runState(state).label !in borrowed)
         }

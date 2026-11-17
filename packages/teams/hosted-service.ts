@@ -2,6 +2,7 @@ import { TeamsApiError } from './index.js';
 import { chatSourceMessage, type ChatReadRequest, type ChatReadResult, type ChatSourceMessage } from './chat-source.js';
 import { executionCommand, type LocalPublishableBot, type MemberExecutionPayloads, type PublishLocalBotInput, type SharedHostStatus } from './execution.js';
 import { isMemberExecutionCommand } from './execution-validation.js';
+import { teamsText } from './i18n.js';
 
 /**
  * A Bot offered to people outside its publisher's Teams (a hosted Bot service). A service is a scope of its own: it is
@@ -188,40 +189,40 @@ export function serviceIdFrom(input: string): string | null {
 export const serviceLink = (origin: string, serviceId: string): string => `${origin}/services/${serviceId}`;
 
 /** Why a service would not answer now, in words. */
-export function availabilityText(availability: ServiceAvailability, zh: boolean): string {
-  const t = (en: string, cn: string) => zh ? cn : en;
+export function availabilityText(availability: ServiceAvailability, locale: string): string {
+  const t = teamsText(locale);
   switch (availability) {
-    case 'available': return t('Available', '可用');
-    case 'disabled': return t('Turned off by its publisher', '发布者已关闭');
-    case 'not_ready': return t('Not set up yet', '尚未就绪');
-    case 'host_offline': return t('The publisher’s computer is offline', '发布者的电脑不在线');
-    case 'service_quota_exhausted': return t('Today’s requests for this service are used up', '该服务今日的请求次数已用完');
-    case 'user_quota_exhausted': return t('You have used today’s requests', '你今日的请求次数已用完');
-    case 'withdrawn': return t('Withdrawn', '已下线');
+    case 'available': return t('services_state_available');
+    case 'disabled': return t('services_state_disabled');
+    case 'not_ready': return t('services_state_not_ready');
+    case 'host_offline': return t('services_state_host_offline');
+    case 'service_quota_exhausted': return t('services_state_service_quota');
+    case 'user_quota_exhausted': return t('services_state_user_quota');
+    case 'withdrawn': return t('services_state_withdrawn');
   }
 }
 /** What a refusal means to the person who met it. Unknown codes are shown as they are. */
-export function serviceErrorText(code: string, zh: boolean): string {
-  const t = (en: string, cn: string) => zh ? cn : en;
+export function serviceErrorText(code: string, locale: string): string {
+  const t = teamsText(locale);
   const known: Record<string, string> = {
-    NOT_FOUND: t('There is no such service, or it is not offered to this account.', '没有这个服务，或它未向此账号开放。'),
-    SERVICE_ENTRY_REQUIRED: t('Open the service and agree to its terms first.', '请先打开该服务并同意其说明。'),
-    SERVICE_ACCESS_REQUIRED: t('This service is no longer offered to this account.', '该服务已不再向此账号开放。'),
-    STALE_MEMBERSHIP: t('Your access changed. Open the service again.', '你的访问已变更，请重新打开该服务。'),
-    SERVICE_WITHDRAWN: t('The publisher withdrew this service.', '发布者已下线该服务。'),
-    SERVICE_DISABLED: t('The publisher turned this service off. Nothing was sent.', '发布者已关闭该服务，消息未发送。'),
-    SERVICE_USER_BUSY: t('Wait for your earlier request to finish. Nothing was sent.', '请等待你之前的请求完成，消息未发送。'),
-    SERVICE_BUSY: t('The service is busy with other people’s requests. Nothing was sent; try again shortly.', '该服务正在处理其他人的请求，消息未发送，请稍后再试。'),
-    REQUEST_QUOTA_EXCEEDED: t('Today’s requests are used up. Nothing was sent.', '今日的请求次数已用完，消息未发送。'),
-    HOST_UNAVAILABLE: t('The publisher’s computer is offline. Nothing was sent.', '发布者的电脑不在线，消息未发送。'),
-    SERVICE_SESSION_LIMIT: t('You have the most sessions this service allows.', '你在该服务中的会话数已达上限。'),
-    REPORT_LIMIT: t('You have sent today’s reports. Try again tomorrow.', '你今日的举报次数已用完，请明天再试。'),
-    SERVICE_LIMIT: t('You offer the most services one account may.', '你提供的服务数已达上限。'),
-    PUBLISHER_REQUIRED: t('Only the publisher can do this.', '只有发布者可以执行此操作。'),
-    SIGN_IN_REQUIRED: t('Sign in first.', '请先登录。'),
-    TEAM_MODEL_UNAVAILABLE: t('This Bot’s model is not set up on this computer.', '此电脑上尚未配置该 Bot 的模型。'),
-    RESOURCE_BINDING_REQUIRED: t('This Bot needs files chosen for it, which a service does not carry yet.', '该 Bot 需要绑定文件，服务暂不支持。'),
-    SERVICE_UNAVAILABLE: t('The service could not be reached. Try again.', '无法连接服务，请重试。'),
+    NOT_FOUND: t('services_error_not_found'),
+    SERVICE_ENTRY_REQUIRED: t('services_error_entry_required'),
+    SERVICE_ACCESS_REQUIRED: t('services_error_access_required'),
+    STALE_MEMBERSHIP: t('services_error_stale'),
+    SERVICE_WITHDRAWN: t('services_error_withdrawn'),
+    SERVICE_DISABLED: t('services_error_disabled'),
+    SERVICE_USER_BUSY: t('services_error_user_busy'),
+    SERVICE_BUSY: t('services_error_busy'),
+    REQUEST_QUOTA_EXCEEDED: t('services_error_quota'),
+    HOST_UNAVAILABLE: t('services_error_host_unavailable'),
+    SERVICE_SESSION_LIMIT: t('services_error_session_limit'),
+    REPORT_LIMIT: t('services_error_report_limit'),
+    SERVICE_LIMIT: t('tw_service_error_limit'),
+    PUBLISHER_REQUIRED: t('tw_service_error_publisher'),
+    SIGN_IN_REQUIRED: t('tw_service_error_sign_in'),
+    TEAM_MODEL_UNAVAILABLE: t('tw_service_error_model'),
+    RESOURCE_BINDING_REQUIRED: t('tw_service_error_files'),
+    SERVICE_UNAVAILABLE: t('services_error_unavailable'),
   };
   return known[code] ?? code;
 }

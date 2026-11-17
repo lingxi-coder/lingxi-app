@@ -5,6 +5,7 @@ import { BotDirectory } from './BotDirectory';
 import { canInviteFriends } from './friends.js';
 import { Avatar, Dialog, Icon, platformNotice, rovingIndex, TeamMark, type DrawerTab, type RenderAvatar } from './ui';
 import type { TeamsSnapshot, TeamsWorkspace } from './workspace.js';
+import { intlTag, useTeamsText } from './i18n.js';
 
 export const DRAWER_MIN = 280;
 export const DRAWER_MAX = 480;
@@ -34,7 +35,6 @@ export const canManageMember = (viewerRole: TeamRole, viewerUid: string, member:
 export interface TeamDetailsDrawerProps {
   workspace: TeamsWorkspace;
   snapshot: TeamsSnapshot;
-  zh: boolean;
   /** The shown tab, when the host keeps it; otherwise the drawer does. */
   tab?: DrawerTab;
   onTabChange?(tab: DrawerTab): void;
@@ -44,7 +44,7 @@ export interface TeamDetailsDrawerProps {
   onWidthChange?(width: number): void;
   onClose(): void;
   renderAvatar?: RenderAvatar;
-  locale?: string;
+  locale: string;
   /** Without it members have no Add friend action (D15). The host looks the person up and shows the result. */
   onAddFriend?(member: TeamMember): void;
   /** Without it the Invites tab has no Invite friends button (D26). The host shows the picker. Only an owner or an admin sees the tab. */
@@ -58,9 +58,9 @@ interface Confirmation { command: TeamCommand; title: string; body: string; conf
  * The right column: the open team's members, invitations and Bots. Leaving or deleting the team is
  * at the top, behind a confirmation. The left edge is a resize handle (280 to 480 pixels); Escape closes.
  */
-export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, width: controlledWidth, defaultWidth, onWidthChange, onClose, renderAvatar, locale, onAddFriend, onInviteFriends }: TeamDetailsDrawerProps): ReactElement | null {
-  const t = (en: string, cn: string) => zh ? cn : en;
-  const tag = locale ?? (zh ? 'zh-CN' : 'en-US');
+export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width: controlledWidth, defaultWidth, onWidthChange, onClose, renderAvatar, locale, onAddFriend, onInviteFriends }: TeamDetailsDrawerProps): ReactElement | null {
+  const t = useTeamsText(locale);
+  const tag = intlTag(locale);
   const id = useId();
   const heading = useRef<HTMLHeadingElement>(null);
   const drag = useRef<{ x: number; width: number } | null>(null);
@@ -96,8 +96,8 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
     if (value !== width) onWidthChange?.(value);
   };
   const choose = (next: DrawerTab) => { setOwnTab(next); onTabChange?.(next); };
-  const role = (value: TeamRole) => ({ owner: t('Owner', '所有者'), admin: t('Admin', '管理员'), member: t('Member', '成员') })[value];
-  const tabLabel = (value: DrawerTab) => ({ members: t('Members', '成员'), invites: t('Invites', '邀请'), bots: 'Bots' })[value];
+  const role = (value: TeamRole) => ({ owner: t('teams_owner'), admin: t('teams_admin'), member: t('teams_member') })[value];
+  const tabLabel = (value: DrawerTab) => ({ members: t('teams_members'), invites: t('teams_invites'), bots: t('remote_bots') })[value];
 
   const ask = (command: TeamCommand, title: string, body: string, confirm: string, danger = true) => setConfirmation({ command, title, body, confirm, danger });
   const confirmNow = async () => {
@@ -109,10 +109,10 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
     if (ok && (pending.command.action === 'leave' || pending.command.action === 'delete')) onClose();
   };
   const leaveOrDelete = team.role === 'owner'
-    ? () => ask({ action: 'delete', teamId: team.id }, t(`Delete “${team.name}”?`, `删除“${team.name}”？`),
-      t('Everyone loses access to its conversations and shared Bots. This can’t be undone.', '所有成员都将无法再访问该团队的会话和共享的 Bot。此操作无法撤销。'), t('Delete', '删除'))
-    : () => ask({ action: 'leave', teamId: team.id, generation: team.generation }, t(`Leave “${team.name}”?`, `退出“${team.name}”？`),
-      t('You will lose access to its conversations and shared Bots. To come back, you need a new invite.', '你将无法再访问该团队的会话和共享的 Bot。如需回来，需要新的邀请。'), t('Leave', '退出'));
+    ? () => ask({ action: 'delete', teamId: team.id }, t('teams_confirm_delete_title_fmt', team.name),
+      t('teams_confirm_delete_body'), t('teams_confirm_delete_button'))
+    : () => ask({ action: 'leave', teamId: team.id, generation: team.generation }, t('teams_confirm_leave_title_fmt', team.name),
+      t('teams_confirm_leave_body'), t('teams_confirm_leave_button'));
 
   const resizeDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     drag.current = { x: event.clientX, width };
@@ -141,7 +141,7 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
   };
 
   const copy = (link: string) => {
-    const done = () => setNotice(t('Link copied', '链接已复制')), fail = () => setNotice(t('Select and copy the link above.', '请选中上方链接并复制。'));
+    const done = () => setNotice(t('teams_link_copied')), fail = () => setNotice(t('tw_team_copy_hint'));
     if (!navigator.clipboard) { fail(); return; }
     navigator.clipboard.writeText(link).then(done, fail);
   };
@@ -150,98 +150,98 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
   const body = (): ReactElement => {
     if (current === 'bots') {
       return <div className="tw-embed">
-        <BotDirectory key={`${uid}:${team.id}:${team.generation}:${snapshot.authority}`} api={workspace.api} uid={uid} team={team} members={snapshot.directory} bots={snapshot.bots} zh={zh} busy={snapshot.messageBusy}
-          status={snapshot.botsUnverified ? t('Bot availability could not be verified.', '未能确认 Bot 可用状态。') : !snapshot.botsLoaded ? t('Loading Bots…', '正在加载 Bot…') : ''}
+        <BotDirectory key={`${uid}:${team.id}:${team.generation}:${snapshot.authority}`} api={workspace.api} uid={uid} team={team} members={snapshot.directory} bots={snapshot.bots} locale={locale} busy={snapshot.messageBusy}
+          status={snapshot.botsUnverified ? t('teams_bots_unverified') : !snapshot.botsLoaded ? t('teams_bots_loading') : ''}
           attempt={workspace.attempt} onOpen={bot => workspace.startBotDm(bot)} onChanged={() => workspace.refreshBots()} />
-        {snapshot.actionError ? <p role="alert" className="tw-error">{messageErrorText(snapshot.actionError, zh)}</p> : null}
+        {snapshot.actionError ? <p role="alert" className="tw-error">{messageErrorText(snapshot.actionError, locale)}</p> : null}
       </div>;
     }
     if (!detail) {
       return snapshot.loadError && !snapshot.detailLoading
-        ? <div className="tw-form"><p role="alert" className="tw-error">{teamsErrorText(snapshot.loadError, zh)}</p><button type="button" onClick={() => void workspace.refresh()}>{t('Retry', '重试')}</button></div>
-        : <p className="tw-empty-line" role="status">{t('Loading…', '正在加载…')}</p>;
+        ? <div className="tw-form"><p role="alert" className="tw-error">{teamsErrorText(snapshot.loadError, locale)}</p><button type="button" onClick={() => void workspace.refresh()}>{t('common_retry')}</button></div>
+        : <p className="tw-empty-line" role="status">{t('teams_loading')}</p>;
     }
     if (current === 'members') {
-      return <ul className="tw-people" aria-label={t('Members', '成员')}>
+      return <ul className="tw-people" aria-label={t('teams_members')}>
         {members.map(member => <li key={member.uid}>
           <Avatar identity={{ kind: 'user', id: member.uid, name: member.displayName }} size={40} render={renderAvatar} />
-          <div className="tw-person-text"><b>{member.displayName}</b><small>{member.uid === uid ? `${t('You', '你')} · ` : ''}{role(member.role)}</small></div>
+          <div className="tw-person-text"><b>{member.displayName}</b><small>{member.uid === uid ? `${t('teams_you')} · ` : ''}{role(member.role)}</small></div>
           {onAddFriend && member.uid !== uid || canManageMember(team.role, uid, member) ? <div className="tw-person-actions">
-            {onAddFriend && member.uid !== uid ? <button type="button" onClick={() => onAddFriend(member)}>{t('Add friend', '添加好友')}</button> : null}
+            {onAddFriend && member.uid !== uid ? <button type="button" onClick={() => onAddFriend(member)}>{t('friends_add')}</button> : null}
             {canManageMember(team.role, uid, member) ? <>
               {team.role === 'owner' ? <button type="button" disabled={snapshot.busy}
                 onClick={() => ask({ action: 'role', teamId: team.id, uid: member.uid, generation: member.generation, role: member.role === 'admin' ? 'member' : 'admin' },
-                  member.role === 'admin' ? t(`Make ${member.displayName} a member?`, `将 ${member.displayName} 设为成员？`) : t(`Make ${member.displayName} an admin?`, `将 ${member.displayName} 设为管理员？`),
-                  member.role === 'admin' ? t('They will no longer be able to invite people or remove members.', '对方将无法再邀请他人或移除成员。') : t('Admins can invite people and remove members.', '管理员可以邀请他人并移除成员。'),
-                  member.role === 'admin' ? t('Make member', '设为成员') : t('Make admin', '设为管理员'), false)}>
-                {member.role === 'admin' ? t('Make member', '设为成员') : t('Make admin', '设为管理员')}</button> : null}
+                  member.role === 'admin' ? t('teams_confirm_demote_title_fmt', member.displayName) : t('teams_confirm_promote_title_fmt', member.displayName),
+                  member.role === 'admin' ? t('teams_confirm_demote_body') : t('teams_confirm_promote_body'),
+                  member.role === 'admin' ? t('teams_demote') : t('teams_promote'), false)}>
+                {member.role === 'admin' ? t('teams_demote') : t('teams_promote')}</button> : null}
               {team.role === 'owner' ? <button type="button" disabled={snapshot.busy}
-                onClick={() => ask({ action: 'handOver', teamId: team.id, uid: member.uid, generation: member.generation }, t(`Make ${member.displayName} the owner of ${team.name}?`, `将「${team.name}」的所有者变更为 ${member.displayName}？`),
-                  t('You stay in the team as an admin, and only the new owner can make you the owner again. Each Bot stays with the member who maintains it, and every chat stays with the people in it.', '你将以管理员身份留在团队中，只有新的所有者才能再把你设为所有者。每个 Bot 仍由其维护者维护，每个对话仍只属于其中的成员。'),
-                  t('Make owner', '设为所有者'), false)}>
-                {t('Make owner', '设为所有者')}</button> : null}
+                onClick={() => ask({ action: 'handOver', teamId: team.id, uid: member.uid, generation: member.generation }, t('tw_team_owner_title_fmt', member.displayName, team.name),
+                  t('tw_team_owner_body'),
+                  t('teams_make_owner'), false)}>
+                {t('teams_make_owner')}</button> : null}
               <button type="button" className="tw-danger-btn" disabled={snapshot.busy}
-                onClick={() => ask({ action: 'remove', teamId: team.id, uid: member.uid, generation: member.generation }, t(`Remove ${member.displayName} from the team?`, `将 ${member.displayName} 移出团队？`),
-                  t('They lose access to its conversations and shared Bots. They can rejoin with a new invite.', '对方将无法再访问该团队的会话和共享的 Bot，之后可通过新的邀请重新加入。'), t('Remove', '移除'))}>{t('Remove', '移除')}</button>
+                onClick={() => ask({ action: 'remove', teamId: team.id, uid: member.uid, generation: member.generation }, t('teams_confirm_remove_title_fmt', member.displayName),
+                  t('teams_confirm_remove_body'), t('teams_confirm_remove_button'))}>{t('teams_confirm_remove_button')}</button>
             </> : null}
           </div> : null}
         </li>)}
       </ul>;
     }
     return <div className="tw-invites">
-      {onInviteFriends && canInviteFriends(team.role) ? <button type="button" onClick={onInviteFriends}>{t('Invite friends', '邀请好友')}</button> : null}
+      {onInviteFriends && canInviteFriends(team.role) ? <button type="button" onClick={onInviteFriends}>{t('friends_invite_action')}</button> : null}
       <form className="tw-form" onSubmit={event => { event.preventDefault(); void workspace.execute({ action: 'invite', teamId: team.id, requestId: crypto.randomUUID(), role: team.role === 'owner' ? inviteRole : 'member', maxUses: uses, ttlSeconds: ttl }); }}>
-        <label>{t('Role', '加入角色')}
+        <label>{t('tw_team_join_role')}
           <select value={team.role === 'owner' ? inviteRole : 'member'} disabled={team.role !== 'owner'} onChange={event => setInviteRole(event.target.value as 'member' | 'admin')}>
-            <option value="member">{t('Member', '成员')}</option>{team.role === 'owner' ? <option value="admin">{t('Admin', '管理员')}</option> : null}
+            <option value="member">{t('teams_member')}</option>{team.role === 'owner' ? <option value="admin">{t('teams_admin')}</option> : null}
           </select>
         </label>
         <div className="tw-form-row">
-          <label>{t('Uses', '可用次数')}<input type="number" min={1} max={50} value={uses} onChange={event => setUses(Number(event.target.value))} required /></label>
-          <label>{t('Expires in', '有效期')}
+          <label>{t('teams_uses')}<input type="number" min={1} max={50} value={uses} onChange={event => setUses(Number(event.target.value))} required /></label>
+          <label>{t('teams_expiry')}
             <select value={ttl} onChange={event => setTtl(Number(event.target.value))}>
-              <option value={3600}>{t('1 hour', '1 小时')}</option><option value={86400}>{t('1 day', '1 天')}</option><option value={604800}>{t('7 days', '7 天')}</option>
+              <option value={3600}>{t('teams_hour')}</option><option value={86400}>{t('teams_day')}</option><option value={604800}>{t('teams_week')}</option>
             </select>
           </label>
         </div>
-        <button type="submit" className="tw-primary" disabled={snapshot.busy}>{t('Create invite link', '创建邀请链接')}</button>
+        <button type="submit" className="tw-primary" disabled={snapshot.busy}>{t('teams_invite_create')}</button>
       </form>
       {snapshot.inviteLink ? <div className="tw-share">
-        <label>{t('Share this invitation', '分享邀请')}<input readOnly value={snapshot.inviteLink} onFocus={event => event.target.select()} /></label>
-        <button type="button" onClick={() => copy(snapshot.inviteLink)}><Icon name="copy" />{t('Copy', '复制')}</button>
+        <label>{t('teams_invite_share')}<input readOnly value={snapshot.inviteLink} onFocus={event => event.target.select()} /></label>
+        <button type="button" onClick={() => copy(snapshot.inviteLink)}><Icon name="copy" />{t('tw_copy')}</button>
       </div> : null}
       {notice ? <p role="status" className="tw-hint">{notice}</p> : null}
-      <ul className="tw-invite-list" aria-label={t('Invitations', '邀请')}>
+      <ul className="tw-invite-list" aria-label={t('tw_team_invitations')}>
         {invites.map(invite => <li key={invite.id}>
-          <span>{invite.role === 'admin' ? t('Admin', '管理员') : t('Member', '成员')} · {invite.uses}/{invite.maxUses} · {new Date(invite.expiresAt).toLocaleString(tag)}</span>
-          {invite.revoked ? <small>{t('Revoked', '已撤销')}</small>
+          <span>{invite.role === 'admin' ? t('teams_admin') : t('teams_member')} · {invite.uses}/{invite.maxUses} · {new Date(invite.expiresAt).toLocaleString(tag)}</span>
+          {invite.revoked ? <small>{t('teams_revoked')}</small>
             : <button type="button" disabled={snapshot.busy || (team.role !== 'owner' && invite.role === 'admin')}
-              onClick={() => ask({ action: 'revokeInvite', teamId: team.id, inviteId: invite.id }, t('Revoke this invite?', '撤销此邀请？'),
-                t('The link stops working right away. People who already joined stay in the team.', '链接会立即失效。已经加入的人会留在团队中。'), t('Revoke', '撤销'))}>{t('Revoke', '撤销')}</button>}
+              onClick={() => ask({ action: 'revokeInvite', teamId: team.id, inviteId: invite.id }, t('teams_confirm_revoke_title'),
+                t('teams_confirm_revoke_body'), t('teams_revoke'))}>{t('teams_revoke')}</button>}
         </li>)}
-        {!invites.length ? <li className="tw-empty-line">{t('No invitations yet.', '还没有邀请。')}</li> : null}
+        {!invites.length ? <li className="tw-empty-line">{t('teams_invite_none')}</li> : null}
       </ul>
     </div>;
   };
 
-  return <aside className="tw-scope tw-drawer" role="complementary" aria-label={t('Team details', '团队详情')} style={{ width }} onKeyDown={escape}>
-    <div className="tw-resize" role="separator" aria-orientation="vertical" aria-label={t('Resize details panel', '调整详情面板宽度')}
+  return <aside className="tw-scope tw-drawer" role="complementary" aria-label={t('teams_team_details')} style={{ width }} onKeyDown={escape}>
+    <div className="tw-resize" role="separator" aria-orientation="vertical" aria-label={t('tw_team_resize')}
       aria-valuemin={DRAWER_MIN} aria-valuemax={DRAWER_MAX} aria-valuenow={width} tabIndex={0}
       onPointerDown={resizeDown} onPointerMove={resizeMove} onPointerUp={resizeUp} onPointerCancel={resizeUp} onKeyDown={resizeKey} />
     <header className="tw-drawer-head">
       <TeamMark id={team.id} name={team.name} size={56} />
       <div className="tw-drawer-title">
         <h2 ref={heading} tabIndex={-1}>{team.name}</h2>
-        <p>{role(team.role)} · {team.memberCount} {t('members', '位成员')} · {t('Platform readable', '平台可读')}</p>
+        <p>{role(team.role)} · {t('teams_members_count_fmt', team.memberCount)} · {t('tw_team_platform_readable')}</p>
       </div>
-      <button type="button" className="tw-icon-btn" aria-label={t('Close details', '关闭详情')} title={t('Close details', '关闭详情')} onClick={onClose}><Icon name="x" /></button>
+      <button type="button" className="tw-icon-btn" aria-label={t('tw_team_close_details')} title={t('tw_team_close_details')} onClick={onClose}><Icon name="x" /></button>
     </header>
     <div className="tw-drawer-danger">
-      <button type="button" className="tw-danger-btn" disabled={snapshot.busy} onClick={leaveOrDelete}>{team.role === 'owner' ? t('Delete team', '删除团队') : t('Leave team', '退出团队')}</button>
-      <p className="tw-hint">{platformNotice(zh)}</p>
+      <button type="button" className="tw-danger-btn" disabled={snapshot.busy} onClick={leaveOrDelete}>{team.role === 'owner' ? t('teams_delete') : t('teams_leave')}</button>
+      <p className="tw-hint">{platformNotice(locale)}</p>
     </div>
-    {snapshot.error ? <p role="alert" className="tw-error tw-drawer-error">{teamsErrorText(snapshot.error, zh)}</p> : null}
-    <div className="tw-tabs" role="tablist" aria-label={t('Team details', '团队详情')} onKeyDown={tabKey}>
+    {snapshot.error ? <p role="alert" className="tw-error tw-drawer-error">{teamsErrorText(snapshot.error, locale)}</p> : null}
+    <div className="tw-tabs" role="tablist" aria-label={t('teams_team_details')} onKeyDown={tabKey}>
       {tabs.map(value => <button key={value} type="button" role="tab" id={`${id}-tab-${value}`} aria-selected={value === current} aria-controls={`${id}-panel`} tabIndex={value === current ? 0 : -1}
         className="tw-tab" onClick={() => choose(value)}>{tabLabel(value)}</button>)}
     </div>
@@ -249,7 +249,7 @@ export function TeamDetailsDrawer({ workspace, snapshot, zh, tab, onTabChange, w
     {confirmation ? <Dialog role="alertdialog" title={confirmation.title} description={confirmation.body} onClose={() => setConfirmation(undefined)}>
       <div className="tw-form">
         <div className="tw-dialog-actions">
-          <button type="button" data-autofocus onClick={() => setConfirmation(undefined)}>{t('Cancel', '取消')}</button>
+          <button type="button" data-autofocus onClick={() => setConfirmation(undefined)}>{t('common_cancel')}</button>
           <button type="button" className={confirmation.danger ? 'tw-danger-btn' : 'tw-primary'} disabled={snapshot.busy} onClick={() => void confirmNow()}>{confirmation.confirm}</button>
         </div>
       </div>

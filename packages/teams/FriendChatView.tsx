@@ -8,6 +8,7 @@ import type { FriendsViewProps } from './FriendsSidebar';
 import { CreationBanner, TeamConversationView } from './TeamConversationView';
 import { Icon, PopupMenu, type MenuItem, type RenderMarkdown } from './ui';
 import type { TeamsWorkspace } from './workspace.js';
+import { useTeamsText } from './i18n.js';
 
 export interface FriendChatViewProps extends FriendsViewProps {
   renderMarkdown?: RenderMarkdown;
@@ -21,26 +22,28 @@ export interface FriendChatViewProps extends FriendsViewProps {
  * friendship replaces all of it with `friends_chat_unavailable` and a Back action.
  */
 export function FriendChatView(props: FriendChatViewProps): ReactElement | null {
-  const { workspace, snapshot, zh } = props;
+  const { workspace, snapshot, locale } = props;
+  const t = useTeamsText(locale);
   const chat = snapshot.chat;
   if (!chat) return null;
-  if (chat.ended) return <Unavailable zh={zh} onBack={() => workspace.show('home')} />;
-  if (!chat.workspace) return <section className="tw-scope tw-conv tw-conv-empty"><p className="tw-empty-line" role="status">{zh ? '正在加载…' : 'Loading…'}</p></section>;
+  if (chat.ended) return <Unavailable locale={locale} onBack={() => workspace.show('home')} />;
+  if (!chat.workspace) return <section className="tw-scope tw-conv tw-conv-empty"><p className="tw-empty-line" role="status">{t('teams_loading')}</p></section>;
   // Another friend is another chat: what the view holds (the open panel, the welcome) is not carried over.
   return <PairChat key={chat.uid} {...props} chat={chat} pair={chat.workspace} />;
 }
 
-function Unavailable({ zh, onBack }: { zh: boolean; onBack(): void }): ReactElement {
+function Unavailable({ locale, onBack }: { locale: string; onBack(): void }): ReactElement {
+  const t = useTeamsText(locale);
   return <section className="tw-scope tw-conv tw-conv-empty">
     <div className="tw-empty">
-      <h2>{zh ? '此聊天已不可用。' : 'This chat is no longer available.'}</h2>
-      <div className="tw-empty-actions"><button type="button" onClick={onBack}>{zh ? '返回' : 'Back'}</button></div>
+      <h2>{t('friends_chat_unavailable')}</h2>
+      <div className="tw-empty-actions"><button type="button" onClick={onBack}>{t('remote_back')}</button></div>
     </div>
   </section>;
 }
 
-function PairChat({ workspace, snapshot, zh, renderAvatar, renderMarkdown, locale, now, chat, pair }: FriendChatViewProps & { chat: FriendChat; pair: TeamsWorkspace }): ReactElement {
-  const t = (en: string, cn: string) => zh ? cn : en;
+function PairChat({ workspace, snapshot, renderAvatar, renderMarkdown, locale, now, chat, pair }: FriendChatViewProps & { chat: FriendChat; pair: TeamsWorkspace }): ReactElement {
+  const t = useTeamsText(locale);
   const view = useSyncExternalStore(pair.subscribe, pair.getSnapshot);
   const [welcome, setWelcome] = useState(chat.joined);
   const [panel, setPanel] = useState(false);
@@ -56,51 +59,51 @@ function PairChat({ workspace, snapshot, zh, renderAvatar, renderMarkdown, local
   // D9, D25: a send, a reconnect or a Bot command that finds the friendship over, or a server-confirmed directory without the chat.
   const gone = chatEnded(view.messagingError) || chatEnded(view.actionError) || chatEnded(view.botsError)
     || (!view.conversations.some(value => value.id === FRIEND_CHAT) && !view.messagingConnecting && !view.offline);
-  if (gone) return <Unavailable zh={zh} onBack={back} />;
+  if (gone) return <Unavailable locale={locale} onBack={back} />;
   const conversation = view.conversation;
   const toChat = () => pair.selectConversation(FRIEND_CHAT);
   if (!conversation) {
     // A Bot chat being created is not in the directory yet, and one that was discarded or never appeared leaves a selection with nothing behind it.
     return <section className="tw-scope tw-conv tw-conv-empty">
-      {view.creation ? <CreationBanner workspace={pair} snapshot={view} zh={zh} /> : <p className="tw-empty-line" role="status">{t('Loading…', '正在加载…')}</p>}
-      {view.selectedConversationId !== FRIEND_CHAT ? <div className="tw-empty-actions"><button type="button" onClick={toChat}>{t('Back', '返回')}</button></div> : null}
+      {view.creation ? <CreationBanner workspace={pair} snapshot={view} locale={locale} /> : <p className="tw-empty-line" role="status">{t('teams_loading')}</p>}
+      {view.selectedConversationId !== FRIEND_CHAT ? <div className="tw-empty-actions"><button type="button" onClick={toChat}>{t('remote_back')}</button></div> : null}
     </section>;
   }
   const friendChat = conversation.id === FRIEND_CHAT;
   const close = () => { setPanel(false); botsRef.current?.focus(); };
   // D22: the friend's header and menu belong to the friend chat alone; a Bot chat is the plain Teams view with a way back.
   const actions = <>
-    <button ref={botsRef} type="button" className="tw-icon-btn" aria-expanded={panel} aria-controls={botsId} aria-label={t('Shared Bots', '共享的 Bot')} title={t('Shared Bots', '共享的 Bot')}
+    <button ref={botsRef} type="button" className="tw-icon-btn" aria-expanded={panel} aria-controls={botsId} aria-label={t('friends_bots_title')} title={t('friends_bots_title')}
       onClick={() => setPanel(open => !open)}><Icon name="bot" /></button>
-    <FriendMenu workspace={workspace} snapshot={snapshot} zh={zh} chat={chat} locale={locale} renderAvatar={renderAvatar} />
+    <FriendMenu workspace={workspace} snapshot={snapshot} chat={chat} locale={locale} renderAvatar={renderAvatar} />
   </>;
   return <div className="tw-friends-chat">
-    {welcome ? <p className="tw-banner" role="status">{nowFriends(chat.name, zh)}</p> : null}
-    <TeamConversationView workspace={pair} snapshot={view} zh={zh} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} locale={locale} now={now}
+    {welcome ? <p className="tw-banner" role="status">{nowFriends(chat.name, locale)}</p> : null}
+    <TeamConversationView workspace={pair} snapshot={view} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} locale={locale} now={now}
       friend={friendChat ? { uid: chat.uid, name: chat.name, handle: chat.handle, actions } : undefined} onBack={friendChat ? undefined : toChat} />
-    {panel && friendChat ? <FriendBotsPanel id={botsId} pair={pair} view={view} chat={chat} zh={zh} onClose={close} /> : null}
+    {panel && friendChat ? <FriendBotsPanel id={botsId} pair={pair} view={view} chat={chat} locale={locale} onClose={close} /> : null}
   </div>;
 }
 
 /** D10: View profile, Remove friend, Block. */
-function FriendMenu({ workspace, snapshot, zh, chat, locale, renderAvatar }: FriendsViewProps & { chat: FriendChat }): ReactElement {
-  const t = (en: string, cn: string) => zh ? cn : en;
+function FriendMenu({ workspace, snapshot, chat, locale, renderAvatar }: FriendsViewProps & { chat: FriendChat }): ReactElement {
+  const t = useTeamsText(locale);
   const [menu, setMenu] = useState(false);
   const [dialog, setDialog] = useState<'profile' | 'remove' | 'block'>();
   const moreRef = useRef<HTMLButtonElement>(null);
   const card = snapshot.cards.find(value => value.uid === chat.uid);
   const items: MenuItem[] = [
-    { id: 'profile', label: t('View profile', '查看资料'), onSelect: () => setDialog('profile') },
-    { id: 'remove', label: t('Remove friend', '删除好友'), danger: true, separated: true, onSelect: () => setDialog('remove') },
-    { id: 'block', label: t('Block', '屏蔽'), danger: true, onSelect: () => setDialog('block') },
+    { id: 'profile', label: t('friends_menu_view_profile'), onSelect: () => setDialog('profile') },
+    { id: 'remove', label: t('friends_menu_remove'), danger: true, separated: true, onSelect: () => setDialog('remove') },
+    { id: 'block', label: t('friends_menu_block'), danger: true, onSelect: () => setDialog('block') },
   ];
   const close = () => setDialog(undefined);
   return <div className="tw-switcher-wrap tw-friends-more">
-    <button ref={moreRef} type="button" className="tw-icon-btn" aria-haspopup="menu" aria-expanded={menu} aria-label={t('More', '更多')} title={t('More', '更多')}
+    <button ref={moreRef} type="button" className="tw-icon-btn" aria-haspopup="menu" aria-expanded={menu} aria-label={t('tw_more')} title={t('tw_more')}
       onClick={() => setMenu(value => !value)}><Icon name="more" /></button>
     {menu ? <PopupMenu label={chat.name} items={items} anchor={moreRef} align="end" onClose={restore => { setMenu(false); if (restore) moreRef.current?.focus(); }} /> : null}
-    {dialog === 'profile' ? <FriendProfileDialog workspace={workspace} zh={zh} uid={chat.uid} name={chat.name} handle={chat.handle} since={card?.since}
+    {dialog === 'profile' ? <FriendProfileDialog workspace={workspace} uid={chat.uid} name={chat.name} handle={chat.handle} since={card?.since}
       locale={locale} renderAvatar={renderAvatar} onClose={close} /> : null}
-    {dialog === 'remove' || dialog === 'block' ? <FriendLeaveDialog workspace={workspace} zh={zh} uid={chat.uid} name={chat.name} action={dialog} onClose={close} /> : null}
+    {dialog === 'remove' || dialog === 'block' ? <FriendLeaveDialog workspace={workspace} locale={locale} uid={chat.uid} name={chat.name} action={dialog} onClose={close} /> : null}
   </div>;
 }

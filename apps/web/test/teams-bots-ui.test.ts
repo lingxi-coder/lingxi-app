@@ -10,16 +10,17 @@ import { classes, mount, scenario, textOf, withDom } from './support/workspacePa
 const { BotDirectory } = loadTeamsModule<typeof import('../../../packages/teams/BotDirectory')>('BotDirectory');
 const { TeamConversationView } = loadTeamsModule<typeof import('../../../packages/teams/TeamConversationView')>('TeamConversationView');
 const { BotRun, usageText, tokenSplit, runLook, RUN_STATES } = loadTeamsModule<typeof import('../../../packages/teams/BotRunCards')>('BotRunCards');
+const { teamsText } = loadTeamsModule<typeof import('../../../packages/teams/i18n')>('i18n');
 async function open(context: Parameters<Parameters<typeof scenario>[1]>[0], overrides: Partial<TeamsApi> = {}) {
   withDom(context); const fake = new FakeTeams('alice'); fake.teams = [team('team-test', { role: 'owner' })]; fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 } })]; Object.assign(fake.api, overrides);
   const workspace = new TeamsWorkspace(fake.api, 'alice', { storage: memoryStorage, environment: new EventTarget() }); context.after(() => workspace.close()); await until(() => workspace.getSnapshot().botsLoaded && !!workspace.getSnapshot().detail); return { fake, workspace };
 }
-const directory = (workspace: TeamsWorkspace) => (s: ReturnType<TeamsWorkspace['getSnapshot']>) => createElement(BotDirectory, { api: workspace.api, uid: s.uid, team: s.team!, members: s.directory, bots: s.bots, zh: false, busy: s.messageBusy, status: '', attempt: workspace.attempt, onOpen: bot => workspace.startBotDm(bot), onChanged: workspace.refreshBots });
-const friendDirectory = (workspace: TeamsWorkspace) => (s: ReturnType<TeamsWorkspace['getSnapshot']>) => createElement(BotDirectory, { api: workspace.api, uid: s.uid, team: s.team!, members: s.directory, bots: s.bots, zh: false, busy: s.messageBusy, status: '', attempt: workspace.attempt, onOpen: bot => workspace.startBotDm(bot), onChanged: workspace.refreshBots, friend: 'Bob' });
+const directory = (workspace: TeamsWorkspace) => (s: ReturnType<TeamsWorkspace['getSnapshot']>) => createElement(BotDirectory, { api: workspace.api, uid: s.uid, team: s.team!, members: s.directory, bots: s.bots, locale: 'en', busy: s.messageBusy, status: '', attempt: workspace.attempt, onOpen: bot => workspace.startBotDm(bot), onChanged: workspace.refreshBots });
+const friendDirectory = (workspace: TeamsWorkspace) => (s: ReturnType<TeamsWorkspace['getSnapshot']>) => createElement(BotDirectory, { api: workspace.api, uid: s.uid, team: s.team!, members: s.directory, bots: s.bots, locale: 'en', busy: s.messageBusy, status: '', attempt: workspace.attempt, onOpen: bot => workspace.startBotDm(bot), onChanged: workspace.refreshBots, friend: 'Bob' });
 scenario('Member home requires no model setup and opens the document; a finished task without usage says so', async context => {
   const { fake, workspace } = await open(context); const calls: MessageCommand[] = []; fake.conversations.set('team-test', [conversation('test-chat')]);
   fake.messages = async <T>(command: MessageCommand) => { calls.push(command); if (command.action === 'listTasks') return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state: 'completed', createdAt: 1, deadline: 2, artifactId: 'artifact-test' }] } as T; if (command.action === 'readArtifact') return { artifactId: 'artifact-test', revision: 1, digest: 'a'.repeat(64), document: { title: 'Trip preparation', body: 'Pack passports' }, currentRevision: 1 } as T; return { bots: fake.bots } as T; };
-  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount()); assert.match(page.text(), /No model or API key setup/); assert.match(page.text(), /Usage unavailable/); assert.doesNotMatch(page.text(), /Missing usage|Reopen document/);
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); context.after(() => page.unmount()); assert.match(page.text(), /No model or API key setup/); assert.match(page.text(), /Usage unavailable/); assert.doesNotMatch(page.text(), /Missing usage|Reopen document/);
   await page.click(page.button('Open document')); assert.match(page.text(), /Trip preparation/); assert.match(page.text(), /Pack passports/); await page.click(page.button('Close')); await page.click(page.button('Open document')); assert.equal(calls.filter(c => c.action === 'readArtifact').length, 2);
 });
 scenario('The Bot document dialog renders its body through the host Markdown renderer, else as plain text', async context => {
@@ -27,7 +28,7 @@ scenario('The Bot document dialog renders its body through the host Markdown ren
   fake.messages = async <T>(command: MessageCommand) => { if (command.action === 'listTasks') return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state: 'completed', createdAt: 1, deadline: 2, artifactId: 'artifact-test' }] } as T; if (command.action === 'readArtifact') return { artifactId: 'artifact-test', revision: 1, digest: 'a'.repeat(64), document: { title: 'Trip preparation', body: '# Pack\n- passports' }, currentRevision: 1 } as T; return { bots: fake.bots } as T; };
   const rendered: string[] = [];
   const renderMarkdown = (text: string) => { rendered.push(text); return createElement('div', { className: 'host-md' }, 'rendered:' + text); };
-  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false, renderMarkdown })); context.after(() => page.unmount());
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en', renderMarkdown })); context.after(() => page.unmount());
   await until(() => /Open document/.test(page.text()), 'the task');
   await page.click(page.button('Open document'));
   assert.ok(rendered.length > 0 && rendered.every(text => text === '# Pack\n- passports')); assert.match(page.text(), /rendered:# Pack/);
@@ -35,7 +36,7 @@ scenario('The Bot document dialog renders its body through the host Markdown ren
 scenario('Publication confirms explicit role, native files, membership audience, costs and quotas', async context => {
   const published: unknown[] = [];
   const { workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-new', name: 'Travel', description: '', model: 'Configured model' }], selectSharedFiles: async () => [{ token: 'trusted-token', kind: 'file', name: 'Trip notes.txt', bytes: 18, sha256: 'a'.repeat(64), mediaType: 'text/plain' }], publishLocalBot: async input => { published.push(input); return { sharedBotId: input.sharedBotId, revision: 1 }; } });
-  const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount()); await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'local-new'); await page.type(page.find(n => n.type === 'textarea')[0], 'Help prepare a family trip.'); await page.click(page.button('Select read-only files / SKILL.md')); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox')[0]); await page.submit(); assert.match(page.text(), /Trip notes.txt/); assert.equal(page.button('Publish assistant').props.disabled, true); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
+  const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount()); await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'local-new'); await page.type(page.find(n => n.type === 'textarea')[0], 'Help prepare a family trip.'); await page.click(page.button('Select read-only files / SKILL.md')); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox')[0]); await page.submit(); assert.match(page.text(), /Trip notes.txt/); assert.equal(page.button('Publish Bot').props.disabled, true); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish Bot'));
   assert.equal(published.length, 1); const value = published[0] as Record<string, unknown>; assert.deepEqual(value.fileTokens, ['trusted-token']); assert.equal(value.role, 'Help prepare a family trip.'); assert.equal(value.instanceId, 'local-new'); assert.notEqual(value.sharedBotId, value.instanceId); assert.deepEqual(value.usePolicy, { mode: 'listed', members: [{ uid: 'bob', generation: 1 }] }); assert.deepEqual(value.quotas, { team: 100, member: 20, bot: 100 });
 });
 scenario('Publication refresh preserves role and native file drafts', async context => {
@@ -63,7 +64,7 @@ scenario('Publishing a Bot again shows what it is shared with now: each file is 
   await page.click(page.oneByLabel('Replace notes.md')); assert.doesNotMatch(page.text(), /will be replaced by SKILL\.md/);
   await page.submit();
   assert.match(page.text(), /handbook\.md → handbook-2026\.md · file · revision 3 · d{64}/); assert.match(page.text(), /prices\.md · will stop being shared/); assert.match(page.text(), /notes\.md · file · unchanged/);
-  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
+  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish Bot'));
   assert.equal(published.length, 1); const first = published[0];
   assert.deepEqual([first.sharedBotId, first.expectedRevision, first.role, first.fileTokens], ['assistant-fixture', 2, 'Help with trips.', []]);
   assert.deepEqual(first.keptResources, ['res-notes']); assert.deepEqual(first.replacedResources, { 'res-handbook': 'token-handbook-2' });
@@ -71,7 +72,7 @@ scenario('Publishing a Bot again shows what it is shared with now: each file is 
   revision = 3; fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, revision: 3 })]; await workspace.refreshBots(); await until(() => workspace.getSnapshot().bots[0]?.revision === 3, 'the next revision');
   await page.type(page.find(n => n.type === 'select')[0], 'local-fixture'); await until(() => /Shared now/.test(page.text()), 'the files again');
   await page.click(page.oneByLabel('Stop sharing notes.md')); await page.click(page.oneByLabel('Keep sharing notes.md')); assert.doesNotMatch(page.text(), /will stop being shared/);
-  await page.submit(); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
+  await page.submit(); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish Bot'));
   assert.deepEqual(published[1].keptResources, ['res-handbook', 'res-prices', 'res-notes']); assert.deepEqual(published[1].replacedResources, {});
   // A publication this Desktop does not hold at the Bot's revision is entered again: nothing is carried.
   revision = 9; fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, revision: 4 })]; await workspace.refreshBots(); await until(() => workspace.getSnapshot().bots[0]?.revision === 4, 'a revision this Desktop does not hold');
@@ -90,13 +91,13 @@ scenario('On Desktop a maintainer sees how this Mac serves their Bots, what stop
   await until(() => page.byLabel('This Mac').length === 1, 'the host section'); const panel = () => textOf(page.oneByLabel('This Mac'));
   assert.match(panel(), /Fixture Bot is answering from this Mac · 1 in progress/); assert.match(panel(), /Elsewhere is published from another computer\. This Mac does not answer for it\./); assert.doesNotMatch(panel(), /Theirs/, 'only the Bots the person maintains');
   assert.match(panel(), /keeps answering after you close the window\. It stops when you quit LingXi or sign out, and while the Mac is asleep or offline\./);
-  assert.match(panel(), /After this Mac restarts, the assistant stays unavailable until you open LingXi\./); assert.match(panel(), /may go to sleep when it is idle/);
+  assert.match(panel(), /After this Mac restarts, the Bot stays unavailable until you open LingXi\./); assert.match(panel(), /may go to sleep when it is idle/);
   const box = (label: RegExp) => page.find(n => n.type === 'input' && n.props.type === 'checkbox' && label.test(textOf(n.parent)))[0];
   assert.deepEqual([box(/Open LingXi in the background/).props.checked, box(/Keep this Mac awake/).props.checked], [false, false]);
   await page.check(box(/Open LingXi in the background/)); assert.deepEqual(changes, [{ openAtLogin: true }]);
   await until(() => /Allow LingXi in System Settings → General → Login Items\./.test(panel()), 'the system asks for approval'); await page.click(page.button('Open Login Items')); assert.equal(opened, 1);
   await page.check(box(/Keep this Mac awake/)); assert.deepEqual(changes.at(-1), { keepAwake: true });
-  await until(() => /While plugged in, this Mac stays awake for as long as an assistant you share is online\./.test(panel()), 'kept awake on mains'); assert.equal(box(/Keep this Mac awake/).props.checked, true);
+  await until(() => /While plugged in, this Mac stays awake for as long as a Bot you share is online\./.test(panel()), 'kept awake on mains'); assert.equal(box(/Keep this Mac awake/).props.checked, true);
   // What stands in the way is named; the state is read again when the cards change.
   const before = reads; host = { ...host, onBattery: true, bots: [{ teamId: 'team-test', sharedBotId: 'assistant-fixture', state: 'not_ready', reason: 'model', running: 0 }] };
   fake.bots = fake.bots.map(bot => bot.sharedBotId === 'assistant-fixture' ? { ...bot, ready: false } : bot); await workspace.refreshBots();
@@ -114,14 +115,14 @@ scenario('A friendship\'s Bots are shared with the friend alone: no audience cho
   fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, state: 'paused', revision: 2 })]; await workspace.refreshBots(); await until(() => workspace.getSnapshot().bots[0]?.state === 'paused', 'the stopped Bot');
   const page = await mount(workspace, friendDirectory(workspace)); context.after(() => page.unmount());
   assert.match(page.text(), /Share a Bot with Bob/); assert.match(page.text(), /A Bot runs on its maintainer’s Desktop\. The maintainer can read every conversation with it\./); assert.match(page.text(), /Sharing stopped/); assert.doesNotMatch(page.text(), /Paused/);
-  assert.doesNotMatch(page.text(), /Daily requests|All current and future members|Find Bots|Team assistants|Pause\b/);
+  assert.doesNotMatch(page.text(), /Daily requests|All current and future members|Find Bots|Team Bots|Pause\b/);
   await page.click(page.button('Load local Bots'));
   assert.equal(page.find(n => n.type === 'select').length, 1, 'only the choice of the local Bot: the audience is the friend');
   await page.type(page.find(n => n.type === 'select')[0], 'local-fixture'); await page.type(page.find(n => n.type === 'textarea')[0], 'Help with trips.');
-  assert.deepEqual(page.find(n => n.type === 'input' && n.props.type === 'checkbox').map(n => textOf(n.parent)), ['Give this assistant a shared list'], 'no member checkboxes');
+  assert.deepEqual(page.find(n => n.type === 'input' && n.props.type === 'checkbox').map(n => textOf(n.parent)), ['Give this Bot a shared list'], 'no member checkboxes');
   await page.submit();
   assert.match(page.text(), /Audience: Bob\./); assert.match(page.text(), /The maintainer can read every conversation with it\./); assert.doesNotMatch(page.text(), /every current and future team member/);
-  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
+  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish Bot'));
   assert.equal(published.length, 1); const value = published[0] as Record<string, unknown>;
   assert.deepEqual(value.usePolicy, { mode: 'all' }); assert.deepEqual(value.quotas, { team: 100, member: 20, bot: 100 });
   assert.equal(value.sharedBotId, 'assistant-fixture', 'the same shared Bot'); assert.equal(value.expectedRevision, 2, 'as its next revision');
@@ -143,7 +144,7 @@ scenario('Stop sharing asks first, names the Bot and can be cancelled; confirmin
 });
 scenario('Usage reads like the phones say it: the total of the tokens in the compact number of the language, then the cost, and nothing is invented', async () => {
   const done = (usage: Record<string, unknown>) => ({ status: 'complete', inputTokens: 1, outputTokens: 1, ...usage }) as never;
-  const english = (usage: unknown) => usageText(usage as never, false), chinese = (usage: unknown) => usageText(usage as never, true);
+  const english = (usage: unknown) => usageText(usage as never, 'en'), chinese = (usage: unknown) => usageText(usage as never, 'zh-Hans');
   // The vectors of TeamTaskUsageTests on iOS.
   assert.equal(english(undefined), 'Usage unavailable'); assert.equal(english({ status: 'missing' }), 'Usage unavailable'); assert.equal(english({ status: 'missing', inputTokens: 5, outputTokens: 6, costMicros: 7, currency: 'USD' }), 'Usage unavailable');
   assert.equal(chinese(undefined), '用量不可用');
@@ -160,21 +161,21 @@ scenario('Usage reads like the phones say it: the total of the tokens in the com
   assert.equal(english({ status: 'complete', inputTokens: 1, outputTokens: 2, costMicros: 2500000 }), '3 tokens · 2.50 currency unknown'); assert.equal(english({ status: 'complete', inputTokens: 1, outputTokens: 2, costMicros: 2500000, currency: '' }), '3 tokens · 2.50 currency unknown');
   assert.equal(english({ status: 'complete', inputTokens: 1, outputTokens: 2 }), '3 tokens · cost unknown');
   // The split stays available, as the tooltip of the line.
-  assert.equal(tokenSplit({ status: 'complete', inputTokens: 123, outputTokens: 456 }), '123 / 456 tokens'); assert.equal(tokenSplit({ status: 'partial', outputTokens: 4 } as never), '0 / 4 tokens');
-  assert.equal(tokenSplit({ status: 'missing' }), ''); assert.equal(tokenSplit(undefined), '');
+  assert.equal(tokenSplit({ status: 'complete', inputTokens: 123, outputTokens: 456 }, 'en'), '123 / 456 tokens'); assert.equal(tokenSplit({ status: 'partial', outputTokens: 4 } as never, 'en'), '0 / 4 tokens');
+  assert.equal(tokenSplit({ status: 'missing' }, 'en'), ''); assert.equal(tokenSplit(undefined, 'en'), '');
+  assert.equal(tokenSplit({ status: 'complete', inputTokens: 123, outputTokens: 456 }, 'ja'), '123 / 456 トークン'); assert.equal(tokenSplit({ status: 'complete', inputTokens: 123, outputTokens: 456 }, 'ko'), '123 / 456 토큰');
 });
 
 scenario('A Bot task\'s card: the glyph beside the state in words, one line under it and at most one action; only Completed is green and only Failed red; a state it does not know is Unknown', async () => {
   const scope = { teamId: 'team-test', generation: 1 };
   // Bob neither asked for the task nor maintains the Bot, so he has nothing to cancel.
   let viewer = { uid: 'bob', bots: [], directory: [], pending: [] } as never;
-  const draw = (task: Record<string, unknown>, zh = false) => renderToStaticMarkup(createElement(BotRun, { task: { taskId: 't', conversationId: 'c', sharedBotId: 's', requester: { uid: 'alice', generation: 1 }, createdAt: 1, deadline: 2, state: 'queued', ...task } as never, api: new FakeTeams().api, scope, zh, snapshot: viewer }));
+  const draw = (task: Record<string, unknown>, locale = 'en') => renderToStaticMarkup(createElement(BotRun, { task: { taskId: 't', conversationId: 'c', sharedBotId: 's', requester: { uid: 'alice', generation: 1 }, createdAt: 1, deadline: 2, state: 'queued', ...task } as never, api: new FakeTeams().api, scope, locale, snapshot: viewer }));
   const states: [string, string, string, string][] = [
     ['queued', 'Queued', 'muted', 'Waiting for the Bot’s Desktop to pick this up.'], ['running', 'Processing', 'muted', 'The Bot is working on it.'],
     ['failed', 'Failed', 'danger', 'The Bot couldn’t finish this request. Send it again.'], ['expired', 'Expired', 'muted', 'The Bot’s Desktop didn’t pick this up in time. Send it again.'],
     ['interrupted', 'Interrupted', 'muted', 'The Bot’s Desktop stopped before finishing. Send a new request.'],
     ['authorization_required', 'Authorization required', 'muted', 'This result can’t be shown yet. Ask the Bot’s maintainer to authorize it.'], ['revoked', 'Access revoked', 'muted', 'You no longer have access to this Bot.'],
-    ['cancelled', 'Cancelled', 'muted', 'This request was cancelled.'],
   ];
   for (const [state, label, tone, detail] of states) {
     const markup = draw({ state });
@@ -183,16 +184,19 @@ scenario('A Bot task\'s card: the glyph beside the state in words, one line unde
     assert.match(markup, /<span class="tw-run-glyph"><svg[^>]*aria-hidden="true"/, `${state}: the glyph is decoration, the state is never colour alone`); assert.match(markup, /<p class="tw-run-state" role="status">/);
     assert.doesNotMatch(markup, /<button/, `${state}: nothing to press without a document`);
   }
+  // Cancelled says it in its label alone: the person did it, so there is no sentence under it, and no usage line unless the run used something.
+  const cancelled = draw({ state: 'cancelled' }); assert.match(cancelled, /data-state="cancelled" data-tone="muted"/); assert.ok(cancelled.includes('<span>Cancelled</span>')); assert.doesNotMatch(cancelled, /tw-run-detail/);
+  assert.match(draw({ state: 'cancelled', usage: { status: 'complete', inputTokens: 1, outputTokens: 2, costMicros: 1200, currency: 'USD' } }), /<p class="tw-run-detail" title="1 \/ 2 tokens">3 tokens · \$0\.0012<\/p>/);
   // Completed: green, no sentence, the usage as its line, and the split of the tokens for whoever hovers it.
   const done = draw({ state: 'completed', usage: { status: 'complete', inputTokens: 1000, outputTokens: 234, costMicros: 1200, currency: 'USD' } });
   assert.match(done, /data-state="completed" data-tone="ok"/); assert.ok(done.includes('<span>Completed</span>')); assert.ok(done.includes('<p class="tw-run-detail" title="1000 / 234 tokens">1.2K tokens · $0.0012</p>'));
   assert.ok(draw({ state: 'completed' }).includes('<p class="tw-run-detail">Usage unavailable</p>'), 'a usage that is not there is not made up');
-  assert.ok(draw({ state: 'completed' }, true).includes('<span>已完成</span>') && draw({ state: 'completed' }, true).includes('用量不可用') && draw({ state: 'queued' }, true).includes('等待 Bot 所在的 Desktop 接收此请求。'));
+  assert.ok(draw({ state: 'completed' }, 'zh-Hans').includes('<span>已完成</span>') && draw({ state: 'completed' }, 'zh-Hans').includes('用量不可用') && draw({ state: 'queued' }, 'zh-Hans').includes('等待 Bot 所在的 Desktop 接收此请求。'));
   // A running task turns, and has the still glyph for reduced motion beside it.
   const running = draw({ state: 'running' }); assert.match(running, /class="tw-icon tw-run-spin"/); assert.match(running, /class="tw-icon tw-run-still"/); assert.doesNotMatch(draw({ state: 'queued' }), /tw-run-spin|tw-run-still/);
   // The one action is the document; a failed task does not offer a document it has no reason to have.
   const withDocument = draw({ state: 'completed', artifactId: 'artifact-1' }); assert.equal((withDocument.match(/<button/g) ?? []).length, 1); assert.match(withDocument, /<button type="button">Open document<\/button>/);
-  assert.match(draw({ state: 'completed', artifactId: 'artifact-1' }, true), />打开文档</);
+  assert.match(draw({ state: 'completed', artifactId: 'artifact-1' }, 'zh-Hans'), />打开文档</);
   // Only Completed is ok and only Failed is danger; a state the service adds later is one more row of the table, and until then it reads Unknown.
   assert.deepEqual(Object.entries(RUN_STATES).filter(([, look]) => look.tone === 'ok').map(([state]) => state), ['completed']); assert.deepEqual(Object.entries(RUN_STATES).filter(([, look]) => look.tone === 'danger').map(([state]) => state), ['failed']);
   assert.deepEqual(Object.keys(RUN_STATES).sort(), ['authorization_required', 'cancelled', 'completed', 'expired', 'failed', 'interrupted', 'needs_reconciliation', 'queued', 'revoked', 'running', 'waiting']);
@@ -203,24 +207,26 @@ scenario('A Bot task\'s card: the glyph beside the state in words, one line unde
   // The one who asked can cancel a task that is still going: the second action, beside the document.
   viewer = { uid: 'alice', bots: [], directory: [], pending: [] } as never;
   assert.match(draw({ state: 'queued' }), /<button type="button" aria-label="Cancel task">Cancel<\/button>/); assert.doesNotMatch(draw({ state: 'completed' }), /<button/);
-  assert.ok(Object.values(RUN_STATES).every(look => look.label[0] && look.label[1] && look.icon && (look.detail ? look.detail[0] && look.detail[1] : true)), 'every row has its words in both languages and a glyph');
+  const everyLanguage = ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko'].map(locale => teamsText(locale));
+  assert.ok(Object.values(RUN_STATES).every(look => look.icon && everyLanguage.every(t => t(look.label) !== look.label && (!look.detail || t(look.detail) !== look.detail))), 'every row has its words in all five languages and a glyph');
+  assert.equal(RUN_STATES.cancelled!.detail, undefined, 'the cancelled row has no detail cell');
   const unknown = draw({ state: 'archived' }); assert.match(unknown, /data-state="archived" data-tone="muted"/); assert.ok(unknown.includes('<span>Unknown</span>')); assert.doesNotMatch(unknown, /tw-run-detail/);
-  assert.equal(runLook('constructor').label[0], 'Unknown', 'a state is looked up by what the table holds, not by what an object inherits'); assert.equal(runLook('__proto__').label[0], 'Unknown'); assert.equal(runLook('toString').tone, 'muted');
+  assert.equal(runLook('constructor').label, 'chat_status_unknown', 'a state is looked up by what the table holds, not by what an object inherits'); assert.equal(runLook('__proto__').label, 'chat_status_unknown'); assert.equal(runLook('toString').tone, 'muted');
 });
 
 scenario('Changed member generation invalidates a confirmed publication review', async context => {
   let sends = 0;
   const { fake, workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-new', name: 'Travel', description: '' }], selectSharedFiles: async () => [], publishLocalBot: async () => { sends++; return { sharedBotId: 'shared-new', revision: 1 }; } });
   const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
-  await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'local-new'); await page.type(page.find(n => n.type === 'textarea')[0], 'Trip role'); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox')[0]); await page.submit(); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); assert.equal(page.button('Publish assistant').props.disabled, false);
+  await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'local-new'); await page.type(page.find(n => n.type === 'textarea')[0], 'Trip role'); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox')[0]); await page.submit(); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); assert.equal(page.button('Publish Bot').props.disabled, false);
   const detail = await fake.detail('team-test'); detail.members = detail.members.map(member => member.uid === 'bob' ? { ...member, generation: 2 } : member); fake.details.set('team-test', detail);
-  await page.during(() => workspace.refresh()); assert.equal(page.button('Publish assistant').props.disabled, true); assert.match(page.text(), /memberships changed/); assert.equal(sends, 0);
+  await page.during(() => workspace.refresh()); assert.equal(page.button('Publish Bot').props.disabled, true); assert.match(page.text(), /memberships changed/); assert.equal(sends, 0);
 });
 scenario('Foreground task polling updates queued status within its one-second observation interval', async context => {
   const { fake, workspace } = await open(context); let state = 'queued';
   fake.messages = async <T>(command: MessageCommand) => command.action === 'listTasks' ? { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state, createdAt: 1, deadline: Date.now() + 300000 }] } as T : { bots: fake.bots } as T;
   context.mock.timers.enable({ apis: ['setInterval'] });
-  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount()); assert.match(page.text(), /Queued/); state = 'running';
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); context.after(() => page.unmount()); assert.match(page.text(), /Queued/); state = 'running';
   await page.during(() => { context.mock.timers.tick(1000); }); assert.match(page.text(), /Processing/);
 });
 scenario('A task without a reply message is a Bot row inside the message log, with the same wrapper as a delivered one', async context => {
@@ -229,7 +235,7 @@ scenario('A task without a reply message is a Bot row inside the message log, wi
   context.mock.timers.enable({ apis: ['setInterval'] });
   fake.conversations.set('team-test', [conversation('test-chat')]); await workspace.refresh();
   workspace.selectConversation('test-chat'); await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat', 'selection');
-  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount());
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); context.after(() => page.unmount());
   for (const [next, label] of [['queued', /Queued/], ['interrupted', /Interrupted/]] as const) {
     state = next; await page.during(() => { context.mock.timers.tick(1000); });
     const row = page.find(n => n.props['data-task-id'] === 'task-test')[0]; assert.ok(row, `the ${next} task has a row`);
@@ -256,7 +262,7 @@ scenario('A task without a reply sits right after the message that requested it,
   ]);
   context.mock.timers.enable({ apis: ['setInterval'] });
   await workspace.refresh(); workspace.selectConversation('test-chat'); await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat' && workspace.getSnapshot().messages.length === 4, 'messages');
-  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount());
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); context.after(() => page.unmount());
   await page.during(() => { context.mock.timers.tick(1000); });
   const log = page.find(n => n.props.role === 'log')[0];
   const items = log.findAll((n: any) => n.type === 'li' && (n.props['data-message-id'] || n.props['data-task-id']));
@@ -269,12 +275,12 @@ scenario('Imported Bot publication binds required resources to the installer’s
   const { workspace } = await open(context, { localBots: async () => [{ instanceId: 'imported-new', name: 'Imported travel', description: '', requiredResources: ['family-notes'] }], selectSharedFiles: async () => [{ token: 'installer-file-token', kind: 'file', name: 'My family notes.txt', bytes: 12, sha256: 'a'.repeat(64), mediaType: 'text/plain' }], publishLocalBot: async input => { sent.push(input); return { sharedBotId: input.sharedBotId, revision: 1 }; } });
   const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount()); await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'imported-new'); await page.type(page.find(n => n.type === 'textarea')[0], 'My family role'); assert.equal(page.button('Review publication').props.disabled, true);
   await page.click(page.button('Select read-only files / SKILL.md')); assert.equal(page.button('Review publication').props.disabled, true, 'picking files alone never inherits author bindings');
-  await page.type(page.find(n => n.type === 'select' && n.props.required && n.props.value === '')[0], 'installer-file-token'); assert.equal(page.button('Review publication').props.disabled, false); await page.submit(); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant')); assert.deepEqual((sent[0] as Record<string, unknown>).resourceBindings, { 'family-notes': 'installer-file-token' });
+  await page.type(page.find(n => n.type === 'select' && n.props.required && n.props.value === '')[0], 'installer-file-token'); assert.equal(page.button('Review publication').props.disabled, false); await page.submit(); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish Bot')); assert.deepEqual((sent[0] as Record<string, unknown>).resourceBindings, { 'family-notes': 'installer-file-token' });
 });
 scenario('Task observer drops previously visible tasks after membership denial', async context => {
   const { fake, workspace } = await open(context); let denied = false;
   fake.messages = async <T>(command: MessageCommand) => { if (command.action === 'listTasks') { if (denied) throw new Error('MEMBERSHIP_REQUIRED'); return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state: 'queued', createdAt: 1, deadline: Date.now() + 300000 }] } as T; } return { bots: fake.bots } as T; };
-  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh: false })); context.after(() => page.unmount()); assert.match(page.text(), /Queued/); denied = true; await page.during(() => { fake.signal({ conversationId: 'test-chat' }); }); assert.doesNotMatch(page.text(), /Queued/); assert.match(page.text(), /Access changed/);
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); context.after(() => page.unmount()); assert.match(page.text(), /Queued/); denied = true; await page.during(() => { fake.signal({ conversationId: 'test-chat' }); }); assert.doesNotMatch(page.text(), /Queued/); assert.match(page.text(), /Access changed/);
 });
 
 scenario('Publication keeps successive native selections and cancellation, including distinct same-name Skills', async context => {
@@ -296,7 +302,7 @@ scenario('Publication keeps successive native selections and cancellation, inclu
   for (let pick = 0; pick < 3; pick++) await page.click(page.button('Select read-only files / SKILL.md'));
   await page.submit();
   await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1));
-  await page.click(page.button('Publish assistant'));
+  await page.click(page.button('Publish Bot'));
   assert.deepEqual((published[0] as Record<string, unknown>).fileTokens, ['notes-token', 'skill-one', 'skill-two']);
 });
 
@@ -307,7 +313,7 @@ const waitTask = (more: Record<string, unknown> = {}, recipient = { uid: 'alice'
   wait: { waitId: 'wait-test', kind: 'human_input', recipient, expiresAt: Date.now() + 240000, messageId: 'message-2' }, ...more,
 });
 /** A Bot DM with a Bot question in it and `tasks()` as the task list; `handle` answers every other command. The caller has set up the DOM once (`withDom`). */
-async function openChat(context: Parameters<Parameters<typeof scenario>[1]>[0], tasks: () => unknown[], handle: (command: MessageCommand) => unknown = () => ({}), maintainer = 'alice', zh = false,
+async function openChat(context: Parameters<Parameters<typeof scenario>[1]>[0], tasks: () => unknown[], handle: (command: MessageCommand) => unknown = () => ({}), maintainer = 'alice', locale = 'en',
   thread: { second?: Partial<TeamMessage>; then?: TeamMessage[] } = {}) {
   const fake = new FakeTeams('alice'); fake.teams = [team('team-test', { role: 'owner' })]; const sent: MessageCommand[] = [];
   const workspace = new TeamsWorkspace(fake.api, 'alice', { storage: memoryStorage, environment: new EventTarget() }); context.after(() => workspace.close());
@@ -323,7 +329,7 @@ async function openChat(context: Parameters<Parameters<typeof scenario>[1]>[0], 
   fake.threads.set('test-chat', messages);
   await workspace.refresh(); await workspace.refreshBots(); workspace.selectConversation('test-chat');
   await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat' && workspace.getSnapshot().messages.length === messages.length && workspace.getSnapshot().botsLoaded, 'the chat');
-  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, zh })); context.after(() => page.unmount());
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale })); context.after(() => page.unmount());
   const buttons = (text: string) => page.find(n => n.type === 'button' && textOf(n) === text);
   const box = () => page.find(n => n.type === 'textarea')[0];
   return { fake, workspace, page, sent, buttons, box };
@@ -338,9 +344,9 @@ scenario('A waiting task names who it waits for and when the wait ends; only tha
   assert.match(other.page.text(), /Waiting for Bob · expires in 4 min/); assert.equal(other.buttons('Reply').length, 0);
   const stale = await openChat(context, () => [waitTask({}, { uid: 'alice', generation: 9 })]);
   assert.match(stale.page.text(), /Waiting for Alice/, 'the same account at another membership generation is not the recipient'); assert.equal(stale.buttons('Reply').length, 0);
-  const chinese = await openChat(context, () => [waitTask({}, { uid: 'bob', generation: 1 })], () => ({}), 'alice', true);
+  const chinese = await openChat(context, () => [waitTask({}, { uid: 'bob', generation: 1 })], () => ({}), 'alice', 'zh-Hans');
   assert.match(chinese.page.text(), /等待 Bob 回复 · 4 分钟后过期/); assert.doesNotMatch(chinese.page.text(), /Waiting for/);
-  const mineZh = await openChat(context, () => [waitTask()], () => ({}), 'alice', true);
+  const mineZh = await openChat(context, () => [waitTask()], () => ({}), 'alice', 'zh-Hans');
   assert.match(mineZh.page.text(), /等待你回复/); assert.match(mineZh.page.text(), /回复/); assert.ok(mineZh.buttons('回复').length === 2 && mineZh.buttons('取消').length === 1);
 });
 scenario('Replying to a question answers its wait with fresh ids and never submits a Bot request', async context => {
@@ -387,22 +393,22 @@ const proposal = { second: { text: 'Asks to change the list “Groceries” (3 c
 const approvalTask = (recipient = { uid: 'alice', generation: 1 }) => waitTask({ wait: { waitId: 'wait-test', kind: 'tool_approval', recipient, expiresAt: Date.now() + 240000, messageId: 'message-2' } }, recipient);
 scenario('A proposed list change shows exactly what would change, and only the member the Bot works for can approve or decline it', async context => {
   withDom(context);
-  const mine = await openChat(context, () => [approvalTask()], () => ({}), 'alice', false, proposal);
+  const mine = await openChat(context, () => [approvalTask()], () => ({}), 'alice', 'en', proposal);
   for (const line of [/Change the list “Groceries”/, /Add “Bread”/, /Mark “Milk” as done/, /Remove an item that is no longer on the list/, /Waiting for approval/, /Nothing is changed unless you approve/]) assert.match(mine.page.text(), line);
   assert.deepEqual([mine.buttons('Approve').length, mine.buttons('Decline').length, mine.buttons('Reply').length], [1, 1, 0], 'an approval is never answered in words');
   const tags = mine.page.find(n => n.type === 'span' && classes(n).includes('tw-tag')).map(textOf); assert.ok(tags.includes('Approval') && !tags.includes('Question'));
-  const other = await openChat(context, () => [approvalTask({ uid: 'bob', generation: 1 })], () => ({}), 'alice', false, proposal);
+  const other = await openChat(context, () => [approvalTask({ uid: 'bob', generation: 1 })], () => ({}), 'alice', 'en', proposal);
   assert.match(other.page.text(), /Waiting for Bob to approve or decline/); assert.deepEqual([other.buttons('Approve').length, other.buttons('Decline').length], [0, 0]);
-  const stale = await openChat(context, () => [approvalTask({ uid: 'alice', generation: 9 })], () => ({}), 'alice', false, proposal);
+  const stale = await openChat(context, () => [approvalTask({ uid: 'alice', generation: 9 })], () => ({}), 'alice', 'en', proposal);
   assert.equal(stale.buttons('Approve').length, 0, 'the same account at another membership generation cannot approve');
-  const chinese = await openChat(context, () => [approvalTask()], () => ({}), 'alice', true, proposal);
-  assert.match(chinese.page.text(), /请求修改清单“Groceries”（3 项修改）/); assert.match(chinese.page.text(), /添加“Bread”/); assert.match(chinese.page.text(), /等待批准/);
+  const chinese = await openChat(context, () => [approvalTask()], () => ({}), 'alice', 'zh-Hans', proposal);
+  assert.match(chinese.page.text(), /请求修改清单“Groceries”。/); assert.match(chinese.page.text(), /添加“Bread”/); assert.match(chinese.page.text(), /等待批准/);
   assert.deepEqual([chinese.buttons('批准').length, chinese.buttons('拒绝').length], [1, 1]); assert.doesNotMatch(chinese.page.text(), /Asks to change/);
 });
 scenario('A decision is one command however often it is sent, and a request that stopped waiting says so', async context => {
   withDom(context);
   let failure = 'SERVICE_UNAVAILABLE';
-  const chat = await openChat(context, () => [approvalTask()], command => { if (command.action === 'decideWait' && failure) throw new Error(failure); return {}; }, 'alice', false, proposal);
+  const chat = await openChat(context, () => [approvalTask()], command => { if (command.action === 'decideWait' && failure) throw new Error(failure); return {}; }, 'alice', 'en', proposal);
   await chat.page.click(chat.buttons('Approve')[0]); assert.equal(chat.page.find(n => n.props.role === 'alert').length, 1, 'a failed decision is reported');
   failure = ''; await chat.page.click(chat.buttons('Approve')[0]); assert.equal(chat.page.find(n => n.props.role === 'alert').length, 0);
   const decisions = chat.sent.filter(c => c.action === 'decideWait'); assert.equal(decisions.length, 2);
@@ -419,14 +425,14 @@ scenario('After the decision the request says how it ended, and the reply can be
   withDom(context);
   const reply = (decision: 'approve' | 'deny') => [message(3, { text: decision === 'approve' ? 'Approved' : 'Declined', author: { kind: 'user', uid: 'alice' }, waitId: 'wait-test', replyTo: 'message-2', decision })];
   const done = { ...waitTask({ state: 'queued', wait: undefined }) };
-  const approved = await openChat(context, () => [done], () => ({}), 'alice', false, { ...proposal, then: reply('approve') });
+  const approved = await openChat(context, () => [done], () => ({}), 'alice', 'en', { ...proposal, then: reply('approve') });
   assert.match(approved.page.text(), /Approved by /); assert.deepEqual([approved.buttons('Approve').length, approved.buttons('Decline').length], [0, 0]);
   assert.deepEqual([approved.page.byLabel('Edit').length, approved.page.byLabel('Recall').length], [1, 1], 'only the request Alice typed herself can be edited or recalled, not her decision');
-  const declined = await openChat(context, () => [done], () => ({}), 'alice', false, { ...proposal, then: reply('deny') });
+  const declined = await openChat(context, () => [done], () => ({}), 'alice', 'en', { ...proposal, then: reply('deny') });
   assert.match(declined.page.text(), /Declined by .*Nothing was changed/);
-  const closed = await openChat(context, () => [waitTask({ state: 'expired', wait: undefined })], () => ({}), 'alice', false, proposal);
+  const closed = await openChat(context, () => [waitTask({ state: 'expired', wait: undefined })], () => ({}), 'alice', 'en', proposal);
   assert.match(closed.page.text(), /This request ended without a decision\. Nothing was changed/); assert.equal(closed.buttons('Approve').length, 0);
-  const chinese = await openChat(context, () => [done], () => ({}), 'alice', true, { ...proposal, then: reply('approve') });
+  const chinese = await openChat(context, () => [done], () => ({}), 'alice', 'zh-Hans', { ...proposal, then: reply('approve') });
   assert.match(chinese.page.text(), /已批准/); assert.doesNotMatch(chinese.page.text(), /Approved/);
 });
 scenario('Cancel is for the requester and the Bot maintainer on a queued, running or waiting task', async context => {
@@ -682,15 +688,15 @@ scenario('Publication offers a shared list, names it in the review, and carries 
   fake.messages = async <T>(command: MessageCommand) => 'schemaVersion' in command && command.action === 'readList'
     ? { sharedBotId: command.payload.sharedBotId, title: 'Groceries', description: 'What the household needs.', dataRevision: 0, items: [], updatedAt: 1 } as T : inner<T>(command);
   const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
-  const listBox = () => page.find(n => n.type === 'input' && n.props.type === 'checkbox' && textOf(n.parent) === 'Give this assistant a shared list')[0];
+  const listBox = () => page.find(n => n.type === 'input' && n.props.type === 'checkbox' && textOf(n.parent) === 'Give this Bot a shared list')[0];
   const name = () => page.find(n => n.type === 'input' && n.props.maxLength === 120)[0], purpose = () => page.find(n => n.type === 'textarea' && n.props.maxLength === 2000)[0];
-  const confirm = async () => { await page.submit(); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant')); };
+  const confirm = async () => { await page.submit(); await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish Bot')); };
   await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'local-new'); await page.type(page.find(n => n.type === 'textarea')[0], 'Keep the shopping list.');
   assert.equal(name(), undefined); await page.check(listBox());
   assert.equal(page.button('Review publication').props.disabled, true, 'a list needs a name and a purpose');
   await page.type(name(), ' Groceries '); await page.type(purpose(), ' What the household needs. '); assert.equal(page.button('Review publication').props.disabled, false);
   await page.submit(); assert.match(page.text(), /Shared list: Groceries/);
-  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
+  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish Bot'));
   assert.deepEqual(published[0].sharedList, { title: 'Groceries', description: 'What the household needs.' });
   // The Bot that already has a list is published again with it, unless its maintainer switches the list off.
   fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, instanceId: 'local-fixture', sharedList: { title: 'Groceries' } })]; await workspace.refreshBots(); await until(() => !!workspace.getSnapshot().bots[0]?.sharedList, 'the Bot with a list');
@@ -703,12 +709,12 @@ scenario('Publication offers a shared list, names it in the review, and carries 
   await page.type(page.find(n => n.type === 'textarea')[0], 'Keep the shopping list.'); await confirm();
   assert.equal(published.length, 3); assert.equal('sharedList' in published[2], false);
   // The maintainer can have the assistant ask before each change; a Bot published that way keeps asking in its next publication.
-  const askBox = () => page.find(n => n.type === 'input' && n.props.type === 'checkbox' && textOf(n.parent) === 'Ask before the assistant changes the list')[0];
+  const askBox = () => page.find(n => n.type === 'input' && n.props.type === 'checkbox' && textOf(n.parent) === 'Ask before the Bot changes the list')[0];
   await page.click(page.button('Load local Bots')); await page.type(page.find(n => n.type === 'select')[0], 'local-new'); await page.type(page.find(n => n.type === 'textarea')[0], 'Keep the shopping list.');
   assert.equal(askBox(), undefined, 'offered only with a list'); await page.check(listBox()); await page.type(name(), 'Groceries'); await page.type(purpose(), 'What the household needs.');
   assert.equal(askBox().props.checked, false); await page.check(askBox()); assert.match(page.text(), /waits up to a day for them to approve or decline/);
-  await page.submit(); assert.match(page.text(), /Shared list: Groceries · the assistant asks before each change/);
-  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish assistant'));
+  await page.submit(); assert.match(page.text(), /Shared list: Groceries · the Bot asks before each change/);
+  await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish Bot'));
   assert.deepEqual(published[3].sharedList, { title: 'Groceries', description: 'What the household needs.', approval: 'requester' });
   fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, instanceId: 'local-fixture', sharedList: { title: 'Groceries', approval: 'requester' } })]; await workspace.refreshBots();
   await until(() => workspace.getSnapshot().bots[0]?.sharedList?.approval === 'requester', 'the Bot that asks');
@@ -730,7 +736,7 @@ scenario('A maintainer offers their assistant to a member who can use it, is tol
   assert.equal(page.byLabel('Handover').length, 0); await page.click(page.button('Hand over…'));
   assert.match(page.text(), /They receive the published role and the files it is shared with\./); assert.match(page.text(), /Your local Bot, your model account and everything else on this Mac stay with you\./);
   assert.match(page.text(), /Conversations people already had with it stay with them and with you\. The new maintainer cannot read them\./);
-  assert.match(page.text(), /Once they take it over, their Mac answers and they pay for the model\. You can no longer pause or publish it, and people start a new chat with it\./);
+  assert.match(page.text(), /Once they take it over, their Mac answers and they pay for the model\. You can no longer stop sharing or publish it, and people start a new chat with it\./);
   assert.deepEqual(options(), ['Choose a member', 'Bob', 'Owner'], 'not oneself'); assert.equal(page.button('Offer').props.disabled, true);
   await page.type(page.find(n => n.type === 'select')[0], 'bob'); assert.equal(page.button('Offer').props.disabled, true, 'the right to pass it on is confirmed first');
   await page.check(box(/I may pass this role and these files on/)); await page.click(page.button('Offer')); await until(() => offers.length === 1, 'the first try');
@@ -744,7 +750,7 @@ scenario('A maintainer offers their assistant to a member who can use it, is tol
   assert.deepEqual(end && 'payload' in end ? end.payload : undefined, { transferId: offers[0]!.transferId });
   // While their Mac takes it over the card says so.
   fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, transfer: offer({ from: { uid: 'alice', generation: 1 }, to: { uid: 'bob', generation: 1 }, state: 'accepted' }) })]; await workspace.refreshBots();
-  await until(() => /Bob is taking this assistant over\. You maintain it until their Mac answers for it\./.test(page.text()), 'accepted');
+  await until(() => /Bob is taking this Bot over\. You maintain it until their Mac answers for it\./.test(page.text()), 'accepted');
   // A handover never widens who sees the files: only members who may use the assistant can be chosen.
   fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, usePolicy: { mode: 'listed', members: [{ uid: 'bob', generation: 1 }] } })]; await workspace.refreshBots();
   await until(() => buttons('Hand over…').length === 1, 'no offer'); await page.click(page.button('Hand over…')); assert.deepEqual(options(), ['Choose a member', 'Bob']);
@@ -758,13 +764,13 @@ scenario('The member an assistant is offered to takes it over on their Desktop w
   const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
   const box = (label: RegExp) => page.find(n => n.type === 'input' && n.props.type === 'checkbox' && label.test(textOf(n.parent)))[0];
   assert.equal(page.byLabel('Handover').length, 1, 'only on the offered assistant');
-  assert.match(textOf(page.oneByLabel('Handover')), /Bob wants to hand this assistant over to you\. It stays with Bob until you take it over\. The offer ends on /); assert.doesNotMatch(page.text(), /open LingXi Desktop on the Mac/);
+  assert.match(textOf(page.oneByLabel('Handover')), /Bob wants to hand this Bot over to you\. It stays with Bob until you take it over\. The offer ends on /); assert.doesNotMatch(page.text(), /open LingXi Desktop on the Mac/);
   await page.click(page.button('Take over…')); await until(() => /You receive the role and the files Fixture Bot is published with\. Nothing else of Bob’s comes with it\./.test(page.text()), 'the dialog');
-  assert.match(page.text(), /This Mac answers for the assistant from now on, with your model account and at your cost\./);
+  assert.match(page.text(), /This Mac answers for the Bot from now on, with your model account and at your cost\./);
   assert.match(page.text(), /You can read every new conversation with it\. Earlier conversations stay with the people who had them, and you cannot read them\./);
   assert.match(page.text(), /Who may use it, its daily limits and its shared list stay as they are\./); assert.match(page.text(), /Mine · my-model/);
   assert.equal(page.button('Take over').props.disabled, true); await page.type(page.find(n => n.type === 'select')[0], 'local-mine');
-  assert.equal(page.button('Take over').props.disabled, true); await page.check(box(/I take over maintaining this assistant and its model costs/));
+  assert.equal(page.button('Take over').props.disabled, true); await page.check(box(/I take over maintaining this Bot and its model costs/));
   await page.click(page.button('Take over')); await until(() => accepted.length === 1 && page.byLabel('Handover').length === 0, 'taken over');
   assert.deepEqual(accepted, [{ teamId: 'team-test', generation: 1, transferId: 'transfer-test', instanceId: 'local-mine' }]); assert.match(page.text(), /Maintainer: Alice/);
 });
@@ -790,7 +796,7 @@ scenario('A chat with an assistant from before it changed maintainer stays reada
   const { fake, page, sent, buttons, box } = await openChat(context, () => [], () => ({}), 'owner');
   assert.ok(box(), 'readers unknown: the chat is used as before');
   fake.conversations.set('team-test', [dm('test-chat', ['alice', 'bob'])]); for (const watch of fake.open('team-test')) fake.deliver(watch);
-  await until(() => /This assistant has a new maintainer and no longer answers in this chat\. What was said here stays as it is\./.test(page.text()), 'the notice');
+  await until(() => /This Bot has a new maintainer and no longer answers in this chat\. What was said here stays as it is\./.test(page.text()), 'the notice');
   assert.equal(box(), undefined); assert.match(page.text(), /Plan my trip/, 'what was said stays');
   // A chat whose readers include the current maintainer is the current one.
   fake.conversations.set('team-test', [dm('test-chat', ['alice', 'owner'])]); for (const watch of fake.open('team-test')) fake.deliver(watch);

@@ -1,5 +1,6 @@
 import type { TaskState } from './execution.js';
 import { authorIdentity, type TeamMessage } from './messages.js';
+import { teamsText } from './i18n.js';
 
 /** Messages from one author within this long of each other read as one run. */
 export const GROUP_WINDOW_MS = 5 * 60_000;
@@ -9,7 +10,7 @@ export interface StreamOptions {
   lastReadSeq: number;
   /** The caller, whose own messages never anchor the "new messages" divider. */
   uid: string;
-  /** BCP 47 tag used for day labels. Chinese tags (`zh…`) get Chinese words. */
+  /** BCP 47 tag used for day labels: the words of "Today" and "Yesterday" are the tag's language in the catalog, the dates are `Intl`'s. */
   locale: string;
   now: Date | number;
   /** IANA zone for day boundaries and labels. Defaults to the runtime's zone. */
@@ -34,7 +35,6 @@ function previousDay(key: string): string {
   const [year, month, day] = key.split('-').map(Number) as [number, number, number];
   return new Date(Date.UTC(year, month - 1, day - 1)).toISOString().slice(0, 10);
 }
-const isChinese = (locale: string) => locale.toLowerCase().startsWith('zh');
 function instant(value: string | null | undefined): number | undefined {
   if (!value) return undefined;
   const ms = Date.parse(value);
@@ -45,8 +45,8 @@ const asMs = (now: Date | number) => typeof now === 'number' ? now : now.getTime
 /** "Today", "Yesterday", or a long weekday + date (with the year when it is not this one). */
 export function dayLabel(ms: number, now: Date | number, locale: string, timeZone?: string): string {
   const nowMs = asMs(now), day = dayKey(ms, timeZone), today = dayKey(nowMs, timeZone);
-  if (day === today) return isChinese(locale) ? '今天' : 'Today';
-  if (day === previousDay(today)) return isChinese(locale) ? '昨天' : 'Yesterday';
+  if (day === today) return teamsText(locale)('tw_day_today');
+  if (day === previousDay(today)) return teamsText(locale)('tw_day_yesterday');
   const sameYear = day.slice(0, 4) === today.slice(0, 4);
   return new Intl.DateTimeFormat(locale, { ...(timeZone ? { timeZone } : {}), weekday: 'long', month: 'long', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) }).format(ms);
 }
@@ -64,7 +64,7 @@ export function formatListTime(value: string | null | undefined, now: Date | num
   const nowMs = asMs(now), day = dayKey(ms, timeZone), today = dayKey(nowMs, timeZone);
   const zone = timeZone ? { timeZone } : {};
   if (day === today) return formatClock(value, locale, timeZone);
-  if (day === previousDay(today)) return isChinese(locale) ? '昨天' : 'Yesterday';
+  if (day === previousDay(today)) return teamsText(locale)('tw_day_yesterday');
   // Two to six days back a weekday name is unambiguous; seven days back would repeat today's.
   let sixDaysAgo = today;
   for (let i = 0; i < 6; i++) sixDaysAgo = previousDay(sixDaysAgo);

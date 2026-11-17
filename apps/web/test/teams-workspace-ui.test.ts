@@ -137,17 +137,17 @@ test('composerLock: observers only read, and a Bot dm waits for a usable Bot', (
   const base = { uid: 'alice', bots: [bot], botsLoaded: true, botsUnverified: false };
   const dm = { kind: 'dm' as const, participants: ['user:alice', 'user:bob'] };
   const botDm = { kind: 'bot_dm' as const, participants: ['user:alice', 'shared_bot:a'] };
-  assert.equal(composerLock({ ...base, conversation: dm }, false), '');
-  assert.equal(composerLock({ ...base, conversation: { kind: 'channel', participants: [] } }, false), '', 'a conversation without a participant list is open');
-  assert.match(composerLock({ ...base, conversation: { kind: 'bot_dm', participants: ['user:bob', 'shared_bot:a'] } }, false), /only participants can send/);
-  assert.match(composerLock({ ...base, conversation: { kind: 'bot_dm', participants: ['user:bob', 'shared_bot:a'] } }, true), /只有参与者可以发送/);
-  assert.equal(composerLock({ ...base, conversation: botDm }, false), '');
-  assert.match(composerLock({ ...base, bots: [botCard({ sharedBotId: 'a', permitted: false })], conversation: botDm }, false), /not available to you/);
-  assert.match(composerLock({ ...base, bots: [botCard({ sharedBotId: 'a', state: 'paused' })], conversation: botDm }, false), /not available to you/);
-  assert.match(composerLock({ ...base, bots: [], botsLoaded: false, conversation: botDm }, false), /Checking whether this Bot is available/);
-  assert.match(composerLock({ ...base, bots: [], botsUnverified: true, conversation: botDm }, false), /could not be verified/);
-  assert.match(composerLock({ ...base, bots: [], botsLoaded: true, botsUnverified: true, conversation: botDm }, true), /未能确认/);
-  assert.equal(composerLock({ ...base, bots: [], botsLoaded: false, conversation: dm }, false), '', 'only a Bot dm needs the Bot list');
+  assert.equal(composerLock({ ...base, conversation: dm }, 'en'), '');
+  assert.equal(composerLock({ ...base, conversation: { kind: 'channel', participants: [] } }, 'en'), '', 'a conversation without a participant list is open');
+  assert.match(composerLock({ ...base, conversation: { kind: 'bot_dm', participants: ['user:bob', 'shared_bot:a'] } }, 'en'), /only participants can send/);
+  assert.match(composerLock({ ...base, conversation: { kind: 'bot_dm', participants: ['user:bob', 'shared_bot:a'] } }, 'zh-Hans'), /只有参与者可以发送/);
+  assert.equal(composerLock({ ...base, conversation: botDm }, 'en'), '');
+  assert.match(composerLock({ ...base, bots: [botCard({ sharedBotId: 'a', permitted: false })], conversation: botDm }, 'en'), /not available to you/);
+  assert.match(composerLock({ ...base, bots: [botCard({ sharedBotId: 'a', state: 'paused' })], conversation: botDm }, 'en'), /not available to you/);
+  assert.match(composerLock({ ...base, bots: [], botsLoaded: false, conversation: botDm }, 'en'), /Checking whether this Bot is available/);
+  assert.match(composerLock({ ...base, bots: [], botsUnverified: true, conversation: botDm }, 'en'), /could not be verified/);
+  assert.match(composerLock({ ...base, bots: [], botsLoaded: true, botsUnverified: true, conversation: botDm }, 'zh-Hans'), /未能确认/);
+  assert.equal(composerLock({ ...base, bots: [], botsLoaded: false, conversation: dm }, 'en'), '', 'only a Bot dm needs the Bot list');
 });
 
 test('visibleStart: the newest window, widened for unread messages and for what the reader asked for', () => {
@@ -191,17 +191,17 @@ test('drawer width and rights', () => {
 
 test('connectionStatus: errors first, then offline, then connected; nothing while loading or without a team', () => {
   const base = { loading: false, selectedTeamId: 'team-aaaa', loadError: '', offline: false, messagingConnecting: false, messagingError: '' };
-  assert.equal(connectionStatus({ ...base, loading: true, loadError: 'X' }, false), undefined);
-  assert.equal(connectionStatus({ ...base, selectedTeamId: '' }, false), undefined);
-  assert.equal(connectionStatus({ ...base, selectedTeamId: '', loadError: 'SERVICE_UNAVAILABLE' }, false)?.action, 'refresh', 'a failed team list can be retried even with no team');
-  assert.deepEqual(connectionStatus(base, false), { kind: 'ok', label: 'Teams connected', detail: 'Teams is connected. Bot host availability is shown in each conversation.' });
-  assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true }, false)?.kind, 'connecting');
-  assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true }, true)?.label, '正在连接…');
-  assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true, messagingError: 'SERVICE_UNAVAILABLE' }, false)?.kind, 'offline');
-  const offline = connectionStatus({ ...base, offline: true }, false)!;
+  assert.equal(connectionStatus({ ...base, loading: true, loadError: 'X' }, 'en'), undefined);
+  assert.equal(connectionStatus({ ...base, selectedTeamId: '' }, 'en'), undefined);
+  assert.equal(connectionStatus({ ...base, selectedTeamId: '', loadError: 'SERVICE_UNAVAILABLE' }, 'en')?.action, 'refresh', 'a failed team list can be retried even with no team');
+  assert.deepEqual(connectionStatus(base, 'en'), { kind: 'ok', label: 'Teams connected', detail: 'Teams is connected. Bot host availability is shown in each conversation.' });
+  assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true }, 'en')?.kind, 'connecting');
+  assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true }, 'zh-Hans')?.label, '正在连接…');
+  assert.equal(connectionStatus({ ...base, offline: true, messagingConnecting: true, messagingError: 'SERVICE_UNAVAILABLE' }, 'en')?.kind, 'offline');
+  const offline = connectionStatus({ ...base, offline: true }, 'en')!;
   assert.equal(offline.kind, 'offline'); assert.equal(offline.action, 'reconnect'); assert.match(offline.detail, /Reconnect to confirm access/);
-  assert.match(connectionStatus({ ...base, offline: true, messagingError: 'STORAGE_FAILED' }, false)!.detail, /storage/i, 'the controller\'s own failure is explained');
-  const failed = connectionStatus({ ...base, offline: true, loadError: 'MEMBERSHIP_REQUIRED' }, true)!;
+  assert.match(connectionStatus({ ...base, offline: true, messagingError: 'STORAGE_FAILED' }, 'en')!.detail, /storage/i, 'the controller\'s own failure is explained');
+  const failed = connectionStatus({ ...base, offline: true, loadError: 'MEMBERSHIP_REQUIRED' }, 'zh-Hans')!;
   assert.equal(failed.kind, 'error'); assert.match(failed.detail, /你已不在此团队/); assert.equal(failed.label, '无法刷新团队');
 });
 
@@ -312,9 +312,9 @@ async function bare(setup: (fake: FakeTeams) => void = () => {}) {
 }
 const html = (element: ReactElement) => renderToStaticMarkup(element);
 const count = (text: string, pattern: RegExp) => (text.match(pattern) ?? []).length;
-const sidebar = (workspace: TeamsWorkspace, snapshot: TeamsSnapshot, more: Record<string, unknown> = {}) => createElement(TeamSidebar, { workspace, snapshot, zh: false, now: NOW, ...more } as never);
-const view = (workspace: TeamsWorkspace, snapshot: TeamsSnapshot, more: Record<string, unknown> = {}) => createElement(TeamConversationView, { workspace, snapshot, zh: false, now: NOW, ...more } as never);
-const drawer = (workspace: TeamsWorkspace, snapshot: TeamsSnapshot, more: Record<string, unknown> = {}) => createElement(TeamDetailsDrawer, { workspace, snapshot, zh: false, onClose() {}, ...more } as never);
+const sidebar = (workspace: TeamsWorkspace, snapshot: TeamsSnapshot, more: Record<string, unknown> = {}) => createElement(TeamSidebar, { workspace, snapshot, locale: 'en', now: NOW, ...more } as never);
+const view = (workspace: TeamsWorkspace, snapshot: TeamsSnapshot, more: Record<string, unknown> = {}) => createElement(TeamConversationView, { workspace, snapshot, locale: 'en', now: NOW, ...more } as never);
+const drawer = (workspace: TeamsWorkspace, snapshot: TeamsSnapshot, more: Record<string, unknown> = {}) => createElement(TeamDetailsDrawer, { workspace, snapshot, locale: 'en', onClose() {}, ...more } as never);
 const rowTags = (markup: string) => [...markup.matchAll(/<button[^>]*data-row="([^"]+)"[^>]*>/g)].map(match => ({ id: match[1]!, tag: match[0] }));
 
 test('sidebar: team switcher, three sections with their add buttons, rows with previews and unread badges', async context => {
@@ -349,7 +349,7 @@ test('sidebar: unread rows have a row menu, zh text, and details when the host o
   const { workspace, snapshot } = await open(); context.after(() => workspace.close());
   const unreadOnly = html(sidebar(workspace, snapshot(), { onOpenDetails() {} }));
   assert.equal(count(unreadOnly, /class="tw-row-more"/g), 4, 'with details every row has the menu');
-  const zh = html(sidebar(workspace, snapshot(), { zh: true }));
+  const zh = html(sidebar(workspace, snapshot(), { locale: 'zh-Hans' }));
   for (const text of ['频道', '私信', 'Bot 对话', '新建频道', '与 Bot 对话', '已连接']) assert.ok(zh.includes(text), text);
   assert.match(zh, /aria-label="4 条未读"/); assert.match(zh, /class="tw-row-preview">你：Lunch\?</);
   // The details panel has one button, the conversation header's. The sidebar reaches the panel through the team menu (an entry that
@@ -423,7 +423,7 @@ test('sidebar: a query narrows every section to the conversations whose name or 
   assert.doesNotMatch(none, /No channels yet|No messages yet|No Bot chats yet/, 'a section that has nothing to show for the query does not say it is empty');
   for (const add of ['New channel', 'New message', 'Message a Bot']) assert.match(none, new RegExp(`aria-label="${add}"`), 'and the sections keep their buttons');
   assert.doesNotMatch(html(sidebar(workspace, snapshot(), { query: 'general' })), /No matching conversations/);
-  assert.match(html(sidebar(workspace, snapshot(), { query: '搜索', zh: true })), /没有匹配的会话。/);
+  assert.match(html(sidebar(workspace, snapshot(), { query: '搜索', locale: 'zh-Hans' })), /没有匹配的会话。/);
 });
 
 test('sidebar: while a query is set every match is listed, with no "Show more"', async context => {
@@ -442,7 +442,7 @@ test('sidebar: while a query is set every match is listed, with no "Show more"',
 
 test('conversation view: header, stream with day and unread dividers, grouped runs, quotes, recalls and escaping', async context => {
   const { workspace, snapshot } = await open(); context.after(() => workspace.close());
-  assert.match(html(view(workspace, snapshot())), /Team assistants/);
+  assert.match(html(view(workspace, snapshot())), /Team Bots/);
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 7, 'the thread');
   const markup = html(view(workspace, snapshot(), { detailsOpen: false, onToggleDetails() {} }));
   const header = /<header class="tw-conv-head">[^]*?<\/header>/.exec(markup)?.[0] ?? '';
@@ -506,11 +506,11 @@ test('conversation view: someone else\'s Bot dm is read-only; a Bot dm needs its
   workspace.selectConversation('others-bot-chat'); await until(() => snapshot().messages.length === 1, 'their thread');
   const observer = html(view(workspace, snapshot()));
   assert.match(observer, /only participants can send messages/); assert.doesNotMatch(observer, /<textarea/); assert.doesNotMatch(observer, /aria-label="Reply"/);
-  assert.match(observer, /Owner: Owner|Online · Owner/); assert.match(observer, /<h2>Fixture Bot · Bob<\/h2>/, 'the Bot\'s owner sees whose chat it is');
+  assert.match(observer, /Maintainer: Owner|Online · Maintainer/); assert.match(observer, /<h2>Fixture Bot · Bob<\/h2>/, 'the Bot\'s maintainer sees whose chat it is');
   workspace.selectConversation('bot-chat'); await until(() => snapshot().selectedConversationId === 'bot-chat', 'bot chat');
   const own = html(view(workspace, snapshot()));
   assert.match(own, /<textarea[^>]*placeholder="Message Fixture Bot"/); assert.match(own, /Messages ask this Bot automatically/); assert.doesNotMatch(own, /Ask a Bot \(@\)/, 'a Bot dm asks its Bot by itself');
-  assert.match(own, /Online · Owner: Owner/); assert.match(own, /<h2>Fixture Bot<\/h2>/); assert.doesNotMatch(own, /tw-chan/, 'a Bot dm has its Bot\'s picture, not the channel #');
+  assert.match(own, /Online · Maintainer: Owner/); assert.match(own, /<h2>Fixture Bot<\/h2>/); assert.doesNotMatch(own, /tw-chan/, 'a Bot dm has its Bot\'s picture, not the channel #');
   fake.bots = [botCard({ permitted: false })]; await workspace.refreshBots(); await until(() => snapshot().bots[0]?.permitted === false, 'revoked access');
   const revoked = html(view(workspace, snapshot()));
   assert.match(revoked, /This Bot is not available to you right now/); assert.doesNotMatch(revoked, /<textarea/);
@@ -527,7 +527,7 @@ test('conversation view: a conversation with no messages says so and invites a f
   workspace.selectConversation('quiet'); await until(() => snapshot().selectedConversationId === 'quiet', 'the quiet conversation');
   const empty = html(view(workspace, snapshot()));
   assert.match(empty, /<div class="tw-empty" role="status"><h3>No messages yet<\/h3><p>Say hello to start the conversation\.<\/p><\/div>/, 'a heading and a hint, not one line of grey text');
-  assert.match(html(view(workspace, snapshot(), { zh: true })), /<h3>暂无消息<\/h3><p>打个招呼，开始对话吧。<\/p>/);
+  assert.match(html(view(workspace, snapshot(), { locale: 'zh-Hans' })), /<h3>暂无消息<\/h3><p>打个招呼，开始对话吧。<\/p>/);
   workspace.selectConversation('dm-bob'); await until(() => snapshot().selectedConversationId === 'dm-bob', 'the conversation with a message to come');
   const loading = html(view(workspace, snapshot()));
   assert.match(loading, /<p class="tw-empty-line" role="status">Loading messages…<\/p>/); assert.doesNotMatch(loading, /No messages yet/, 'a conversation that has messages is not empty while they load');
@@ -582,7 +582,7 @@ test('conversation view: no team, no conversations, a pending creation', async c
   assert.match(html(view(none.workspace, none.snapshot())), /Create or join a team/);
   const { fake, workspace, snapshot } = await open(fake => { fake.conversations.set('team-aaaa', []); });
   context.after(() => workspace.close());
-  assert.match(html(view(workspace, snapshot())), /Team assistants/);
+  assert.match(html(view(workspace, snapshot())), /Team Bots/);
   fake.messages = async () => { throw new Error('SERVICE_UNAVAILABLE'); };
   await workspace.createConversation('channel', 'planning', ['bob']); await until(() => !!snapshot().creation, 'the pending creation');
   const markup = html(view(workspace, snapshot()));
@@ -594,18 +594,18 @@ test('conversation subtitle names who is in a conversation or whether its Bot is
   const snap = (bots: SharedBotCard[]) => ({ bots, directory: members3, uid });
   const bot = botCard({ sharedBotId: 'a', maintainer: { uid: 'bob', generation: 1 } });
   const botDm = conversation('b', { kind: 'bot_dm', participants: ['user:alice', 'shared_bot:a'] });
-  assert.equal(conversationSubtitle(botDm, snap([bot]), false), 'Online · Owner: Bob');
-  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, ready: false }]), false), 'Host unavailable · Owner: Bob');
-  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, state: 'paused' }]), true), '已停止共享 · 所有者: Bob');
-  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, state: 'paused' }]), false), 'Sharing stopped · Owner: Bob');
-  assert.equal(conversationSubtitle(botDm, snap([]), false), '', 'nothing to say about a Bot that is not listed');
-  assert.equal(conversationSubtitle(conversation('d', { kind: 'dm' }), snap([]), false), 'Direct message');
-  assert.equal(conversationSubtitle(conversation('g', { kind: 'group', participants: ['user:alice', 'user:bob', 'user:owner'] }), snap([]), true), '3 位成员');
+  assert.equal(conversationSubtitle(botDm, snap([bot]), 'en'), 'Online · Maintainer: Bob');
+  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, ready: false }]), 'en'), 'Host unavailable · Maintainer: Bob');
+  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, state: 'paused' }]), 'zh-Hans'), '已停止共享 · 维护者：Bob');
+  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, state: 'paused' }]), 'en'), 'Sharing stopped · Maintainer: Bob');
+  assert.equal(conversationSubtitle(botDm, snap([]), 'en'), '', 'nothing to say about a Bot that is not listed');
+  assert.equal(conversationSubtitle(conversation('d', { kind: 'dm' }), snap([]), 'en'), 'Direct message');
+  assert.equal(conversationSubtitle(conversation('g', { kind: 'group', participants: ['user:alice', 'user:bob', 'user:owner'] }), snap([]), 'zh-Hans'), '3 位成员');
   const mixed = conversation('m', { kind: 'group', participants: ['user:alice', 'user:bob', 'user:carol', 'user:owner', 'shared_bot:one'] });
-  assert.equal(conversationSubtitle(mixed, snap([]), false), '4 members · 1 Bot', 'Bots are not members');
-  assert.equal(conversationSubtitle(mixed, snap([]), true), '4 位成员 · 1 个 Bot');
-  assert.equal(conversationSubtitle(conversation('m2', { kind: 'channel', participants: ['user:alice', 'user:bob', 'shared_bot:one', 'shared_bot:two'] }), snap([]), false), '2 members · 2 Bots');
-  assert.equal(conversationSubtitle(conversation('c', { participants: [] }), snap([]), false), '');
+  assert.equal(conversationSubtitle(mixed, snap([]), 'en'), '4 members · 1 Bot', 'Bots are not members');
+  assert.equal(conversationSubtitle(mixed, snap([]), 'zh-Hans'), '4 位成员 · 1 个 Bot');
+  assert.equal(conversationSubtitle(conversation('m2', { kind: 'channel', participants: ['user:alice', 'user:bob', 'shared_bot:one', 'shared_bot:two'] }), snap([]), 'en'), '2 members · 2 Bots');
+  assert.equal(conversationSubtitle(conversation('c', { participants: [] }), snap([]), 'en'), '');
 });
 
 test('drawer: leave or delete first, then tabs by role, with a resizable separator and a close button', async context => {
@@ -635,9 +635,9 @@ test('drawer: leave or delete first, then tabs by role, with a resizable separat
   const shared = html(drawer(workspace, snapshot(), { tab: 'invites' }));
   assert.match(shared, new RegExp(`value="https://lingxios.net/open/team/join\\?code=${'A'.repeat(32)}"`)); assert.match(shared, /Copy<\/button>/);
   const bots = html(drawer(workspace, snapshot(), { tab: 'bots' }));
-  assert.match(bots, /Fixture Bot/); assert.match(bots, /Message assistant/); assert.match(bots, /class="tw-embed"/);
+  assert.match(bots, /Fixture Bot/); assert.match(bots, /Message Bot/); assert.match(bots, /class="tw-embed"/);
   assert.match(html(drawer(workspace, snapshot(), { width: 9999 })), /style="width:480px"/); assert.match(html(drawer(workspace, snapshot(), { defaultWidth: 300 })), /style="width:300px"/);
-  assert.match(html(drawer(workspace, snapshot(), { zh: true })), /删除团队/);
+  assert.match(html(drawer(workspace, snapshot(), { locale: 'zh-Hans' })), /删除团队/);
 });
 
 test('drawer: a plain member can leave and sees no Invites tab, even when asked for it', async context => {

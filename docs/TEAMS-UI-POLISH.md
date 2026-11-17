@@ -119,7 +119,7 @@ in `Conversation/ConversationExecutionViews.swift` belongs to the main chat: it 
 | authorization_required | `teams_run_authorization_required` | `teams_run_authorization_required_detail` | `lock.circle` | `Lock` | lock | muted |
 | revoked | `teams_run_revoked` | `teams_run_revoked_detail` | `nosign` | `Block` | ban | muted |
 | waiting | `teams_task_waiting` | written by the card (who, expiry) | `ellipsis.bubble` | `Pending` | dots | muted |
-| cancelled | `teams_task_cancelled` | Web: "This request was cancelled."; mobile: none | `xmark.circle` | `Cancel` | x in circle | muted |
+| cancelled | `teams_task_cancelled` | none | `xmark.circle` | `Cancel` | x in circle | muted |
 | needs_reconciliation | `teams_task_needs_checking` | written by the card (maintainer or not) | `questionmark.circle` | `FactCheck` | help | muted |
 | any other value | `chat_status_unknown` | none | `questionmark.circle` | `HelpOutline` | help | muted |
 
@@ -140,7 +140,7 @@ tones pass 3:1 as graphics on the card surface in both themes (Appendix D). On i
   below 0.0001 reads "<" followed by the smallest amount. No `costMicros` reads "cost unknown" (`teams_usage_cost_unknown`); a cost
   without a currency shows the amount and "currency unknown" (`teams_usage_currency_unknown`). A cost is never invented.
 - Status `missing` or no usage reads "Usage unavailable" (`teams_usage_missing`); `partial` puts "Partial usage"
-  (`teams_usage_partial`) in front; `complete` has no prefix (`teams_usage_complete` is superseded).
+  (`teams_usage_partial`) in front; `complete` has no prefix (`teams_usage_complete` was deleted).
 
 | Client | Number and currency |
 | --- | --- |
@@ -188,7 +188,7 @@ zh-Hant, ja and ko).
 
 No confirmation, because the act is undoable or already explicit: Unblock, Decline a friend request, Cancel a sent request,
 Dismiss a team offer, Discard a failed pending message (the text is still on screen and the button is the explicit act), Mark read,
-Accept, Join. Today's "Confirm this membership change?" (`teams_confirm_change`) and a title-only "Leave this team?" are replaced.
+Accept, Join. The old "Confirm this membership change?" (`teams_confirm_change`, deleted) and a title-only "Leave this team?" are replaced.
 The Stop sharing dialog is one dialog, with the Bot's name in the title, on Teams and Friends alike.
 
 | Client | Translation |
@@ -249,24 +249,27 @@ The Stop sharing dialog is one dialog, with the Bot's name in the title, on Team
   `apps/firebase/src/shared-bots.mjs` still says 助手, and it and its sibling `消息已更新，本次结果未发布。请重新提问。` are
   Chinese for every locale. A backend change is outside this pass.
 
-**U13 Desktop and Web copy (rule only; nothing is migrated in this pass).** The views of `packages/teams` say every text twice
-inline (`zh ? ... : ...`, `t(en, zh)`), so zh-Hant users read Simplified Chinese and ja and ko users read English.
-1. No new inline pair. Text goes through the shared catalog in all five locales.
-2. Reuse the mobile key when the copy is the same (`teams_*`, `friends_*`); a string only Desktop and Web need takes the prefix
-   `tw_` (Teams Web) and is added with the migration.
-3. `zh: boolean` props become `locale: string`; the Electron hosts pass the real locale.
-4. Until a component migrates, its inline pair must stay a pair of the catalog: `apps/web/test/friends-strings.test.ts` checks that
-   every inline `t(en, zh)` of the eight Friends views is verbatim a pair of `en.json` and `zh-Hans.json`, and
-   `packages/teams/friends.test.ts` checks the `friends_error_*` texts. That is why this pass adds keys beside
-   `teams_group_bot_dm`, `friends_blocked_empty`, `friends_link_reset_confirm`, `friends_link_off_confirm` and
-   `friends_share_bot_stop` instead of rewriting them: those texts are still inline in `FriendChatView.tsx`, `BlockedList.tsx`,
-   `AddFriendView.tsx` and `FriendBotsPanel.tsx`.
-5. The migration (phase P4c of the polish plan) generates `packages/teams/i18n.generated.ts`, adds `useTeamsText(locale)`, and then deletes the
-   superseded keys of Appendix C.
+**U13 Desktop and Web copy (migrated in phase P4c).** The views of `packages/teams` used to say every text twice inline
+(`zh ? ... : ...`, `t(en, zh)`), so zh-Hant users read Simplified Chinese and ja and ko users read English. Every Team, Friend and
+hosted-service view now takes its text from the shared catalog, in all five locales:
+1. No inline pair. `apps/web/test/teams-strings.test.ts` fails on a `zh ?` choice, a `zh: boolean` prop or a `t(English, Chinese)` pair in
+   `packages/teams`, the Web Teams, Friends and page files, and the Electron `Teams*` and `Friends*` components.
+2. Reuse the mobile key when the copy is the same (`teams_*`, `friends_*`, `services_*`, `account_*`); a string only Desktop and Web need
+   takes the prefix `tw_<area>_<what>` (Teams Web). Text with a value takes a `_fmt` key with positional placeholders (`%1$s`), because a
+   `%@` key cannot be named from TypeScript.
+3. `zh: boolean` props became `locale: string`. The Electron hosts pass the real locale; the Web pages pass the app language, which is `en` or
+   `zh` today (`zh` reads as zh-Hans), so Web shows zh-Hant, ja or ko only when a host passes such a tag.
+4. `generate.py` writes `packages/teams/i18n.generated.ts`, the slice of the catalog the views name (`resources/translations/README.md`,
+   "Desktop and Web Teams text"); `packages/teams/i18n.ts` holds `useTeamsText(locale)`, `teamsText`, `teamsLocale`, `intlTag` and `fillText`.
+   `generate.py --check` fails on a stale bundle.
+5. The superseded keys of Appendix C are deleted from the five files and the generated outputs. `apps/web/test/friends-strings.test.ts`
+   (inline pairs are catalog pairs) is replaced by `teams-strings.test.ts`.
 
-Inline copy that still contradicts U1 until then: "assistant" / 助手 in `MemberHome.tsx`, `BotDirectory.tsx`, `TeamSidebar.tsx`
-and `errors.ts`; "Bot DMs" in `TeamSidebar.tsx`, `FriendChatView.tsx` and `workspace.ts`; "owner" for a Bot's maintainer in
-`BotDirectory.tsx`, `Composer.tsx` and `NewConversationDialog.tsx`; 私聊 in `NewConversationDialog.tsx`.
+The inline copy that contradicted U1 went with the inline pairs: "assistant" / 助手 (`MemberHome.tsx`, `BotDirectory.tsx`,
+`TeamSidebar.tsx`, `errors.ts`), "Bot DMs" (`TeamSidebar.tsx`, `FriendChatView.tsx`, `workspace.ts`), "owner" for a Bot's maintainer
+(`BotDirectory.tsx`, `Composer.tsx`, `NewConversationDialog.tsx`, `TeamConversationView.tsx`) and 私聊 (`NewConversationDialog.tsx`).
+`teams-strings.test.ts` bans those words in all five languages of every bundled key. Not part of the migration: `OpenLinkPage.tsx`,
+the landing page of any link opened in a browser, which keeps its own en and zh copy like the site's other pages.
 
 ## 2. Appendix A: strings added
 
@@ -396,9 +399,12 @@ any of these keys (checked against the iOS, Android, Desktop, Web and `packages/
 | `teams_usage_missing` | Missing usage · cost unknown | Usage unavailable |
 | `friends_bots_note` | A Bot runs on its owner’s Desktop. The owner can read every conversation with it. | A Bot runs on its maintainer’s Desktop. The maintainer can read every conversation with it. |
 
-## 4. Appendix C: superseded and dead keys (kept; delete after the clients and the migration land)
+## 4. Appendix C: superseded and dead keys (deleted by the migration)
 
-Superseded, still used by a client today:
+The migration (P4c) deleted these 47 keys from the five `resources/translations/*.json` files, and so from the generated
+`Localizable.xcstrings`, `values*/strings.xml` and `packages/teams/i18n.generated.ts`. No iOS, Android, Desktop or Web source and no test names them.
+
+Superseded (16):
 
 | Old key | Replaced by |
 | --- | --- |
@@ -406,16 +412,18 @@ Superseded, still used by a client today:
 | `teams_bot_pause` | `friends_share_bot_stop` |
 | `teams_bot_unbind_detail` (Friends dialog) | `teams_bot_stop_detail` |
 | `teams_assistants` | `remote_bots` as the section title |
-| `teams_group_bot_dm` | `teams_group_bot_chats` (not rewritten in place: pinned by `friends-strings.test.ts`) |
+| `teams_group_bot_dm` | `teams_group_bot_chats` |
 | `teams_task_expired`, `teams_task_interrupted`, `teams_task_authorization_required` | `teams_run_*` label plus `_detail` |
-| borrowed `cron_status_queued`, `mcp_reconnect`, `chat_run_expand`, `chat_run_collapse` | `teams_run_queued`, `teams_reconnect`, `teams_section_expand`, `teams_section_collapse` |
 | `teams_usage_complete` | no prefix for a complete usage line |
 | `friends_blocked_empty`, `mobile_bots_none` | the `_title` / `_body` / `_hint` keys of U9 |
-| `friends_link_reset_confirm`, `friends_link_off_confirm` | `friends_link_reset_title` / `_body`, `friends_link_off_title` / `_body` (still inline in `AddFriendView.tsx`) |
+| `friends_link_reset_confirm`, `friends_link_off_confirm` | `friends_link_reset_title` / `_body`, `friends_link_off_title` / `_body` |
 
-No client names these today (candidates for the cleanup after the migration): `teams_bot_unbind`, `teams_bot_unbind_title`,
-`teams_run_preparing`, `teams_run_recovery`, `teams_run_recovered` ("Owner", for a Bot), `teams_run_missed`, `teams_run_host_*`
-(6), `teams_question_*` (9), `teams_recover_*` (9), `teams_error_answer_rejected`, `friends_share_bot_with`.
+Dead (31): `teams_bot_unbind`, `teams_bot_unbind_title %@` and its `_fmt`, `teams_run_preparing`, `teams_run_recovery`, `teams_run_recovered`
+("Owner", for a Bot), `teams_run_missed`, `teams_run_host_*` (6), `teams_question_*` (9), `teams_recover_*` (8) and `teams_error_answer_rejected`.
+
+Kept on purpose: the borrowed `cron_status_queued`, `mcp_reconnect`, `chat_run_expand` and `chat_run_collapse`, which the cron, MCP and chat
+features of the same clients still read (the Teams views say `teams_run_queued`, `teams_reconnect`, `teams_section_expand` and
+`teams_section_collapse`); and `friends_share_bot_with`, listed here as unused before the migration, which `BotDirectory.tsx` now names.
 
 ## 5. Appendix D: contrast numbers
 
@@ -459,54 +467,32 @@ Run-card glyph tones on the card surface (graphics, 3:1):
 
 ## 6. Appendix E: tests, gates and open items
 
-- **Tests that read the catalog.** `apps/web/test/friends-strings.test.ts` (inline pairs of the Friends views are catalog pairs),
-  `packages/teams/friends.test.ts` (`friends_error_*` en and zh-Hans texts), `apps/electron/test/localization.test.ts` and
-  `native-localization.test.ts`. With the strings of this pass the first two and `native-localization.test.ts` pass;
-  `localization.test.ts` stops on `apps_library`, which is not in the catalog at HEAD either (it lives in
-  `localAppWorkspaceCatalog.ts`, which the test does not merge), so that failure is not caused by this pass.
-- **Tests that assert old English literals** (not the catalog) and will change with the client work: the usage-line tests
-  (`apps/ios/native/Tests/TeamTaskUsageTests.swift`, `.../teams/TeamsBotTextTest.kt`, `apps/web/test/teams-bots-ui.test.ts`) assert
-  "Missing usage", "Partial usage", "Complete usage" and six decimals (U5); `apps/electron/test/fixtures/teams-sidebar-electron.mjs`
-  asserts the heading "Bot DMs" (U1); `apps/web/test/friends-ui.test.ts` asserts the inline "A Bot runs on its owner's Desktop."
-  of `BotDirectory.tsx` (U1); `apps/web/test/teams-workspace-ui.test.ts` (line 476) asserts the inline "Waiting for server
-  confirmation" of `TeamConversationView.tsx` (Appendix B, `teams_message_confirming`). All of them read inline text in
-  `packages/teams` or a fixed English word list in the mobile code, none reads the catalog, so none fails today.
-- **`scripts/checks/check_i18n_pairing.py`** already fails on the tree before this pass (94 unpaired against a baseline of 93, the
-  plural key `teams_bots_count %lld`; zh-Hant 254 against 235; en 20 against 19). This pass adds no unpaired key (every `%@` key has
-  its `_fmt` sibling) and raises the identical-to-zh-Hans counts to zh-Hant 260, en 23, ja 43, ko 13 (baselines 235, 19, 42, 13), so
-  ja is the one line this pass newly trips (43 against 42, from `teams_bot_tag`). All 11 additions are intentional (a shared word or
-  format, or the product term "Bot") and are ready to paste into `INTENTIONAL_IDENTICAL_TO_BASE`; with them the counts return to the
-  pre-pass 254, 20, 42 and 12, and the older overage (zh-Hant, en, the one unpaired key) is left as it was:
-
-```python
-    # Teams UI polish: the same characters or the same product word in both Chinese variants, or in every locale.
-    ("zh-Hant", "teams_you"): "你",
-    ("zh-Hant", "teams_confirm_remove_button"): "移除",
-    ("zh-Hant", "teams_bot_disabled"): "已停止共享",
-    ("zh-Hant", "teams_usage_tokens_total %@"): "%@ tokens",
-    ("zh-Hant", "teams_usage_tokens_total_fmt"): "%1$s tokens",
-    ("en", "teams_usage_tokens_total %@"): "%@ tokens",
-    ("en", "teams_usage_tokens_total_fmt"): "%1$s tokens",
-    ("zh-Hant", "teams_bot_tag"): "Bot",
-    ("en", "teams_bot_tag"): "Bot",
-    ("ja", "teams_bot_tag"): "Bot",
-    ("ko", "teams_bot_tag"): "Bot",
-```
-
-- **Translation debt found, not changed (out of scope for an add-only pass).** In `teams_*` and `friends_*`, 36 zh-Hant, 48 ja and 48 ko
-  values are still the English text: the team-management keys `teams_new` to `teams_confirm_leave` (including the role names
-  `teams_owner`, `teams_admin`, `teams_member` and the buttons `teams_promote`, `teams_demote`, `teams_remove`, `teams_leave`,
-  `teams_delete`, `teams_revoke`) and the task keys from `teams_recent_tasks` to `teams_task_view`. Nine zh-Hant values are
-  Simplified Chinese (`teams_bot_owner %@` and its `_fmt`, `teams_recent_tasks`, `teams_artifact_open`, `teams_task_expired`,
-  `teams_task_interrupted`, `teams_task_authorization_required`, `teams_error_request_quota`, `teams_task_view`). The ones that
-  carry a glossary term should be fixed first:
-
-| Key | zh-Hant | ja | ko |
-| --- | --- | --- | --- |
-| `teams_owner` | 擁有者 | オーナー | 소유자 |
-| `teams_admin` | 管理員 | 管理者 | 관리자 |
-| `teams_member` | 成員 | メンバー | 멤버 |
-| `teams_bot_owner %@` / `_fmt` | 維護者：%@ | メンテナー: %@ | 메인테이너: %@ |
-
-  Also: `teams_preview_you` is 我 in zh-Hant while `teams_you` is 你 (Taiwan chat apps write 你); align the old key when it is
-  next touched.
+- **Tests that read the catalog.** `apps/web/test/teams-strings.test.ts` (the bundle is the catalog; no view says a text twice inline;
+  parameters agree across the five locales; zh-Hant, ja and ko are translated, not English or Simplified; the glossary of U1; `teamsLocale`,
+  `teamsText`, `fillText` and `intlTag`) replaces `friends-strings.test.ts`, whose inline-pair pattern the migration left empty.
+  `apps/web/test/teams-web-view.test.ts` renders the layout and the sign-in card in zh-Hant, ja and ko and asserts their own words.
+  `packages/teams/friends.test.ts` (`friends_error_*`), `apps/electron/test/localization.test.ts` and `native-localization.test.ts` read the
+  catalog too, and `resources/translations/test_generate.py` covers the Teams bundle (the scan, the escaping, the references it refuses, freshness).
+  All of them pass.
+- **Tests that assert English literals** (not the catalog) were changed with the client work and the migration: the usage-line tests
+  (`apps/ios/native/Tests/TeamTaskUsageTests.swift`, `.../teams/TeamsBotTextTest.kt`) assert "Usage unavailable" and "Partial usage" (U5);
+  `apps/electron/test/fixtures/teams-sidebar-electron.mjs` asserts the heading "Bot chats" (U1) and the Bots note "Team Bots" (it said
+  "Team assistants"); `apps/web/test/friends-ui.test.ts` asserts "Maintainer: Bob"; `apps/web/test/teams-workspace-ui.test.ts` asserts
+  "Waiting for confirmation. Retrying won't send it twice." (Appendix B). `TeamConfirmationsTest.kt` and `TeamsBotTextTest.kt` no longer
+  name the deleted `R.string` keys; the Android tests were edited but not compiled in this pass (no Android build here).
+- **`scripts/checks/check_i18n_pairing.py`** fails on HEAD already and still does, with no measure worse than HEAD: 94 unpaired against a
+  baseline of 93 (the plural key `teams_bots_count %lld`), zh-Hant 277 identical to zh-Hans against 235 (HEAD 284), en 20 against 19 and
+  ja 43 against 42 (both as at HEAD), ko 12, no empty value, no source orphan. The migration adds no unpaired key (every `%@` key has its
+  `_fmt` sibling) and enters the 30 new `tw_*` values that are legitimately the same characters in two languages in
+  `INTENTIONAL_IDENTICAL_TO_BASE`: 26 for zh-Hant (words both Chinese variants write alike, such as 移交, 更多 and 今天, and two separators)
+  and 4 for ja (提供者, 最新 and two separators).
+- **Translation debt.** The migration translated every key the views name: 30 keys got real zh-Hant, ja and ko text (90 values; the
+  team-management, role, invite and loading words, `teams_owner`, `teams_admin`, `teams_member` and `teams_bot_owner %@` / `_fmt` among
+  them were English, or Simplified Chinese in zh-Hant), and `teams-strings.test.ts` keeps them translated. What is left is read only by
+  the iOS and Android clients and was not touched: zh-Hant, ja and ko still show English for `teams_new`, `teams_copy`, `teams_remove`,
+  `teams_signin` and `teams_empty`; ja and ko also for `teams_recent_tasks`, `teams_artifact_title`, `teams_error_request_quota` and
+  `teams_task_view`, where zh-Hant shows Simplified Chinese; `teams_cancel` is English in all three and unused (U8: `common_cancel`).
+  Also: `teams_preview_you` is 我 in zh-Hant while `teams_you` is 你 (Taiwan chat apps write 你); align the old key when it is next touched.
+- **Open.** The Android unit tests above are not compiled. `generate.py` writes every `tw_*` string (310) into the iOS and Android outputs
+  although no mobile code names them. The Web app language is `en` or `zh`, so zh-Hant, ja and ko reach Web only when a host passes
+  such a tag. The Bot reply bodies written by the backend (`apps/firebase/src/shared-bots.mjs`, U12) are unchanged.

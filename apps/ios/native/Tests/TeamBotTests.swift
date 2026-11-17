@@ -233,8 +233,11 @@ final class TeamBotMemberEntryTests: XCTestCase {
         XCTAssertNil(value.memberRemaining)
         XCTAssertNil(value.memberQuotaReset)
         XCTAssertEqual(value.memberExamples, [])
-        XCTAssertEqual(TeamBotMemberText.remaining(value.memberRemaining, chinese: false), "Your daily remaining: unverified")
-        XCTAssertEqual(TeamBotMemberText.capabilities(value.capabilities, chinese: true), "能力未核实")
+        XCTAssertEqual(TeamBotMemberText.availabilityKey(value.memberAvailability), "teams_bot_avail_unverified")
+        XCTAssertEqual(TeamBotMemberText.remaining(value.memberRemaining), .init(label: "teams_bot_remaining_today", value: .key("chat_status_unknown")))
+        XCTAssertEqual(TeamBotMemberText.capabilities(value.capabilities).map(\.value), [.key("chat_status_unknown"), .key("chat_status_unknown")],
+                       "a Bot that has not reported what it can do is Unknown, not unsupported")
+        XCTAssertNil(TeamBotMemberText.reset(value.memberQuotaReset))
     }
     func testServerMemberProjectionPreservesZeroAndActualCapabilities() throws {
         let value = try card(["examples": [" First ", "", "First", "Second", "Third", "Fourth"],
@@ -243,20 +246,41 @@ final class TeamBotMemberEntryTests: XCTestCase {
         XCTAssertEqual(value.capabilities, TeamBotCapabilities(durableWait: true, writeOperations: false))
         XCTAssertEqual(value.memberAvailability, .quota_exhausted)
         XCTAssertEqual(value.memberRemaining, 0)
-        XCTAssertEqual(TeamBotMemberText.reset(value.memberQuotaReset, chinese: false), "Quota resets: 1970-01-02 00:00 UTC")
-        XCTAssertEqual(TeamBotMemberText.capabilities(value.capabilities, chinese: false), "Wait and resume: supported · Write operations: unsupported")
+        XCTAssertEqual(TeamBotMemberText.availabilityKey(value.memberAvailability), "teams_bot_avail_quota")
+        XCTAssertEqual(TeamBotMemberText.remaining(value.memberRemaining), .init(label: "teams_bot_remaining_today", value: .figure("0")), "zero is a figure, not Unknown")
+        XCTAssertEqual(TeamBotMemberText.reset(value.memberQuotaReset), .init(label: "teams_bot_resets", value: .figure("1970-01-02 00:00 UTC")))
+        XCTAssertEqual(TeamBotMemberText.capabilities(value.capabilities), [.init(label: "teams_bot_wait_resume", value: .key("teams_bot_supported")),
+                                                                            .init(label: "teams_bot_write_ops", value: .key("teams_bot_not_supported"))])
     }
     func testUnknownStateAndInvalidProjectionStayUnverified() throws {
         let value = try card(["availability": "raw_host_failure_credentials", "dailyRemaining": -1, "quotaResetsAt": -1])
         XCTAssertEqual(value.memberAvailability, .unverified)
         XCTAssertNil(value.memberRemaining)
         XCTAssertNil(value.memberQuotaReset)
-        XCTAssertNil(TeamBotMemberText.reset(.infinity, chinese: false))
+        XCTAssertNil(TeamBotMemberText.reset(.infinity))
         XCTAssertThrowsError(try card(["capabilities": ["durableWait": true]]))
         for state in ["ready", "paused", "offline", "maintenance", "quota_exhausted", "unverified"] {
             let card = try card(["availability": state])
-            XCTAssertFalse(TeamBotMemberText.availability(card.memberAvailability, chinese: false).isEmpty)
-            XCTAssertFalse(TeamBotMemberText.availability(card.memberAvailability, chinese: true).isEmpty)
+            XCTAssertEqual(card.memberAvailability.rawValue, state)
+        }
+        XCTAssertEqual(TeamBotMemberText.availabilityKey(value.memberAvailability), "teams_bot_avail_unverified")
+    }
+    /// The member text is the catalog's: the keys Desktop and Web read (`packages/teams/BotMemberDetails.tsx`), each with its own words in all five languages.
+    func testMemberTextIsTheSharedCatalogKeysInEveryLanguage() throws {
+        let states: [(TeamBotAvailability, String)] = [(.ready, "teams_bot_avail_ready"), (.paused, "teams_bot_disabled"), (.offline, "teams_bot_avail_offline"),
+            (.maintenance, "teams_bot_avail_maintenance"), (.quota_exhausted, "teams_bot_avail_quota"), (.unverified, "teams_bot_avail_unverified")]
+        for (state, key) in states { XCTAssertEqual(TeamBotMemberText.availabilityKey(state), key, "\(state)") }
+        XCTAssertEqual(Set(states.map(\.1)).count, states.count, "each state has its own words")
+        let reset = try XCTUnwrap(TeamBotMemberText.reset(86_400_000))
+        let items = TeamBotMemberText.capabilities(TeamBotCapabilities(durableWait: false, writeOperations: true)) + [TeamBotMemberText.remaining(3), reset]
+        XCTAssertEqual(items.map(\.label), ["teams_bot_wait_resume", "teams_bot_write_ops", "teams_bot_remaining_today", "teams_bot_resets"])
+        XCTAssertEqual(items.map(\.value), [.key("teams_bot_not_supported"), .key("teams_bot_supported"), .figure("3"), .figure("1970-01-02 00:00 UTC")])
+        let catalogue = try Catalogue.load()
+        let keys = states.map(\.1) + items.map(\.label) + ["teams_bot_supported", "teams_bot_not_supported", "chat_status_unknown", "teams_bot_examples_hint"]
+        for key in keys {
+            for language in ["en", "zh-Hans", "zh-Hant", "ja", "ko"] {
+                XCTAssertFalse((catalogue.value(key, language) ?? "").isEmpty, "\(key) has no \(language) text")
+            }
         }
     }
     func testExamplesOnlyFillAnUntouchedComposer() {
@@ -280,7 +304,7 @@ final class TeamBotMemberEntryTests: XCTestCase {
         let retired = try card(["sharedBotId": "sharedbot_retired", "state": "deleted"])
         XCTAssertEqual(TeamBotMemberRules.directory([published, paused, retired]).map(\.sharedBotId), ["sharedbot_01", "sharedbot_paused"])
         XCTAssertFalse(paused.selectable)
-        XCTAssertEqual(TeamBotMemberText.availability(paused.memberAvailability, chinese: true), "已暂停")
+        XCTAssertEqual(TeamBotMemberText.availabilityKey(paused.memberAvailability), "teams_bot_disabled", "a Bot whose sharing stopped reads Sharing stopped (U1), never Paused")
     }
     func testOnlyNewBotSubmitsObserveKnownAvailability() throws {
         for state in ["paused", "offline", "maintenance", "quota_exhausted"] {

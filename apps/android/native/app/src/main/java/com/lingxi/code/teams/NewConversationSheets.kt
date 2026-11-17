@@ -273,6 +273,4 @@ private fun NewBotList(
 
 /** The additive, sanitized member status; missing projections remain unverified. */
 @Composable
-internal fun botAvailabilityText(bot: TeamBotCard): String = TeamBotEntry.availability(
-    bot, androidx.compose.ui.platform.LocalConfiguration.current.locales[0].language == "zh",
-)
+internal fun botAvailabilityText(bot: TeamBotCard): String = stringResource(TeamBotEntry.availabilityRes(bot))

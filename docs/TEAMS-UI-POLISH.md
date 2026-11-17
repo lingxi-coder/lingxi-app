@@ -493,6 +493,6 @@ Run-card glyph tones on the card surface (graphics, 3:1):
   `teams_signin` and `teams_empty`; ja and ko also for `teams_recent_tasks`, `teams_artifact_title`, `teams_error_request_quota` and
   `teams_task_view`, where zh-Hant shows Simplified Chinese; `teams_cancel` is English in all three and unused (U8: `common_cancel`).
   Also: `teams_preview_you` is 我 in zh-Hant while `teams_you` is 你 (Taiwan chat apps write 你); align the old key when it is next touched.
-- **Open.** The Android unit tests above are not compiled. `generate.py` writes every `tw_*` string (310) into the iOS and Android outputs
-  although no mobile code names them. The Web app language is `en` or `zh`, so zh-Hant, ja and ko reach Web only when a host passes
+- **Open.** `generate.py` leaves `tw_*` keys out of the iOS and Android outputs; copy all clients show (the Bot availability and
+  capability lines) uses shared `teams_bot_*` keys. The Web app language is `en` or `zh`, so zh-Hant, ja and ko reach Web only when a host passes
   such a tag. The Bot reply bodies written by the backend (`apps/firebase/src/shared-bots.mjs`, U12) are unchanged.

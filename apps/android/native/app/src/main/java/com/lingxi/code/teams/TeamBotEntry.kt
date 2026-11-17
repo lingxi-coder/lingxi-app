@@ -1,5 +1,7 @@
 package com.lingxi.code.teams
 
+import androidx.annotation.StringRes
+import com.lingxi.code.R
 import org.json.JSONObject
 import java.time.Instant
 import java.time.ZoneOffset
@@ -19,6 +21,15 @@ internal data class TeamBotEntryContext(val uid: String, val teamId: String, val
 
 /** A UI lifetime in addition to the workspace identity: an old creation may not navigate a newly opened screen. */
 internal class TeamBotEntryLease { var active = true }
+
+/** The value of a "label: value" item of the member text: words from the catalog (Supported, Not supported, Unknown) or a figure that needs no translation (a count, a UTC time). */
+internal sealed interface TeamBotValue {
+    data class Words(@StringRes val id: Int) : TeamBotValue
+    data class Figure(val text: String) : TeamBotValue
+}
+
+/** One "label: value" item of the member text; [label] is a string resource. */
+internal data class TeamBotItem(@StringRes val label: Int, val value: TeamBotValue)
 
 internal object TeamBotEntry {
     private val unavailableStatuses = setOf("paused", "offline", "maintenance", "quota_exhausted")
@@ -81,29 +92,41 @@ internal object TeamBotEntry {
     fun canSeed(draft: ComposerDraft, hasFiles: Boolean, example: String): Boolean =
         draft == ComposerDraft() && !hasFiles && TeamsComposeLogic.canSendText(example)
 
-    /** The member projection is the sole health source; old ready/quotas fields do not invent a new projection. */
-    fun availability(bot: TeamBotCard, chinese: Boolean): String = when (if (bot.state != "published") "paused" else bot.availability) {
-        "ready" -> if (chinese) "可用" else "Ready"
-        "paused" -> if (chinese) "已暂停" else "Paused"
-        "offline" -> if (chinese) "宿主离线" else "Host offline"
-        "maintenance" -> if (chinese) "维护中" else "Under maintenance"
-        "quota_exhausted" -> if (chinese) "今日额度已用完" else "Daily quota exhausted"
-        else -> if (chinese) "状态待核实" else "Status unverified"
+    /**
+     * The member text is the catalog's: the `teams_bot_*` strings Desktop and Web read too (`packages/teams/BotMemberDetails.tsx`), so every client says the
+     * same thing in every language. These return which strings and figures; the screen puts them into the UI language (`botAvailabilityText`, `teamBotLine`).
+     *
+     * The member projection is the sole health source; old ready/quotas fields do not invent a new projection. A Bot whose sharing stopped reads "Sharing
+     * stopped" whatever its host reports (U1).
+     */
+    @StringRes
+    fun availabilityRes(bot: TeamBotCard): Int = when (if (bot.state != "published") "paused" else bot.availability) {
+        "ready" -> R.string.teams_bot_avail_ready
+        "paused" -> R.string.teams_bot_disabled
+        "offline" -> R.string.teams_bot_avail_offline
+        "maintenance" -> R.string.teams_bot_avail_maintenance
+        "quota_exhausted" -> R.string.teams_bot_avail_quota
+        else -> R.string.teams_bot_avail_unverified
     }
 
-    fun capabilities(bot: TeamBotCard, chinese: Boolean): String {
-        val value = bot.capabilities ?: return if (chinese) "能力待核实" else "Capabilities unverified"
-        val labels = mutableListOf(if (chinese) "对话" else "Conversation")
-        if (value.durableWait) labels += if (chinese) "可持续等待回复或批准" else "Waits for replies or approval"
-        if (value.writeOperations) labels += if (chinese) "可写入，依权限执行" else "Writes with permission"
-        return labels.joinToString(" · ")
+    /** Wait and resume, and write operations, each Supported or Not supported. A Bot that has not reported them is Unknown for both. */
+    fun capabilities(bot: TeamBotCard): List<TeamBotItem> {
+        fun supported(on: Boolean?) = TeamBotValue.Words(when (on) { null -> R.string.chat_status_unknown; true -> R.string.teams_bot_supported; false -> R.string.teams_bot_not_supported })
+        return listOf(
+            TeamBotItem(R.string.teams_bot_wait_resume, supported(bot.capabilities?.durableWait)),
+            TeamBotItem(R.string.teams_bot_write_ops, supported(bot.capabilities?.writeOperations)),
+        )
     }
 
-    fun quota(bot: TeamBotCard, chinese: Boolean): String {
-        val remaining = bot.dailyRemaining?.let { if (chinese) "本人今日剩余 $it 次" else "Your remaining uses today: $it" }
-            ?: if (chinese) "本人剩余额度待核实" else "Your remaining quota is unverified"
-        val reset = bot.quotaResetsAt?.let { DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm 'UTC'").withZone(ZoneOffset.UTC).format(Instant.ofEpochMilli(it)) }
-        return remaining + if (reset != null) { if (chinese) " · 重置 $reset" else " · Resets $reset" }
-        else if (chinese) " · 重置时间待核实（UTC）" else " · Reset time unverified (UTC)"
-    }
+    /** The member's own requests left today, or Unknown when the service has not said. */
+    fun remaining(bot: TeamBotCard) = TeamBotItem(
+        R.string.teams_bot_remaining_today, bot.dailyRemaining?.let { TeamBotValue.Figure(it.toString()) } ?: TeamBotValue.Words(R.string.chat_status_unknown),
+    )
+
+    private val resetFormat = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm 'UTC'").withZone(ZoneOffset.UTC)
+
+    /** When the daily quota resets, in UTC, or Unknown when the service has not said. */
+    fun resets(bot: TeamBotCard) = TeamBotItem(
+        R.string.teams_bot_resets, bot.quotaResetsAt?.let { TeamBotValue.Figure(resetFormat.format(Instant.ofEpochMilli(it))) } ?: TeamBotValue.Words(R.string.chat_status_unknown),
+    )
 }

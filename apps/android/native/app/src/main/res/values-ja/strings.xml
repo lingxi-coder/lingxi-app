@@ -3188,6 +3188,18 @@
     <string name="tool_denied_exit_unknown">終了コード不明</string>
     <string name="tool_denied_no_output">出力なし</string>
     <string name="tool_denied_reason">拒否された理由</string>
+    <string name="teams_bot_avail_ready">準備完了</string>
     <string name="teams_confirm_make_owner_title_fmt">%1$s さんをオーナーにしますか？</string>
     <string name="services_menu">サービスのオプション</string>
+    <string name="teams_bot_avail_offline">ホストがオフライン</string>
+    <string name="teams_bot_avail_maintenance">一時的にメンテナンス中</string>
+    <string name="teams_bot_avail_quota">本日の上限に達しました</string>
+    <string name="teams_bot_avail_unverified">状態を確認できません</string>
+    <string name="teams_bot_supported">対応</string>
+    <string name="teams_bot_not_supported">非対応</string>
+    <string name="teams_bot_wait_resume">待機と再開</string>
+    <string name="teams_bot_write_ops">書き込み操作</string>
+    <string name="teams_bot_remaining_today">自分の今日の残りリクエスト数</string>
+    <string name="teams_bot_resets">リセット時刻</string>
+    <string name="teams_bot_examples_hint">入力例は下書きに追加されます。内容を確認してから送信してください。</string>
 </resources>

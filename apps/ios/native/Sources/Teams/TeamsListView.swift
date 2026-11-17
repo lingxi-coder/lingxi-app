@@ -81,6 +81,7 @@ struct TeamsListView: View {
                                 .disabled(workspace.messageBusy || (!bot.selectable && history == nil))
                                 .accessibilityIdentifier("teams.assistant.\(bot.sharedBotId)")
                                 TeamBotMemberInfo(bot: bot, unverified: model?.botsUnverified == true)
+                                TeamBotExamplesHint(bot: bot)
                                 ForEach(bot.memberExamples, id: \.self) { example in
                                     Button { open(bot, example: example) } label: {
                                         Label(example, systemImage: "text.bubble").font(.subheadline).minimumHitTarget(minWidth: 0, alignment: .leading)

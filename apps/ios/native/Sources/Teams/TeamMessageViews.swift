@@ -84,8 +84,7 @@ struct TeamConversationContext {
     /// The same member-safe, freshness-aware status shown by the Bot directory.
     @MainActor
     func presenceText(_ card: TeamBotCard) -> String {
-        TeamBotMemberText.availability(model.botsUnverified ? .unverified : card.memberAvailability,
-            chinese: TeamsListStrings.isChinese(languageTag: Bundle._lxCurrentLanguageID.withLock { $0 }))
+        TeamsText.localized(TeamBotMemberText.availabilityKey(model.botsUnverified ? .unverified : card.memberAvailability))
     }
 
     /// The second line of the header (Desktop `conversationSubtitle`): a Bot DM says whether the Bot is reachable

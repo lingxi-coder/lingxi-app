@@ -3188,6 +3188,18 @@
     <string name="tool_denied_exit_unknown">Exit code unknown</string>
     <string name="tool_denied_no_output">No output</string>
     <string name="tool_denied_reason">Why it was denied</string>
+    <string name="teams_bot_avail_ready">Ready</string>
     <string name="teams_confirm_make_owner_title_fmt">Make %1$s the owner?</string>
     <string name="services_menu">Service options</string>
+    <string name="teams_bot_avail_offline">Host offline</string>
+    <string name="teams_bot_avail_maintenance">Temporarily under maintenance</string>
+    <string name="teams_bot_avail_quota">Daily quota exhausted</string>
+    <string name="teams_bot_avail_unverified">Status unverified</string>
+    <string name="teams_bot_supported">Supported</string>
+    <string name="teams_bot_not_supported">Not supported</string>
+    <string name="teams_bot_wait_resume">Wait and resume</string>
+    <string name="teams_bot_write_ops">Write operations</string>
+    <string name="teams_bot_remaining_today">Your remaining requests today</string>
+    <string name="teams_bot_resets">Resets</string>
+    <string name="teams_bot_examples_hint">Examples add to your draft. Review and send when ready.</string>
 </resources>

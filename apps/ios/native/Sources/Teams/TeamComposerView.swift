@@ -183,7 +183,7 @@ struct TeamComposerView: View {
                             AgentAvatar(agentID: bot.avatarId, size: 24)
                             Text(bot.name).font(.body.weight(.semibold)).foregroundStyle(.primary).lineLimit(1)
                             Spacer()
-                            Text(TeamBotMemberText.availability(bot.memberAvailability, chinese: TeamsListStrings.isChinese(languageTag: Bundle._lxCurrentLanguageID.withLock { $0 }))).font(.caption).foregroundStyle(.secondary)
+                            Text(LocalizedStringKey(TeamBotMemberText.availabilityKey(bot.memberAvailability))).font(.caption).foregroundStyle(.secondary)
                         }
                         .padding(.horizontal, 12)
                         .frame(minHeight: 44)
@@ -264,7 +264,7 @@ struct TeamComposerView: View {
     private var footer: some View {
         if let availabilityBlock {
             let status = model.botsUnverified || context.bots.contains { $0.newRequestBlock == availabilityBlock && $0.memberAvailability == .unverified } ? TeamBotAvailability.unverified : availabilityBlock
-            Text(TeamBotMemberText.availability(status, chinese: TeamsListStrings.isChinese(languageTag: Bundle._lxCurrentLanguageID.withLock { $0 })))
+            Text(LocalizedStringKey(TeamBotMemberText.availabilityKey(status)))
                 .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("teams.composer.availability")
         }
         if tooLong {

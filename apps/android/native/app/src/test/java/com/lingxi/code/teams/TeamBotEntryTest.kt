@@ -1,10 +1,15 @@
 package com.lingxi.code.teams
 
+import com.lingxi.code.R
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
+import java.io.File
 
 class TeamBotEntryTest {
+    private val unknown = TeamBotValue.Words(R.string.chat_status_unknown)
+    private val supported = TeamBotValue.Words(R.string.teams_bot_supported)
+    private val notSupported = TeamBotValue.Words(R.string.teams_bot_not_supported)
     private fun card(extra: String = "") = TeamBotCard.parse(JSONObject("""{"sharedBotId":"sharedbot_01","name":"Helper","description":"","maintainer":{"uid":"owner","generation":1},"revision":1,"state":"published","permitted":true,"ready":true,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":100,"member":10,"bot":50}$extra}"""))
 
     @Test fun missingProjectionNeverInventsStatusCapabilityOrZeroRemaining() {
@@ -14,10 +19,11 @@ class TeamBotEntryTest {
         assertNull(bot.availability)
         assertNull(bot.dailyRemaining)
         assertNull(bot.quotaResetsAt)
-        assertEquals("Status unverified", TeamBotEntry.availability(bot, false))
-        assertEquals("Capabilities unverified", TeamBotEntry.capabilities(bot, false))
-        assertTrue(TeamBotEntry.quota(bot, false).contains("unverified"))
-        assertFalse(TeamBotEntry.quota(bot, false).contains("100"))
+        assertEquals(R.string.teams_bot_avail_unverified, TeamBotEntry.availabilityRes(bot))
+        assertEquals("a Bot that has not reported what it can do is Unknown, not unsupported", listOf(unknown, unknown), TeamBotEntry.capabilities(bot).map { it.value })
+        // The remaining requests and the reset are Unknown, never the 100 / 10 / 50 limits of the quotas the card also carries.
+        assertEquals(TeamBotItem(R.string.teams_bot_remaining_today, unknown), TeamBotEntry.remaining(bot))
+        assertEquals(TeamBotItem(R.string.teams_bot_resets, unknown), TeamBotEntry.resets(bot))
     }
 
     @Test fun projectionParsesExamplesActualCapabilitiesAndExplicitZero() {
@@ -25,10 +31,10 @@ class TeamBotEntryTest {
         assertEquals(listOf("First", "Second", "Third"), bot.examples)
         assertEquals(TeamBotCapabilities(true, false), bot.capabilities)
         assertEquals(0L, bot.dailyRemaining)
-        assertEquals("Daily quota exhausted", TeamBotEntry.availability(bot, false))
-        assertTrue(TeamBotEntry.capabilities(bot, false).contains("Waits"))
-        assertFalse(TeamBotEntry.capabilities(bot, false).contains("Writes"))
-        assertEquals("Your remaining uses today: 0 · Resets 2026-11-17 00:00 UTC", TeamBotEntry.quota(bot, false))
+        assertEquals(R.string.teams_bot_avail_quota, TeamBotEntry.availabilityRes(bot))
+        assertEquals(listOf(TeamBotItem(R.string.teams_bot_wait_resume, supported), TeamBotItem(R.string.teams_bot_write_ops, notSupported)), TeamBotEntry.capabilities(bot))
+        assertEquals("zero is a figure, not Unknown", TeamBotItem(R.string.teams_bot_remaining_today, TeamBotValue.Figure("0")), TeamBotEntry.remaining(bot))
+        assertEquals(TeamBotItem(R.string.teams_bot_resets, TeamBotValue.Figure("2026-11-17 00:00 UTC")), TeamBotEntry.resets(bot))
     }
 
     @Test fun malformedOptionalValuesRemainUnknown() {
@@ -46,10 +52,8 @@ class TeamBotEntryTest {
 
     @Test fun maintenanceNeverShowsDetailedHostReason() {
         val bot = card(""", "availability":"maintenance","healthReason":"model","capabilities":{"durableWait":false,"writeOperations":true}""")
-        assertEquals("Under maintenance", TeamBotEntry.availability(bot, false))
-        assertEquals("维护中", TeamBotEntry.availability(bot, true))
-        assertFalse(TeamBotEntry.capabilities(bot, false).contains("Waits"))
-        assertTrue(TeamBotEntry.capabilities(bot, false).contains("Writes"))
+        assertEquals(R.string.teams_bot_avail_maintenance, TeamBotEntry.availabilityRes(bot))
+        assertEquals(listOf(notSupported, supported), TeamBotEntry.capabilities(bot).map { it.value })
     }
 
     @Test fun examplesOnlyFillAnEmptyDraftAndNeverAppendOrSend() {
@@ -76,7 +80,7 @@ class TeamBotEntryTest {
         }
         for (status in listOf(null, "ready", "unverified"))
             assertTrue(TeamBotEntry.blockedRequests(targets, listOf(card().copy(availability = status)), false).isEmpty())
-        assertEquals("Host offline", TeamBotEntry.availability(card().copy(availability = "offline"), false))
+        assertEquals(R.string.teams_bot_avail_offline, TeamBotEntry.availabilityRes(card().copy(availability = "offline")))
     }
 
     @Test fun memberDirectoryKeepsAuthorizedPausedCardsWithoutMakingThemSelectable() {
@@ -85,8 +89,7 @@ class TeamBotEntryTest {
         val archived = card().copy(state = "retired")
         assertEquals(listOf(paused, published), TeamBotEntry.memberDirectory(listOf(paused, published, archived)))
         assertFalse(paused.selectable)
-        assertEquals("Paused", TeamBotEntry.availability(paused, false))
-        assertEquals("已暂停", TeamBotEntry.availability(paused, true))
+        assertEquals("a Bot whose sharing stopped reads Sharing stopped (U1), never Paused", R.string.teams_bot_disabled, TeamBotEntry.availabilityRes(paused))
         assertEquals(setOf(paused.sharedBotId), staleTeamBotSelections(setOf(paused.sharedBotId), listOf(paused)))
     }
 
@@ -103,7 +106,7 @@ class TeamBotEntryTest {
         assertEquals("unverified", expired.availability)
         assertFalse(expired.ready)
         assertNull(TeamBotEntry.nextStatusDeadline(listOf(expired), clock))
-        assertEquals("Status unverified", TeamBotEntry.availability(expired, false))
+        assertEquals(R.string.teams_bot_avail_unverified, TeamBotEntry.availabilityRes(expired))
         // A failed reread keeps the server-authorized card, but never restores the expired maintenance claim.
         assertEquals(expired, TeamBotEntry.unverified(expired))
     }
@@ -149,6 +152,34 @@ class TeamBotEntryTest {
         val legacyUnknown = TeamBotEntry.unverified(card())
         assertFalse(legacyUnknown.admissionBlockedPendingRefresh)
         TeamBotEntry.requireNewRequest(setOf(legacyUnknown.sharedBotId), listOf(legacyUnknown))
+    }
+
+    /** The member text is the catalog's: the keys Desktop and Web read (`packages/teams/BotMemberDetails.tsx`), each with its own words. */
+    @Test fun everyAvailabilityNamesItsOwnSharedWordsAndAStateThisBuildDoesNotKnowReadsUnverified() {
+        val expected = mapOf(
+            "ready" to R.string.teams_bot_avail_ready, "offline" to R.string.teams_bot_avail_offline, "maintenance" to R.string.teams_bot_avail_maintenance,
+            "quota_exhausted" to R.string.teams_bot_avail_quota, "unverified" to R.string.teams_bot_avail_unverified,
+        )
+        for ((state, id) in expected) assertEquals(state, id, TeamBotEntry.availabilityRes(card().copy(availability = state)))
+        assertEquals(expected.size, expected.values.toSet().size)
+        // Whatever its host reports, a Bot whose sharing stopped reads so; a missing or newer state reads unverified.
+        for (state in listOf("ready", "offline", null)) assertEquals(R.string.teams_bot_disabled, TeamBotEntry.availabilityRes(card().copy(state = "paused", availability = state)))
+        assertEquals(R.string.teams_bot_disabled, TeamBotEntry.availabilityRes(card().copy(availability = "paused")))
+        for (state in listOf(null, "from-a-newer-service", "")) assertEquals(R.string.teams_bot_avail_unverified, TeamBotEntry.availabilityRes(card().copy(availability = state)))
+    }
+
+    @Test fun theMemberTextHasItsWordsInAllFiveLanguages() {
+        val keys = listOf(
+            "teams_bot_avail_ready", "teams_bot_avail_offline", "teams_bot_avail_maintenance", "teams_bot_avail_quota", "teams_bot_avail_unverified", "teams_bot_disabled",
+            "teams_bot_supported", "teams_bot_not_supported", "teams_bot_wait_resume", "teams_bot_write_ops", "teams_bot_remaining_today", "teams_bot_resets",
+            "teams_bot_examples_hint", "chat_status_unknown",
+        )
+        for (directory in listOf("values", "values-zh-rTW", "values-en", "values-ja", "values-ko")) {
+            val file = listOf("src/main/res/$directory/strings.xml", "app/src/main/res/$directory/strings.xml", "apps/android/native/app/src/main/res/$directory/strings.xml").map(::File).first { it.exists() }
+            // Plain text on purpose: the Android XML classes on the unit-test class path are stubs.
+            val names = Regex("<string\\s+name=\"([^\"]+)\"[^>]*>(.+?)</string>", RegexOption.DOT_MATCHES_ALL).findAll(file.readText()).associate { it.groupValues[1] to it.groupValues[2] }
+            for (key in keys) assertFalse("$directory has no text for $key", names[key].isNullOrBlank())
+        }
     }
 
     @Test fun contextIncludesAccountTeamMembershipAndLifecycle() {

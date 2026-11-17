@@ -3188,6 +3188,18 @@
     <string name="tool_denied_exit_unknown">종료 코드 알 수 없음</string>
     <string name="tool_denied_no_output">출력 없음</string>
     <string name="tool_denied_reason">거부된 이유</string>
+    <string name="teams_bot_avail_ready">준비됨</string>
     <string name="teams_confirm_make_owner_title_fmt">%1$s 님을 소유자로 지정할까요?</string>
     <string name="services_menu">서비스 옵션</string>
+    <string name="teams_bot_avail_offline">호스트 오프라인</string>
+    <string name="teams_bot_avail_maintenance">일시적으로 점검 중</string>
+    <string name="teams_bot_avail_quota">오늘의 한도를 모두 사용했습니다</string>
+    <string name="teams_bot_avail_unverified">상태를 확인할 수 없음</string>
+    <string name="teams_bot_supported">지원됨</string>
+    <string name="teams_bot_not_supported">지원되지 않음</string>
+    <string name="teams_bot_wait_resume">대기 및 재개</string>
+    <string name="teams_bot_write_ops">쓰기 작업</string>
+    <string name="teams_bot_remaining_today">오늘 남은 내 요청 수</string>
+    <string name="teams_bot_resets">초기화 시각</string>
+    <string name="teams_bot_examples_hint">예시는 초안에 추가됩니다. 내용을 확인한 뒤 직접 보내세요.</string>
 </resources>

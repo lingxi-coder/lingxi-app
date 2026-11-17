@@ -220,13 +220,25 @@ export type TeamsKey =
   | 'teams_approval_undone_fmt'
   | 'teams_approval_waiting_member_fmt'
   | 'teams_artifact_open'
+  | 'teams_bot_avail_maintenance'
+  | 'teams_bot_avail_offline'
+  | 'teams_bot_avail_quota'
+  | 'teams_bot_avail_ready'
+  | 'teams_bot_avail_unverified'
   | 'teams_bot_disabled'
+  | 'teams_bot_examples_hint'
   | 'teams_bot_message'
   | 'teams_bot_not_permitted'
+  | 'teams_bot_not_supported'
   | 'teams_bot_owner_fmt'
+  | 'teams_bot_remaining_today'
+  | 'teams_bot_resets'
   | 'teams_bot_stop_detail'
   | 'teams_bot_stop_title_fmt'
+  | 'teams_bot_supported'
   | 'teams_bot_tag'
+  | 'teams_bot_wait_resume'
+  | 'teams_bot_write_ops'
   | 'teams_bots_count_one_fmt'
   | 'teams_bots_count_other_fmt'
   | 'teams_bots_loading'
@@ -482,17 +494,6 @@ export type TeamsKey =
   | 'tw_back_conversations'
   | 'tw_back_friends'
   | 'tw_back_team'
-  | 'tw_bot_avail_maintenance'
-  | 'tw_bot_avail_offline'
-  | 'tw_bot_avail_quota'
-  | 'tw_bot_avail_unverified'
-  | 'tw_bot_examples_hint'
-  | 'tw_bot_not_supported'
-  | 'tw_bot_remaining_today'
-  | 'tw_bot_resets'
-  | 'tw_bot_supported'
-  | 'tw_bot_wait_resume'
-  | 'tw_bot_write_ops'
   | 'tw_botdir_allowed_memberships'
   | 'tw_botdir_asks_before'
   | 'tw_botdir_audience'
@@ -797,7 +798,6 @@ export type TeamsKey =
   | 'tw_signin_register_action'
   | 'tw_signin_title'
   | 'tw_signin_title_register'
-  | 'tw_state_ready'
   | 'tw_team'
   | 'tw_team_close_details'
   | 'tw_team_copy_hint'
@@ -1029,13 +1029,25 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_approval_undone_fmt: { en: 'Mark %1$s as not done', 'zh-Hans': '将%1$s标记为未完成', 'zh-Hant': '將%1$s標記為未完成', ja: '%1$sを未完了にする', ko: '%1$s을(를) 미완료로 표시' },
   teams_approval_waiting_member_fmt: { en: 'Waiting for %1$s to approve or decline.', 'zh-Hans': '等待 %1$s 批准或拒绝。', 'zh-Hant': '等待 %1$s 核准或拒絕。', ja: '%1$s の承認または却下を待っています。', ko: '%1$s 님의 승인 또는 거절을 기다리는 중입니다.' },
   teams_artifact_open: { en: 'Open document', 'zh-Hans': '打开文档', 'zh-Hant': '開啟文件', ja: 'ドキュメントを開く', ko: '문서 열기' },
+  teams_bot_avail_maintenance: { en: 'Temporarily under maintenance', 'zh-Hans': '暂时维护中', 'zh-Hant': '暫時維護中', ja: '一時的にメンテナンス中', ko: '일시적으로 점검 중' },
+  teams_bot_avail_offline: { en: 'Host offline', 'zh-Hans': '宿主离线', 'zh-Hant': '宿主離線', ja: 'ホストがオフライン', ko: '호스트 오프라인' },
+  teams_bot_avail_quota: { en: 'Daily quota exhausted', 'zh-Hans': '今日额度已用完', 'zh-Hant': '今日額度已用完', ja: '本日の上限に達しました', ko: '오늘의 한도를 모두 사용했습니다' },
+  teams_bot_avail_ready: { en: 'Ready', 'zh-Hans': '已就绪', 'zh-Hant': '已就緒', ja: '準備完了', ko: '준비됨' },
+  teams_bot_avail_unverified: { en: 'Status unverified', 'zh-Hans': '状态未确认', 'zh-Hant': '狀態未確認', ja: '状態を確認できません', ko: '상태를 확인할 수 없음' },
   teams_bot_disabled: { en: 'Sharing stopped', 'zh-Hans': '已停止共享', 'zh-Hant': '已停止共享', ja: '共有停止中', ko: '공유 중지됨' },
+  teams_bot_examples_hint: { en: 'Examples add to your draft. Review and send when ready.', 'zh-Hans': '示例会加入草稿，请检查后自行发送。', 'zh-Hant': '範例會加入草稿，請檢查後自行傳送。', ja: '入力例は下書きに追加されます。内容を確認してから送信してください。', ko: '예시는 초안에 추가됩니다. 내용을 확인한 뒤 직접 보내세요.' },
   teams_bot_message: { en: 'Message Bot', 'zh-Hans': '与 Bot 对话', 'zh-Hant': '與 Bot 對話', ja: 'Bot とチャット', ko: 'Bot과 대화' },
   teams_bot_not_permitted: { en: 'Not permitted', 'zh-Hans': '无使用权限', 'zh-Hant': '無使用權限', ja: '利用権限がありません', ko: '사용 권한 없음' },
+  teams_bot_not_supported: { en: 'Not supported', 'zh-Hans': '不支持', 'zh-Hant': '不支援', ja: '非対応', ko: '지원되지 않음' },
   teams_bot_owner_fmt: { en: 'Maintainer: %1$s', 'zh-Hans': '维护者：%1$s', 'zh-Hant': '維護者：%1$s', ja: 'メンテナー: %1$s', ko: '메인테이너: %1$s' },
+  teams_bot_remaining_today: { en: 'Your remaining requests today', 'zh-Hans': '本人今日剩余请求', 'zh-Hant': '本人今日剩餘請求', ja: '自分の今日の残りリクエスト数', ko: '오늘 남은 내 요청 수' },
+  teams_bot_resets: { en: 'Resets', 'zh-Hans': '重置于', 'zh-Hant': '重置於', ja: 'リセット時刻', ko: '초기화 시각' },
   teams_bot_stop_detail: { en: 'New requests to this Bot stop. Existing conversations stay. You can share it again from LingXi Desktop.', 'zh-Hans': '将停止向此 Bot 发送新请求，现有会话会保留。你可以在灵犀 Desktop 重新共享。', 'zh-Hant': '將停止向此 Bot 傳送新請求，現有會話會保留。你可以在靈犀 Desktop 重新共享。', ja: 'この Bot への新しいリクエストは停止します。既存の会話は残ります。LingXi Desktop からいつでも再共有できます。', ko: '이 Bot에 대한 새 요청이 중지됩니다. 기존 대화는 그대로 유지됩니다. LingXi Desktop에서 다시 공유할 수 있습니다.' },
   teams_bot_stop_title_fmt: { en: 'Stop sharing “%1$s”?', 'zh-Hans': '停止共享“%1$s”？', 'zh-Hant': '停止共享「%1$s」？', ja: '「%1$s」の共有を停止しますか？', ko: '“%1$s” 공유를 중지할까요?' },
+  teams_bot_supported: { en: 'Supported', 'zh-Hans': '支持', 'zh-Hant': '支援', ja: '対応', ko: '지원됨' },
   teams_bot_tag: { en: 'Bot', 'zh-Hans': 'Bot', 'zh-Hant': 'Bot', ja: 'Bot', ko: 'Bot' },
+  teams_bot_wait_resume: { en: 'Wait and resume', 'zh-Hans': '等待与恢复', 'zh-Hant': '等待與恢復', ja: '待機と再開', ko: '대기 및 재개' },
+  teams_bot_write_ops: { en: 'Write operations', 'zh-Hans': '写入操作', 'zh-Hant': '寫入操作', ja: '書き込み操作', ko: '쓰기 작업' },
   teams_bots_count_one_fmt: { en: '%1$d Bot', 'zh-Hans': '%1$d 个 Bot', 'zh-Hant': '%1$d 個 Bot', ja: '%1$d 個の Bot', ko: 'Bot %1$d개' },
   teams_bots_count_other_fmt: { en: '%1$d Bots', 'zh-Hans': '%1$d 个 Bot', 'zh-Hant': '%1$d 個 Bot', ja: '%1$d 個の Bot', ko: 'Bot %1$d개' },
   teams_bots_loading: { en: 'Loading Bots…', 'zh-Hans': '正在加载 Bot…', 'zh-Hant': '正在載入 Bot…', ja: 'Bot を読み込んでいます…', ko: 'Bot을 불러오는 중…' },
@@ -1291,17 +1303,6 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_back_conversations: { en: '‹ Conversations', 'zh-Hans': '‹ 会话列表', 'zh-Hant': '‹ 會話列表', ja: '‹ 会話一覧', ko: '‹ 대화 목록' },
   tw_back_friends: { en: '‹ Friends', 'zh-Hans': '‹ 好友', 'zh-Hant': '‹ 好友', ja: '‹ 友だち', ko: '‹ 친구' },
   tw_back_team: { en: '‹ Back to the Team', 'zh-Hans': '‹ 返回团队', 'zh-Hant': '‹ 返回團隊', ja: '‹ チームに戻る', ko: '‹ 팀으로 돌아가기' },
-  tw_bot_avail_maintenance: { en: 'Temporarily under maintenance', 'zh-Hans': '暂时维护中', 'zh-Hant': '暫時維護中', ja: '一時的にメンテナンス中', ko: '일시적으로 점검 중' },
-  tw_bot_avail_offline: { en: 'Host offline', 'zh-Hans': '宿主离线', 'zh-Hant': '宿主離線', ja: 'ホストがオフライン', ko: '호스트 오프라인' },
-  tw_bot_avail_quota: { en: 'Daily quota exhausted', 'zh-Hans': '今日额度已用完', 'zh-Hant': '今日額度已用完', ja: '本日の上限に達しました', ko: '오늘의 한도를 모두 사용했습니다' },
-  tw_bot_avail_unverified: { en: 'Status unverified', 'zh-Hans': '状态未确认', 'zh-Hant': '狀態未確認', ja: '状態を確認できません', ko: '상태를 확인할 수 없음' },
-  tw_bot_examples_hint: { en: 'Examples add to your draft. Review and send when ready.', 'zh-Hans': '示例会加入草稿，请检查后自行发送。', 'zh-Hant': '範例會加入草稿，請檢查後自行傳送。', ja: '入力例は下書きに追加されます。内容を確認してから送信してください。', ko: '예시는 초안에 추가됩니다. 내용을 확인한 뒤 직접 보내세요.' },
-  tw_bot_not_supported: { en: 'Not supported', 'zh-Hans': '不支持', 'zh-Hant': '不支援', ja: '非対応', ko: '지원되지 않음' },
-  tw_bot_remaining_today: { en: 'Your remaining requests today', 'zh-Hans': '本人今日剩余请求', 'zh-Hant': '本人今日剩餘請求', ja: '自分の今日の残りリクエスト数', ko: '오늘 남은 내 요청 수' },
-  tw_bot_resets: { en: 'Resets', 'zh-Hans': '重置于', 'zh-Hant': '重置於', ja: 'リセット時刻', ko: '초기화 시각' },
-  tw_bot_supported: { en: 'Supported', 'zh-Hans': '支持', 'zh-Hant': '支援', ja: '対応', ko: '지원됨' },
-  tw_bot_wait_resume: { en: 'Wait and resume', 'zh-Hans': '等待与恢复', 'zh-Hant': '等待與恢復', ja: '待機と再開', ko: '대기 및 재개' },
-  tw_bot_write_ops: { en: 'Write operations', 'zh-Hans': '写入操作', 'zh-Hant': '寫入操作', ja: '書き込み操作', ko: '쓰기 작업' },
   tw_botdir_allowed_memberships: { en: 'Allowed memberships', 'zh-Hans': '允许的成员身份', 'zh-Hant': '允許的成員身分', ja: '許可するメンバーシップ', ko: '허용된 멤버십' },
   tw_botdir_asks_before: { en: 'the Bot asks before each change', 'zh-Hans': 'Bot 每次修改前先征得同意', 'zh-Hant': 'Bot 每次修改前先徵得同意', ja: 'Bot は変更のたびに確認します', ko: 'Bot이 변경할 때마다 확인함' },
   tw_botdir_audience: { en: 'Audience', 'zh-Hans': '受众', 'zh-Hant': '受眾', ja: '対象', ko: '대상' },
@@ -1606,7 +1607,6 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_signin_register_action: { en: 'Create account and continue', 'zh-Hans': '注册并继续', 'zh-Hant': '註冊並繼續', ja: 'アカウントを作成して続行', ko: '계정을 만들고 계속' },
   tw_signin_title: { en: 'Sign in to LingXi Teams', 'zh-Hans': '登录灵犀团队', 'zh-Hant': '登入靈犀團隊', ja: 'LingXi チームにサインイン', ko: 'LingXi 팀에 로그인' },
   tw_signin_title_register: { en: 'Create your LingXi account', 'zh-Hans': '注册灵犀账号', 'zh-Hant': '註冊靈犀帳號', ja: 'LingXi アカウントを作成', ko: 'LingXi 계정 만들기' },
-  tw_state_ready: { en: 'Ready', 'zh-Hans': '已就绪', 'zh-Hant': '已就緒', ja: '準備完了', ko: '준비됨' },
   tw_team: { en: 'Team', 'zh-Hans': '团队', 'zh-Hant': '團隊', ja: 'チーム', ko: '팀' },
   tw_team_close_details: { en: 'Close details', 'zh-Hans': '关闭详情', 'zh-Hant': '關閉詳細資訊', ja: '詳細を閉じる', ko: '세부 정보 닫기' },
   tw_team_copy_hint: { en: 'Select and copy the link above.', 'zh-Hans': '请选中上方链接并复制。', 'zh-Hant': '請選取上方連結並複製。', ja: '上のリンクを選択してコピーしてください。', ko: '위 링크를 선택해 복사하세요.' },

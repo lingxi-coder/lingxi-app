@@ -3188,6 +3188,18 @@
     <string name="tool_denied_exit_unknown">退出码未知</string>
     <string name="tool_denied_no_output">无输出</string>
     <string name="tool_denied_reason">拒绝原因</string>
+    <string name="teams_bot_avail_ready">已就绪</string>
     <string name="teams_confirm_make_owner_title_fmt">将 %1$s 设为所有者？</string>
     <string name="services_menu">服务选项</string>
+    <string name="teams_bot_avail_offline">宿主离线</string>
+    <string name="teams_bot_avail_maintenance">暂时维护中</string>
+    <string name="teams_bot_avail_quota">今日额度已用完</string>
+    <string name="teams_bot_avail_unverified">状态未确认</string>
+    <string name="teams_bot_supported">支持</string>
+    <string name="teams_bot_not_supported">不支持</string>
+    <string name="teams_bot_wait_resume">等待与恢复</string>
+    <string name="teams_bot_write_ops">写入操作</string>
+    <string name="teams_bot_remaining_today">本人今日剩余请求</string>
+    <string name="teams_bot_resets">重置于</string>
+    <string name="teams_bot_examples_hint">示例会加入草稿，请检查后自行发送。</string>
 </resources>

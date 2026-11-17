@@ -101,36 +101,47 @@ enum TeamBotMemberRules {
         cards.compactMap(\.memberStatusExpiry).filter { $0 > now }.min()
     }
 }
-/// Plain member text shared by the list, picker, details and conversation header.
+/// What a member reads about a Bot in the list, picker, details and conversation header. The words are catalog keys, the `teams_bot_*` keys
+/// Desktop and Web read too (`packages/teams/BotMemberDetails.tsx`), so every client says the same thing in every language. These rules
+/// choose the keys and the figures; `TeamsStrings.swift` puts them into the UI language.
 enum TeamBotMemberText {
-    static func availability(_ value: TeamBotAvailability, chinese: Bool) -> String {
+    /// One "label: value" item of the member text. The label is a catalog key; the value is another key (Supported, Not supported, Unknown)
+    /// or a figure that needs no translation (a count, a UTC time).
+    struct Item: Equatable, Sendable {
+        enum Value: Equatable, Sendable { case key(String), figure(String) }
+        let label: String
+        let value: Value
+    }
+
+    /// How a Bot's availability reads. A Bot whose sharing stopped reads "Sharing stopped" (`teams_bot_disabled`, docs/TEAMS-UI-POLISH.md U1).
+    static func availabilityKey(_ value: TeamBotAvailability) -> String {
         switch value {
-        case .ready: return chinese ? "可使用" : "Ready"
-        case .paused: return chinese ? "已暂停" : "Paused"
-        case .offline: return chinese ? "离线" : "Offline"
-        case .maintenance: return chinese ? "维护中" : "Under maintenance"
-        case .quota_exhausted: return chinese ? "今日额度已用完" : "Daily quota exhausted"
-        case .unverified: return chinese ? "状态未核实" : "Status unverified"
+        case .ready: "teams_bot_avail_ready"
+        case .paused: "teams_bot_disabled"
+        case .offline: "teams_bot_avail_offline"
+        case .maintenance: "teams_bot_avail_maintenance"
+        case .quota_exhausted: "teams_bot_avail_quota"
+        case .unverified: "teams_bot_avail_unverified"
         }
     }
-    static func capabilities(_ value: TeamBotCapabilities?, chinese: Bool) -> String {
-        guard let value else { return chinese ? "能力未核实" : "Capabilities unverified" }
-        let yes = chinese ? "支持" : "supported", no = chinese ? "不支持" : "unsupported"
-        return chinese ? "等待与恢复：\(value.durableWait ? yes : no) · 写入操作：\(value.writeOperations ? yes : no)"
-            : "Wait and resume: \(value.durableWait ? yes : no) · Write operations: \(value.writeOperations ? yes : no)"
+    /// Wait and resume, and write operations, each Supported or Not supported. A Bot that has not reported them is Unknown for both.
+    static func capabilities(_ value: TeamBotCapabilities?) -> [Item] {
+        func supported(_ on: Bool?) -> Item.Value { .key(on.map { $0 ? "teams_bot_supported" : "teams_bot_not_supported" } ?? "chat_status_unknown") }
+        return [Item(label: "teams_bot_wait_resume", value: supported(value?.durableWait)),
+                Item(label: "teams_bot_write_ops", value: supported(value?.writeOperations))]
     }
-    static func remaining(_ value: Int?, chinese: Bool) -> String {
-        let amount = value.map(String.init) ?? (chinese ? "未核实" : "unverified")
-        return chinese ? "本人今日剩余：\(amount)" : "Your daily remaining: \(amount)"
+    /// The member's own requests left today, or Unknown when the service has not said.
+    static func remaining(_ value: Int?) -> Item {
+        Item(label: "teams_bot_remaining_today", value: value.map { .figure(String($0)) } ?? .key("chat_status_unknown"))
     }
-    static func reset(_ value: Double?, chinese: Bool) -> String? {
+    /// When the daily quota resets, in UTC; `nil` when the service reports no usable time.
+    static func reset(_ value: Double?) -> Item? {
         guard let value, value.isFinite, value > 0 else { return nil }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyy-MM-dd HH:mm 'UTC'"
-        let date = formatter.string(from: Date(timeIntervalSince1970: value / 1000))
-        return chinese ? "额度重置：\(date)" : "Quota resets: \(date)"
+        return Item(label: "teams_bot_resets", value: .figure(formatter.string(from: Date(timeIntervalSince1970: value / 1000))))
     }
 }
 /// What a Bot run cost, as the host reports it. `missing` carries no figures; `partial` and `complete` carry the

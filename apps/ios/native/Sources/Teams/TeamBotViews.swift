@@ -1,5 +1,21 @@
 import SwiftUI
 
+extension TeamBotMemberText {
+    /// One item in the UI language: "Wait and resume: Supported".
+    static func text(_ item: Item) -> String {
+        let value: String
+        switch item.value {
+        case .key(let key): value = TeamsText.localized(key)
+        case .figure(let figure): value = figure
+        }
+        return TeamsText.localized(item.label) + ": " + value
+    }
+
+    /// Items on one line, "Wait and resume: Supported · Write operations: Not supported". The colon and the middle dot are punctuation, the
+    /// same in every language and on every client, so they stay in code; only the words are resources (docs/TEAMS-UI-POLISH.md U12).
+    static func line(_ items: [Item]) -> String { TeamsStreamLogic.joinedLine(items.map(text)) }
+}
+
 /// Member-safe service projection. Missing fields stay explicitly unverified.
 struct TeamBotMemberInfo: View {
     @Environment(\.locale) private var locale
@@ -7,16 +23,25 @@ struct TeamBotMemberInfo: View {
     var unverified = false
 
     var body: some View {
-        let chinese = TeamsListStrings.isChinese(languageTag: Bundle._lxCurrentLanguageID.withLock { $0 })
         VStack(alignment: .leading, spacing: 3) {
-            Text(TeamBotMemberText.availability(unverified ? .unverified : bot.memberAvailability, chinese: chinese))
+            Text(LocalizedStringKey(TeamBotMemberText.availabilityKey(unverified ? .unverified : bot.memberAvailability)))
                 .accessibilityIdentifier("teams.bot.availability.\(bot.sharedBotId)")
-            Text(TeamBotMemberText.capabilities(bot.capabilities, chinese: chinese))
-            Text(TeamBotMemberText.remaining(unverified ? nil : bot.memberRemaining, chinese: chinese))
+            Text(verbatim: TeamBotMemberText.line(TeamBotMemberText.capabilities(bot.capabilities)))
+            Text(verbatim: TeamBotMemberText.line([TeamBotMemberText.remaining(unverified ? nil : bot.memberRemaining)]))
                 .accessibilityIdentifier("teams.bot.remaining.\(bot.sharedBotId)")
-            if !unverified, let reset = TeamBotMemberText.reset(bot.memberQuotaReset, chinese: chinese) { Text(reset) }
+            if !unverified, let reset = TeamBotMemberText.reset(bot.memberQuotaReset) { Text(verbatim: TeamBotMemberText.line([reset])) }
         }
         .font(.caption).foregroundStyle(.secondary)
+    }
+}
+
+/// What a tap on one of the Bot's example requests does: it fills the draft and never sends (`teams_bot_examples_hint`, the words Desktop and
+/// Web use). Nothing when the Bot has no examples.
+struct TeamBotExamplesHint: View {
+    let bot: TeamBotCard
+
+    var body: some View {
+        if !bot.memberExamples.isEmpty { Text("teams_bot_examples_hint").font(.caption).foregroundStyle(.secondary) }
     }
 }
 
@@ -58,6 +83,7 @@ struct TeamBotCardView: View {
                 Text("teams_bot_not_shared").font(.caption).foregroundStyle(.secondary)
             }
             if bot.selectable, let onExample {
+                TeamBotExamplesHint(bot: bot)
                 ForEach(bot.memberExamples, id: \.self) { example in
                     Button { onExample(example) } label: {
                         Label(example, systemImage: "text.bubble").font(.subheadline).minimumHitTarget(minWidth: 0, alignment: .leading)

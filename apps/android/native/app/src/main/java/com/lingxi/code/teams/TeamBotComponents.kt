@@ -303,16 +303,31 @@ internal fun StopSharingDialog(botName: String, onConfirm: () -> Unit, onDismiss
     )
 }
 
+/**
+ * Items on one line, "Wait and resume: Supported · Write operations: Not supported". The colon and the middle dot are punctuation, the same in every
+ * language and on every client, so they stay in code; only the words are resources (U12).
+ */
+@Composable
+internal fun teamBotLine(items: List<TeamBotItem>): String = items.map { item ->
+    stringResource(item.label) + ": " + when (val value = item.value) {
+        is TeamBotValue.Words -> stringResource(value.id)
+        is TeamBotValue.Figure -> value.text
+    }
+}.joinToString(" · ")
+
 /** Member-safe projection only: never render host reasons, credentials or configured quota limits. */
 @Composable
 internal fun TeamBotMemberInfo(bot: TeamBotCard, enabled: Boolean, onExample: ((String) -> Unit)? = null, modifier: Modifier = Modifier) {
-    val chinese = LocalConfiguration.current.locales[0].language == "zh"
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(TeamBotEntry.capabilities(bot, chinese), style = MaterialTheme.typography.bodySmall)
-        Text(TeamBotEntry.quota(bot, chinese), style = MaterialTheme.typography.bodySmall)
-        if (onExample != null) bot.examples.forEachIndexed { index, example ->
-            TextButton(enabled = enabled && bot.selectable, onClick = { onExample(example) }, modifier = Modifier.testTag("teams.bot.example.${bot.sharedBotId}.$index")) {
-                Text(example, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+        Text(teamBotLine(TeamBotEntry.capabilities(bot)), style = MaterialTheme.typography.bodySmall)
+        Text(teamBotLine(listOf(TeamBotEntry.remaining(bot), TeamBotEntry.resets(bot))), style = MaterialTheme.typography.bodySmall)
+        if (onExample != null && bot.examples.isNotEmpty()) {
+            // What a tap on an example does, in the words Desktop and Web use: it fills the draft and never sends.
+            Text(stringResource(R.string.teams_bot_examples_hint), style = MaterialTheme.typography.bodySmall)
+            bot.examples.forEachIndexed { index, example ->
+                TextButton(enabled = enabled && bot.selectable, onClick = { onExample(example) }, modifier = Modifier.testTag("teams.bot.example.${bot.sharedBotId}.$index")) {
+                    Text(example, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                }
             }
         }
     }

@@ -368,6 +368,7 @@ struct NewConversationSheet: View {
                 }
             }
             TeamBotMemberInfo(bot: bot, unverified: model?.botsUnverified == true)
+            TeamBotExamplesHint(bot: bot)
             ForEach(bot.memberExamples, id: \.self) { example in
                 Button {
                     Task {

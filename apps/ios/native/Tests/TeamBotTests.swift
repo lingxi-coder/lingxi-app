@@ -216,3 +216,131 @@ final class TeamBotTests: XCTestCase {
         XCTAssertEqual(TeamBotSelection.unavailable([sharedBotId], cards: [card], participants: [sharedBotId]), [sharedBotId])
     }
 }
+
+/// P0 member projections and example admission are Foundation-only so they can run without a native app build.
+final class TeamBotMemberEntryTests: XCTestCase {
+    private func card(_ extra: [String: Any] = [:]) throws -> TeamBotCard {
+        var json: [String: Any] = ["sharedBotId": "sharedbot_01", "name": "Helper", "description": "", "maintainer": ["uid": "owner", "generation": 3],
+            "revision": 2, "state": "published", "permitted": true, "ready": true, "onlineUntil": 0,
+            "usePolicy": ["mode": "all"], "quotas": ["team": 100, "member": 20, "bot": 50]]
+        json.merge(extra) { _, new in new }
+        return try JSONDecoder().decode(TeamBotCard.self, from: JSONSerialization.data(withJSONObject: json))
+    }
+    func testMissingProjectionNeverInventsCapabilityOrRemainingQuota() throws {
+        let value = try card()
+        XCTAssertEqual(value.memberAvailability, .unverified)
+        XCTAssertNil(value.capabilities)
+        XCTAssertNil(value.memberRemaining)
+        XCTAssertNil(value.memberQuotaReset)
+        XCTAssertEqual(value.memberExamples, [])
+        XCTAssertEqual(TeamBotMemberText.remaining(value.memberRemaining, chinese: false), "Your daily remaining: unverified")
+        XCTAssertEqual(TeamBotMemberText.capabilities(value.capabilities, chinese: true), "能力未核实")
+    }
+    func testServerMemberProjectionPreservesZeroAndActualCapabilities() throws {
+        let value = try card(["examples": [" First ", "", "First", "Second", "Third", "Fourth"],
+            "capabilities": ["durableWait": true, "writeOperations": false], "availability": "quota_exhausted", "dailyRemaining": 0, "quotaResetsAt": 86_400_000])
+        XCTAssertEqual(value.memberExamples, ["First", "Second", "Third"])
+        XCTAssertEqual(value.capabilities, TeamBotCapabilities(durableWait: true, writeOperations: false))
+        XCTAssertEqual(value.memberAvailability, .quota_exhausted)
+        XCTAssertEqual(value.memberRemaining, 0)
+        XCTAssertEqual(TeamBotMemberText.reset(value.memberQuotaReset, chinese: false), "Quota resets: 1970-01-02 00:00 UTC")
+        XCTAssertEqual(TeamBotMemberText.capabilities(value.capabilities, chinese: false), "Wait and resume: supported · Write operations: unsupported")
+    }
+    func testUnknownStateAndInvalidProjectionStayUnverified() throws {
+        let value = try card(["availability": "raw_host_failure_credentials", "dailyRemaining": -1, "quotaResetsAt": -1])
+        XCTAssertEqual(value.memberAvailability, .unverified)
+        XCTAssertNil(value.memberRemaining)
+        XCTAssertNil(value.memberQuotaReset)
+        XCTAssertNil(TeamBotMemberText.reset(.infinity, chinese: false))
+        XCTAssertThrowsError(try card(["capabilities": ["durableWait": true]]))
+        for state in ["ready", "paused", "offline", "maintenance", "quota_exhausted", "unverified"] {
+            let card = try card(["availability": state])
+            XCTAssertFalse(TeamBotMemberText.availability(card.memberAvailability, chinese: false).isEmpty)
+            XCTAssertFalse(TeamBotMemberText.availability(card.memberAvailability, chinese: true).isEmpty)
+        }
+    }
+    func testExamplesOnlyFillAnUntouchedComposer() {
+        let empty = TeamComposerDraft()
+        XCTAssertEqual(empty.fillingExample("Example", hasFiles: false).text, "Example")
+        XCTAssertEqual(empty.fillingExample("Example", hasFiles: true), empty)
+        XCTAssertEqual(empty.fillingExample("  ", hasFiles: false), empty)
+        for draft in [TeamComposerDraft(text: "Existing"), TeamComposerDraft(text: " "), TeamComposerDraft(replyToID: "reply"), TeamComposerDraft(targets: ["sharedbot_other"])] {
+            XCTAssertEqual(draft.fillingExample("Example", hasFiles: false), draft)
+        }
+    }
+    func testDraftOwnershipIncludesAccountTeamGenerationAndConversation() {
+        let key = TeamComposerDraft.key(uid: "u", teamID: "t", generation: 1, conversationID: "c")
+        XCTAssertNotEqual(key, TeamComposerDraft.key(uid: "other", teamID: "t", generation: 1, conversationID: "c"))
+        XCTAssertNotEqual(key, TeamComposerDraft.key(uid: "u", teamID: "other", generation: 1, conversationID: "c"))
+        XCTAssertNotEqual(key, TeamComposerDraft.key(uid: "u", teamID: "t", generation: 2, conversationID: "c"))
+        XCTAssertNotEqual(key, TeamComposerDraft.key(uid: "u", teamID: "t", generation: 1, conversationID: "other"))
+    }
+    func testDirectoryKeepsServerVisiblePausedCardsWithoutGrantingUse() throws {
+        let published = try card(), paused = try card(["sharedBotId": "sharedbot_paused", "state": "paused", "permitted": false, "availability": "paused"])
+        let retired = try card(["sharedBotId": "sharedbot_retired", "state": "deleted"])
+        XCTAssertEqual(TeamBotMemberRules.directory([published, paused, retired]).map(\.sharedBotId), ["sharedbot_01", "sharedbot_paused"])
+        XCTAssertFalse(paused.selectable)
+        XCTAssertEqual(TeamBotMemberText.availability(paused.memberAvailability, chinese: true), "已暂停")
+    }
+    func testOnlyNewBotSubmitsObserveKnownAvailability() throws {
+        for state in ["paused", "offline", "maintenance", "quota_exhausted"] {
+            let card = try card(["availability": state])
+            let block = { (targets: Set<String>, operation: String, wait: Bool) in
+                TeamBotMemberRules.blockedAvailability(targets: targets, cards: [card], operation: operation, answeringWait: wait)
+            }
+            XCTAssertEqual(block(["sharedbot_01"], "create", false)?.rawValue, state)
+            XCTAssertNil(block(["sharedbot_01"], "create", true), "a wait answer starts no task")
+            XCTAssertNil(block(["sharedbot_01"], "edit", false))
+            XCTAssertNil(block(["sharedbot_01"], "recall", false))
+            XCTAssertNil(block([], "create", false), "human-only messages retain local queueing")
+            XCTAssertNil(block(["other_bot"], "create", false))
+        }
+        for fields: [String: Any] in [[:], ["availability": "unverified"], ["availability": "ready"]] {
+            XCTAssertNil(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: [try card(fields)]))
+        }
+    }
+    func testMaintenanceRefreshExpiresIndependentlyOfHostLeaseUsingFakeClock() throws {
+        let maintenance = try card(["availability": "maintenance", "ready": false, "onlineUntil": 9000, "statusExpiresAt": 2000, "dailyRemaining": 4])
+        let ready = try card(["sharedBotId": "sharedbot_ready", "availability": "ready", "onlineUntil": 8000, "statusExpiresAt": 6000])
+        XCTAssertEqual(TeamBotMemberRules.nextStatusRefresh([ready, maintenance], now: 1000), 2000)
+        XCTAssertEqual(maintenance.expiringStatus(at: 1999).memberAvailability, .maintenance)
+        let expired = maintenance.expiringStatus(at: 2000)
+        XCTAssertEqual(expired.memberAvailability, .unverified)
+        XCTAssertNil(expired.memberRemaining, "a slow/failed refresh must not leave a fresh-looking remaining count")
+        XCTAssertEqual(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: [expired]), .maintenance)
+        XCTAssertEqual(TeamBotMemberRules.nextStatusRefresh([ready, expired], now: 2000), 6000)
+        XCTAssertNil(TeamBotMemberRules.nextStatusRefresh([ready, expired], now: 6000))
+        let legacy = try card(["onlineUntil": 5000]), legacyOffline = try card(["ready": false, "onlineUntil": 5000])
+        XCTAssertEqual(legacy.memberStatusExpiry, 5000)
+        XCTAssertNil(legacyOffline.memberStatusExpiry)
+        XCTAssertEqual(TeamBotMemberRules.nextStatusRefresh([legacy, legacyOffline], now: 4000), 5000)
+    }
+
+    func testKnownRefusalRemainsBlockedDuringPendingAndFailedRefreshUntilFreshReady() throws {
+        for state in ["paused", "offline", "maintenance", "quota_exhausted"] {
+            let known = try card(["availability": state, "statusExpiresAt": 2000])
+            let pending = known.expiringStatus(at: 2000)
+            let failed = TeamBotMemberRules.failedValidation([pending])
+            XCTAssertEqual(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: [pending])?.rawValue, state)
+            XCTAssertEqual(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: failed)?.rawValue, state)
+        }
+        let maintenance = try card(["availability": "maintenance", "ready": false, "onlineUntil": 9000, "statusExpiresAt": 2000])
+        let pending = maintenance.expiringStatus(at: 2000)
+        XCTAssertEqual(pending.memberAvailability, .unverified)
+        XCTAssertEqual(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: [pending]), .maintenance)
+        let failed = TeamBotMemberRules.failedValidation([pending, try card(["sharedBotId": "legacy"])])
+        XCTAssertEqual(failed.map(\.sharedBotId), ["sharedbot_01"], "legacy cards keep their original failed-read behavior")
+        XCTAssertEqual(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: failed), .maintenance)
+        let unknown = TeamBotMemberRules.validatedCards([try card(["availability": "unverified"])], previous: failed, now: 2500)
+        XCTAssertEqual(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: unknown), .maintenance)
+        let staleReady = TeamBotMemberRules.validatedCards([try card(["availability": "ready", "statusExpiresAt": 2400])], previous: failed, now: 2500)
+        XCTAssertEqual(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: staleReady), .maintenance)
+        let ready = TeamBotMemberRules.validatedCards([try card(["availability": "ready", "statusExpiresAt": 4000])], previous: failed, now: 2500)
+        XCTAssertNil(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: ready))
+        XCTAssertNil(TeamBotMemberRules.blockedAvailability(targets: [], cards: failed))
+        XCTAssertNil(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: failed, answeringWait: true))
+        XCTAssertNil(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: failed, operation: "edit"))
+        XCTAssertNil(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: failed, operation: "recall"))
+    }
+
+}

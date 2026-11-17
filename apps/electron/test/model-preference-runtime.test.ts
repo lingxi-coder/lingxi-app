@@ -8,11 +8,14 @@ import { SessionRuntime } from '../src/main/bridge.js';
 import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
 import { SettingsStore } from '../src/main/settings';
 import type { ClientCommand } from '@lingxi/bridge-client';
+import type { ProviderAccountLaunch } from '../src/main/provider-accounts.js';
 const defaultRef = { projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555' };
-function runtime(store: SettingsStore, ref = defaultRef, resolveProviderAccounts?: () => Promise<undefined>) {
+function runtime(store: SettingsStore, ref = defaultRef, resolveProviderAccounts?: () => Promise<ProviderAccountLaunch | undefined>) {
   const commands: ClientCommand[] = [];
   const observed: string[] = [];
-  const client = Object.assign(new EventEmitter(), { cancel: () => undefined, sendCommand: (command: ClientCommand) => {
+  const client = Object.assign(new EventEmitter(), { cancel: () => undefined,
+    getWorkspaceState: async () => ({ cwd: ref.projectPath, additional_directories: [] as string[] }),
+    sendCommand: (command: ClientCommand) => {
     // Audio context refreshes are independent of model persistence.
     if (command.type !== 'get_audio_session_context') commands.push(command);
   } });
@@ -35,6 +38,215 @@ function modelPreferenceCommands(commands: ClientCommand[]): ClientCommand[] {
   // runtime concern; these tests assert model preference effects only.
   return commands.filter(command => command.type !== 'get_audio_session_context');
 }
+
+function aliasFence(client: ReturnType<typeof runtime>['client']) {
+  const releases: Array<() => void> = [];
+  client.getWorkspaceState = () => new Promise(resolve => {
+    releases.push(() => resolve({ cwd: defaultRef.projectPath, additional_directories: [] }));
+  });
+  return releases;
+}
+
+test('direct alias ACK uses exact UTF16 source and a correlated FIFO fence before saving the canonical model', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-source-ack-'));
+  const store = new SettingsStore(dir); store.setLastModel('old-model');
+  const { instance, client } = runtime(store);
+  const fences = aliasFence(client);
+  const source = 'release-\ud800';
+  const selecting = instance.dispatchCommand({ type: 'set_model', model: source });
+  const settled = Promise.allSettled([selecting]);
+  try {
+    await tick();
+    client.emit('event', { type: 'model_changed', model: 'provider-a/concrete-model', model_source: 'release-\ufffd' });
+    await tick();
+    assert.equal(fences.length, 0, 'a lossy replacement is not the requested source');
+    client.emit('event', { type: 'model_changed', model: 'provider-a/concrete-model', model_source: source });
+    await tick();
+    assert.equal(fences.length, 1, 'source aliases require a correlated command-queue fence');
+    client.emit('event', { type: 'model_list', current: 'provider-a/concrete-model', models: ['provider-a/concrete-model'] });
+    await tick();
+    assert.equal(store.getPublic().model, 'old-model', 'unsolicited model listings cannot release that fence');
+    fences.shift()!();
+    assert.equal((await settled)[0].status, 'fulfilled');
+    assert.equal(store.getPublic().model, 'provider-a/concrete-model');
+  } finally {
+    instance.cancelTurn(undefined); fences.splice(0).forEach(release => release());
+    await settled; rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('direct model ACK cannot use another provider or a missing or wrong source as a suffix match', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const requested of ['shared-model', 'provider-a/shared-model']) {
+    const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-ack-scope-'));
+    const store = new SettingsStore(dir); store.setLastModel('old-model');
+    const { instance, client } = runtime(store);
+    client.emit('event', { type: 'settings_snapshot', effective_json: JSON.stringify({ providers: {
+      'provider-a': { models: ['shared-model'] }, 'provider-b': { models: ['shared-model'] },
+    } }), provenance_json: '{}' });
+    const selecting = instance.dispatchCommand({ type: 'set_model', model: requested });
+    const settled = Promise.allSettled([selecting]);
+    try {
+      await tick();
+      for (const source of [undefined, 'wrong-source', ...(requested.includes('/') ? [requested] : [])]) {
+        client.emit('event', { type: 'model_changed', model: 'provider-b/shared-model', ...(source === undefined ? {} : { model_source: source }) });
+        client.emit('event', { type: 'model_list', current: 'provider-b/shared-model', models: ['provider-a/shared-model', 'provider-b/shared-model'] });
+        await tick();
+        assert.equal(store.getPublic().model, 'old-model');
+        assert.equal(instance.turnActive, true, 'an unrelated provider/source cannot confirm the pending selection');
+      }
+    } finally {
+      instance.cancelTurn(undefined); await settled;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a bare wire id containing a slash is not mistaken for an explicit provider scope', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-nested-wire-'));
+  const store = new SettingsStore(dir); store.setLastModel('old-model');
+  const { instance, client } = runtime(store);
+  const fences = aliasFence(client);
+  client.emit('event', { type: 'settings_snapshot', effective_json: JSON.stringify({ providers: {
+    'provider-a': { models: ['vendor/shared-model'] },
+  } }), provenance_json: '{}' });
+  const selecting = instance.dispatchCommand({ type: 'set_model', model: 'vendor/shared-model' });
+  const settled = Promise.allSettled([selecting]);
+  try {
+    await tick();
+    client.emit('event', { type: 'model_changed', model: 'provider-a/vendor/shared-model', model_source: 'vendor/shared-model' });
+    await tick(); assert.equal(fences.length, 1); fences.shift()!();
+    assert.equal((await settled)[0].status, 'fulfilled');
+    assert.equal(store.getPublic().model, 'provider-a/vendor/shared-model');
+  } finally {
+    instance.cancelTurn(undefined); fences.splice(0).forEach(release => release());
+    await settled; rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an alias fence failure cannot save a selection or leave its pending switch busy', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-fence-error-'));
+  const store = new SettingsStore(dir); store.setLastModel('old-model');
+  const { instance, client } = runtime(store);
+  let fences = 0;
+  client.getWorkspaceState = async () => { fences++; throw new Error('fixture connection closed'); };
+  const selecting = instance.dispatchCommand({ type: 'set_model', model: 'latest' });
+  const settled = Promise.allSettled([selecting]);
+  try {
+    await tick();
+    client.emit('event', { type: 'model_changed', model: 'provider-a/current-model', model_source: 'latest' });
+    await tick(); assert.equal(fences, 1);
+    assert.equal((await settled)[0].status, 'rejected');
+    assert.equal(instance.turnActive, false);
+    assert.equal(store.getPublic().model, 'old-model');
+  } finally {
+    instance.cancelTurn(undefined); await settled;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a cancelled alias fence cannot persist over a fresh confirmed selection when it resolves later', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-stale-fence-'));
+  const store = new SettingsStore(dir); store.setLastModel('old-model');
+  const { instance, client } = runtime(store);
+  const fences = aliasFence(client);
+  const first = instance.dispatchCommand({ type: 'set_model', model: 'latest' });
+  const firstOutcome = Promise.allSettled([first]);
+  let secondOutcome: Promise<PromiseSettledResult<void>[]> | undefined;
+  try {
+    await tick(); client.emit('event', { type: 'model_changed', model: 'provider-a/old-model', model_source: 'latest' });
+    await tick(); assert.equal(fences.length, 1);
+    instance.cancelTurn(undefined); await firstOutcome;
+    const second = instance.dispatchCommand({ type: 'set_model', model: 'provider-a/fresh-model' });
+    secondOutcome = Promise.allSettled([second]); await tick();
+    client.emit('event', { type: 'model_changed', model: 'provider-a/fresh-model' });
+    assert.equal((await secondOutcome)[0].status, 'fulfilled');
+    fences.shift()!(); await tick();
+    assert.equal(store.getPublic().model, 'provider-a/fresh-model');
+  } finally {
+    instance.cancelTurn(undefined); fences.splice(0).forEach(release => release());
+    await firstOutcome; await secondOutcome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cancel then the same alias ignores old ACK/listing and confirms only the latest raw ACK after its fence', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-alias-cancel-'));
+  const store = new SettingsStore(dir); store.setLastModel('old-model');
+  const { instance, client, commands } = runtime(store);
+  const fences = aliasFence(client);
+  const first = instance.dispatchCommand({ type: 'set_model', model: 'latest' });
+  const firstOutcome = Promise.allSettled([first]);
+  let secondOutcome: Promise<PromiseSettledResult<void>[]> | undefined;
+  try {
+    await tick(); instance.cancelTurn(undefined); await firstOutcome;
+    const second = instance.dispatchCommand({ type: 'set_model', model: 'latest' });
+    secondOutcome = Promise.allSettled([second]); await tick();
+    assert.equal(commands.filter(command => command.type === 'set_model').length, 2);
+    client.emit('event', { type: 'model_changed', model: 'provider-a/old-version', model_source: 'latest' });
+    await tick();
+    assert.equal(fences.length, 1);
+    client.emit('event', { type: 'model_list', current: 'provider-a/old-version', models: ['provider-a/old-version'] });
+    await tick();
+    assert.equal(store.getPublic().model, 'old-model');
+    client.emit('event', { type: 'model_changed', model: 'provider-a/new-version', model_source: 'latest' });
+    await tick();
+    fences.splice(0).forEach(release => release());
+    assert.equal((await secondOutcome)[0].status, 'fulfilled');
+    assert.equal(store.getPublic().model, 'provider-a/new-version', 'the fence must use the latest raw ACK, not its earlier candidate');
+  } finally {
+    instance.cancelTurn(undefined); fences.splice(0).forEach(release => release());
+    await firstOutcome; await secondOutcome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('credential injection ACK is a real FIFO barrier before the replacement model command is marked sent', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-injection-fifo-'));
+  const store = new SettingsStore(dir); store.setLastModel('old-model');
+  const launch: ProviderAccountLaunch = { providerAccounts: { storeScope: 'fixture', configRevision: 1, accounts: [], health: [] }, providerAccountCredentials: {} };
+  const { instance, client, commands } = runtime(store, defaultRef, async () => launch);
+  Object.assign(instance, { state: { status: 'connected' } });
+  const fences = aliasFence(client);
+  const first = instance.dispatchCommand({ type: 'set_model', model: 'latest' });
+  const firstOutcome = Promise.allSettled([first]);
+  let secondOutcome: Promise<PromiseSettledResult<void>[]> | undefined;
+  const injects = () => commands.filter((command): command is Extract<ClientCommand, { type: 'provider_accounts' }> => command.type === 'provider_accounts');
+  try {
+    await tick();
+    assert.equal(commands.filter(command => command.type === 'set_model').length, 0);
+    client.emit('event', { type: 'provider_accounts_updated', operation_id: injects()[0].operation_id, snapshot_json: '{}' });
+    await tick(); instance.cancelTurn(undefined); await firstOutcome;
+    const second = instance.dispatchCommand({ type: 'set_model', model: 'latest' });
+    secondOutcome = Promise.allSettled([second]); await tick();
+    assert.equal(injects().length, 2);
+    assert.equal((instance as any).pendingModelSwitch.sent, false);
+    client.emit('event', { type: 'model_changed', model: 'provider-a/old-version', model_source: 'latest' });
+    await tick();
+    assert.equal(fences.length, 0, 'the old ACK is before the injection ACK, so the new model has not been sent');
+    assert.equal(commands.filter(command => command.type === 'set_model').length, 1);
+    client.emit('event', { type: 'provider_accounts_updated', operation_id: injects()[1].operation_id, snapshot_json: '{}' });
+    await tick();
+    assert.equal((instance as any).pendingModelSwitch.sent, true);
+    assert.equal(commands.filter(command => command.type === 'set_model').length, 2);
+    client.emit('event', { type: 'model_changed', model: 'provider-a/new-version', model_source: 'latest' });
+    await tick();
+    assert.equal(fences.length, 1); fences.shift()!();
+    assert.equal((await secondOutcome)[0].status, 'fulfilled');
+    assert.equal(store.getPublic().model, 'provider-a/new-version');
+  } finally {
+    instance.cancelTurn(undefined); fences.splice(0).forEach(release => release());
+    for (const command of injects()) client.emit('event', { type: 'provider_accounts_updated', operation_id: command.operation_id, snapshot_json: '{}' });
+    await firstOutcome; await secondOutcome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('model confirmation gives the full ACK budget after waiting for credentials', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });

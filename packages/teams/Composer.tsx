@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactElement } from 'react';
 import { ATTACHMENT_ACCEPT, type FileRefusal } from './attachments.js';
 import { DraftFiles } from './MessageFiles';
+import { BotMemberDetails, botAvailabilityText } from './BotMemberDetails';
 import { messageErrorText } from './errors.js';
 import { sharedBotUsable, type SharedBotCard } from './execution.js';
 import { botDmHandedOver, byteLength, canSendText, mentionAt, mentionCandidates, MESSAGE_BYTES, sendsOnEnter, snippet, withoutMention } from './compose.js';
@@ -90,8 +91,18 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
   const open = candidates.length > 0;
   const choice = Math.min(active, Math.max(0, candidates.length - 1));
   const askable = asks && snapshot.bots.some(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`));
+  const dmBot = conversation.kind === 'bot_dm' ? snapshot.bots.find(bot => conversation.participants.includes(`shared_bot:${bot.sharedBotId}`)) : undefined;
+  const contextBots = dmBot ? [dmBot] : snapshot.bots.filter(bot => targets.includes(bot.sharedBotId));
+  const requestedBots = dmBot ? [dmBot.sharedBotId] : targets;
+  const unavailable = !editing && !answering && (requestedBots.some(id => snapshot.blockedBotIds.includes(id)) || snapshot.bots.some(bot => requestedBots.includes(bot.sharedBotId) && (bot.state === 'paused' || ['paused', 'offline', 'maintenance', 'quota_exhausted'].includes(bot.availability ?? ''))));
   const bytes = byteLength(text);
   const botName = (key: string) => snapshot.bots.find(bot => bot.sharedBotId === key)?.name ?? t('teams_bot_tag');
+
+  // A member-home example may arrive just after the DM mounted. Read the scoped draft again.
+  useEffect(() => {
+    const draft = workspace.draft(conversation.id);
+    if (!editing && !answering && draft !== latest.current) { setText(draft); caretTo.current = draft.length; input.current?.focus(); }
+  }, [workspace, conversation.id, snapshot.draftText, editing?.id, answering?.waitId]);
 
   // An edit borrows the box: the draft is set aside and comes back when the edit ends.
   useEffect(() => {
@@ -152,7 +163,7 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
   const sendable = (canSendText(text) || (ready.length > 0 && !text.trim())) && filesSettled && byteLength(text) <= MESSAGE_BYTES;
 
   const send = async () => {
-    if (lock || !sendable || snapshot.messageBusy) return;
+    if (lock || unavailable || !sendable || snapshot.messageBusy) return;
     const body = text, replied = reply?.message, changing = editing, answered = answering?.waitId, carried = ready;
     const ok = await workspace.run(async () => {
       const model = snapshot.messaging;
@@ -193,6 +204,7 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
   if (lock) return <div className="tw-composer tw-composer-locked"><p className="tw-readonly" role="status">{lock}</p>
     {moved ? <button type="button" disabled={snapshot.messageBusy} onClick={() => void workspace.openBotDm(moved)}>{t('tw_composer_new_chat')}</button> : null}</div>;
   return <form className="tw-composer" onSubmit={event => { event.preventDefault(); void send(); }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={drop}>
+    {contextBots.map(bot => <div key={bot.sharedBotId}>{!dmBot ? <b>{bot.name}</b> : null}<BotMemberDetails bot={bot} locale={locale} busy={snapshot.messageBusy || !!editing || !!answering} onExample={dmBot ? example => workspace.fillExample(conversation.id, example) : undefined} /></div>)}
     {editing ? <div className="tw-context"><Icon name="edit" /><span>{t('teams_editing_message')}</span><button type="button" className="tw-link" onClick={onClearEditing}>{t('common_cancel')}</button></div> : null}
     {reply ? <div className="tw-context"><Icon name="reply" /><span className="tw-context-text">{withSlot(t('teams_replying_to_fmt', SLOT), <b>{reply.author}</b>)}: {snippet(reply.message.recalled ? t('tw_composer_recalled') : reply.message.text)}</span>
       <button type="button" className="tw-icon-btn" aria-label={t('teams_cancel_reply')} onClick={onClearReply}><Icon name="x" /></button></div> : null}
@@ -212,7 +224,7 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
         {candidates.map((bot, index) => <li key={bot.sharedBotId} id={`${listId}-${index}`} role="option" aria-selected={index === choice} className="tw-mention"
           onMouseDown={event => { event.preventDefault(); pick(bot); }}>
           <Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={24} render={renderAvatar} />
-          <b>{bot.name}</b><small>{bot.ready ? t('remote_online') : t('tw_host_unavailable')}</small>
+          <b>{bot.name}</b><small>{botAvailabilityText(bot, locale)}</small>
         </li>)}
       </ul> : null}
       <textarea ref={input} rows={1} value={text} onChange={change} onPaste={paste} onSelect={event => setCaret(event.currentTarget.selectionStart)} onKeyDown={keys}
@@ -228,12 +240,13 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
         {asks ? <button type="button" className="tw-icon-btn" aria-label={t('teams_composer_ask_bot')} title={t('teams_composer_ask_bot')} disabled={!askable || targets.length >= MAX_TARGETS} onClick={insertAt}><Icon name="at" /></button> : null}
         {bytes > MESSAGE_BYTES * 0.9 ? <span className="tw-count" data-over={bytes > MESSAGE_BYTES} role="status">{bytes.toLocaleString(intlTag(locale))} / {MESSAGE_BYTES.toLocaleString(intlTag(locale))}</span> : null}
         {editing ? <button type="button" onClick={onClearEditing}>{t('common_cancel')}</button> : null}
-        <button type="submit" className="tw-primary tw-send" disabled={snapshot.messageBusy || !sendable} aria-label={editing ? t('teams_message_save') : t('teams_message_send')}>
+        <button type="submit" className="tw-primary tw-send" disabled={snapshot.messageBusy || unavailable || !sendable} aria-label={editing ? t('teams_message_save') : t('teams_message_send')}>
           {editing ? t('common_save') : <Icon name="send" />}
         </button>
       </div>
     </div>
     <p className="tw-hint">
+      {unavailable ? `${t('tw_composer_unavailable')} ` : ''}
       {files.length && !filesSettled ? `${files.some(file => file.state === 'failed') ? t('teams_file_note_failed') : t('teams_file_note_uploading')} ` : ''}
       {answering ? t('tw_composer_reply_note')
         : conversation.kind === 'bot_dm' ? t('teams_composer_note_bot_dm')

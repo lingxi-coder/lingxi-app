@@ -314,7 +314,7 @@ export class SessionRuntime {
   private readonly latestState = new Map<string, SequencedRuntimeEventEnvelope<ClientEvent>>();
   private remotePendingNotified = false;
   private credentialRoutingSettings: unknown = undefined;
-  private pendingModelSwitch: { model: string; sent: boolean; slash: boolean; turnId?: number; promise: Promise<void>; complete(selected?: string): void; fail(error: Error): void } | undefined;
+  private pendingModelSwitch: { model: string; sent: boolean; slash: boolean; turnId?: number; promise: Promise<void>; complete(selected?: string): void; confirmAlias(): void; fail(error: Error): void } | undefined;
 
   private pendingPermissionSwitch: {
     mode: PermissionModeId;
@@ -446,6 +446,24 @@ export class SessionRuntime {
     let reject!: (error: Error) => void;
     const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let aliasFencePending = false;
+    const current = (): boolean => this.pendingModelSwitch === pending && pending.sent
+      && generation === this.generation && client === this.client && !this.disposed && !this.archiving;
+    const aliasAckMatches = (): boolean => {
+      const ack = this.latestModelAck;
+      if (!ack || ack.client !== client || ack.generation !== generation || ack.source !== model || !ack.model) return false;
+      const slash = model.indexOf('/');
+      if (slash < 0) return true;
+      const prefix = model.slice(0, slash);
+      const knownProfile = this.configuredCustomProviderIds.includes(prefix) || this.accountBindings.has(prefix)
+        || this.latestOfficialProviderCatalog.some(provider => provider.provider_id === prefix);
+      if (ack.model.startsWith(`${prefix}/`)) return true;
+      if (knownProfile) return false;
+      // An unqualified provider wire id can itself contain '/'. Only remove
+      // the server's one profile segment when comparing that complete wire id.
+      const profileEnd = ack.model.indexOf('/');
+      return profileEnd >= 0 && ack.model.slice(profileEnd + 1) === model;
+    };
     const finish = (error?: Error): void => {
       if (this.pendingModelSwitch !== pending) return;
       clearTimeout(timer);
@@ -462,6 +480,21 @@ export class SessionRuntime {
         } catch (error) {
           finish(new Error(`Could not save model: ${sanitizeDiagnostic(error)}`));
         }
+      },
+      confirmAlias: (): void => {
+        if (!current() || aliasFencePending || !aliasAckMatches()) return;
+        aliasFencePending = true;
+        void (async () => {
+          try {
+            // This correlated RPC shares SetModel's ordinary FIFO. It is a
+            // barrier, not a model snapshot: its response follows this switch's
+            // raw ACK, unlike an unsolicited model_list event.
+            await client.getWorkspaceState();
+            if (current() && aliasAckMatches()) pending.complete(this.latestModelAck!.model);
+          } catch {
+            if (current()) pending.fail(new Error('Model switch confirmation failed.'));
+          } finally { aliasFencePending = false; }
+        })();
       },
       fail: (error: Error) => finish(error),
     };
@@ -737,6 +770,7 @@ export class SessionRuntime {
   get audioSessionContext() { return this.cachedAudioSessionContext ? { ...this.cachedAudioSessionContext } : undefined; }
 
   private selectedModelReference: string | undefined;
+  private latestModelAck: { client: BridgeClient; generation: number; model: string; source?: string } | undefined;
   private pendingCredentialSettings: { promise: Promise<void>; resolve(): void; reject(error: Error): void } | undefined;
 
   private ensureCredentialSettings(): Promise<void> {
@@ -2696,6 +2730,7 @@ export class SessionRuntime {
         return;
       }
       if (event.type === 'model_changed') {
+        this.latestModelAck = { client, generation, model: event.model, source: event.model_source };
         this.requestAudioSessionContext(client, generation);
       }
       if (event.type === 'audio_request') {
@@ -2980,7 +3015,11 @@ export class SessionRuntime {
       }
       if (event.type === 'model_changed') {
         this.selectedModelReference = event.model;
-        if (this.pendingModelSwitch?.sent && !this.pendingModelSwitch.slash && this.pendingModelSwitch.model === event.model) this.pendingModelSwitch.complete();
+        const selection = this.pendingModelSwitch;
+        if (selection?.sent && !selection.slash) {
+          if (selection.model === event.model) selection.complete(event.model);
+          else if (event.model_source === selection.model) selection.confirmAlias();
+        }
         try { this.opts.onModelChanged?.(event.model); }
         catch (error) { this.diagnostics.add('warn', 'host', error); }
         const pending = this.pendingSessionResume;

@@ -35,26 +35,25 @@ final class SecureStorageReplacementTests: XCTestCase {
     #if canImport(harness_runtimeFFI)
     @MainActor
     func testNativeAccountFacadePersistsIndependentKeysAndPriorityAcrossEngines() async throws {
-        let sandbox = FileManager.default.temporaryDirectory.appendingPathComponent("native-account-roundtrip-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: sandbox) }
+        let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+        let sandbox = fixture.sandboxRoot
         let storage = SecureStorageImpl(backend: AccountIsolatedKeychainBackend())
         let media = try IOSNativeMediaHostComposition(
             audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON))
         @MainActor func buildHandle() throws -> MobileEngineHandle {
             let directories = MobileUserStorage.directories(managedRoot: sandbox.appendingPathComponent("runtime").path)
-            return try buildIosEngineWithConfig(config: IosEngineLaunchConfigFfi(
+            return fixture.track(try buildIosEngineWithConfig(config: IosEngineLaunchConfigFfi(
                 appVersion: nil, appAgentHost: false,
                 brandId: directories.brandId, linuxUser: directories.linuxUser,
                 configDirName: directories.configDirName, nativeConfigHome: directories.configHome,
                 apiBase: "https://api.anthropic.com", model: "", sessionMode: .code, initialSessionId: nil, initialSessionTranscriptPath: nil, schedulerController: false,
-                visionDelegationEnabled: false, appSandboxRoot: sandbox.path, projectCwd: nil,
+                visionDelegationEnabled: false, appSandboxRoot: sandbox.path, projectCwd: fixture.guestCwd(),
                 projectAdditionalDirectories: [], projectMountGrants: [], providerConfig: nil,
                 mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
                 physicalMemoryBytes: 0, hostEnvironment: nil), listener: AccountRoundtripListener(),
                 mediaHost: media.nativeHost, share: ShareImpl(), notifications: NotificationImpl(),
                 clipboard: ClipboardImpl(), permissions: AccountRoundtripPermissions(),
-                secureStorage: storage, deviceControl: nil)
+                secureStorage: storage, deviceControl: nil))
         }
         let handle = try buildHandle()
         var snapshot = try JSONDecoder().decode(ProviderAccountSnapshot.self,
@@ -90,9 +89,8 @@ final class SecureStorageReplacementTests: XCTestCase {
 
     @MainActor
     func testLogicalOpenAIConfigurationExposesOAuthOnlyHostModelProjection() async throws {
-        let sandbox = FileManager.default.temporaryDirectory.appendingPathComponent("native-oauth-projection-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: sandbox) }
+        let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+        let sandbox = fixture.sandboxRoot
         let backend = AccountIsolatedKeychainBackend()
         let storage = SecureStorageImpl(backend: backend)
         let directories = MobileUserStorage.directories(managedRoot: sandbox.appendingPathComponent("runtime").path)
@@ -101,12 +99,12 @@ final class SecureStorageReplacementTests: XCTestCase {
         @MainActor func buildHandle() throws -> MobileEngineHandle {
             // Explicitly omit appVersion: the native carrier leaves startup_catalog None,
             // so this fixture uses only built-in local discovery and cannot prefetch a catalog.
-            try buildIosEngineWithConfig(config: IosEngineLaunchConfigFfi(
+            fixture.track(try buildIosEngineWithConfig(config: IosEngineLaunchConfigFfi(
                 appVersion: nil, appAgentHost: false,
                 brandId: directories.brandId, linuxUser: directories.linuxUser,
                 configDirName: directories.configDirName, nativeConfigHome: directories.configHome,
                 apiBase: "https://api.anthropic.com", model: "", sessionMode: .code, initialSessionId: nil, initialSessionTranscriptPath: nil, schedulerController: false,
-                visionDelegationEnabled: false, appSandboxRoot: sandbox.path, projectCwd: nil,
+                visionDelegationEnabled: false, appSandboxRoot: sandbox.path, projectCwd: fixture.guestCwd(),
                 projectAdditionalDirectories: [], projectMountGrants: [],
                 providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}",
                     routingJson: #"{"mobileEnabledProfiles":["openai"]}"#),
@@ -114,7 +112,7 @@ final class SecureStorageReplacementTests: XCTestCase {
                 physicalMemoryBytes: 0, hostEnvironment: nil),
                 listener: AccountRoundtripListener(), mediaHost: media.nativeHost, share: ShareImpl(),
                 notifications: NotificationImpl(), clipboard: ClipboardImpl(),
-                permissions: AccountRoundtripPermissions(), secureStorage: storage, deviceControl: nil)
+                permissions: AccountRoundtripPermissions(), secureStorage: storage, deviceControl: nil))
         }
         let handle = try buildHandle()
         let initial = try JSONDecoder().decode(ProviderAccountSnapshot.self,
@@ -176,7 +174,7 @@ final class SecureStorageReplacementTests: XCTestCase {
         }, "An OAuth-only account does not silently authorize a metered binding")
         let referenceID = "\(available.executionBindingId)/\(available.modelId)"
         let providers = providerConfigurationTestRepository(
-            persistenceURL: sandbox.appendingPathComponent("provider-ui.json"), accounts: accounts)
+            persistenceURL: fixture.caseDirectory.appendingPathComponent("provider-ui.json"), accounts: accounts)
         _ = providers.addProfile(presetID: "openai")
         XCTAssertEqual(providers.makeLaunchSnapshot().enabledProfileIDs, ["openai"])
         XCTAssertTrue(accounts.modelIsAvailable(reference: referenceID))

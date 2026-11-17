@@ -482,6 +482,17 @@ export type TeamsKey =
   | 'tw_back_conversations'
   | 'tw_back_friends'
   | 'tw_back_team'
+  | 'tw_bot_avail_maintenance'
+  | 'tw_bot_avail_offline'
+  | 'tw_bot_avail_quota'
+  | 'tw_bot_avail_unverified'
+  | 'tw_bot_examples_hint'
+  | 'tw_bot_not_supported'
+  | 'tw_bot_remaining_today'
+  | 'tw_bot_resets'
+  | 'tw_bot_supported'
+  | 'tw_bot_wait_resume'
+  | 'tw_bot_write_ops'
   | 'tw_botdir_allowed_memberships'
   | 'tw_botdir_asks_before'
   | 'tw_botdir_audience'
@@ -495,6 +506,10 @@ export type TeamsKey =
   | 'tw_botdir_confirm'
   | 'tw_botdir_consent'
   | 'tw_botdir_empty'
+  | 'tw_botdir_example_fmt'
+  | 'tw_botdir_examples_hint'
+  | 'tw_botdir_examples_legend'
+  | 'tw_botdir_examples_title'
   | 'tw_botdir_host_hint'
   | 'tw_botdir_host_this'
   | 'tw_botdir_import_hint'
@@ -511,6 +526,7 @@ export type TeamsKey =
   | 'tw_botdir_list_purpose_hint'
   | 'tw_botdir_list_title'
   | 'tw_botdir_list_unpublish_hint'
+  | 'tw_botdir_list_unsupported'
   | 'tw_botdir_load_local'
   | 'tw_botdir_local_bot_model'
   | 'tw_botdir_market'
@@ -545,6 +561,7 @@ export type TeamsKey =
   | 'tw_composer_recalled'
   | 'tw_composer_reply_note'
   | 'tw_composer_reply_to_fmt'
+  | 'tw_composer_unavailable'
   | 'tw_connecting'
   | 'tw_conv_connecting'
   | 'tw_conv_creating'
@@ -695,6 +712,19 @@ export type TeamsKey =
   | 'tw_opening'
   | 'tw_people'
   | 'tw_preview_fmt'
+  | 'tw_report_cost_fmt'
+  | 'tw_report_cursor_loop'
+  | 'tw_report_download_csv'
+  | 'tw_report_download_json'
+  | 'tw_report_export'
+  | 'tw_report_generating'
+  | 'tw_report_intro'
+  | 'tw_report_missing_fmt'
+  | 'tw_report_no_cost'
+  | 'tw_report_partial_fmt'
+  | 'tw_report_ready_one_fmt'
+  | 'tw_report_ready_other_fmt'
+  | 'tw_report_unpriced_fmt'
   | 'tw_run_reply'
   | 'tw_run_status_label'
   | 'tw_service_all'
@@ -1261,6 +1291,17 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_back_conversations: { en: '‹ Conversations', 'zh-Hans': '‹ 会话列表', 'zh-Hant': '‹ 會話列表', ja: '‹ 会話一覧', ko: '‹ 대화 목록' },
   tw_back_friends: { en: '‹ Friends', 'zh-Hans': '‹ 好友', 'zh-Hant': '‹ 好友', ja: '‹ 友だち', ko: '‹ 친구' },
   tw_back_team: { en: '‹ Back to the Team', 'zh-Hans': '‹ 返回团队', 'zh-Hant': '‹ 返回團隊', ja: '‹ チームに戻る', ko: '‹ 팀으로 돌아가기' },
+  tw_bot_avail_maintenance: { en: 'Temporarily under maintenance', 'zh-Hans': '暂时维护中', 'zh-Hant': '暫時維護中', ja: '一時的にメンテナンス中', ko: '일시적으로 점검 중' },
+  tw_bot_avail_offline: { en: 'Host offline', 'zh-Hans': '宿主离线', 'zh-Hant': '宿主離線', ja: 'ホストがオフライン', ko: '호스트 오프라인' },
+  tw_bot_avail_quota: { en: 'Daily quota exhausted', 'zh-Hans': '今日额度已用完', 'zh-Hant': '今日額度已用完', ja: '本日の上限に達しました', ko: '오늘의 한도를 모두 사용했습니다' },
+  tw_bot_avail_unverified: { en: 'Status unverified', 'zh-Hans': '状态未确认', 'zh-Hant': '狀態未確認', ja: '状態を確認できません', ko: '상태를 확인할 수 없음' },
+  tw_bot_examples_hint: { en: 'Examples add to your draft. Review and send when ready.', 'zh-Hans': '示例会加入草稿，请检查后自行发送。', 'zh-Hant': '範例會加入草稿，請檢查後自行傳送。', ja: '入力例は下書きに追加されます。内容を確認してから送信してください。', ko: '예시는 초안에 추가됩니다. 내용을 확인한 뒤 직접 보내세요.' },
+  tw_bot_not_supported: { en: 'Not supported', 'zh-Hans': '不支持', 'zh-Hant': '不支援', ja: '非対応', ko: '지원되지 않음' },
+  tw_bot_remaining_today: { en: 'Your remaining requests today', 'zh-Hans': '本人今日剩余请求', 'zh-Hant': '本人今日剩餘請求', ja: '自分の今日の残りリクエスト数', ko: '오늘 남은 내 요청 수' },
+  tw_bot_resets: { en: 'Resets', 'zh-Hans': '重置于', 'zh-Hant': '重置於', ja: 'リセット時刻', ko: '초기화 시각' },
+  tw_bot_supported: { en: 'Supported', 'zh-Hans': '支持', 'zh-Hant': '支援', ja: '対応', ko: '지원됨' },
+  tw_bot_wait_resume: { en: 'Wait and resume', 'zh-Hans': '等待与恢复', 'zh-Hant': '等待與恢復', ja: '待機と再開', ko: '대기 및 재개' },
+  tw_bot_write_ops: { en: 'Write operations', 'zh-Hans': '写入操作', 'zh-Hant': '寫入操作', ja: '書き込み操作', ko: '쓰기 작업' },
   tw_botdir_allowed_memberships: { en: 'Allowed memberships', 'zh-Hans': '允许的成员身份', 'zh-Hant': '允許的成員身分', ja: '許可するメンバーシップ', ko: '허용된 멤버십' },
   tw_botdir_asks_before: { en: 'the Bot asks before each change', 'zh-Hans': 'Bot 每次修改前先征得同意', 'zh-Hant': 'Bot 每次修改前先徵得同意', ja: 'Bot は変更のたびに確認します', ko: 'Bot이 변경할 때마다 확인함' },
   tw_botdir_audience: { en: 'Audience', 'zh-Hans': '受众', 'zh-Hant': '受眾', ja: '対象', ko: '대상' },
@@ -1272,8 +1313,12 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_botdir_choose_bot: { en: 'Choose a Bot', 'zh-Hans': '选择 Bot', 'zh-Hant': '選擇 Bot', ja: 'Bot を選択', ko: 'Bot 선택' },
   tw_botdir_choose_resource: { en: 'Choose an authorized resource', 'zh-Hans': '选择有权共享的资料', 'zh-Hant': '選擇有權共享的資料', ja: '共有する権限のあるリソースを選択', ko: '공유할 권한이 있는 자료 선택' },
   tw_botdir_confirm: { en: 'Confirm publication', 'zh-Hans': '确认发布', 'zh-Hant': '確認發布', ja: '公開を確認', ko: '게시 확인' },
-  tw_botdir_consent: { en: 'I have permission to share the role, selected resources and their derived results with this audience, and confirm model costs and quotas.', 'zh-Hans': '我有权向以上受众共享角色、选定资料及其派生结果，并确认模型费用和额度。', 'zh-Hant': '我有權向上述受眾共享角色、選定的資料及其衍生結果，並確認模型費用與額度。', ja: 'このロール、選択したリソース、およびその派生結果をこの対象と共有する権限があり、モデルの費用と上限を確認しました。', ko: '이 대상과 역할, 선택한 자료 및 파생 결과를 공유할 권한이 있으며, 모델 비용과 한도를 확인했습니다.' },
+  tw_botdir_consent: { en: 'I have permission to share the role, examples, selected resources and their derived results with this audience, and confirm model costs and quotas.', 'zh-Hans': '我有权向以上受众共享角色、示例、选定资料及其派生结果，并确认模型费用和额度。', 'zh-Hant': '我有權向上述受眾共享角色、範例、選定的資料及其衍生結果，並確認模型費用與額度。', ja: 'このロール、入力例、選択したリソース、およびその派生結果をこの対象と共有する権限があり、モデルの費用と上限を確認しました。', ko: '이 대상과 역할, 예시, 선택한 자료 및 파생 결과를 공유할 권한이 있으며, 모델 비용과 한도를 확인했습니다.' },
   tw_botdir_empty: { en: 'No Bots are published yet.', 'zh-Hans': '尚未发布 Bot。', 'zh-Hant': '尚未發布 Bot。', ja: 'まだ公開されている Bot はありません。', ko: '아직 게시된 Bot이 없습니다.' },
+  tw_botdir_example_fmt: { en: 'Example %1$d', 'zh-Hans': '示例 %1$d', 'zh-Hant': '範例 %1$d', ja: '入力例 %1$d', ko: '예시 %1$d' },
+  tw_botdir_examples_hint: { en: 'Review the market defaults or write your own prompts. Members choose an example to fill a draft; it is never sent automatically. Each example allows up to 2,000 UTF-8 bytes.', 'zh-Hans': '请确认市场默认示例，或编辑自己的提示。成员点击示例仅填入草稿，不会自动发送。每条示例最多 2,000 UTF-8 字节。', 'zh-Hant': '請確認市場的預設範例，或自行編寫提示。成員點選範例只會填入草稿，不會自動傳送。每則範例最多 2,000 個 UTF-8 位元組。', ja: 'マーケットの既定の入力例を確認するか、独自のプロンプトを書いてください。メンバーが入力例を選ぶと下書きに入力されるだけで、自動では送信されません。入力例は 1 件あたり最大 2,000 バイト（UTF-8）です。', ko: '마켓의 기본 예시를 확인하거나 직접 프롬프트를 작성하세요. 멤버가 예시를 선택하면 초안에 채워질 뿐 자동으로 전송되지 않습니다. 예시는 하나당 최대 2,000 UTF-8 바이트입니다.' },
+  tw_botdir_examples_legend: { en: 'Member examples (up to 3)', 'zh-Hans': '成员示例（最多 3 条）', 'zh-Hant': '成員範例（最多 3 則）', ja: 'メンバー向けの入力例（最大 3 件）', ko: '멤버용 예시(최대 3개)' },
+  tw_botdir_examples_title: { en: 'Member examples', 'zh-Hans': '成员示例', 'zh-Hant': '成員範例', ja: 'メンバー向けの入力例', ko: '멤버용 예시' },
   tw_botdir_host_hint: { en: 'This Desktop hosts execution and pays its configured model costs. Each request has a five-minute deadline. The Bot changes nothing outside the chat except its shared list, if it has one.', 'zh-Hans': '此 Desktop 承载执行并承担所配置模型的费用。每次请求期限五分钟。除共享清单（如有）外，Bot 不会修改聊天之外的任何内容。', 'zh-Hant': '此 Desktop 負責執行並承擔所設定模型的費用。每次請求的期限為五分鐘。除共享清單（如有）外，Bot 不會修改對話以外的任何內容。', ja: 'この Desktop が実行を担い、設定されたモデルの費用を負担します。各リクエストの期限は5分です。Bot は、共有リスト（ある場合）を除き、チャット以外のものを一切変更しません。', ko: '이 Desktop이 실행을 맡고 설정된 모델의 비용을 부담합니다. 각 요청의 제한 시간은 5분입니다. Bot은 공유 목록(있는 경우)을 제외하고 채팅 밖의 어떤 것도 변경하지 않습니다.' },
   tw_botdir_host_this: { en: 'Host: this Desktop', 'zh-Hans': '宿主：此 Desktop', 'zh-Hant': '宿主：此 Desktop', ja: 'ホスト: この Desktop', ko: '호스트: 이 Desktop' },
   tw_botdir_import_hint: { en: 'Imported packages use your own authorized resources. Author resources and grants are excluded.', 'zh-Hans': '导入包使用你自己有权共享的资料，不继承作者的资料和授权。', 'zh-Hant': '匯入的套件使用你自己有權共享的資料，不會沿用作者的資料與授權。', ja: 'インポートしたパッケージでは、共有する権限のあるご自身のリソースを使います。作者のリソースや権限は引き継がれません。', ko: '가져온 패키지는 내가 공유할 권한이 있는 자료를 사용합니다. 작성자의 자료와 권한은 포함되지 않습니다.' },
@@ -1290,6 +1335,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_botdir_list_purpose_hint: { en: 'The Bot is told this, so it knows when to read or change the list.', 'zh-Hans': 'Bot 会看到这段说明，以便知道何时读取或修改清单。', 'zh-Hant': 'Bot 會看到這段說明，以便知道何時讀取或修改清單。', ja: 'Bot はこの説明を見て、リストをいつ読み取り・変更すべきかを判断します。', ko: 'Bot은 이 설명을 보고 목록을 언제 읽거나 변경해야 하는지 알게 됩니다.' },
   tw_botdir_list_title: { en: 'Give this Bot a shared list', 'zh-Hans': '为此 Bot 提供共享清单', 'zh-Hant': '為此 Bot 提供共享清單', ja: 'この Bot に共有リストを持たせる', ko: '이 Bot에 공유 목록 제공' },
   tw_botdir_list_unpublish_hint: { en: 'Publishing without the list hides it from everyone. Its items are kept and come back when the list is published again.', 'zh-Hans': '不带清单发布会对所有人隐藏该清单。清单内容会保留，再次带清单发布时恢复。', 'zh-Hant': '不帶清單發布會對所有人隱藏該清單。清單內容會保留，再次帶清單發布時恢復。', ja: 'リストなしで公開すると、リストは全員に表示されなくなります。項目は保持され、リスト付きで再公開すると元に戻ります。', ko: '목록 없이 게시하면 모든 사람에게 목록이 숨겨집니다. 항목은 그대로 보관되며, 목록과 함께 다시 게시하면 복원됩니다.' },
+  tw_botdir_list_unsupported: { en: 'Shared lists need verified write operation support on this Desktop. This Bot can still be published with read-only resources.', 'zh-Hans': '共享清单需要此 Desktop 已确认支持写入操作。仍可发布此 Bot 并共享只读资料。', 'zh-Hant': '共享清單需要此 Desktop 已確認支援寫入操作。仍可發布此 Bot 並共享唯讀資料。', ja: '共有リストを使うには、この Desktop が書き込み操作に対応していることの確認が必要です。この Bot は、読み取り専用のリソースを共有して公開できます。', ko: '공유 목록을 사용하려면 이 Desktop이 쓰기 작업을 지원하는지 확인되어야 합니다. 이 Bot은 읽기 전용 자료를 공유하여 게시할 수 있습니다.' },
   tw_botdir_load_local: { en: 'Load local Bots', 'zh-Hans': '加载本机 Bot', 'zh-Hant': '載入本機 Bot', ja: 'ローカルの Bot を読み込む', ko: '로컬 Bot 불러오기' },
   tw_botdir_local_bot_model: { en: 'Local Bot and model', 'zh-Hans': '本机 Bot 与模型', 'zh-Hant': '本機 Bot 與模型', ja: 'ローカルの Bot とモデル', ko: '로컬 Bot과 모델' },
   tw_botdir_market: { en: 'Find Bots in the market', 'zh-Hans': '在市场发现 Bot', 'zh-Hant': '在市場探索 Bot', ja: 'マーケットで Bot を探す', ko: '마켓에서 Bot 찾기' },
@@ -1324,6 +1370,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_composer_recalled: { en: 'Recalled message', 'zh-Hans': '已撤回消息', 'zh-Hant': '已收回的訊息', ja: '取り消されたメッセージ', ko: '회수된 메시지' },
   tw_composer_reply_note: { en: 'Your reply goes to the Bot, which then continues its task.', 'zh-Hans': '你的回复会发给 Bot，由它继续完成任务。', 'zh-Hant': '你的回覆會傳送給 Bot，由它繼續完成任務。', ja: '返信は Bot に送られ、Bot がタスクを続行します。', ko: '답장은 Bot에게 전달되며, Bot이 작업을 이어서 진행합니다.' },
   tw_composer_reply_to_fmt: { en: 'Reply to %1$s', 'zh-Hans': '回复 %1$s', 'zh-Hant': '回覆 %1$s', ja: '%1$s に返信', ko: '%1$s에게 답장' },
+  tw_composer_unavailable: { en: 'This Bot cannot accept a new request now. Your draft is kept.', 'zh-Hans': '此 Bot 目前无法接受新请求，你的草稿会保留。', 'zh-Hant': '此 Bot 目前無法接受新請求，你的草稿會保留。', ja: 'この Bot は現在、新しいリクエストを受け付けられません。下書きは保持されます。', ko: '이 Bot은 지금 새 요청을 받을 수 없습니다. 초안은 그대로 유지됩니다.' },
   tw_connecting: { en: 'Connecting…', 'zh-Hans': '正在连接…', 'zh-Hant': '正在連線…', ja: '接続中…', ko: '연결 중…' },
   tw_conv_connecting: { en: 'Connecting… Waiting for the server to confirm access.', 'zh-Hans': '正在连接…等待服务器确认访问权限。', 'zh-Hant': '正在連線…等待伺服器確認存取權限。', ja: '接続中… サーバーがアクセスを確認するのを待っています。', ko: '연결 중… 서버가 접근 권한을 확인하기를 기다리는 중입니다.' },
   tw_conv_creating: { en: 'Creating conversation…', 'zh-Hans': '正在创建会话…', 'zh-Hant': '正在建立會話…', ja: '会話を作成中…', ko: '대화를 만드는 중…' },
@@ -1474,6 +1521,19 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_opening: { en: 'Opening…', 'zh-Hans': '正在打开…', 'zh-Hant': '正在開啟…', ja: '開いています…', ko: '여는 중…' },
   tw_people: { en: 'People', 'zh-Hans': '成员', 'zh-Hant': '成員', ja: 'メンバー', ko: '멤버' },
   tw_preview_fmt: { en: '%1$s: %2$s', 'zh-Hans': '%1$s：%2$s', 'zh-Hant': '%1$s：%2$s', ja: '%1$s: %2$s', ko: '%1$s: %2$s' },
+  tw_report_cost_fmt: { en: 'Complete priced cost: %1$s %2$s', 'zh-Hans': '完整已定价费用：%1$s %2$s', 'zh-Hant': '完整已定價費用：%1$s %2$s', ja: '使用量が完全で価格が確定した費用: %1$s %2$s', ko: '사용량이 완전하고 가격이 책정된 비용: %1$s %2$s' },
+  tw_report_cursor_loop: { en: 'The page cursor repeated. No incomplete report was exported. Retry.', 'zh-Hans': '分页游标重复，未导出不完整报告，请重试。', 'zh-Hant': '分頁游標重複，未匯出不完整的報告，請重試。', ja: 'ページカーソルが繰り返されました。不完全なレポートは書き出していません。もう一度お試しください。', ko: '페이지 커서가 반복되었습니다. 불완전한 보고서는 내보내지 않았습니다. 다시 시도하세요.' },
+  tw_report_download_csv: { en: 'Download CSV', 'zh-Hans': '下载 CSV', 'zh-Hant': '下載 CSV', ja: 'CSV をダウンロード', ko: 'CSV 다운로드' },
+  tw_report_download_json: { en: 'Download JSON', 'zh-Hans': '下载 JSON', 'zh-Hant': '下載 JSON', ja: 'JSON をダウンロード', ko: 'JSON 다운로드' },
+  tw_report_export: { en: 'Export my task summaries', 'zh-Hans': '导出本人的任务摘要', 'zh-Hant': '匯出本人的任務摘要', ja: '自分のタスク概要を書き出す', ko: '내 작업 요약 내보내기' },
+  tw_report_generating: { en: 'Generating task summaries', 'zh-Hans': '正在生成任务摘要', 'zh-Hant': '正在產生任務摘要', ja: 'タスク概要を生成中', ko: '작업 요약 생성 중' },
+  tw_report_intro: { en: 'Exports your authorized task summaries for this membership, without message bodies, resources or credentials. Cost totals include only complete priced usage, separated by currency; missing, partial and unpriced usage remain explicit.', 'zh-Hans': '仅导出本人当前成员身份有权访问的任务摘要，不含消息正文、资料或凭据。费用仅汇总完整且已定价的用量，按币种分别计算；缺失、不完整与未定价用量单独保留。', 'zh-Hant': '僅匯出本人目前成員身分有權存取的任務摘要，不含訊息內文、資料或憑證。費用僅彙總完整且已定價的用量，並依幣別分別計算；缺失、不完整與未定價的用量會單獨保留。', ja: '現在のメンバーシップで閲覧できる自分のタスク概要を書き出します。メッセージ本文、リソース、認証情報は含まれません。費用の合計は、使用量が完全で価格が確定しているものだけを通貨別に集計します。使用量なし・使用量が不完全・価格未確定の件数は別に表示されます。', ko: '현재 멤버십으로 접근할 수 있는 내 작업 요약을 내보냅니다. 메시지 본문, 자료, 자격 증명은 포함되지 않습니다. 비용 합계에는 사용량이 완전하고 가격이 책정된 항목만 통화별로 집계되며, 사용량 없음·불완전·가격 미책정 항목은 따로 표시됩니다.' },
+  tw_report_missing_fmt: { en: 'Missing usage: %1$d', 'zh-Hans': '用量缺失：%1$d', 'zh-Hant': '缺少用量：%1$d', ja: '使用量なし: %1$d', ko: '사용량 없음: %1$d' },
+  tw_report_no_cost: { en: 'No complete priced usage is available.', 'zh-Hans': '暂无完整且已定价的费用。', 'zh-Hant': '暫無完整且已定價的費用。', ja: '使用量が完全で価格が確定した費用はまだありません。', ko: '사용량이 완전하고 가격이 책정된 비용이 아직 없습니다.' },
+  tw_report_partial_fmt: { en: 'Partial usage: %1$d', 'zh-Hans': '用量不完整：%1$d', 'zh-Hant': '用量資料不完整：%1$d', ja: '使用量が不完全: %1$d', ko: '사용량 불완전: %1$d' },
+  tw_report_ready_one_fmt: { en: '%1$d task summary ready.', 'zh-Hans': '已生成 %1$d 项任务摘要。', 'zh-Hant': '已產生 %1$d 項任務摘要。', ja: 'タスク概要を %1$d 件生成しました。', ko: '작업 요약 %1$d개를 생성했습니다.' },
+  tw_report_ready_other_fmt: { en: '%1$d task summaries ready.', 'zh-Hans': '已生成 %1$d 项任务摘要。', 'zh-Hant': '已產生 %1$d 項任務摘要。', ja: 'タスク概要を %1$d 件生成しました。', ko: '작업 요약 %1$d개를 생성했습니다.' },
+  tw_report_unpriced_fmt: { en: 'Unpriced usage: %1$d', 'zh-Hans': '费用未知：%1$d', 'zh-Hant': '費用未知：%1$d', ja: '価格未確定: %1$d', ko: '가격 미책정: %1$d' },
   tw_run_reply: { en: 'Reply to the Bot’s question', 'zh-Hans': '回复 Bot 的问题', 'zh-Hant': '回覆 Bot 的問題', ja: 'Bot の質問に返信', ko: 'Bot의 질문에 답장' },
   tw_run_status_label: { en: 'Task status', 'zh-Hans': '任务状态', 'zh-Hant': '任務狀態', ja: 'タスクの状態', ko: '작업 상태' },
   tw_service_all: { en: 'Everyone together', 'zh-Hans': '所有人合计', 'zh-Hant': '所有人合計', ja: '全員の合計', ko: '전체 합계' },

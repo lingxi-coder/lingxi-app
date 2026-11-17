@@ -18,18 +18,18 @@ private actor AdminRoundtripListener: IosEventListener {
 /// credential store, user configuration, or successful no-op ACK can satisfy it.
 final class NativeAdminEngineRoundtripTests: XCTestCase {
     func testKeylessAdminCatalogsAndCorrelatedHookValidationReturnThroughNativeCallbacks() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("native-admin-\(UUID().uuidString)", isDirectory: true)
+        let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+        let root = fixture.sandboxRoot
         let directories = MobileUserStorage.directories(managedRoot: root.appendingPathComponent("runtime", isDirectory: true).path)
         let workspace = URL(fileURLWithPath: directories.projects, isDirectory: true)
             .appendingPathComponent("\(UUID().uuidString.lowercased())/workspace", isDirectory: true)
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try await exercise(root: root, workspace: workspace)
+        try await exercise(fixture: fixture, workspace: workspace)
     }
 
     // Keeping the handle in this frame releases it before the caller removes its sandbox.
-    private func exercise(root: URL, workspace: URL) async throws {
+    private func exercise(fixture: MobileWorkspaceNativeTestFixture, workspace: URL) async throws {
+        let root = fixture.sandboxRoot
         let listener = AdminRoundtripListener()
         let mediaHost = try await MainActor.run {
             try IOSNativeMediaHostComposition(
@@ -52,6 +52,7 @@ final class NativeAdminEngineRoundtripTests: XCTestCase {
             listener: listener, mediaHost: mediaHost, share: ShareImpl(),
             notifications: NotificationImpl(), clipboard: ClipboardImpl(),
             permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
+        fixture.track(handle)
 
         func response(_ command: ClientCommand, matching predicate: (ClientEvent) -> Bool) async throws -> ClientEvent {
             await listener.clear()

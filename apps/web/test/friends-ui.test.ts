@@ -706,7 +706,7 @@ const botsChat = async (context: TestContext, setup: (teams: FakeTeams) => void 
 };
 
 scenario('the Bots action opens the friendship\'s Bots over the chat: Teams cards without an audience or quota, the note, and no sharing on Web (D21)', async context => {
-  const { page, pair, panel, teams } = await botsChat(context, t => { t.bots = [botCard({ name: 'Bob Helper', description: 'Answers about trips', maintainer: { uid: 'bob', generation: 1 } })]; });
+  const { page, pair, panel, teams } = await botsChat(context, t => { t.bots = [botCard({ name: 'Bob Helper', description: 'Answers about trips', maintainer: { uid: 'bob', generation: 1 }, availability: 'ready' })]; });
   await until(() => pair().getSnapshot().botsLoaded, 'the Bot cards');
   assert.equal(page.byClass('tw-friends-bots').length, 0, 'closed until asked for');
   const opener = () => page.byLabel('Shared Bots').find(node => node.type === 'button')!;

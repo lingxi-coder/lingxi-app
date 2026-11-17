@@ -362,12 +362,20 @@ struct NewConversationSheet: View {
                 AgentAvatar(agentID: bot.avatarId, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(bot.name).font(.body.weight(.semibold))
-                    Text(verbatim: TeamsStreamLogic.joinedLine([
-                        TeamsText.localized(bot.ready ? "remote_online" : "teams_bot_offline_queued"),
-                        String(localized: "teams_bot_owner \(owner(bot.maintainer.uid))"),
-                    ]))
-                    .font(.caption).foregroundStyle(.secondary)
+                    // The state is the first line of `TeamBotMemberInfo` below; this line is whose Bot it is.
+                    Text("teams_bot_owner \(owner(bot.maintainer.uid))")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
+            }
+            TeamBotMemberInfo(bot: bot, unverified: model?.botsUnverified == true)
+            ForEach(bot.memberExamples, id: \.self) { example in
+                Button {
+                    Task {
+                        tried = true
+                        if let id = await workspace.openBotDM(bot, example: example) { onOpen(id) }
+                    }
+                } label: { Label(example, systemImage: "text.bubble").font(.subheadline).minimumHitTarget(minWidth: 0, alignment: .leading) }
+                    .buttonStyle(.borderless).disabled(workspace.messageBusy || offline)
             }
             HStack(spacing: 10) {
                 Button {

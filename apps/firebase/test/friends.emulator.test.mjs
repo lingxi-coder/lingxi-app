@@ -1274,9 +1274,10 @@ test('shared Bots in a friendship (F3): published for all, the friend lists it a
   assert.equal((await assertSucceeds(read('bob', `${chatPath}/messages`))).size, 2);
   assert.equal((await assertSucceeds(read('alice', `${chatPath}/messages`))).size, 2);
   await assertFails(read('carol', `${chatPath}/messages`));
-  // Stopping the sharing is a pause: the friend no longer sees or uses the Bot, the history stays, and publishing again restores it.
+  // Pausing keeps the Bot visible to its original audience and its history readable, while stopping new use.
   assert.equal((await command(alice, 'pauseSharedBot', { sharedBotId: 'sharedbot_01', expectedRevision: 1 })).revision, 2);
-  assert.deepEqual((await command(bob, 'listSharedBots', {})).bots, []);
+  assert.deepEqual((await command(bob, 'listSharedBots', {})).bots.map(bot => [bot.sharedBotId, bot.state, bot.availability, bot.permitted, bot.ready]),
+    [['sharedbot_01', 'paused', 'paused', false, false]]);
   assert.equal((await command(alice, 'listSharedBots', {})).bots[0].state, 'paused');
   await rejects(command(bob, 'submit', { conversationId: 'bot_chat_01', messageId: 'pair_message_2', changeId: 'pair_change_02', text: 'Still there?', targets: ['sharedbot_01'] }), 403, 'BOT_USE_REQUIRED');
   assert.equal((await assertSucceeds(read('bob', `${chatPath}/messages`))).size, 2);

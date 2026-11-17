@@ -1,0 +1,2 @@
+studyId,participantAlias,scopeAlias,caseId,taskId,taskCreatedAtUtc,taskCompletedAtUtc,outcome,completionFraction,takeoverFraction,baselineManualMinutes,actualActiveMinutes,humanTakeoverMinutes,savedMinutes,firstSetupMinutes,maintenanceMinutes,checkMinutes,waitMinutes,usageStatus,inputTokens,outputTokens,costMicros,currency,evidenceRef,missingReason
+P0-TEMPLATE,participant-01,qa-family,F01,REPLACE_ACTUAL_TASK_ID,,,,,,,,,,,,,,,,,,,,

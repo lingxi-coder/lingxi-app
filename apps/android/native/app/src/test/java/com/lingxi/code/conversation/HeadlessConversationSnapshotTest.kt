@@ -115,13 +115,18 @@ class HeadlessConversationSnapshotTest {
         val result = runCatching {
             refreshHeadlessConversationSnapshot(activation(), events, submit = { throw failure })
         }
-        assertSame(failure, result.exceptionOrNull())
+        val thrown = requireNotNull(result.exceptionOrNull())
+        assertEquals(failure.javaClass, thrown.javaClass)
+        assertEquals(failure.message, thrown.message)
+        assertTrue(generateSequence(thrown) { it.cause }.any { it === failure })
         assertEquals(0, events.subscriptionCount.value)
 
         val recovered = refreshHeadlessConversationSnapshot(activation(), events, submit = {
             events.emit(snapshot(row(0uL, "recovered", "assistant", text("A final"))))
         })
         assertEquals("A final", recovered.transcript.single().text)
+        assertTrue(recovered.transcriptComplete)
+        assertEquals(0, events.subscriptionCount.value)
     }
 
     @Test

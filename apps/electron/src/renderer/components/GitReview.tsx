@@ -247,7 +247,7 @@ function GitReviewContent() {
   if (!git) return <div className="git-empty">{tr('desktop_git_bbeb21cae4')}</div>;
   if (!git.scope) return <div className="git-empty" role="status"><Icon name="folder" size={36}/><p>{tr('desktop_git_select_project')}</p></div>;
   const { status, view } = git;
-  return <div className="git-review" style={themeStyle(t)}>
+  return <div className="git-review" style={{ ...themeStyle(t), '--git-bg': `var(--inspector-bg, ${t.surface})` } as CSSProperties}>
     <div className="git-review-toolbar"><select aria-label={tr('desktop_git_051da6ae6f')} value={view.page} onChange={(e) => git.update({ page: e.target.value as Page })}><option value="changes">{tr('desktop_git_bbd4b6a86b')}</option><option value="history">{tr('desktop_git_0e76960093')}</option><option value="stash">{tr('desktop_git_e45b6015e5')}</option><option value="commit">{tr('desktop_git_82a9c46ffa')}</option><option value="sync">{tr('desktop_git_8d261a372f')}</option></select><span className="git-spacer"/><button title={tr('desktop_git_52e029304e')} aria-label={tr('desktop_git_52e029304e')} disabled={git.loading || git.busy} onClick={() => void git.refresh()}><Icon name="refresh" size={16}/></button><button disabled={!status?.repository} aria-label={tr('desktop_git_5051902c7b')} onClick={() => setPicker(true)}><BranchIcon/>{status?.branch || tr('desktop_git_23b028a2c6')}</button></div>
     {git.error && <div className="git-message git-error" role="alert">{git.error}<button onClick={git.terminal}>{tr('desktop_git_acb1f43d28')}</button></div>}
     {git.busy && <div className="git-message" role="status">{tr('desktop_git_4cb3a82a31')}</div>}

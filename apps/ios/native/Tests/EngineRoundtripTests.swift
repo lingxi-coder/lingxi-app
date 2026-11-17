@@ -162,13 +162,11 @@ import XCTest
 
         @MainActor
         func testOfficialDeepSeekSnapshotBuildsEngineWithoutDuplicateProfile() async throws {
-            let sandbox = FileManager.default.temporaryDirectory
-                .appendingPathComponent("LingxiCodeDeepSeekTest-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: sandbox) }
+            let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+            let sandbox = fixture.sandboxRoot
 
             let repository = ProviderRepository(
-                persistenceURL: sandbox.appendingPathComponent("provider-settings.json")
+                persistenceURL: fixture.caseDirectory.appendingPathComponent("provider-settings.json")
             )
             let deepSeek = repository.addProfile(presetID: "deepseek")
             repository.setDefaultProfile(deepSeek)
@@ -189,7 +187,7 @@ import XCTest
                 sessionMode: .code, initialSessionId: nil, initialSessionTranscriptPath: nil, schedulerController: false,
                 visionDelegationEnabled: snapshot.visionDelegationEnabled,
                 appSandboxRoot: sandbox.path,
-                projectCwd: nil,
+                projectCwd: fixture.guestCwd(),
                 projectAdditionalDirectories: [],
                 projectMountGrants: [],
                 providerConfig: IosProviderConfigFfi(
@@ -215,6 +213,7 @@ import XCTest
                 secureStorage: nil,
                 deviceControl: nil
             )
+            fixture.track(handle)
             let binding = try await mediaHost.updateAudioSessionContext(engine: handle)
             XCTAssertNotNil(binding, "A configured provider must retain its audio route")
         }
@@ -287,12 +286,9 @@ import XCTest
             terminal.assertForOverFulfill = false
             let listener = CollectingListener(terminal: terminal)
 
-            // A writable sandbox root for the engine's filesystem / config — a
-            // fresh temp dir so the test is hermetic.
-            let sandbox = FileManager.default.temporaryDirectory
-                .appendingPathComponent("LingxiCodeTest-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: sandbox) }
+            // The immutable kernel root is process-scoped; this case owns its
+            // own Project and a drained, empty native account/config store.
+            let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
 
             // Engine startup succeeds with an isolated, empty account store.
             // Local credentials cannot turn this into an upstream-success test.
@@ -302,7 +298,7 @@ import XCTest
                 audioConfigurationJSON: try XCTUnwrap(audioConfigurationJSON)
             )
             do {
-                handle = try buildIosEngineWithConfig(config: try mobileWorkspaceTestLaunchConfiguration(sandboxRoot: sandbox, apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
+                handle = try buildIosEngineWithConfig(config: try fixture.launchConfiguration(apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
                         ?? "https://api.anthropic.com", model: "claude-sonnet-4-20250514"), listener: listener,
                     mediaHost: mediaHostComposition.nativeHost,
                     share: ShareImpl(),
@@ -311,6 +307,7 @@ import XCTest
                     permissions: NoopPermissionSink(),
                     secureStorage: nil,
                     deviceControl: nil)
+                fixture.track(handle)
             } catch {
                 XCTFail("buildIosEngine must succeed keyless (handshake), got error: \(error)")
                 return
@@ -381,13 +378,11 @@ import XCTest
 
         @MainActor
         func testPersistedMainHistoryUUIDsSurviveNativeResume() async throws {
-            let sandbox = FileManager.default.temporaryDirectory
-                .appendingPathComponent("uuid-" + UUID().uuidString.prefix(6), isDirectory: true)
-            try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: sandbox) }
+            let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+            let sandbox = fixture.sandboxRoot
             let runtime = try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox)
             let paths = try mobileUserDirectories(managedRoot: runtime.managedRoot)
-            let cwd = paths.codeGuestCwd
+            let cwd = fixture.guestCwd()
             // Real transcripts are bucketed by the stable Linux cwd.
             let projectName = String(cwd.map { $0.isASCII && $0.isLetter || $0.isASCII && $0.isNumber ? $0 : "-" })
             let directory = URL(fileURLWithPath: paths.configHome, isDirectory: true)
@@ -416,10 +411,11 @@ import XCTest
             let mediaHostComposition = try IOSNativeMediaHostComposition(
                 audioConfigurationJSON: try XCTUnwrap(audioConfigurationJSON)
             )
-            let handle = try buildIosEngineWithConfig(config: try mobileWorkspaceTestLaunchConfiguration(sandboxRoot: sandbox, apiBase: "https://api.anthropic.com", model: "claude-sonnet-4-20250514"), listener: listener, mediaHost: mediaHostComposition.nativeHost,
+            let handle = try buildIosEngineWithConfig(config: try fixture.launchConfiguration(apiBase: "https://api.anthropic.com", model: "claude-sonnet-4-20250514"), listener: listener, mediaHost: mediaHostComposition.nativeHost,
                 share: ShareImpl(), notifications: NotificationImpl(),
                 clipboard: ClipboardImpl(), permissions: NoopPermissionSink(),
                 secureStorage: nil, deviceControl: nil)
+            fixture.track(handle)
             try await handle.resumeWorkspaceSession(sessionId: sessionID, transcriptPath: transcriptURL.path)
             var restoredMessages: [MessageDto]?
             for _ in 0..<200 {
@@ -435,6 +431,80 @@ import XCTest
                            "real disk history must retain each exact persisted UUID across UniFFI")
         }
 
+        @MainActor
+        func testSharedKernelColdResumeRetainsHostBackedGuestWorkspaceAndTranscript() async throws {
+            let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+            let terminal = expectation(description: "the isolated keyless turn settles before cold resume")
+            terminal.assertForOverFulfill = false
+            let firstListener = CollectingListener(terminal: terminal)
+            let mediaHost = try IOSNativeMediaHostComposition(
+                audioConfigurationJSON: try XCTUnwrap(AudioConfigurationStore.shared.mediaRuntimeConfigurationJSON)
+            ).nativeHost
+            func build(listener: IosEventListener, sessionID: String? = nil,
+                       source: String? = nil) throws -> MobileEngineHandle {
+                fixture.track(try buildIosEngineWithConfig(
+                    config: try fixture.launchConfiguration(apiBase: "https://api.anthropic.com",
+                        model: "claude-sonnet-4-20250514", initialSessionId: sessionID,
+                        initialSessionTranscriptPath: source),
+                    listener: listener, mediaHost: mediaHost, share: ShareImpl(),
+                    notifications: NotificationImpl(), clipboard: ClipboardImpl(),
+                    permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil))
+            }
+            var first: MobileEngineHandle? = try build(listener: firstListener)
+            let owner = await first!.workspaceState()
+            let nested = fixture.workspace().appendingPathComponent("nested", isDirectory: true)
+            try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+            let guestCwd = fixture.guestCwd() + "/nested"
+            try await first!.changeWorkspace(path: guestCwd, expectedSessionId: owner.sessionId)
+            let moved = await first!.workspaceState()
+            XCTAssertEqual(moved.cwd, guestCwd, "the real FFI filesystem must resolve this guest directory")
+            try await first!.submit(command: .sendPrompt(
+                text: ClientTextDto(codeUnits: Array("shared kernel guest resume fixture".utf16)),
+                promptMode: nil, images: [], turnId: nil, visualizationContext: nil))
+            await fulfillment(of: [terminal], timeout: 30)
+            let userUUID = try XCTUnwrap(firstListener.events.compactMap { event -> String? in
+                if case let .userTranscriptRowIdentity(_, uuid) = event { return uuid }
+                return nil
+            }.last)
+            first = nil
+            let released = await waitForMobileSessionRelease(lingxiHome: fixture.directories.configHome,
+                                                            sessionId: owner.sessionId, timeoutMs: 8_000)
+            XCTAssertTrue(released)
+            guard released else { return }
+
+            let guestPrefix = fixture.directories.guestHome + "/"
+            let hostPrefix = fixture.directories.home + "/"
+            let guestSource = owner.transcriptPath.hasPrefix(hostPrefix)
+                ? guestPrefix + String(owner.transcriptPath.dropFirst(hostPrefix.count))
+                : owner.transcriptPath
+            XCTAssertTrue(guestSource.hasPrefix(guestPrefix))
+            let resumedListener = CollectingListener()
+            let resumed = try build(listener: resumedListener, sessionID: owner.sessionId, source: guestSource)
+            let restored = await resumed.workspaceState()
+            XCTAssertEqual(restored.sessionId, owner.sessionId)
+            XCTAssertEqual(restored.cwd, guestCwd)
+            var restoredMessages: [MessageDto]?
+            for _ in 0..<200 {
+                restoredMessages = resumedListener.events.compactMap { event -> [MessageDto]? in
+                    if case let .sessionResumed(id, _, messages) = event, id == owner.sessionId { return messages }
+                    return nil
+                }.last
+                if restoredMessages != nil { break }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            XCTAssertEqual(restoredMessages?.filter { $0.transcriptUuid == userUUID }.count, 1,
+                           "cold restore must read the exact persisted row through its host-backed guest source")
+            withExtendedLifetime(resumed) {}
+        }
+
+        func testNativeWorkspaceFixtureRejectsOverlappingMutableOwners() throws {
+            let first = try MobileWorkspaceNativeTestFixture(testCase: self)
+            XCTAssertThrowsError(try MobileWorkspaceNativeTestFixture(testCase: self)) { error in
+                XCTAssertTrue(error.localizedDescription.contains("Another native fixture"))
+            }
+            withExtendedLifetime(first) {}
+        }
+
         /// The real catalog is readable before a provider is configured, but
         /// changing to an unauthenticated provider must fail without confirming
         /// a model switch. This test never reads developer credentials.
@@ -445,10 +515,7 @@ import XCTest
             gotChanged.isInverted = true
             let listener = ModelListener(gotList: gotList, gotChanged: gotChanged)
 
-            let sandbox = FileManager.default.temporaryDirectory
-                .appendingPathComponent("LingxiCodeTest-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: sandbox) }
+            let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
 
             // SHIP-BLOCKER #2: build with an EMPTY model id — the engine must start
             // on `MobileConfig.default_model` (a real Anthropic wire id), never a
@@ -460,7 +527,7 @@ import XCTest
                 audioConfigurationJSON: try XCTUnwrap(audioConfigurationJSON)
             )
             do {
-                handle = try buildIosEngineWithConfig(config: try mobileWorkspaceTestLaunchConfiguration(sandboxRoot: sandbox, apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
+                handle = try buildIosEngineWithConfig(config: try fixture.launchConfiguration(apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
                         ?? "https://api.anthropic.com", model: ""), listener: listener,
                     mediaHost: mediaHostComposition.nativeHost,
                     share: ShareImpl(),
@@ -469,6 +536,7 @@ import XCTest
                     permissions: NoopPermissionSink(),
                     secureStorage: nil,
                     deviceControl: nil)
+                fixture.track(handle)
             } catch {
                 XCTFail("buildIosEngine must succeed keyless with empty model, got: \(error)")
                 return

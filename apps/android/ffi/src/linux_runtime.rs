@@ -1,6 +1,6 @@
 #[cfg(feature = "uniffi")]
 use super::configuration::AndroidMobileLinuxConfigFfi;
-#[cfg(all(feature = "uniffi", target_os = "android"))]
+#[cfg(feature = "uniffi")]
 use super::linux_conversion::configured_workspace_guest_path;
 #[cfg(feature = "uniffi")]
 use super::linux_conversion::{
@@ -427,36 +427,60 @@ pub(super) fn android_mobile_linux_runtime(
     }
 }
 
-#[cfg(all(feature = "uniffi", target_os = "android"))]
-pub(super) fn prepared_android_mobile_linux_runtime(
+/// Validate the product's configured mount without erasing the host spelling
+/// the SDK needs to distinguish a managed workspace from an interior alias.
+#[cfg(feature = "uniffi")]
+pub(super) fn configured_android_workspace_mount(
     config: &AndroidMobileLinuxConfigFfi,
-) -> Result<Arc<dyn mobile_linux_api::MobileLinuxRuntime>, String> {
-    mobile_linux_api::BrandRuntimeProfile::new(
+) -> Result<mobile_linux_api::MountSpec, String> {
+    let profile = mobile_linux_api::BrandRuntimeProfile::new(
         config.brand_id.clone(),
         config.linux_user.clone(),
         config.config_dir_name.clone(),
-    )
-    .validate()
-    .map_err(str::to_string)?;
-    let runtime = android_mobile_linux_runtime(config);
+    );
+    profile.validate().map_err(str::to_string)?;
     let host_path = config
         .workspace_host_path
         .as_deref()
         .ok_or_else(|| "Android PRoot workspace is not configured".to_string())?;
-    let host_path = std::fs::canonicalize(host_path)
+    let host_path = std::path::PathBuf::from(host_path);
+    if !host_path.is_absolute() {
+        return Err("Android PRoot workspace must be an absolute host path".into());
+    }
+    let canonical_host = std::fs::canonicalize(&host_path)
         .map_err(|error| format!("Android PRoot workspace is unavailable: {error}"))?;
-    let mounts = vec![mobile_linux_api::MountSpec {
+    let mount = mobile_linux_api::MountSpec {
         host_path,
         guest_path: configured_workspace_guest_path(config),
         read_only: false,
         purpose: mobile_linux_api::MountPurpose::Workspace,
-    }];
+    };
+    let managed_root = std::path::Path::new(&config.managed_root);
+    let canonical_managed =
+        std::fs::canonicalize(managed_root).unwrap_or_else(|_| managed_root.to_path_buf());
+    if (canonical_host.starts_with(&canonical_managed)
+        || canonical_managed.starts_with(&canonical_host))
+        && !mobile_linux_core::is_persistent_user_workspace(managed_root, &profile, &mount)
+    {
+        return Err(
+            "Android PRoot workspace may not expose an alias or managed runtime data".into(),
+        );
+    }
+    Ok(mount)
+}
+
+#[cfg(all(feature = "uniffi", target_os = "android"))]
+pub(super) fn prepared_android_mobile_linux_runtime(
+    config: &AndroidMobileLinuxConfigFfi,
+) -> Result<Arc<dyn mobile_linux_api::MobileLinuxRuntime>, String> {
+    let mount = configured_android_workspace_mount(config)?;
+    let runtime = android_mobile_linux_runtime(config);
     let executor = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("Android PRoot mount executor failed: {error}"))?;
     executor
-        .block_on(runtime.configure_mounts(mounts))
+        .block_on(runtime.configure_mounts(vec![mount]))
         .map_err(|error| format!("Android PRoot workspace mount failed: {error}"))?;
     Ok(runtime)
 }

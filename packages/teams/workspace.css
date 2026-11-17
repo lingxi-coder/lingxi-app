@@ -140,6 +140,12 @@
 .tw-dialog .tw-dialog-body { margin-top: -6px; color: var(--tw-muted); line-height: 1.5; }
 .tw-profile { display: flex; align-items: center; gap: 14px; }
 .tw-form { display: flex; flex-direction: column; gap: 12px; }
+/* Publication review keeps full resource digests within the dialog's available width. */
+.tw-dialog .tw-form:has(> blockquote),
+.tw-dialog .tw-form:has(> blockquote) > * {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
 .tw-form label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .tw-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .tw-scope input:not([type='checkbox']):not([type='radio']), .tw-scope select, .tw-scope textarea, .tw-dialog input:not([type='checkbox']):not([type='radio']), .tw-dialog select {
@@ -460,6 +466,13 @@
 .hosted-service-composer { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px 16px 16px; }
 .hosted-service-composer textarea { flex: 1; min-height: 44px; max-height: 200px; resize: vertical; }
 .tw-sidebar-services { flex: none; margin: 4px 12px 10px; padding: 6px 8px; text-align: start; }
+
+/* Member projections and draft-only examples share the existing cards and composer. */
+.tw-bot-member-details { min-inline-size: 0; }
+.tw-bot-member-details ul { display: grid; gap: .4rem; padding-inline-start: 1.25rem; }
+.tw-bot-member-details button { white-space: normal; overflow-wrap: anywhere; text-align: start; min-block-size: 2rem; }
+.tw-task-export { padding-block: .5rem 1rem; }
+.tw-task-export a { display: inline-block; padding-block: .4rem; }
 /* U6: on a touch screen no control is smaller than 44 x 44. Last in the file on purpose: the base rules of the same weight (`.tw-embed button`, `.tw-mention`, `.tw-target`) come before it and so give way. */
 @media (hover: none) and (pointer: coarse) {
   .tw-scope button, .tw-dialog button, .tw-embed button, .tw-scope .tw-menu-item, .tw-scope .tw-tab, .tw-scope .tw-switcher { min-height: 44px; }
@@ -469,4 +482,6 @@
   .tw-row { display: flex; align-items: center; }
   .tw-scope .tw-row-main { flex: 1; width: auto; min-width: 0; }
   .tw-scope .tw-row-more { position: static; flex: none; }
+  .tw-bot-member-details button, .tw-task-export button { min-height: 44px; }
+  .tw-task-export a { display: inline-flex; align-items: center; min-height: 44px; }
 }

@@ -83,13 +83,20 @@ internal fun TeamComposer(
         val start = if (editing != null) editing.text else draft.text
         mutableStateOf(TextFieldValue(start, TextRange(start.length)))
     }
+    androidx.compose.runtime.LaunchedEffect(draft.text, editing?.id) {
+        if (editing == null && field.text != draft.text) field = TextFieldValue(draft.text, TextRange(draft.text.length))
+    }
     val askable = conversation.kind == "group" || conversation.kind == "channel"
     val mention = if (askable && editing == null) TeamsComposeLogic.mentionAt(field.text, field.selection.end) else null
     val candidates = if (mention != null && draft.targets.size < TeamsComposeLogic.MAX_TARGETS) TeamsComposeLogic.mentionCandidates(bots, conversation, draft.targets, mention.query) else emptyList()
     val staleTargets = if (editing == null && askable) composerStaleTargets(draft.targets, bots, conversation) else emptySet()
     val staleBotDm = conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1
     val tooLong = TeamsComposeLogic.byteLength(field.text) > TeamsComposeLogic.MESSAGE_BYTES
-    val canSend = TeamAttachments.canSend(field.text, files) && !messaging.submitting && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
+    val viewer = messaging.cache?.let { TeamMemberRef(uid, it.generation) }
+    val answeringWait = TeamTaskActions.answerableWait(replyTo, messaging.tasks, viewer, TeamTaskActions.pendingWaitIds(messaging.cache?.outbox.orEmpty())) != null
+    val requestTargets = if (conversation.kind == "bot_dm") conversation.sharedBotIds else draft.targets
+    val blockedBots = TeamBotEntry.blockedRequests(requestTargets, bots, editing != null || answeringWait)
+    val canSend = TeamAttachments.canSend(field.text, files) && !messaging.submitting && blockedBots.isEmpty() && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
     val hasAskableBots = askable && bots.any { it.selectable && "shared_bot:${it.sharedBotId}" in conversation.participants }
     fun update(value: TextFieldValue, targets: Set<String> = draft.targets) {
         field = value
@@ -158,6 +165,9 @@ internal fun TeamComposer(
             }
         }
         TeamDraftFiles(files, refusals, onRemoveFile, onDismissRefusals)
+        blockedBots.forEach { bot ->
+            Text(bot.name + " · " + botAvailabilityText(bot), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
         if (staleTargets.isNotEmpty() || staleBotDm) Text(stringResource(R.string.teams_error_bot_access_changed), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.Bottom) {
             if (onChooseFiles != null) TeamAttachButton(enabled = files.size < TeamAttachments.MESSAGE_FILES && !messaging.submitting, onChosen = onChooseFiles)

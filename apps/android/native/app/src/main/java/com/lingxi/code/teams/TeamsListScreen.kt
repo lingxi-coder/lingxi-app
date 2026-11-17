@@ -89,6 +89,7 @@ internal fun TeamsListScreen(
     onReconnect: () -> Unit,
     onDiscardCreation: () -> Unit,
     onMessageBot: (String) -> Unit = {},
+    onBotExample: (String, String) -> Unit = { _, _ -> },
     onArtifact: (String) -> Unit = {},
     onRefreshTask: (String) -> Unit = {},
     onCancelTask: (String) -> Unit = {},
@@ -101,6 +102,7 @@ internal fun TeamsListScreen(
     val strings = rememberTeamsListStrings()
     val conversations = messaging.cache?.conversations.orEmpty()
     val bots = messaging.bots
+    val memberBots = TeamBotEntry.memberDirectory(bots)
     val now = rememberNowMs()
     var searching by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
@@ -168,10 +170,20 @@ internal fun TeamsListScreen(
                 )
                 visible.isEmpty() && query.isNotBlank() -> TeamsMessageState(stringResource(R.string.teams_no_matches), Modifier.testTag(TeamsTags.NO_MATCHES))
                 else -> LazyColumn(Modifier.fillMaxSize(), state = listState) {
-                    // The team's shared Bots, as rows like the conversations: the Bot's own art, its name and whether it is online (U1: "Bots", never "Assistants").
-                    if (query.isBlank() && bots.any { it.selectable }) {
+                    // The team's shared Bots, as rows like the conversations: the Bot's own art, its name and its state (U1: "Bots", never "Assistants"). A paused
+                    // Bot stays listed, so its state can be read, but cannot be asked; the lines under the row are the member-safe projection of the Bot.
+                    if (query.isBlank() && memberBots.isNotEmpty()) {
                         item(key = "assistants") { Text(stringResource(R.string.remote_bots), Modifier.padding(16.dp).semantics { heading() }, style = MaterialTheme.typography.titleSmall) }
-                        items(bots.filter { it.selectable }, key = { "assistant-${it.sharedBotId}" }) { bot -> TeamBotRow(bot, onClick = { onMessageBot(bot.sharedBotId) }) }
+                        items(memberBots, key = { "assistant-${it.sharedBotId}" }) { bot ->
+                            Column(Modifier.fillMaxWidth()) {
+                                TeamBotRow(bot, enabled = bot.selectable, onClick = { onMessageBot(bot.sharedBotId) })
+                                // In the column of the row's text: the avatar (40 dp) and its gap (12 dp) after the 16 dp edge.
+                                Column(Modifier.fillMaxWidth().padding(start = 68.dp, end = 16.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    if (bot.description.isNotBlank()) Text(bot.description, style = MaterialTheme.typography.bodyMedium)
+                                    TeamBotMemberInfo(bot, enabled = !messaging.submitting && messaging.cache?.creation == null, onExample = { onBotExample(bot.sharedBotId, it) })
+                                }
+                            }
+                        }
                     }
                     if (query.isBlank() && messaging.tasks.isNotEmpty()) {
                         item(key = "tasks") { Text(stringResource(R.string.teams_recent_tasks), Modifier.padding(16.dp).semantics { heading() }, style = MaterialTheme.typography.titleSmall) }
@@ -236,11 +248,11 @@ private fun SectionHeader(id: String, title: String, collapsed: Boolean, unread:
     }
 }
 
-/** One shared Bot of the team: its avatar (keyed by `avatarId`), its name and whether it is online; a tap opens or starts its Bot chat. */
+/** One shared Bot of the team: its avatar (keyed by `avatarId`), its name and its state; a tap opens or starts its Bot chat, unless the Bot cannot be asked ([enabled]). */
 @Composable
-private fun TeamBotRow(bot: TeamBotCard, onClick: () -> Unit) {
+private fun TeamBotRow(bot: TeamBotCard, enabled: Boolean, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(onClickLabel = stringResource(R.string.teams_bot_message), onClick = onClick)
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = enabled, onClickLabel = stringResource(R.string.teams_bot_message), onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp).testTag("teams.assistant.${bot.sharedBotId}"),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {

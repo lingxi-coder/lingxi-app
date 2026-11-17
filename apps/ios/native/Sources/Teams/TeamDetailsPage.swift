@@ -380,7 +380,10 @@ struct TeamDetailsPage: View {
                         Task { if let id = await workspace.openBotDM(bot) { onOpenConversation(id) } }
                     },
                     onStopSharing: { stopping = bot },
-                    onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation)) && !offline ? { listOf = bot } : nil)
+                    onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation)) && !offline ? { listOf = bot } : nil,
+                    onExample: { example in
+                        Task { if let id = await workspace.openBotDM(bot, example: example) { onOpenConversation(id) } }
+                    }, unverified: model?.botsUnverified == true)
             }
             if empty {
                 // What is empty, and what to do about it (U9): the hint is the body here, so the footer leaves it out.

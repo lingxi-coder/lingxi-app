@@ -28,10 +28,8 @@ private actor SettingsRoundtripListener: IosEventListener {
 final class NativeSettingsEngineRoundtripTests: XCTestCase {
     @MainActor
     func testEmptyProviderConfigurationDoesNotPreventEngineStartup() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("native-empty-provider-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+        let root = fixture.sandboxRoot
 
         let listener = SettingsRoundtripListener()
         let mediaHost = try IOSNativeMediaHostComposition(
@@ -43,7 +41,7 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
             brandId: directories.brandId, linuxUser: directories.linuxUser,
             configDirName: directories.configDirName, nativeConfigHome: directories.configHome,
             apiBase: "https://invalid.example", model: "", sessionMode: .code, initialSessionId: nil, initialSessionTranscriptPath: nil, schedulerController: false,
-            visionDelegationEnabled: false, appSandboxRoot: root.path, projectCwd: nil,
+            visionDelegationEnabled: false, appSandboxRoot: root.path, projectCwd: fixture.guestCwd(),
             projectAdditionalDirectories: [], projectMountGrants: [],
             providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),
             mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: root),
@@ -51,6 +49,7 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
             listener: listener, mediaHost: mediaHost, share: ShareImpl(),
             notifications: NotificationImpl(), clipboard: ClipboardImpl(),
             permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
+        fixture.track(handle)
 
         let audio = try object(await handle.audioSessionContext())
         XCTAssertEqual((audio["error"] as? [String: Any])?["kind"] as? String, "needs_configuration")
@@ -61,7 +60,8 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
     }
 
     func testKeylessLayerWritesReadBackAndSurviveEngineRebuild() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("native-settings-\(UUID().uuidString)", isDirectory: true)
+        let fixture = try MobileWorkspaceNativeTestFixture(testCase: self)
+        let root = fixture.sandboxRoot
         let directories = MobileUserStorage.directories(managedRoot: root.appendingPathComponent("runtime", isDirectory: true).path)
         let workspace = URL(fileURLWithPath: directories.projects, isDirectory: true)
             .appendingPathComponent("\(UUID().uuidString.lowercased())/workspace", isDirectory: true)
@@ -69,19 +69,19 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: userFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data(#"{"viewMode":"focus"}"#.utf8).write(to: userFile)
-        defer { try? FileManager.default.removeItem(at: root) }
         let layers: [(WritableScopeDto, String, URL, String)] = [
             (.user, "user", userFile, "terse"),
             (.project, "project", workspace.appendingPathComponent(".lingxi/settings.json"), "verbose"),
             (.local, "local", workspace.appendingPathComponent(".lingxi/settings.local.json"), "default")
         ]
         // Each call builds a new real handle, which is released on return.
-        try await exercise(root: root, workspace: workspace, layers: layers, write: true)
-        try await exercise(root: root, workspace: workspace, layers: layers, write: false)
+        try await exercise(fixture: fixture, workspace: workspace, layers: layers, write: true)
+        try await exercise(fixture: fixture, workspace: workspace, layers: layers, write: false)
     }
 
-    private func exercise(root: URL, workspace: URL,
+    private func exercise(fixture: MobileWorkspaceNativeTestFixture, workspace: URL,
                           layers: [(WritableScopeDto, String, URL, String)], write: Bool) async throws {
+        let root = fixture.sandboxRoot
         let listener = SettingsRoundtripListener()
         let mediaHost = try await MainActor.run {
             try IOSNativeMediaHostComposition(
@@ -104,6 +104,7 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
             listener: listener, mediaHost: mediaHost, share: ShareImpl(),
             notifications: NotificationImpl(), clipboard: ClipboardImpl(),
             permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
+        fixture.track(handle)
         try await handle.submit(command: .refreshListings(which: [.settings]))
         let initial = try await snapshot(listener)
         XCTAssertEqual(try object(initial.effective)["viewMode"] as? String, "focus")

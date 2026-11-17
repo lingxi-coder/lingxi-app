@@ -277,7 +277,7 @@ const at = (minute: number) => new Date(2026, 10, 2, 11, minute).toISOString();
 
 async function open(setup: (fake: FakeTeams) => void = () => {}) {
   const fake = new FakeTeams();
-  const bot = botCard();
+  const bot = botCard({ availability: 'ready' });
   fake.teams = [team('team-aaaa', { name: 'Acme', role: 'owner' }), team('team-bbbb', { name: 'Beta', generation: 2 })];
   fake.bots = [bot];
   fake.conversations.set('team-aaaa', [
@@ -506,11 +506,11 @@ test('conversation view: someone else\'s Bot dm is read-only; a Bot dm needs its
   workspace.selectConversation('others-bot-chat'); await until(() => snapshot().messages.length === 1, 'their thread');
   const observer = html(view(workspace, snapshot()));
   assert.match(observer, /only participants can send messages/); assert.doesNotMatch(observer, /<textarea/); assert.doesNotMatch(observer, /aria-label="Reply"/);
-  assert.match(observer, /Maintainer: Owner|Online · Maintainer/); assert.match(observer, /<h2>Fixture Bot · Bob<\/h2>/, 'the Bot\'s maintainer sees whose chat it is');
+  assert.match(observer, /Ready · Maintainer: Owner/); assert.match(observer, /<h2>Fixture Bot · Bob<\/h2>/, 'the Bot\'s maintainer sees whose chat it is');
   workspace.selectConversation('bot-chat'); await until(() => snapshot().selectedConversationId === 'bot-chat', 'bot chat');
   const own = html(view(workspace, snapshot()));
   assert.match(own, /<textarea[^>]*placeholder="Message Fixture Bot"/); assert.match(own, /Messages ask this Bot automatically/); assert.doesNotMatch(own, /Ask a Bot \(@\)/, 'a Bot dm asks its Bot by itself');
-  assert.match(own, /Online · Maintainer: Owner/); assert.match(own, /<h2>Fixture Bot<\/h2>/); assert.doesNotMatch(own, /tw-chan/, 'a Bot dm has its Bot\'s picture, not the channel #');
+  assert.match(own, /Ready · Maintainer: Owner/); assert.match(own, /<h2>Fixture Bot<\/h2>/); assert.doesNotMatch(own, /tw-chan/, 'a Bot dm has its Bot\'s picture, not the channel #');
   fake.bots = [botCard({ permitted: false })]; await workspace.refreshBots(); await until(() => snapshot().bots[0]?.permitted === false, 'revoked access');
   const revoked = html(view(workspace, snapshot()));
   assert.match(revoked, /This Bot is not available to you right now/); assert.doesNotMatch(revoked, /<textarea/);
@@ -562,7 +562,7 @@ test('an unavailable Bot keeps the failed message visible with a retry action, w
   const { fake, workspace, snapshot } = await open(fake => {
     const row = fake.conversations.get('team-aaaa')!.find(value => value.id === 'bot-chat')!;
     row.lastSeq = 0;
-    fake.bots = [botCard({ ready: false })];
+    fake.bots = [botCard({ ready: false, availability: 'offline' })];
   });
   context.after(() => workspace.close());
   workspace.selectConversation('bot-chat'); await until(() => snapshot().selectedConversationId === 'bot-chat');
@@ -570,7 +570,7 @@ test('an unavailable Bot keeps the failed message visible with a retry action, w
   fake.messages = async command => { if (command.action === 'submit') throw new Error('HOST_UNAVAILABLE'); return original(command); };
   await snapshot().messaging!.queue('create', 'Hello'); await until(() => snapshot().pending[0]?.error === 'HOST_UNAVAILABLE');
   const markup = html(view(workspace, snapshot()));
-  assert.match(markup, /Host unavailable/); assert.match(markup, /Hello/); assert.match(markup, />Retry<\/button>/);
+  assert.match(markup, /Host offline · Maintainer: Owner/); assert.match(markup, /Hello/); assert.match(markup, />Retry<\/button>/);
   assert.doesNotMatch(markup, /No messages yet\. Say hello\./);
   assert.match(html(sidebar(workspace, snapshot())), /Not sent: Hello/);
   workspace.selectConversation('dm-bob');
@@ -594,8 +594,12 @@ test('conversation subtitle names who is in a conversation or whether its Bot is
   const snap = (bots: SharedBotCard[]) => ({ bots, directory: members3, uid });
   const bot = botCard({ sharedBotId: 'a', maintainer: { uid: 'bob', generation: 1 } });
   const botDm = conversation('b', { kind: 'bot_dm', participants: ['user:alice', 'shared_bot:a'] });
-  assert.equal(conversationSubtitle(botDm, snap([bot]), 'en'), 'Online · Maintainer: Bob');
-  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, ready: false }]), 'en'), 'Host unavailable · Maintainer: Bob');
+  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, availability: 'ready' }]), 'en'), 'Ready · Maintainer: Bob');
+  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, ready: false, availability: 'offline' }]), 'en'), 'Host offline · Maintainer: Bob');
+  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, ready: false, availability: 'maintenance' }]), 'en'), 'Temporarily under maintenance · Maintainer: Bob');
+  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, availability: 'quota_exhausted' }]), 'en'), 'Daily quota exhausted · Maintainer: Bob');
+  assert.equal(conversationSubtitle(botDm, snap([bot]), 'en'), 'Status unverified · Maintainer: Bob', 'a card that carries no availability is not presented as online');
+  assert.equal(conversationSubtitle(botDm, snap([{ ...bot, availability: 'ready' }]), 'ja'), '準備完了 · メンテナー: Bob'); assert.equal(conversationSubtitle(botDm, snap([bot]), 'zh-Hant'), '狀態未確認 · 維護者：Bob');
   assert.equal(conversationSubtitle(botDm, snap([{ ...bot, state: 'paused' }]), 'zh-Hans'), '已停止共享 · 维护者：Bob');
   assert.equal(conversationSubtitle(botDm, snap([{ ...bot, state: 'paused' }]), 'en'), 'Sharing stopped · Maintainer: Bob');
   assert.equal(conversationSubtitle(botDm, snap([]), 'en'), '', 'nothing to say about a Bot that is not listed');

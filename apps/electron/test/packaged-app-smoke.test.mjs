@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, test } from 'node:test';
+import vm from 'node:vm';
 
 import {
   APP_USER_DATA_SUBPATH,
+  assertPackagedAnonymousAccount,
   assertTemporaryBrokerLaunchdIdentity,
   unregisterCredentialBrokerForColdStart,
   assertCustomProviderTurn,
@@ -17,11 +19,13 @@ import {
   enterPackagedProjectName,
   createPackagedSettings,
   createPackagedConversationSpaces,
+  createPackagedAppLauncher,
   isExpectedBootstrapPromptPlaceholder,
   isSafeProviderAccountSnapshot,
   runtimePathsForHome,
   runPackagedCredentialStability,
   restartPackagedBridgeWhenIdle,
+  retainPackagedSmokeEvidence,
   sanitizePackagedAppEnvironment,
   waitForRendererCommit,
   waitForPackagedAppExit,
@@ -29,8 +33,154 @@ import {
 } from '../scripts/packaged-app-smoke.mjs';
 import { workspaceFingerprint as hostWorkspaceFingerprint } from '../src/main/host-utils.ts';
 import { ConversationSpaceStore } from '../src/main/conversationSpaceStore.ts';
+import { AccountService } from '../src/main/account.ts';
+import { accountSessionDiagnosticScope, brokerAccountSessionStore } from '../src/main/account-broker-storage.ts';
 
 const temporaryDirectories = [];
+
+const accountScope = '11111111-2222-4333-8444-555555555555';
+
+function launchFixture() {
+  const calls = [];
+  const spawnProcess = (executable, args, options) => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    calls.push({ executable, args, options, child });
+    return child;
+  };
+  return { calls, spawnProcess };
+}
+
+function accountPage(request, beforeEvaluate = () => {}) {
+  const window = { lingxi: { account: { request } } };
+  const calls = [];
+  return { window, calls, async send(method, params, timeoutMs) {
+    assert.equal(method, 'Runtime.evaluate');
+    calls.push({ expression: params.expression, timeoutMs });
+    beforeEvaluate(window, params.expression);
+    const value = await vm.runInNewContext(params.expression, { window });
+    return { result: { value } };
+  } };
+}
+
+test('development smoke reuses one explicit host account scope across initial, restart and activation launches', () => {
+  const fixture = launchFixture();
+  const env = { HOME: '/isolated/home' };
+  const launcher = createPackagedAppLauncher('/signed/LingXi Code.app', env, {
+    credentialChannel: 'development', accountScope, spawnProcess: fixture.spawnProcess,
+  });
+  for (const port of [9300, 9301, 9302]) launcher.launch(port, '/isolated/profile');
+  assert.equal(fixture.calls.length, 3);
+  assert.equal(launcher.scope, accountScope.replaceAll('-', ''));
+  for (const [index, call] of fixture.calls.entries()) {
+    assert.deepEqual(call.args, ['--user-data-dir=/isolated/profile', `--remote-debugging-port=${9300 + index}`,
+      '--lingxi-host-diagnostics', `--lingxi-account-session-scope=${launcher.scope}`]);
+    assert.equal(accountSessionDiagnosticScope(call.args, 'development'), launcher.scope);
+    assert.strictEqual(call.options.env, env);
+  }
+  const other = createPackagedAppLauncher('/signed/LingXi Code.app', env, {
+    credentialChannel: 'development', spawnProcess: fixture.spawnProcess,
+  });
+  assert.notEqual(other.scope, launcher.scope, 'each separate run must get a fresh slot');
+});
+
+test('production smoke keeps its original launch arguments and rejects explicit diagnostic scope', () => {
+  const fixture = launchFixture();
+  const launcher = createPackagedAppLauncher('/signed/LingXi Code.app', {}, {
+    credentialChannel: 'production', spawnProcess: fixture.spawnProcess,
+  });
+  assert.equal(launcher.scope, undefined);
+  launcher.launch(9300, '/isolated/profile');
+  assert.deepEqual(fixture.calls[0].args, ['--user-data-dir=/isolated/profile', '--remote-debugging-port=9300']);
+  assert.equal(accountSessionDiagnosticScope(fixture.calls[0].args, 'production'), undefined);
+  assert.throws(() => createPackagedAppLauncher('/signed/app', {}, {
+    credentialChannel: 'production', accountScope, spawnProcess: fixture.spawnProcess,
+  }), /production launches cannot select/);
+  assert.equal(fixture.calls.length, 1);
+});
+
+test('invalid development diagnostic scopes and unknown channels fail before launching a process', () => {
+  const fixture = launchFixture();
+  for (const value of ['', 'personal', '../lingxi-account-session', 'a'.repeat(33), `${'a'.repeat(32)}\n`, `${accountScope}\r\n`, null]) {
+    assert.throws(() => createPackagedAppLauncher('/signed/app', {}, {
+      credentialChannel: 'development', accountScope: value, spawnProcess: fixture.spawnProcess,
+    }), /invalid packaged account diagnostic scope/);
+  }
+  assert.throws(() => createPackagedAppLauncher('/signed/app', {}, {
+    spawnProcess: fixture.spawnProcess,
+  }), /invalid packaged credential channel/);
+  assert.equal(fixture.calls.length, 0);
+});
+
+test('smoke proves anonymous status through the real AccountService and exact diagnostic Broker slot', async () => {
+  const values = new Map([['lingxi-account-session', 'personal sentinel'], ['other-diagnostic-slot', 'other sentinel']]);
+  const before = new Map(values), reads = [], commands = [];
+  const service = new AccountService({ projectId: 'fixture', appId: 'fixture', apiKey: 'fixture', authDomain: 'fixture' },
+    brokerAccountSessionStore({ credentialChannel: 'development',
+      async resolve(id) { reads.push(id); return values.get(id); },
+      async set() { assert.fail('anonymous smoke must not write an account session'); },
+      async delete() { assert.fail('anonymous smoke must not delete an account session'); },
+    }, accountScope), async () => assert.fail('anonymous smoke must not start OAuth'),
+    async () => assert.fail('anonymous smoke must not contact Firebase'));
+  const page = accountPage(command => { commands.push(command.type); return service.execute(command); });
+  const status = await assertPackagedAnonymousAccount(page, 1000);
+  assert.deepEqual(status, { anonymous: true, errorFree: true, sessionExpired: false, busy: false, secure: true });
+  assert.deepEqual(commands, ['status']);
+  assert.deepEqual(reads, ['lingxi-account-diagnostic-11111111222243338444555555555555']);
+  assert.deepEqual(values, before);
+  assert.ok(page.calls.every(call => call.timeoutMs > 0 && call.timeoutMs <= 1000));
+});
+
+test('anonymous verification waits for preload availability before making one real status request', async () => {
+  let reads = 0, evaluations = 0;
+  const request = async () => { reads++; return { user: null, error: null, busy: false, persistence: 'secure' }; };
+  const page = accountPage(request, window => {
+    if (++evaluations === 1) window.lingxi = undefined;
+    else window.lingxi = { account: { request } };
+  });
+  await assertPackagedAnonymousAccount(page, 1000);
+  assert.equal(reads, 1);
+});
+
+test('anonymous verification rejects restored users, account failures, expiry and non-Broker persistence without leaking values', async () => {
+  const healthy = { user: null, error: null, busy: false, persistence: 'secure' };
+  for (const state of [
+    { ...healthy, user: { uid: 'DO_NOT_LEAK', email: 'DO_NOT_LEAK' } },
+    { ...healthy, error: 'DO_NOT_LEAK' },
+    { ...healthy, sessionExpired: true }, { ...healthy, busy: true }, { ...healthy, persistence: 'session' },
+  ]) {
+    let calls = 0;
+    await assert.rejects(assertPackagedAnonymousAccount(accountPage(async () => { calls++; return state; }), 1000),
+      error => !error.message.includes('DO_NOT_LEAK') && error.message.includes('must be anonymous'));
+    assert.equal(calls, 1, 'a failed status must never be retried or replaced with fake anonymous state');
+  }
+});
+
+test('anonymous verification has a bounded API readiness deadline', async () => {
+  const page = accountPage(async () => assert.fail('status must not run without the API'), window => { window.lingxi = undefined; });
+  await assert.rejects(assertPackagedAnonymousAccount(page, 1), /platform account API did not become ready/);
+  assert.ok(page.calls.length <= 2);
+  assert.ok(page.calls.every(call => call.timeoutMs > 0 && call.timeoutMs <= 1));
+});
+
+test('optional smoke evidence failure cannot prevent subsequent owned teardown', () => {
+  const root = temporaryDirectory();
+  const diagnostics = join(root, 'desktop.jsonl');
+  writeFileSync(diagnostics, '{"event":"fixture"}\n');
+  const receipt = { mode: 'isolated-development-platform-account', scope: accountScope, checks: [{ anonymous: true }] };
+  retainPackagedSmokeEvidence(join(root, 'evidence'), receipt, diagnostics);
+  assert.deepEqual(JSON.parse(readFileSync(join(root, 'evidence', 'packaged-account-isolation.json'), 'utf8')), receipt);
+  assert.equal(readFileSync(join(root, 'evidence', 'packaged-runtime-diagnostics.jsonl'), 'utf8'), '{"event":"fixture"}\n');
+  const blocked = join(root, 'not-a-directory');
+  writeFileSync(blocked, 'fixture');
+  const phases = [];
+  assert.doesNotThrow(() => {
+    retainPackagedSmokeEvidence(blocked, receipt, diagnostics);
+    phases.push('owned-app-and-broker-teardown');
+  });
+  assert.deepEqual(phases, ['owned-app-and-broker-teardown']);
+});
 
 const RESTART_BUSY_GUARD = 'cancel active turns and pending interactions before restarting the engine';
 

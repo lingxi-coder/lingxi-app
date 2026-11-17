@@ -28,7 +28,7 @@ import { TeamConnector } from './teams/connector.js';
 import { TeamPrivateStore } from './teams/privateStore.js';
 import { resolveTeamBinaries } from './teams/process.js';
 import { accountSessionStore } from './account-storage.js';
-import { brokerAccountSessionStore } from './account-broker-storage.js';
+import { accountSessionDiagnosticScope, brokerAccountSessionStore } from './account-broker-storage.js';
 import firebaseConfig from '../shared/firebaseConfig.json';
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
@@ -387,6 +387,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
   });
+  const diagnosticAccountScope = accountSessionDiagnosticScope(process.argv, credentialBroker?.credentialChannel);
   diagnostics.add('info', 'host', credentialBroker
     ? 'credential store: macOS credential broker'
     : 'credential store: shared engine secure storage');
@@ -782,7 +783,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     return notifier?.scheduledRun(title, body, ref) ?? false;
   }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)), { keepAwake });
   const account = new AccountService(firebaseConfig, credentialBroker
-    ? brokerAccountSessionStore(credentialBroker)
+    ? brokerAccountSessionStore(credentialBroker, diagnosticAccountScope)
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
   host.attachAccount(account);
   const teamsService = new TeamsService(account, firebaseConfig);

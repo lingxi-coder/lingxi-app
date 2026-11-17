@@ -1,5 +1,25 @@
 import SwiftUI
 
+/// Member-safe service projection. Missing fields stay explicitly unverified.
+struct TeamBotMemberInfo: View {
+    @Environment(\.locale) private var locale
+    let bot: TeamBotCard
+    var unverified = false
+
+    var body: some View {
+        let chinese = TeamsListStrings.isChinese(languageTag: Bundle._lxCurrentLanguageID.withLock { $0 })
+        VStack(alignment: .leading, spacing: 3) {
+            Text(TeamBotMemberText.availability(unverified ? .unverified : bot.memberAvailability, chinese: chinese))
+                .accessibilityIdentifier("teams.bot.availability.\(bot.sharedBotId)")
+            Text(TeamBotMemberText.capabilities(bot.capabilities, chinese: chinese))
+            Text(TeamBotMemberText.remaining(unverified ? nil : bot.memberRemaining, chinese: chinese))
+                .accessibilityIdentifier("teams.bot.remaining.\(bot.sharedBotId)")
+            if !unverified, let reset = TeamBotMemberText.reset(bot.memberQuotaReset, chinese: chinese) { Text(reset) }
+        }
+        .font(.caption).foregroundStyle(.secondary)
+    }
+}
+
 struct TeamBotCardView: View {
     let bot: TeamBotCard
     let ownerName: String
@@ -14,6 +34,8 @@ struct TeamBotCardView: View {
     let onStopSharing: () -> Void
     /// Opens the list the Bot shares. Set only for a viewer the service lets read it.
     var onList: (() -> Void)? = nil
+    var onExample: ((String) -> Void)? = nil
+    var unverified = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -26,8 +48,7 @@ struct TeamBotCardView: View {
             }
             if !bot.description.isEmpty { Text(bot.description).font(.subheadline) }
             if (bot.state == "published") {
-                Label(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued"), systemImage: bot.ready ? "circle.fill" : "moon.zzz")
-                    .font(.caption).foregroundStyle(bot.ready ? Color.green : Color.secondary)
+                TeamBotMemberInfo(bot: bot, unverified: unverified)
                 if showsAudience {
                     Text(LocalizedStringKey(bot.usePolicy.mode == "all" ? "teams_bot_use_all" : "teams_bot_use_listed")).font(.caption).foregroundStyle(.secondary)
                 }
@@ -35,6 +56,14 @@ struct TeamBotCardView: View {
             } else {
                 Text("teams_bot_disabled").font(.caption.weight(.semibold)).foregroundStyle(.orange)
                 Text("teams_bot_not_shared").font(.caption).foregroundStyle(.secondary)
+            }
+            if bot.selectable, let onExample {
+                ForEach(bot.memberExamples, id: \.self) { example in
+                    Button { onExample(example) } label: {
+                        Label(example, systemImage: "text.bubble").font(.subheadline).minimumHitTarget(minWidth: 0, alignment: .leading)
+                    }
+                    .buttonStyle(.borderless).disabled(busy)
+                }
             }
             // Three buttons at 44 pt do not fit side by side on a narrow phone or under a large text size: they stack then.
             ViewThatFits(in: .horizontal) {

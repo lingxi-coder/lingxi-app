@@ -262,12 +262,15 @@ internal fun TeamApprovalCard(approval: TeamListApproval, waitId: String, state:
     }
 }
 
-/** [onStopSharing] is the maintainer's Stop sharing (confirmed first); [onList], when set, opens the Bot's shared list. */
+/**
+ * [onStopSharing] is the maintainer's Stop sharing (confirmed first); [onList], when set, opens the Bot's shared list; [onExample], when set, starts a chat
+ * with one of the Bot's example requests (see [TeamBotMemberInfo]).
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun TeamBotCardView(
     bot: TeamBotCard, ownerName: String, uid: String, generation: Long, enabled: Boolean, onMessage: () -> Unit, onStopSharing: () -> Unit,
-    modifier: Modifier = Modifier, onList: (() -> Unit)? = null,
+    modifier: Modifier = Modifier, onList: (() -> Unit)? = null, onExample: ((String) -> Unit)? = null,
 ) {
     var confirm by remember(bot.sharedBotId, bot.revision, bot.state) { mutableStateOf(false) }
     Column(modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -278,6 +281,7 @@ internal fun TeamBotCardView(
                 if (bot.description.isNotBlank()) Text(bot.description, style = MaterialTheme.typography.bodyMedium)
                 Text("${botAvailabilityText(bot)} · ${stringResource(R.string.teams_bot_owner_fmt, ownerName)}", style = MaterialTheme.typography.bodySmall)
                 Text(stringResource(if (bot.usePolicy.getString("mode") == "all") R.string.teams_bot_use_all else R.string.teams_bot_use_listed), style = MaterialTheme.typography.bodySmall)
+                TeamBotMemberInfo(bot, enabled, onExample)
                 // Up to three actions: they wrap under each other rather than run out of the card at a large font size.
                 FlowRow {
                     TextButton(enabled = enabled && bot.selectable, onClick = onMessage) { Text(stringResource(R.string.teams_bot_message)) }
@@ -297,4 +301,19 @@ internal fun StopSharingDialog(botName: String, onConfirm: () -> Unit, onDismiss
         title = stringResource(R.string.teams_bot_stop_title_fmt, botName), body = stringResource(R.string.teams_bot_stop_detail),
         confirm = stringResource(R.string.friends_share_bot_stop), destructive = true, onConfirm = onConfirm, onDismiss = onDismiss,
     )
+}
+
+/** Member-safe projection only: never render host reasons, credentials or configured quota limits. */
+@Composable
+internal fun TeamBotMemberInfo(bot: TeamBotCard, enabled: Boolean, onExample: ((String) -> Unit)? = null, modifier: Modifier = Modifier) {
+    val chinese = LocalConfiguration.current.locales[0].language == "zh"
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(TeamBotEntry.capabilities(bot, chinese), style = MaterialTheme.typography.bodySmall)
+        Text(TeamBotEntry.quota(bot, chinese), style = MaterialTheme.typography.bodySmall)
+        if (onExample != null) bot.examples.forEachIndexed { index, example ->
+            TextButton(enabled = enabled && bot.selectable, onClick = { onExample(example) }, modifier = Modifier.testTag("teams.bot.example.${bot.sharedBotId}.$index")) {
+                Text(example, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            }
+        }
+    }
 }

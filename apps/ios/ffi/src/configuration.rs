@@ -482,10 +482,10 @@ pub(super) fn validate_mobile_linux_workspace_config(
     )?;
 
     let persistent_workspace = mobile_linux_core::is_persistent_user_workspace(
-        &managed_root,
+        std::path::Path::new(&config.managed_root),
         &brand_profile,
         &mobile_linux_api::MountSpec {
-            host_path: workspace_host_path.clone(),
+            host_path: requested_workspace_host_path.clone(),
             guest_path: mobile_linux_api::guest_paths::workspace_for_profile(
                 &brand_profile,
                 &config.stable_workspace_id,
@@ -589,6 +589,10 @@ fn validate_project_mount_grants(
     }
     let guest_home = Path::new(&directories.guest_home);
     let config_guest = Path::new(&directories.config_guest_path);
+    let config_dir_name = config_guest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "selected brand config directory has no valid name".to_string())?;
     let apps_guest = Path::new(&directories.apps_guest_path);
     let primary_guest = Path::new(primary_workspace_guest);
     let home_host = Path::new(&directories.home)
@@ -648,6 +652,9 @@ fn validate_project_mount_grants(
         }
 
         let host = canonical_directory_without_symlinks(&home_host, relative)?;
+        if mobile_linux_path_contains_protected_config_subtree(&host, config_dir_name) {
+            return Err("project mount grant targets a protected provider/config subtree".into());
+        }
         if paths_overlap(&host, &primary_host) {
             return Err("project mount grant overlaps the primary Projects mount".into());
         }

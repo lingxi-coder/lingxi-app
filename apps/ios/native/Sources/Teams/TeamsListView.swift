@@ -33,12 +33,18 @@ struct TeamsListView: View {
         func unread(_ conversation: TeamMessageConversation) -> Int { model?.unread(of: conversation) ?? 0 }
     }
 
+    private func open(_ bot: TeamBotCard, example: String? = nil) {
+        Task {
+            if let id = await workspace.openBotDM(bot, example: example) { onOpen(id) }
+        }
+    }
+
     var body: some View {
         let model = workspace.messaging
         let strings = TeamsListStrings.current
         let members = workspace.directory
         let bots = model?.bots ?? []
-        let usableBots = bots.filter(\.selectable)
+        let memberBots = TeamBotMemberRules.directory(bots)
         let all = model?.cache?.conversations ?? []
         let labels = Dictionary(all.map { ($0.id, TeamsListLogic.conversationLabel($0, members: members, uid: uid, bots: bots, strings: strings)) }, uniquingKeysWith: { first, _ in first })
         let context = Context(model: model, strings: strings, members: members, bots: bots, labels: labels, online: model.map { !$0.offline } ?? false)
@@ -51,24 +57,39 @@ struct TeamsListView: View {
                     .listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear)
                     .id(Self.topID)
                     .accessibilityHidden(true)
-                if !usableBots.isEmpty {
+                // The team's shared Bots (U1: "Bots", never "Assistants"). A paused Bot stays in the directory, so its state can be read; it opens
+                // the chat the viewer already has with it, if any. The Bot's own lines (state, what it can do, the quota, example requests) are
+                // `TeamBotMemberInfo`, the member-safe projection.
+                if !memberBots.isEmpty {
                     Section("remote_bots") {
-                        ForEach(usableBots) { bot in
-                            Button {
-                                // Opens the DM the viewer already has with the Bot, and creates one only when there is none.
-                                Task { if let id = await workspace.openBotDM(bot) { onOpen(id) } }
-                            } label: {
-                                HStack(spacing: 12) {
-                                    AgentAvatar(agentID: bot.avatarId, size: 40)
-                                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(memberBots) { bot in
+                            VStack(alignment: .leading, spacing: 8) {
+                                let history = TeamsListLogic.findBotDm(all, uid: uid, sharedBotId: bot.sharedBotId, bots: bots)
+                                Button {
+                                    // Opens the DM the viewer already has with the Bot, and creates one only when there is none.
+                                    if bot.selectable { open(bot) } else if let history { onOpen(history.id) }
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        AgentAvatar(agentID: bot.avatarId, size: 40)
                                         Text(bot.name).font(.body.weight(.semibold))
-                                        Text(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued")).font(.caption).foregroundStyle(.secondary)
                                     }
+                                    .padding(.vertical, 4)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
                                 }
-                                .padding(.vertical, 4)
-                                .contentShape(Rectangle())
+                                .buttonStyle(.borderless)
+                                .disabled(workspace.messageBusy || (!bot.selectable && history == nil))
+                                .accessibilityIdentifier("teams.assistant.\(bot.sharedBotId)")
+                                TeamBotMemberInfo(bot: bot, unverified: model?.botsUnverified == true)
+                                ForEach(bot.memberExamples, id: \.self) { example in
+                                    Button { open(bot, example: example) } label: {
+                                        Label(example, systemImage: "text.bubble").font(.subheadline).minimumHitTarget(minWidth: 0, alignment: .leading)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .disabled(workspace.messageBusy || !bot.selectable)
+                                    .accessibilityIdentifier("teams.assistant.example.\(bot.sharedBotId)")
+                                }
                             }
-                            .accessibilityIdentifier("teams.assistant.\(bot.sharedBotId)")
                         }
                     }
                 }

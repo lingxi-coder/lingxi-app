@@ -74,7 +74,7 @@ scenario('composer: @ offers the Bots of the conversation, only a chosen Bot is 
   assert.equal(page.byClass('tw-mentions').length, 0);
   await page.type(box(), 'hey @Fix', 8);
   const options = page.find(node => node.props.role === 'option');
-  assert.deepEqual(options.map(textOf), ['FBFixture BotOnline'], 'the usable Bot of this channel matches the query (initials, name, presence)');
+  assert.deepEqual(options.map(textOf), ['FBFixture BotStatus unverified'], 'a missing availability projection is not presented as online');
   assert.equal(box().props['aria-activedescendant'], options[0].props.id);
   assert.equal(await page.key(box(), 'Escape'), true, 'Escape closes the list'); assert.equal(page.byClass('tw-mentions').length, 0);
   await page.type(box(), 'hey @Fi', 7); assert.equal(page.byClass('tw-mentions').length, 1, 'typing again reopens it');

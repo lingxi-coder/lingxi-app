@@ -28,7 +28,7 @@ const deployment = (host, actor, generation = 1) => ({ ...host, sharedBotId: bot
   capabilities: { durableWait: false, writeOperations: true, delegation: false }, enabled: true });
 const publish = (override = {}) => ({ sharedBotId: botId, expectedRevision: 0, name: 'Travel assistant', description: 'Shared travel notes',
   usePolicy: { mode: 'all' }, deployment: deployment(oldHost, owner), inputs: [input('persona', 'persona_01'), input('file', 'travel_file')],
-  quotas: { team: 100, member: 20, bot: 100 }, ...override });
+  quotas: { team: 100, member: 20, bot: 100 }, examples: ['Summarize the shared travel notes.'], ...override });
 const submit = (conversationId = oldChat, id = ++serial) => ({ conversationId, messageId: `message_${id}`, changeId: `change_${id}`, text: 'What should we pack?', targets: [botId] });
 const result = (host, started, override = {}) => ({ ...host, taskId: started.task.taskId, permitId: started.permitId, outcome: 'completed', text: 'Pack your passports.', finishedAt: now,
   inputGrantIds: started.inputs.map(grant => grant.grantId), outputAudience: { mode: 'published_inputs' },
@@ -97,6 +97,8 @@ test('handover: the Bot keeps its entry, its audience and its shared results; au
   assert.deepEqual(done, { sharedBotId: botId, revision: 2, grantIds: bot.grants.map(grant => grant.grantId) });
   assert.deepEqual(bot.identity, { ...before.bot.identity, maintainer: { uid: 'other', generation: 1 }, revision: 2, activeDeploymentId: newHost.deploymentId });
   assert.deepEqual([bot.name, bot.description, bot.quotas, bot.sharedList, bot.transfer], [before.bot.name, before.bot.description, before.bot.quotas, before.bot.sharedList, undefined]);
+  assert.deepEqual(bot.examples, before.bot.examples, 'handover keeps the examples of the source publication');
+  assert.deepEqual((await card(member)).examples, before.bot.examples);
   assert.deepEqual(bot.grants.map(({ grantId, publisher, ...grant }) => grant), before.bot.grants.map(({ grantId, publisher, ...grant }) => grant), 'the same inputs for the same audience');
   assert.ok(bot.grants.every(grant => grant.publisher.uid === 'other'));
   assert.equal(await partCount(), 0, 'the package is not kept'); assert.equal((await transferData('transfer_0001')).state, 'completed');

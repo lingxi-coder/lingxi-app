@@ -296,11 +296,11 @@ private fun ConversationBody(
     }
 
     // Reply and edit targets; the unsent text lives in the workspace draft of this conversation.
-    var draft by remember(conversationId) { mutableStateOf(workspace.draft(conversationId)) }
+    val draft = workspace.draft(conversationId)
     var editingId by remember(conversationId) { mutableStateOf<String?>(null) }
     val replyTo = draft.replyToId?.let { byId[it] }
     val editing = editingId?.let { byId[it] }
-    fun setDraft(next: ComposerDraft) { draft = next; workspace.setDraft(conversationId, next) }
+    fun setDraft(next: ComposerDraft) { workspace.setDraft(conversationId, next) }
     fun personName(id: String) = members.firstOrNull { it.uid == id }?.displayName?.takeIf { it.isNotEmpty() } ?: if (id == uid) strings.you else strings.member
     // U3: the signed-in person reads "You" in the stream and in "Replying to", whatever their display name.
     val you = stringResource(R.string.teams_you)
@@ -355,6 +355,14 @@ private fun ConversationBody(
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp).testTag(TeamsTags.PILL),
                 shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, shadowElevation = 4.dp,
             ) { JumpPill(unseen) }
+        }
+        if (conversation.kind == "bot_dm") bots.firstOrNull { it.sharedBotId == conversation.sharedBotId }?.let { bot ->
+            val lock = TeamsComposeLogic.composerLock(uid, conversation.kind, conversation.participants, bots, messaging.botsLoaded, messaging.botsFailed, conversation.readers)
+            TeamBotMemberInfo(
+                bot, enabled = editing == null && draft == ComposerDraft() && files.isEmpty() && lock == ComposerLock.None,
+                onExample = { example -> workspace.botEntryContext(uid)?.let { workspace.seedBotExample(it, conversationId, example) } },
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
         }
         TeamComposer(
             conversation = conversation, label = label, uid = uid, messaging = messaging, draft = draft,

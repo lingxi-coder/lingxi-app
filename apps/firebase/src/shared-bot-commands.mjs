@@ -6,6 +6,8 @@ export const executionId = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const cursor = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
+// A host saves this 32-byte random secret before sending a grant request. It is never a caller-selected raw permit.
+const permitNonce = z.string().regex(/^[a-f0-9]{64}$/u);
 const text = z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 8192);
 /** One part of a file or of a handover package: at most 700 KiB of bytes, which with its record stays under Firestore's 1 MiB per document. */
 const base64Part = z.string().min(4).max(4 * Math.ceil(attachmentLimits.partBytes / 3)).regex(/^[A-Za-z0-9+/]+={0,2}$/u);
@@ -27,6 +29,7 @@ export const publishedInput = z.object({
   ]),
 }).strict();
 const quota = z.number().int().min(1).max(10000);
+const examples = z.array(z.string().trim().min(1).refine(value => !value.includes('\0') && Buffer.byteLength(value, 'utf8') <= 2000)).max(3);
 // Results lacking explicit provenance remain owner-only and cannot enter a shared Chat.
 const outputAudience = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('owner') }).strict(),
@@ -60,7 +63,7 @@ const payloads = {
     sharedBotIds: z.array(executionId).min(1).max(8).refine(unique) }).strict(),
   publishSharedBot: z.object({
     sharedBotId: executionId, expectedRevision: cursor, name: z.string().trim().min(1).max(80),
-    description: z.string().max(500), usePolicy,
+    description: z.string().max(500), usePolicy, examples: examples.optional(),
     deployment: deploymentRecord,
     inputs: z.array(publishedInput).min(1).max(50).refine(values => unique(values.map(value => value.resourceId))),
     quotas: z.object({ team: quota, member: quota, bot: quota }).strict(),
@@ -83,7 +86,8 @@ const payloads = {
   getTransfer: z.object({ transferId: executionId }).strict(),
   listSharedBots: z.object({}).strict(),
   pauseSharedBot: z.object({ sharedBotId: executionId, expectedRevision: positive }).strict(),
-  heartbeatDeployment: z.object({ ...host, ready: z.boolean() }).strict(),
+  heartbeatDeployment: z.object({ ...host, ready: z.boolean(), healthReason: z.enum(['bot', 'runtime', 'model']).optional() }).strict()
+    .refine(value => !value.ready || value.healthReason === undefined, 'Only an unhealthy deployment has a health reason'),
   activateDeployment: z.object({ deploymentId: executionId, hostId: executionId,
     expectedAccountEpoch: positive, newAccountEpoch: positive }).strict()
     .refine(value => value.newAccountEpoch > value.expectedAccountEpoch, 'Account epoch must advance'),
@@ -101,7 +105,7 @@ const payloads = {
   readAttachmentPart: z.object({ attachmentId: executionId, index: partIndex }).strict(),
   revokeAttachment: z.object({ attachmentId: executionId, changeId: executionId }).strict(),
   listHostTasks: z.object({ ...host, after: executionId.optional() }).strict(),
-  startTask: z.object({ ...host, ...task, expectedLastChangeSeq: cursor }).strict(),
+  startTask: z.object({ ...host, ...task, expectedLastChangeSeq: cursor, permitNonce: permitNonce.optional() }).strict(),
   prepareTask: z.object({ ...host, ...task }).strict(),
   validateTask: z.object({ ...host, ...task, permitId: executionId, expectedLastChangeSeq: cursor }).strict(),
   completeTask: z.object({ ...host, ...task, permitId: executionId,
@@ -125,8 +129,8 @@ const payloads = {
     z.object({ ...pause, kind: z.literal('tool_approval'),
       approval: z.object({ operationId: digest, logicalStepId, ...listWrite }).strict() }).strict(),
   ]),
-  continueTask: z.object({ ...host, ...task, expectedEpoch: positive, checkpointDigest: digest,
-    reason: z.enum(['answer', 'recovery']), dispatchedRequests: cursor }).strict(),
+  continueTask: z.object({ ...host, ...task, expectedEpoch: positive.max(Number.MAX_SAFE_INTEGER - 1), checkpointDigest: digest,
+    reason: z.enum(['answer', 'recovery']), dispatchedRequests: cursor, permitNonce: permitNonce.optional() }).strict(),
   // The operation ledger (M2 Q04). `operationId` is derived from the task and the durable logical step, never from a provider call id.
   recordOperation: z.object({ ...host, ...task, permitId: executionId, operationId: digest, logicalStepId,
     category: operationCategory, tool: z.object({ name: z.string().min(1).max(128), version: z.string().min(1).max(64) }).strict(),

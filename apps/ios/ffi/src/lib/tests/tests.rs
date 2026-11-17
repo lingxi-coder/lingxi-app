@@ -219,16 +219,18 @@ fn ios_project_mount_grants_accept_only_registered_mode_workspaces() {
         vec![scheduled_root],
     );
     assert!(super::configuration::ios_project_mount_grants(&config).is_err());
-    let protected = std::path::Path::new(&paths.chat_cwd).join("providers");
-    std::fs::create_dir_all(&protected).unwrap();
-    let guest = format!("{}/providers", paths.chat_guest_cwd);
-    let config = launch_config_with_project_mounts(
-        linux.clone(),
-        Some(paths.projects.clone()),
-        vec![guest.clone()],
-        vec![guest],
-    );
-    assert!(super::configuration::ios_project_mount_grants(&config).is_err());
+    for private_name in ["provider", "providers"] {
+        let protected = std::path::Path::new(&paths.chat_cwd).join(private_name);
+        std::fs::create_dir_all(&protected).unwrap();
+        let guest = format!("{}/{private_name}", paths.chat_guest_cwd);
+        let config = launch_config_with_project_mounts(
+            linux.clone(),
+            Some(paths.projects.clone()),
+            vec![guest.clone()],
+            vec![guest],
+        );
+        assert!(super::configuration::ios_project_mount_grants(&config).is_err());
+    }
     #[cfg(unix)]
     {
         let alias = std::path::Path::new(&paths.chat_cwd).join("alias");
@@ -346,7 +348,7 @@ fn ios_runtime_status_uses_the_selected_brand_writable_guest_paths() {
         .contains(&"/home/atlas_guest".to_string()));
     assert!(status
         .writable_guest_paths
-        .contains(&"/home/atlas_guest/.atlas".to_string()));
+        .contains(&"/home/atlas_guest/.atlas-workspaces".to_string()));
     assert!(!status
         .writable_guest_paths
         .contains(&"/home/lingxi".to_string()));
@@ -758,11 +760,42 @@ fn mobile_linux_workspace_accepts_only_the_exact_managed_projects_root() {
     }
     #[cfg(unix)]
     {
-        let alias = std::path::Path::new(&directories.config_home).join("projects-alias");
-        std::os::unix::fs::symlink(&directories.projects, &alias).unwrap();
-        changed = config;
-        changed.workspace_host_path = alias.display().to_string();
-        assert!(validate(&changed).is_err());
+        for alias in [
+            std::path::Path::new(&directories.config_home).join("projects-alias"),
+            std::path::Path::new(&directories.projects)
+                .parent()
+                .unwrap()
+                .join("projects-alias"),
+        ] {
+            std::os::unix::fs::symlink(&directories.projects, &alias).unwrap();
+            changed = config.clone();
+            changed.workspace_host_path = alias.display().to_string();
+            assert!(validate(&changed).is_err());
+        }
+    }
+}
+
+#[test]
+fn mobile_linux_workspace_accepts_configured_and_canonical_managed_root_spellings() {
+    let temp = tempfile::tempdir().unwrap();
+    let configured = user_storage_config(temp.path());
+    let canonical_workspace = std::path::Path::new(&configured.workspace_host_path)
+        .canonicalize()
+        .unwrap();
+    let mut canonical_host = configured.clone();
+    canonical_host.workspace_host_path = canonical_workspace.display().to_string();
+    let mut canonical_root = canonical_host.clone();
+    canonical_root.managed_root = std::path::Path::new(&canonical_root.managed_root)
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+    for config in [configured, canonical_host, canonical_root] {
+        let (host, id) =
+            super::validate_mobile_linux_workspace_config(&config.app_sandbox_root, &config)
+                .expect("managed root may use its configured or canonical system spelling");
+        assert_eq!(host, canonical_workspace);
+        assert_eq!(id, "projects");
     }
 }
 
